@@ -25,9 +25,28 @@ pub(super) fn finish_resume(app: &mut App) -> bool {
     true
 }
 
+pub(super) fn scroll_to_bottom(app: &mut App) {
+    app.view.scroll = 0;
+    app.view.scroll_target = 0;
+    app.view.last_total = 0;
+    app.view.scroll_to_entry = None;
+    crate::selection::cancel_drag(app);
+    app.selection.region = None;
+}
+
+pub(crate) fn load_history(app: &mut App, state: &PublicSessionState) {
+    scroll_to_bottom(app);
+    app.view.transcript.load_snapshot(state);
+    app.view
+        .transcript_cache
+        .start_history(app.view.transcript.entry_count());
+    app.expand_rebuilt_tools();
+}
+
 pub(super) fn close(app: &mut App) {
     finish_resume(app);
     app.resume_picker.open = false;
+    scroll_to_bottom(app);
     let previewing = app.resume_picker.previewing;
     if let Some(transcript) = app.resume_picker.transcript.take() {
         if previewing {
@@ -40,6 +59,9 @@ pub(super) fn close(app: &mut App) {
             app.view.transcript.restore(transcript);
             local::restore(&mut app.view.transcript, notices);
         }
+        app.view
+            .transcript_cache
+            .start_history(app.view.transcript.entry_count());
         // Exiting the preview is Python's transcript rebuild: re-decide the
         // custom-tools deprecation on the session restored underneath.
         crate::startup::banners::rebuild_custom_tools_deprecation(app);

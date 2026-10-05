@@ -6,8 +6,8 @@ use tokio::sync::mpsc;
 
 use super::clear::clear_history;
 use super::simple::{
-    add_text, copy_last_agent_message, help_text, read_log, reload_config, rename_session,
-    status_text, whoami, DATA_RETENTION_MESSAGE,
+    add_text, copy_last_agent_message, help_text, read_log, reload_config, rename_session, whoami,
+    DATA_RETENTION_MESSAGE,
 };
 use super::stress;
 use super::submission::{clear_and_remember, new_message_id, NOTICE_TIMEOUT_SECS};
@@ -27,6 +27,7 @@ pub(super) fn run_command(
     value: &str,
 ) -> bool {
     clear_and_remember(app, value);
+    crate::telemetry::slash_command_used(app, command, "builtin");
     if !matches!(command, "/resume" | "/continue") {
         let echo_id = new_message_id();
         local::add_message(&mut app.view.transcript, &echo_id, "command", value);
@@ -37,10 +38,12 @@ pub(super) fn run_command(
     match command {
         "/exit" => return true,
         "/config" => config::open(app, client, config_tx),
+        "/voice" => crate::voice_app::open(app),
         "/theme" => theme_picker::open(app),
         "/model" => model_picker::open(app),
         "/thinking" => crate::thinking_picker::open(app),
         "/remote-project" => crate::vibe_code_project::open(app, client),
+        "/teleport" => crate::teleport::command(app, client),
         "/log-level" => log_level_picker::open(app),
         "/resume" | "/continue" => resume_picker::open(app, client),
         "/rewind" => rewind::start(app, client),
@@ -50,7 +53,7 @@ pub(super) fn run_command(
         "/compact" => super::compact::start_compact(app, client, value),
         "/copy" => copy_last_agent_message(app),
         "/paste-image" => paste_image::request(app, true),
-        "/status" => add_text(app, &status_text(app)),
+        "/status" => super::provider_auth::status(app, client),
         "/log" => read_log(app, client),
         "/rename" => rename_session(app, client, value),
         "/reload" => reload_config(app, client),

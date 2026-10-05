@@ -314,6 +314,13 @@ class CoreRequestHandler:
                     ProtocolErrorCode.NOT_IMPLEMENTED,
                     f"Plugins are not supported: {method}",
                 )
+            case "providerAuth":
+                # A Unified-session projection; the legacy backend has no
+                # provider-auth view to serve.
+                raise RequestFailure(
+                    ProtocolErrorCode.NOT_IMPLEMENTED,
+                    f"Provider auth is not supported: {method}",
+                )
             case "review":
                 result = self._review.dispatch(method, raw_params)
             case (

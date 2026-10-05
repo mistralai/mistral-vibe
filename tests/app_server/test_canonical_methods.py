@@ -218,6 +218,24 @@ async def test_plugin_procedures_are_not_implemented_on_the_legacy_backend(
 
 
 @pytest.mark.asyncio
+async def test_provider_auth_read_is_not_implemented_on_the_legacy_backend() -> None:
+    """The auth snapshot is a Unified-session projection.
+
+    The legacy backend has no provider-auth view to serve, so it rejects the
+    method; the Textual client never asks for it on a Legacy session and keeps
+    the statistics-only ``/status``.
+    """
+    client, session = await _session_with_history()
+    try:
+        with pytest.raises(AppServerResponseError) as excinfo:
+            await client.request("providerAuth/read", {"sessionId": session.session_id})
+    finally:
+        await session.close()
+
+    assert excinfo.value.error.code is ProtocolErrorCode.NOT_IMPLEMENTED
+
+
+@pytest.mark.asyncio
 async def test_queued_steering_is_not_implemented_on_the_legacy_backend() -> None:
     """*Prepare*: An attached session using the Legacy backend.
     *Do*: Request atomic queued steering through the public session client.

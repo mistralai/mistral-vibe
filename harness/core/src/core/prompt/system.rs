@@ -148,7 +148,7 @@ mod tests {
         assert!(system_prompt.contains("<description>Review &lt;code&gt; safely.</description>"));
         assert!(system_prompt.contains("<path>/skills/review&lt;&amp;/SKILL.md</path>"));
         assert!(system_prompt.contains("<name>project</name>"));
-        assert!(system_prompt.contains("`tools.agent.spawn`"));
+        assert!(system_prompt.contains("`tools.subagent.spawn`"));
         let tool_use = system_prompt
             .find("## Using tool functions via run_typescript")
             .expect("tool-use guidance");

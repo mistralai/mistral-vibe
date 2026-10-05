@@ -7,8 +7,11 @@ use crate::core::hooks::HookPoint;
 use crate::core::hooks::HookToolKey;
 use crate::core::tools::external::{ExternalTool, ExternalToolCall};
 use crate::core::tools::resolved::ResolvedTools;
-use crate::core::wire::tool::ToolCall;
+use crate::core::tools::result::permission_denied_result;
+use crate::core::wire::tool::{ToolCall, ToolResult};
 use serde_json::Value;
+
+use crate::core::features::permissions::{PermissionDecision, PermissionPolicy};
 
 /// Everything dispatching a tool needs from the session, and nothing else.
 ///
@@ -23,6 +26,7 @@ pub(crate) struct ToolContext<'a> {
     pub(crate) turn_id: &'a str,
     /// Context length at dispatch time. Seeds replay-stable execution ids.
     pub(crate) message_count: usize,
+    permission_policy: Option<&'a PermissionPolicy>,
 }
 
 impl<'a> ToolContext<'a> {
@@ -31,12 +35,14 @@ impl<'a> ToolContext<'a> {
         hook_binding_index: &'a HookBindingIndex,
         turn_id: &'a str,
         message_count: usize,
+        permission_policy: Option<&'a PermissionPolicy>,
     ) -> Self {
         Self {
             tools,
             hook_binding_index,
             turn_id,
             message_count,
+            permission_policy,
         }
     }
 
@@ -68,6 +74,17 @@ impl<'a> ToolContext<'a> {
         self.tools.resolve_effective_call(original, arguments)
     }
 
+    pub(crate) fn permission_denial(&self, call: &ExternalToolCall) -> Option<ToolResult> {
+        self.permission_policy
+            .is_some_and(|policy| {
+                matches!(
+                    policy.evaluate(call),
+                    PermissionDecision::Deny | PermissionDecision::Ask
+                )
+            })
+            .then(permission_denied_result)
+    }
+
     pub(crate) fn with_program_context<R>(&self, apply: impl FnOnce(ProgramContext<'_>) -> R) -> R {
         let resolve_operation = |name: &str, arguments: Value| {
             let tool = self.tools.resolve_program_call(name, arguments)?;
@@ -81,6 +98,7 @@ impl<'a> ToolContext<'a> {
         let effective_call = |original: &ExternalToolCall, arguments: Value| {
             self.effective_call(original, arguments)
         };
+        let permission_denial = |call: &ExternalToolCall| self.permission_denial(call);
         apply(ProgramContext::new(
             self.tools.program_descriptors(),
             self.tools.programmatic_settings(),
@@ -89,6 +107,7 @@ impl<'a> ToolContext<'a> {
             &resolve_operation,
             &post_hook_binding_ids,
             &effective_call,
+            &permission_denial,
         ))
     }
 }

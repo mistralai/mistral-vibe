@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from e2e.app_server.scenario import Timeline
 
+env = {"SSH_CONNECTION": "127.0.0.1 2222 127.0.0.1 22"}
 expected_clipboard = "he"
 
 _SELECT_RIGHT = "\x1b[1;2C"

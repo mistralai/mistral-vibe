@@ -39,10 +39,17 @@ from tests.stubs.app_server import start_test_app_server
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.agent import RETRYING_EXT_METHOD, VibeAcpAgent
-from vibe.acp.exceptions import UnauthenticatedError
+from vibe.acp.exceptions import ConfigurationError, UnauthenticatedError
 from vibe.app_server.events import SessionUpdated
 from vibe.app_server.local import LocalHarnessHost, LocalHarnessOptions
 from vibe.app_server.models import PublicError, PublicTurnStatus, TurnErrorCode
+from vibe.app_server.protocol import (
+    AppServerResponseError,
+    InvalidParamsData,
+    InvalidParamsIssue,
+    ProtocolError,
+    ProtocolErrorCode,
+)
 from vibe.app_server.session import AppServerSession, AppServerTurnError
 from vibe.core.config import SessionLoggingConfig
 from vibe.core.types import FunctionCall, ScheduledLoop, ToolCall
@@ -63,7 +70,9 @@ def _agent(
         )
 
     agent = VibeAcpAgent(
-        session_starter=start_session, experimental_harness=experimental_harness
+        session_starter=start_session,
+        experimental_harness=experimental_harness,
+        legacy_harness=not experimental_harness,
     )
     client = FakeClient()
     agent.on_connect(client)
@@ -167,7 +176,11 @@ async def test_new_session_without_a_key_is_unauthenticated(
 
     async def start_session(options: LocalHarnessOptions) -> AppServerSession:
         return await harness_host.start(
-            replace(options, experimental_harness=experimental_harness)
+            replace(
+                options,
+                experimental_harness=experimental_harness,
+                legacy_harness=not experimental_harness,
+            )
         )
 
     agent = VibeAcpAgent(session_starter=start_session)
@@ -185,6 +198,46 @@ async def test_new_session_without_a_key_is_unauthenticated(
 
     # Assert
     assert "mistral" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_new_session_error_surfaces_invalid_params_detail(tmp_path: Path) -> None:
+    """*Prepare*: An ACP agent whose app server rejects the session with a
+    field-level ``INVALID_PARAMS`` issue. *Do*: Open a session. *Assert*: The
+    ``ConfigurationError`` carries the rendered detail, not just the protocol
+    code name, so an editor shows what actually failed.
+    """
+    issue = InvalidParamsIssue(
+        path=["message", "content", 1, "resource", "resource"],
+        message="Unable to extract tag using discriminator 'kind'",
+    )
+
+    async def start_session(options: LocalHarnessOptions) -> AppServerSession:
+        raise AppServerResponseError(
+            ProtocolError(
+                code=ProtocolErrorCode.INVALID_PARAMS,
+                message="Invalid request parameters",
+                data=InvalidParamsData(error_count=1, issues=[issue]).model_dump(
+                    mode="json"
+                ),
+            )
+        )
+
+    agent = VibeAcpAgent(session_starter=start_session)
+    client = FakeClient()
+    agent.on_connect(client)
+    client.on_connect(agent)
+
+    try:
+        # Do
+        with pytest.raises(ConfigurationError) as exc_info:
+            await agent.new_session(cwd=str(tmp_path), mcp_servers=[])
+    finally:
+        await agent.close()
+
+    # Assert
+    assert "Invalid request parameters" in str(exc_info.value)
+    assert "Unable to extract tag using discriminator 'kind'" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -233,7 +286,9 @@ async def test_acp_session_workspace_and_mcp_inputs_cross_the_app_server_boundar
         )
 
     agent = VibeAcpAgent(
-        session_starter=start_session, experimental_harness=experimental_harness
+        session_starter=start_session,
+        experimental_harness=experimental_harness,
+        legacy_harness=not experimental_harness,
     )
     client = FakeClient()
     agent.on_connect(client)
@@ -305,7 +360,9 @@ async def test_unsolicited_scheduled_turn_is_forwarded_to_acp(
         )
 
     agent = VibeAcpAgent(
-        session_starter=start_session, experimental_harness=experimental_harness
+        session_starter=start_session,
+        experimental_harness=experimental_harness,
+        legacy_harness=not experimental_harness,
     )
     client = FakeClient()
     agent.on_connect(client)
@@ -355,7 +412,9 @@ async def test_retries_are_forwarded_as_an_ext_notification_not_a_session_update
         )
 
     agent = VibeAcpAgent(
-        session_starter=start_session, experimental_harness=experimental_harness
+        session_starter=start_session,
+        experimental_harness=experimental_harness,
+        legacy_harness=not experimental_harness,
     )
     client = FakeClient()
     agent.on_connect(client)

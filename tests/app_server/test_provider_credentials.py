@@ -65,7 +65,9 @@ def _vertex_provider() -> ProviderConfig:
     )
 
 
-def _config(*providers: ProviderConfig, active: str | None = None) -> VibeConfigSchema:
+def _config(
+    *providers: ProviderConfig, active: str | None = None, **kwargs: Any
+) -> VibeConfigSchema:
     models = [
         ModelConfig(
             name=f"{provider.name}-model",
@@ -78,6 +80,7 @@ def _config(*providers: ProviderConfig, active: str | None = None) -> VibeConfig
         providers=list(providers),
         models=models,
         active_model=f"{active or providers[0].name}-model",
+        **kwargs,
     )
 
 
@@ -118,22 +121,34 @@ async def test_resolution_reads_the_orchestrator_on_every_call() -> None:
     assert before.revision != after.revision
 
 
-def test_utility_credential_provider_targets_mistral_or_raises() -> None:
-    """The title credential port binds to the Mistral provider, and raises (→
-    auth-required) when none exists, so it never resolves the active key.
+@pytest.mark.asyncio
+async def test_a_utility_route_keeps_its_providers_key_after_a_switch() -> None:
+    """The route's endpoint is fixed at derivation; its key must not follow the
+    live selection to another provider.
     """
-    from vibe.app_server._runtime import _utility_credential_provider
-    from vibe.core.types import Backend
+    from vibe.app_server._runtime import _named_provider
 
-    mistral = _provider("mistral", backend=Backend.MISTRAL)
-    anthropic = _provider("anthropic", api_style="anthropic")
+    orchestrator = _orchestrator(
+        _config(_provider("primary"), _provider("secondary"), active="primary")
+    )
+    service = ProviderCredentialService(
+        orchestrator, select_provider=_named_provider("primary")
+    )
 
-    on_mistral = _config(mistral, anthropic, active="anthropic")
-    assert _utility_credential_provider(on_mistral).name == "mistral"
+    await orchestrator.set_field("/active_model", "secondary-model")
+    result = await service.resolve()
 
-    no_mistral = _config(anthropic, active="anthropic")
-    with pytest.raises(ValueError):
-        _utility_credential_provider(no_mistral)
+    assert isinstance(result, ProviderCredentialSnapshot)
+    assert result.token == "primary-secret"
+
+
+def test_a_utility_routes_provider_gone_from_config_raises() -> None:
+    from vibe.app_server._runtime import _named_provider
+
+    select = _named_provider("removed")
+
+    with pytest.raises(ValueError, match="no longer configured"):
+        select(_config(_provider("primary"), active="primary"))
 
 
 @pytest.mark.asyncio

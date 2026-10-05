@@ -6,15 +6,18 @@ from pathlib import Path
 from mistralai_vibe_local_harness.protocol import (
     JsonObject,
     JsonSchema,
-    JsonValue,
     RustEvent,
     RustProvidedToolCall,
     RustProvidedToolCallAction,
     RustToolFailedEvent,
     RustToolSucceededEvent,
 )
+from pydantic import JsonValue
 import pytest
 
+from tests.conftest import build_test_vibe_config
+from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
+from vibe.app_server._cron import CRON_TOOL_NAME, CronArgs
 from vibe.app_server._provided_tools import (
     TODO_TOOL_NAME,
     VIBE_PROVIDED_TOOL_MODES,
@@ -24,8 +27,18 @@ from vibe.app_server._provided_tools import (
     resolved_max_todos,
     vibe_tool_groups,
 )
+from vibe.app_server._unified_permissions import UnifiedPermissionResolver
+from vibe.app_server._unified_scheduled_loops import (
+    ScheduledLoopStoreError,
+    UnifiedScheduledLoops,
+)
 from vibe.app_server._unified_scratchpad import SCRATCHPAD_TOOL_NAME, scratchpad_dir
+from vibe.core.config.harness_files import HarnessFilesManager
+from vibe.core.loop import MAX_LOOPS_PER_SESSION, LoopError
+from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.builtins.todo import TodoConfig
+from vibe.core.tools.manager import ToolManager
+from vibe.core.tools.permissions import PermissionStore
 
 _Executor = Callable[[RustProvidedToolCallAction], Awaitable[RustEvent]]
 
@@ -36,10 +49,13 @@ def _executor(
     *,
     tools: VibeProvidedTools | None = None,
     max_todos: Callable[[], int] | None = None,
+    scheduled_loops: Callable[[str], UnifiedScheduledLoops] | None = None,
 ) -> _Executor:
     holder = tools if tools is not None else VibeProvidedTools()
     return holder.executor_factory(
-        root, max_todos=max_todos or (lambda: TodoConfig().max_todos)
+        root,
+        max_todos=max_todos or (lambda: TodoConfig().max_todos),
+        scheduled_loops=scheduled_loops,
     )(session_id)
 
 
@@ -78,7 +94,11 @@ def test_the_vibe_group_declares_todo_when_the_legacy_tool_is_available() -> Non
 
     assert len(groups) == 1
     assert groups[0].name == VIBE_TOOL_GROUP
-    assert [tool.name for tool in groups[0].tools] == ["todo", SCRATCHPAD_TOOL_NAME]
+    assert [tool.name for tool in groups[0].tools] == [
+        "todo",
+        SCRATCHPAD_TOOL_NAME,
+        CRON_TOOL_NAME,
+    ]
     todo = groups[0].tools[0]
     assert todo.exposure == "direct_and_programmatic"
     assert "tools.vibe.todo" in todo.description
@@ -90,9 +110,10 @@ def test_the_vibe_group_declares_todo_when_the_legacy_tool_is_available() -> Non
 def test_the_scratchpad_survives_todo_being_switched_off() -> None:
     groups = vibe_tool_groups({"bash"})
 
-    # It is gated on nothing: there is no legacy scratchpad tool for a config to
-    # disable, so the group is declared for the scratchpad alone.
-    assert [tool.name for tool in groups[0].tools] == [SCRATCHPAD_TOOL_NAME]
+    assert [tool.name for tool in groups[0].tools] == [
+        SCRATCHPAD_TOOL_NAME,
+        CRON_TOOL_NAME,
+    ]
     scratchpad = groups[0].tools[0]
     assert scratchpad.exposure == "direct"
     assert _schema_property(scratchpad.input_schema, "action")["enum"] == [
@@ -275,7 +296,7 @@ def test_the_scratchpad_obeys_the_tool_filters() -> None:
     unlisted = vibe_tool_groups({"todo"}, enabled_tools=["bash"])
     listed = vibe_tool_groups({"todo"}, enabled_tools=["unified_harness_*"])
 
-    assert [tool.name for tool in disabled[0].tools] == [TODO_TOOL_NAME]
+    assert [tool.name for tool in disabled[0].tools] == [TODO_TOOL_NAME, CRON_TOOL_NAME]
     assert [tool.name for tool in unlisted[0].tools] == [TODO_TOOL_NAME]
     assert [tool.name for tool in listed[0].tools] == [
         TODO_TOOL_NAME,
@@ -283,16 +304,21 @@ def test_the_scratchpad_obeys_the_tool_filters() -> None:
     ]
 
 
-def test_the_group_disappears_when_both_tools_are_filtered_out() -> None:
-    assert vibe_tool_groups(set(), disabled_tools=[SCRATCHPAD_TOOL_NAME]) == []
+def test_the_group_disappears_when_all_tools_are_filtered_out() -> None:
+    assert (
+        vibe_tool_groups(set(), disabled_tools=[SCRATCHPAD_TOOL_NAME, CRON_TOOL_NAME])
+        == []
+    )
 
 
 def test_todo_is_routed_to_the_name_its_permission_is_configured_under() -> None:
-    # The resolver reads `[tools.todo]`, so the route has to publish that name; the
-    # scratchpad has no such entry, which is why only todo is registered.
-    assert VIBE_PROVIDED_TOOL_NAMES == {f"{VIBE_TOOL_GROUP}.{TODO_TOOL_NAME}": "todo"}
+    assert VIBE_PROVIDED_TOOL_NAMES == {
+        f"{VIBE_TOOL_GROUP}.{TODO_TOOL_NAME}": "todo",
+        f"{VIBE_TOOL_GROUP}.{CRON_TOOL_NAME}": "cron",
+    }
     assert VIBE_PROVIDED_TOOL_MODES == {
         TODO_TOOL_NAME: "ask",
+        CRON_TOOL_NAME: "ask",
         SCRATCHPAD_TOOL_NAME: "allow",
     }
 
@@ -364,3 +390,310 @@ def test_the_cap_falls_back_to_the_tools_own_default() -> None:
     assert resolved_max_todos({"max_todos": 3}) == 3
     # `/config` can leave nonsense behind; the tool must not stop working over it.
     assert resolved_max_todos({"max_todos": "many"}) == default
+
+
+def test_cron_declares_discriminated_actions_and_structured_results() -> None:
+    tool = next(
+        tool for tool in vibe_tool_groups(set())[0].tools if tool.name == "cron"
+    )
+
+    assert tool.exposure == "direct"
+    schema = CronArgs.model_json_schema()
+    assert isinstance(schema, dict)
+    assert isinstance(tool.input_schema, dict)
+    assert tool.input_schema["type"] == "object"
+    assert not {"oneOf", "allOf", "anyOf"} & tool.input_schema.keys()
+    assert tool.input_schema["required"] == ["action"]
+    assert _schema_property(tool.input_schema, "action")["enum"] == [
+        "schedule",
+        "schedule_cron",
+        "list",
+        "cancel",
+        "clear",
+    ]
+    assert schema["discriminator"]["propertyName"] == "action"
+    assert set(schema["discriminator"]["mapping"]) == {
+        "schedule",
+        "schedule_cron",
+        "list",
+        "cancel",
+        "clear",
+    }
+    assert len(schema["oneOf"]) == 5
+    variants = schema["$defs"]
+    assert variants["ScheduleArgs"]["required"] == [
+        "action",
+        "interval_seconds",
+        "prompt",
+    ]
+    interval = variants["ScheduleArgs"]["properties"]["interval_seconds"]
+    assert interval["type"] == "integer"
+    assert interval["minimum"] == 30
+    assert _schema_property(tool.input_schema, "interval_seconds") == interval
+    assert variants["ScheduleCronArgs"]["required"] == ["action", "cron", "prompt"]
+    assert variants["CancelArgs"]["required"] == ["action", "id"]
+    assert tool.output_schema is not None
+    assert _schema_property(tool.output_schema, "loops")["type"] == "array"
+    assert _schema_property(tool.output_schema, "verb")["type"] == "string"
+    assert _schema_property(tool.output_schema, "message")["type"] == "string"
+    for term in ("50", "persisted", "live", "idle", "local timezone", "not caught up"):
+        assert term in tool.description
+
+
+@pytest.mark.parametrize(
+    ("enabled", "disabled", "expected"),
+    [
+        ([], [], True),
+        (["cron"], [], True),
+        (["cr*"], [], True),
+        (["bash"], [], False),
+        ([], ["cron"], False),
+        ([], ["cr*"], False),
+        (["cron"], ["cron"], False),
+    ],
+)
+def test_cron_obeys_tool_filters(enabled, disabled, expected) -> None:
+    groups = vibe_tool_groups(set(), enabled_tools=enabled, disabled_tools=disabled)
+    assert (
+        any(tool.name == "cron" for group in groups for tool in group.tools) is expected
+    )
+
+
+def _cron(action_id: str, **arguments: JsonValue) -> RustProvidedToolCallAction:
+    return _call(action_id, tool_name=CRON_TOOL_NAME, **arguments)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persistent", [True, False])
+async def test_cron_actions_use_the_session_store(
+    tmp_path: Path, persistent: bool
+) -> None:
+    path = tmp_path / "loops.json"
+    store = UnifiedScheduledLoops(path, persistent=lambda: persistent)
+    execute = _executor(tmp_path, scheduled_loops=lambda _: store)
+
+    interval = await execute(
+        _cron("interval", action="schedule", interval_seconds=30, prompt="check tests")
+    )
+    cron = await execute(
+        _cron("cron", action="schedule_cron", cron="0 9 * * 1-5", prompt="check build")
+    )
+    loops = await store.list()
+    assert len(loops) == 2
+    for event, loop in zip((interval, cron), loops, strict=True):
+        assert isinstance(event, RustToolSucceededEvent)
+        assert event.result.structured_content == {
+            "verb": "Scheduled",
+            "loops": [loop.model_dump(mode="json")],
+            "message": f"Scheduled loop {loop.id}",
+        }
+        assert event.result.content
+    assert loops[0].interval_seconds == 30
+    assert loops[1].cron == "0 9 * * 1-5"
+    assert path.exists() is persistent
+    restored = UnifiedScheduledLoops(path, persistent=lambda: True)
+    if persistent:
+        await restored.restore()
+        assert await restored.list() == loops
+
+    listed = await execute(_cron("list", action="list"))
+    assert isinstance(listed, RustToolSucceededEvent)
+    assert listed.result.structured_content == {
+        "verb": "Listed",
+        "loops": [loop.model_dump(mode="json") for loop in loops],
+        "message": "Listed 2 scheduled loops",
+    }
+
+    cancelled = await execute(_cron("cancel", action="cancel", id=loops[0].id))
+    assert isinstance(cancelled, RustToolSucceededEvent)
+    assert cancelled.result.structured_content == {
+        "verb": "Cancelled",
+        "loops": [loops[0].model_dump(mode="json")],
+        "message": f"Cancelled loop {loops[0].id}",
+    }
+    assert await store.list() == [loops[1]]
+
+    cleared = await execute(_cron("clear", action="clear"))
+    assert isinstance(cleared, RustToolSucceededEvent)
+    assert cleared.result.structured_content == {
+        "verb": "Cleared",
+        "loops": [],
+        "message": "Cleared 1 scheduled loops",
+        "cleared_count": 1,
+    }
+    assert await store.list() == []
+    if persistent:
+        await restored.restore()
+        assert await restored.list() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"action": "unknown"},
+        {"action": "schedule", "prompt": "check"},
+        *[
+            {"action": "schedule", "interval_seconds": interval, "prompt": "check"}
+            for interval in (29, 30.5, 30.0, "30", True, None)
+        ],
+        {"action": "schedule", "interval_seconds": 30},
+        {"action": "schedule", "interval_seconds": 30, "prompt": ""},
+        {"action": "schedule", "interval_seconds": 30, "prompt": "   "},
+        {"action": "schedule", "interval_seconds": 30, "prompt": "/loop list"},
+        {"action": "schedule_cron", "prompt": "check"},
+        *[
+            {"action": "schedule_cron", "cron": cron, "prompt": "check"}
+            for cron in ("invalid", "* * * *", "* * * * * *", "@daily", "60 * * * *")
+        ],
+        {"action": "cancel"},
+        {"action": "cancel", "id": "missing"},
+        {"action": "cancel", "id": ""},
+        {"action": "list", "interval_seconds": 30},
+    ],
+)
+async def test_invalid_cron_calls_fail_without_mutating_the_store(
+    tmp_path: Path, arguments: dict[str, JsonValue]
+) -> None:
+    store = UnifiedScheduledLoops(tmp_path / "loops.json", persistent=lambda: False)
+    execute = _executor(tmp_path, scheduled_loops=lambda _: store)
+    existing = await store.create_interval(60, "keep me")
+
+    rejected = await execute(_cron("invalid", **arguments))
+
+    assert isinstance(rejected, RustToolFailedEvent)
+    assert rejected.action_id == "invalid"
+    assert rejected.call_id == "call-invalid"
+    assert rejected.result.error.code == "tool_failed"
+    assert rejected.result.error.message
+    assert rejected.result.error.retryable is False
+    assert await store.list() == [existing]
+
+
+@pytest.mark.asyncio
+async def test_cron_limit_is_a_correctable_tool_failure(tmp_path: Path) -> None:
+    store = UnifiedScheduledLoops(tmp_path / "loops.json", persistent=lambda: False)
+    execute = _executor(tmp_path, scheduled_loops=lambda _: store)
+    for _ in range(MAX_LOOPS_PER_SESSION):
+        await store.create_interval(30, "check")
+
+    rejected = await execute(
+        _cron("overflow", action="schedule", interval_seconds=30, prompt="check")
+    )
+
+    assert isinstance(rejected, RustToolFailedEvent)
+    assert "50" in rejected.result.error.message
+    assert len(await store.list()) == MAX_LOOPS_PER_SESSION
+
+
+@pytest.mark.asyncio
+async def test_cron_without_a_backend_is_a_correctable_tool_failure(
+    tmp_path: Path,
+) -> None:
+    rejected = await _executor(tmp_path)(_cron("unavailable", action="list"))
+
+    assert isinstance(rejected, RustToolFailedEvent)
+    assert "not available" in rejected.result.error.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [ValueError, LoopError, ScheduledLoopStoreError])
+async def test_cron_backend_resolution_failures_are_correctable(
+    tmp_path: Path, error_type: type[Exception]
+) -> None:
+    def unavailable(session_id: str) -> UnifiedScheduledLoops:
+        raise error_type(f"No live backend for {session_id}")
+
+    execute = _executor(tmp_path, scheduled_loops=unavailable)
+    rejected = await execute(_cron("unavailable", action="list"))
+
+    assert isinstance(rejected, RustToolFailedEvent)
+    assert "No live backend for session-1" in rejected.result.error.message
+    assert isinstance(
+        await execute(_call("todo", action="read")), RustToolSucceededEvent
+    )
+    assert isinstance(
+        await execute(_scratchpad("scratchpad", action="list")), RustToolSucceededEvent
+    )
+
+
+@pytest.mark.asyncio
+async def test_cron_persistence_failure_reaches_the_model(tmp_path: Path) -> None:
+    parent = tmp_path / "not-a-directory"
+    parent.write_text("occupied")
+    store = UnifiedScheduledLoops(parent / "loops.json", persistent=lambda: True)
+    execute = _executor(tmp_path, scheduled_loops=lambda _: store)
+
+    rejected = await execute(
+        _cron("persist", action="schedule", interval_seconds=30, prompt="check")
+    )
+
+    assert isinstance(rejected, RustToolFailedEvent)
+    assert "persist" in rejected.result.error.message.lower()
+    assert await store.list() == []
+
+
+@pytest.mark.asyncio
+async def test_cron_resolves_the_calling_session_backend_on_every_call(
+    tmp_path: Path,
+) -> None:
+    store = UnifiedScheduledLoops(tmp_path / "first.json", persistent=lambda: False)
+    sessions: list[str] = []
+
+    def resolve(session_id: str) -> UnifiedScheduledLoops:
+        sessions.append(session_id)
+        return store
+
+    execute = _executor(tmp_path, "child-session", scheduled_loops=resolve)
+    assert sessions == []
+    first = await execute(
+        _cron("first", action="schedule", interval_seconds=30, prompt="first")
+    )
+    assert isinstance(first, RustToolSucceededEvent)
+    assert len(await store.list()) == 1
+
+    store = UnifiedScheduledLoops(tmp_path / "second.json", persistent=lambda: False)
+    listed = await execute(_cron("second", action="list"))
+    assert isinstance(listed, RustToolSucceededEvent)
+    assert isinstance(listed.result.structured_content, dict)
+    assert listed.result.structured_content["loops"] == []
+    assert sessions == ["child-session", "child-session"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("permission", "decision"),
+    [(None, "allow"), ("ask", "ask"), ("always", "allow"), ("never", "deny")],
+)
+@pytest.mark.parametrize(
+    "session_permission", [None, ToolPermission.ASK, ToolPermission.NEVER]
+)
+async def test_cron_approval_mode_honors_config(
+    tmp_path: Path,
+    permission: str | None,
+    decision: str,
+    session_permission: ToolPermission | None,
+) -> None:
+    config = build_test_vibe_config(
+        tools={} if permission is None else {"cron": {"permission": permission}}
+    )
+    orchestrator = FakeConfigOrchestrator(config)
+    store = PermissionStore()
+    manager = ToolManager(
+        lambda: orchestrator.config,
+        defer_mcp=True,
+        cwd=tmp_path,
+        harness_files=HarnessFilesManager().for_session(tmp_path),
+        permission_getter=store.get_tool_permission,
+    )
+    resolver = UnifiedPermissionResolver(manager, store, orchestrator)
+    resolver.provided_names.register(VIBE_TOOL_GROUP, VIBE_PROVIDED_TOOL_NAMES)
+
+    if session_permission is not None:
+        store.set_tool_permission(CRON_TOOL_NAME, session_permission)
+        decision = "deny" if session_permission is ToolPermission.NEVER else "ask"
+
+    assert VIBE_PROVIDED_TOOL_MODES[CRON_TOOL_NAME] == "ask"
+    outcome = await resolver.resolve("vibe.cron", {"action": "list"})
+    assert outcome.decision == decision

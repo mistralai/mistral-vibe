@@ -4,7 +4,7 @@ import re
 
 import pytest
 
-from vibe.cli.commands import Command, CommandRegistry
+from vibe.cli.commands import Command, CommandContext, CommandRegistry
 from vibe.core.skills.builtins.vibe import SKILL as VIBE_SKILL
 
 _SKILL_MODULE = "vibe/core/skills/builtins/vibe.py"
@@ -203,6 +203,20 @@ class TestCommandRegistry:
         assert cmd.handler == "_loop_command"
         assert cmd.side_channel is False
         assert cmd_args == "30s ping"
+
+    def test_loop_command_stays_visible_when_harness_routing_changes(self) -> None:
+        registry = CommandRegistry()
+
+        for experimental_harness in [True, False]:
+            registry.refresh(CommandContext(experimental_harness=experimental_harness))
+
+            result = registry.parse_command("/loop list")
+            assert result is not None
+            assert result[1].forwards_to_model is experimental_harness
+            assert result[1].side_channel is False
+            assert registry.has_command("loop")
+            assert registry.get_command_name("/loop") == "loop"
+            assert "/loop" in registry.get_help_text()
 
     @pytest.mark.parametrize(
         "command_name",

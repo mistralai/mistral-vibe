@@ -3,6 +3,7 @@
 mod edit;
 mod events;
 mod images;
+mod interrupt;
 mod prompt;
 mod replacement;
 mod requests;
@@ -11,10 +12,13 @@ mod snapshot;
 mod state;
 mod steering;
 
-pub use edit::replace_selected;
+pub use edit::{replace_selected, save_edit};
 pub use events::{apply_event, QueueEvent, ReplacementOutcome};
 pub use images::merge_edit_images;
-pub use requests::{enqueue_prompt, flush_pending, pop_last, remove_selected, resume};
+pub use interrupt::{interrupt_on_start, interrupt_pending, take_interrupt_on_start};
+pub use requests::{
+    enqueue_prompt, flush_pending, has_removable, pop_last, remove_selected, resume,
+};
 pub use selection::{
     confirm_consumed_edit, edit_selected, end_edit, enter, exit, finish_consumed_edit,
     handle_selection_key, is_available, select_newer, select_older,
@@ -42,6 +46,8 @@ pub struct QueueItem {
     pub server_message_id: String,
     pub text: String,
     pub images: Vec<ImageAttachment>,
+    /// Mention stats of the sent revision, reported once the prompt runs.
+    pub mentions: Option<serde_json::Value>,
     /// Whether this prompt's current content is part of the server queue item.
     pub sent: bool,
     /// Whether any revision was sent or is being sent under this message id.
@@ -78,6 +84,8 @@ pub struct QueueController {
     pub(crate) deferred_prompt: Option<String>,
     /// Whether the server holds the queue until the user resumes it.
     pub paused: bool,
+    /// When the user interrupted a turn the server had not started yet (Python `_pending_turn`).
+    pub interrupt_on_start: Option<std::time::Instant>,
     /// Highlighted prompt in queue mode, by message id, or `None` when closed.
     pub selected: Option<String>,
     /// Whether Enter loaded the highlighted prompt into the input for editing.
@@ -86,6 +94,8 @@ pub struct QueueController {
     consumed_edit: Option<ConsumedEdit>,
     /// Chat input saved when queue mode opened, restored when it exits.
     pub draft: String,
+    /// The same draft with its mentions and mode, restored whole when present.
+    pub draft_snapshot: Option<crate::edit_history::Snapshot>,
     /// Queue ids whose turn started before their enqueue answer landed.
     started: Vec<String>,
     /// Server ids of consumed queue items: new prompts never merge into them.
@@ -148,7 +158,9 @@ impl QueueController {
         self.editing = false;
         self.consumed_edit = None;
         self.draft.clear();
+        self.draft_snapshot = None;
         self.paused = false;
+        self.interrupt_on_start = None;
     }
 }
 

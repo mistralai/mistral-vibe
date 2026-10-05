@@ -412,7 +412,10 @@ async def test_mcp_login_for_disabled_source_performs_no_runtime_authorization(
 async def test_sessionless_mcp_mutations_do_not_build_a_session_runtime_and_bootstrap(
     experimental_harness: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    process = HarnessProcess(experimental_harness=experimental_harness)
+    process = HarnessProcess(
+        experimental_harness=experimental_harness,
+        legacy_harness=not experimental_harness,
+    )
     build_calls = 0
     build_name = (
         "build_unified_session_context" if experimental_harness else "open_root"

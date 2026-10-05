@@ -192,7 +192,9 @@ def _acp_agent_with_allowed_models(experimental_harness: bool = False) -> VibeAc
 
     starter: SessionStarter = start_session
     agent = VibeAcpAgent(
-        session_starter=starter, experimental_harness=experimental_harness
+        session_starter=starter,
+        experimental_harness=experimental_harness,
+        legacy_harness=not experimental_harness,
     )
     client = FakeClient()
     agent.on_connect(client)

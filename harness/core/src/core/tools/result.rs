@@ -29,6 +29,22 @@ pub(crate) fn invalid_tool_call_result(reason: String) -> ToolResult {
     }
 }
 
+pub(crate) fn permission_denied_result() -> ToolResult {
+    const MESSAGE: &str = "Tool call denied by permission policy.";
+
+    ToolResult::Failure {
+        content: text_content(MESSAGE),
+        structured_content: StructuredContent::Absent,
+        meta: None,
+        error: ProtocolError {
+            code: "permission_denied".to_string(),
+            message: MESSAGE.to_string(),
+            retryable: false,
+            details: Value::Null,
+        },
+    }
+}
+
 pub(crate) fn model_tool_result_content(result: &ToolResult) -> Vec<ContentBlock> {
     let structured_content = result.structured_content().filter(|value| !value.is_null());
     let content = match result {

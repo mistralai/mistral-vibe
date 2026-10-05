@@ -6,6 +6,10 @@ from e2e.app_server.scenario import Timeline
 _SHIFT_TAB = "\x1b[Z"
 
 env = {"VIBE_TEST_SHOW_RUST_HINT": "1"}
-screen_contains = {"rust": ("You are using the Rust version of Vibe (experimental).",)}
+screen_contains = {
+    "rust": (
+        "Experimental Rust TUI - unset `VIBE_CLI` (or set it to `python`) for the legacy Python TUI.",
+    )
+}
 
 timeline: Timeline = [_SHIFT_TAB]

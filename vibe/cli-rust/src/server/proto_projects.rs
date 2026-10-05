@@ -59,10 +59,13 @@ pub struct PickerState {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PickerView {
     pub context: PickerContext,
     pub state: PickerState,
     pub git: GitInfo,
+    #[serde(default)]
+    pub saved_project_link_cleared: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +73,8 @@ pub struct PickerView {
 pub struct OpenResponse {
     pub picker_id: String,
     pub view: PickerView,
+    #[serde(default)]
+    pub resolved_project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,4 +88,10 @@ pub struct LoadMoreResponse {
 pub struct ProjectResponse {
     pub view: PickerView,
     pub project: Project,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RecoverResponse {
+    pub recovered: bool,
+    pub view: PickerView,
 }

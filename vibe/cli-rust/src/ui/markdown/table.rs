@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Line;
 
-use super::text::{cell_width, merge, pad_line, wrap_chars};
+use super::text::{cell_width, merge, pad, pad_line, wrap_chars};
 use super::{Out, Sc, TableCell, TableCellSpan};
 use crate::ui::theme;
 
@@ -35,10 +35,14 @@ pub(super) fn render_table(
 
 /// A border rule: `left`, then `fill` runs joined by `mid`, closed by `right`.
 fn rule(left: char, mid: char, right: char, widths: &[usize], pad: usize) -> Line<'static> {
-    let mut cells: Vec<Sc> = vec![(left, border())];
+    let mut cells: Vec<Sc> = vec![(left, border(), None)];
     for (i, &w) in widths.iter().enumerate() {
-        cells.extend(std::iter::repeat_n(('─', border()), w));
-        cells.push((if i + 1 == widths.len() { right } else { mid }, border()));
+        cells.extend(std::iter::repeat_n(('─', border(), None), w));
+        cells.push((
+            if i + 1 == widths.len() { right } else { mid },
+            border(),
+            None,
+        ));
     }
     pad_line(merge(&cells), pad)
 }
@@ -78,7 +82,7 @@ fn render_row(
             .get(column)
             .unwrap_or(&empty)
             .iter()
-            .map(|(character, _)| character)
+            .map(|sc| sc.0)
             .collect::<String>()
             .into();
         let spans = cell_spans(lines, cells.get(column).unwrap_or(&empty), x, y);
@@ -93,25 +97,25 @@ fn render_row(
         x += width + 1;
     }
     for line in 0..height {
-        let mut rendered: Vec<Sc> = vec![('│', border())];
+        let mut rendered: Vec<Sc> = vec![('│', border(), None)];
         for (&width, lines) in widths.iter().zip(&wrapped) {
             let region = width.saturating_sub(2);
             let cell = lines.get(line).map(Vec::as_slice).unwrap_or_default();
             if width > 0 {
-                rendered.push((' ', Style::default()));
+                rendered.push((' ', Style::default(), None));
             }
-            for &(character, style) in cell {
-                rendered.push((character, if header { fill } else { style }));
+            for &(character, style, link) in cell {
+                rendered.push((character, if header { fill } else { style }, link));
             }
             for _ in cell_width(cell)..region {
-                rendered.push((' ', fill));
+                rendered.push((' ', fill, None));
             }
             if width > 1 {
-                rendered.push((' ', Style::default()));
+                rendered.push((' ', Style::default(), None));
             }
-            rendered.push(('│', border()));
+            rendered.push(('│', border(), None));
         }
-        out.lines.push(pad_line(merge(&rendered), pad));
+        out.lines.push_row(vec![self::pad(pad)], &rendered);
     }
 }
 

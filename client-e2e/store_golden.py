@@ -40,7 +40,7 @@ def main() -> None:
         if scenario.skip_reason:
             print(f"  skip {name}: {scenario.skip_reason}")
             continue
-        scenario.capture_startup = False
+        scenario.clamp_capture_startup()
         try:
             captured = capture_scenario(CLIENTS["rust"], scenario)
         except (TimeoutError, OSError) as exc:

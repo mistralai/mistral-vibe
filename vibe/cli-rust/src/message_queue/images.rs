@@ -4,14 +4,17 @@ use super::QueueItem;
 use crate::server::{ImageAttachment, ImageSource, PreparedPrompt};
 
 impl QueueItem {
-    /// Restore file-backed attachments as editable composer mentions.
-    pub fn edit_text(&self) -> String {
-        let text = crate::paste_path::rewrite_bare_image_paths_in_text(&self.text);
+    /// The prompt as the composer edits it, led by an `@` mention for each
+    /// file-backed attachment its text does not mention. Bare image paths are
+    /// left for the composer to rewrite around the mentions it restores.
+    pub fn raw_edit_text(&self) -> String {
+        let text = self.text.clone();
+        let rewritten = crate::paste_path::rewrite_bare_image_paths_in_text(&self.text);
         let mentions: Vec<String> = self
             .images
             .iter()
             .filter_map(|image| match &image.source {
-                ImageSource::File { path } if !image_is_mentioned(&text, image) => {
+                ImageSource::File { path } if !image_is_mentioned(&rewritten, image) => {
                     Some(crate::paste_path::image_path_mention(path))
                 }
                 _ => None,
@@ -29,7 +32,8 @@ fn image_is_mentioned(text: &str, image: &ImageAttachment) -> bool {
     let ImageSource::File { path } = &image.source else {
         return false;
     };
-    crate::paste_path::contains_image_path_mention(text, path)
+    crate::image_placeholders::references(text, image)
+        || crate::paste_path::contains_image_path_mention(text, path)
         || crate::paste_path::contains_image_path_mention(text, &image.alias)
 }
 

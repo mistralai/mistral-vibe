@@ -10,7 +10,7 @@ chunks, and translate the final assistant message back into a
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from html import escape
 from http import HTTPStatus
 import json
@@ -45,6 +45,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustUserMessage,
     tool_call_wire_arguments,
 )
+from mistralai_vibe_local_harness.session_protocol import PublicRetryCategory
 from mistralai_vibe_local_harness.vibe._credentials import ProviderCredentialSnapshot
 from mistralai_vibe_local_harness.vibe._runtime_config import (
     LocalModelRoute,
@@ -177,6 +178,10 @@ async def execute_generic_completion(
     route: LocalModelRoute | None = None,
     on_retry: ProviderRetryObserver | None = None,
     on_delta: ProviderDeltaObserver | None = None,
+    # Accepted for signature parity with the Mistral adapter and dropped:
+    # these provider APIs have no request-metadata channel, so the call's
+    # attribution rides the Host's request-sent telemetry instead.
+    metadata: Mapping[str, str] | None = None,
 ) -> RustCompletionResult:
     route = route or config.active_model
     provider = _provider_view(config)
@@ -320,9 +325,17 @@ async def _complete_with_retries(
             budget_spent = time.monotonic() - start >= max_elapsed_time_s
             if budget_spent or not _is_retryable_error(exc):
                 raise
-            if on_retry is not None:
-                await on_retry(_provider_retry(exc))
             delay = _next_retry_delay(exc, attempt)
+            if on_retry is not None:
+                category, detail = _retry_reason(exc)
+                await on_retry(
+                    ProviderRetry(
+                        category=category,
+                        detail=detail,
+                        delay_s=delay,
+                        retry_attempt=attempt + 1,
+                    )
+                )
             logger.warning(
                 "Retrying generic completion (attempt %d, delay %.2fs): %r",
                 attempt + 1,
@@ -403,7 +416,7 @@ def _is_retryable_error(error: Exception) -> bool:
     return isinstance(error, _RETRYABLE_REQUEST_ERRORS)
 
 
-def _provider_retry(error: Exception) -> ProviderRetry:
+def _retry_reason(error: Exception) -> tuple[PublicRetryCategory, str]:
     status = _http_status(error)
     if status is not None:
         if status == HTTPStatus.TOO_MANY_REQUESTS:
@@ -414,12 +427,12 @@ def _provider_retry(error: Exception) -> ProviderRetry:
             category = "server_error"
         else:
             category = "unknown"
-        return ProviderRetry(category=category, detail=f"HTTP {status}")
+        return category, f"HTTP {status}"
     if isinstance(error, httpx.TimeoutException):
-        return ProviderRetry(category="timed_out", detail=type(error).__name__)
+        return "timed_out", type(error).__name__
     if isinstance(error, _RETRYABLE_REQUEST_ERRORS + (ssl.SSLError,)):
-        return ProviderRetry(category="connection", detail=type(error).__name__)
-    return ProviderRetry(category="unknown", detail=type(error).__name__)
+        return "connection", type(error).__name__
+    return "unknown", type(error).__name__
 
 
 def _http_status(error: Exception) -> int | None:

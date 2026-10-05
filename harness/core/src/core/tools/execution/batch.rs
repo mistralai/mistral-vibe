@@ -93,10 +93,12 @@ fn start_tool_execution(
             observations,
         ));
     }
-    if let Some(result) =
-        tools.with_program_context(|context| dispatch_program(context, &call, determinism))
-    {
+    let mut accepted_results = Vec::new();
+    if let Some(result) = tools.with_program_context(|context| {
+        dispatch_program(context, &call, determinism, &mut accepted_results)
+    }) {
         let (outcome, effects) = result?;
+        let mut observations = accepted_program_results(tools.turn_id, accepted_results);
         return match outcome {
             ProgramOutcome::Pending(execution) => Ok((
                 ToolExecution {
@@ -104,7 +106,7 @@ fn start_tool_execution(
                     state: ToolExecutionState::ProgramPending { execution },
                 },
                 effects,
-                Vec::new(),
+                observations,
             )),
             ProgramOutcome::Completed(completed) => {
                 if !effects.is_empty() {
@@ -118,33 +120,47 @@ fn start_tool_execution(
                     LargeOutputSource::RunTypescript,
                     *completed,
                 )?;
+                observations.extend(finalized.observations);
                 Ok((
                     ToolExecution {
                         call,
                         state: finalized.state,
                     },
                     finalized.actions,
-                    finalized.observations,
+                    observations,
                 ))
             }
         };
     }
-    match direct_tool_execution_from_resolved_tools(tools, &call) {
-        Ok((execution, effect)) => Ok((
-            ToolExecution {
+    let (execution, effect) = match direct_tool_execution_from_resolved_tools(tools, &call) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return Ok(completed_execution(
+                tools.turn_id,
                 call,
-                state: execution,
-            },
-            vec![effect],
-            Vec::new(),
-        )),
-        Err(error) => Ok(completed_execution(
-            tools.turn_id,
-            call,
-            invalid_tool_call_result(error.detail().to_string()),
-            Vec::new(),
-        )),
+                invalid_tool_call_result(error.detail().to_string()),
+                Vec::new(),
+            ));
+        }
+    };
+
+    let permission_denial = match &execution {
+        ToolExecutionState::DirectPending { call } => tools.permission_denial(call),
+        _ => None,
+    };
+
+    if let Some(result) = permission_denial {
+        return Ok(completed_execution(tools.turn_id, call, result, Vec::new()));
     }
+
+    Ok((
+        ToolExecution {
+            call,
+            state: execution,
+        },
+        vec![effect],
+        Vec::new(),
+    ))
 }
 
 fn advance_program(
@@ -158,7 +174,7 @@ fn advance_program(
     let parent_call = execution.call.clone();
     let ProgramTransition {
         advance,
-        accepted_result,
+        accepted_results,
     } = {
         let ToolExecutionState::ProgramPending { execution: program } = &mut execution.state else {
             return Err(CoreError::invariant(
@@ -169,9 +185,7 @@ fn advance_program(
             program.advance(context, &parent_call, input, determinism)
         })?
     };
-    if let Some(accepted) = accepted_result {
-        observations.push(accepted_program_result(tools.turn_id, accepted));
-    }
+    observations.extend(accepted_program_results(tools.turn_id, accepted_results));
     match advance {
         ProgramAdvance::Pending {
             actions: next_actions,
@@ -305,6 +319,16 @@ fn accepted_program_result(turn_id: &str, accepted: AcceptedProgramResult) -> Ob
     }
 }
 
+fn accepted_program_results(
+    turn_id: &str,
+    accepted_results: Vec<AcceptedProgramResult>,
+) -> Vec<Observation> {
+    accepted_results
+        .into_iter()
+        .map(|accepted| accepted_program_result(turn_id, accepted))
+        .collect()
+}
+
 fn accepted_direct_result(
     turn_id: &str,
     operation_id: &str,
@@ -325,8 +349,8 @@ fn completed_execution(
     result: ToolResult,
     mut observations: Vec<Observation>,
 ) -> (ToolExecution, Vec<Action>, Vec<Observation>) {
-    observations.push(tool_execution_finished(turn_id, &call.id, result.clone()));
     let state = completed_external_tool_state(&call, &result);
+    observations.push(tool_execution_finished(turn_id, &call.id, result));
     (ToolExecution { call, state }, Vec::new(), observations)
 }
 
@@ -586,10 +610,19 @@ pub(crate) fn finish_tool_batch_hook(
                     effective_arguments,
                 } => {
                     let effective_call = tools.effective_call(&original, effective_arguments)?;
-                    effects.push(external_tool_effect(tools, &effective_call)?);
-                    execution.state = ToolExecutionState::DirectPending {
-                        call: effective_call,
-                    };
+                    if let Some(result) = tools.permission_denial(&effective_call) {
+                        execution.state = completed_external_tool_state(&execution.call, &result);
+                        observations.push(tool_execution_finished(
+                            tools.turn_id,
+                            &execution.call.id,
+                            result,
+                        ));
+                    } else {
+                        effects.push(external_tool_effect(tools, &effective_call)?);
+                        execution.state = ToolExecutionState::DirectPending {
+                            call: effective_call,
+                        };
+                    }
                 }
                 PreToolCallOutput::Skip { reason } => {
                     let skipped = skipped_tool_result(reason)?;

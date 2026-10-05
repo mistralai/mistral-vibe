@@ -1,5 +1,7 @@
 //! Paint prepared transcript entries without cloning owned text.
 
+use std::borrow::Cow;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -7,6 +9,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::entry::{RenderedEntry, RenderedParts};
+use crate::ui::markdown::{self, Link, PreparedMarkdown};
 
 pub(super) fn entry(
     frame: &mut Frame,
@@ -15,7 +18,7 @@ pub(super) fn entry(
     height: u16,
     rendered: RenderedEntry,
     prewrapped: bool,
-    decorate: impl FnOnce(&mut Buffer, Rect, &[(String, String)], crate::ui::markdown::LinkKind),
+    decorate: impl FnOnce(&mut Buffer, Vec<Link>),
 ) -> i32 {
     let bottom = y + height as i32;
     let viewport_top = area.y as i32;
@@ -33,43 +36,23 @@ pub(super) fn entry(
         width: area.width,
         height: (height - offset).min(available),
     };
-    let RenderedParts {
-        lines,
-        prepared,
-        links,
-        link_kind,
-    } = rendered.into_parts();
-    match prepared {
-        Some(prepared) => {
-            report_overflow(prepared.lines(), area.width);
-            if prewrapped {
-                paint_prewrapped(frame.buffer_mut(), rect, offset, prepared.lines());
-            } else {
-                let paragraph = Paragraph::new(prepared.lines().to_vec())
-                    .wrap(Wrap { trim: false })
-                    .scroll((offset, 0));
-                frame.render_widget(paragraph, rect);
-            }
-            decorate(
-                frame.buffer_mut(),
-                rect,
-                prepared.links(),
-                crate::ui::markdown::LinkKind::External,
-            );
-        }
-        None => {
-            report_overflow(&lines, area.width);
-            if prewrapped {
-                paint_prewrapped(frame.buffer_mut(), rect, offset, &lines);
-            } else {
-                let paragraph = Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .scroll((offset, 0));
-                frame.render_widget(paragraph, rect);
-            }
-            decorate(frame.buffer_mut(), rect, &links, link_kind);
-        }
+    let RenderedParts { lines, prepared } = rendered.into_parts();
+    let linked = prepared.as_deref().map_or(&lines, PreparedMarkdown::linked);
+    let screen_links = markdown::screen_links(linked, prewrapped, rect, offset);
+    let lines: Cow<[Line<'static>]> = match &prepared {
+        Some(prepared) => Cow::Borrowed(prepared.lines()),
+        None => Cow::Owned(lines.into_lines()),
+    };
+    report_overflow(&lines, area.width);
+    if prewrapped {
+        paint_prewrapped(frame.buffer_mut(), rect, offset, &lines);
+    } else {
+        let paragraph = Paragraph::new(lines.into_owned())
+            .wrap(Wrap { trim: false })
+            .scroll((offset, 0));
+        frame.render_widget(paragraph, rect);
     }
+    decorate(frame.buffer_mut(), screen_links);
     bottom
 }
 

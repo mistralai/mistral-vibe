@@ -5,6 +5,8 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from mcp.shared.exceptions import McpError
+from mcp.types import ErrorData
 import pytest
 import respx
 
@@ -255,6 +257,18 @@ class TestConnectorErrorMessage:
         msg = _connector_error_message(exc, "id-1", "myconn")
         assert "400" in msg
         assert "bad request detail" in msg
+
+    def test_nested_session_terminated_surfaces_gateway_404(self) -> None:
+        leaf = McpError(ErrorData(code=32600, message="Session terminated"))
+        exc = ExceptionGroup("g", [ExceptionGroup("g", [leaf])])
+        msg = _connector_error_message(exc, "id-1", "myconn")
+        assert "HTTP 404" in msg
+
+    def test_nested_connect_error_keeps_ssl_detail(self) -> None:
+        leaf = httpx.ConnectError("CERTIFICATE_VERIFY_FAILED")
+        exc = ExceptionGroup("g", [ExceptionGroup("g", [leaf])])
+        msg = _connector_error_message(exc, "id-1", "myconn")
+        assert "CERTIFICATE_VERIFY_FAILED" in msg
 
 
 class TestUnwrapHttpStatusError:

@@ -37,6 +37,11 @@ from vibe.app_server.models import (
     ProcessEffectDetail,
     PublicCallbackEntry,
     PublicEffectEntry,
+    RunningEffectState,
+    ScratchpadEffectDetail,
+    ScratchpadListInput,
+    ScratchpadReadInput,
+    ScratchpadWriteInput,
     ShellEffectDetail,
     ShellEffectOutput,
     SkillEffectDetail,
@@ -52,6 +57,7 @@ from vibe.app_server.models import (
     validate_history_entry,
 )
 from vibe.core.tools.builtins.todo import TodoConfig
+from vibe.utils.tool_presentation import ToolEffectKind
 
 
 def test_projects_unified_read_file_with_nullable_limit() -> None:
@@ -151,6 +157,72 @@ def test_projects_unified_write_file_with_retained_call_content() -> None:
     assert FileWriteEffectOutput.model_validate(projected.state.output) == (
         FileWriteEffectOutput(file_path="/workspace/notes.txt", content="hello\n")
     )
+
+
+def test_projects_unified_write_file_over_an_existing_file() -> None:
+    entry = _effect(
+        "write_file",
+        {"path": "notes.txt", "content": "hello\n"},
+        result={
+            "structured_content": {
+                "path": "/workspace/notes.txt",
+                "bytes_written": 6,
+                "file_existed": True,
+            },
+            "_meta": {
+                "mistralai.vibe.sdk.write_file": {"previous_content": "goodbye\n"}
+            },
+        },
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    output = FileWriteEffectOutput.model_validate(projected.state.output)
+    assert output.file_existed
+    assert output.previous_content == "goodbye\n"
+    assert projected.state.display.verb == "Updated"
+
+
+def test_projects_unified_write_file_the_runtime_could_not_diff() -> None:
+    # The Runtime omits the annotation for a file too large or not text.
+    entry = _effect(
+        "write_file",
+        {"path": "notes.txt", "content": "hello\n"},
+        result={
+            "structured_content": {
+                "path": "/workspace/notes.txt",
+                "bytes_written": 6,
+                "file_existed": True,
+            }
+        },
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    output = FileWriteEffectOutput.model_validate(projected.state.output)
+    assert output.file_existed
+    assert output.previous_content is None
+
+
+def test_leaves_a_write_generic_when_the_runtime_omits_file_existed() -> None:
+    # A Runtime predating the flag says nothing about what the write replaced.
+    # Reading that as a creation would credit the whole body as additions.
+    entry = _effect(
+        "write_file",
+        {"path": "notes.txt", "content": "hello\n"},
+        result={
+            "structured_content": {"path": "/workspace/notes.txt", "bytes_written": 6}
+        },
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, GenericEffectDetail)
 
 
 def test_projects_unified_batched_search_replace_and_occurrences() -> None:
@@ -410,6 +482,7 @@ def test_projects_process_start_with_command_in_display() -> None:
     assert projected.detail.display.message == "sleep 30"
     assert projected.detail.display.settled_verb == "Started"
     assert projected.detail.display.settled_message == "sleep 30"
+    assert projected.detail.display.status_text == "Starting process"
     assert isinstance(projected.state, CompletedEffectState)
     assert projected.state.display.verb == "Started"
     assert projected.state.display.message == "sleep 30"
@@ -979,15 +1052,39 @@ def test_projects_the_scratchpad_call(
     projected = project_unified_history_entry(entry)
 
     assert isinstance(projected, PublicEffectEntry)
-    # No dedicated widget: the projection rewrites the display and leaves the
-    # generic effect otherwise intact.
-    assert isinstance(projected.detail, GenericEffectDetail)
+    # A surface reads the kind rather than matching the tool name.
+    assert isinstance(projected.detail, ScratchpadEffectDetail)
+    assert projected.detail.kind is ToolEffectKind.SCRATCHPAD
+    match projected.detail.input:
+        case ScratchpadListInput():
+            assert arguments["action"] == "list"
+        case ScratchpadReadInput(path=path):
+            assert (arguments["action"], path) == ("read", arguments["path"])
+        case ScratchpadWriteInput(path=path, content=content):
+            assert (arguments["action"], path, content) == (
+                "write",
+                arguments["path"],
+                arguments["content"],
+            )
     assert unified_tool_category(entry) == "scratchpad"
     assert projected.detail.display.verb == verb
     assert projected.detail.display.message == message
     assert projected.detail.display.summary == f"{verb} {message}"
     assert isinstance(projected.state, CompletedEffectState)
     assert (projected.state.display.verb, projected.state.display.message) == settled
+
+
+def test_a_scratchpad_action_outside_the_union_stays_generic() -> None:
+    entry = _effect(
+        f"vibe.{SCRATCHPAD_TOOL_NAME}",
+        {"action": "append", "path": "plan.md"},
+        result={"structured_content": {"verb": "Appended", "path": "plan.md"}},
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, GenericEffectDetail)
 
 
 def test_the_scratchpad_executor_result_projects_end_to_end(tmp_path: Path) -> None:
@@ -1103,3 +1200,240 @@ def _generic_detail(name: str, input_value: object) -> dict[str, object]:
             "statusText": f"Running {name}",
         },
     }
+
+
+@pytest.mark.parametrize(
+    ("arguments", "verb", "settled", "message"),
+    [
+        (
+            {"action": "schedule", "interval_seconds": 90, "prompt": "check CI"},
+            "Scheduling",
+            "Scheduled",
+            "every 1 minute 30 seconds: check CI",
+        ),
+        (
+            {"action": "schedule_cron", "cron": "0 9 * * 1-5", "prompt": "review CI"},
+            "Scheduling",
+            "Scheduled",
+            "cron 0 9 * * 1-5 (local time): review CI",
+        ),
+        ({"action": "list"}, "Listing", "Listed", "scheduled prompts"),
+        (
+            {"action": "cancel", "id": "abc"},
+            "Cancelling",
+            "Cancelled",
+            "scheduled prompt abc",
+        ),
+        ({"action": "clear"}, "Clearing", "Cleared", "scheduled prompts"),
+    ],
+)
+@pytest.mark.parametrize("running", [False, True])
+def test_cron_calls_use_action_verbs_while_running_or_failed(
+    arguments, verb, settled, message, running
+):
+    entry = _effect("vibe.cron", arguments, error="request failed")
+    if running:
+        entry = entry.model_copy(update={"state": RunningEffectState()})
+    projected = project_unified_history_entry(entry)
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, GenericEffectDetail)
+    assert projected.detail.tool_name == "vibe.cron"
+    assert projected.detail.display.verb == verb
+    assert projected.detail.display.settled_verb == settled
+    assert projected.detail.display.message == message
+    assert projected.state == entry.state
+    assert unified_tool_category(entry) == "cron"
+
+
+def test_cron_expanded_results_are_readable_without_mutating_model_output():
+    result = {
+        "structured_content": {
+            "verb": "Listed",
+            "message": "Listed 2 scheduled loops",
+            "loops": [
+                {
+                    "id": "interval-1",
+                    "interval_seconds": 90,
+                    "prompt": "check CI\nand report failures",
+                    "next_fire_at": 1790067600,
+                    "created_at": 1,
+                    "future_field": True,
+                },
+                {
+                    "id": "calendar-1",
+                    "cron": "0 9 * * 1-5",
+                    "prompt": "review CI",
+                    "next_fire_at": 1790067600,
+                },
+            ],
+            "future_field": "ignored",
+        }
+    }
+    entry = _effect(
+        "vibe.cron",
+        {"action": "list"},
+        result=result,
+        warnings=["a warning"],
+        approval_note="approved",
+    )
+    projected = project_unified_history_entry(entry)
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.verb == "Listed"
+    assert projected.state.display.message == "2 scheduled prompts"
+    assert projected.state.display.warnings == ["a warning"]
+    assert projected.state.display.approval_note == "approved"
+    body = projected.state.output
+    assert isinstance(body, str)
+    assert "Prompt: check CI\n  and report failures" in body
+    assert "Schedule: every 1 minute 30 seconds" in body
+    assert "Schedule: cron 0 9 * * 1-5 (local time)" in body
+    assert body.count("Next run: ") == 2
+    assert "ID: interval-1\n\nPrompt: review CI" in body
+    assert "ID: calendar-1" in body
+    assert "1790067600" not in body
+    assert "structured_content" not in body
+    assert projected.state.output_text == body
+    assert isinstance(entry.state, CompletedEffectState)
+    assert entry.state.output == result
+    assert project_unified_history_entry(projected) == projected
+
+
+@pytest.mark.parametrize(
+    ("action", "verb", "message", "expected"),
+    [
+        ("list", "Listed", "Listed 0 scheduled loops", "No scheduled prompts."),
+        ("clear", "Cleared", "Cleared 2 scheduled loops", "Cleared 2 scheduled loops"),
+    ],
+)
+def test_cron_empty_results_have_plain_language_bodies(action, verb, message, expected):
+    projected = project_unified_history_entry(
+        _effect(
+            "vibe.cron",
+            {"action": action},
+            result={
+                "structured_content": {"verb": verb, "message": message, "loops": []}
+            },
+        )
+    )
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.verb == verb
+    assert projected.state.output == expected
+
+
+def test_cancelled_schedule_does_not_advertise_another_run():
+    projected = project_unified_history_entry(
+        _effect(
+            "vibe.cron",
+            {"action": "cancel", "id": "abc"},
+            result={
+                "structured_content": {
+                    "verb": "Cancelled",
+                    "message": "Cancelled loop abc",
+                    "loops": [
+                        {
+                            "id": "abc",
+                            "prompt": "check CI",
+                            "interval_seconds": 60,
+                            "next_fire_at": 1790067600,
+                        }
+                    ],
+                }
+            },
+        )
+    )
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.verb == "Cancelled"
+    assert projected.state.display.message == "check CI"
+    assert isinstance(projected.state.output, str)
+    assert "ID: abc" in projected.state.output
+    assert "Next run" not in projected.state.output
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        None,
+        "hook replacement",
+        {"structured_content": {}},
+        {
+            "structured_content": {
+                "verb": "Listed",
+                "message": "result",
+                "loops": [
+                    {
+                        "id": "abc",
+                        "prompt": "p",
+                        "interval_seconds": 60,
+                        "next_fire_at": 1e100,
+                    }
+                ],
+            }
+        },
+    ],
+)
+def test_unreadable_cron_results_keep_the_original_generic_effect(output):
+    entry = _effect("vibe.cron", {"action": "list"}, result=output)
+    assert project_unified_history_entry(entry) is entry
+
+
+@pytest.mark.asyncio
+async def test_cron_executor_result_projects_through_the_public_boundary(
+    tmp_path: Path,
+):
+    from vibe.app_server._unified_scheduled_loops import UnifiedScheduledLoops
+
+    store = UnifiedScheduledLoops(tmp_path / "loops.json", persistent=lambda: False)
+    executor = VibeProvidedTools().executor_factory(
+        tmp_path, max_todos=lambda: 10, scheduled_loops=lambda _: store
+    )("session-1")
+    arguments: JsonObject = {
+        "action": "schedule",
+        "interval_seconds": 60,
+        "prompt": "check CI",
+    }
+    event = await executor(
+        RustProvidedToolCallAction(
+            action_id="action-1",
+            turn_id="turn-1",
+            call_id="call-1",
+            call=RustProvidedToolCall(
+                group_name="vibe", tool_name="cron", arguments=arguments
+            ),
+        )
+    )
+    assert isinstance(event, RustToolSucceededEvent)
+    source = event.result.model_dump(mode="json")
+    projected = project_unified_history_entry(
+        _effect("vibe.cron", arguments, result=source)
+    )
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.verb == "Scheduled"
+    assert projected.state.display.message == "every 1 minute: check CI"
+    assert isinstance(projected.state.output, str)
+    assert "Schedule: every 1 minute" in projected.state.output
+    assert "ID: " in projected.state.output
+    assert event.result.model_dump(mode="json") == source
+
+
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_cron_clear_display_uses_structured_count_not_result_prose(count):
+    result = {
+        "structured_content": {
+            "verb": "Changed wording",
+            "message": "Unrelated result text",
+            "loops": [],
+            "cleared_count": count,
+        }
+    }
+    projected = project_unified_history_entry(
+        _effect("vibe.cron", {"action": "clear"}, result=result)
+    )
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    noun = f"{count} scheduled loop{'s' if count != 1 else ''}"
+    assert projected.state.display.message == noun
+    assert projected.state.output == f"Cleared {noun}"

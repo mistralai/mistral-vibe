@@ -234,7 +234,15 @@ fn raw_text(value: &Value, kind: &str) -> String {
         _ => value
             .as_str()
             .map(str::to_owned)
-            .unwrap_or_else(|| value.to_string()),
+            // A null scalar (an unknown context window) edits from an empty
+            // draft, not from the literal text "null".
+            .unwrap_or_else(|| {
+                if value.is_null() {
+                    String::new()
+                } else {
+                    value.to_string()
+                }
+            }),
     }
 }
 

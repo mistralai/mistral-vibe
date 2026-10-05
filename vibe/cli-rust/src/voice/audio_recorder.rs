@@ -8,17 +8,23 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
+use super::signal::{mic_access_hint, RecordingSignal};
+
 /// Open the default input device and stream mono `pcm_s16le` chunks until `stop`.
 /// Returns the chunk receiver and the sample rate actually captured at.
 pub fn start(
     _requested_rate: u32,
     peak: Arc<AtomicU32>,
     stop: Arc<AtomicBool>,
+    signal: Arc<RecordingSignal>,
 ) -> Result<(UnboundedReceiver<Vec<u8>>, u32), String> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| "No audio input device found.".to_string())?;
+    let device = host.default_input_device().ok_or_else(|| {
+        format!(
+            "No audio input device found.{}",
+            mic_access_hint(std::env::consts::OS)
+        )
+    })?;
     let supported = device
         .default_input_config()
         .map_err(|e| format!("Audio backend is unavailable: {e}"))?;
@@ -32,7 +38,7 @@ pub fn start(
 
     // cpal streams are not Send on macOS; build and own it on a dedicated thread.
     std::thread::spawn(move || {
-        let stream = match build(&device, &config, channels, sample_format, tx, peak) {
+        let stream = match build(&device, &config, channels, sample_format, tx, peak, signal) {
             Ok(s) => s,
             Err(e) => {
                 let _ = ready_tx.send(Err(e));
@@ -66,11 +72,12 @@ fn build(
     fmt: SampleFormat,
     tx: UnboundedSender<Vec<u8>>,
     peak: Arc<AtomicU32>,
+    signal: Arc<RecordingSignal>,
 ) -> Result<cpal::Stream, String> {
     match fmt {
-        SampleFormat::F32 => build_typed::<f32>(device, config, channels, tx, peak),
-        SampleFormat::I16 => build_typed::<i16>(device, config, channels, tx, peak),
-        SampleFormat::U16 => build_typed::<u16>(device, config, channels, tx, peak),
+        SampleFormat::F32 => build_typed::<f32>(device, config, channels, tx, peak, signal),
+        SampleFormat::I16 => build_typed::<i16>(device, config, channels, tx, peak, signal),
+        SampleFormat::U16 => build_typed::<u16>(device, config, channels, tx, peak, signal),
         other => Err(format!("Unsupported sample format {other:?}")),
     }
 }
@@ -81,6 +88,7 @@ fn build_typed<T>(
     channels: usize,
     tx: UnboundedSender<Vec<u8>>,
     peak: Arc<AtomicU32>,
+    signal: Arc<RecordingSignal>,
 ) -> Result<cpal::Stream, String>
 where
     T: SizedSample + Send + 'static,
@@ -105,6 +113,7 @@ where
                     }
                     bytes.extend_from_slice(&mono.to_le_bytes());
                 }
+                signal.observe(block_peak);
                 peak.store(block_peak.to_bits(), Ordering::Relaxed);
                 let _ = tx.send(bytes);
             },

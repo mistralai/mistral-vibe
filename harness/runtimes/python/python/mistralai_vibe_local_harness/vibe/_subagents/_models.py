@@ -31,6 +31,15 @@ class SubagentModel(BaseModel):
 
 
 class _SessionIdentityModel(SubagentModel):
+    """Base of the identities a session stores and restores itself by.
+
+    These travel inside a persisted document, so they meet the same rule it
+    does: a build that finds a field it does not know keeps it and writes it
+    back, rather than refusing a session another build recorded.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
     @field_validator(
         "session_id", "root_session_id", "parent_session_id", check_fields=False
     )

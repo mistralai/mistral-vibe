@@ -47,7 +47,7 @@ def _context(tmp_path: Path, session_id: str = "session-1") -> HookContext:
     # (it is the file sandbox), so tests default to that shape: trust-gating
     # regressions surface instead of hiding behind the empty default.
     return HookContext(
-        config=LocalRuntimeAdapterConfig(cwd=tmp_path, workspace_roots=(tmp_path,)),
+        config=LocalRuntimeAdapterConfig.at(cwd=tmp_path, roots=(tmp_path,)),
         messages=(),
         session_id=session_id,
     )

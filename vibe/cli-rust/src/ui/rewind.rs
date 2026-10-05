@@ -12,6 +12,7 @@ use crate::rewind::{options, Step};
 
 /// Preview characters kept in the title (Python `_title_text`).
 const PREVIEW_LIMIT: usize = 80;
+const TITLE_PREFIX: &str = "Rewind to: ";
 
 /// One rendered row: `(text, style)` runs starting at the content column.
 type Row = Vec<(String, Style)>;
@@ -66,9 +67,22 @@ fn rows(app: &App) -> Vec<Row> {
     let title = Style::default()
         .fg(theme::primary())
         .add_modifier(Modifier::BOLD);
-    let mut rows: Vec<Row> = title_text(&app.rewind.preview)
+    // A collapsed paste keeps its placeholder, set apart from the title color.
+    let placeholder = title.fg(theme::secondary());
+    let mut rows: Vec<Row> = app
+        .rewind
+        .preview
+        .truncated(TITLE_PREFIX, PREVIEW_LIMIT)
         .lines()
-        .map(|line| vec![(line.to_owned(), title)])
+        .map(|segments| {
+            segments
+                .into_iter()
+                .map(|(text, is_placeholder)| {
+                    let style = if is_placeholder { placeholder } else { title };
+                    (text.to_owned(), style)
+                })
+                .collect()
+        })
         .collect();
     rows.push(Vec::new());
     for (index, label) in options(app).iter().enumerate() {
@@ -86,11 +100,6 @@ fn rows(app: &App) -> Vec<Row> {
     rows.push(Vec::new());
     rows.push(help(app));
     rows
-}
-
-fn title_text(preview: &str) -> String {
-    let preview: String = preview.chars().take(PREVIEW_LIMIT).collect();
-    format!("Rewind to: {preview}")
 }
 
 /// The hint line: keys in bold $primary, labels in $text-muted.

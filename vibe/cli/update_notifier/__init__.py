@@ -5,6 +5,8 @@ from vibe.cli.update_notifier.adapters.filesystem_update_cache_repository import
 )
 from vibe.cli.update_notifier.adapters.github_update_gateway import GitHubUpdateGateway
 from vibe.cli.update_notifier.adapters.pypi_update_gateway import PyPIUpdateGateway
+from vibe.cli.update_notifier.adapters.uv_tool_update_gateway import UvToolUpdateGateway
+from vibe.cli.update_notifier.gateway_factory import create_update_gateway
 from vibe.cli.update_notifier.ports.update_cache_repository import (
     UpdateCache,
     UpdateCacheRepository,
@@ -15,6 +17,7 @@ from vibe.cli.update_notifier.ports.update_gateway import (
     UpdateGateway,
     UpdateGatewayCause,
     UpdateGatewayError,
+    UpdateGatewayUnavailableError,
 )
 from vibe.cli.update_notifier.update import (
     UpdateAvailability,
@@ -42,6 +45,9 @@ __all__ = [
     "UpdateGateway",
     "UpdateGatewayCause",
     "UpdateGatewayError",
+    "UpdateGatewayUnavailableError",
+    "UvToolUpdateGateway",
+    "create_update_gateway",
     "get_pending_update_from_cache",
     "get_update_if_available",
     "load_whats_new_content",

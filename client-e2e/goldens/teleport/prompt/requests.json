@@ -1,0 +1,20 @@
+[
+ {
+  "method": "vibeCode/projects/open",
+  "params": {
+   "prompt": "fix the flaky test",
+   "purpose": "teleport",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "vibeCode/teleport/start",
+  "params": {
+   "operationId": "<client-message-id>",
+   "pickerId": "picker-1",
+   "projectId": "linked",
+   "prompt": "fix the flaky test",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

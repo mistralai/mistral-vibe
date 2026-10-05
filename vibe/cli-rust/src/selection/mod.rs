@@ -168,10 +168,7 @@ pub fn release(app: &mut App) -> Release {
         // The text is only known once the frame is painted, so the copy is
         // deferred to the overlay, which clears an empty selection itself.
         Some(Surface::Region(_)) => match app.selection.region.as_mut() {
-            Some(selection)
-                if selection.anchor != selection.head
-                    || app.selection.granularity != Granularity::Char =>
-            {
+            Some(selection) if !is_collapsed(selection, app.selection.granularity) => {
                 selection.pending_copy = true;
                 Release::Selected
             }
@@ -192,6 +189,11 @@ pub fn release(app: &mut App) -> Release {
             Release::Nothing
         }
     }
+}
+
+/// A char gesture whose head is still on its press cell selects nothing.
+pub fn is_collapsed(selection: &Selection, granularity: Granularity) -> bool {
+    selection.anchor == selection.head && granularity == Granularity::Char
 }
 
 /// A scroll drops the composer selection; a transcript one rides the document.

@@ -97,7 +97,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _builtin_plugin_roots() -> list[Path]:
+def packaged_builtin_plugin_roots() -> list[Path]:
     """Discover built-in plugin directories shipped inside the package."""
     try:
         import vibe.plugins.builtins as _pkg
@@ -158,7 +158,7 @@ async def resolve_session_plugins(
     exact plugin sets).
     """
     if builtin_plugin_roots is None:
-        builtin_plugin_roots = _builtin_plugin_roots()
+        builtin_plugin_roots = packaged_builtin_plugin_roots()
     resolution = await asyncio.to_thread(
         _resolve_installed, harness_files, config_orchestrator, builtin_plugin_roots
     )

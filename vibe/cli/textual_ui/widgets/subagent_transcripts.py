@@ -192,7 +192,9 @@ class SubagentTranscripts(VerticalGroup):
         with self.app.batch_update():
             await transcript.container.remove_children()
             await transcript.container.mount(
-                NoMarkupStatic("Unable to load this subagent transcript.")
+                NoMarkupStatic(
+                    "This subagent is closed. Its transcript is no longer available."
+                )
             )
 
     async def clear(self) -> None:

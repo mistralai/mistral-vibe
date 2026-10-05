@@ -48,6 +48,8 @@ from vibe.app_server.protocol import (
     Notification,
     ProtocolError,
     ProtocolErrorCode,
+    ProviderAuthReadParams,
+    ProviderAuthReadResponse,
     RuntimeMutationResponse,
     RuntimeMutationStatus,
     RuntimeReadParams,
@@ -57,6 +59,7 @@ from vibe.app_server.protocol import (
     SessionReadyWaitParams,
     SessionReadyWaitResponse,
 )
+from vibe.app_server.provider_auth import ProviderAuthView
 
 
 def _raise_for_write(response: ConfigWriteResponse) -> None:
@@ -289,6 +292,31 @@ class IdentityResource:
         )
         self._current = response.identity
         return response.identity
+
+
+class ProviderAuthResource:
+    """Reads the redacted active-provider auth snapshot.
+
+    Holds no cached state: the view is a snapshot taken per read, so later
+    credential changes are reflected by the next read rather than a stale one.
+    """
+
+    def __init__(
+        self, connection: AppServerResourceConnection, state: ClientSessionState
+    ) -> None:
+        self._connection = connection
+        self._state = state
+
+    async def read(self) -> ProviderAuthView:
+        client = await self._connection.connect()
+        response = validate_wire(
+            ProviderAuthReadResponse,
+            await client.request(
+                "providerAuth/read",
+                ProviderAuthReadParams(session_id=self._state.session_id),
+            ),
+        )
+        return response.auth
 
 
 class AgentResource:

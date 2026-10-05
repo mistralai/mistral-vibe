@@ -7,7 +7,7 @@ use serde_json::json;
 
 use crate::app::App;
 use crate::observability::level::{self, LogLevelChain, DEFAULT_LOG_LEVEL, LOG_LEVELS};
-use crate::server::{method, Client};
+use crate::server::Client;
 
 pub const BADGE_SESSION: &str = "session";
 pub const BADGE_CONFIG: &str = "config";
@@ -172,19 +172,13 @@ fn write_config(
         } else {
             json!({"op": "set", "path": LOG_LEVEL_PATH, "value": level, "targetLayer": null})
         };
-        let params = json!({
-            "sessionId": session_id,
-            "ops": [op],
-            "reason": "log level picker",
-            "reloadRuntime": false,
-        });
-        let event = match client.request(method::CONFIG_WRITE, params).await {
-            Ok(_) => Event::Applied,
-            Err(error) => Event::Failed {
-                error: error.to_string(),
-                restore,
-            },
-        };
+        let event =
+            match crate::config_write::write(&client, &session_id, vec![op], "log level picker")
+                .await
+            {
+                Ok(_) => Event::Applied,
+                Err(error) => Event::Failed { error, restore },
+            };
         crate::input::deliver(tx, event, &pending).await;
     });
 }

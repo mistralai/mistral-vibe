@@ -58,16 +58,25 @@ pub fn open(app: &mut App, client: &Arc<Client>, server_name: String) {
     start_login(app, client);
 }
 
-/// Esc/Backspace, and the successful login (Python `MCPOAuthClosed`).
-pub fn close(app: &mut App, client: &Arc<Client>, refreshed: bool) {
-    let server_name = if refreshed {
-        app.mcp_oauth.server_name.clone()
-    } else {
-        String::new()
-    };
-    app.mcp_oauth.open = false;
-    app.mcp_oauth.generation += 1;
-    crate::mcp::reopen(app, client, refreshed, server_name);
+/// Esc/Backspace (Python `MCPOAuthClosed()`).
+pub fn close(app: &mut App, client: &Arc<Client>) {
+    dismiss(app);
+    crate::mcp::reopen(app, client, false, String::new());
+}
+
+/// The login succeeded: stay up while the browser re-discovers, as Python awaits `_refresh_mcp_browser` first.
+fn connect(app: &mut App, client: &Arc<Client>) {
+    app.mcp_oauth.status_message = Some("Connecting...".to_owned());
+    let server_name = app.mcp_oauth.server_name.clone();
+    crate::mcp::reopen(app, client, true, server_name);
+}
+
+/// Take the app down once the browser it handed back to has answered.
+pub fn dismiss(app: &mut App) {
+    if app.mcp_oauth.open {
+        app.mcp_oauth.open = false;
+        app.mcp_oauth.generation += 1;
+    }
 }
 
 /// `R`: start the login again unless one is already running.
@@ -112,10 +121,13 @@ fn start_login(app: &mut App, client: &Arc<Client>) {
 
 pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
     if app.mcp_oauth.open && event.generation == app.mcp_oauth.generation {
-        app.mcp_oauth.logging_in = false;
         match event.error {
-            None => close(app, client, true),
-            Some(error) => on_login_failed(app, error),
+            // `logging_in` stays set so `R` cannot restart a login while connecting.
+            None => connect(app, client),
+            Some(error) => {
+                app.mcp_oauth.logging_in = false;
+                on_login_failed(app, error);
+            }
         }
     }
     app.commit_finished();

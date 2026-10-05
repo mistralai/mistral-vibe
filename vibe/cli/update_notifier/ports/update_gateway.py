@@ -49,5 +49,9 @@ class UpdateGatewayError(Exception):
         super().__init__(detail)
 
 
+class UpdateGatewayUnavailableError(UpdateGatewayError):
+    pass
+
+
 class UpdateGateway(Protocol):
     async def fetch_update(self) -> Update | None: ...

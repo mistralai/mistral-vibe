@@ -25,10 +25,12 @@ pub(super) fn document_height(
 }
 
 pub(super) struct Hitmaps<'a> {
-    pub entries: &'a mut Vec<(u16, u16, String)>,
+    pub entries: &'a mut Vec<(u16, u16, Option<u16>, String)>,
     pub links: &'a mut Vec<markdown::Link>,
     pub diffs: &'a mut Vec<(u16, u16, u16)>,
     pub tables: &'a mut Vec<TableCellHit>,
+    /// `(index, top, height)` of each painted entry, `top` relative to the viewport top.
+    pub rows: &'a mut Vec<(usize, i32, u16)>,
 }
 
 pub(super) struct Viewport<'a> {
@@ -36,9 +38,8 @@ pub(super) struct Viewport<'a> {
     pub area: Rect,
     pub width: u16,
     pub top: i32,
-    pub banner: &'a [Line<'static>],
-    /// `(label, url)` pairs the promo under the banner declares.
-    pub promo_targets: &'a [(String, String)],
+    /// The startup banner with the promo under it, and the promo's links.
+    pub banner: &'a markdown::LinkedLines,
     pub pulse_frame: usize,
     pub selected: Option<&'a str>,
     pub selected_table: Option<&'a (TableCellKey, usize)>,
@@ -60,6 +61,7 @@ pub(super) fn render(
         links,
         diffs,
         tables,
+        rows,
     } = hitmaps;
     let Viewport {
         layout,
@@ -67,7 +69,6 @@ pub(super) fn render(
         width,
         mut top,
         banner,
-        promo_targets,
         pulse_frame,
         selected,
         selected_table,
@@ -80,29 +81,19 @@ pub(super) fn render(
         frame,
         area,
         top,
-        measure(banner, width),
-        banner,
+        measure(banner.lines(), width),
+        banner.lines(),
         false,
-        |buffer, rect| {
-            if promo_targets.is_empty() {
-                return;
-            }
-            let promo_links =
-                markdown::links(buffer, rect, promo_targets, markdown::LinkKind::External);
-            if let Some(position) = mouse_position {
-                for link in &promo_links {
-                    if link.contains(position) {
-                        link.paint_hover(buffer, position);
-                    }
-                }
-            }
-            links.extend(promo_links);
+        |buffer, rect, offset| {
+            let promo = markdown::screen_links(banner, false, rect, offset);
+            hover(buffer, &promo, mouse_position);
+            links.extend(promo);
         },
     );
     if layout.entries.is_empty() {
         return;
     }
-    top = place(frame, area, top, 1, &[Line::from("")], false, |_, _| {});
+    top = place(frame, area, top, 1, &[Line::from("")], false, |_, _, _| {});
     let viewport_top = area.y as i32;
     let visible_document_top =
         u16::try_from((viewport_top - document_top).max(0)).unwrap_or(u16::MAX);
@@ -156,22 +147,30 @@ pub(super) fn render(
         let visible_top = entry_y.max(viewport_top);
         let visible_bottom = (entry_y + positioned.height as i32).min(viewport_bottom);
         if visible_bottom > visible_top {
+            rows.push((positioned.index, entry_y - viewport_top, positioned.height));
             let content_top = if let Some(group) = value.group.as_ref().filter(|group| group.first)
             {
                 let header_top = (entry_y + 1).max(viewport_top);
                 let header_bottom = (entry_y + 2).min(viewport_bottom);
                 if header_bottom > header_top {
-                    hitmap.push((header_top as u16, header_bottom as u16, group.key.clone()));
+                    let key = group.key.clone();
+                    hitmap.push((header_top as u16, header_bottom as u16, None, key));
                 }
                 entry_y + 2
             } else {
                 entry_y
             };
+            // An ungrouped entry opens with a gap row above its header.
+            let header = content_top + i32::from(value.group.is_none());
+            let header = (viewport_top..viewport_bottom)
+                .contains(&header)
+                .then_some(header as u16);
             let content_top = content_top.max(viewport_top);
             if content_visible && visible_bottom > content_top {
                 hitmap.push((
                     content_top as u16,
                     visible_bottom as u16,
+                    header,
                     value.id.to_owned(),
                 ));
                 if let Some(gutter) = entry::diff_gutter(&value, entry_expanded) {
@@ -186,21 +185,24 @@ pub(super) fn render(
             positioned.height,
             rendered,
             positioned.prewrapped,
-            |buffer, rect, targets, link_kind| {
-                if !content_visible || targets.is_empty() {
+            |buffer, entry_links| {
+                if !content_visible {
                     return;
                 }
-                let entry_links = markdown::links(buffer, rect, targets, link_kind);
-                if let Some(position) = mouse_position {
-                    for link in &entry_links {
-                        if link.contains(position) {
-                            link.paint_hover(buffer, position);
-                        }
-                    }
-                }
+                hover(buffer, &entry_links, mouse_position);
                 links.extend(entry_links);
             },
         );
+    }
+}
+
+/// Paint Textual's hover style on the links under the pointer.
+fn hover(buffer: &mut Buffer, links: &[markdown::Link], mouse_position: Option<(u16, u16)>) {
+    let Some(position) = mouse_position else {
+        return;
+    };
+    for link in links.iter().filter(|link| link.contains(position)) {
+        link.paint_hover(buffer);
     }
 }
 
@@ -211,7 +213,7 @@ fn place(
     height: u16,
     lines: &[Line<'static>],
     prewrapped: bool,
-    decorate: impl FnOnce(&mut Buffer, Rect),
+    decorate: impl FnOnce(&mut Buffer, Rect, u16),
 ) -> i32 {
     let bottom = y + height as i32;
     let viewport_top = area.y as i32;
@@ -245,7 +247,7 @@ fn place(
                     .scroll((offset, 0));
                 frame.render_widget(paragraph, rect);
             }
-            decorate(frame.buffer_mut(), rect);
+            decorate(frame.buffer_mut(), rect, offset);
         }
     }
     bottom

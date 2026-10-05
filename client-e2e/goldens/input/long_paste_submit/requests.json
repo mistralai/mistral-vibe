@@ -1,0 +1,51 @@
+[
+ {
+  "method": "workspace/prompt/prepare",
+  "params": {
+   "message": "summarize row 0\nrow 1\nrow 2\nrow 3\nrow 4\nrow 5\nrow 6\nrow 7\nrow 8\nrow 9\nrow 10\nrow 11",
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "titleContent": null
+  }
+ },
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "entries": [
+    {
+     "annotations": {
+      "vibe.userDisplayContent": {
+       "content": [
+        {
+         "chars": 73,
+         "hash": "c7eb93f8c6c1c46f",
+         "pasted": 74,
+         "start": 10,
+         "type": "vibe.collapsed_paste"
+        }
+       ],
+       "host": "vibe",
+       "version": "1"
+      }
+     },
+     "content": [
+      {
+       "text": "summarize row 0\nrow 1\nrow 2\nrow 3\nrow 4\nrow 5\nrow 6\nrow 7\nrow 8\nrow 9\nrow 10\nrow 11",
+       "type": "text"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "feedback/shouldShow",
+  "params": {
+   "pendingUserMessages": 1,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

@@ -33,6 +33,10 @@ from e2e.pty.screen import Snapshot
 # the host. Answer dark by default; a scenario overrides it by query string.
 _DEFAULT_TERMINAL_RESPONSES = {"\x1b]11;?\x07": "\x1b]11;rgb:0000/0000/0000\x1b\\"}
 
+# setup/* is per-scenario: every interactive run sends a pre-session
+# setup/status (the base fixture's hasApiKey:true keeps the wizard closed),
+# but only the onboarding scenarios pin it via request_methods — adding it
+# here would churn ~150 unrelated goldens with an identical empty-params frame.
 _PARITY_METHODS = frozenset({
     "callback/result",
     "config/write",
@@ -54,6 +58,18 @@ _PARITY_METHODS = frozenset({
     "turn/start",
     "turn/steer",
     "workspace/trust/decision",
+})
+
+# Telemetry whose properties vary per run (startup timings, generated recording
+# and message ids) never reaches the goldens, even when a scenario opts into
+# `telemetry/record` parity.
+_VOLATILE_TELEMETRY_EVENTS = frozenset({
+    "vibe.startup",
+    "vibe.at_mention_inserted",
+    "vibe.audio.transcription.start",
+    "vibe.audio.transcription.cancel_recording",
+    "vibe.audio.transcription.done",
+    "vibe.audio.transcription.error",
 })
 
 
@@ -103,6 +119,10 @@ def capture_scenario(
                     **_DEFAULT_TERMINAL_RESPONSES,
                     **scenario.terminal_responses,
                 }.items()
+            ),
+            exit_responses=tuple(
+                (trigger.encode(), reply.encode())
+                for trigger, reply in scenario.exit_responses.items()
             ),
         )
         try:
@@ -228,9 +248,10 @@ def _environment(
         # Pin truecolor so Textual never downsamples RGB themes to the 256-color
         # cube (ratatui keeps truecolor); the host's COLORTERM must not decide parity.
         "COLORTERM": "truecolor",
-        # Pin a non-VS Code terminal so the host's TERM_PROGRAM never decides the
-        # promo banner; a scenario overrides it to test the VS Code family.
-        "TERM_PROGRAM": "xterm-ghostty",
+        # Pin a non-VS Code terminal the detector maps by name, so the host's
+        # TERM_PROGRAM never decides the promo banner and terminal detection
+        # never falls through to the host terminal's env markers.
+        "TERM_PROGRAM": "ghostty",
         "COLUMNS": str(COLUMNS),
         "LINES": str(ROWS),
         "VIBE_HOME": home,
@@ -279,10 +300,12 @@ def _read_logged_requests(path: Path) -> list[Request]:
 
 
 def _parity_request(request: Request, methods: frozenset[str]) -> bool:
-    if request.method in methods:
-        return True
     if request.method != "telemetry/record":
+        return request.method in methods
+    if request.params.get("name") in _VOLATILE_TELEMETRY_EVENTS:
         return False
+    if "telemetry/record" in methods:
+        return True
     if request.params.get("name") == "vibe.user_rating_feedback":
         return True
     return (

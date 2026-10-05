@@ -43,6 +43,7 @@ def _setup_recording_hook(vibe_home: Path, invocation_path: Path) -> None:
         )
 
 
+@pytest.mark.unified_default
 @pytest.mark.timeout(20)
 def test_spawn_cli_runs_configured_hook_after_turn(
     streaming_mock_server: StreamingMockServer,

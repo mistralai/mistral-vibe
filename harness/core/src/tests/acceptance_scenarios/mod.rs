@@ -9,6 +9,7 @@ mod compaction;
 mod completion_and_tools;
 mod hooks;
 mod large_output;
+mod permissions;
 mod recovery;
 mod runtime_driver;
 mod steering;

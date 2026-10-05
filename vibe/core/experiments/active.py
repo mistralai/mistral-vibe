@@ -25,6 +25,8 @@ class ExperimentName(StrEnum):
     CLI_EXTRA_MODELS = "vibe_cli_extra_models"
     REGISTRY_SKILLS = "vibe_cli_registry_skills"
     UNIFIED_HARNESS_ROLLOUT = "vibe_cli_unified_harness_rollout"
+    # Read from the eval cache by the `vibe` launcher (vibe/cli/_rust.py).
+    RUST_TUI_ROLLOUT = "vibe_cli_rust_tui_rollout"
 
 
 DEFAULT_VARIANTS: Final[dict[ExperimentName, object]] = {
@@ -36,6 +38,7 @@ DEFAULT_VARIANTS: Final[dict[ExperimentName, object]] = {
     ExperimentName.CLI_EXTRA_MODELS: {},
     ExperimentName.REGISTRY_SKILLS: False,
     ExperimentName.UNIFIED_HARNESS_ROLLOUT: "legacy",
+    ExperimentName.RUST_TUI_ROLLOUT: "python",
 }
 
 assert all(name in DEFAULT_VARIANTS for name in ExperimentName), (
@@ -50,7 +53,15 @@ EXPERIMENT_SURFACES: Final[dict[ExperimentName, frozenset[ExperimentSurface]]] =
     ExperimentName.CLI_MODEL_ROUTING: frozenset(ExperimentSurface),
     ExperimentName.CLI_EXTRA_MODELS: frozenset(ExperimentSurface),
     ExperimentName.REGISTRY_SKILLS: frozenset(ExperimentSurface),
-    ExperimentName.UNIFIED_HARNESS_ROLLOUT: frozenset(ExperimentSurface),
+    # No surface consumes the Unified Harness rollout assignment anymore:
+    # unflagged startup constructs the Unified Runtime unconditionally and
+    # fails fast, so reporting an exposure would claim a treatment that is
+    # never served. The variant still resolves and caches (harmless), and the
+    # remote GrowthBook feature stays pinned to "unified" while older Vibe
+    # releases that still read it are supported. The declaration is removed
+    # with the rest of the rollout contract in the legacy-harness cutover.
+    ExperimentName.UNIFIED_HARNESS_ROLLOUT: frozenset(),
+    ExperimentName.RUST_TUI_ROLLOUT: frozenset(ExperimentSurface),
     # ``managed_shell_tools_enabled`` is read only by the legacy ToolManager; the
     # Harness owns the tool surface, so the variant can never apply on Unified.
     ExperimentName.MANAGED_SHELL_TOOLS: frozenset({ExperimentSurface.LEGACY}),

@@ -175,6 +175,10 @@ async fn apply_ready_event_drives_flush_pending() {
         }),
         attach: Attach::Started,
         runtime: serde_json::json!({"runtime": {}}),
+        is_cold_start: true,
+        settled: None,
+        prepared: None,
+        absorbed: Vec::new(),
     };
     apply_startup_event(
         &mut app,
@@ -280,6 +284,25 @@ async fn flush_pending_rejects_non_side_channel_while_generating() {
     assert_eq!(app.chat_input.cursor, 0);
     assert!(completion_manager::is_open(&app));
     assert!(app.view.transcript.revision() > before);
+}
+
+/// A deferred teleport rejected at flush time goes back into the input.
+#[tokio::test]
+async fn flush_pending_restores_a_rejected_teleport() {
+    let mut app = App::default();
+    app.session.status = Status::Generating {
+        since: std::time::Instant::now(),
+    };
+    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
+    let client = Arc::new(Client::stub());
+
+    app.pending_commands.push("&ship it".to_owned());
+    let exit = submission::flush_pending(&mut app, &client, &config_tx);
+
+    assert!(!exit);
+    assert_eq!(app.chat_input.full_text(), "&ship it");
+    assert_eq!(app.chat_input.cursor, 0);
+    assert!(app.teleport.is_none());
 }
 
 /// `flush_pending` with nothing deferred keeps a dismissed completion popup

@@ -31,7 +31,7 @@ class LocalHarness:
     def __init__(self, options: LocalHarnessOptions) -> None:
         self._options = options
         self._started = False
-        self._host = LocalHarnessHost()
+        self._host = LocalHarnessHost(shared=False)
 
     async def start(self) -> AppServerSession:
         if self._started:
@@ -48,7 +48,8 @@ class LocalHarness:
 
 
 class LocalHarnessHost:
-    def __init__(self) -> None:
+    def __init__(self, *, shared: bool = True) -> None:
+        self._shared = shared
         self._process: HarnessProcess | None = None
         self._experimental_harness: bool | None = None
         self._legacy_harness: bool | None = None
@@ -97,7 +98,9 @@ class LocalHarnessHost:
     ) -> HarnessProcess:
         if self._process is None:
             self._process = HarnessProcess(
-                experimental_harness=experimental_harness, legacy_harness=legacy_harness
+                experimental_harness=experimental_harness,
+                legacy_harness=legacy_harness,
+                shared=self._shared,
             )
             self._experimental_harness = experimental_harness
             self._legacy_harness = legacy_harness

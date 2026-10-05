@@ -94,9 +94,14 @@ async def test_stateful_subagent_runs_through_the_backend(
     experimental_harness: bool,
     tmp_path,
 ) -> None:
+    """*Prepare*: Mock a parent that discovers and invokes the stateful subagent tool.
+    *Do*: Run a parent turn through the Unified Harness backend.
+    *Assert*: The child runs and its completed effect appears in parent history.
+    """
     if not experimental_harness:
         pytest.skip("stateful subagents require the Unified Harness backend")
 
+    # Prepare
     requests: list[dict[str, object]] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -122,7 +127,7 @@ async def test_stateful_subagent_runs_through_the_backend(
                             "name": "run_typescript",
                             "arguments": json.dumps({
                                 "code": (
-                                    "async function main() { return tools.agent.spawn({"
+                                    "async function main() { return tools.subagent.spawn({"
                                     "agentName: 'researcher', "
                                     "message: 'Investigate the local Harness marker'"
                                     "}); }"
@@ -158,6 +163,7 @@ async def test_stateful_subagent_runs_through_the_backend(
     try:
         session = await connection.host.open_session()
 
+        # Do
         _ = [event async for event in session.act("Delegate this investigation")]
         for _ in range(100):
             if any(
@@ -168,6 +174,7 @@ async def test_stateful_subagent_runs_through_the_backend(
                 break
             await asyncio.sleep(0.01)
 
+        # Assert
         effect = next(
             entry
             for entry in session.history

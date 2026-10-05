@@ -1,7 +1,7 @@
 //! macOS clipboard-image ingestion and composer token insertion.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -11,7 +11,11 @@ use tempfile::Builder;
 use tokio::sync::mpsc::Sender;
 
 use crate::app::{App, Status, ToastSeverity};
-use crate::{chat_input, completion_manager, paste_path};
+use crate::{chat_input, paste_files, paste_path};
+
+mod store;
+
+pub use store::{clipboard_image_path, write_clipboard_image};
 
 pub const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
@@ -25,11 +29,27 @@ pub struct State {
     pub in_flight: usize,
 }
 
+impl State {
+    pub fn has_slot(&self) -> bool {
+        self.tx.is_some() && self.in_flight < CHANNEL_CAP
+    }
+}
+
 pub enum Event {
-    Empty { notify: bool },
+    Empty {
+        notify: bool,
+    },
     TooLarge(usize),
     Failed,
-    Pasted { path: PathBuf, size: usize },
+    Pasted {
+        path: PathBuf,
+    },
+    ImageFiles(Vec<PathBuf>),
+    Probed {
+        start: usize,
+        raw: String,
+        paths: Option<Vec<String>>,
+    },
 }
 
 pub fn is_supported() -> bool {
@@ -41,20 +61,13 @@ pub fn is_paste_image_key(key: &KeyEvent, supported: bool) -> bool {
 }
 
 pub fn request(app: &mut App, notify_when_empty: bool) {
-    if !is_supported() || app.paste_image.in_flight >= CHANNEL_CAP {
-        return;
+    if is_supported() {
+        paste_files::spawn_job(
+            app,
+            move || read_and_store(notify_when_empty),
+            Event::Failed,
+        );
     }
-    let Some(tx) = app.paste_image.tx.clone() else {
-        return;
-    };
-    app.paste_image.in_flight += 1;
-    let pending = app.commit_started();
-    tokio::spawn(async move {
-        let event = tokio::task::spawn_blocking(move || read_and_store(notify_when_empty))
-            .await
-            .unwrap_or(Event::Failed);
-        crate::input::deliver(Some(tx), event, &pending).await;
-    });
 }
 
 pub fn apply_event(app: &mut App, event: Event) {
@@ -80,43 +93,39 @@ pub fn apply_event(app: &mut App, event: Event) {
             ToastSeverity::Warning,
             WARNING_SECS,
         ),
-        Event::Pasted { path, size } => {
-            if !app.session.startup_config.active_model_supports_images
-                && !matches!(app.session.status, Status::Starting)
-            {
-                let name = &app.session.startup_config.active_model_display_name;
-                app.show_toast(
-                    format!(
-                        "Model `{name}` does not support images. Switch with /model or ask me to enable image support for this model."
-                    ),
-                    ToastSeverity::Warning,
-                    WARNING_SECS,
-                );
-                return;
-            }
-            crate::input::reset_history_state(app);
-            insert_image_token(
-                &mut app.chat_input.input,
-                &mut app.chat_input.cursor,
-                &mut app.chat_input.anchor,
-                &path,
-            );
-            app.chat_input.scroll = None;
-            completion_manager::input_changed(app);
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("image.png");
-            app.show_toast(
-                format!("Image pasted as {name} ({})", natural_size(size)),
-                ToastSeverity::Information,
-                2,
-            );
-        }
+        Event::Pasted { path } => paste_files::apply_image_files(app, vec![path]),
+        Event::ImageFiles(paths) => paste_files::apply_image_files(app, paths),
+        Event::Probed { start, raw, paths } => paste_files::apply_probed(app, start, &raw, paths),
     }
 }
 
+/// Warn and return true when the active model cannot take images.
+pub(crate) fn rejects_images(app: &mut App) -> bool {
+    if app.session.startup_config.images_supported || matches!(app.session.status, Status::Starting)
+    {
+        return false;
+    }
+    let name = &app.session.startup_config.active_model_display_name;
+    app.show_toast(
+        format!(
+            "Model `{name}` does not support images. Switch with /model or ask me to enable image support for this model."
+        ),
+        ToastSeverity::Warning,
+        WARNING_SECS,
+    );
+    true
+}
+
+// Finder copies also carry the file icon as an image, so file URLs win.
 fn read_and_store(notify: bool) -> Event {
+    let files = paste_files::read_clipboard_files();
+    if !files.is_empty() {
+        let images = paste_files::image_files(files);
+        return match images.is_empty() {
+            true => Event::Empty { notify },
+            false => Event::ImageFiles(images),
+        };
+    }
     let Some(data) = read_clipboard_image() else {
         return Event::Empty { notify };
     };
@@ -124,10 +133,7 @@ fn read_and_store(notify: bool) -> Event {
         return Event::TooLarge(data.len());
     }
     match write_clipboard_image(&data) {
-        Ok(path) => Event::Pasted {
-            path,
-            size: data.len(),
-        },
+        Ok(path) => Event::Pasted { path },
         Err(error) => {
             tracing::warn!(%error, "failed to write pasted clipboard image");
             Event::Failed
@@ -159,7 +165,7 @@ fn read_macos_class(four_cc: &str) -> Option<Vec<u8>> {
     );
     let mut command = Command::new("osascript");
     command.args(["-e", &script]);
-    if !run_with_timeout(&mut command) {
+    if !run_with_timeout(&mut command, Stdio::null()) {
         return None;
     }
     fs::read(file.path()).ok().filter(|data| !data.is_empty())
@@ -181,7 +187,7 @@ fn convert_to_png_via_sips(data: &[u8]) -> Option<Vec<u8>> {
         "--out",
         output_path.to_str()?,
     ]);
-    if !run_with_timeout(&mut command) {
+    if !run_with_timeout(&mut command, Stdio::null()) {
         return None;
     }
     fs::read(&output_path)
@@ -189,8 +195,8 @@ fn convert_to_png_via_sips(data: &[u8]) -> Option<Vec<u8>> {
         .filter(|bytes| bytes.starts_with(PNG_MAGIC))
 }
 
-fn run_with_timeout(command: &mut Command) -> bool {
-    let Ok(mut child) = command.stdout(Stdio::null()).stderr(Stdio::null()).spawn() else {
+pub(crate) fn run_with_timeout(command: &mut Command, stdout: Stdio) -> bool {
+    let Ok(mut child) = command.stdout(stdout).stderr(Stdio::null()).spawn() else {
         return false;
     };
     let deadline = Instant::now() + READ_TIMEOUT;
@@ -207,31 +213,22 @@ fn run_with_timeout(command: &mut Command) -> bool {
     }
 }
 
-pub fn write_clipboard_image(data: &[u8]) -> io::Result<PathBuf> {
-    let mut file = Builder::new()
-        .prefix("vibe-clipboard-")
-        .suffix(".png")
-        .tempfile()?;
-    file.write_all(data)?;
-    file.flush()?;
-    let (_file, path) = file.keep().map_err(|error| error.error)?;
-    Ok(path)
-}
-
+/// Insert an image token at the caret, spaced from its neighbours, and return its byte span.
 pub fn insert_image_token(
     input: &mut String,
     cursor: &mut usize,
     anchor: &mut Option<usize>,
-    path: &Path,
-) {
+    token: &str,
+) -> (usize, usize) {
     if let Some((lo, hi)) = chat_input::selection_range(input, *cursor, *anchor) {
         input.replace_range(lo..hi, "");
         *cursor = lo;
     }
     *anchor = None;
-    let token = paste_path::image_path_mention(&path.to_string_lossy());
-    let insertion = paste_path::with_image_mention_boundaries(input, *cursor, &token);
+    let insertion = paste_path::with_image_mention_boundaries(input, *cursor, token);
+    let start = *cursor + insertion.find(token).unwrap_or_default();
     crate::utils::input_edit::insert(input, cursor, &insertion);
+    (start, start + token.len())
 }
 
 fn applescript_string(path: &Path) -> String {

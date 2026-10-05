@@ -35,11 +35,12 @@ pub enum Action {
     DeleteToStartOfLine,
     DeleteToEndOfLine,
     Insert(char),
+    Undo,
+    Redo,
 }
 
 impl Action {
-    /// True if the action can change the text (an edit) rather than only moving
-    /// the caret or selection. Callers reset history navigation on edits.
+    /// Whether `apply` can edit text; composer-owned undo/redo are excluded.
     pub fn is_edit(&self) -> bool {
         matches!(
             self,
@@ -162,6 +163,7 @@ fn anchor_selection(cursor: usize, anchor: &mut Option<usize>) {
 pub fn apply(action: &Action, input: &mut String, cursor: &mut usize, anchor: &mut Option<usize>) {
     normalize_positions(input, cursor, anchor);
     match action {
+        Action::Undo | Action::Redo => {} // The composer owns edit history.
         // Plain caret moves drop any selection.
         Action::CursorLeft => {
             *anchor = None;

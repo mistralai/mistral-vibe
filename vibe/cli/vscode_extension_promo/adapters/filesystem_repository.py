@@ -8,7 +8,7 @@ from vibe.cli.vscode_extension_promo._port import (
     VscodeExtensionPromoState,
 )
 from vibe.utils.cache_store import CacheStore, FileSystemCacheStore
-from vibe.utils.paths import get_vibe_home
+from vibe.utils.vibe_home import get_vibe_home
 
 _CACHE_SECTION = "vscode_extension_promo"
 

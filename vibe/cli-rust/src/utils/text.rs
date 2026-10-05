@@ -8,6 +8,19 @@ fn is_control(c: char) -> bool {
     matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}')
 }
 
+/// Python's `:,` integer format: digits grouped in threes by commas.
+pub fn thousands(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
 /// Flatten every whitespace run to one space so a heredoc keeps the header one row tall.
 pub fn single_line(text: &str) -> String {
     text.split_whitespace()

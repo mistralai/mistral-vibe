@@ -107,6 +107,31 @@ class HarnessTurnConflictError(HarnessSessionError):
         )
 
 
+class HarnessForkEntryRequiredError(HarnessSessionError):
+    def __init__(self) -> None:
+        super().__init__(
+            "fork_entry_required", "entry_id is required to fork a running session"
+        )
+
+
+class HarnessForkActiveTurnError(HarnessSessionError):
+    def __init__(self, entry_id: str) -> None:
+        super().__init__(
+            "fork_active_turn",
+            f"Cannot fork from active Turn entry: {entry_id}",
+            details={"entry_id": entry_id},
+        )
+
+
+class HarnessForkEntryNotFoundError(HarnessSessionError):
+    def __init__(self, entry_id: str) -> None:
+        super().__init__(
+            "fork_entry_not_found",
+            f"Cannot find user entry: {entry_id}",
+            details={"entry_id": entry_id},
+        )
+
+
 class HarnessTurnQueueFullError(HarnessSessionError):
     def __init__(self, max_items: int) -> None:
         super().__init__(
@@ -157,6 +182,15 @@ class HarnessContextCompactionError(HarnessSessionError):
             "context_compaction_failed",
             message,
             details={"reason": code, "details": details},
+        )
+
+
+class HarnessHistoryEntryConflictError(HarnessSessionError):
+    def __init__(self, entry_id: str) -> None:
+        super().__init__(
+            "history_entry_conflict",
+            f"Public history entry already exists: {entry_id}",
+            details={"entry_id": entry_id},
         )
 
 
@@ -242,6 +276,10 @@ __all__ = [
     "HarnessChildSessionRequiresParentError",
     "HarnessCommandConflictError",
     "HarnessContextCompactionError",
+    "HarnessForkActiveTurnError",
+    "HarnessForkEntryNotFoundError",
+    "HarnessForkEntryRequiredError",
+    "HarnessHistoryEntryConflictError",
     "HarnessInvalidMigrationSourceError",
     "HarnessInvalidSessionStoreError",
     "HarnessNotImplementedError",

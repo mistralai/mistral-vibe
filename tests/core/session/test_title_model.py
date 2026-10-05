@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from tests.conftest import build_test_vibe_config
+from vibe.core.config import UtilityFeature
 from vibe.core.session import title_model
 from vibe.core.session.title_model import (
     _clean_title,
@@ -149,6 +150,8 @@ class TestGenerateSessionTitle:
         )
 
         assert captured["config"] is config
+        assert captured["feature"] is UtilityFeature.TITLE
+        assert "call_type" not in captured
         assert captured["retry_budget_seconds"] > 0
         assert captured["max_tokens"] > 0
         assert "do a thing" in captured["user_content"]

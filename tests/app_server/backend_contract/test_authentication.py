@@ -142,6 +142,8 @@ async def test_session_start_without_a_key_is_unauthorized(
 
     The code and the provider are what ACP reads to offer a sign-in; a
     configuration error here would send the user to edit ``config.toml``.
+    ``env_key`` is what the Rust wizard persists the key under; it comes
+    from the effective config, so a project-layer override is respected.
     """
     # Do
     with pytest.raises(AppServerResponseError) as exc_info:
@@ -149,7 +151,10 @@ async def test_session_start_without_a_key_is_unauthorized(
 
     # Assert
     assert exc_info.value.error.code is ProtocolErrorCode.UNAUTHORIZED
-    assert exc_info.value.error.data == {"provider": "mistral"}
+    assert exc_info.value.error.data == {
+        "provider": "mistral",
+        "env_key": "MISTRAL_API_KEY",
+    }
 
 
 @pytest.mark.asyncio

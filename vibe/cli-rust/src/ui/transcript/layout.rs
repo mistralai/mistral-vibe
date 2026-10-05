@@ -22,7 +22,7 @@ pub(super) fn build<'a>(
     if cache.layout(revision, width).is_none() {
         let mut top = 0u16;
         let mut entries = Vec::new();
-        for entry in transcript.lines() {
+        for entry in transcript.lines_from(cache.history_from()) {
             let entry_expanded = expanded.contains(entry.id);
             let group_expanded = entry
                 .group

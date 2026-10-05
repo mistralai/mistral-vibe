@@ -78,11 +78,24 @@ class WorktreeEffectInput(DeferredTurnModel):
     path: str
 
 
+class WorktreeEffectProgress(DeferredTurnModel):
+    """How far the Host has come in preparing the worktree.
+
+    File counts are present only while files are being checked out, and only
+    once the Host knows them.
+    """
+
+    phase: Literal["naming", "fetching", "checking_out"]
+    completed_files: int | None = None
+    total_files: int | None = None
+
+
 class PendingWorktreeEffectDetail(DeferredTurnModel):
     kind: Literal["worktree"] = "worktree"
     tool_name: Literal["worktree"] = "worktree"
     input: None = None
     display: WorktreeEffectCallDisplay
+    progress: WorktreeEffectProgress | None = None
 
 
 class CompletedWorktreeEffectDetail(DeferredTurnModel):
@@ -160,6 +173,12 @@ class DeferredTurnPreparationContext:
     session_id: SessionId
     turn_id: TurnId
     started_at: UnixTimeMilliseconds
+    # Publishes new versions of the pending entries, matched by ID, while
+    # preparation runs. A call after the Turn stopped waiting on this
+    # preparation does nothing.
+    replace_pending_history_entries: Callable[
+        [tuple[PublicHistoryEntry, ...]], Awaitable[None]
+    ]
 
 
 @dataclass(frozen=True, slots=True)

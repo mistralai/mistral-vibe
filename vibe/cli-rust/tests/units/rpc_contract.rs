@@ -83,12 +83,15 @@ fn initialize_params_serialize_camel_case() {
             name: "vibe-rs".into(),
             entrypoint: Some("cli".into()),
             version: "1.0".into(),
+            title: Some("Vibe Rust".into()),
+            terminal_emulator: "unknown".into(),
         },
         capabilities: Default::default(),
     };
     let value: Value = serde_json::to_value(&params).unwrap();
     assert_eq!(value["clientInfo"]["name"], "vibe-rs");
     assert_eq!(value["clientInfo"]["entrypoint"], "cli");
+    assert_eq!(value["clientInfo"]["terminalEmulator"], "unknown");
     assert_eq!(value["capabilities"]["callbackKinds"], json!([]));
 }
 
@@ -98,7 +101,7 @@ fn turn_enqueue_params_serialize_entries_and_content_blocks() {
         idempotency_key: "key-1".into(),
         session_id: "sess".into(),
         entries: vec![TurnInputEntry {
-            annotations: [("intent".to_string(), "chat".to_string())].into(),
+            annotations: [("intent".to_string(), json!("chat"))].into(),
             content: vec![ContentBlock::Text {
                 text: "hello".into(),
             }],

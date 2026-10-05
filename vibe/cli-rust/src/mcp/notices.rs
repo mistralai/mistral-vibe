@@ -10,7 +10,7 @@ const DISCOVERY_TOAST_SECS: u64 = 10;
 
 /// Toast every failed discovery, then mount the OAuth-required notice.
 pub fn show_post_init_notices(app: &mut App, runtime: &Value) {
-    let state = state_at(runtime, "/runtime/mcp");
+    let state = state_at(runtime, "/runtime/mcp").unwrap_or_default();
     for (name, error) in &state.discovery_errors {
         app.show_toast(
             format!("MCP server '{name}' failed to connect: {error}"),

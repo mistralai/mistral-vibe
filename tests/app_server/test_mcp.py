@@ -25,7 +25,9 @@ from vibe.app_server._plugin_mcp import (
 from vibe.app_server._session_backend_port import (
     MCPAuthorizationRequired,
     MCPAuthorizationSnapshot,
+    SessionMCPSourceState,
     SessionMCPState,
+    SessionMCPToolDescriptor,
 )
 from vibe.app_server.mcp_catalog import project_mcp_sources
 from vibe.app_server.models import MCPSourceKind, MCPSourceStatus
@@ -625,3 +627,41 @@ async def test_mcp_toggle_enable_broken_server_stays_unavailable(
     # Assert
     broken = next(s for s in mcp_state.sources if s.name == "search")
     assert broken.status == MCPSourceStatus.UNAVAILABLE
+
+
+def test_a_plugin_row_reads_the_session_connection_over_app_discovery() -> None:
+    # Prepare
+    config = build_test_vibe_config(mcp_servers=[])
+    state = SessionMCPState(
+        catalog_revision="catalog",
+        route_revision="route",
+        sources=(
+            SessionMCPSourceState(
+                name="linear-plugin",
+                transport="http",
+                status="connected",
+                tools=(
+                    SessionMCPToolDescriptor(
+                        remote_name="create_issue",
+                        description="Create an issue.",
+                        enabled=True,
+                        display_name="linear-plugin_create_issue",
+                    ),
+                ),
+            ),
+        ),
+        discovery_errors={},
+    )
+
+    # Do
+    sources, _ = project_mcp_sources(
+        orchestrator=FakeConfigOrchestrator(config),
+        state=state,
+        plugin_sources=[_plugin_source("linear-plugin", status="unavailable")],
+    )
+
+    # Assert
+    assert [(source.name, source.status, source.plugin_name) for source in sources] == [
+        ("linear-plugin", MCPSourceStatus.CONNECTED, "linear-probe")
+    ]
+    assert [tool.name for tool in sources[0].tools] == ["create_issue"]

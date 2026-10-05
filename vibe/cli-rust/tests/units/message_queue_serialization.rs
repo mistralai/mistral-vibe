@@ -11,6 +11,7 @@ fn queued(message_id: &str, text: &str) -> QueueItem {
         server_message_id: message_id.to_string(),
         text: text.to_string(),
         images: Vec::new(),
+        mentions: None,
         sent: true,
         ever_sent: true,
         revision: 1,
@@ -39,7 +40,12 @@ fn prompt_added_while_a_promoted_replace_settles_keeps_fifo_order() {
         QueueEvent::GroupReplaced {
             server_message_id: "message-1".to_string(),
             revision: 1,
-            covered: vec![("message-2".to_string(), "second".to_string(), Vec::new())],
+            covered: vec![(
+                "message-2".to_string(),
+                "second".to_string(),
+                Vec::new(),
+                None,
+            )],
             delivered: vec!["message-1".to_string(), "message-2".to_string()],
             outcome: ReplacementOutcome::Consumed,
         },

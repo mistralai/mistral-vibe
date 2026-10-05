@@ -2,12 +2,10 @@
 
 use std::sync::Arc;
 
-use crate::server::Client;
-use crate::server::{method, MCPSourceKind, MCPSourceStatus, MCPSourceSummary};
-use serde_json::json;
+use crate::server::{Client, MCPSourceKind};
 
 use super::rows::{self, Row};
-use super::{add_result, reconcile_selection, request_state};
+use super::{add_result, reconcile_selection, Event};
 use crate::app::App;
 
 /// Esc: close the browser and mount the closed message (Python `MCPClosed`).
@@ -33,20 +31,18 @@ pub fn back(app: &mut App) {
     reconcile_selection(app);
 }
 
-/// Enter: open the highlighted source's tools, or hand it to the auth flow.
-pub fn select(app: &mut App, client: &Arc<Client>) {
-    let Some(Row::Source(row)) = rows::rows(&app.mcp).into_iter().nth(app.mcp.selected) else {
-        return;
-    };
-    // The auth flows own these sources; the browser hands the source over and
-    // closes (Python posts `MCPOAuthRequested` / `ConnectorAuthRequested`).
-    if row.needs_auth {
-        match row.kind {
-            MCPSourceKind::Server => crate::mcp_oauth::open(app, client, row.name),
-            MCPSourceKind::Connector => crate::connector_auth::open(app, client, row.name),
+/// Enter: open the highlighted source's tools (or its auth flow), or the manage-connectors page.
+pub fn select(app: &mut App) {
+    let row = match rows::rows(&app.mcp).into_iter().nth(app.mcp.selected) {
+        Some(Row::Source(row)) => row,
+        Some(Row::Manage) => {
+            if let Some(url) = &app.mcp.state.manage_connectors_url {
+                crate::external_url::open(url);
+            }
+            return;
         }
-        return;
-    }
+        _ => return,
+    };
     app.mcp.search.focused = false;
     app.mcp.viewing_name = Some(row.name);
     app.mcp.viewing_kind = Some(row.kind);
@@ -54,6 +50,37 @@ pub fn select(app: &mut App, client: &Arc<Client>) {
     app.mcp.scroll = 0;
     app.mcp.free_scroll = false;
     reconcile_selection(app);
+    request_auth(app);
+}
+
+/// Python's detail view posts `MCPOAuthRequested` / `ConnectorAuthRequested` for a source awaiting auth.
+pub(super) fn request_auth(app: &mut App) {
+    if !rows::viewing_source(&app.mcp).is_some_and(rows::awaits_auth) {
+        return;
+    }
+    let Some(tx) = app.mcp.tx.clone() else {
+        return;
+    };
+    app.commit_started();
+    if tx.try_send(Event::AuthRequested).is_err() {
+        app.commit_finished();
+    }
+}
+
+/// Hand the viewed source to its auth flow, unless the user left that view meanwhile.
+pub(super) fn hand_off_auth(app: &mut App, client: &Arc<Client>) {
+    if !app.mcp.open {
+        return;
+    }
+    let Some(source) = rows::viewing_source(&app.mcp).filter(|source| rows::awaits_auth(source))
+    else {
+        return;
+    };
+    let (name, kind) = (source.name.clone(), source.kind);
+    match kind {
+        MCPSourceKind::Server => crate::mcp_oauth::open(app, client, name),
+        MCPSourceKind::Connector => crate::connector_auth::open(app, client, name),
+    }
 }
 
 /// Move the highlight to the next selectable row, clamped (Textual `OptionList`).
@@ -100,16 +127,19 @@ pub fn press(app: &mut App, at: (u16, u16)) {
     }
 }
 
-/// Mouse release: a click on a source opens its tools, like Enter does.
-pub fn release(app: &mut App, client: &Arc<Client>, at: (u16, u16)) {
+/// Mouse release: a click on a source or action selects it, like Enter does.
+pub fn release(app: &mut App, at: (u16, u16)) {
     let Some(row) = row_at(app, at) else {
         return;
     };
     if row != app.mcp.selected {
         return;
     }
-    if matches!(rows::rows(&app.mcp).get(row), Some(Row::Source(_))) {
-        select(app, client);
+    if matches!(
+        rows::rows(&app.mcp).get(row),
+        Some(Row::Source(_) | Row::Manage)
+    ) {
+        select(app);
     }
 }
 
@@ -126,73 +156,4 @@ fn row_at(app: &App, at: (u16, u16)) -> Option<usize> {
         .get(row)
         .is_some_and(|row| row.selectable())
         .then_some(row)
-}
-
-/// `d`/`e` on the highlighted source or tool (Python `_set_highlighted_disabled`).
-pub fn set_disabled(app: &mut App, client: &Arc<Client>, disabled: bool) {
-    let Some(row) = rows::rows(&app.mcp).into_iter().nth(app.mcp.selected) else {
-        return;
-    };
-    let (kind, name, tool_name) = match row {
-        Row::Source(row) => {
-            let status = if disabled {
-                MCPSourceStatus::Disabled
-            } else {
-                MCPSourceStatus::Enabled
-            };
-            let Some(source) = source_mut(app, &row.name, Some(row.kind)) else {
-                return;
-            };
-            source.status = status;
-            (row.kind, row.name, None)
-        }
-        Row::Tool(row) => {
-            let Some(name) = app.mcp.viewing_name.clone() else {
-                return;
-            };
-            // The viewed source's own kind, which `/mcp <name>` leaves unset.
-            let Some(kind) = rows::find_source(&app.mcp.state, &name, app.mcp.viewing_kind)
-                .map(|source| source.kind)
-            else {
-                return;
-            };
-            let Some(source) = source_mut(app, &name, Some(kind)) else {
-                return;
-            };
-            let Some(tool) = source.tools.iter_mut().find(|tool| tool.name == row.name) else {
-                return;
-            };
-            tool.enabled = !disabled;
-            (kind, name, Some(row.name))
-        }
-        _ => return,
-    };
-    let (method, params) = match kind {
-        MCPSourceKind::Connector => (
-            method::CONNECTOR_TOGGLE,
-            json!({"alias": name, "disabled": disabled, "toolName": tool_name}),
-        ),
-        MCPSourceKind::Server => (
-            method::MCP_TOGGLE,
-            json!({
-                "name": name,
-                "source": kind.as_str(),
-                "disabled": disabled,
-                "toolName": tool_name,
-            }),
-        ),
-    };
-    request_state(app, client, method, params);
-}
-
-fn source_mut<'a>(
-    app: &'a mut App,
-    name: &str,
-    kind: Option<MCPSourceKind>,
-) -> Option<&'a mut MCPSourceSummary> {
-    app.mcp
-        .state
-        .sources
-        .iter_mut()
-        .find(|source| source.name == name && kind.is_none_or(|kind| source.kind == kind))
 }

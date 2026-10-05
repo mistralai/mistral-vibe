@@ -34,8 +34,10 @@ _C1_CONTROL_END = 0x9F
 DEFAULT_LINE_LIMIT = 2_000
 MAX_READ_BYTES = 50 * 1_024
 MAX_WRITE_BYTES = 64_000
+MAX_WRITE_PREVIOUS_CONTENT_BYTES = 64_000
 MAX_EDIT_FILE_SIZE_BYTES = 512 * 1_024 * 1_024
 SEARCH_REPLACE_ANNOTATION_KEY = "mistralai.vibe.sdk.search_replace"
+WRITE_FILE_ANNOTATION_KEY = "mistralai.vibe.sdk.write_file"
 
 
 class ReadFileArgs(BaseModel):
@@ -65,6 +67,16 @@ class WriteFileResult(BaseModel):
     path: str
     bytes_written: int
     file_existed: bool
+
+
+class WriteFileAnnotations(BaseModel):
+    """What the write replaced.
+
+    An annotation rather than a result: the model wrote the new content, it does
+    not need the old one read back to it.
+    """
+
+    previous_content: str
 
 
 class SearchReplaceBlock(BaseModel):
@@ -134,10 +146,20 @@ def _execute_file_tool_sync(
                 return _succeeded(action, result.model_dump(mode="json"))
             case "file_system.write_file":
                 write_args = WriteFileArgs.model_validate(action.call.arguments)
-                result = write_file(
+                write_result, write_annotations = write_file(
                     write_args, _target_path(write_args.path, config, authorized_path)
                 )
-                return _succeeded(action, result.model_dump(mode="json"))
+                return _succeeded(
+                    action,
+                    write_result.model_dump(mode="json"),
+                    meta=None
+                    if write_annotations is None
+                    else {
+                        WRITE_FILE_ANNOTATION_KEY: write_annotations.model_dump(
+                            mode="json"
+                        )
+                    },
+                )
             case "file_system.search_replace":
                 edit_args = SearchReplaceArgs.model_validate(action.call.arguments)
                 result, annotations = search_replace(
@@ -184,7 +206,9 @@ def read_file(args: ReadFileArgs, path: Path) -> ReadFileResult:
     raise ValueError(f"Could not decode text file with supported encodings: {path}")
 
 
-def write_file(args: WriteFileArgs, path: Path) -> WriteFileResult:
+def write_file(
+    args: WriteFileArgs, path: Path
+) -> tuple[WriteFileResult, WriteFileAnnotations | None]:
     content_bytes = args.content.encode("utf-8")
     if len(content_bytes) > MAX_WRITE_BYTES:
         raise ValueError(f"Content exceeds {MAX_WRITE_BYTES} bytes limit")
@@ -192,11 +216,27 @@ def write_file(args: WriteFileArgs, path: Path) -> WriteFileResult:
         raise ValueError(f"Path is a directory, not a file: {path}")
 
     file_existed = path.exists()
+    previous_content = _replaced_content(path) if file_existed else None
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(path, args.content, "utf-8")
-    return WriteFileResult(
-        path=str(path), bytes_written=len(content_bytes), file_existed=file_existed
+    return (
+        WriteFileResult(
+            path=str(path), bytes_written=len(content_bytes), file_existed=file_existed
+        ),
+        None
+        if previous_content is None
+        else WriteFileAnnotations(previous_content=previous_content),
     )
+
+
+def _replaced_content(path: Path) -> str | None:
+    """The text a write is about to replace, when it is small enough to carry."""
+    try:
+        if path.stat().st_size > MAX_WRITE_PREVIOUS_CONTENT_BYTES:
+            return None
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
 
 
 def search_replace(
@@ -296,11 +336,11 @@ def _resolve_file_path(
         raise ValueError("Path cannot be empty")
     path = Path(raw_path).expanduser()
     if not path.is_absolute():
-        path = config.cwd / path
+        path = config.workspace.cwd / path
     resolved = path.resolve()
     if not _roots_are_a_boundary(config):
         return resolved
-    roots = (*(config.workspace_roots or (config.cwd,)), *additional_roots)
+    roots = (*config.workspace.roots, *additional_roots)
     resolved_roots = tuple(root.expanduser().resolve() for root in roots)
     if not any(resolved.is_relative_to(root) for root in resolved_roots):
         raise ValueError(f"Path is outside the workspace: {resolved}")

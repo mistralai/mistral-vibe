@@ -86,6 +86,7 @@ impl HarnessState {
             &self.hook_binding_index,
             self.require_active()?.turn_id.as_str(),
             self.context.message_count(),
+            self.config.settings.tools.permissions.as_ref(),
         ))
     }
 

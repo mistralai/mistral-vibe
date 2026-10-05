@@ -224,6 +224,67 @@ async def test_unified_due_loop_runs_as_an_unsolicited_turn(
 
 
 @pytest.mark.asyncio
+async def test_unified_fired_loop_prompt_keeps_its_marker_across_fork(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_connection: BackendContractConnection,
+    experimental_harness: bool,
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resumed Unified session whose due loop has fired.
+    *Do*: Fork the session, then fork that fork.
+    *Assert*: Both forked prompts still carry the fired-loop display marker.
+    """
+    if not experimental_harness:
+        pytest.skip("Unified scheduler integration")
+
+    # Prepare
+    session = await backend_contract_persistent_connection.host.open_session()
+    loop = await session.resources.loops.create("30s", "scheduled prompt")
+    await session.inject_user_context("persist the session", as_message=True)
+    session_id = session.session_id
+    await session.close()
+    _mark_unified_loop_due(tmp_path, session_id)
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("scheduled response")
+    )
+    resumed_connection = await connect_backend_contract_host(
+        True, session_options=SessionOptions(), capabilities=ClientCapabilities()
+    )
+    resumed = await resumed_connection.host.resume_session(session_id)
+
+    # Do
+    try:
+        async with asyncio.timeout(3):
+            while (
+                resumed.state.latest_turn is None
+                or resumed.state.latest_turn.status != "completed"
+            ):
+                await asyncio.sleep(0.01)
+        fork = await resumed.resources.sessions.fork()
+        nested = await resumed.resources.sessions.fork()
+    finally:
+        await resumed.close()
+
+    # Assert
+    assert nested.source_session_id == fork.state.session.id
+    for forked in (fork, nested):
+        prompts = [
+            entry
+            for entry in forked.state.history or []
+            if isinstance(entry, PublicMessageEntry)
+            and entry.text == "scheduled prompt"
+        ]
+        assert len(prompts) == 1
+        display = prompts[0].user_display_content
+        assert display is not None
+        [marker] = display.content
+        assert marker["type"] == "vibe.scheduled_loop"
+        assert marker["loopId"] == loop.id
+        assert isinstance(marker["firedAt"], int)
+
+
+@pytest.mark.asyncio
 async def test_headless_unified_resume_does_not_fire_due_loops(
     backend_contract_mistral_api: respx.Route,
     backend_contract_persistent_connection: BackendContractConnection,

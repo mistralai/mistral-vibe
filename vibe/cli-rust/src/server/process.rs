@@ -16,6 +16,8 @@ use super::child::ChildHandle;
 use crate::server::Request;
 use crate::server::RpcError;
 
+mod stub;
+
 /// Maximum notifications buffered (channel capacity). A full channel backpressures the reader.
 const MAX_PENDING_NOTIFICATIONS: usize = 512;
 
@@ -73,6 +75,7 @@ pub struct Client {
 }
 
 /// How to launch the backend; defaults to `uv run --quiet vibe-app-server --experimental-harness`.
+#[derive(Clone)]
 pub struct Launch {
     pub program: String,
     pub args: Vec<String>,
@@ -125,14 +128,19 @@ impl Client {
         if let Some(cwd) = &launch.cwd {
             cmd.current_dir(cwd);
         }
+        // The app-server child loads ~/.vibe/.env itself (python-dotenv); the
+        // keys this client's non-interpolating parser set would shadow the
+        // child's own values, so strip exactly those.
+        for key in crate::credentials::dotenv::dotenv_set_keys() {
+            cmd.env_remove(&key);
+        }
 
-        let mut child = cmd
-            .spawn()
+        let mut child = ChildHandle::spawn(&mut cmd)
             .with_context(|| format!("failed to spawn `{}`", launch.program))?;
 
-        let stdin = child.stdin.take().context("child stdin missing")?;
-        let stdout = child.stdout.take().context("child stdout missing")?;
-        if let Some(stderr) = child.stderr.take() {
+        let stdin = child.child.stdin.take().context("child stdin missing")?;
+        let stdout = child.child.stdout.take().context("child stdout missing")?;
+        if let Some(stderr) = child.child.stderr.take() {
             tokio::spawn(super::stderr::drain(stderr));
         }
 
@@ -186,7 +194,7 @@ impl Client {
                 deny_callbacks,
                 active_session,
             },
-            ChildHandle::new(child),
+            child,
             notif_rx,
             crash_rx,
         ))
@@ -226,6 +234,23 @@ impl Client {
         Ok(rx)
     }
 
+    /// Like `request` but returns the structured `RpcError` (code + data).
+    /// The error is a classified value callers inspect, not a chain to carry.
+    #[allow(clippy::result_large_err)]
+    pub async fn request_err(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let rx = self
+            .send_now(method, params)
+            .map_err(|error| RpcError::synthetic("send", &error.to_string()))?;
+        match rx.await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(RequestFailure::Rpc(error))) => Err(error),
+            Ok(Err(RequestFailure::AppServerClosed)) => {
+                Err(RpcError::synthetic("transport", "app-server closed"))
+            }
+            Err(_) => Err(RpcError::synthetic("transport", "response channel dropped")),
+        }
+    }
+
     /// A clone of the notification sender, so a client-side generator (e.g. the
     /// `/stress` firehose) can inject frames through the same reducer path real
     /// server notifications take.
@@ -253,26 +278,6 @@ impl Client {
             .send(Some(frame))
             .map_err(|_| anyhow!("writer task gone"))?;
         Ok(())
-    }
-
-    /// A `Client` whose writer and reader channels are immediately closed, so
-    /// every `request` fails. Used only in tests that exercise pure reducer
-    /// logic without a running app-server.
-    #[doc(hidden)]
-    pub fn stub() -> Self {
-        let (to_writer, writer_rx) = mpsc::unbounded_channel::<Option<String>>();
-        let (notif_tx, _notif_rx) = mpsc::channel::<Notification>(1);
-        // Drop the writer receiver so `request` fails immediately.
-        drop(writer_rx);
-        Self {
-            next_id: Arc::new(AtomicU64::new(1)),
-            to_writer,
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            notif_tx,
-            shutdown_requested: Arc::new(AtomicBool::new(false)),
-            deny_callbacks: Arc::new(AtomicBool::new(false)),
-            active_session: Arc::new(Mutex::new(None)),
-        }
     }
 
     /// Close child stdin after queued frames, so the server sees EOF and exits.

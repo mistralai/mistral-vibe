@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 import json
 import logging
@@ -24,7 +24,6 @@ from mistralai_vibe_local_harness.protocol import (
     RustFailTurnEvent,
     RustHarnessCapabilitySet,
     RustHarnessConfig,
-    RustHarnessSettings,
     RustImageContentBlock,
     RustPluginContextDefinition,
     RustProtocolError,
@@ -38,12 +37,16 @@ from mistralai_vibe_local_harness.protocol import (
     RustUserMessageEvent,
 )
 from mistralai_vibe_local_harness.session_protocol import (
+    BackgroundProcessOutputRead,
+    BackgroundProcessOutputResult,
+    BackgroundProcessStopResult,
     BlockedSessionStatus,
     ContentBlock as SessionContentBlock,
     EmbeddedResourceContentBlock as SessionEmbeddedResourceContentBlock,
     Event as SessionEvent,
     FailedPublicTurn,
     FailedSessionStatus,
+    HostEffectRecord,
     IdleSessionStatus,
     ImageContentBlock as SessionImageContentBlock,
     InProgressPublicTurn,
@@ -131,6 +134,8 @@ from mistralai_vibe_local_harness.vibe._runtime import (
 from mistralai_vibe_local_harness.vibe._runtime_config import (
     LocalRuntimeAdapterConfig,
     ProviderRetry,
+    SessionConfig,
+    SessionWorkspace,
 )
 from mistralai_vibe_local_harness.vibe._session_events import SessionEventSubscriptions
 from mistralai_vibe_local_harness.vibe._storage import (
@@ -142,6 +147,9 @@ from mistralai_vibe_local_harness.vibe._storage import (
 )
 from mistralai_vibe_local_harness.vibe._subagents._configuration import (
     ResolvedSubagentConfiguration,
+)
+from mistralai_vibe_local_harness.vibe._subagents._host import (
+    ResolvedChildSessionBinding,
 )
 from mistralai_vibe_local_harness.vibe._subagents._models import (
     ChildCommandResult,
@@ -194,6 +202,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         session_id: str,
         created_at: int,
         *,
+        workspace: SessionWorkspace | None = None,
         cwd: str | None = None,
         on_reconfigure_subagents: Callable[[LocalRuntimeAdapterConfig], Awaitable[None]]
         | None = None,
@@ -218,29 +227,48 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         session_metadata: SessionMetadataV1 | None = None,
         action_adapter: _LocalActionState | None = None,
         adapter_config: LocalRuntimeAdapterConfig | None = None,
+        core_config: RustHarnessConfig | None = None,
         foreign_hook_handlers: HookHandlers | None = None,
         release_plugins: Callable[[], Awaitable[None]] | None = None,
         read_plugin_info: Callable[[], Awaitable[PluginInfo]] | None = None,
     ) -> None:
         self._session_id = session_id
         self._created_at = created_at
-        self._cwd = cwd
+        if workspace is None:
+            workspace = (
+                adapter_config.workspace
+                if adapter_config is not None
+                else SessionWorkspace()
+            )
+            if cwd is not None:
+                workspace = workspace.moved_to(cwd)
+            if image_source_roots is not None:
+                workspace = SessionWorkspace(
+                    cwd=workspace.cwd, roots=image_source_roots
+                )
+        self._workspace = workspace
+        if adapter_config is not None:
+            adapter_config = adapter_config.with_workspace(workspace)
         self._on_reconfigure_subagents = on_reconfigure_subagents
         self._action_adapter = action_adapter
+        if self._action_adapter is not None:
+            adapter_config = adapter_config or LocalRuntimeAdapterConfig(
+                workspace=workspace
+            )
+            self._action_adapter.configure(adapter_config)
         # Kept apart from the merged set inside ``action_adapter``: a child Session
         # inherits this Session's ``hook_bindings``, so it has to re-merge the same
         # foreign handlers against the Host's own builtins (see
         # ``UnifiedHarnessSessionBackendHost.create_or_restore_child``).
         self._foreign_hook_handlers = foreign_hook_handlers or HookHandlers()
         # Session-owned and config-independent: the attachments directory has to
-        # survive every ``apply_adapter_config``, which only carries the
-        # workspace roots.
+        # survive every adapter configuration update and remain an additional
+        # readable image root.
         self._attachments_root = (
             attachments_root.expanduser().resolve()
             if attachments_root is not None
             else None
         )
-        self._image_source_roots = self._resolve_image_source_roots(image_source_roots)
         self._turn_queue = SessionTurnQueue()
         self._state = state or PublicSessionState(
             session=PublicSession(
@@ -257,11 +285,17 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         self._retrying: PublicRetryState | None = None
         self._lease = lease
         self._runtime = runtime
+        # Reads and events share this Runtime-refreshed public projection. Reading
+        # the durable process store for every session snapshot adds filesystem I/O
+        # even when no process changed.
+        self._background_processes_snapshot = tuple(
+            runtime.background_processes
+            if runtime is not None
+            else self._state.background_processes
+        )
         self._mcp_runtime = mcp_runtime
         self._connector_runtime = connector_runtime
-        self._pending_capabilities: RustHarnessCapabilitySet | None = None
-        self._pending_settings: RustHarnessSettings | None = None
-        self._pending_system_instructions: str | None = None
+        self._pending_core_config = core_config if runtime is None else None
         self._pending_adapter_config: LocalRuntimeAdapterConfig | None = None
         self._on_shutdown = on_shutdown
         self._on_work_state_changed = on_work_state_changed
@@ -276,6 +310,9 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         # App Server requests run concurrently. Keep direct-turn admission,
         # queue mutation, promotion, and lazy Runtime creation in one sequence.
         self._lifecycle_lock = asyncio.Lock()
+        # A fork blocks new Turns while it copies the source without blocking
+        # interrupts and other lifecycle work.
+        self._turn_start_lock = asyncio.Lock()
         self._promotion_conflict_id: str | None = None
         # The turn this session reserved, held until Core accepts it or it ends.
         self._reserved_turn_id: str | None = None
@@ -297,8 +334,10 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         self._active_model = (
             None if adapter_config is None else adapter_config.active_model.model
         )
+        self._active_agent = (
+            None if adapter_config is None else adapter_config.active_agent
+        )
         self._title_cadence = TitleCadence()
-        self._title_cadence_seeded = False
         self._approval_waiters: dict[str, asyncio.Future[ApprovalGrant]] = {}
         self._user_input_waiters: dict[str, asyncio.Future[tuple[bool, JsonValue]]] = {}
         self._open_callbacks: dict[str, JsonObject] = {}
@@ -306,7 +345,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         self._closed_callback_ids: set[str] = set()
         self._event_subscriptions = SessionEventSubscriptions()
         self._event_observers: dict[str, Callable[[JsonObject], None]] = {}
-        if runtime is not None and on_work_state_changed is not None:
+        if runtime is not None:
             runtime.configure_work_state_callback(self._notify_work_state_changed)
         self._buffered_events: list[JsonObject] | None = None
 
@@ -319,8 +358,12 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         return self._state.session.parent_session_id
 
     @property
-    def cwd(self) -> str | None:
-        return self._cwd
+    def cwd(self) -> str:
+        return str(self._workspace.cwd)
+
+    @property
+    def workspace(self) -> SessionWorkspace:
+        return self._workspace
 
     @property
     def foreign_hook_handlers(self) -> HookHandlers:
@@ -353,23 +396,24 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             await runtime.update_runtime_state(update)
             return True
 
-    async def persist_cwd(self, cwd: str) -> bool:
-        async with self._lifecycle_lock:
-            if self._cwd == cwd:
-                return False
-            self._cwd = cwd
-            if self._session_metadata is not None:
-                self._session_metadata.cwd = cwd
-            runtime = self._runtime
-            if runtime is None:
-                return True
+    async def _persist_workspace_locked(self) -> bool:
+        cwd = str(self._workspace.cwd)
+        metadata_changed = (
+            self._session_metadata is not None and self._session_metadata.cwd != cwd
+        )
+        runtime = self._runtime
+        runtime_changed = False
+        if runtime is not None and runtime.runtime_state.session_metadata.cwd != cwd:
+            runtime_changed = True
 
             def update(state: RuntimeStateV3) -> RuntimeStateV3:
                 metadata = state.session_metadata.model_copy(update={"cwd": cwd})
                 return state.model_copy(update={"session_metadata": metadata})
 
             await runtime.update_runtime_state(update)
-            return True
+        if self._session_metadata is not None:
+            self._session_metadata.cwd = cwd
+        return metadata_changed or runtime_changed
 
     @property
     def turn_queue(self) -> TurnQueue:
@@ -441,33 +485,134 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     def configuration_over(self, config: RustHarnessConfig) -> RustHarnessConfig:
         """`config`, carrying whatever this session has been told since.
 
-        A session that has not promoted holds its settings and capabilities
-        rather than pushing them, so a caller resolving anything against the
-        configuration it was created with would be a move behind.
+        An unpromoted session holds its latest complete Core configuration.
+        Session identity and bound plugins still come from the caller because
+        promotion owns those values.
         """
-        update: dict[str, object] = {}
-        if self._pending_settings is not None:
-            update["settings"] = self._pending_settings
-        if self._pending_capabilities is not None:
-            update["capabilities"] = self._pending_capabilities
-        if self._pending_system_instructions is not None:
-            update["system_instructions"] = self._pending_system_instructions
-        if not update:
+        pending = self._pending_core_config
+        if pending is None:
             return config
-        return config.model_copy(update=update, deep=True)
+        return pending.model_copy(
+            update={"task_id": config.task_id, "plugins": config.plugins}, deep=True
+        )
+
+    def _fork_configuration_over(self, config: RustHarnessConfig) -> RustHarnessConfig:
+        """Merge this live Session into a child-owned Core configuration."""
+        current = self._pending_core_config
+        if current is None and self._runtime is not None:
+            current = self._runtime.config
+        if current is None:
+            return config
+        capabilities = current.capabilities.model_copy(
+            update={
+                "hook_bindings": config.capabilities.hook_bindings,
+                "tool_groups": config.capabilities.tool_groups,
+            },
+            deep=True,
+        )
+        return current.model_copy(
+            update={
+                "task_id": config.task_id,
+                "plugins": config.plugins,
+                "capabilities": capabilities,
+            },
+            deep=True,
+        )
+
+    async def record_live_agent_change(
+        self, adapter_config: LocalRuntimeAdapterConfig
+    ) -> None:
+        """Journal the agent a mid-turn ``apply_adapter_config`` switched to."""
+        await self._record_agent_move(adapter_config, self._runtime)
+
+    async def _record_agent_move(
+        self,
+        adapter_config: LocalRuntimeAdapterConfig,
+        runtime: DurableSessionRuntime | None,
+    ) -> None:
+        agent = adapter_config.active_agent
+        if agent is None:
+            return
+        if (
+            runtime is not None
+            and self._active_agent is not None
+            and agent != self._active_agent
+        ):
+            await runtime.record_agent_change(agent, turn_id=self.active_turn_id)
+        self._active_agent = agent
 
     def apply_adapter_config(self, adapter_config: LocalRuntimeAdapterConfig) -> None:
+        """Apply local runtime config within the Session's current workspace."""
         if self._action_adapter is None:
             self._raise_not_implemented("apply_adapter_config")
+        adapter_config = adapter_config.with_workspace(self._workspace)
+        if self._runtime is not None:
+            self._runtime.configure_process_config(adapter_config)
         self._action_adapter.configure(adapter_config)
         self._title_config = adapter_config
         if self._runtime is None:
             self._pending_adapter_config = adapter_config
-        else:
-            self._runtime.configure_process_config(adapter_config)
-        self._image_source_roots = self._resolve_image_source_roots(
-            adapter_config.workspace_roots or None
-        )
+
+    async def _apply_local_config_locked(
+        self, local_config: LocalRuntimeAdapterConfig
+    ) -> None:
+        """Apply and persist local config without exposing a failed workspace move."""
+        if self._action_adapter is None:
+            self._raise_not_implemented("apply_adapter_config")
+        previous_config = self._title_config
+        assert previous_config is not None
+        self._workspace = local_config.workspace
+        try:
+            self.apply_adapter_config(local_config)
+            await self._persist_workspace_locked()
+        except BaseException:
+            self._workspace = previous_config.workspace
+            self.apply_adapter_config(previous_config)
+            raise
+
+    async def adopt_child_binding(
+        self,
+        adapter_config: LocalRuntimeAdapterConfig,
+        binding: ResolvedChildSessionBinding,
+    ) -> None:
+        """Adopt a child binding and persist its workspace and identity together."""
+        async with self._lifecycle_lock:
+            if self._action_adapter is None:
+                self._raise_not_implemented("apply_adapter_config")
+            previous_config = self._title_config
+            assert previous_config is not None
+            self._workspace = adapter_config.workspace
+            self.apply_adapter_config(adapter_config)
+            metadata_update = {
+                "cwd": str(adapter_config.workspace.cwd),
+                "subagent_template_digest": binding.template_digest,
+                "subagent_policy_ceiling_digest": binding.policy_ceiling_digest,
+            }
+            try:
+                runtime = self._runtime
+                if runtime is not None:
+                    await runtime.update_runtime_state(
+                        lambda state: state.model_copy(
+                            update={
+                                "session_metadata": state.session_metadata.model_copy(
+                                    update=metadata_update
+                                )
+                            },
+                            deep=True,
+                        )
+                    )
+            except BaseException:
+                self._workspace = previous_config.workspace
+                self.apply_adapter_config(previous_config)
+                raise
+            if self._session_metadata is not None:
+                self._session_metadata.cwd = metadata_update["cwd"]
+                self._session_metadata.subagent_template_digest = (
+                    binding.template_digest
+                )
+                self._session_metadata.subagent_policy_ceiling_digest = (
+                    binding.policy_ceiling_digest
+                )
 
     async def reconfigure_subagents(
         self, adapter_config: LocalRuntimeAdapterConfig
@@ -494,22 +639,49 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     ) -> None:
         runtime = self._runtime
         if runtime is None:
-            self._pending_capabilities = capabilities
+            pending = self._pending_core_config
+            if pending is None:
+                raise RuntimeError(
+                    "unpromoted session is missing its Core configuration"
+                )
+            self._pending_core_config = pending.model_copy(
+                update={"capabilities": capabilities}, deep=True
+            )
             return
         await runtime.reconfigure_skills(capabilities.skills)
         if plugins is not None:
             await runtime.reconfigure_plugins(plugins)
 
-    async def apply_runtime_configuration(
+    async def _apply_runtime_config_locked(
         self,
-        settings: RustHarnessSettings,
-        adapter_config: LocalRuntimeAdapterConfig,
-        capabilities: RustHarnessCapabilitySet,
-        *,
-        system_instructions: str | None = None,
-        plugins: tuple[RustPluginContextDefinition, ...] | None = None,
-        allow_reserved_turn: bool = False,
+        runtime: DurableSessionRuntime,
+        core_config: RustHarnessConfig,
+        local_config: LocalRuntimeAdapterConfig,
     ) -> None:
+        await runtime.reconfigure_settings(core_config.settings)
+        await runtime.reconfigure_skills(core_config.capabilities.skills)
+        await self._apply_local_config_locked(local_config)
+        # Both guards in ``apply_config`` mean this only runs between turns,
+        # which is when the new model actually takes over. A session opened
+        # without a configuration has no model to have moved from.
+        model = local_config.active_model.model
+        if self._active_model is not None and model != self._active_model:
+            await runtime.record_model_change(model)
+        self._active_model = model
+        await self._record_agent_move(local_config, runtime)
+
+    async def apply_config(
+        self, config: SessionConfig, *, allow_reserved_turn: bool = False
+    ) -> None:
+        """Apply one complete Core and local execution configuration.
+
+        Before promotion, the complete Core configuration is retained for
+        creation. A resident Core receives only its reconfigurable dimensions.
+        In both cases, the attached workspace is the session's canonical source
+        for execution, persistence, and model-facing configuration.
+        """
+        core_config = config.core
+        local_config = config.local
         async with self._lifecycle_lock:
             self._reject_compaction()
             if (
@@ -519,58 +691,58 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 self._reject_active_turn()
             runtime = self._runtime
             if runtime is None:
-                self._pending_settings = settings
-                self._pending_capabilities = capabilities
-                # Core instructions cannot be replaced after creation, so an
-                # ephemeral session retains them for its first promotion.
-                if system_instructions is not None:
-                    self._pending_system_instructions = system_instructions
-                self.apply_adapter_config(adapter_config)
+                previous_core_config = self._pending_core_config
+                self._pending_core_config = core_config
+                try:
+                    await self._apply_local_config_locked(local_config)
+                except BaseException:
+                    self._pending_core_config = previous_core_config
+                    raise
                 # Nothing to record into yet, but this is the model the session
                 # now runs: leaving the tracker behind would report the move
                 # again once a runtime exists.
-                self._active_model = adapter_config.active_model.model
+                self._active_model = local_config.active_model.model
+                self._active_agent = local_config.active_agent
                 if self._on_reconfigure_subagents is not None:
                     try:
-                        await self._on_reconfigure_subagents(adapter_config)
+                        await self._on_reconfigure_subagents(local_config)
                     except Exception:
                         logger.warning(
                             "Failed to reconfigure subagents after runtime update",
                             exc_info=True,
                         )
                 return
-            await runtime.reconfigure_settings(settings)
-            self.apply_adapter_config(adapter_config)
-            # Both guards above mean this only runs between turns, which is when
-            # the new model actually takes over, so the transcript entry lands in
-            # the right place without anyone having to time it. A session opened
-            # without a configuration has no model to have moved from.
-            model = adapter_config.active_model.model
-            if self._active_model is not None and model != self._active_model:
-                await runtime.record_model_change(model)
-            self._active_model = model
-            await runtime.reconfigure_skills(capabilities.skills)
-            if plugins is not None:
-                await runtime.reconfigure_plugins(plugins)
+            await self._apply_runtime_config_locked(runtime, core_config, local_config)
             if self._on_reconfigure_subagents is not None:
                 try:
-                    await self._on_reconfigure_subagents(adapter_config)
+                    await self._on_reconfigure_subagents(local_config)
                 except Exception:
                     logger.warning(
                         "Failed to reconfigure subagents after runtime update",
                         exc_info=True,
                     )
 
-    def _resolve_image_source_roots(
-        self, roots: tuple[Path, ...] | None
-    ) -> tuple[Path, ...]:
-        workspace = _image_source_roots(self._cwd, roots)
-        if self._attachments_root is None or self._attachments_root in workspace:
-            return workspace
-        return workspace + (self._attachments_root,)
+    @property
+    def _image_source_roots(self) -> tuple[Path, ...]:
+        roots = self._workspace.roots
+        if self._attachments_root is None or self._attachments_root in roots:
+            return roots
+        return roots + (self._attachments_root,)
 
     async def read(self, params: SessionReadParams) -> SessionReadResult:
         return SessionReadResult(snapshot=self._snapshot(params.history_limit))
+
+    async def stop_background_process(
+        self, process_id: str
+    ) -> BackgroundProcessStopResult:
+        runtime = self._runtime_for_host()
+        return await runtime.stop_background_process(process_id)
+
+    async def read_background_process_output(
+        self, request: BackgroundProcessOutputRead
+    ) -> BackgroundProcessOutputResult:
+        runtime = self._runtime_for_host()
+        return await runtime.read_background_process_output(request)
 
     async def subscribe(self, params: SessionReadParams) -> HarnessSessionSubscription:
         # Snapshot creation and subscriber registration contain no await, so a
@@ -639,6 +811,20 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         )
         if tasks:
             await asyncio.gather(*tasks)
+
+    @asynccontextmanager
+    async def _fork_boundary(self) -> AsyncIterator[None]:
+        """Block new Turns while a caller copies and forks this Session."""
+        async with self._turn_start_lock:
+            yield
+
+    @asynccontextmanager
+    async def _locked_turn_start(self) -> AsyncIterator[None]:
+        """Wait for any fork, then lock other lifecycle changes while a Turn starts."""
+        async with self._turn_start_lock:
+            await self._settle_turn_configuration()
+            async with self._lifecycle_lock:
+                yield
 
     def open_callbacks(self) -> tuple[JsonObject, ...]:
         return tuple(self._open_callbacks.values())
@@ -736,8 +922,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         self._raise_not_implemented("reload_config")
 
     async def start_turn(self, params: object) -> object:
-        await self._settle_turn_configuration()
-        async with self._lifecycle_lock:
+        async with self._locked_turn_start():
             return await self._start_turn(params)
 
     async def start_deferred_turn(
@@ -751,7 +936,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         newly created session visible while guaranteeing that no model or tool
         work starts against the pre-preparation cwd.
         """
-        async with self._lifecycle_lock:
+        async with self._turn_start_lock, self._lifecycle_lock:
             self._require_session(params.session_id)
             if params.turn.session_id != params.session_id:
                 raise ValueError("Deferred Turn session IDs must match")
@@ -767,10 +952,20 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 params.turn, image_source_roots=self._image_source_roots
             )
             started_at = _now_milliseconds()
+
+            async def replace_pending_history_entries(
+                entries: tuple[PublicHistoryEntry, ...],
+            ) -> None:
+                async with self._lifecycle_lock:
+                    if self._reserved_turn_id != payload.turn_id:
+                        return
+                    self._replace_turn_history_entries(entries, turn_id=payload.turn_id)
+
             preparation_context = DeferredTurnPreparationContext(
                 session_id=self._session_id,
                 turn_id=payload.turn_id,
                 started_at=started_at,
+                replace_pending_history_entries=replace_pending_history_entries,
             )
             self._reserved_turn_id = payload.turn_id
             self._reserved_turn_started_at = started_at
@@ -811,8 +1006,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             )
 
     async def start_scheduled_turn(self, params: object, loop_id: str) -> object:
-        await self._settle_turn_configuration()
-        async with self._lifecycle_lock:
+        async with self._locked_turn_start():
             return await self._start_turn(params, scheduled_loop_id=loop_id)
 
     async def _start_turn(
@@ -955,7 +1149,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 self._publish_failed_turn(reserved_payload.turn_id, exc)
             return
 
-        async with self._lifecycle_lock:
+        async with self._turn_start_lock, self._lifecycle_lock:
             if self._reserved_turn_id != reserved_payload.turn_id:
                 return
             try:
@@ -968,6 +1162,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                     content=payload.content,
                     client_command_id=reserved_payload.client_command_id,
                     params=payload.params,
+                    abandon_on_restart=reserved_payload.abandon_on_restart,
                 )
                 if result.history_entries:
                     replacements = self._replace_turn_history_entries(
@@ -1153,6 +1348,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                         "queue_item_id": params.queue_item_id,
                         "turn_id": params.expected_turn_id,
                     },
+                    abandon_on_restart=True,
                 ),
                 name=f"harness-queued-steer:{params.queue_item_id}",
             )
@@ -1217,19 +1413,13 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             try:
                 runtime = await asyncio.to_thread(self._promote_on_start, binding)
                 self._runtime = runtime
-                if self._on_work_state_changed is not None:
-                    runtime.configure_work_state_callback(
-                        self._notify_work_state_changed
-                    )
+                self._background_processes_snapshot = tuple(
+                    runtime.background_processes
+                )
+                runtime.configure_work_state_callback(self._notify_work_state_changed)
                 self._promote_on_start = None
                 self._pending_plugin_binding = None
-                pending, self._pending_capabilities = self._pending_capabilities, None
-                if pending is not None:
-                    await runtime.reconfigure_skills(pending.skills)
-                pending_settings, self._pending_settings = self._pending_settings, None
-                if pending_settings is not None:
-                    await runtime.reconfigure_settings(pending_settings)
-                self._pending_system_instructions = None
+                self._pending_core_config = None
                 pending_process = self._pending_adapter_config
                 self._pending_adapter_config = None
                 if pending_process is not None:
@@ -1278,9 +1468,9 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             turn_id=expected_turn_id, content=content, mode="steer"
         )
         dumped = raw.model_dump(mode="json", by_alias=True, exclude_none=True)
+        idempotency_key = getattr(raw, "idempotency_key", None)
         result = await runtime.command_without_driving_actions(
-            client_command_id=getattr(raw, "idempotency_key", None)
-            or f"steer-{secrets.token_hex(16)}",
+            client_command_id=idempotency_key or f"steer-{secrets.token_hex(16)}",
             method="turn/steer",
             params=cast(dict[str, JsonValue], dumped),
             command=command,
@@ -1288,6 +1478,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 "accepted": True,
                 "last_event_id": self._current_event_id(),
             },
+            abandon_on_restart=not idempotency_key,
         )
         return _SessionBackendResult(response=result.response)
 
@@ -1349,6 +1540,33 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         async with self._lifecycle_lock:
             return await self._inject_context(params)
 
+    async def record_host_effect(self, record: HostEffectRecord) -> object:
+        """Persist one Host-authored terminal effect in public history.
+
+        Public history never reaches the model, so a Host record preserves
+        what a user saw without authoring conversation. Only terminal records
+        are accepted: an in-flight effect streams through live events instead,
+        keeping transient state out of the durable projection.
+        """
+        async with self._lifecycle_lock:
+            runtime = await self._runtime_for_turn_locked(
+                promotion_conflict_id="host-effect", operation="record_host_effect"
+            )
+            entry = cast(
+                JsonObject,
+                {
+                    **cast(dict[str, JsonValue], record.model_dump(mode="json")),
+                    "type": "effect",
+                    "sessionId": self._session_id,
+                    "generationStatus": "completed",
+                    "relatedEntryId": None,
+                },
+            )
+            await runtime.append_public_history_entries([entry])
+            return _SessionBackendResult(
+                response={"accepted": True, "last_event_id": self._current_event_id()}
+            )
+
     async def _inject_context(self, params: object) -> object:
         self._reject_compaction()
         self._reject_active_turn()
@@ -1371,6 +1589,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             params=cast(dict[str, JsonValue], dumped),
             command=RustContextMessageEvent(content=content),
             response_factory=lambda _transition: {},
+            abandon_on_restart=True,
         )
         entries: list[JsonObject] = []
         if getattr(raw, "as_message", False):
@@ -1473,6 +1692,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             outcome = await runtime.compact_context(
                 client_command_id=f"compact-{secrets.token_hex(16)}",
                 instructions=instructions,
+                abandon_on_restart=True,
             )
         except BaseException:
             self._buffered_events = None
@@ -1588,6 +1808,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             params={"message": message, "turn_id": target.command.turn_id},
             command=command,
             response_factory=lambda _transition: {},
+            abandon_on_restart=False,
         )
         await self._record_parent_command(parent_session_id, operation_key, target)
         if result.transition is not None and result.transition.actions:
@@ -1642,6 +1863,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             params={"message": message, "turn_id": target.command.turn_id},
             command=command,
             response_factory=lambda _transition: {},
+            abandon_on_restart=False,
         )
         await self._record_parent_command(parent_session_id, operation_key, target)
         if result.transition is not None and result.transition.actions:
@@ -1824,12 +2046,16 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         except BaseException as exc:
             errors.append(exc)
         runtime = self._runtime
-        self._runtime = None
         if runtime is not None:
             try:
                 await runtime.close()
             except BaseException as exc:
                 errors.append(exc)
+            finally:
+                # Runtime.close() persists terminal process states and notifies
+                # this session. Keep it attached until then so the final public
+                # snapshot records completed, stopped, or orphaned processes.
+                self._runtime = None
         mcp_runtime = self._mcp_runtime
         self._mcp_runtime = None
         if mcp_runtime is not None:
@@ -1924,6 +2150,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                     params=payload.params,
                     command=RustContextMessageEvent(content=list(entry.content)),
                     response_factory=lambda _transition: {},
+                    abandon_on_restart=payload.abandon_on_restart,
                 )
             if not payload.content:
                 return
@@ -1936,6 +2163,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 ),
                 response_factory=lambda _transition: {},
                 accepted_public_history_entries=accepted_public_history_entries,
+                abandon_on_restart=payload.abandon_on_restart,
             )
 
         task = asyncio.create_task(run())
@@ -1973,8 +2201,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             await settle()
 
     async def _drain_turn_queue(self) -> None:
-        await self._settle_turn_configuration()
-        async with self._lifecycle_lock:
+        async with self._locked_turn_start():
             if (
                 self._closed
                 or self._reserved_turn_id is not None
@@ -2013,6 +2240,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             content=content,
             client_command_id=f"queue-{queue_item_id}",
             params=cast(dict[str, JsonValue], dumped),
+            abandon_on_restart=True,
         )
         self._schedule_turn(
             runtime,
@@ -2077,6 +2305,9 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             callback_id=callback_id,
             action=action,
             created_at=_now_milliseconds(),
+            input_entry_id=_turn_input_entry_id(
+                self._current_state_and_watermark()[0].latest_turn, action.turn_id
+            ),
             reason=reason,
             required_permissions=required_permissions,
         )
@@ -2095,17 +2326,6 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             if self._open_callbacks.pop(callback_id, None) is not None:
                 self._publish_session_state_update()
 
-    async def _request_process_approval(
-        self, action: RustRuntimeBuiltinToolCallAction
-    ) -> bool:
-        """Adapt the grant-returning requester to the process runtime's boolean port.
-
-        Smart approve's ``_request_approval`` returns an ``ApprovalGrant`` (once /
-        session / always / deny); the process runtime only needs allow-vs-deny.
-        """
-        grant = await self._request_approval(action)
-        return grant.approved
-
     async def _request_user_input(
         self, action: RustProvidedToolCallAction
     ) -> RustToolSucceededEvent | RustFailTurnEvent:
@@ -2120,6 +2340,9 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             callback_id=callback_id,
             action=action,
             created_at=_now_milliseconds(),
+            input_entry_id=_turn_input_entry_id(
+                self._current_state_and_watermark()[0].latest_turn, action.turn_id
+            ),
         )
         self._user_input_waiters[callback_id] = future
         self._open_callbacks[callback_id] = callback
@@ -2303,7 +2526,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             turn_completing = isinstance(status, dict) and status.get("type") == "idle"
         # Tick the title cadence on every projected event, not only at turn
         # boundaries. A single long turn accrues steps with no status change, so a
-        # boundary-only check would defer the periodic refresh until the turn ends
+        # boundary-only check would defer the initial title until the turn ends
         # (or is interrupted). Reading the runtime projection keeps the source of
         # truth authoritative; the cadence gates due-ness and only one title task
         # runs at a time, so ticking per event is cheap.
@@ -2362,6 +2585,15 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         _ = asyncio.ensure_future(settle())
 
     def _notify_work_state_changed(self) -> None:
+        runtime = self._runtime
+        if runtime is not None:
+            background_processes = tuple(runtime.background_processes)
+            if background_processes != self._background_processes_snapshot:
+                self._background_processes_snapshot = background_processes
+                self._state = self._state.model_copy(
+                    update={"background_processes": list(background_processes)}
+                )
+                self._publish_session_state_update()
         callback = self._on_work_state_changed
         if callback is None:
             return
@@ -2387,13 +2619,11 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         current_title = current_title if isinstance(current_title, str) else None
         step = count_model_steps(entries)
         compaction_id = latest_compaction_id(entries)
-        self._seed_title_cadence_once(runtime, step=step, compaction_id=compaction_id)
         if not self._title_cadence.begin_if_due(
             step=step,
             current_title=current_title,
             compaction_id=compaction_id,
             turn_completing=turn_completing,
-            periodic=config.title_model_is_fast,
         ):
             return
         self._title_task = asyncio.create_task(
@@ -2405,21 +2635,6 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         if self._title_task is task:
             self._title_task = None
         self._notify_work_state_changed()
-
-    def _seed_title_cadence_once(
-        self, runtime: DurableSessionRuntime, *, step: int, compaction_id: str | None
-    ) -> None:
-        # On resume the cadence starts empty and would treat the persisted title
-        # as a manual rename, freezing auto refresh. Adopt a persisted auto title
-        # so it keeps refreshing; leave a manual one for is_manual to block.
-        if self._title_cadence_seeded:
-            return
-        self._title_cadence_seeded = True
-        session = runtime.projection.session
-        if session.title is not None and session.title_source == "auto":
-            self._title_cadence.restore(
-                title=session.title, step=step, compaction_id=compaction_id
-            )
 
     async def _cancel_title_task(self) -> None:
         task = self._title_task
@@ -2494,6 +2709,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                     session_id=self._session_id,
                     queue_item_id=queue_item_id
                     or _turn_queue_item_id(state.latest_turn, turn_id),
+                    input_entry_id=_turn_input_entry_id(state.latest_turn, turn_id),
                     started_at=started_at,
                     completed_at=now,
                     error=PublicError(code=type(exception).__name__, message=message),
@@ -2551,6 +2767,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 "latest_turn": InterruptedPublicTurn(
                     id=turn_id,
                     session_id=self._session_id,
+                    input_entry_id=_turn_input_entry_id(state.latest_turn, turn_id),
                     started_at=started_at,
                     completed_at=now,
                     reason="client interrupt",
@@ -2621,6 +2838,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                     state = runtime_state
         elif self._runtime is not None and hasattr(self._runtime, "projection"):
             state = self._runtime.projection
+        state = self._with_background_processes(state)
         if state.retrying == self._retrying:
             # Every read and every published event lands here, and nothing is
             # retrying almost always, so the common case must not pay for a copy
@@ -2629,6 +2847,17 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         return state.model_copy(
             update={"retrying": self._retrying}
         ), self._current_event_id()
+
+    def _with_background_processes(
+        self, state: PublicSessionState
+    ) -> PublicSessionState:
+        if not self._background_processes_snapshot and not state.background_processes:
+            return state
+        if tuple(state.background_processes) == self._background_processes_snapshot:
+            return state
+        return state.model_copy(
+            update={"background_processes": list(self._background_processes_snapshot)}
+        )
 
     async def _set_provider_retry(
         self, turn_id: str, retry: ProviderRetry | None
@@ -2644,7 +2873,11 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             updated = None
         else:
             updated = PublicRetryState(
-                turn_id=turn_id, category=retry.category, detail=retry.detail
+                turn_id=turn_id,
+                category=retry.category,
+                detail=retry.detail,
+                retry_at=_now_milliseconds() + round(retry.delay_s * 1000),
+                retry_attempt=retry.retry_attempt,
             )
         if updated == self._retrying:
             return
@@ -2706,10 +2939,10 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     def _with_harness_owned_state(self, event: JsonObject) -> JsonObject:
         """Stamp the state this backend owns onto a published state event.
 
-        The turn queue and the provider-retry indicator are the Harness's, not
-        the projection's, so an event minted by the projector carries neither.
-        Emitting one without them reads downstream as "empty queue, not
-        retrying", which silently retires a retry that is still in flight.
+        The turn queue, background processes, and provider-retry indicator are
+        the Harness's, not the projection's, so an event minted by the projector
+        carries none of them. Emitting one without them reads downstream as
+        empty state and silently retires work that is still in flight.
         """
         if event.get("type") != "session_state_updated":
             return event
@@ -2718,6 +2951,10 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             return event
         state = {
             **raw_state,
+            "backgroundProcesses": [
+                process.model_dump(mode="json", by_alias=True)
+                for process in self._background_processes_snapshot
+            ],
             "turnQueue": self.turn_queue.model_dump(mode="json", by_alias=True),
         }
         # Absent means "not retrying": the field is omitted when unset so a
@@ -2779,6 +3016,7 @@ class _TurnStartPayload:
     content: list[RustContentBlock]
     client_command_id: str
     params: dict[str, JsonValue]
+    abandon_on_restart: bool
 
 
 def _deferred_turn_start_payload(
@@ -2815,6 +3053,7 @@ def _deferred_turn_start_payload(
             dict[str, JsonValue],
             request.model_dump(mode="json", by_alias=True, exclude_none=True),
         ),
+        abandon_on_restart=not request.idempotency_key,
     )
 
 
@@ -2846,11 +3085,13 @@ def _turn_start_payload(
         )
     turn_id = f"turn-{secrets.token_hex(16)}"
     dumped = raw.model_dump(mode="json", by_alias=True, exclude_none=True)
+    idempotency_key = getattr(raw, "idempotency_key", None)
     return _TurnStartPayload(
         turn_id=turn_id,
         content=content,
-        client_command_id=getattr(raw, "idempotency_key", None) or turn_id,
+        client_command_id=idempotency_key or turn_id,
         params=cast(dict[str, JsonValue], dumped),
+        abandon_on_restart=not idempotency_key,
     )
 
 
@@ -3000,6 +3241,8 @@ def _scheduled_loop_notice(session_id: str, turn_id: str, loop_id: str) -> JsonO
         "updatedAt": observed_at,
         "generationStatus": "completed",
         "level": "info",
+        "relatedEntryId": None,
+        "inputEntryId": None,
         "message": f"Loop `{loop_id}` fired",
         "details": {"kind": "scheduled_loop_fired", "loopId": loop_id},
     }
@@ -3114,16 +3357,6 @@ def _validated_inline_image_data(data: str) -> str:
     return data
 
 
-def _image_source_roots(
-    cwd: str | None, image_source_roots: tuple[Path, ...] | None
-) -> tuple[Path, ...]:
-    if image_source_roots is not None:
-        roots = image_source_roots
-    else:
-        roots = (Path(cwd or Path.cwd()),)
-    return tuple(root.expanduser().resolve() for root in roots)
-
-
 def _read_image_file_source(
     path: Path, *, image_source_roots: tuple[Path, ...]
 ) -> _EncodedImageFile:
@@ -3156,6 +3389,7 @@ def _approval_callback(
     callback_id: str,
     action: RustRuntimeBuiltinToolCallAction | RustProvidedToolCallAction,
     created_at: int,
+    input_entry_id: str | None,
     reason: str | None = None,
     required_permissions: tuple[JsonObject, ...] = (),
 ) -> JsonObject:
@@ -3180,6 +3414,7 @@ def _approval_callback(
             "updatedAt": created_at,
             "generationStatus": "in_progress",
             "relatedEntryId": related_entry_id,
+            "inputEntryId": input_entry_id,
             "callbackId": callback_id,
             "title": f"Approve {tool_name}",
             "detail": {
@@ -3221,6 +3456,7 @@ def _user_input_callback(
     callback_id: str,
     action: RustProvidedToolCallAction,
     created_at: int,
+    input_entry_id: str | None,
 ) -> JsonObject:
     return cast(
         JsonObject,
@@ -3233,6 +3469,7 @@ def _user_input_callback(
             "updatedAt": created_at,
             "generationStatus": "in_progress",
             "relatedEntryId": action.call_id,
+            "inputEntryId": input_entry_id,
             "callbackId": callback_id,
             "title": "User input required",
             "detail": {
@@ -3356,6 +3593,13 @@ def _turn_queue_item_id(turn: object, turn_id: str) -> str | None:
         return None
     queue_item_id = getattr(turn, "queue_item_id", None)
     return queue_item_id if isinstance(queue_item_id, str) else None
+
+
+def _turn_input_entry_id(turn: object, turn_id: str) -> str | None:
+    if getattr(turn, "id", None) != turn_id:
+        return None
+    input_entry_id = getattr(turn, "input_entry_id", None)
+    return input_entry_id if isinstance(input_entry_id, str) else None
 
 
 def _now_milliseconds() -> int:

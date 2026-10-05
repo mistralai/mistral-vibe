@@ -347,8 +347,27 @@ async def test_thinking_picker_shows_all_levels() -> None:
         await pilot.pause(0.2)
 
         picker = app.query_one(ThinkingPickerApp)
-        assert picker._thinking_levels == THINKING_LEVELS
+        assert picker._thinking_levels == list(THINKING_LEVELS)
         assert picker._current_thinking == "off"
+
+
+@pytest.mark.asyncio
+async def test_thinking_picker_shows_the_model_set() -> None:
+    narrowed = ModelConfig(
+        name="model-a",
+        provider="mistral",
+        alias="alpha",
+        thinking_levels=["off", "high"],
+    )
+    config = build_test_vibe_config(models=[narrowed], active_model="alpha")
+    app = build_test_vibe_app(config=config)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_thinking()
+        await pilot.pause(0.2)
+
+        picker = app.query_one(ThinkingPickerApp)
+        assert picker._thinking_levels == ["off", "high"]
 
 
 @pytest.mark.asyncio

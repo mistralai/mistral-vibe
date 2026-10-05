@@ -2,12 +2,44 @@ from __future__ import annotations
 
 import pytest
 
-from vibe.cli.commands import CommandRegistry
+from vibe.cli.commands import CommandContext, CommandRegistry
 from vibe.cli.textual_ui.widgets.chat_input.input_kinds import (
     Prompt,
     SlashCommand,
     classify,
 )
+
+
+@pytest.mark.parametrize("experimental_harness", [False, True])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/loop",
+        "/loop list",
+        "/loop cancel",
+        "/loop cancel abc123",
+        "/loop cancel all",
+        "/loop 30s check the build",
+        "/loop every weekday at 9am check the build",
+        "  /LOOP\tlist  ",
+        "/loop 30s check\nthe build",
+    ],
+)
+def test_loop_classification_depends_on_active_harness(
+    value: str, experimental_harness: bool
+) -> None:
+    result = classify(
+        value,
+        commands=CommandRegistry(
+            context=CommandContext(experimental_harness=experimental_harness)
+        ),
+        resolve_skill=lambda _value: pytest.fail("/loop must not resolve a skill"),
+    )
+
+    if experimental_harness:
+        assert result == Prompt(text=value)
+    else:
+        assert isinstance(result, SlashCommand)
 
 
 def _classify(value: str) -> object:

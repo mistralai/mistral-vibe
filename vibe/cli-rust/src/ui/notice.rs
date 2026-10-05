@@ -20,6 +20,7 @@ const NATIVE_COPY_HINT: &str = "if paste fails, hold Shift (Option in iTerm2, Fn
 
 /// Copy `text` and surface the same inline notice as Python.
 pub fn copied(app: &mut App, text: &str) {
+    crate::telemetry::user_copied_text(app, text);
     let message = if clipboard::copy_to_clipboard(text) {
         "Copied to clipboard".to_string()
     } else {

@@ -134,7 +134,10 @@ def parse_arguments() -> argparse.Namespace:
         "--legacy-harness",
         action="store_true",
         default=False,
-        help="Force the legacy Python harness, overriding the GrowthBook rollout.",
+        help=(
+            "Force the legacy Python harness. Temporary escape hatch, kept "
+            "until the legacy runtime is removed."
+        ),
     )
     add_smart_approve_argument(parser)
     parser.add_argument(
@@ -357,6 +360,7 @@ def _suggest_worktree_name(prompt: str | None) -> str | None:
 
     import asyncio
 
+    from vibe.cli.cli import _build_cli_launch_context
     from vibe.core.config.harness_files import init_harness_files_manager
     from vibe.core.config.vibe_schema import load_dotenv_values
     from vibe.core.git.worktree.naming_model import suggest_worktree_name
@@ -369,7 +373,11 @@ def _suggest_worktree_name(prompt: str | None) -> str | None:
     # init with these same sources returns without replacing the singleton.
     load_dotenv_values()
     init_harness_files_manager("user", "project")
-    return asyncio.run(suggest_worktree_name(prompt, cwd=Path.cwd()))
+    return asyncio.run(
+        suggest_worktree_name(
+            prompt, cwd=Path.cwd(), launch_context=_build_cli_launch_context()
+        )
+    )
 
 
 def _set_process_title() -> None:

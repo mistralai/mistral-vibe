@@ -4,10 +4,12 @@ import asyncio
 from collections.abc import Sequence
 import re
 
-from vibe.core.config import VibeConfigSchema
+from vibe.core.config import UtilityFeature, VibeConfigSchema
 from vibe.core.llm.utility_completion import run_utility_completion
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.session.title_policy import DEFAULT_TITLE_POLICY, TitlePolicy
+from vibe.core.telemetry.send import TelemetryClient
+from vibe.core.telemetry.types import LaunchContext
 from vibe.core.types import LLMMessage, Role
 
 _ELISION = "\n\n[…]\n\n"
@@ -23,15 +25,23 @@ async def generate_session_title(
     config: VibeConfigSchema,
     previous_title: str | None = None,
     policy: TitlePolicy = DEFAULT_TITLE_POLICY,
+    launch_context: LaunchContext | None = None,
+    session_id: str | None = None,
+    telemetry: TelemetryClient | None = None,
 ) -> str | None:
     """Ask a model for a concise title describing the session.
 
     ``previous_title`` is fed back so the model can refine an earlier title
-    rather than start over. Returns None when there is nothing to title (empty
-    transcript) or the model gives no usable answer. Raises on any real failure
-    (misconfiguration, backend error, timeout) so the caller can log it and we
-    fix the cause; the single background boundary in the agent loop keeps such a
-    failure from disrupting the session.
+    rather than start over. ``launch_context``, ``session_id`` and ``telemetry``
+    stamp the background call with its own ``title_generation`` identity: the
+    request metadata and one ``vibe.request_sent`` event, so it is counted
+    separately from the session's model turns.
+
+    Returns None when there is nothing to title (empty transcript) or the model
+    gives no usable answer. Raises on any real failure (misconfiguration,
+    backend error, timeout) so the caller can log it and we fix the cause; the
+    single background boundary in the agent loop keeps such a failure from
+    disrupting the session.
     """
     transcript = build_title_transcript(messages, policy=policy)
     if not transcript:
@@ -39,11 +49,15 @@ async def generate_session_title(
     async with asyncio.timeout(policy.total_timeout_seconds):
         content = await run_utility_completion(
             config=config,
+            feature=UtilityFeature.TITLE,
             system_prompt=UtilityPrompt.SESSION_TITLE.read(),
             user_content=_user_prompt(transcript, previous_title),
             max_tokens=policy.max_tokens,
             request_timeout_seconds=policy.request_timeout_seconds,
             retry_budget_seconds=policy.retry_budget_seconds,
+            launch_context=launch_context,
+            session_id=session_id,
+            telemetry=telemetry,
         )
     return _clean_title(content, policy=policy)
 

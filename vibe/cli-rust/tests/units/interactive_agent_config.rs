@@ -6,7 +6,8 @@ use vibe_rs::cli::Cli;
 
 fn config_from(args: &[&str]) -> vibe_rs::server::AgentConfig {
     let cli = Cli::parse_from(args);
-    cli.interactive_agent_config(Some("/work".into())).unwrap()
+    cli.interactive_agent_config(Some("/work".into()), None)
+        .unwrap()
 }
 
 #[test]
@@ -69,7 +70,7 @@ fn interactive_tool_filters_and_trust_are_wired() {
 fn interactive_add_dir_resolves_to_workspace_roots() {
     let cwd = std::env::current_dir().unwrap();
     let config = Cli::parse_from(["vibe-rs", "--add-dir", "."])
-        .interactive_agent_config(Some(cwd.to_string_lossy().into_owned()))
+        .interactive_agent_config(Some(cwd.to_string_lossy().into_owned()), None)
         .unwrap();
     assert_eq!(config.workspace_roots.len(), 1);
     assert!(
@@ -82,7 +83,7 @@ fn interactive_add_dir_resolves_to_workspace_roots() {
 #[test]
 fn interactive_add_dir_rejects_missing_paths() {
     let error = Cli::parse_from(["vibe-rs", "--add-dir", "/does/not/exist"])
-        .interactive_agent_config(None)
+        .interactive_agent_config(None, None)
         .unwrap_err();
     assert!(error.to_string().contains("--add-dir"));
 }

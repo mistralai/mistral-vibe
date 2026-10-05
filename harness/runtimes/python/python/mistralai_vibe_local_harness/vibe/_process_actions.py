@@ -289,7 +289,7 @@ def _validate_start(
             )
         )
     cwd, cwd_issue = _resolve_working_directory(
-        arguments.get("cwd", ""), config.cwd, windows=_is_windows(config)
+        arguments.get("cwd", ""), config.workspace.cwd, windows=_is_windows(config)
     )
     if cwd_issue is not None:
         issues.append(cwd_issue)

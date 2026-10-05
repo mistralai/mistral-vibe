@@ -231,7 +231,7 @@ class MCPApp(Container):
             source = self._source_for_option(event.option)
             self._set_help_text(
                 _LIST_VIEW_HELP_AUTH
-                if source is not None and source.status is MCPSourceStatus.NEEDS_AUTH
+                if source is not None and _awaits_auth(source)
                 else _LIST_VIEW_HELP_TOOLS
             )
 
@@ -603,6 +603,11 @@ def _source_from_option_id(value: str) -> tuple[str, MCPSourceKind] | None:
         if value.startswith(prefix):
             return value.removeprefix(prefix), kind
     return None
+
+
+def _awaits_auth(source: MCPSourceSummary) -> bool:
+    # A bootstrap error shows in the detail view instead of the auth flow.
+    return source.status is MCPSourceStatus.NEEDS_AUTH and not source.error
 
 
 def _source_status(source: MCPSourceSummary) -> tuple[str, str, str]:

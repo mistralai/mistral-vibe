@@ -558,6 +558,7 @@ fn apply_completion_event(
             &state.hook_binding_index,
             &active.turn_id,
             state.context.message_count() + 1,
+            state.config.settings.tools.permissions.as_ref(),
         );
         resolve_completion(
             CandidateContext::new(

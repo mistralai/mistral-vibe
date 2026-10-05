@@ -1,4 +1,4 @@
-//! Image paths pasted or dropped into the composer gain an `@` mention.
+//! Image paths pasted or dropped into the composer: detection, `@` mentions, placeholders.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,10 +7,21 @@ use tempfile::TempDir;
 use vibe_rs::app::App;
 use vibe_rs::input;
 use vibe_rs::paste_path::{
-    contains_image_path_mention, has_supported_path_root, image_path_mention_on,
-    maybe_prepend_at_for_image_path, maybe_prepend_at_for_image_path_on,
-    rewrite_bare_image_paths_in_text, rewrite_bare_image_paths_in_text_on,
+    contains_image_path_mention, has_supported_path_root, image_path_mention_on, pasted_image_path,
+    pasted_image_path_on, rewrite_bare_image_paths_in_text, rewrite_bare_image_paths_in_text_on,
 };
+
+/// The `@` mention a lone pasted image path stands for, or the paste unchanged.
+fn maybe_prepend_at_for_image_path(pasted: &str) -> String {
+    maybe_prepend_at_for_image_path_on(pasted, cfg!(windows))
+}
+
+fn maybe_prepend_at_for_image_path_on(pasted: &str, windows: bool) -> String {
+    pasted_image_path_on(pasted, windows).map_or_else(
+        || pasted.to_owned(),
+        |path| image_path_mention_on(&path, windows),
+    )
+}
 
 struct TestDir(TempDir);
 
@@ -114,21 +125,22 @@ fn rewrites_image_paths_without_probing_the_filesystem() {
 }
 
 #[test]
-fn inserts_pasted_image_mentions_with_token_boundaries() {
+fn inserts_numbered_image_placeholders_with_token_boundaries() {
     let mut app = App::default();
     app.chat_input.input = "inspectnow".to_owned();
     app.chat_input.cursor = "inspect".len();
 
     input::handle_paste(&mut app, "/tmp/diagram.png".to_owned());
 
-    assert_eq!(app.chat_input.input, "inspect @/tmp/diagram.png now");
-    assert_eq!(app.chat_input.cursor, "inspect @/tmp/diagram.png ".len());
+    assert_eq!(app.chat_input.input, "inspect [Image #1] now");
+    assert_eq!(app.chat_input.cursor, "inspect [Image #1] ".len());
 
     app.chat_input.input = "inspect".to_owned();
     app.chat_input.cursor = app.chat_input.input.len();
     input::handle_paste(&mut app, "/tmp/diagram.png".to_owned());
 
-    assert_eq!(app.chat_input.input, "inspect @/tmp/diagram.png ");
+    assert_eq!(app.chat_input.input, "inspect [Image #2] ");
+    assert_eq!(pasted_image_path("inspect /tmp/diagram.png"), None);
 }
 
 #[test]

@@ -717,6 +717,80 @@ def test_streaming_message_is_added_patched_and_frozen() -> None:
         projection.consume(_notification(4, patched[0]))
 
 
+@pytest.mark.parametrize(
+    ("input_fields", "input_patch"),
+    [
+        pytest.param(
+            {},
+            JsonPatchOperation(op="add", path="/inputEntryId", value="steer-1"),
+            id="legacy-omitted-add",
+        ),
+        pytest.param(
+            {"inputEntryId": None},
+            JsonPatchOperation(op="replace", path="/inputEntryId", value="steer-1"),
+            id="nullable-replace",
+        ),
+    ],
+)
+def test_history_patch_links_legacy_and_nullable_input_entry_id(
+    input_fields: dict[str, JsonValue], input_patch: JsonPatchOperation
+) -> None:
+    """*Prepare*: A streaming entry from an older or current server.
+    *Do*: Apply the server's add or replace patch to link its input.
+    *Assert*: Both wire forms update the client projection without losing content.
+    """
+    # Prepare
+    projection = _projection()
+    projection.consume(
+        Notification(
+            method="history/entryAdded",
+            params={
+                "eventId": 1,
+                "sessionId": "session-1",
+                "emittedAt": 1,
+                "entry": {
+                    "type": "message",
+                    "id": "assistant-1",
+                    "sessionId": "session-1",
+                    "turnId": "turn-1",
+                    "createdAt": 1,
+                    "updatedAt": 1,
+                    "generationStatus": "in_progress",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "hello"}],
+                    "relatedEntryId": None,
+                    **input_fields,
+                },
+            },
+        )
+    )
+
+    # Do
+    event = projection.consume(
+        Notification(
+            method="history/entryUpdated",
+            params={
+                "eventId": 2,
+                "sessionId": "session-1",
+                "emittedAt": 2,
+                "entryId": "assistant-1",
+                "patch": [input_patch.model_dump(mode="json", by_alias=True)],
+            },
+        )
+    )
+
+    # Assert
+    assert isinstance(event, HistoryEntryUpdated)
+    assert event.previous.input_entry_id is None
+    assert event.entry.input_entry_id == "steer-1"
+    entry = projection.history[0]
+    assert isinstance(entry, PublicMessageEntry)
+    assert entry.input_entry_id == "steer-1"
+    assert entry.text == "hello"
+    assert entry.related_entry_id is None
+    assert projection.last_event_id == 2
+
+
 def test_in_progress_entry_identity_is_frozen() -> None:
     projector = EventProjector("session-1", "turn-1")
     projector.project(AssistantEvent(content="hello", message_id="message-1"))

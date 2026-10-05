@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import AsyncIterator
 from dataclasses import replace
 import json
@@ -27,7 +28,11 @@ from mistralai_vibe_local_harness.vibe._processes._output import ProcessOutputSt
 from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
 
 from vibe.app_server._runtime import HarnessProcess
-from vibe.app_server._session_backend_port import SessionBackend, SessionBackendHost
+from vibe.app_server._session_backend_port import (
+    SessionBackend,
+    SessionBackendError,
+    SessionBackendHost,
+)
 from vibe.app_server._unified_harness_backend_adapter import (
     UnifiedSessionContext,
     UnifiedSessionSettings,
@@ -46,6 +51,7 @@ from vibe.app_server.protocol import (
     CallbackResult,
     CallbackResultParams,
     PageRequest,
+    ProtocolErrorCode,
     SessionOptions,
     SessionReadParams,
     SessionResumeParams,
@@ -127,10 +133,15 @@ async def test_vibe_enables_background_processes_for_every_host_shell_profile(
     assert derivation.core_config.settings.tools.command_environment.mode == profile
     assert derivation.adapter_config.command_environment == profile
     assert derivation.adapter_config.process_authority == "host_shell"
-    assert derivation.adapter_config.tool_modes["process.start"] == "ask"
     assert all(
-        derivation.adapter_config.tool_modes[name] == "allow"
-        for name in ("process.output", "process.write", "process.list", "process.stop")
+        derivation.adapter_config.tool_modes[name] == "ask"
+        for name in (
+            "process.start",
+            "process.output",
+            "process.write",
+            "process.list",
+            "process.stop",
+        )
     )
 
 
@@ -196,6 +207,29 @@ async function main() {{
 }}
 """,
     )
+    output_page = await cast(Any, replacement).dispatch_extension(
+        "session/backgroundProcess/output",
+        {
+            "sessionId": replacement.session_id,
+            "processId": process_id,
+            "fromEnd": True,
+            "cursor": 0,
+            "waitMs": 0,
+            "maxBytes": 64_000,
+        },
+    )
+    with pytest.raises(SessionBackendError) as invalid_cursor:
+        await cast(Any, replacement).dispatch_extension(
+            "session/backgroundProcess/output",
+            {
+                "sessionId": replacement.session_id,
+                "processId": process_id,
+                "fromEnd": False,
+                "cursor": output_page.response.bytes_available + 1,
+                "waitMs": 0,
+                "maxBytes": 64_000,
+            },
+        )
 
     # Assert
     assert r"{\"processes\":[]}" in _model_input_text(scripted.final_inputs[1])
@@ -212,6 +246,10 @@ async function main() {{
     assert [item.process_id for item in stored.submitted_process_notifications] == [
         process_id
     ]
+    assert output_page.response.availability == "available"
+    assert output_page.response.is_final
+    assert b"got:hello" in base64.b64decode(output_page.response.output_base64)
+    assert invalid_cursor.value.code is ProtocolErrorCode.INVALID_PARAMS
     assert (
         UnifiedSessionStore(storage_root, second.backend.session_id)
         .load()

@@ -31,7 +31,7 @@ pub enum Event {
     Refreshed {
         generation: u64,
         tool_count: u64,
-        runtime: Option<Value>,
+        response: Option<Value>,
     },
 }
 
@@ -129,23 +129,22 @@ pub fn refresh(app: &mut App, client: &Arc<Client>) {
     let client = client.clone();
     let pending = app.commit_started();
     tokio::spawn(async move {
-        let result = client
+        let response = client
             .request(
                 method::CONNECTOR_REFRESH,
                 json!({"sessionId": session_id, "name": name}),
             )
             .await
             .ok();
-        let tool_count = result
+        let tool_count = response
             .as_ref()
-            .and_then(|result| result.get("toolCount"))
+            .and_then(|response| response.get("toolCount"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let runtime = result.and_then(|result| result.get("runtime").cloned());
         let event = Event::Refreshed {
             generation,
             tool_count,
-            runtime,
+            response,
         };
         deliver(Some(tx), event, &pending).await;
     });
@@ -164,11 +163,11 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             }
             Event::Refreshed {
                 tool_count,
-                runtime,
+                response,
                 ..
             } => {
-                if let Some(runtime) = runtime {
-                    crate::event_handler::apply_runtime_value(app, &runtime);
+                if let Some(response) = response {
+                    crate::event_handler::apply_response_runtime(app, &response);
                 }
                 on_connector_refreshed(app, client, tool_count);
             }

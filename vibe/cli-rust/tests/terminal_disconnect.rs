@@ -44,7 +44,7 @@ impl TerminalSession {
                     &mut slave,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &mut size,
+                    &raw mut size,
                 )
             },
             0
@@ -63,6 +63,10 @@ impl TerminalSession {
             .current_dir(home.path())
             .env("VIBE_HOME", home.path())
             .env("VIBE_APP_SERVER_BIN", &backend)
+            // The pre-engine onboarding wizard opens when no API key resolves;
+            // these tests exercise the session path, so pin a key explicitly
+            // instead of depending on the developer's keychain.
+            .env("MISTRAL_API_KEY", "terminal-disconnect-fake-key")
             .env_remove("VIBE_APP_SERVER_CMD")
             .env_remove("VIBE_APP_SERVER_CWD")
             .env("TERM", "xterm-256color")

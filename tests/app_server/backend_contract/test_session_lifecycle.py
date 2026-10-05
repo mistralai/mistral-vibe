@@ -10,6 +10,7 @@ from tests.app_server.backend_contract.conftest import (
     BackendContractConnection,
     connect_backend_contract_host,
 )
+from vibe.app_server.local import LocalHarnessHost, LocalHarnessOptions
 from vibe.app_server.models import PublicMessageEntry
 from vibe.app_server.protocol import (
     ClientCapabilities,
@@ -270,3 +271,41 @@ async def test_resume_attaches_the_requested_persisted_session_and_keeps_it_usab
         ] == ["save this", "saved", "resume this", "resumed"]
     finally:
         await resumed.close()
+
+
+@pytest.mark.asyncio
+async def test_stopping_a_session_leaves_its_siblings_on_a_shared_harness_serving(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    experimental_harness: bool,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=lambda _request: backend_contract_mistral_response("still here")
+    )
+    harness_host = LocalHarnessHost()
+    options = LocalHarnessOptions(
+        session_options=SessionOptions(),
+        experimental_harness=experimental_harness,
+        legacy_harness=not experimental_harness,
+    )
+    try:
+        stopped = await harness_host.start(options)
+        sibling = await harness_host.start(options)
+
+        await stopped.close()
+
+        try:
+            _ = [event async for event in sibling.act("are you there?")]
+            sibling_messages = [
+                entry.text
+                for entry in sibling.history
+                if isinstance(entry, PublicMessageEntry)
+            ]
+            later = await harness_host.start(options)
+            await later.close()
+        finally:
+            await sibling.close()
+    finally:
+        await harness_host.close()
+
+    assert sibling_messages == ["are you there?", "still here"]

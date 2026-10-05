@@ -198,10 +198,10 @@ class UnifiedTeleportContextSummarizer:
             result = await backend.complete(
                 model=compaction_model,
                 messages=summary_messages,
-                temperature=0.0,
+                temperature=compaction_model.temperature,
                 tools=None,
                 tool_choice=None,
-                max_tokens=512,
+                max_tokens=None,
                 extra_headers={"user-agent": get_user_agent(Backend.MISTRAL)},
                 metadata=metadata,
             )

@@ -7,6 +7,7 @@ from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.llm.utility_completion import run_utility_completion
 from vibe.core.prompts import UtilityPrompt
+from vibe.core.telemetry.types import LaunchContext
 from vibe.observability.logging import logger
 
 # The caller has a deterministic name ready, so waiting is worth less than
@@ -17,8 +18,13 @@ _TOTAL_TIMEOUT_SECONDS = 2.0
 _MAX_TOKENS = 24
 
 
-async def suggest_worktree_name(prompt: str | None, *, cwd: Path) -> str | None:
+async def suggest_worktree_name(
+    prompt: str | None, *, cwd: Path, launch_context: LaunchContext | None = None
+) -> str | None:
     """Ask a small model to name a worktree after the session's first message.
+
+    ``launch_context`` stamps the request with the calling client's entrypoint
+    so the ``worktree_title`` call is attributed rather than anonymous.
 
     Returns None whenever a name cannot be produced -- no prompt, no provider,
     no API key, too slow, or any failure at all. Naming is a nicety and the
@@ -29,7 +35,7 @@ async def suggest_worktree_name(prompt: str | None, *, cwd: Path) -> str | None:
         return None
     try:
         async with asyncio.timeout(_TOTAL_TIMEOUT_SECONDS):
-            return await _complete(prompt, cwd=cwd)
+            return await _complete(prompt, cwd=cwd, launch_context=launch_context)
     except TimeoutError:
         logger.debug("Worktree name suggestion timed out")
         return None
@@ -38,7 +44,9 @@ async def suggest_worktree_name(prompt: str | None, *, cwd: Path) -> str | None:
         return None
 
 
-async def _complete(prompt: str, *, cwd: Path) -> str | None:
+async def _complete(
+    prompt: str, *, cwd: Path, launch_context: LaunchContext | None
+) -> str | None:
     # Scoped to the session cwd so a trusted project config is read from the
     # repo being worked in, matching HostRequestHandler._load_orchestrator.
     # Reads the global manager rather than building one: loading config resolves
@@ -60,5 +68,7 @@ async def _complete(prompt: str, *, cwd: Path) -> str | None:
         # a keyless provider should fall back at once instead of burning the
         # budget on setup that can only fail.
         skip_if_no_key=True,
+        call_type="worktree_title",
+        launch_context=launch_context,
     )
     return content or None

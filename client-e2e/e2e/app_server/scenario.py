@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import importlib.util
 import os
 from pathlib import Path
+import re
 import sys
 from types import ModuleType
 from typing import Any, Protocol, runtime_checkable
@@ -27,8 +28,17 @@ def resize(rows: int, columns: int) -> Resize:
 
 @dataclass(frozen=True)
 class Action:
+    """One external action; a pattern ``url`` matches a generated path in full."""
+
     kind: str
-    url: str
+    url: str | re.Pattern[str]
+
+    def matches(self, actual: Action) -> bool:
+        if self.kind != actual.kind or not isinstance(actual.url, str):
+            return False
+        if isinstance(self.url, re.Pattern):
+            return self.url.fullmatch(actual.url) is not None
+        return self.url == actual.url
 
 
 @dataclass(frozen=True)
@@ -85,6 +95,8 @@ class Scenario:
     """Settle after every keypress, for scenarios needing each key in its own read."""
     terminal_responses: Mapping[str, str] = field(default_factory=dict)
     """Terminal output queries and their input replies."""
+    exit_responses: Mapping[str, str] = field(default_factory=dict)
+    """Post-exit output triggers and their input replies, FIFO."""
     client_args: tuple[str, ...] = ()
     """Extra CLI args appended to the client command (e.g. `--continue`)."""
     stdout_before_completion: tuple[Mapping[str, Any], ...] = ()
@@ -99,6 +111,13 @@ class Scenario:
     def event_batches(self) -> list[list[AppServerEvent]]:
         """Return non-empty server-event batches in input order."""
         return [step.events for step in self.steps if step.events]
+
+    def clamp_capture_startup(self) -> None:
+        """Drop the startup snapshot for stepped scenarios: only stepless ones
+        (e.g. onboarding welcome) need it to capture anything.
+        """
+        if self.steps:
+            self.capture_startup = False
 
 
 def available_scenarios() -> list[str]:
@@ -173,6 +192,7 @@ def _build_scenario(module: ModuleType, name: str, origin: str) -> Scenario:
         exit_after_last_step=getattr(module, "exit_after_last_step", False),
         settle_per_key=getattr(module, "settle_per_key", False),
         terminal_responses=getattr(module, "terminal_responses", {}),
+        exit_responses=getattr(module, "exit_responses", {}),
         client_args=tuple(getattr(module, "client_args", ())),
         stdout_before_completion=tuple(getattr(module, "stdout_before_completion", ())),
         headless_returncode=getattr(module, "headless_returncode", 0),

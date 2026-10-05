@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from vibe.core.experiments import cache
+from vibe.core.experiments._constants import EVAL_CACHE_TTL_SECONDS
 from vibe.core.experiments.models import EvalResponse
 from vibe.core.paths import EXPERIMENT_EVAL_CACHE_FILE
 
@@ -47,7 +48,7 @@ def test_load_returns_none_when_entry_is_stale(_fixed_key: None) -> None:
 
     path = EXPERIMENT_EVAL_CACHE_FILE.path
     entries = json.loads(path.read_text())
-    entries["user-abc"]["stored_at_timestamp"] -= cache._EVAL_CACHE_TTL_SECONDS + 1
+    entries["user-abc"]["stored_at_timestamp"] -= EVAL_CACHE_TTL_SECONDS + 1
     path.write_text(json.dumps(entries))
 
     assert cache.load_cached_eval_response(_config()) is None

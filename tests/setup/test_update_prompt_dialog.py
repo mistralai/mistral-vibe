@@ -152,7 +152,7 @@ async def test_ctrl_q_during_update_cancels_subprocess_and_quits() -> None:
 
     update_started = asyncio.Event()
 
-    async def slow_update() -> bool:
+    async def slow_update(latest_version: str) -> bool:
         update_started.set()
         await asyncio.sleep(60)
         return True

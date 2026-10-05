@@ -22,6 +22,60 @@ fn user_message(id: &str) -> serde_json::Value {
     })
 }
 
+fn assistant_text(id: &str, text: &str) -> serde_json::Value {
+    json!({
+        "id": id,
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": text}],
+    })
+}
+
+fn answered_callback(id: &str) -> serde_json::Value {
+    json!({
+        "id": id,
+        "type": "callback",
+        "callbackId": id,
+        "title": "Tool approval",
+        "detail": {"kind": "tool_approval", "request": {}},
+        "state": {"status": "answered"},
+        "generationStatus": "completed",
+    })
+}
+
+fn server_notice(id: &str) -> serde_json::Value {
+    json!({
+        "id": id,
+        "type": "notice",
+        "level": "info",
+        "message": "Session title updated",
+        "detail": {"kind": "session_title_updated", "title": "t"},
+    })
+}
+
+fn scheduled_loop_notice(id: &str) -> serde_json::Value {
+    json!({
+        "id": id,
+        "type": "notice",
+        "level": "info",
+        "message": "Loop fired",
+        "detail": {"kind": "scheduled_loop_fired", "loopId": "l1"},
+    })
+}
+
+fn agent_change(id: &str) -> serde_json::Value {
+    json!({
+        "id": id,
+        "type": "checkpoint",
+        "kind": "agent_change",
+        "details": {"agent": "plan"},
+    })
+}
+
+fn unknown_entry(id: &str) -> serde_json::Value {
+    json!({"id": id, "type": "future_kind"})
+}
+
 /// Live entries, reduced one `history/entryAdded` at a time.
 fn live(entries: &[serde_json::Value]) -> Transcript {
     let mut transcript = Transcript::default();
@@ -94,5 +148,139 @@ fn trailing_group_settles_on_a_rebuild() {
     assert_eq!(
         rebuilt(&history).expandable_ids(),
         vec!["tool-group:e1".to_owned()]
+    );
+}
+
+/// A widget-less entry between two call rounds must not open a second block:
+/// every call lands in the same collapsed group (VIBE-4587).
+#[test]
+fn answered_callback_keeps_call_rounds_in_one_group() {
+    let transcript = live(&[
+        effect("e1", "completed"),
+        answered_callback("cb1"),
+        effect("e2", "completed"),
+    ]);
+    assert_eq!(
+        transcript.expandable_ids(),
+        vec!["tool-group:e1".to_owned()]
+    );
+    assert!(transcript.entry(0).unwrap().group.unwrap().first);
+    assert!(transcript.entry(2).unwrap().group.unwrap().last);
+}
+
+#[test]
+fn widget_less_server_notice_keeps_call_rounds_in_one_group() {
+    let transcript = live(&[
+        effect("e1", "completed"),
+        server_notice("n1"),
+        effect("e2", "completed"),
+    ]);
+    assert_eq!(
+        transcript.expandable_ids(),
+        vec!["tool-group:e1".to_owned()]
+    );
+}
+
+#[test]
+fn assistant_text_still_splits_call_rounds() {
+    let transcript = live(&[
+        effect("e1", "completed"),
+        assistant_text("m1", "Working on it."),
+        effect("e2", "completed"),
+    ]);
+    assert_eq!(
+        transcript.expandable_ids(),
+        vec!["tool-group:e1".to_owned(), "tool-group:e2".to_owned()]
+    );
+}
+
+#[test]
+fn unknown_entry_keeps_call_rounds_in_one_group() {
+    let transcript = live(&[
+        effect("e1", "completed"),
+        unknown_entry("u1"),
+        effect("e2", "completed"),
+    ]);
+    assert_eq!(
+        transcript.expandable_ids(),
+        vec!["tool-group:e1".to_owned()]
+    );
+}
+
+#[test]
+fn agent_change_keeps_call_rounds_in_one_group() {
+    let transcript = live(&[
+        effect("e1", "completed"),
+        agent_change("c1"),
+        effect("e2", "completed"),
+    ]);
+    assert_eq!(
+        transcript.expandable_ids(),
+        vec!["tool-group:e1".to_owned()]
+    );
+}
+
+/// The group's header and border land on the first and last rows that paint,
+/// so a widget-less entry may also open or close the run.
+#[test]
+fn widget_less_entry_first_keeps_header_on_first_call() {
+    let transcript = live(&[answered_callback("cb1"), effect("e1", "completed")]);
+    assert_eq!(
+        transcript.expandable_ids(),
+        vec!["tool-group:e1".to_owned()]
+    );
+    let group = transcript.entry(1).unwrap().group.unwrap();
+    assert!(group.first);
+    assert!(group.last);
+}
+
+#[test]
+fn widget_less_entry_last_keeps_border_on_last_call() {
+    let transcript = live(&[effect("e1", "completed"), answered_callback("cb1")]);
+    assert_eq!(
+        transcript.expandable_ids(),
+        vec!["tool-group:e1".to_owned()]
+    );
+    let group = transcript.entry(0).unwrap().group.unwrap();
+    assert!(group.first);
+    assert!(group.last);
+}
+
+#[test]
+fn scheduled_loop_notice_does_not_split_call_rounds() {
+    // The notice paints nothing: the fired loop shows on its prompt instead.
+    let transcript = live(&[
+        effect("e1", "completed"),
+        scheduled_loop_notice("n1"),
+        effect("e2", "completed"),
+    ]);
+    assert_eq!(
+        transcript.expandable_ids(),
+        vec!["tool-group:e1".to_owned()]
+    );
+}
+
+#[test]
+fn scheduled_loop_prompt_splits_call_rounds() {
+    let transcript = live(&[
+        effect("e1", "completed"),
+        user_message("u1"),
+        scheduled_loop_notice("n1"),
+        effect("e2", "completed"),
+    ]);
+    assert_eq!(
+        transcript.expandable_ids(),
+        vec!["tool-group:e1".to_owned(), "tool-group:e2".to_owned()]
+    );
+}
+
+#[test]
+fn local_notice_still_splits_call_rounds() {
+    let mut notice = server_notice("n1");
+    notice["local"] = true.into();
+    let transcript = live(&[effect("e1", "completed"), notice, effect("e2", "completed")]);
+    assert_eq!(
+        transcript.expandable_ids(),
+        vec!["tool-group:e1".to_owned(), "tool-group:e2".to_owned()]
     );
 }

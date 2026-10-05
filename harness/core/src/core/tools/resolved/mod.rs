@@ -8,6 +8,8 @@ mod self_tools;
 #[cfg(test)]
 pub(crate) mod testing;
 
+#[cfg(test)]
+pub(crate) use self::assembly::RESERVED_TOOL_NAMESPACES;
 use self::contracts::{ToolContracts, validate_model_input};
 use self::program::ResolvedProgramTools;
 use crate::core::config::{HarnessConfig, ToolGroupMetadata};
@@ -22,6 +24,7 @@ use crate::core::features::{file_system, large_output};
 use crate::core::step_protocol::ToolDefinition;
 use crate::core::tools::external::{
     ExternalTool, ExternalToolCall, RuntimeBuiltinToolName, ToolTarget,
+    provided_tool_qualified_name,
 };
 use crate::core::wire::tool::ToolCall;
 use serde_json::Value;
@@ -190,7 +193,7 @@ fn validate_tool_groups(config: &HarnessConfig) -> Result<(), CoreError> {
                 ),
             ));
         }
-        if assembly::is_reserved_group_name(&group.name) {
+        if assembly::RESERVED_TOOL_NAMESPACES.contains(&group.name.as_str()) {
             return Err(CoreError::invalid_configuration(
                 "tool_groups",
                 format!("tool group name {:?} is reserved", group.name),
@@ -210,7 +213,6 @@ fn validate_tool_groups(config: &HarnessConfig) -> Result<(), CoreError> {
                 format!("tool group {:?} connector_id must not be empty", group.name),
             ));
         }
-        let mut function_names = HashSet::new();
         for tool in &group.tools {
             if !tool_discovery::is_identifier(&tool.name) {
                 return Err(CoreError::invalid_configuration(
@@ -221,17 +223,11 @@ fn validate_tool_groups(config: &HarnessConfig) -> Result<(), CoreError> {
                     ),
                 ));
             }
-            if !function_names.insert(tool.name.clone()) {
-                return Err(CoreError::invalid_configuration(
-                    "tool_groups",
-                    format!("duplicate tool function {:?}.{:?}", group.name, tool.name),
-                ));
-            }
-            let qualified_name = format!("{}.{}", group.name, tool.name);
+            let qualified_name = provided_tool_qualified_name(&group.name, &tool.name);
             if !qualified_names.insert(qualified_name.clone()) {
                 return Err(CoreError::invalid_configuration(
                     "tool_groups",
-                    format!("duplicate tool function {qualified_name:?}"),
+                    format!("duplicate stable tool ID {qualified_name:?}"),
                 ));
             }
             if tool.exposure.is_direct() {
@@ -287,7 +283,6 @@ mod tests {
     };
     use crate::core::features::programmatic_tool_calling::ProgrammaticName;
     use crate::core::features::tool_discovery::{SearchMode, SearchRequest};
-    use crate::core::testing::BackgroundProcessMode;
     use crate::core::testing::CommandEnvironment;
     use crate::core::tools::resolved::testing::{config, qualified_name};
     use serde_json::json;
@@ -481,123 +476,5 @@ mod tests {
         );
         assert!(result.contains("<name>clientInteraction</name>"));
         assert!(result.contains("<status>not_callable</status>"));
-    }
-
-    ///
-    /// *Prepare*: Legal provided groups reuse the built-in `self` and `process` namespaces.
-    /// *Do*: Compile the resolved tools and query exact details plus group-description-only searches.
-    /// *Assert*: Built-in search descriptions still win while configured icons apply to every
-    /// document in the reused namespace.
-    ///
-    #[test]
-    fn reused_builtin_namespaces_preserve_search_metadata() {
-        // Prepare
-        let programmatic_tool = |name: &str| ProvidedToolDefinition {
-            name: name.to_string(),
-            description: "Configured operation".to_string(),
-            input_schema: json!({"type": "object"}),
-            output_schema: Some(json!({"type": "object"})),
-            exposure: ProvidedToolExposure::Programmatic,
-        };
-        let mut config = config();
-        config.settings.tools.background_processes = BackgroundProcessMode::Enabled;
-        config.capabilities.tool_groups = vec![
-            ToolGroupDefinition {
-                name: "self".to_string(),
-                description: "selfconfiguredonlytoken".to_string(),
-                metadata: None,
-                icon_url: Some("https://example.test/self.png".to_string()),
-                tools: vec![programmatic_tool("configured")],
-            },
-            ToolGroupDefinition {
-                name: "process".to_string(),
-                description: "processconfiguredonlytoken".to_string(),
-                metadata: None,
-                icon_url: Some("https://example.test/process.png".to_string()),
-                tools: vec![programmatic_tool("configured")],
-            },
-        ];
-
-        // Do
-        let tools = ResolvedTools::compile(&config).unwrap();
-        let details = tools.search(SearchRequest {
-            mode: SearchMode::Details,
-            functions: vec![
-                "self.sleep".to_string(),
-                "self.configured".to_string(),
-                "process.start".to_string(),
-                "process.configured".to_string(),
-            ],
-            ..SearchRequest::default()
-        });
-        let self_description_search = tools.search(SearchRequest {
-            query: Some("selfconfiguredonlytoken".to_string()),
-            ..SearchRequest::default()
-        });
-        let process_description_search = tools.search(SearchRequest {
-            query: Some("processconfiguredonlytoken".to_string()),
-            ..SearchRequest::default()
-        });
-
-        // Assert
-        assert_eq!(
-            details
-                .matches("connectorIconUrl: 'https://example.test/self.png'")
-                .count(),
-            2
-        );
-        assert_eq!(
-            details
-                .matches("connectorIconUrl: 'https://example.test/process.png'")
-                .count(),
-            2
-        );
-        assert!(!self_description_search.contains("self.configured"));
-        assert!(!process_description_search.contains("process.configured"));
-    }
-
-    ///
-    /// *Prepare*: A direct-only provided group reuses the enabled `process` namespace.
-    /// *Do*: Load built-in process details and search for the provided group's description.
-    /// *Assert*: The configured icon decorates the built-in document while the group remains a
-    /// separate non-callable integration notice.
-    ///
-    #[test]
-    fn direct_only_reused_namespace_keeps_builtin_icon_and_notice() {
-        // Prepare
-        let mut config = config();
-        config.settings.tools.background_processes = BackgroundProcessMode::Enabled;
-        config.capabilities.tool_groups = vec![ToolGroupDefinition {
-            name: "process".to_string(),
-            description: "processnoticeonlytoken".to_string(),
-            metadata: None,
-            icon_url: Some("https://example.test/process-notice.png".to_string()),
-            tools: vec![ProvidedToolDefinition {
-                name: "process_status".to_string(),
-                description: "Read provided process status".to_string(),
-                input_schema: json!({"type": "object"}),
-                output_schema: Some(json!({"type": "object"})),
-                exposure: ProvidedToolExposure::Direct,
-            }],
-        }];
-
-        // Do
-        let tools = ResolvedTools::compile(&config).unwrap();
-        let details = tools.search(SearchRequest {
-            mode: SearchMode::Details,
-            functions: vec!["process.start".to_string()],
-            ..SearchRequest::default()
-        });
-        let notice = tools.search(SearchRequest {
-            connectors: vec!["process".to_string()],
-            query: Some("processnoticeonlytoken".to_string()),
-            ..SearchRequest::default()
-        });
-
-        // Assert
-        assert!(details.contains("connectorIconUrl: 'https://example.test/process-notice.png'"));
-        assert!(notice.contains("<name>process</name>"));
-        assert!(notice.contains("<status>not_callable</status>"));
-        assert!(!notice.contains("process.process_status"));
     }
 }

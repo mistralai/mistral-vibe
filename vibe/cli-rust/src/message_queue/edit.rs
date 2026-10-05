@@ -5,9 +5,21 @@ use std::sync::Arc;
 use crate::app::App;
 use crate::server::Client;
 use crate::transcript::local;
+use crate::ui;
 
 use super::replacement::replace_group;
 use super::requests::enqueue_prompt;
+
+/// Save the edited prompt, then leave queue mode so the normal
+/// bindings (Enter steers, Esc interrupts) resume. The saved edit is no longer
+/// in the composer, so `exit` must restore the draft, not clear the input.
+pub fn save_edit(app: &mut App, client: &Arc<Client>, text: String) {
+    replace_selected(app, client, text);
+    app.queue.editing = false;
+    ui::notice::clear(app);
+    super::selection::exit(app);
+    crate::completion_manager::input_changed(app);
+}
 
 pub fn replace_selected(app: &mut App, client: &Arc<Client>, text: String) {
     let Some(index) = app.queue.selected_position() else {

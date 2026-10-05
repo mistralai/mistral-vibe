@@ -6,20 +6,26 @@
 
 pub mod callback;
 pub mod child;
+pub mod connector_web;
 pub mod effect;
 pub mod effect_output;
 pub mod images;
 pub mod process;
 pub mod proto_agents;
 pub mod proto_approval;
+pub mod proto_children;
 pub mod proto_mcp;
 pub mod proto_projects;
 pub mod proto_questions;
+pub mod proto_teleport;
 pub mod proto_trust;
 pub mod reader;
 pub mod signal;
 pub mod stderr;
 pub mod types;
+pub mod web_output;
+#[cfg(windows)]
+mod windows_job;
 
 pub use child::{ChildHandle, SHUTDOWN_GRACE};
 pub use effect::*;
@@ -30,6 +36,7 @@ pub use process::{
 };
 pub use proto_agents::*;
 pub use proto_approval::*;
+pub use proto_children::*;
 pub use proto_mcp::*;
 pub use proto_questions::*;
 pub use proto_trust::*;

@@ -11,6 +11,9 @@ use crate::chat_input::Action;
 /// The chat input editing action a key triggers, or `None` for keys the chat input
 /// does not edit with (submit, history, scroll, popup nav are handled elsewhere).
 pub fn action_for(k: &KeyEvent) -> Option<Action> {
+    if let Some(action) = history_action_for(k, cfg!(unix)) {
+        return Some(action);
+    }
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let alt = k.modifiers.contains(KeyModifiers::ALT);
     let shift = k.modifiers.contains(KeyModifiers::SHIFT);
@@ -61,6 +64,19 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
         KeyCode::Right => Some(Action::CursorRight),
         KeyCode::Home => Some(Action::CursorLineStart),
         KeyCode::End => Some(Action::CursorLineEnd),
+        _ => None,
+    }
+}
+
+/// Super bindings mirror Textual; Ctrl bindings are reserved for job control on Unix.
+pub fn history_action_for(key: &KeyEvent, can_suspend: bool) -> Option<Action> {
+    let modifiers = key.modifiers;
+    if modifiers != KeyModifiers::SUPER && (can_suspend || modifiers != KeyModifiers::CONTROL) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('z') => Some(Action::Undo),
+        KeyCode::Char('y') => Some(Action::Redo),
         _ => None,
     }
 }

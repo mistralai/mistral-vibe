@@ -274,10 +274,7 @@ def _policy_ceiling(
     *,
     integration_authority: dict[str, JsonValue] | None,
 ) -> ResolvedSubagentPolicyCeiling:
-    roots = sorted(
-        str(path.expanduser().resolve())
-        for path in (adapter.workspace_roots or (adapter.cwd,))
-    )
+    roots = sorted(str(path.expanduser().resolve()) for path in adapter.workspace.roots)
     tool_grants = {
         name: ResolvedToolGrant(
             binding_id=f"builtin:{name}",
@@ -342,7 +339,7 @@ def _policy_ceiling(
         "retry_max_elapsed_time_s": adapter.retry_max_elapsed_time_s,
     }
     return ResolvedSubagentPolicyCeiling(
-        workdir=str(adapter.cwd.expanduser().resolve()),
+        workdir=str(adapter.workspace.cwd),
         read_roots=roots,
         write_roots=roots,
         completion_grants={"completion:default": _digest(completion_authority)},
@@ -414,10 +411,10 @@ def _binding_digest(
                     "max_tokens": adapter.max_tokens,
                     "timeout_s": adapter.timeout_s,
                     "retry_max_elapsed_time_s": adapter.retry_max_elapsed_time_s,
-                    "cwd": str(adapter.cwd.expanduser().resolve()),
+                    "cwd": str(adapter.workspace.cwd),
                     "workspace_roots": sorted(
                         str(path.expanduser().resolve())
-                        for path in adapter.workspace_roots
+                        for path in adapter.workspace.roots
                     ),
                     # Ambient env var names omitted; see _policy_ceiling_digest.
                     "bypass_approval": adapter.bypass_approval,

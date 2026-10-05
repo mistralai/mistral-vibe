@@ -66,6 +66,7 @@ pip install mistral-vibe
   - [Interactive Mode](#interactive-mode)
   - [Trust Folder System](#trust-folder-system)
   - [Programmatic Mode](#programmatic-mode)
+  - [TUI Implementations](#tui-implementations)
 - [Voice Mode](#voice-mode)
 - [Slash Commands](#slash-commands)
   - [Built-in Slash Commands](#built-in-slash-commands)
@@ -319,6 +320,28 @@ Example:
 vibe --prompt "Analyze the codebase" --max-turns 5 --max-price 1.0 --max-tokens 50000 --output json
 ```
 
+### TUI Implementations
+
+The `vibe` command starts through a small launcher that picks the terminal
+client from the `VIBE_CLI` environment variable:
+
+- `VIBE_CLI=rust vibe` starts the Rust TUI.
+- `VIBE_CLI=python vibe` runs the legacy Python (Textual) TUI.
+- With `VIBE_CLI` unset (or set to any other value), `vibe` runs the legacy
+  Python TUI.
+
+The commands above use POSIX shell syntax, where the assignment only applies
+to that command. On Windows, set the variable for the session instead:
+
+- PowerShell: `$env:VIBE_CLI = "python"; vibe` (unset with
+  `Remove-Item Env:VIBE_CLI`)
+- cmd: `set VIBE_CLI=python`, then run `vibe` (unset with `set VIBE_CLI=`)
+
+When the `VIBE_CLI` environment variable is set to `rust`, every `vibe`
+invocation selects the Rust client. To run a nested command (e.g.
+`vibe mcp add ...`) with the legacy Python client instead, set `VIBE_CLI` to
+`python` for that invocation.
+
 ## Voice Mode
 
 > [!WARNING]
@@ -362,6 +385,15 @@ from the partial response. Add optional guidance after the command, for example
 Use `/mcp` or `/connectors` to browse configured MCP servers and workspace
 connectors. The browser starts on the first item; press Up or Left to focus its
 fuzzy search bar, then Up again to wrap to the last item.
+
+With the Unified Harness, `/loop every two minutes check the build` asks the
+model to schedule a recurring prompt. Calendar requests such as `/loop weekdays
+at 9am review CI` work too, using the machine's local timezone. Ask the model to
+list or cancel schedules; `/loop` has no TUI management subcommands. Requests
+submitted while busy join the normal prompt queue. Schedules survive resume,
+but only run while Vibe is open and idle; missed runs do not accumulate.
+The `cron` tool is enabled and allowed by default; explicit tool filters and
+`tools.cron.permission` settings still apply.
 
 ### Custom Slash Commands via Skills
 
@@ -703,12 +735,13 @@ for the complete command reference. `vibe mcp remove <name>` removes the server
 from the user configuration. Removing an OAuth server also deletes its stored
 tokens, client information, and configuration fingerprint when available.
 
-With `VIBE_CLI=rust`, shell `mcp add` uses the OAuth-only `/mcp add` syntax:
-`vibe mcp add https://mcp.linear.app/mcp --name linear --no-login`.
-It accepts `--scope` (repeatable), `--transport`, and `--allow-insecure-http`;
-without `--no-login`, it starts browser login. Both `add` and `remove NAME`
-update the user configuration without opening a chat session. For stdio or
-static-auth additions, use `VIBE_CLI=python vibe mcp add` with the flags above.
+With `VIBE_CLI` set to `rust`, shell `mcp add` uses the OAuth-only
+`/mcp add` syntax: `vibe mcp add https://mcp.linear.app/mcp --name linear
+--no-login`. It accepts `--scope` (repeatable), `--transport`, and
+`--allow-insecure-http`; without `--no-login`, it starts browser login. Both
+`add` and `remove NAME` update the user configuration without opening a chat
+session. For stdio or static-auth additions, set `VIBE_CLI` to `python` and run
+`vibe mcp add` with the flags above.
 
 Hosted OAuth MCP servers can also be added from inside Vibe:
 
@@ -981,9 +1014,9 @@ only Git-dependent metadata and features are unavailable.
 
 ### Update Settings
 
-Vibe checks PyPI at most once per day during a session. When a newer version is found, the next launch shows an update prompt before opening the chat, offering to either update immediately (via `uv tool upgrade mistral-vibe` or `brew upgrade mistral-vibe`) or continue with the current version.
+Vibe checks for updates at most once per day during a session. When Vibe is installed from a package index with `uv tool install`, the check runs `uv tool list --outdated`, so your uv settings (such as `exclude-newer`) decide which version is offered, and an exact version pin (`mistral-vibe==X`) suppresses the offer. Other installs (git or local path, Homebrew, pip, or a uv too old for `--outdated`) query PyPI. When a newer version is found, the next launch shows an update prompt before opening the chat, offering to either update immediately (via `uv tool upgrade mistral-vibe` or `brew upgrade mistral-vibe`) or continue with the current version. Vibe reports success only once `vibe --version` shows the new version. If a uv install stays on the old version, for example because of a version pin, Vibe asks whether to run `uv tool install --force mistral-vibe@latest`, which drops the pin, extras and `--with` packages.
 
-Run `vibe --check-upgrade` to check PyPI immediately, prompt to install a newer version if one exists, and exit.
+Run `vibe --check-upgrade` to check immediately, prompt to install a newer version if one exists, and exit.
 
 To disable the daily check entirely, add this to your `config.toml`:
 

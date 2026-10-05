@@ -2,7 +2,9 @@
 
 pub(crate) mod grouping;
 pub(crate) mod local;
+mod older;
 pub(crate) mod patch;
+mod scheduled_loop;
 mod subagent;
 
 use std::collections::{HashMap, HashSet};
@@ -12,8 +14,10 @@ use serde_json::Value;
 
 use grouping::is_hidden_hook_notice;
 pub use grouping::{effect_kind, groups_with_tools, outcome, Group, Outcome};
+pub use older::HistoryCursor;
 use patch::appended_text;
 pub use patch::apply_json_patch;
+pub use scheduled_loop::FiredLoop;
 
 #[derive(Default)]
 pub struct Transcript {
@@ -29,12 +33,17 @@ pub struct Transcript {
     /// `current_tool_group` open across a successful turn, and finalizes it
     /// only on a non-grouping entry, a failed/interrupted turn, or a rebuild).
     live_tail_open: bool,
+    /// Highest `[Image #N]` a user message has shown, so a new paste numbers past it.
+    highest_image_label: usize,
+    /// Where paging resumes when older server history is not loaded yet.
+    history_before_cursor: Option<HistoryCursor>,
 }
 
 pub struct Snapshot {
     entries: Vec<Value>,
     hidden: HashSet<String>,
     last_event_id: u64,
+    history_before_cursor: Option<HistoryCursor>,
 }
 
 struct StoredEntry {
@@ -57,6 +66,8 @@ struct StoredEntry {
     stream_delta: Option<String>,
     /// Completed subagent response carried by the following harness notification.
     attached_output: Option<String>,
+    /// The scheduled loop whose firing sent this user prompt.
+    fired_loop: Option<FiredLoop>,
 }
 
 /// A borrowed renderable entry: its id, height-cache revision, and typed variant.
@@ -81,6 +92,8 @@ pub struct TranscriptEntry<'a> {
     pub stream_delta: Option<&'a str>,
     /// Completed subagent response carried by the following harness notification.
     pub attached_output: Option<&'a str>,
+    /// The scheduled loop whose firing sent this user prompt.
+    pub fired_loop: Option<&'a FiredLoop>,
     pub entry: &'a HistoryEntry,
 }
 
@@ -90,6 +103,7 @@ impl Transcript {
             entries: self.entries.iter().map(|entry| entry.raw.clone()).collect(),
             hidden: self.hidden.clone(),
             last_event_id: self.last_event_id,
+            history_before_cursor: self.history_before_cursor.clone(),
         }
     }
 
@@ -99,6 +113,7 @@ impl Transcript {
         self.hidden = snapshot.hidden;
         self.next_rev += 1;
         self.last_event_id = snapshot.last_event_id;
+        self.history_before_cursor = snapshot.history_before_cursor;
         for entry in snapshot.entries {
             self.insert(entry, true);
         }
@@ -110,6 +125,7 @@ impl Transcript {
         self.indices.clear();
         self.next_rev += 1;
         self.live_tail_open = false;
+        self.history_before_cursor = None;
     }
 
     /// Python `stop_current_tool_call`: a failed or interrupted turn settles
@@ -141,19 +157,34 @@ impl Transcript {
             })
     }
 
-    /// Rewindable user messages as `(entry index, entry id, text)`: server-owned
+    /// Highest `[Image #N]` any user message has shown in this transcript.
+    pub fn highest_image_label(&self) -> usize {
+        self.highest_image_label
+    }
+
+    /// Rewindable user messages as `(entry index, entry id, text)`, the text
+    /// showing its collapsed pastes as their placeholders: server-owned
     /// user entries only, mirroring Python's `_get_user_message_widgets`, which
-    /// skips queued prompts and slash-command echoes.
-    pub fn user_messages(&self) -> Vec<(usize, String, String)> {
+    /// skips queued prompts and slash-command echoes. Prompts a scheduled loop
+    /// sent are skipped too: the harness refuses to rewind to them.
+    pub fn user_messages(&self) -> Vec<(usize, String, crate::collapsed_pastes::Collapsed)> {
         self.entries
             .iter()
             .enumerate()
-            .filter(|(index, stored)| !stored.local && !self.is_hidden(*index))
+            .filter(|(index, stored)| {
+                !stored.local && stored.fired_loop.is_none() && !self.is_hidden(*index)
+            })
             .filter_map(|(index, stored)| {
                 let HistoryEntry::Message(message) = &stored.typed else {
                     return None;
                 };
-                (message.role == "user").then(|| (index, stored.id.clone(), message_text(message)))
+                (message.role == "user").then(|| {
+                    let text = crate::collapsed_pastes::collapse_marked(
+                        &message_text(message),
+                        message.user_display_content.as_ref(),
+                    );
+                    (index, stored.id.clone(), text)
+                })
             })
             .collect()
     }
@@ -169,6 +200,7 @@ impl Transcript {
         self.next_rev += 1;
         self.live_tail_open = false;
         self.last_event_id = state.event_id;
+        self.history_before_cursor = HistoryCursor::of(state);
         if let Some(history) = &state.history {
             for entry in history {
                 self.insert(entry.clone(), true);
@@ -192,9 +224,14 @@ impl Transcript {
         let history = match state.history.as_ref() {
             // Python keeps the loaded history when the snapshot carries none.
             None => previous,
-            Some(current) => {
-                merge_snapshot_suffix(&previous, current).unwrap_or_else(|| current.clone())
-            }
+            Some(current) => match merge_snapshot_suffix(&previous, current) {
+                // The retained prefix keeps the cursor that paged it in.
+                Some(merged) => merged,
+                None => {
+                    self.history_before_cursor = HistoryCursor::of(state);
+                    current.clone()
+                }
+            },
         };
         self.entries.clear();
         self.indices.clear();
@@ -266,11 +303,25 @@ impl Transcript {
                     .unwrap_or(false),
             )
         });
+        if let HistoryEntry::Message(message) = &typed {
+            if message.role == "user" {
+                let shown = crate::image_placeholders::highest_number(&message_text(message));
+                self.highest_image_label = self.highest_image_label.max(shown);
+            }
+        }
         let mut groups = groups_with_tools(&typed);
-        let attached_output = self
+        let (attached_output, fired_loop) = self
             .indices
             .get(&id)
-            .and_then(|&index| self.entries[index].attached_output.clone());
+            .map(|&index| {
+                let existing = &self.entries[index];
+                (
+                    existing.attached_output.clone(),
+                    existing.fired_loop.clone(),
+                )
+            })
+            .unwrap_or_default();
+        let fired_loop = scheduled_loop::from_display(&raw).or(fired_loop);
         let stored = StoredEntry {
             id: id.clone(),
             typed,
@@ -293,6 +344,7 @@ impl Transcript {
                 .unwrap_or(false),
             stream_delta: None,
             attached_output,
+            fired_loop,
             raw,
             rev: self.next_rev,
         };
@@ -331,6 +383,13 @@ impl Transcript {
                 self.entries[previous].attached_output = Some(notification.output);
                 self.hidden.insert(id.clone());
                 groups = true;
+            }
+        }
+        if let Some(fired) = scheduled_loop::fired(&stored.typed) {
+            if let Some(user) = scheduled_loop::prompt_index(&self.entries[..at], &stored.raw) {
+                self.next_rev += 1;
+                self.entries[user].rev = self.next_rev;
+                self.entries[user].fired_loop = Some(fired);
             }
         }
         self.entries.insert(at, stored);
@@ -479,10 +538,11 @@ impl Transcript {
     }
 
     /// Shown entries in order, minus hidden hook notices and hidden reasoning.
-    fn rendered(&self) -> impl Iterator<Item = TranscriptEntry<'_>> + '_ {
+    pub fn lines_from(&self, start: usize) -> impl Iterator<Item = TranscriptEntry<'_>> + '_ {
         self.entries
             .iter()
             .enumerate()
+            .skip(start)
             .filter(|(index, _)| !self.is_hidden(*index))
             .map(|(index, stored)| self.borrow(index, stored))
     }
@@ -492,7 +552,7 @@ impl Transcript {
         if is_hidden_hook_notice(&stored.typed, &self.entries[..index]) {
             return true;
         }
-        if self.hidden.contains(&stored.id) {
+        if self.hidden.contains(&stored.id) || scheduled_loop::is_fired(&stored.typed) {
             return true;
         }
         !self.show_reasoning && matches!(stored.typed, HistoryEntry::Reasoning(_))
@@ -512,6 +572,7 @@ impl Transcript {
             after_history: stored.after_history,
             stream_delta: stored.stream_delta.as_deref(),
             attached_output: stored.attached_output.as_deref(),
+            fired_loop: stored.fired_loop.as_ref(),
             entry: &stored.typed,
         }
     }
@@ -527,9 +588,14 @@ impl Transcript {
             .is_some_and(|(_, previous)| previous.pending)
     }
 
-    /// Hidden rows stay in `entries` but must not open a new tool group.
+    /// Hidden and widget-less rows stay in `entries` but must not open a new
+    /// tool group: consecutive call blocks with nothing painted between them
+    /// fold into one (VIBE-4587).
     fn splits_tool_group(&self, index: usize) -> bool {
-        !self.is_hidden(index) && !groups_with_tools(&self.entries[index].typed)
+        let stored = &self.entries[index];
+        !self.is_hidden(index)
+            && !groups_with_tools(&stored.typed)
+            && !grouping::renders_nothing(&stored.typed, stored.local)
     }
 
     /// Describe the visible portion of the consecutive effect/reasoning group.
@@ -550,7 +616,11 @@ impl Transcript {
         let visible = self.entries[start..end]
             .iter()
             .enumerate()
-            .filter(|(offset, _)| !self.is_hidden(start + offset))
+            .filter(|(offset, _)| {
+                let stored = &self.entries[start + offset];
+                !self.is_hidden(start + offset)
+                    && !grouping::renders_nothing(&stored.typed, stored.local)
+            })
             .map(|(offset, entry)| (start + offset, entry))
             .collect::<Vec<_>>();
         let (first_index, first_entry) = visible.first()?;
@@ -585,7 +655,20 @@ impl Transcript {
 
     /// Borrow renderable entries in order without rebuilding their typed values.
     pub fn lines(&self) -> impl Iterator<Item = TranscriptEntry<'_>> + '_ {
-        self.rendered()
+        self.lines_from(0)
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Prepare 25 older entries, keeping a tool group together at the boundary.
+    pub fn history_batch_start(&self, end: usize) -> usize {
+        let mut start = end.min(self.entries.len()).saturating_sub(25);
+        while start > 0 && !self.splits_tool_group(start) && !self.splits_tool_group(start - 1) {
+            start -= 1;
+        }
+        start
     }
 
     /// Monotonic content revision used to invalidate ordered render layouts.
@@ -636,6 +719,13 @@ impl Transcript {
     /// Whether an entry with this id is currently in the transcript.
     pub fn contains(&self, id: &str) -> bool {
         self.indices.contains_key(id)
+    }
+
+    /// Whether the entry `id` is a prompt shown under the `» Queued` header.
+    pub fn is_pending(&self, id: &str) -> bool {
+        self.indices
+            .get(id)
+            .is_some_and(|&index| self.entries[index].pending)
     }
 
     /// Whether the entry `id` toggles on click: a tool row or a reasoning trace.

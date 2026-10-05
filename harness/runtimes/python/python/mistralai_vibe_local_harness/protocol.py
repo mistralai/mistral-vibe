@@ -26,8 +26,6 @@ type RustHookPoint = Literal[
     "post_tool_call",
 ]
 
-_RESERVED_DIRECT_TOOL_NAMES = {"search_tool_functions", "run_typescript", "skill"}
-
 RustRuntimeBuiltinToolName = Literal[
     "self.sleep",
     "file_system.read_file",
@@ -68,15 +66,6 @@ RUNTIME_BUILTIN_TOOL_NAMES: tuple[RustRuntimeBuiltinToolName, ...] = (
     "subagent.stop",
 )
 
-RUNTIME_BUILTIN_TOOL_NAMESPACES: frozenset[str] = frozenset(
-    name.split(".", 1)[0] for name in RUNTIME_BUILTIN_TOOL_NAMES
-)
-
-# A provided call is gated as ``group.tool``, the shape a builtin is named by, and the
-# permission resolver reads that one string: a ``skill`` group holding a ``read`` tool
-# would be resolved against the rules for ``skill.read``.
-_RESERVED_TOOL_GROUP_NAMES: frozenset[str] = RUNTIME_BUILTIN_TOOL_NAMESPACES | {"agent"}
-
 
 class RustProtocolModel(BaseModel):
     model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
@@ -107,8 +96,6 @@ class RustToolGroupDefinition(RustProtocolModel):
     def validate_name(cls, value: str) -> str:
         if not _is_programmatic_identifier(value):
             raise ValueError("tool group name must be a valid TypeScript identifier")
-        if value in _RESERVED_TOOL_GROUP_NAMES:
-            raise ValueError("tool group name is reserved")
         return value
 
     @model_validator(mode="after")
@@ -382,12 +369,6 @@ class RustHarnessConfig(RustProtocolModel):
             if tool.exposure in {"direct", "direct_and_programmatic"}
         ]
         _reject_duplicates("direct tool name", direct_names)
-        reserved_direct_names = sorted(set(direct_names) & _RESERVED_DIRECT_TOOL_NAMES)
-        if reserved_direct_names:
-            raise ValueError(
-                "direct tool names conflict with built-in tools: "
-                + ", ".join(repr(name) for name in reserved_direct_names)
-            )
         _reject_duplicates("skill name", [skill.name for skill in skills])
         _reject_duplicates("skill path", [skill.path for skill in skills])
         return self

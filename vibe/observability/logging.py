@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import TextIOWrapper
@@ -13,6 +14,12 @@ from typing import Any
 from vibe.config_values import DEFAULT_LOG_LEVEL
 
 logger = logging.getLogger("vibe")
+
+# Asyncio tasks and to_thread workers inherit it, so every record a multiplexed channel
+# emits names the channel without threading an argument through the harness.
+app_server_channel: ContextVar[str | None] = ContextVar(
+    "app_server_channel", default=None
+)
 
 # The experimental Unified Harness Runtime logs under its own top-level logger, which
 # propagates to the root rather than to "vibe". Route it to the same file handler so
@@ -45,6 +52,8 @@ class StructuredLogFormatter(logging.Formatter):
         pid = os.getpid()
         level = record.levelname
         message = encode_log_message(record.getMessage())
+        if (channel := app_server_channel.get()) is not None:
+            message = f"channel={channel} {message}"
 
         line = f"{timestamp} {ppid} {pid} {level} {message}"
         if record.exc_info:
@@ -54,13 +63,8 @@ class StructuredLogFormatter(logging.Formatter):
 
 
 class OwnerOnlyRotatingFileHandler(RotatingFileHandler):
-    """A rotating handler whose files are always created owner-only.
-
-    Rotation reopens the file with umask-derived modes, so every open
-    re-asserts the creation mode; an existing file keeps its current mode.
-    """
-
     def _open(self) -> TextIOWrapper[Any]:
+        # Rotation reopens with umask-derived modes; an existing file keeps its own.
         try:
             os.close(
                 os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -72,13 +76,6 @@ class OwnerOnlyRotatingFileHandler(RotatingFileHandler):
 
 class _VibeFileHandler(OwnerOnlyRotatingFileHandler):
     pass
-
-
-# The Unified Harness runtime logs under this top-level logger. It is not a child
-# of the "vibe" logger, so it propagates to the root logger -- which carries no Vibe
-# file handler -- and its diagnostics never reach vibe.log. Capture it alongside
-# Vibe's own logger so `--experimental-harness` sessions are observable.
-_HARNESS_LOGGER_NAME = "mistralai_vibe_local_harness"
 
 
 def init_file_logging(

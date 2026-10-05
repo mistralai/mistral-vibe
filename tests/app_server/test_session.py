@@ -1250,7 +1250,7 @@ async def test_fork_uses_latest_compaction_boundary_in_copied_prefix(
 
 @pytest.mark.asyncio
 async def test_detached_fork_transfers_live_runtime_without_session_logging() -> None:
-    process = HarnessProcess()
+    process = HarnessProcess(legacy_harness=True)
     source_loop = build_test_agent_loop()
 
     async def open_source(_request: RootOpenRequest) -> AgentLoop:
@@ -1302,7 +1302,7 @@ async def test_detached_fork_transfers_live_runtime_without_session_logging() ->
 
 @pytest.mark.asyncio
 async def test_harness_process_closes_unclaimed_fork_runtime() -> None:
-    process = HarnessProcess()
+    process = HarnessProcess(legacy_harness=True)
     staged = build_test_agent_loop()
     close = AsyncMock(wraps=staged.aclose)
     staged.aclose = close
@@ -1317,7 +1317,7 @@ async def test_harness_process_closes_unclaimed_fork_runtime() -> None:
 async def test_detached_fork_reserves_source_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    process = HarnessProcess()
+    process = HarnessProcess(legacy_harness=True)
     source_loop = build_test_agent_loop()
     entered = asyncio.Event()
     release = asyncio.Event()

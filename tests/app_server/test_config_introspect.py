@@ -14,6 +14,7 @@ from vibe.app_server._config_introspect import (
     collect_layer_values,
 )
 from vibe.app_server.protocol import ConfigFieldKind, ConfigLayerValueWire
+from vibe.core.config.layers.default import DefaultConfigLayer
 from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.layers.user import UserConfigLayer
@@ -63,7 +64,11 @@ def test_build_field_wires_covers_schema_and_defaults(
     config = make_config()
     by_name = {wire.name: wire for wire in build_field_wires(config, {})}
 
-    assert by_name.keys() == set(type(config).model_fields) - HIDDEN_SETTINGS
+    # ``max_context_length`` is per-model only, so it arrives as a synthetic
+    # row on top of the schema's own fields.
+    assert by_name.keys() == (
+        set(type(config).model_fields) - HIDDEN_SETTINGS | {"max_context_length"}
+    )
     assert not HIDDEN_SETTINGS & by_name.keys()
     assert by_name["autocopy_to_clipboard"].kind is ConfigFieldKind.BOOL
     assert by_name["show_subagent_status_list"].kind is ConfigFieldKind.BOOL
@@ -141,6 +146,11 @@ def test_build_field_wires_keeps_admin_lock_for_global_compaction_threshold(
     assert threshold.value == 50_000
     assert threshold.path == "/auto_compact_threshold"
     assert threshold.origin == "admin"
+    # The unset sentinel is not a value a layer set; it must never surface as
+    # the row's default origin.
+    assert [(entry.layer, entry.value) for entry in threshold.layer_values] == [
+        ("admin", 50_000)
+    ]
 
 
 @pytest.mark.asyncio
@@ -158,6 +168,18 @@ async def test_collect_layer_values_groups_fields_by_priority(tmp_path) -> None:
     assert [(entry.layer, entry.value) for entry in values["api_timeout"]] == [
         ("overrides", 1.0)
     ]
+
+
+@pytest.mark.asyncio
+async def test_collect_layer_values_hides_the_unset_threshold_sentinel() -> None:
+    # The default layer materializes the sentinel for every threshold; it
+    # means "no layer set one" and must never surface as provenance.
+    defaults = DefaultConfigLayer(schema=VibeConfigSchema)
+
+    values = await collect_layer_values([defaults])
+
+    assert "auto_compact_threshold" not in values
+    assert not [path for path in values if path.endswith("/auto_compact_threshold")]
 
 
 @pytest.mark.asyncio
@@ -193,3 +215,79 @@ async def test_build_field_wires_projects_growthbook_routed_model_threshold(
     assert threshold.value == 168_000
     assert threshold.path == "/models/routed/auto_compact_threshold"
     assert threshold.origin == "growthbook"
+
+
+def test_build_field_wires_surfaces_the_active_model_window(
+    make_config: Callable[..., VibeConfigSchema],
+) -> None:
+    config = make_config(
+        active_model="custom",
+        models=[
+            ModelConfig(
+                name="custom",
+                provider="mistral",
+                alias="custom",
+                max_context_length=262_144,
+            )
+        ],
+    )
+    wires = build_field_wires(
+        config,
+        {
+            "/models/custom/max_context_length": [
+                ConfigLayerValueWire(layer="user-toml", value=262_144)
+            ]
+        },
+    )
+
+    window = next(wire for wire in wires if wire.name == "max_context_length")
+    assert window.value == 262_144
+    assert window.path == "/models/custom/max_context_length"
+    assert window.origin == "user-toml"
+    assert window.kind is ConfigFieldKind.INT
+
+
+def test_build_field_wires_shows_an_unset_window_as_default(
+    make_config: Callable[..., VibeConfigSchema],
+) -> None:
+    config = make_config(
+        active_model="custom",
+        models=[ModelConfig(name="custom", provider="mistral", alias="custom")],
+    )
+
+    window = next(
+        wire
+        for wire in build_field_wires(config, {})
+        if wire.name == "max_context_length"
+    )
+
+    assert window.value is None
+    assert window.origin == DEFAULT_ORIGIN
+    assert window.path == "/models/custom/max_context_length"
+
+
+def test_build_field_wires_shows_the_derived_threshold_on_the_global_row(
+    make_config: Callable[..., VibeConfigSchema],
+) -> None:
+    # Nothing is set anywhere, so the row must display the derived value,
+    # never the raw unset sentinel the merged config carries.
+    config = make_config(
+        active_model="custom",
+        models=[
+            ModelConfig(
+                name="custom",
+                provider="mistral",
+                alias="custom",
+                max_context_length=262_144,
+            )
+        ],
+    )
+
+    threshold = next(
+        wire
+        for wire in build_field_wires(config, {})
+        if wire.name == "auto_compact_threshold"
+    )
+
+    assert threshold.value == 209_715
+    assert threshold.origin == DEFAULT_ORIGIN

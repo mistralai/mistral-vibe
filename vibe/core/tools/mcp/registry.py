@@ -35,6 +35,7 @@ from vibe.core.tools.mcp.tools import (
 )
 from vibe.core.tools.remote import AuthStatus, RemoteTool
 from vibe.core.utils import run_sync
+from vibe.core.utils.exceptions import leaf_exceptions
 from vibe.observability.logging import logger
 
 
@@ -101,14 +102,9 @@ class MCPRegistry:
 
     @staticmethod
     def _format_mcp_error(exc: BaseException) -> str:
-        if isinstance(exc, BaseExceptionGroup):
-            messages = [
-                formatted
-                for child in exc.exceptions
-                if (formatted := MCPRegistry._format_mcp_error(child))
-            ]
-            return "; ".join(messages)
-        return str(exc)
+        return "; ".join(
+            message for leaf in leaf_exceptions(exc) if (message := str(leaf))
+        )
 
     @staticmethod
     def _format_failed(exc: BaseException) -> str:

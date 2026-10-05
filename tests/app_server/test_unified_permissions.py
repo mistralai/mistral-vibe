@@ -62,6 +62,11 @@ def _resolver(
     return resolver, orchestrator
 
 
+# The ids the harness mints: ``process-<hex>-<hex>`` over session and call ids.
+_STARTED_PROCESS = f"process-{'a' * 12}-{'1' * 24}"
+_OTHER_PROCESS = f"process-{'a' * 12}-{'2' * 24}"
+
+
 def _granted(outcome: Any) -> tuple[RequiredPermission, ...]:
     """The permissions as the callback round trip delivers them back: wire JSON."""
     return tuple(
@@ -430,6 +435,79 @@ async def test_an_always_configured_write_still_asks_for_a_sensitive_file(
     assert [permission["scope"] for permission in sensitive.required_permissions] == [
         PermissionScope.FILE_PATTERN.value
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_never_configured_write_runs_only_where_its_allowlist_says(
+    tmp_path: Path,
+) -> None:
+    """What ``_rust_tool_modes`` lifts this builtin to ``ask`` for, and what makes
+    the lift safe: the mode says ``ask``, but the answer is still the configured
+    refusal everywhere the list does not reach. ``.env`` is the case that would
+    otherwise leak -- its rule returns ``ask``, and honouring that under a
+    ``never`` would turn a refusal into a prompt.
+    """
+    resolver, _ = _resolver(
+        tmp_path,
+        write_file={
+            "permission": "never",
+            "allowlist": [str(tmp_path / "plans" / "*")],
+        },
+    )
+
+    allowlisted = await resolver.resolve(
+        "file_system.write_file",
+        {"path": str(tmp_path / "plans" / "plan.md"), "content": "x"},
+    )
+    elsewhere = await resolver.resolve(
+        "file_system.write_file", {"path": str(tmp_path / "src.py"), "content": "x"}
+    )
+    sensitive = await resolver.resolve(
+        "file_system.write_file", {"path": str(tmp_path / ".env"), "content": "K=1"}
+    )
+
+    assert allowlisted.decision == "allow"
+    assert elsewhere.decision == "deny"
+    assert sensitive.decision == "deny"
+
+
+@pytest.mark.asyncio
+async def test_a_never_configured_write_denies_a_path_the_rules_cannot_read(
+    tmp_path: Path,
+) -> None:
+    """The path rules raise on a path the OS cannot stat, and the Harness answers a
+    resolver that raised with a prompt -- so the model could put a ``never`` tool in
+    front of the user by naming a path that crashes the check.
+    """
+    resolver, _ = _resolver(
+        tmp_path,
+        write_file={
+            "permission": "never",
+            "allowlist": [str(tmp_path / "plans" / "*")],
+        },
+    )
+
+    outcome = await resolver.resolve(
+        "file_system.write_file", {"path": f"{tmp_path}/a\x00b", "content": "x"}
+    )
+
+    assert outcome.decision == "deny"
+
+
+@pytest.mark.asyncio
+async def test_an_always_configured_write_still_raises_a_path_the_rules_cannot_read(
+    tmp_path: Path,
+) -> None:
+    """Only a ``never`` is decided here. Swallowing the failure for an ``always``
+    tool would auto-allow the very call whose ``.env`` and denylist checks did not
+    run; the Harness's own fallback prompts instead.
+    """
+    resolver, _ = _resolver(tmp_path, write_file={"permission": "always"})
+
+    with pytest.raises(ValueError, match="null"):
+        await resolver.resolve(
+            "file_system.write_file", {"path": f"{tmp_path}/a\x00b", "content": "x"}
+        )
 
 
 @pytest.mark.asyncio
@@ -853,6 +931,345 @@ async def test_the_unified_todo_tool_obeys_the_permission_configured_for_todo(
     # Do / Assert
     assert (await denied.resolve(route, {"action": "read"})).decision == "deny"
     assert (await allowed.resolve(route, {"action": "read"})).decision == "allow"
+
+
+@pytest.mark.asyncio
+async def test_a_background_start_asks_scoped_to_the_command_it_would_run(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resolver over the default tool catalogue.
+    *Do*: Resolve a ``process.start`` the user has not approved.
+    *Assert*: It asks, scoped to the command the start would run. The start runs
+    ``[shell, "-lc", command]``, so it is the shell's own question, and the
+    command is what a grant gets recorded against.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path)
+
+    # Do
+    outcome = await resolver.resolve("process.start", {"command": "npm test"})
+
+    # Assert
+    assert outcome.decision == "ask"
+    assert [
+        permission["sessionPattern"] for permission in outcome.required_permissions
+    ] == ["npm test *"]
+
+
+@pytest.mark.asyncio
+async def test_a_start_with_env_or_a_working_directory_never_auto_allows(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resolver whose ``bash`` allowlist already covers a command.
+    *Do*: Resolve ``process.start`` for it -- once plain, once carrying env,
+    once carrying a working directory.
+    *Assert*: The plain start runs off the allowlist; the other two ask with no
+    permissions attached. Env and cwd reach the tool unseen by any command
+    rule, so an allowlist entry scoped to the command cannot speak for them --
+    and the ask being permissionless means ``grant`` records nothing, so no
+    answer widens past the call it was given.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path, bash={"allowlist": ["npm test"]})
+
+    # Do
+    plain = await resolver.resolve("process.start", {"command": "npm test"})
+    with_env = await resolver.resolve(
+        "process.start", {"command": "npm test", "env": {"LD_PRELOAD": "/tmp/x.so"}}
+    )
+    with_cwd = await resolver.resolve(
+        "process.start", {"command": "npm test", "cwd": str(tmp_path / "elsewhere")}
+    )
+
+    # Assert
+    assert plain.decision == "allow"
+    assert with_env.decision == "ask"
+    assert with_env.required_permissions == ()
+    assert with_cwd.decision == "ask"
+    assert with_cwd.required_permissions == ()
+
+
+@pytest.mark.asyncio
+async def test_a_start_from_the_tools_own_working_directory_stays_plain(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resolver whose ``bash`` allowlist already covers a command.
+    *Do*: Resolve a ``process.start`` for it carrying a cwd equal to the tool's
+    own working directory, then one carrying a different cwd.
+    *Assert*: The tool's own cwd is where the tool already runs, so that start
+    is the plain one and the allowlist answers for it; a cwd elsewhere is
+    hidden from every command rule, so it asks with no permissions attached.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path, bash={"allowlist": ["npm test"]})
+
+    # Do
+    own_cwd = await resolver.resolve(
+        "process.start", {"command": "npm test", "cwd": str(tmp_path)}
+    )
+    elsewhere = await resolver.resolve(
+        "process.start", {"command": "npm test", "cwd": str(tmp_path / "elsewhere")}
+    )
+
+    # Assert
+    assert own_cwd.decision == "allow"
+    assert elsewhere.decision == "ask"
+    assert elsewhere.required_permissions == ()
+
+
+@pytest.mark.asyncio
+async def test_a_denylisted_command_still_denies_a_start_with_env(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resolver whose config denylists a command pattern.
+    *Do*: Resolve a ``process.start`` running it with env attached.
+    *Assert*: It is refused. The env makes the call unscopeable, not unjudgeable:
+    the command is still the command, and a denylist the user cannot click past
+    is the point of a denylist.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path, bash={"denylist": ["rm -rf /"]})
+
+    # Do
+    outcome = await resolver.resolve(
+        "process.start", {"command": "rm -rf /", "env": {"A": "1"}}
+    )
+
+    # Assert
+    assert outcome.decision == "deny"
+    assert outcome.reason is not None
+    assert "denylist" in outcome.reason
+
+
+@pytest.mark.asyncio
+async def test_a_command_grant_does_not_cover_a_start_with_env(tmp_path: Path) -> None:
+    """*Prepare*: A resolver with a session grant for one plain background start.
+    *Do*: Resolve the same command again carrying env.
+    *Assert*: It still asks. The grant was recorded against the command alone;
+    letting it clear a call that also picks the process's environment would
+    approve a start the user never described.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path)
+    outcome = await resolver.resolve("process.start", {"command": "npm test"})
+    await resolver.grant("process.start", _granted(outcome), permanent=False)
+
+    # Do
+    again = await resolver.resolve("process.start", {"command": "npm test"})
+    with_env = await resolver.resolve(
+        "process.start", {"command": "npm test", "env": {"FOO": "1"}}
+    )
+
+    # Assert
+    assert again.decision == "allow"
+    assert with_env.decision == "ask"
+    assert with_env.required_permissions == ()
+
+
+@pytest.mark.asyncio
+async def test_a_denylisted_command_is_refused_as_a_background_start(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resolver whose config denylists a command pattern.
+    *Do*: Resolve a ``process.start`` running it.
+    *Assert*: The resolver refuses. A background start executes the command with
+    the shell, so the shell's denylist has to reach it -- the prompt this used to
+    bypass was the whole hole.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path, bash={"denylist": ["rm -rf /"]})
+
+    # Do
+    outcome = await resolver.resolve("process.start", {"command": "rm -rf /"})
+
+    # Assert
+    assert outcome.decision == "deny"
+    assert outcome.reason is not None
+    assert "denylist" in outcome.reason
+
+
+@pytest.mark.asyncio
+async def test_a_session_grant_for_a_background_start_covers_only_its_command(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resolver that has just been told one start is approved.
+    *Do*: Resolve the same command again, then a destructive one.
+    *Assert*: The repeat runs and the other still asks. A start never granted
+    more than its command on the legacy path; the unified path must not either.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path)
+    outcome = await resolver.resolve("process.start", {"command": "npm test"})
+    await resolver.grant("process.start", _granted(outcome), permanent=False)
+
+    # Do
+    again = await resolver.resolve("process.start", {"command": "npm test --watch"})
+    other = await resolver.resolve("process.start", {"command": "rm -rf /tmp/x"})
+
+    # Assert
+    assert again.decision == "allow"
+    assert other.decision == "ask"
+    assert other.required_permissions
+
+
+@pytest.mark.asyncio
+async def test_a_permanent_grant_for_a_background_start_lands_in_the_bash_allowlist(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resolver, and a ``process.start`` that asks with a command pattern.
+    *Do*: Grant it permanently.
+    *Assert*: The pattern lands in the shell's allowlist, so the next session
+    starts the same command without a prompt. A start is a shell call, so the
+    shell's allowlist is the honest place to remember it.
+    """
+    # Prepare
+    resolver, orchestrator = _resolver(tmp_path)
+    outcome = await resolver.resolve("process.start", {"command": "npm test"})
+
+    # Do
+    await resolver.grant("process.start", _granted(outcome), permanent=True)
+
+    # Assert
+    assert "npm test" in orchestrator.config.tools["bash"]["allowlist"]
+    again = await resolver.resolve("process.start", {"command": "npm test"})
+    assert again.decision == "allow"
+
+
+@pytest.mark.asyncio
+async def test_a_process_read_clears_without_a_prompt(tmp_path: Path) -> None:
+    """*Prepare*: A resolver, and a process this session already started under the
+    ``process.start`` gate.
+    *Do*: Resolve ``process.output`` and ``process.list`` calls for it.
+    *Assert*: Both run. Reading back a process the start gate let run adds no
+    authority the call did not already have, and the reads carry nothing a
+    prompt could scope a grant to.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path)
+
+    # Do
+    output = await resolver.resolve("process.output", {"processId": "abc", "waitMs": 0})
+    listing = await resolver.resolve("process.list", {})
+
+    # Assert
+    assert output.decision == "allow"
+    assert listing.decision == "allow"
+
+
+@pytest.mark.asyncio
+async def test_a_process_stop_clears_without_a_prompt(tmp_path: Path) -> None:
+    """*Prepare*: A resolver, and a process this session already started under the
+    ``process.start`` gate.
+    *Do*: Resolve a ``process.stop`` call for it.
+    *Assert*: It runs. A stop only revokes a process the start gate already let
+    run -- it cannot expand what the session was allowed to do, and gating it
+    could strand a runaway process behind a prompt no human is watching.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path)
+
+    # Do
+    stopped = await resolver.resolve("process.stop", {"processId": _STARTED_PROCESS})
+
+    # Assert
+    assert stopped.decision == "allow"
+
+
+@pytest.mark.asyncio
+async def test_a_process_write_asks_scoped_to_the_process_id(tmp_path: Path) -> None:
+    """*Prepare*: A resolver, and a live process this session started.
+    *Do*: Resolve a ``process.write`` to it, approve the ask, then resolve the
+    same write and one to another process.
+    *Assert*: The ask names the process id, the repeat runs, and the other still
+    asks. A write mutates a live process, and the id is the only thing narrower
+    than "every process" to scope a grant to.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path)
+
+    # Do
+    outcome = await resolver.resolve(
+        "process.write", {"processId": _STARTED_PROCESS, "text": "hello\n"}
+    )
+    await resolver.grant("process.write", _granted(outcome), permanent=False)
+    again = await resolver.resolve(
+        "process.write", {"processId": _STARTED_PROCESS, "text": "world\n"}
+    )
+    other = await resolver.resolve(
+        "process.write", {"processId": _OTHER_PROCESS, "text": "hello\n"}
+    )
+
+    # Assert
+    assert outcome.decision == "ask"
+    assert [
+        permission["sessionPattern"] for permission in outcome.required_permissions
+    ] == [_STARTED_PROCESS]
+    assert again.decision == "allow"
+    assert other.decision == "ask"
+    assert other.required_permissions
+
+
+@pytest.mark.asyncio
+async def test_a_permanent_grant_for_a_process_write_stays_in_the_session(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resolver, and a ``process.write`` approved "for good".
+    *Do*: Read back what reached the config, then resolve the same write again.
+    *Assert*: Nothing was persisted, and the session still covers the call. A
+    grant scoped to a process id names an object that dies with the session, and
+    the config layer has no place to record one -- the next session's ids are
+    new, so remembering this one there would be junk that matches nothing.
+    """
+    # Prepare
+    resolver, orchestrator = _resolver(tmp_path)
+    outcome = await resolver.resolve(
+        "process.write", {"processId": _STARTED_PROCESS, "text": "hello\n"}
+    )
+    assert outcome.decision == "ask"
+
+    # Do
+    await resolver.grant("process.write", _granted(outcome), permanent=True)
+
+    # Assert
+    bash_config = orchestrator.config.tools.get("bash", {})
+    assert "permission" not in bash_config
+    assert _STARTED_PROCESS not in bash_config.get("allowlist", [])
+    again = await resolver.resolve(
+        "process.write", {"processId": _STARTED_PROCESS, "text": "hello\n"}
+    )
+    assert again.decision == "allow"
+
+
+@pytest.mark.asyncio
+async def test_a_write_to_a_wildcard_process_id_grants_nothing(tmp_path: Path) -> None:
+    """*Prepare*: A resolver, and a ``process.write`` whose process id is ``*``.
+    *Do*: Resolve it, approve the ask for the session, then resolve a plain
+    shell command and the same write again.
+    *Assert*: The ask carries no permissions, and approving it records nothing
+    that any later call matches. A grant is scoped by the process id, and the
+    id reaches the resolver as model-supplied text: recording ``*`` as a
+    command pattern on the shell would let one approval cover every command,
+    so an id the harness would never mint has nothing to scope a grant to.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path)
+
+    # Do
+    outcome = await resolver.resolve(
+        "process.write", {"processId": "*", "text": "hello\n"}
+    )
+    assert outcome.decision == "ask"
+    assert outcome.required_permissions == ()
+    await resolver.grant("process.write", _granted(outcome), permanent=False)
+    bash = await resolver.resolve("file_system.bash", {"command": "npm test"})
+    again = await resolver.resolve(
+        "process.write", {"processId": "*", "text": "hello\n"}
+    )
+
+    # Assert
+    assert bash.decision == "ask"
+    assert bash.required_permissions
+    assert again.decision == "ask"
 
 
 def test_scope_names_survive_the_round_trip() -> None:

@@ -19,7 +19,7 @@ protocol and the Runtime completion adapter. It never imports ``vibe``/``vibe.co
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from enum import StrEnum, auto
 import hashlib
@@ -43,6 +43,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustUserMessage,
 )
 from mistralai_vibe_local_harness.session_protocol import JsonObject
+from mistralai_vibe_local_harness.vibe._completion import report_request_sent
 from mistralai_vibe_local_harness.vibe._credentials import (
     ProviderAuthRequired,
     ProviderCredentialSnapshot,
@@ -259,16 +260,29 @@ async def _classify_safely(
 # Model classifier
 # ---------------------------------------------------------------------------
 
-type CompletionFn = Callable[
-    [
-        list[RustMessage],
-        list[RustToolDefinition],
-        LocalRuntimeAdapterConfig,
-        ProviderCredentialSnapshot,
-        LocalModelRoute,
-    ],
-    Awaitable[RustCompletionResult],
-]
+
+class CompletionFn(Protocol):
+    """One completion adapter invocation, carrying the call's attribution.
+
+    The leading parameters are positional-only so any callable matching the
+    adapters' shape satisfies the protocol, whatever it names its arguments.
+    ``metadata`` is the Host's request metadata for the call, or ``None`` when
+    the Host provides no source. The generic adapters accept and drop it: their
+    provider APIs have no request-metadata channel, so a classify call on one
+    of them is attributed only through the Host's request-sent telemetry.
+    """
+
+    async def __call__(
+        self,
+        messages: list[RustMessage],
+        tools: list[RustToolDefinition],
+        config: LocalRuntimeAdapterConfig,
+        credential: ProviderCredentialSnapshot,
+        route: LocalModelRoute,
+        /,
+        *,
+        metadata: Mapping[str, str] | None = None,
+    ) -> RustCompletionResult: ...
 
 
 def _classifier_completion_config(
@@ -351,9 +365,22 @@ class ModelRiskClassifier:
                 f"classifier credential unavailable: {credential.reason}"
             )
         complete = self._complete or _completion_for_backend(run_config.backend)
+        # The classify completion is attributed and counted like any other: the
+        # Host's metadata source names it, and its request shape reaches the
+        # Host telemetry sink, so it is never lumped in with the session's own
+        # calls. Iteration is always 0: the classifier runs outside a turn's
+        # completion loop.
+        report_request_sent(
+            messages, run_config, route, purpose="classify", iteration=0
+        )
+        metadata = (
+            run_config.completion_metadata("classify", 0)
+            if run_config.completion_metadata is not None
+            else None
+        )
         start = time.perf_counter()
         completion = await asyncio.wait_for(
-            complete(messages, [], run_config, credential, route),
+            complete(messages, [], run_config, credential, route, metadata=metadata),
             timeout=self._timeout_s,
         )
         latency_ms = (time.perf_counter() - start) * 1000
@@ -541,7 +568,7 @@ Evaluate the REAL-WORLD IMPACT of the action, not just the surface text.
 ## Block rules — mark UNSAFE if the action:
 
 1. **Destroys or exfiltrates data**: force-pushing over history, mass-deleting files, sending internal data to external services, uploading files to public URLs, curl/wget with sensitive data to external endpoints.
-2. **Degrades security posture**: disabling logging, installing persistence (SSH keys, cronjobs), disabling firewalls or safety checks (--no-verify, --force), or writing any path that decides what this session will execute — the agent's own config (`.vibe/`), git hooks or `.git/config`, and shell startup files (`.bashrc`, `.zshrc`, `.profile`). These convert one approved call into arbitrary future execution, so they are **critical** regardless of how the user phrased the request.
+2. **Degrades security posture**: disabling logging, installing persistence (SSH keys, cronjobs), disabling firewalls or safety checks (--no-verify, --force), or writing any path that decides what this session will execute — the agent's own config (`.vibe/`), git hooks or `.git/config`, and shell startup files (`.bashrc`, `.zshrc`, `.profile`). Files inside a git worktree under `.vibe/worktrees/` are ordinary project files, not agent config; only a `.vibe/`, `.git/hooks` or `.git/config` inside that worktree counts. These convert one approved call into arbitrary future execution, so they are **critical** regardless of how the user phrased the request.
 3. **Crosses trust boundaries**: running code cloned from external repos, scanning credential stores (.env, ~/.ssh, browser profiles) for tokens, accessing services the user never mentioned, reading secret files without clear authorization.
 4. **Bypasses review or affects others**: pushing to main/master/release/* branches, force-pushing (`--force` or `--force-with-lease`) to any branch, running production deploys, modifying shared resources or jobs the agent didn't create, running migrations against shared databases.
 5. **Executes arbitrary code**: running interpreters (python -c, node -e, ruby -e), starting interactive shells (bash -i, sh -i), spawning processes that escape the agent's control, running scripts from untrusted sources.

@@ -1,7 +1,7 @@
 //! Prompt-queue requests and the ADR-0013 selection state machine.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use vibe_rs::app::{App, Status};
@@ -24,11 +24,26 @@ fn item(id: &str, text: &str, queue_item_id: Option<&str>) -> QueueItem {
         server_message_id: id.into(),
         text: text.into(),
         images: Vec::new(),
+        mentions: None,
         sent: queue_item_id.is_some(),
         ever_sent: queue_item_id.is_some(),
         revision: 0,
         replacing: false,
     }
+}
+
+fn mount(app: &mut App, id: &str, text: &str, pending: bool) {
+    app.view.transcript.add(&json!({
+        "entry": {
+            "id": id,
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+            "generationStatus": "completed",
+            "local": true,
+            "pending": pending
+        }
+    }));
 }
 
 #[tokio::test]
@@ -88,11 +103,13 @@ async fn flush_pending_sends_prompts_held_during_startup() {
 fn pop_last_removes_the_newest_prompt() {
     let mut app = generating_app();
     app.queue.items = vec![item("a", "first", None), item("b", "second", None)];
+    mount(&mut app, "a", "first", true);
+    mount(&mut app, "b", "second", true);
 
     assert!(mq::pop_last(&mut app, &Arc::new(Client::stub())));
     assert_eq!(app.queue.len(), 1);
     assert_eq!(app.queue.items[0].message_id, "a");
-    assert!(app.view.transcript.is_empty(), "b left the transcript");
+    assert!(!app.view.transcript.contains("b"), "b left the transcript");
 
     assert!(
         mq::pop_last(&mut app, &Arc::new(Client::stub())),
@@ -100,6 +117,122 @@ fn pop_last_removes_the_newest_prompt() {
     );
     assert!(!mq::pop_last(&mut app, &Arc::new(Client::stub())));
     assert!(app.queue.is_empty());
+}
+
+#[test]
+fn pop_last_leaves_a_first_prompt_shown_as_sent() {
+    // An idle session's first prompt shows as sent before its turn starts, so Ctrl+C skips it.
+    let mut app = generating_app();
+    app.queue.items = vec![item("a", "first", None)];
+    mount(&mut app, "a", "first", false);
+    app.queue.items[0].replacing = true;
+
+    assert!(!mq::has_removable(&app));
+    assert!(!mq::pop_last(&mut app, &Arc::new(Client::stub())));
+    assert_eq!(app.queue.len(), 1);
+}
+
+#[test]
+fn interrupting_an_unstarted_turn_waits_for_it_unless_its_prompt_is_rejected() {
+    let client = Arc::new(Client::stub());
+    let mut app = generating_app();
+    app.queue.items = vec![item("a", "first", None)];
+    mount(&mut app, "a", "first", false);
+
+    vibe_rs::commands::submission::interrupt_turn(&mut app, &client);
+    assert!(
+        mq::interrupt_pending(&app),
+        "no turn id yet: interrupt on start"
+    );
+    assert!(matches!(app.session.status, Status::Ready));
+
+    let rejected = mq::QueueEvent::Rejected {
+        message_id: "a".into(),
+        error: None,
+    };
+    mq::apply_event(&mut app, &client, rejected);
+    assert!(
+        !mq::interrupt_pending(&app),
+        "no turn will start for a rejected prompt"
+    );
+}
+
+#[test]
+fn a_rejected_interrupted_prompt_leaves_the_prompts_queued_after_it_alone() {
+    let client = Arc::new(Client::stub());
+    let mut app = generating_app();
+    app.queue.items = vec![item("a", "first", None), item("b", "second", Some("qb"))];
+    app.queue.interrupt_on_start = Some(Instant::now());
+
+    let rejected = mq::QueueEvent::Rejected {
+        message_id: "a".into(),
+        error: None,
+    };
+    mq::apply_event(&mut app, &client, rejected);
+
+    assert_eq!(app.queue.len(), 1);
+    assert!(
+        !mq::interrupt_pending(&app),
+        "b must not inherit a's interrupt"
+    );
+}
+
+#[test]
+fn an_unqueued_turn_like_retry_is_interrupted_once_it_starts_and_marked_once() {
+    let client = Arc::new(Client::stub());
+    let mut app = generating_app();
+    let submission = vibe_rs::commands::submission::interrupt_turn;
+
+    submission(&mut app, &client);
+    let marked = app.view.transcript.revision();
+    assert!(
+        mq::interrupt_pending(&app),
+        "retry turns have no queue item"
+    );
+
+    app.session.status = Status::Generating {
+        since: Instant::now(),
+    };
+    submission(&mut app, &client);
+    assert_eq!(app.view.transcript.revision(), marked, "no second marker");
+    assert!(matches!(app.session.status, Status::Ready));
+}
+
+#[test]
+fn a_pending_interrupt_stops_waiting_after_pythons_bound() {
+    let mut app = generating_app();
+    app.queue.interrupt_on_start = Instant::now().checked_sub(Duration::from_secs(31));
+    assert!(!mq::take_interrupt_on_start(&mut app), "stale interrupt");
+    assert!(app.queue.interrupt_on_start.is_none());
+
+    app.queue.interrupt_on_start = Some(Instant::now());
+    assert!(mq::take_interrupt_on_start(&mut app));
+    assert!(!mq::take_interrupt_on_start(&mut app), "taken once");
+}
+
+#[tokio::test]
+async fn a_prompt_never_merges_into_an_interrupted_turn() {
+    let client = Arc::new(Client::stub());
+    let mut app = generating_app();
+    app.queue.items = vec![item("a", "first", Some("qa"))];
+    mount(&mut app, "a", "first", false);
+    app.queue.interrupt_on_start = Some(Instant::now());
+
+    mq::enqueue_prompt(&mut app, &client, "second".into());
+
+    assert_eq!(app.queue.len(), 2);
+    assert_ne!(app.queue.items[1].server_message_id, "a");
+}
+
+#[test]
+fn pop_last_swallows_ctrl_c_while_a_queued_prompt_is_saving() {
+    let mut app = generating_app();
+    app.queue.items = vec![item("a", "first", None)];
+    mount(&mut app, "a", "first", true);
+    app.queue.items[0].replacing = true;
+
+    assert!(mq::pop_last(&mut app, &Arc::new(Client::stub())));
+    assert_eq!(app.queue.len(), 1);
 }
 
 #[test]
@@ -256,6 +389,39 @@ fn exit_after_editing_clears_the_input() {
     assert_eq!(app.queue.selected, None);
     assert!(app.chat_input.input.is_empty());
     assert!(app.overlays.notice.is_none(), "the edit hint is cleared");
+}
+
+#[tokio::test]
+async fn saving_an_edit_exits_selection_and_restores_the_draft() {
+    let mut app = generating_app();
+    let client = Arc::new(Client::stub());
+    app.chat_input.input = "draft text".into();
+    mq::enqueue_prompt(&mut app, &client, "second".into());
+    assert!(mq::enter(&mut app));
+    mq::edit_selected(&mut app);
+
+    mq::save_edit(&mut app, &client, "second edited".into());
+    assert_eq!(app.queue.selected, None);
+    assert!(!app.queue.editing);
+    assert_eq!(app.queue.items[0].text, "second edited");
+    assert_eq!(app.chat_input.input, "draft text");
+    assert!(app.overlays.notice.is_none(), "the edit hint is cleared");
+}
+
+#[test]
+fn finish_consumed_edit_exits_selection_mode() {
+    let mut app = generating_app();
+    app.queue.items = vec![item("a", "first", None), item("b", "second", None)];
+    app.chat_input.input = "draft text".into();
+    assert!(mq::enter(&mut app));
+    mq::edit_selected(&mut app);
+
+    mq::remove_selected(&mut app, &Arc::new(Client::stub()));
+    assert!(mq::confirm_consumed_edit(&mut app));
+    assert!(mq::finish_consumed_edit(&mut app));
+    assert_eq!(app.queue.selected, None);
+    assert!(!app.queue.editing);
+    assert_eq!(app.chat_input.input, "draft text");
 }
 
 #[test]

@@ -1,11 +1,10 @@
-"""Background session-title generation for the Unified Harness runtime."""
-
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
 from contextlib import suppress
 import dataclasses
+import json
 import logging
 import re
 
@@ -22,6 +21,7 @@ from mistralai_vibe_local_harness.session_protocol import JsonObject
 from mistralai_vibe_local_harness.vibe._completion import (
     _REJECTION_REASONS,
     _provider_status,
+    report_request_sent,
 )
 from mistralai_vibe_local_harness.vibe._credentials import (
     ProviderAuthRequired,
@@ -46,14 +46,17 @@ You write short, descriptive titles for coding-agent sessions. Given a transcrip
 
 Rules:
 - 3 to 8 words. No trailing period.
-- Name the task or topic, not the request. Describe what is being worked on, not that the user asked for it.
+- Name the overall task or feature the session is working on, not the most recent subtask or the last few turns.
+- Titles are often cut off at the end in the UI, so order by importance: pinpoint identifier first, then the topic, then the action last. "PR 4821: billing retries, architecture review". Without an identifier, lead with the action and topic: "Fix Stripe webhook retries". The action is the first thing to drop when space runs short; never drop the identifier or the topic. Not "User asked to review a PR" and not "Fix Acme app PR 4821 review".
+- Keep identifiers that pinpoint the subject (PR or issue numbers, ticket ids, package or file names), but drop repository names, URLs, and owner prefixes: "PR 4821", not "acme/app" or the link itself.
 - Base the title on what the conversation reveals the task to be, including facts the assistant uncovered (for example, the real subject of a linked issue or ticket). If the user's opening message is just a link or a terse reference, title what it turned out to be about, not the reference itself.
 - Ignore the assistant's process narration and preambles ("I'll explore…", "Let me…", "First, I'll…", "I'll start by…"); these describe activity, not the task.
+- The transcript interleaves tool calls and tool results ("tool(name): …", "tool result(name): …") with the conversation. Use the facts they uncovered — a fetched PR's subject, the file being changed — to name the topic, not the tool activity itself.
 - Prefer specific nouns from the code or domain over generic phrases. "Fix Stripe webhook retries" beats "Fix a bug".
 - Plain text only, in sentence case. No quotes, backticks, markdown, code fences, or emoji.
 - Always answer in English. If the transcript is in another language, translate the intent rather than transliterating.
 - Prefer the shortest title that still captures the topic.
-- If a `Current title:` is given, keep it unless the session's focus has clearly shifted, in which case refine it.
+- If a `Current title:` is given, it names the session's overall task: keep it unless the transcript shows the session is genuinely about something else. If it is missing the topic and the transcript reveals it (for example the subject of a linked PR or issue), sharpen it. Never rewrite it to describe recent activity or the latest subtask.
 - If the transcript is empty or describes no task, answer `New session`.
 
 Respond with ONLY the title, on one line, with no quotes or explanation.
@@ -67,19 +70,13 @@ _WRAPPING_QUOTES = "\"'`“”‘’"
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class TitlePolicy:
-    refresh_every_steps: int = 6
+    confirm_after_steps: int = 6
     capped_max_generations: int = 2
-    # How many model steps into the first turn the initial title fires (or at the
-    # first turn's completion, whichever comes first). Kept low so a long,
-    # tool-heavy single turn — which emits few assistant messages — still gets a
-    # title while it runs, not only when it ends or is interrupted. Title quality
-    # comes from the fast model and the prompt, not from waiting; the periodic
-    # refresh then sharpens it as the work proceeds. ``count_model_steps`` counts
-    # tool activity too, so "3 steps" is reached by real work, not just chatter.
     initial_max_steps: int = 3
     max_transcript_chars: int = 6000
     head_transcript_chars: int = 1500
     max_message_chars: int = 2000
+    max_tool_chars: int = 400
     request_timeout_seconds: float = 6.0
     retry_budget_seconds: float = 10.0
     total_timeout_seconds: float = 20.0
@@ -104,23 +101,31 @@ def build_title_transcript(
 ) -> str:
     blocks: list[str] = []
     for entry in entries:
-        if entry.get("type") != "message":
+        entry_type = entry.get("type")
+        if entry_type == "message":
+            block = _message_block(entry, policy=policy)
+        elif entry_type == "effect":
+            block = _tool_block(entry, policy=policy)
+        else:
             continue
-        role = entry.get("role")
-        if role not in {"user", "assistant"}:
-            continue
-        text = _entry_text(entry).strip()
-        if not text:
-            continue
-        if len(text) > policy.max_message_chars:
-            text = text[: policy.max_message_chars]
-        blocks.append(f"{role}: {text}")
+        if block:
+            blocks.append(block)
     transcript = "\n\n".join(blocks).strip()
     if len(transcript) <= policy.max_transcript_chars:
         return transcript
     head = transcript[: policy.head_transcript_chars].rstrip()
     tail = transcript[-policy.tail_transcript_chars :].lstrip()
     return f"{head}{_ELISION}{tail}"
+
+
+def _message_block(entry: JsonObject, *, policy: TitlePolicy) -> str | None:
+    role = entry.get("role")
+    if role not in {"user", "assistant"}:
+        return None
+    text = _entry_text(entry).strip()
+    if not text:
+        return None
+    return f"{role}: {text[: policy.max_message_chars]}"
 
 
 def clean_title(
@@ -150,24 +155,8 @@ def _cold_route(config: LocalRuntimeAdapterConfig) -> LocalModelRoute:
 def _title_completion_config(
     config: LocalRuntimeAdapterConfig, *, policy: TitlePolicy
 ) -> LocalRuntimeAdapterConfig:
-    """Config the title completion runs against: the session's, unless a title
-    provider route redirects it to another provider.
-
-    The completion adapters take a single ``LocalRuntimeAdapterConfig``, so a
-    cross-provider title (e.g. the fast Mistral model while the session runs on
-    Anthropic) is expressed by overlaying the provider destination fields and the
-    credential port. With no route set the title stays on the session provider.
-
-    The session's telemetry sinks are always dropped: a background title is not
-    the user's turn, so its provider correlation id and request metrics must not
-    be written into the session's holders (a later rating would otherwise join
-    the title call instead of the turn).
-    """
     overlaid = dataclasses.replace(
-        config,
-        max_tokens=policy.max_tokens,
-        correlation_id_sink=None,
-        request_sent_sink=None,
+        config, max_tokens=policy.max_tokens, correlation_id_sink=None
     )
     route = config.title_provider
     if route is None:
@@ -217,6 +206,12 @@ async def execute_title_completion(
             ]
         ),
     ]
+    report_request_sent(messages, config, route, purpose="title", iteration=0)
+    metadata = (
+        config.completion_metadata("title", 0)
+        if config.completion_metadata is not None
+        else None
+    )
     try:
         result: RustCompletionResult
         if title_config.backend == "mistral":
@@ -227,6 +222,7 @@ async def execute_title_completion(
                 credential=credential,
                 route=route,
                 stream=False,
+                metadata=metadata,
             )
         elif title_config.backend == "generic":
             result = await execute_generic_completion(
@@ -235,18 +231,11 @@ async def execute_title_completion(
                 config=title_config,
                 credential=credential,
                 route=route,
+                metadata=metadata,
             )
         else:
             raise ValueError(f"Unsupported completion backend: {title_config.backend}")
     except Exception as exc:
-        # Report a refused credential only when the title ran on its own
-        # credential port (a cross-provider route), so the same key is not
-        # re-sent on every subsequent title tick. A same-provider title shares
-        # the session's port, and a title-only refusal (e.g. the fast model
-        # forbidden on an otherwise valid key) must not mark the session
-        # credential rejected and break the next turn. The reject is itself
-        # guarded: a raising port must not turn a dropped title into a failure
-        # that escapes this background task.
         rejection = _REJECTION_REASONS.get(_provider_status(exc) or 0)
         if rejection is not None and config.title_provider is not None:
             with suppress(Exception):
@@ -285,27 +274,29 @@ async def generate_session_title(
 
 
 def count_model_steps(entries: Sequence[JsonValue]) -> int:
-    """Count model progress for the title cadence: assistant messages plus effects.
-
-    A single long turn can be almost entirely tool calls with only a handful of
-    assistant messages. Counting messages alone would leave such a turn's title
-    frozen until it ends. Effects (tool calls, background processes) are the
-    public projection's record of that work, so counting them too lets the
-    cadence advance — and the periodic refresh fire — while the turn runs.
-    """
-    return sum(
-        1
-        for entry in entries
-        if isinstance(entry, dict)
-        and (
-            (entry.get("type") == "message" and entry.get("role") == "assistant")
-            or entry.get("type") == "effect"
-        )
-    )
+    steps = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_type = entry.get("type")
+        if entry_type == "message":
+            if entry.get("role") == "assistant":
+                steps += 1
+            continue
+        if entry_type != "effect":
+            continue
+        if entry.get("generationStatus") != "completed":
+            continue
+        state = entry.get("state")
+        if not isinstance(state, dict):
+            continue
+        output = state.get("outputText")
+        if isinstance(output, str) and output.strip():
+            steps += 1
+    return steps
 
 
 def latest_compaction_id(entries: Sequence[JsonValue]) -> str | None:
-    """Id of the most recent completed compaction checkpoint, or None."""
     for entry in reversed(entries):
         if (
             isinstance(entry, dict)
@@ -319,29 +310,6 @@ def latest_compaction_id(entries: Sequence[JsonValue]) -> str | None:
 
 
 class TitleCadence:
-    """Decides when a background title (re)generation is due.
-
-    The driver ticks on every projected state update, so the cadence advances
-    mid-turn as work happens, not only at turn boundaries. The initial title is
-    due once ``initial_max_steps`` model steps accrue (a mix of assistant
-    messages and tool activity — see ``count_model_steps``) or the first turn
-    completes, whichever comes first, so a long single turn is titled while it
-    runs. Afterwards the periodic refresh sharpens it every
-    ``refresh_every_steps`` steps.
-
-    Afterwards the cadence splits on the title model's cost, signalled by
-    ``periodic``. On the cheap fast model (``periodic=True``) it refreshes every
-    ``refresh_every_steps`` steps and after each compaction. On the possibly
-    expensive active model (``periodic=False``) it drops the periodic refresh and
-    caps total attempts at ``capped_max_generations``, so it only titles at the
-    start and after a compaction, a handful of times at most. An attempt is
-    counted when it begins, so a failing expensive model cannot retry without
-    bound.
-
-    A title we did not generate (a manual ``/rename``, or any title carried in on
-    resume) blocks automatic refresh.
-    """
-
     def __init__(self, policy: TitlePolicy = DEFAULT_TITLE_POLICY) -> None:
         self._policy = policy
         self._generated_title: str | None = None
@@ -359,30 +327,24 @@ class TitleCadence:
         current_title: str | None,
         compaction_id: str | None,
         turn_completing: bool,
-        periodic: bool,
     ) -> bool:
-        """Return whether a generation is due, counting the attempt when it is."""
         if self.is_manual(current_title):
             return False
-        if not periodic and self._attempts >= self._policy.capped_max_generations:
+        if self._attempts >= self._policy.capped_max_generations:
             return False
         initial_pending = self._last_generated_step < 0
         new_compaction = (
             compaction_id is not None and compaction_id != self._last_compaction_id
         )
         initial_due = initial_pending and (
-            step >= self._policy.initial_max_steps or (turn_completing and step >= 1)
+            step >= self._policy.initial_max_steps or turn_completing or new_compaction
         )
-        periodic_due = (
-            periodic
-            and not initial_pending
-            and step - self._last_generated_step >= self._policy.refresh_every_steps
+        confirm_due = (
+            not initial_pending
+            and step - self._last_generated_step >= self._policy.confirm_after_steps
         )
-        if not (initial_due or new_compaction or periodic_due):
+        if not (initial_due or confirm_due):
             return False
-        # Consume the trigger up front: a generation that later fails or is
-        # rejected never calls ``record``, so without this the same step or
-        # compaction would look due on the very next event and re-fire the call.
         self._attempts += 1
         self._last_generated_step = step
         self._last_compaction_id = compaction_id
@@ -390,17 +352,6 @@ class TitleCadence:
 
     def record(self, *, title: str) -> None:
         self._generated_title = title
-
-    def restore(self, *, title: str, step: int, compaction_id: str | None) -> None:
-        """Adopt a persisted auto title on resume so it keeps refreshing.
-
-        Marks the title as our own (``is_manual`` stays False) and continues the
-        step/compaction timeline from where the reloaded transcript stands, so
-        the next refresh lands after the normal interval rather than immediately.
-        """
-        self._generated_title = title
-        self._last_generated_step = step
-        self._last_compaction_id = compaction_id
 
 
 def _entry_text(entry: JsonObject) -> str:
@@ -414,6 +365,42 @@ def _entry_text(entry: JsonObject) -> str:
             if isinstance(value, str):
                 parts.append(value)
     return "\n".join(parts)
+
+
+def _tool_block(entry: JsonObject, *, policy: TitlePolicy) -> str | None:
+    detail = entry.get("detail")
+    if not isinstance(detail, dict):
+        detail = {}
+    name = detail.get("toolName")
+    if not isinstance(name, str) or not name:
+        title = entry.get("title")
+        name = title if isinstance(title, str) and title else "tool"
+    lines: list[str] = []
+    call = detail.get("input")
+    if call is not None:
+        call_text = (
+            call
+            if isinstance(call, str)
+            else json.dumps(call, ensure_ascii=False, default=str)
+        ).strip()
+        if call_text and call_text not in {"{}", "[]", '""'}:
+            lines.append(f"tool({name}): {call_text[: policy.max_tool_chars]}")
+    state = entry.get("state")
+    if isinstance(state, dict):
+        output = state.get("outputText")
+        if isinstance(output, str) and output.strip():
+            lines.append(
+                f"tool result({name}): {output.strip()[: policy.max_tool_chars]}"
+            )
+        elif state.get("status") == "failed":
+            error = state.get("error")
+            message = error.get("message") if isinstance(error, dict) else None
+            if isinstance(message, str) and message.strip():
+                lines.append(
+                    f"tool result({name}) failed: "
+                    f"{message.strip()[: policy.max_tool_chars]}"
+                )
+    return "\n".join(lines) if lines else None
 
 
 __all__ = [

@@ -19,9 +19,10 @@ def _loop(loop_id: str = "loop-1") -> ScheduledLoop:
 
 
 @pytest.mark.parametrize(
-    ("seconds", "formatted"), [(90, "1m30s"), (180, "3m"), (7200, "2h"), (259200, "3d")]
+    ("seconds", "formatted"),
+    [(None, "unknown"), (90, "1m30s"), (180, "3m"), (7200, "2h"), (259200, "3d")],
 )
-def test_loop_duration_formatting(seconds: int, formatted: str) -> None:
+def test_loop_duration_formatting(seconds: int | None, formatted: str) -> None:
     assert _format_duration(seconds) == formatted
 
 
@@ -45,6 +46,20 @@ async def test_loop_command_routes_to_typed_methods() -> None:
     loops.create.assert_awaited_once_with("30s", "prompt")
     loops.delete.assert_awaited_once_with("deleted")
     loops.clear.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", ["", "list", "30s prompt"])
+async def test_loop_commands_tolerate_calendar_projection(arguments: str) -> None:
+    loop = ScheduledLoop(
+        id="calendar", prompt="prompt", cron="0 9 * * 1-5", next_fire_at=60
+    )
+    loops = AsyncMock()
+    loops.list.return_value = [loop]
+    loops.create.return_value = loop
+    commands = ScheduledLoopCommands(loops, tools_collapsed=lambda: False)
+
+    assert isinstance(await commands.handle_command(arguments), UserCommandMessage)
 
 
 @pytest.mark.asyncio

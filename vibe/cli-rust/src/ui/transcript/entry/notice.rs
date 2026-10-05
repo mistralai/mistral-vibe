@@ -3,34 +3,27 @@
 use ratatui::text::{Line, Span};
 
 use super::bordered::prefix;
-use super::message::push_command_result;
 use crate::server::{NoticeDetail, NoticeEntry};
+use crate::ui::markdown::LinkedLines;
 use crate::ui::theme;
 use crate::utils::text;
 
 /// Notices are side-channel signals, not transcript content: Python acts on each
-/// detail kind and renders nothing, except a fired scheduled loop which mounts a
-/// `UserCommandMessage`, and a completed hook with output which mounts a
-/// `HookSystemMessageLine` inside the run's container. Client-owned notices
-/// (app-server crash, failed suspend) render their message directly.
+/// detail kind and renders nothing, except a completed hook with output which
+/// mounts a `HookSystemMessageLine` inside the run's container. A fired scheduled
+/// loop annotates its user prompt instead. Client-owned notices (app-server
+/// crash, failed suspend) render their message directly.
 pub(super) fn push_notice(
-    lines: &mut Vec<Line<'static>>,
+    lines: &mut LinkedLines,
     notice: &NoticeEntry,
     width: u16,
     local: bool,
     grouped: bool,
 ) {
     if let Some(detail) = notice.detail.as_ref() {
-        match detail.kind.as_deref() {
-            Some("scheduled_loop_fired") => {
-                push_command_result(lines, &notice.message, width);
-                return;
-            }
-            Some("hook_completed") => {
-                push_hook_message(lines, detail, width, grouped);
-                return;
-            }
-            _ => {}
+        if detail.kind.as_deref() == Some("hook_completed") {
+            push_hook_message(lines, detail, width, grouped);
+            return;
         }
     }
     // Only client-owned notices (app-server crash, failed suspend) render their
@@ -54,12 +47,7 @@ pub(super) fn push_notice(
 /// icon colored by `status` (default warning), the text muted and dim. Visibility
 /// is gated by `is_hidden_hook_notice`, so a notice reaching here has both its
 /// hook name and content set inside an open container.
-fn push_hook_message(
-    lines: &mut Vec<Line<'static>>,
-    detail: &NoticeDetail,
-    width: u16,
-    grouped: bool,
-) {
+fn push_hook_message(lines: &mut LinkedLines, detail: &NoticeDetail, width: u16, grouped: bool) {
     let (Some(hook_name), Some(content)) = (detail.hook_name.as_deref(), detail.content.as_deref())
     else {
         return;

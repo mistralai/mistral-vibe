@@ -20,7 +20,7 @@ use crate::utils::startup_cache;
 use crate::{
     agents, approval, completion_manager, config, config_issues, feedback, mcp, message_queue,
     model_picker, observability, post_ready, question_app, resume_picker, session_exit, startup,
-    todo_tracker, turn_summary, ui,
+    subagents, todo_tracker, turn_summary, ui,
 };
 
 /// Seconds a server warning/error toast stays up (Python `App.notify` default).
@@ -35,6 +35,7 @@ pub fn apply_startup_event(
 ) -> bool {
     match event {
         StartupEvent::Trust(details) => {
+            app.session.trust_prompted = true;
             crate::trust_folders::open(app, *details);
             false
         }
@@ -54,6 +55,24 @@ pub fn apply_startup_event(
             false
         }
         StartupEvent::Ready(ready) => apply_ready(app, client, config_tx, *ready),
+        StartupEvent::MissingApiKey { .. } => {
+            // The wizard is a pre-session surface (Python `run_onboarding`):
+            // the loop exits on this verdict and the entrypoint reruns the
+            // wizard, so the reducer only logs.
+            tracing::warn!(vibe_boundary = "startup", "missing API key; setup required");
+            false
+        }
+        StartupEvent::ConfigError(message) => {
+            let message = format!("Invalid configuration: {message}");
+            tracing::error!(
+                vibe_boundary = "startup",
+                fatal = true,
+                "config error: {message}"
+            );
+            app.session.startup_error = Some(message);
+            app.set_status(Status::Failed);
+            false
+        }
         StartupEvent::Failed(error) => {
             tracing::error!(
                 vibe_boundary = "startup",
@@ -96,6 +115,36 @@ pub fn show_dangerous_directory_warning(app: &mut App) {
     }
 }
 
+/// Python `_schedule_update_notification`/`_check_update`: one detached,
+/// non-forced check after startup, its outcome only written to the update
+/// cache. Failures are logged, never surfaced. Replay runs have no PyPI, so
+/// the check stays offline there like the other replay-gated subsystems.
+fn spawn_background_update_check(enabled: bool) {
+    if !enabled || crate::utils::is_replaying() {
+        return;
+    }
+    tokio::spawn(async move {
+        let repository = crate::update_notifier::cache::FileSystemUpdateCacheRepository;
+        let gateway =
+            crate::update_notifier::gateway::UpdateCheckGateway::for_project("mistral-vibe").await;
+        let now = crate::utils::now_unix();
+        if let Err(error) = crate::update_notifier::update::get_update_if_available(
+            &gateway,
+            env!("CARGO_PKG_VERSION"),
+            &repository,
+            now,
+            false,
+        )
+        .await
+        {
+            // Python warns for `UpdateError`; a failed cache write never
+            // reaches here — it is logged inside, like Python's swallowed
+            // `OSError`.
+            tracing::warn!("Update check failed: {}", error.message)
+        }
+    });
+}
+
 /// Python `_auto_resume_on_startup`'s closing line: what the attach did.
 fn attach_notice(app: &mut App, attach: startup::Attach) {
     let id = submission::new_message_id();
@@ -126,6 +175,10 @@ fn apply_ready(
         state,
         attach,
         runtime,
+        is_cold_start,
+        settled,
+        prepared,
+        absorbed,
     } = ready;
     observability::level::set_config_log_level(config.log_level.as_deref());
     observability::sentry::init_sentry(
@@ -150,6 +203,8 @@ fn apply_ready(
             .unwrap_or("");
         app.terminal_notifier.set_default_title(title);
     }
+    app.subagents.status_list_enabled = startup::read_show_subagent_status_list(&runtime);
+    app.quit.ask_confirmation_on_exit = startup::read_ask_confirmation_on_exit(&runtime);
     apply_final_startup_config(app, startup_cache);
     app.view
         .transcript
@@ -159,20 +214,41 @@ fn apply_ready(
     // wins: the one started here is only what Esc would fall back to.
     if !app.session.resumed {
         app.set_session_id(state.session.id.clone());
+        app.subagents.seed_snapshot(state.child_sessions.clone());
+        subagents::refresh(app);
         match app.resume_picker.open {
             true => resume_picker::rebase(app, &state),
             false => {
                 app.todo_tracker.seed_from_history(state.history.as_ref());
-                app.view.transcript.load_snapshot(&state);
-                app.expand_rebuilt_tools();
+                resume_picker::load_history(app, &state);
+                crate::worktree::track_state(app, &state);
             }
         }
     }
     app.session.tokens = startup::read_tokens(&runtime);
+    app.subagents.main_tokens = app.session.tokens;
     apply_stats(
         app,
         runtime.pointer("/runtime/stats").unwrap_or(&Value::Null),
     );
+    // This run's `--worktree` verdict (the announce), pinned apart from the
+    // session's own tracking: a resumed session's restored effect carries the
+    // original run's `created`, and reuse must stay non-cleaning (Python's
+    // `worktree_session.created`).
+    app.session.prepared_worktree = prepared;
+    // The notifications the settle wait absorbed, applied once the state they
+    // follow exists, so the footer lands on the worktree before first paint.
+    for notification in absorbed {
+        if !apply_notification(app, client, &notification) {
+            tracing::debug!("absorbed notification deferred; no approval is pending pre-TUI");
+        }
+    }
+    // Python chdirs before SessionOptions, and later picker resumes resend
+    // this config, so it must keep naming the settled worktree, not the
+    // checkout the run started in.
+    if let Some(cwd) = settled {
+        app.session.agent_config.cwd = Some(cwd);
+    }
     // Python snapshots the usage baseline once the session attaches; a picker
     // resume that already adopted keeps the baseline it set.
     if !app.session.resumed {
@@ -188,10 +264,17 @@ fn apply_ready(
     mcp::show_post_init_notices(app, &runtime);
     config_issues::show_config_issues(app, &runtime);
     startup::banners::mount(app, &runtime, client);
+    // Python reads the what's-new gate inside mount, then schedules the
+    // update check; keeping the spawn after mount preserves that ordering.
+    // ADR 0015: apply the live trust policy before the check's gateway
+    // builds its client.
+    crate::update_notifier::gateway::configure_tls_trust(config.enable_system_trust_store);
+    spawn_background_update_check(config.enable_update_checks);
     post_ready::fetch(app, client, config.show_greeting);
     completion_manager::refresh(app);
     app.set_status(Status::Ready);
     approval::show_pending(app);
+    record_startup(app, &attach, is_cold_start, config.harness_selection_source);
     attach_notice(app, attach);
     crate::commands::shell::flush_pending(app, client);
     message_queue::flush_pending(app, client);
@@ -207,16 +290,58 @@ fn apply_ready(
     submission::flush_pending(app, client, config_tx)
 }
 
+/// Python `_send_startup_telemetry_once`. Fields this client has no surface for
+/// (teleport) are honestly `false`; `session_init_duration_ms` stays null since
+/// the server does not report it to this client.
+fn record_startup(
+    app: &mut App,
+    attach: &startup::Attach,
+    is_cold_start: bool,
+    harness_selection_source: Option<String>,
+) {
+    let properties = crate::telemetry::bmap(serde_json::json!({
+        "agent_ready_duration_ms": startup::agent_ready_duration_ms(),
+        "session_init_duration_ms": Value::Null,
+        "has_initial_prompt": app.session.initial_prompt.as_deref().is_some_and(|p| !p.is_empty()),
+        "teleport_on_start": false,
+        "show_resume_picker": matches!(app.session.startup_resume, StartupResume::Picker),
+        "is_resuming_session": matches!(attach, startup::Attach::Resumed(_)),
+        "prompt_for_workspace_trust": app.session.trust_prompted,
+        "is_cold_start": is_cold_start,
+        "harness_selection_source": harness_selection_source,
+    }));
+    app.session.startup_telemetry = Some(properties);
+    flush_startup_telemetry(app);
+}
+
+/// Send the held `vibe.startup` once the first frame exists: a `--worktree` run
+/// replays `Ready` before its first draw.
+pub fn flush_startup_telemetry(app: &mut App) {
+    let Some(first_frame) = startup::first_frame_duration_ms() else {
+        return;
+    };
+    let Some(mut properties) = app.session.startup_telemetry.take() else {
+        return;
+    };
+    properties.insert("first_frame_duration_ms".into(), first_frame.into());
+    crate::telemetry::record(app, crate::telemetry::event::STARTUP, properties);
+}
+
 /// Python `_process_initial_prompt`: send the positional `vibe <prompt>` argument
-/// into the session, once as a plain prompt like `_handle_user_message` does.
+/// into the session, once as a plain prompt like `_handle_user_message` does, or
+/// teleport it under `--teleport`.
 pub fn process_initial_prompt(app: &mut App, client: &Arc<Client>) {
     // Python's `args.initial_prompt or stdin_prompt` drops an empty string.
-    if let Some(prompt) = app
+    let prompt = app
         .session
         .initial_prompt
         .take()
-        .filter(|prompt| !prompt.is_empty())
+        .filter(|prompt| !prompt.is_empty());
+    if std::mem::take(&mut app.session.teleport_on_start)
+        && crate::commands::has_command("/teleport")
     {
+        crate::teleport::submit(app, client, prompt.unwrap_or_default());
+    } else if let Some(prompt) = prompt {
         message_queue::enqueue_prompt(app, client, prompt);
     }
 }
@@ -226,9 +351,17 @@ pub fn process_initial_prompt(app: &mut App, client: &Arc<Client>) {
 /// `runtime/updated` and the `config/write` response committed from the model picker.
 pub fn apply_runtime_value(app: &mut App, runtime: &Value) {
     crate::terminal_notifier::configure(app, runtime);
+    app.subagents.status_list_enabled = startup::read_show_subagent_status_list(runtime);
+    app.quit.ask_confirmation_on_exit = startup::read_ask_confirmation_on_exit(runtime);
+    subagents::refresh(app);
+    let narrator_enabled = app.session.startup_config.narrator_enabled;
     let version = app.session.startup_config.server_version.clone();
     if let Some(config) = startup_cache::StartupConfig::from_runtime(&version, runtime) {
         apply_final_startup_config(app, config);
+    }
+    crate::voice_app::apply_runtime(app, runtime);
+    if narrator_enabled != app.session.startup_config.narrator_enabled {
+        turn_summary::cancel(app);
     }
     app.completion.skills = startup_cache::read_skills(runtime);
     model_picker::apply_runtime(app, runtime);
@@ -242,6 +375,15 @@ pub fn apply_runtime_value(app: &mut App, runtime: &Value) {
         runtime.pointer("/runtime/stats").unwrap_or(&Value::Null),
     );
     completion_manager::refresh(app);
+    mcp::apply_runtime(app, runtime);
+}
+
+/// Apply a mutation response's `runtime` when it carries one (Python
+/// `if response.runtime is not None: state.apply_runtime(response.runtime)`).
+pub fn apply_response_runtime(app: &mut App, response: &Value) {
+    if response.get("runtime").is_some_and(Value::is_object) {
+        apply_runtime_value(app, response);
+    }
 }
 
 fn apply_stats(app: &mut App, stats: &Value) {
@@ -450,6 +592,7 @@ fn is_foreign_session_notification(app: &App, event: &Notification) -> bool {
             | notification::TURN_QUEUE_UPDATED
             | notification::SESSION_STATS_UPDATED
             | notification::SESSION_SNAPSHOT
+            | notification::CHILD_SESSION_UPDATED
     ) {
         return false;
     }
@@ -472,6 +615,18 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             == Some("approval")
     {
         return approval::on_callback_call(app, &event.params);
+    }
+    if event.method == notification::SESSION_UPDATED {
+        // Applied before the Starting gate: the worktree move can land between
+        // session/start and the handshake's last read, and the state-only
+        // updates are safe pre-ready.
+        if let Some(patch) = event.params.get("patch") {
+            crate::worktree::track_patch(app, patch);
+        }
+        if let Some(title) = crate::terminal_notifier::updated_title(&event.params) {
+            app.terminal_notifier.set_default_title(title);
+        }
+        return true;
     }
     // Warnings/errors are transient toasts, never re-sent in the snapshot: surface them pre-Ready like Python's out-of-band listener.
     if matches!(app.session.status, Status::Starting | Status::Failed)
@@ -510,6 +665,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             message_queue::steering_history_added(app, client, &event.params);
             retry::on_entry_added(app, &event.params);
             app.view.transcript.add(&event.params);
+            crate::worktree::track_entry(app, &event.params);
             record_todos(app, event.params.get("entry"));
             retry_continuation::merge_continuation(app);
             // Python sets `_turn_assistant_message` inside the resolve, so a
@@ -518,17 +674,23 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             expand_live_reasoning(app, &event.params);
             sync_loading_label(app, &event.params);
             turn_summary::track_narrator_added(app, &event.params);
+            if let Some(entry) = event.params.get("entry") {
+                subagents::remember_parent_instruction_from_entry(app, entry);
+            }
         }
         notification::HISTORY_ENTRY_UPDATED => {
             app.view.transcript.update(&event.params);
+            crate::worktree::track_entry(app, &event.params);
             record_todos(app, updated_entry_raw(app, &event.params).as_ref());
             retry_continuation::merge_continuation(app);
             sync_loading_label(app, &event.params);
             turn_summary::track_narrator_updated(app, &event.params);
-        }
-        notification::SESSION_UPDATED => {
-            if let Some(title) = crate::terminal_notifier::updated_title(&event.params) {
-                app.terminal_notifier.set_default_title(title);
+            // The wire patch carries no entry; the stored one is post-patch.
+            if let Some(id) = event.params.get("entryId").and_then(Value::as_str) {
+                let entry = app.view.transcript.entry_raw(id).cloned();
+                if let Some(entry) = entry {
+                    subagents::remember_parent_instruction_from_entry(app, &entry);
+                }
             }
         }
         notification::SESSION_SNAPSHOT => {
@@ -548,12 +710,15 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                         false => {
                             // A handoff or resync adopts another harness session.
                             app.todo_tracker.seed_from_history(state.history.as_ref());
-                            app.view.transcript.load_snapshot(&state);
+                            resume_picker::load_history(app, &state);
                         }
                     }
+                    crate::worktree::track_state(app, &state);
                     retry_continuation::reconcile_snapshot(app, same_session);
                     sync_retrying_label(app, &state);
                     app.expand_rebuilt_tools();
+                    app.subagents.seed_snapshot(state.child_sessions.clone());
+                    subagents::refresh(app);
                 }
             }
         }
@@ -563,11 +728,12 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                 .pointer("/turn/id")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            if let Some(queue_item_id) = event
+            let queue_item_id = event
                 .params
                 .pointer("/turn/queueItemId")
-                .and_then(Value::as_str)
-            {
+                .and_then(Value::as_str);
+            let interrupt = message_queue::take_interrupt_on_start(app);
+            if let Some(queue_item_id) = queue_item_id {
                 if message_queue::turn_started(app, client, queue_item_id) {
                     feedback::maybe_show(app, client, app.session.session_id.clone());
                 }
@@ -581,6 +747,11 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             turn_summary::on_turn_end(app, client);
             turn_summary::cancel(app);
             turn_summary::on_turn_start(app, "");
+            // The user interrupted this turn before it started (Python `_interrupt_turn`).
+            if interrupt {
+                app.set_status(Status::Ready);
+                submission::send_interrupt(app, client);
+            }
         }
         // The server promotes the next queued prompt itself; the loading area goes
         // idle until its `turn/started` arrives, as Python's does.
@@ -656,14 +827,55 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                 .get("contextWindow")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            app.session.tokens = (current, max);
+            // Python `_update_context_progress` masks the session budget with
+            // the viewed child's own context usage while a subagent is viewed.
+            app.subagents.main_tokens = (current, max);
+            if app.subagents.viewed_subagent_id.is_none() {
+                app.session.tokens = (current, max);
+            }
             apply_stats(app, event.params.get("stats").unwrap_or(&Value::Null));
         }
         notification::SESSION_COMPACTED => {
             // Python `replace_state`: the handoff installs the replacement session.
-            match compact::compacted_session_id(&event.params) {
-                Some(id) => compact::apply_compacted(app, id),
+            match compact::compacted_handoff(&event.params) {
+                Some((id, child_sessions)) => compact::apply_compacted(app, id, child_sessions),
                 None => compact::settle_compact(app),
+            }
+        }
+        // Python `ChildSessionUpdated`: upsert the child, announce the ready
+        // transition, and coalesce the viewed child's transcript refresh.
+        notification::CHILD_SESSION_UPDATED => {
+            if let Ok(params) = serde_json::from_value::<crate::server::ChildSessionUpdatedParams>(
+                event.params.clone(),
+            ) {
+                let session = params.child_session.clone();
+                app.subagents.replace_child_session(params.child_session);
+                let announced = app
+                    .subagents
+                    .transcripts
+                    .announce_ready_transition(&session);
+                if app.subagents.viewed_subagent_id.as_deref() == Some(session.id.as_str()) {
+                    if announced {
+                        subagents::anchor(app);
+                    }
+                    subagents::refresh_context_progress(app);
+                    subagents::schedule_refresh(app);
+                }
+                subagents::refresh(app);
+            }
+        }
+        // Python `SessionContextCleared` -> `_reset_subagent_views`; the
+        // handoff state carries the replacement session's children. The
+        // replacement is the live session from here on, or every later
+        // notification reads as foreign (`apply_compacted` parity).
+        notification::SESSION_CONTEXT_CLEARED => {
+            if let Some(state) = event.params.get("state").cloned().and_then(|state| {
+                serde_json::from_value::<crate::server::PublicSessionState>(state).ok()
+            }) {
+                app.set_session_id(state.session.id.clone());
+                subagents::reset_views(app);
+                app.subagents.seed_snapshot(state.child_sessions.clone());
+                subagents::refresh(app);
             }
         }
         // Server-pushed operational warning/error: surface as a toast, like
@@ -698,11 +910,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
         // change; a plain runtime refresh (after resume, turn/completed, ...)
         // does not.
         notification::RUNTIME_UPDATED => {
-            let narrator_enabled = app.session.startup_config.narrator_enabled;
             apply_runtime_value(app, &event.params);
-            if narrator_enabled != app.session.startup_config.narrator_enabled {
-                turn_summary::cancel(app);
-            }
         }
         // Forwarded by the client: a callback the user must answer.
         server_method::CALLBACK_CALL => {
@@ -736,6 +944,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
         // The catalog publishes it alongside the canonical one; swallowing it
         // keeps the URL from being handled twice (Python `consume_notification`).
         notification::MCP_AUTH_URL_LEGACY => {}
+        notification::TELEPORT_EVENT => crate::teleport::on_event(app, client, &event.params),
         _ => {}
     }
     true

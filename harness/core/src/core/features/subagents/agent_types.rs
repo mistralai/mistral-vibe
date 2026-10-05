@@ -61,7 +61,7 @@ pub(crate) fn render_agent_types<'a>(
     Some(format!(
         r#"## Available agent types
 
-Spawn a listed preconfigured subagent by passing its exact name as `agentType` to `tools.agent.spawn`.
+Spawn a listed preconfigured subagent by passing its exact name as `agentType` to `tools.subagent.spawn`.
 
 <available-agent-types>
 {entries}

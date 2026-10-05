@@ -1,6 +1,7 @@
 //! `/config` settings screen state and value formatting.
 
 mod dynamic;
+mod voice_toggle;
 
 use crate::server::method;
 use crate::server::Client;
@@ -44,6 +45,7 @@ pub fn load(session_id: String, client: &Arc<Client>, tx: &mpsc::Sender<Loaded>)
     });
 }
 pub fn apply_loaded(app: &mut App, mut loaded: Loaded) {
+    voice_toggle::record(app, &loaded);
     let index = app.config_screen.selected;
     let path = filtered(app).get(index).map(|field| field.path.clone());
     for field in &mut loaded.fields {
@@ -260,13 +262,15 @@ pub(crate) fn write(
     let pending = app.commit_started();
     let op = op.to_owned();
     tokio::spawn(async move {
-        let params = serde_json::json!({
-            "sessionId": session_id,
-            "ops": [{"op": op, "path": field.path, "value": value, "targetLayer": target}],
-            "reason": if op == "set" { "config screen edit" } else { "config screen reset" },
-            "reloadRuntime": false,
-        });
-        let event = match client.request(method::CONFIG_WRITE, params).await {
+        let ops = vec![serde_json::json!(
+            {"op": op, "path": field.path, "value": value, "targetLayer": target}
+        )];
+        let reason = if op == "set" {
+            "config screen edit"
+        } else {
+            "config screen reset"
+        };
+        let event = match crate::config_write::write(&client, &session_id, ops, reason).await {
             Ok(result) => model_picker::Event::Written(result),
             Err(err) => {
                 tracing::warn!(%err, path = %field.path, "settings update failed");

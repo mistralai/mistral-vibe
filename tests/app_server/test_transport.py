@@ -5,7 +5,9 @@ import asyncio
 from contextlib import suppress
 from io import BytesIO
 import json
+from pathlib import Path
 import socket
+import sys
 from threading import Event
 from typing import Any
 from unittest.mock import AsyncMock
@@ -75,7 +77,12 @@ def test_stdio_main_neutralizes_stdout_after_serving(
     monkeypatch.setattr(
         stdio,
         "parse_arguments",
-        lambda: argparse.Namespace(experimental_harness=False, legacy_harness=False),
+        lambda: argparse.Namespace(
+            experimental_harness=False,
+            legacy_harness=False,
+            multiplex=False,
+            additional_builtin_plugin_roots=[],
+        ),
     )
     monkeypatch.setattr(stdio, "init_harness_files_manager", lambda *_: None)
     monkeypatch.setattr(stdio, "init_file_logging", lambda _: None)
@@ -111,6 +118,7 @@ async def test_stdio_server_creates_the_harness_behind_its_transport(
         "transport_kind": "stdio",
         "experimental_harness": False,
         "legacy_harness": False,
+        "additional_builtin_plugin_roots": (),
     }
     harness.serve.assert_awaited_once_with()
 
@@ -134,7 +142,31 @@ async def test_stdio_server_forwards_experimental_harness_selection(
         "transport_kind": "stdio",
         "experimental_harness": True,
         "legacy_harness": False,
+        "additional_builtin_plugin_roots": (),
     }
+
+
+def test_stdio_arguments_collect_every_builtin_plugin_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vibe-app-server",
+            "--additional-builtin-plugin-root",
+            "/bundle/plugins",
+            "--additional-builtin-plugin-root",
+            "/bundle/more-plugins",
+        ],
+    )
+
+    arguments = stdio.parse_arguments()
+
+    assert arguments.additional_builtin_plugin_roots == [
+        Path("/bundle/plugins"),
+        Path("/bundle/more-plugins"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -223,6 +255,30 @@ async def test_stdio_transport_bounds_pending_output() -> None:
 
     messages = [json.loads(line) for line in writer.output.getvalue().splitlines()]
     assert messages == [{"id": 1}, {"id": 2}, {"id": 3}]
+
+
+@pytest.mark.asyncio
+async def test_stdio_transport_batches_messages_queued_behind_a_write() -> None:
+    writer = BlockingWriter()
+    transport = StdioJsonRpcTransport(BytesIO(), writer, outbox_size=8)
+    writes: list[bytes] = []
+    write = writer.write
+
+    def record(data: bytes) -> int:
+        writes.append(data)
+        return write(data)
+
+    writer.write = record  # type: ignore[method-assign]
+    await transport.send({"id": 1})
+    assert await asyncio.to_thread(writer.started.wait, 1)
+    for index in range(2, 6):
+        await transport.send({"id": index})
+    writer.release.set()
+    await asyncio.wait_for(transport.close(), timeout=1)
+
+    assert [len(data.splitlines()) for data in writes] == [1, 4]
+    messages = [json.loads(line) for line in writer.output.getvalue().splitlines()]
+    assert messages == [{"id": index} for index in range(1, 6)]
 
 
 def test_stdio_transport_rejects_unbounded_outbox() -> None:

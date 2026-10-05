@@ -23,7 +23,9 @@ fn resume_carries_interactive_flags() {
         "--disabled-tools",
         "web_search",
     ]);
-    let config = cli.interactive_agent_config(Some("/work".into())).unwrap();
+    let config = cli
+        .interactive_agent_config(Some("/work".into()), None)
+        .unwrap();
     let params = resume_params("session-1", &config);
 
     assert_eq!(params["sessionId"], "session-1");
@@ -50,7 +52,9 @@ fn resume_carries_interactive_flags() {
 #[test]
 fn resume_defaults_stay_slim() {
     let cli = Cli::parse_from(["vibe-rs", "--resume", "session-1"]);
-    let config = cli.interactive_agent_config(Some("/work".into())).unwrap();
+    let config = cli
+        .interactive_agent_config(Some("/work".into()), None)
+        .unwrap();
     let params = resume_params("session-1", &config);
 
     // Defaults are skipped, matching the Python wire shape.

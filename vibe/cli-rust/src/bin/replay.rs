@@ -16,7 +16,10 @@ const TURN_QUEUE_REPLACE: &str = "session/turn/queue/replace";
 const AGENT_UPDATE: &str = "session/agent/update";
 const SHELL_COMMAND: &str = "session/shellCommand";
 const SESSION_RESUME: &str = "session/resume";
+const SESSION_START: &str = "session/start";
+const SETUP_STORE_CREDENTIAL: &str = "setup/store-credential";
 const SESSION_STOP: &str = "session/stop";
+const WORKTREE_REMOVE: &str = "workspace/git/worktrees/remove";
 const FIXTURE_ENV: &str = "VIBE_REPLAY_FIXTURE";
 const STEP_FIFO_ENV: &str = "VIBE_REPLAY_STEP_FIFO";
 const REQUEST_LOG_ENV: &str = "VIBE_REPLAY_REQUEST_LOG";
@@ -25,15 +28,67 @@ const REQUEST_LOG_ENV: &str = "VIBE_REPLAY_REQUEST_LOG";
 type Batch = (Option<String>, Option<String>, Vec<Value>);
 
 /// Methods answered with another method's canned result (reconnect reuses start).
-fn resolve_response<'a>(handshake: &'a Map<String, Value>, method: &str) -> Option<&'a Value> {
-    if let Some(result) = handshake.get(method) {
-        return Some(result);
+fn resolve_response(handshake: &mut Map<String, Value>, method: &str) -> Option<Value> {
+    if let Some(entry) = handshake.get_mut(method) {
+        return canned(entry);
     }
     let alias = match method {
         "session/resume" | "session/continue" => "session/start",
         _ => return None,
     };
-    handshake.get(alias)
+    handshake.get_mut(alias).and_then(canned)
+}
+
+/// A list entry answers its requests in order, repeating the last one; a
+/// single value answers every request, as before. Empty answers nothing.
+fn canned(entry: &mut Value) -> Option<Value> {
+    if let Value::Array(answers) = entry {
+        if answers.is_empty() {
+            return None;
+        }
+        if answers.len() > 1 {
+            return Some(answers.remove(0));
+        }
+        // The last answer repeats, unwrapped.
+        return Some(answers[0].clone());
+    }
+    Some(entry.clone())
+}
+
+/// Check if the handshake declares an error response for a method.
+fn resolve_error<'a>(handshake: &'a Map<String, Value>, method: &str) -> Option<&'a Value> {
+    let entry = handshake.get(method)?;
+    entry.get("error")
+}
+
+/// A completed `setup/store-credential` gives the server the key, so the
+/// handshake's pinned `unauthorized` no longer answers on this connection:
+/// the retried session handshake on the SAME child authenticates, exactly
+/// like the real server's env mutation makes the stored key visible.
+fn clear_missing_key_errors(handshake: &mut Map<String, Value>) {
+    for method in [SESSION_START, SESSION_RESUME] {
+        let unauthorized = handshake
+            .get(method)
+            .and_then(|entry| entry.get("error"))
+            .filter(|error| error.get("code").and_then(Value::as_str) == Some("unauthorized"))
+            .is_some();
+        if unauthorized {
+            if let Some(Value::Object(entry)) = handshake.get_mut(method) {
+                entry.remove("error");
+            }
+        }
+    }
+}
+
+/// A scenario pins a per-session answer as `"<method>#<sessionId>"`, so a
+/// session-scoped read (e.g. a child transcript) answers with its own state.
+fn session_scoped_response<'a>(
+    handshake: &'a Map<String, Value>,
+    method: &str,
+    params: Option<&Value>,
+) -> Option<&'a Value> {
+    let session_id = params?.get("sessionId").and_then(Value::as_str)?;
+    handshake.get(&format!("{method}#{session_id}"))
 }
 
 fn idempotency_conflict(
@@ -112,10 +167,16 @@ fn stamp_user_message_id(batch: &mut [Value], client_message_id: &str) {
     }
 }
 
-fn stamp_shell_operation_id(events: &mut [Value], operation_id: &str) {
+/// Bind `$operationId` placeholders (shell entry ids, teleport events) to the request's id.
+fn stamp_operation_id(events: &mut [Value], operation_id: &str) {
     for event in events {
-        if event.pointer("/params/entry/id").and_then(Value::as_str) == Some("$operationId") {
-            event["params"]["entry"]["id"] = json!(operation_id);
+        for pointer in ["/params/entry/id", "/params/event/operationId"] {
+            if let Some(slot) = event
+                .pointer_mut(pointer)
+                .filter(|slot| slot.as_str() == Some("$operationId"))
+            {
+                *slot = json!(operation_id);
+            }
         }
     }
 }
@@ -420,7 +481,7 @@ fn main() {
             .filter(|_| method != SHELL_COMMAND || shell_run)
             .unwrap_or_default();
         if let Some(operation_id) = msg.pointer("/params/operationId").and_then(Value::as_str) {
-            stamp_shell_operation_id(&mut request_events, operation_id);
+            stamp_operation_id(&mut request_events, operation_id);
         }
         if shell_run {
             for event in &request_events {
@@ -430,8 +491,32 @@ fn main() {
         let response = match method {
             AGENT_UPDATE => agent_update_response(&handshake, msg.get("params")),
             SESSION_RESUME => resume_response(&handshake, msg.get("params")),
-            _ => resolve_response(&handshake, method).cloned(),
+            // Session-scoped pins win, then the shared (list-consuming) canned answers.
+            _ => {
+                let scoped =
+                    session_scoped_response(&handshake, method, msg.get("params")).cloned();
+                scoped.or_else(|| resolve_response(&mut handshake, method))
+            }
         };
+        // A completed store-credential hands the server the key: the pinned
+        // handshake `unauthorized` answers no longer apply on this connection.
+        if method == SETUP_STORE_CREDENTIAL
+            && response
+                .as_ref()
+                .and_then(|result| result.get("outcome"))
+                .and_then(Value::as_str)
+                == Some("completed")
+        {
+            clear_missing_key_errors(&mut handshake);
+        }
+        // Check for a canned error response (e.g. unauthorized on session/start).
+        if let Some(err) = resolve_error(&handshake, method) {
+            send(
+                &writer_tx,
+                json!({"jsonrpc": "2.0", "id": id, "error": err}),
+            );
+            continue;
+        }
         match response {
             Some(mut result) => {
                 if READ_LIKE.contains(&method) && !declared.contains(method) {
@@ -465,7 +550,10 @@ fn main() {
                 }),
             ),
         }
-        if method == SESSION_STOP {
+        // A scenario that answers worktree cleanup keeps the server alive past
+        // the stop: the client asks its exit questions with the server still
+        // up, and stdin EOF (its close) ends this loop instead.
+        if method == SESSION_STOP && !handshake.contains_key(WORKTREE_REMOVE) {
             break;
         }
         // Shell streaming events precede its response; other request events follow it.

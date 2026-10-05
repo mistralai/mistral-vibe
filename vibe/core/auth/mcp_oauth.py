@@ -27,6 +27,7 @@ from pydantic import AnyUrl, BaseModel, ConfigDict
 
 from vibe import __version__
 from vibe.core.config import MCPHttp, MCPOAuth, MCPStreamableHttp
+from vibe.core.utils.exceptions import first_of_type
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 from vibe.utils.keyring import (
     delete_api_key_from_keyring,
@@ -600,25 +601,15 @@ async def _classify_refresh_error(response: httpx.Response) -> tuple[str, bool]:
     return reason, error == _OAUTH_INVALID_GRANT
 
 
-def _first_of_type[E: BaseException](exc: BaseException, target: type[E]) -> E | None:
-    if isinstance(exc, target):
-        return exc
-    if isinstance(exc, BaseExceptionGroup):
-        for sub in exc.exceptions:
-            if (found := _first_of_type(sub, target)) is not None:
-                return found
-    return None
-
-
 def unwrap_oauth_refresh_error(
     exc: BaseException,
 ) -> MCPOAuthInvalidGrant | MCPOAuthTransientRefreshError | OAuthFlowError | None:
     """Find a known OAuth error inside a possibly-grouped exception (streamable_http wraps auth-flow errors in an ExceptionGroup)."""
-    if (invalid_grant := _first_of_type(exc, MCPOAuthInvalidGrant)) is not None:
+    if (invalid_grant := first_of_type(exc, MCPOAuthInvalidGrant)) is not None:
         return invalid_grant
-    if (transient := _first_of_type(exc, MCPOAuthTransientRefreshError)) is not None:
+    if (transient := first_of_type(exc, MCPOAuthTransientRefreshError)) is not None:
         return transient
-    return _first_of_type(exc, OAuthFlowError)
+    return first_of_type(exc, OAuthFlowError)
 
 
 class _ServerIssuedSecretContext(OAuthContext):

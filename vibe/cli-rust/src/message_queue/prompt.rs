@@ -4,10 +4,30 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::server::{method, Client, PreparedPrompt, RequestFailure, TurnInputEntry};
+use crate::collapsed_pastes::{CollapsedPastes, DISPLAY_ANNOTATION};
+use crate::image_placeholders;
+use crate::server::{
+    method, Client, ImageAttachment, PreparedPrompt, RequestFailure, TurnInputEntry,
+};
 
 /// Expand mentions and snapshot attachments before a prompt enters the queue.
+/// `[Image #N]` placeholders of `images` are prepared as the image mentions
+/// they stand for, then restored in the text the model reads.
 pub(super) async fn prepare(
+    client: &Arc<Client>,
+    session_id: &str,
+    text: &str,
+    images: &[ImageAttachment],
+) -> Result<PreparedPrompt, String> {
+    let expanded = image_placeholders::expand(text, images);
+    let mut prepared = prepare_text(client, session_id, &expanded).await?;
+    if expanded != text {
+        image_placeholders::collapse(&mut prepared, text, images);
+    }
+    Ok(prepared)
+}
+
+async fn prepare_text(
     client: &Arc<Client>,
     session_id: &str,
     text: &str,
@@ -27,7 +47,7 @@ pub(super) async fn prepare(
                 .downcast_ref::<RequestFailure>()
                 .is_some_and(RequestFailure::is_invalid_params)
             {
-                return Err(error.to_string());
+                return Err(format!("{error:#}"));
             }
             tracing::warn!(%error, "prompt preparation unavailable; using raw text");
             Ok(PreparedPrompt::from_text(text.to_owned()))
@@ -35,9 +55,20 @@ pub(super) async fn prepare(
     }
 }
 
-pub(super) fn entry(entry_id: String, prompt: &PreparedPrompt, fallback: &str) -> TurnInputEntry {
+/// A queued user entry whose display content marks the collapsed pastes it sends.
+pub(super) fn entry(
+    entry_id: String,
+    prompt: &PreparedPrompt,
+    fallback: &str,
+    pastes: &CollapsedPastes,
+) -> TurnInputEntry {
+    let text = prompt.prompt_text.as_deref().unwrap_or(fallback);
     TurnInputEntry {
-        annotations: Default::default(),
+        annotations: pastes
+            .display(text)
+            .map(|display| (DISPLAY_ANNOTATION.to_owned(), display))
+            .into_iter()
+            .collect(),
         content: prompt.content_blocks(fallback),
         entry_id,
         role: "user",
@@ -52,7 +83,7 @@ pub(super) async fn request(
     let value = serde_json::to_value(params).map_err(|error| error.to_string())?;
     client.request(method, value).await.map_err(|error| {
         tracing::warn!(%error, method, "queue command failed");
-        error.to_string()
+        format!("{error:#}")
     })?;
     Ok(())
 }

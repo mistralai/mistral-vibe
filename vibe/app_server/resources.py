@@ -13,6 +13,7 @@ from vibe.app_server._runtime_resources import (
     AgentResource,
     ConfigResource,
     IdentityResource,
+    ProviderAuthResource,
     RuntimeResource,
 )
 from vibe.app_server._service_resources import (
@@ -41,6 +42,7 @@ class AppServerResources:
     ) -> None:
         self.account = AccountResource(connection, state)
         self.identity = IdentityResource(connection, state)
+        self.provider_auth = ProviderAuthResource(connection, state)
         self.config = ConfigResource(connection, state)
         self.agents = AgentResource(connection, state)
         self.runtime = RuntimeResource(connection, state)

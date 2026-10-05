@@ -64,7 +64,7 @@ class DeferredConfiguration[DerivationT]:
         async with self._applying:
             yield
 
-    async def apply(self) -> None:
+    async def apply(self) -> bool:
         """Derive and push now, parking again if a turn owns the settings.
 
         Serialised: deriving and pushing are two awaits, so concurrent callers
@@ -74,24 +74,24 @@ class DeferredConfiguration[DerivationT]:
         configuration that won.
         """
         async with self._applying:
-            await self._apply_locked()
+            return await self._apply_locked()
 
     async def _apply_locked(
         self,
         push: Callable[[DerivationT], Awaitable[None]] | None = None,
         *,
         check_turn: bool = True,
-    ) -> None:
+    ) -> bool:
         self._parked = False
         try:
             derivation = await self._derive()
             if check_turn and self._turn_running():
                 self._parked = True
-                return
+                return False
             await (push or self._push)(derivation)
         except HarnessTurnConflictError:
             self._parked = True
-            return
+            return False
         except BaseException:
             # Parked until it is actually running. One caller is the event pump,
             # whose task is cancelled when the session's stream ends, and a
@@ -100,17 +100,18 @@ class DeferredConfiguration[DerivationT]:
             self._parked = True
             raise
         self._adopt(derivation)
+        return True
 
-    async def apply_when_idle(self) -> None:
+    async def apply_when_idle(self) -> bool:
         """Push between turns; park during one."""
         if self._turn_running():
             self._parked = True
-            return
-        await self.apply()
+            return False
+        return await self.apply()
 
     async def apply_through(
         self, push: Callable[[DerivationT], Awaitable[None]]
-    ) -> None:
+    ) -> bool:
         """Derive and push through a push of the caller's own.
 
         A turn the Session has reserved but not started is one the Core has not
@@ -119,7 +120,7 @@ class DeferredConfiguration[DerivationT]:
         lock is what this shares with the ordinary apply.
         """
         async with self._applying:
-            await self._apply_locked(push, check_turn=False)
+            return await self._apply_locked(push, check_turn=False)
 
     async def settle_through(
         self, push: Callable[[DerivationT], Awaitable[None]]
@@ -134,8 +135,7 @@ class DeferredConfiguration[DerivationT]:
         async with self._applying:
             if not self._parked:
                 return False
-            await self._apply_locked(push, check_turn=False)
-            return not self._parked
+            return await self._apply_locked(push, check_turn=False)
 
     async def settle(self) -> bool:
         """Apply what is parked, if a boundary has actually been reached.
@@ -154,5 +154,4 @@ class DeferredConfiguration[DerivationT]:
         async with self._applying:
             if not self._parked or self._turn_running():
                 return False
-            await self._apply_locked()
-            return not self._parked
+            return await self._apply_locked()

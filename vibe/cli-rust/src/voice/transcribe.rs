@@ -20,7 +20,7 @@ pub async fn transcribe(
     sample_rate: u32,
     chunks: UnboundedReceiver<Vec<u8>>,
     events: &Sender<VoiceEvent>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let url = build_url(&cfg.api_base, &cfg.name);
     let mut req = url
         .as_str()
@@ -69,12 +69,13 @@ pub async fn transcribe(
 }
 
 /// Drain server events until `transcription.done`, an error, or the socket closes.
-async fn read_events<S>(read: &mut S, events: &Sender<VoiceEvent>) -> Result<(), String>
+pub async fn read_events<S>(read: &mut S, events: &Sender<VoiceEvent>) -> Result<bool, String>
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
     let mut got_text = false;
-    while let Some(Ok(msg)) = read.next().await {
+    while let Some(msg) = read.next().await {
+        let msg = msg.map_err(|error| format!("Transcription connection failed: {error}"))?;
         let text = match msg {
             Message::Text(t) => t,
             Message::Close(_) => break,
@@ -84,9 +85,14 @@ where
             continue;
         };
         match value.get("type").and_then(Value::as_str) {
+            Some("session.created") => {
+                if let Some(id) = value.pointer("/session/request_id").and_then(Value::as_str) {
+                    let _ = events.try_send(VoiceEvent::SessionCreated(id.to_string()));
+                }
+            }
             Some("transcription.text.delta") => {
                 if let Some(delta) = value.get("text").and_then(Value::as_str) {
-                    got_text = true;
+                    got_text |= !delta.is_empty();
                     let _ = events.try_send(VoiceEvent::TextDelta(delta.to_string()));
                 }
             }
@@ -104,10 +110,7 @@ where
             _ => {}
         }
     }
-    if !got_text {
-        let _ = events.try_send(VoiceEvent::Notice("No speech detected".to_string()));
-    }
-    Ok(())
+    Ok(got_text)
 }
 
 /// `{api_base}/v1/audio/transcriptions/realtime?model=…`, forcing the ws scheme.

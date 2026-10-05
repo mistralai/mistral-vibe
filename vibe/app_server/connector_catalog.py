@@ -651,11 +651,14 @@ class ConnectorCatalogService:
                 f"Connector alias not found in the accepted session catalog: {params.alias}",
             )
 
-        catalog_result = self.read_catalog(context.orchestrator)
-        catalog = catalog_result.catalog
-        if accepted is not None and (
-            catalog is None or catalog.revision != accepted.accepted_catalog_revision
-        ):
+        catalog = (
+            self._catalog_at_revision(
+                context.orchestrator, accepted.accepted_catalog_revision
+            )
+            if accepted is not None
+            else self.read_catalog(context.orchestrator).catalog
+        )
+        if accepted is not None and catalog is None:
             raise RequestFailure(
                 ProtocolErrorCode.CONFLICT,
                 "The host connector catalog does not match the target session",
@@ -767,6 +770,10 @@ class ConnectorCatalogService:
         root: SessionBackend | None,
         notify: Notify,
     ) -> ConnectorRuntimeAuthorization | None:
+        # An event, not a request: one for a session this server does not serve
+        # is dropped, never raised into the loop that forwards every event.
+        if root is None or root.session_id != params.session_id:
+            return None
         context = await self._target(params.session_id, root)
         request = await context.require_control().request_connector_auth(
             alias=params.alias
@@ -1183,6 +1190,19 @@ class ConnectorCatalogService:
             catalog=hit.catalog, stored_at=hit.stored_at
         )
         return _catalog_read_result(hit.catalog, "fresh_cache", backend=self._backend)
+
+    def _catalog_at_revision(
+        self, orchestrator: ConfigOrchestrator[VibeConfigSchema], revision: str
+    ) -> ResolvedConnectorCatalog | None:
+        # Freshness decides when to refetch, not which catalog a session accepted.
+        provider = _resolve_provider(orchestrator.config)
+        memory = (
+            self._memory.get(provider.fingerprint) if provider is not None else None
+        )
+        if memory is not None and memory.catalog.revision == revision:
+            return memory.catalog
+        catalog = self.read_catalog(orchestrator).catalog
+        return catalog if catalog is not None and catalog.revision == revision else None
 
     async def _read_catalog_async(
         self, orchestrator: ConfigOrchestrator[VibeConfigSchema]

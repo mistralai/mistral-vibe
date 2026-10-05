@@ -4,20 +4,18 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::super::super::markdown::{LinkKind, LinkedLines, Sc};
 use super::super::super::{highlight, styled_text, theme};
 use super::super::diff;
 use super::bordered::{body_width, prefix};
-use crate::server::effect_output::TodoRow;
+use crate::server::effect_output::{BodyLine, TodoRow};
 use crate::utils::text;
-
-/// Marker a web-search source row opens with; its title is painted as a link.
-const SOURCE_BULLET: &str = "  • ";
 
 /// Paint diff rows under the effect header: expanding border, then the banded row.
 /// Rows wrap instead of overflowing: the gutter repeats on continuation rows so
 /// wrapped content keeps its structure and nothing scrolls horizontally.
 pub(super) fn push_edit_diff(
-    lines: &mut Vec<Line<'static>>,
+    lines: &mut LinkedLines,
     rows: &[diff::DiffRow],
     width: u16,
     warnings: &[String],
@@ -99,9 +97,10 @@ fn truncate(text: &str, width: usize) -> String {
     out
 }
 
-/// One wrapped body row: source bullet, warning, or highlightable text.
+/// One wrapped body row: a row of a led line (web-search source), warning, or highlightable text.
 enum Row {
-    Source(String),
+    /// The lead (or its blank hang on wrapped rows), the text, and the link it opens.
+    Led(String, String, Option<usize>),
     Warning(String),
     Text(String),
 }
@@ -109,8 +108,8 @@ enum Row {
 /// The bordered result body: warnings stacked above the content rows
 /// (Python's Read/Edit/Grep widgets compose them into one result widget).
 pub(super) fn push_effect_body(
-    lines: &mut Vec<Line<'static>>,
-    body: &[String],
+    lines: &mut LinkedLines,
+    body: &[BodyLine],
     width: u16,
     content_style: Style,
     lang: &str,
@@ -121,19 +120,33 @@ pub(super) fn push_effect_body(
         .into_iter()
         .map(Row::Warning)
         .chain(body.iter().flat_map(|line| {
-            // A source bullet's every row is link-styled, so hit testing still
-            // binds the label once it wraps (`markdown::links` walks a label
-            // across rows).
-            let bullet = line.starts_with(SOURCE_BULLET);
-            text::wrap_hard(&text::expand_tabs(line), content)
+            let link = line
+                .link
+                .clone()
+                .map(|url| lines.link(url, LinkKind::External));
+            let text = text::expand_tabs(&line.text);
+            if line.lead.is_empty() && link.is_none() {
+                return text::wrap_hard(&text, content)
+                    .into_iter()
+                    .map(Row::Text)
+                    .collect::<Vec<_>>();
+            }
+            // Wrapped rows hang under the text, unless the body is too narrow to indent.
+            let (lead, text, hang) = match line.lead.width() {
+                hang if hang < content => (line.lead, text, hang),
+                _ => ("", format!("{}{text}", line.lead), 0),
+            };
+            text::wrap_hard(&text, content - hang)
                 .into_iter()
-                .map(move |row| {
-                    if bullet {
-                        Row::Source(row)
-                    } else {
-                        Row::Text(row)
-                    }
+                .enumerate()
+                .map(|(index, row)| {
+                    let lead = match index {
+                        0 => lead.to_owned(),
+                        _ => " ".repeat(hang),
+                    };
+                    Row::Led(lead, row, link)
                 })
+                .collect()
         }))
         .collect::<Vec<_>>();
     let last = rows.len().saturating_sub(1);
@@ -147,19 +160,24 @@ pub(super) fn push_effect_body(
                     theme::text(theme::warning()),
                 ));
             }
-            Row::Source(text_line) => {
-                // The label and its wrapped continuations stay link-styled, so
-                // hit testing binds them across rows.
-                let link = theme::text(theme::md_link())
+            Row::Led(lead, text_line, link) => {
+                if !lead.is_empty() {
+                    spans.push(Span::styled(lead.clone(), style));
+                }
+                let Some(link) = link else {
+                    spans.push(Span::styled(text_line.clone(), content_style));
+                    lines.push(Line::from(spans));
+                    continue;
+                };
+                let link_style = theme::text(theme::md_link())
                     .add_modifier(Modifier::DIM)
                     .add_modifier(Modifier::UNDERLINED);
-                match text_line.strip_prefix(SOURCE_BULLET) {
-                    Some(title) => {
-                        spans.push(Span::styled(SOURCE_BULLET, style));
-                        spans.push(Span::styled(title.to_string(), link));
-                    }
-                    None => spans.push(Span::styled(text_line.to_string(), link)),
-                }
+                let title: Vec<Sc> = text_line
+                    .chars()
+                    .map(|c| (c, link_style, Some(*link)))
+                    .collect();
+                lines.push_row(spans, &title);
+                continue;
             }
             Row::Text(text_line) => {
                 match highlight::code(text_line, lang).and_then(|rows| rows.into_iter().next()) {
@@ -174,7 +192,7 @@ pub(super) fn push_effect_body(
 
 /// Python `TodoResultWidget`: one `{icon} {content}` row per todo, bucketed by
 /// status and colored per bucket (`.todo-{status}` classes).
-pub(super) fn push_todo_body(lines: &mut Vec<Line<'static>>, rows: &[TodoRow<'_>], width: u16) {
+pub(super) fn push_todo_body(lines: &mut LinkedLines, rows: &[TodoRow<'_>], width: u16) {
     let wrapped = rows
         .iter()
         .flat_map(|row| {
@@ -212,7 +230,7 @@ fn wrap_warnings(warnings: &[String], width: u16) -> Vec<String> {
         .collect()
 }
 
-fn push_warning_rows(lines: &mut Vec<Line<'static>>, rows: &[String], last: usize) {
+fn push_warning_rows(lines: &mut LinkedLines, rows: &[String], last: usize) {
     for (index, row) in rows.iter().enumerate() {
         lines.push(Line::from(vec![
             prefix(index == last, theme::muted_style()),

@@ -270,6 +270,13 @@ class WorktreeClaim:
     def holders(self) -> frozenset[str]:
         return self._live_holders(exclude={_STARTING_HOLDER})
 
+    def holders_excluding(self, session_id: str | None) -> frozenset[str]:
+        """The live holders minus the asking session, which never counts."""
+        held_by = self.holders()
+        if session_id is not None:
+            held_by -= {session_id}
+        return held_by
+
     def mark_starting(self) -> None:
         self._acquire_holder(
             self._holder_path(_STARTING_HOLDER), reference_counted=False

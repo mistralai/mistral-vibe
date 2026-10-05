@@ -1,0 +1,46 @@
+[
+ {
+  "method": "session/list",
+  "params": {
+   "cwd": "/home/user/worktrees/feature"
+  }
+ },
+ {
+  "method": "session/resume",
+  "params": {
+   "agentConfig": {
+    "cwd": "<cwd>",
+    "trustWorkspace": true
+   },
+   "historyLimit": 200,
+   "sessionId": "00000000-0000-4000-8000-000000000003"
+  }
+ },
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "text": "hi",
+       "type": "text"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000003"
+  }
+ },
+ {
+  "method": "feedback/shouldShow",
+  "params": {
+   "pendingUserMessages": 1,
+   "sessionId": "00000000-0000-4000-8000-000000000003"
+  }
+ }
+]

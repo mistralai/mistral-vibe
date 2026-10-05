@@ -3,9 +3,10 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 import re
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from vibe.core.config import MCPServer, MCPStdio
+from vibe.utils.url import display_url_or_raw
 
 REDACTED = "<redacted>"
 PLUGIN_PLACEHOLDER = "<plugin>"
@@ -85,10 +86,10 @@ def redact_values(values: Mapping[str, str]) -> dict[str, str]:
 
 
 def redact_url(url: str) -> str:
-    parts = urlsplit(url)
-    host = parts.hostname or ""
-    netloc = f"{host}:{parts.port}" if parts.port is not None else host
-    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    # The shared rebuild drops the query and userinfo and re-brackets an IPv6
+    # host; a netloc it cannot rebuild is stripped textually rather than
+    # published raw, since the plugin catalog publishes the result directly.
+    return display_url_or_raw(url)
 
 
 def sanitize_message(message: str, roots: Iterable[Path] = ()) -> str:

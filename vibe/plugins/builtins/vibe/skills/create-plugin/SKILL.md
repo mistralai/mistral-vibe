@@ -97,7 +97,7 @@ connectors), add an `ai.mistral.vibe` extension to `plugin.json`:
 Without this extension, Vibe only loads `plugin.json`, `skills/`, and
 `mcp.json`. The `toolNamespace` defaults to a TypeScript identifier derived
 from the plugin name. It must not be one of the reserved namespaces:
-`file_system`, `self`, `process`, `agent`, `vibe`.
+`file_system`, `self`, `process`, `skill`, `subagent`, `vibe`.
 
 `vibe` is reserved for built-in plugins shipped with the CLI; user plugins
 must choose a different namespace.

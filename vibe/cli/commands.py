@@ -24,6 +24,7 @@ class Command:
     exits: bool = False
     side_channel: bool = False
     is_available: CommandAvailability | None = None
+    forwards_to_model: bool = False
 
 
 class CommandRegistry:
@@ -127,7 +128,7 @@ class CommandRegistry:
             ),
             "status": Command(
                 aliases=frozenset(["/status"]),
-                description="Display agent statistics",
+                description="Display agent statistics and model and provider details",
                 handler="_show_status",
                 side_channel=True,
             ),
@@ -231,10 +232,13 @@ class CommandRegistry:
             "loop": Command(
                 aliases=frozenset(["/loop"]),
                 description=(
-                    "Schedule a recurring prompt. "
+                    "Schedule a recurring prompt in natural language: `/loop [schedule] [prompt]`"
+                    if self._context.experimental_harness
+                    else "Schedule a recurring prompt. "
                     "Use `/loop <interval> <prompt>`, `/loop list`, or `/loop cancel <id|all>`"
                 ),
                 handler="_loop_command",
+                forwards_to_model=self._context.experimental_harness,
             ),
             "data-retention": Command(
                 aliases=frozenset(["/data-retention"]),

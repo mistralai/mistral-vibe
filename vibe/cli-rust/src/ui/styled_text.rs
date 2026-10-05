@@ -5,14 +5,6 @@ use ratatui::text::Span;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-pub(crate) fn width(spans: &[Span<'static>]) -> usize {
-    spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>()
-        .width()
-}
-
 pub(crate) fn wrap_hard(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
     let width = width.max(1);
     let chars = styled_chars(spans);

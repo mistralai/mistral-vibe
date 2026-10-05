@@ -10,6 +10,7 @@ use crate::app::App;
 use crate::config;
 use crate::selection::{self, Release};
 use crate::server::Client;
+use crate::utils::scroll::ScrollAnchor;
 use crate::{approval, connector_auth, external_url, mcp, mcp_oauth, question_input};
 
 pub(super) fn dispatch(
@@ -30,7 +31,7 @@ pub(super) fn dispatch(
         MouseTarget::RemoteProject => crate::vibe_code_project::input::mouse(app, client, event),
         MouseTarget::Mcp => match event.kind {
             MouseEventKind::Down(MouseButton::Left) => mcp::press(app, at),
-            MouseEventKind::Up(MouseButton::Left) => mcp::release(app, client, at),
+            MouseEventKind::Up(MouseButton::Left) => mcp::release(app, at),
             _ => {}
         },
         MouseTarget::McpOAuth => match event.kind {
@@ -51,16 +52,74 @@ pub(super) fn dispatch(
             }
         }
         MouseTarget::TodoSidebar => {}
+        MouseTarget::SubagentList => subagent_list_event(app, event),
         MouseTarget::Config | MouseTarget::ConfigEditor => {
             config::handle_mouse(app, client, config_tx, event)
         }
+        // The wizard's regions never reach the loop (the wizard runs
+        // pre-session and routes its own mouse events).
         MouseTarget::Blocked
         | MouseTarget::Completion
         | MouseTarget::ThemePicker
         | MouseTarget::ModelPicker
         | MouseTarget::LogLevelPicker
         | MouseTarget::ResumePicker
-        | MouseTarget::Rewind => {}
+        | MouseTarget::Rewind
+        | MouseTarget::OnboardingThemeList
+        | MouseTarget::OnboardingPreview
+        | MouseTarget::OnboardingLinks
+        | MouseTarget::OnboardingInputs => {}
+    }
+}
+
+/// The subagent list: hover moves the marker, a click highlights then selects
+/// (Python `on_mouse_move` + OptionList click).
+fn subagent_list_event(app: &mut App, event: MouseEvent) {
+    let at = (event.column, event.row);
+    let Some(index) = app
+        .subagents
+        .list
+        .row_areas
+        .iter()
+        .find(|(area, _)| {
+            at.0 >= area.x && at.0 < area.right() && at.1 >= area.y && at.1 < area.bottom()
+        })
+        .map(|(_, index)| *index)
+    else {
+        if event.kind == MouseEventKind::Moved {
+            app.subagents.list.mouse_session_id = None;
+        }
+        return;
+    };
+    let session_id = if index == 0 {
+        None
+    } else {
+        app.subagents
+            .list
+            .rows
+            .get(index - 1)
+            .map(|row| row.id.clone())
+    };
+    match event.kind {
+        MouseEventKind::Moved => {
+            app.subagents.list.mouse_session_id =
+                Some(session_id.unwrap_or_else(|| crate::subagents::MAIN_SESSION_ID.to_owned()));
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            app.subagents.list.mouse_session_id = None;
+            app.subagents.list.highlighted = index;
+            app.subagents.list.focused = true;
+            app.subagents.list.press_row = Some(index);
+            app.set_app_focus(false);
+        }
+        // A click is press then release on the same option (Textual OptionList).
+        MouseEventKind::Up(MouseButton::Left) => {
+            let pressed = app.subagents.list.press_row.take();
+            if pressed == Some(index) {
+                crate::subagents::select(app, session_id);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -111,8 +170,15 @@ fn selection_event(app: &mut App, target: MouseTarget, event: MouseEvent) {
     let at = (event.column, event.row);
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            // Python keeps the input box enabled while the list is focused, so
+            // clicking the composer hands it focus (Textual widget click).
+            if target == MouseTarget::Composer && app.subagents.list.focused {
+                crate::subagents::focus_input(app);
+            }
             // Python keeps the inline notice across a transcript mouse-down
             // (it clears only via its own timeout or a queue-mode event).
+            app.selection.had_selection_at_press =
+                app.selection.region.is_some() || app.selection.bottom_bar.is_some();
             selection::press(app, at);
         }
         MouseEventKind::Drag(MouseButton::Left) => selection::drag(app, at),
@@ -127,6 +193,9 @@ fn selection_event(app: &mut App, target: MouseTarget, event: MouseEvent) {
                     crate::ui::markdown::LinkKind::Attachment => {
                         external_url::open_file(link.target())
                     }
+                    crate::ui::markdown::LinkKind::InlineImage => {
+                        crate::inline_images::open(app, link.target())
+                    }
                 }
             } else if matches!(released, Release::RegionClick) {
                 toggle_effect_at(app, event.row);
@@ -136,21 +205,63 @@ fn selection_event(app: &mut App, target: MouseTarget, event: MouseEvent) {
     }
 }
 
-fn toggle_effect_at(app: &mut App, row: u16) {
-    let Some(id) = app
+/// Toggle the entry or group a transcript row hit, following the viewed
+/// child's transcript and cache when a sub-agent view is open.
+pub fn toggle_effect_at(app: &mut App, row: u16) {
+    let Some((header, id)) = app
         .view
         .entry_hitmap
         .iter()
-        .find(|(top, bottom, _)| row >= *top && row < *bottom)
-        .map(|(_, _, id)| id.clone())
+        .find(|(top, bottom, _, _)| row >= *top && row < *bottom)
+        .map(|(_, _, header, id)| (*header, id.clone()))
     else {
         return;
     };
-    if !app.view.transcript.is_expandable(&id) {
+    // Python `_click_is_passive`: with a selection showing, only the header row toggles.
+    if app.selection.had_selection_at_press && header != Some(row) {
         return;
     }
-    if !app.view.expanded.remove(&id) {
-        app.view.expanded.insert(id);
+    // The child view swaps its transcript and cache in only at render time,
+    // so the expandability check and the layout cache to invalidate both
+    // follow the viewed child, like `App::toggle_tools`.
+    if let Some(child) = app
+        .subagents
+        .viewed_subagent_id
+        .as_deref()
+        .and_then(|child_id| app.subagents.transcripts.child_mut(child_id))
+    {
+        if !child.transcript.is_expandable(&id) {
+            return;
+        }
+        child.cache.invalidate_layouts();
+    } else {
+        if !app.view.transcript.is_expandable(&id) {
+            return;
+        }
+        app.view.transcript_cache.invalidate_layouts();
     }
-    app.view.transcript_cache.invalidate_layouts();
+    let reveal = !app.view.expanded.remove(&id);
+    if reveal {
+        app.view.expanded.insert(id.clone());
+    }
+    anchor_toggle(app, row, id, reveal);
+}
+
+/// Hold the clicked entry steady; an expansion then scrolls just enough to show what it revealed.
+fn anchor_toggle(app: &mut App, row: u16, key: String, reveal: bool) {
+    let landing = row.saturating_sub(app.view.selection_region.area.y);
+    let clicked = i32::from(landing);
+    app.view.scroll_anchor = app
+        .view
+        .entry_rows
+        .iter()
+        .find(|(_, top, height)| (*top..*top + i32::from(*height)).contains(&clicked))
+        .map(|&(index, row, height)| ScrollAnchor {
+            index,
+            row,
+            height,
+            landing,
+            key: Some(key),
+            reveal,
+        });
 }

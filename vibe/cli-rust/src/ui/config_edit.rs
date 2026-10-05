@@ -8,9 +8,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
-use unicode_segmentation::UnicodeSegmentation;
 
-use super::{composer_layout::ComposerLayout, scrollbar, theme};
+use super::{composer_layout::ComposerLayout, scrollbar, tab_cells::cells, theme};
 use crate::app::App;
 use crate::config_edit::{self, ConfigEdit};
 pub(super) use layout::draw_too_small;
@@ -150,20 +149,23 @@ fn input(f: &mut Frame, mut area: Rect, edit: &mut ConfigEdit) {
         .take(usize::from(inner.height))
         .map(|row| {
             let Some(at) = layout.caret_in(row) else {
-                return Line::raw(row.text);
+                return Line::raw(row.shown(..));
             };
-            let len = row.text[at..].graphemes(true).next().map_or(0, str::len);
+            let (lo, hi) = cells(row.text, row.column)
+                .map(|cell| (cell.byte, cell.byte + cell.symbol.len()))
+                .find(|&(_, hi)| hi > at)
+                .unwrap_or((at, at));
             Line::from(vec![
-                Span::raw(row.text[..at].to_owned()),
+                Span::raw(row.shown(..lo)),
                 Span::styled(
-                    if len == 0 {
+                    if lo == hi {
                         " ".to_owned()
                     } else {
-                        row.text[at..at + len].to_owned()
+                        row.shown(lo..hi)
                     },
                     cursor_style,
                 ),
-                Span::raw(row.text[at + len..].to_owned()),
+                Span::raw(row.shown(hi..)),
             ])
         })
         .collect::<Vec<_>>();

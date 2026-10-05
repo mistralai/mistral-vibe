@@ -146,7 +146,7 @@ class TestAgentLoopBackgroundTitle:
     @staticmethod
     def _patch_generator(monkeypatch: pytest.MonkeyPatch, title: str | None) -> None:
         async def fake_generate(
-            messages, *, config, previous_title=None, policy=None
+            messages, *, config, previous_title=None, policy=None, **_kwargs
         ) -> str | None:
             return title
 
@@ -301,7 +301,7 @@ class TestAgentLoopBackgroundTitle:
         calls = 0
 
         async def fake_generate(
-            messages, *, config, previous_title=None, policy=None
+            messages, *, config, previous_title=None, policy=None, **_kwargs
         ) -> str:
             nonlocal calls
             calls += 1
@@ -330,7 +330,7 @@ class TestAgentLoopBackgroundTitle:
         calls = 0
 
         async def fake_generate(
-            messages, *, config, previous_title=None, policy=None
+            messages, *, config, previous_title=None, policy=None, **_kwargs
         ) -> str | None:
             nonlocal calls
             calls += 1
@@ -362,7 +362,7 @@ class TestAgentLoopBackgroundTitle:
         calls = 0
 
         async def fake_generate(
-            messages, *, config, previous_title=None, policy=None
+            messages, *, config, previous_title=None, policy=None, **_kwargs
         ) -> str | None:
             nonlocal calls
             outcome = outcomes[calls]
@@ -406,7 +406,7 @@ class TestAgentLoopBackgroundTitle:
         generated = False
 
         async def fake_generate(
-            messages, *, config, previous_title=None, policy=None
+            messages, *, config, previous_title=None, policy=None, **_kwargs
         ) -> str:
             nonlocal generated
             generated = True
@@ -458,7 +458,8 @@ class TestAgentLoopTitleTier:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "vibe.core.agent_loop._loop.is_fast_utility_model", lambda config: True
+            "vibe.core.agent_loop._loop.is_fast_utility_model",
+            lambda config, *, feature=None: True,
         )
         loop = _make_agent_loop(tmp_path)
         cadence = _RecordingCadence()
@@ -473,7 +474,8 @@ class TestAgentLoopTitleTier:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "vibe.core.agent_loop._loop.is_fast_utility_model", lambda config: False
+            "vibe.core.agent_loop._loop.is_fast_utility_model",
+            lambda config, *, feature=None: False,
         )
         loop = _make_agent_loop(tmp_path)
         cadence = _RecordingCadence()

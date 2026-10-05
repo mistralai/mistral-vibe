@@ -34,6 +34,7 @@ def test_release_rejects_unexpected_wheel_tags(
     for index, platform in enumerate(_PLATFORMS):
         tag = replacement if index == 0 and replacement else f"cp312-abi3-{platform}"
         (dist / f"mistral_vibe-1.0.0-{tag}.whl").touch()
+    (dist / "mistral_vibe-1.0.0.tar.gz").touch()
     workflow = yaml.safe_load(_WORKFLOW.read_text())
     steps = workflow["jobs"]["release-pypi"]["steps"]
     validation = next(

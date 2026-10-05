@@ -172,6 +172,22 @@ class Checkpointer:
             self._events = self._events[:index]
             self._open = None
 
+    def prefix_before(self, turn_id: int) -> Checkpointer:
+        """A copy of the log truncated at ``turn_id``'s mark, for a fork.
+
+        Keeps the source's manual-edit counter and re-bases the sequence on
+        the retained prefix, so the copy's later events never collide with
+        the region ids and manual-edit owners it inherits.
+        """
+        index = History(self._events).event_index_of_turn(turn_id)
+        copy = Checkpointer()
+        if index is None:
+            return copy
+        copy._events = list(self._events[:index])
+        copy._seq = max((event.seq for event in copy._events), default=0)
+        copy._manual_index = self._manual_index
+        return copy
+
     # -- Manual-edit capture ---------------------------------------------------
 
     def reconcile(self, path: str, current: FileState) -> None:

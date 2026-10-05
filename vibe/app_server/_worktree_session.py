@@ -27,6 +27,7 @@ from vibe.core.git.worktree import (
     PendingSessionHold,
     PreparedWorktree,
     RetainedRepositoryMapping,
+    WorktreeProgressCallback,
 )
 from vibe.core.paths import dedup_paths
 from vibe.core.session.worktrees import (
@@ -37,8 +38,12 @@ from vibe.core.session.worktrees import (
     UseExistingWorktree,
     WorktreeRequest,
 )
+from vibe.core.telemetry.types import LaunchContext
 
 type MoveSession = Callable[[SessionOptions], Awaitable[None]]
+type AnnounceWorktree = Callable[
+    [SessionOptions, PreparedWorktree | None], Awaitable[None]
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,8 +69,10 @@ class SessionWorktrees:
     CLI has to call.
     """
 
-    def __init__(self) -> None:
-        self._lifecycle = WorktreeLifecycle()
+    def __init__(
+        self, launch_context_getter: Callable[[], LaunchContext | None] | None = None
+    ) -> None:
+        self._lifecycle = WorktreeLifecycle(launch_context_getter=launch_context_getter)
 
     # -- where a session starts -------------------------------------------
 
@@ -88,7 +95,11 @@ class SessionWorktrees:
         )
         return _rewritten(options, resolved)
 
-    async def resolve_for_start(self, options: SessionOptions) -> WorktreeResolution:
+    async def resolve_for_start(
+        self,
+        options: SessionOptions,
+        on_progress: WorktreeProgressCallback | None = None,
+    ) -> WorktreeResolution:
         """Resolve off the event loop, cleaning up if the start is cancelled."""
         request = _requested(options)
         if request is None:
@@ -108,7 +119,16 @@ class SessionWorktrees:
                     if pending_hold is not None:
                         pending_hold.release()
                 raise
-        resolved = await self._lifecycle.resolve_for_start(request, _base_cwd(options))
+        resolved = await self._lifecycle.resolve_for_start(
+            request, _base_cwd(options), on_progress
+        )
+        return _rewritten(options, resolved)
+
+    async def resolve_for_fork(self, options: SessionOptions) -> WorktreeResolution:
+        """Isolate a managed source while retaining an unmanaged workspace."""
+        resolved = await self._lifecycle.resolve_fork(_base_cwd(options))
+        if resolved.prepared is None:
+            return WorktreeResolution(options=options)
         return _rewritten(options, resolved)
 
     async def raise_behind(
@@ -117,6 +137,8 @@ class SessionWorktrees:
         move: MoveSession,
         requested: SessionOptions,
         started_in: SessionOptions,
+        announce: AnnounceWorktree | None = None,
+        on_progress: WorktreeProgressCallback | None = None,
     ) -> WorktreeResolution:
         """Raise the worktree the session asked for and move it in.
 
@@ -125,17 +147,34 @@ class SessionWorktrees:
         the project must refuse to run rather than quietly write it.
         """
         previous = _base_cwd(started_in)
-        resolution = await self.resolve_for_start(requested)
+        resolution = await self.resolve_for_start(requested, on_progress)
         cwd = _base_cwd(resolution.options)
+        announced = False
         try:
             self.hold(cwd, session_id, resolution.pending_hold)
+            # Announced before the move, not after it: a client waiting out the
+            # preparation (the CLI's pre-TUI gate) can proceed the moment the
+            # worktree exists, while the context rebuild that retargets the
+            # tools still runs. Turns are held behind that rebuild, so nothing
+            # runs in the wrong place. Best effort: a lost announce costs an
+            # early footer, not the session.
+            if announce is not None:
+                with suppress(Exception):
+                    await announce(resolution.options, resolution.prepared_worktree)
+                announced = True
             await move(resolution.options)
-        except BaseException:
-            # Inside the same arm as the move: a worktree created and then not
-            # held could be selected by retention while startup is unwinding.
+        except BaseException as exc:
+            # A cancellation that lands once the settle was announced is a
+            # teardown, not a failed start: the worktree was already handed to
+            # a client, and a replacing session (a resume rebinds, shutting
+            # the start backend down) may be standing in it. Release the
+            # claim, keep the directory, and let retention reap it if nobody
+            # holds it. Anything that fails before the announce, or fails on
+            # its own, unwinds the start it created.
             with suppress(BaseException):
                 self.release(cwd, session_id)
-            await self.cleanup(resolution)
+            if not (announced and isinstance(exc, asyncio.CancelledError)):
+                await self.cleanup(resolution)
             raise
         # The session is standing in the worktree by now. Letting go of where it
         # was is bookkeeping, and must not be the reason its turns are refused.

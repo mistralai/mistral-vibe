@@ -10,6 +10,7 @@ use vibe_rs::server::{MCPSourceKind, MCPSourceStatus, MCPSourceSummary, MCPToolS
 fn source(name: &str, kind: MCPSourceKind, tools: bool) -> MCPSourceSummary {
     MCPSourceSummary {
         name: name.to_owned(),
+        display_name: String::new(),
         kind,
         transport: "stdio".to_owned(),
         status: MCPSourceStatus::Connected,
@@ -23,6 +24,7 @@ fn source(name: &str, kind: MCPSourceKind, tools: bool) -> MCPSourceSummary {
             Vec::new()
         },
         error: None,
+        plugin_name: None,
     }
 }
 

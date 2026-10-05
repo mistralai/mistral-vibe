@@ -10,7 +10,7 @@ from vibe.core.telemetry.send import (
     send_unified_subagent_tool_call_finished,
     send_unified_tool_call_finished,
 )
-from vibe.core.telemetry.types import TelemetryCallType
+from vibe.core.telemetry.types import AttachmentKind, TelemetryCallType
 
 __all__ = ["SessionTelemetry"]
 
@@ -67,6 +67,7 @@ class SessionTelemetry:
         nb_prompt_chars: int,
         call_type: TelemetryCallType,
         message_id: str | None = None,
+        attachment_counts: dict[AttachmentKind, int] | None = None,
     ) -> None:
         self._client.send_request_sent(
             model=model,
@@ -75,6 +76,7 @@ class SessionTelemetry:
             nb_prompt_chars=nb_prompt_chars,
             call_type=call_type,
             message_id=message_id,
+            attachment_counts=attachment_counts,
         )
 
     def record_tool_call_finished(

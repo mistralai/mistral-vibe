@@ -1,21 +1,35 @@
 //! Composer row and scroll calculations.
 
 use std::collections::VecDeque;
+use std::ops::RangeBounds;
 
-use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+use super::tab_cells::{cells, cells_width, Cell};
+
+/// Visual row as `(start, end, column)`: body bytes and its logical-line column.
+type Range = (usize, usize, usize);
 
 #[derive(Clone, Copy)]
 pub struct Row<'a> {
     pub index: usize,
     pub start: usize,
     pub text: &'a str,
+    pub column: usize,
     final_in_line: bool,
 }
 
 impl Row<'_> {
     pub fn end(self) -> usize {
         self.start + self.text.len()
+    }
+
+    /// Row bytes in `bytes` as drawn, tabs expanded to spaces.
+    pub fn shown(self, bytes: impl RangeBounds<usize>) -> String {
+        cells(self.text, self.column)
+            .filter(|cell| bytes.contains(&cell.byte))
+            .map(Cell::shown)
+            .collect()
     }
 }
 
@@ -24,15 +38,17 @@ struct Glyph {
     start: usize,
     end: usize,
     width: u16,
+    column: usize,
     whitespace: bool,
 }
 
-fn wrapped_ranges(text: &str, width: u16) -> Vec<(usize, usize)> {
-    let glyphs = text.grapheme_indices(true).map(|(start, symbol)| Glyph {
-        start,
-        end: start + symbol.len(),
-        width: symbol.width() as u16,
-        whitespace: symbol.chars().all(char::is_whitespace),
+fn wrapped_ranges(text: &str, width: u16) -> Vec<Range> {
+    let glyphs = cells(text, 0).map(|cell| Glyph {
+        start: cell.byte,
+        end: cell.byte + cell.symbol.len(),
+        width: cell.width as u16,
+        column: cell.column,
+        whitespace: cell.symbol.chars().all(char::is_whitespace),
     });
     let mut rows = Vec::new();
     let mut line: Vec<Glyph> = Vec::new();
@@ -58,7 +74,7 @@ fn wrapped_ranges(text: &str, width: u16) -> Vec<(usize, usize)> {
             || (glyph.width > 0 && line_width + whitespace_width + word_width + glyph.width > width)
         {
             let mut remaining = width.saturating_sub(line_width);
-            push_range(&mut rows, &line, glyph.start);
+            push_range(&mut rows, &line, (glyph.start, glyph.column));
             line.clear();
             line_width = 0;
             while let Some(pending) = whitespace.front() {
@@ -85,63 +101,64 @@ fn wrapped_ranges(text: &str, width: u16) -> Vec<(usize, usize)> {
     line.extend(whitespace);
     line.append(&mut word);
     if !line.is_empty() {
-        push_range(&mut rows, &line, text.len());
+        push_range(&mut rows, &line, (text.len(), 0));
     }
     if rows.is_empty() {
-        rows.push((0, 0));
+        rows.push((0, 0, 0));
     }
     rows
 }
 
-fn push_range(rows: &mut Vec<(usize, usize)>, glyphs: &[Glyph], fallback: usize) {
+fn push_range(rows: &mut Vec<Range>, glyphs: &[Glyph], (byte, column): (usize, usize)) {
     rows.push(
         glyphs
             .first()
             .zip(glyphs.last())
-            .map_or((fallback, fallback), |(first, last)| {
-                (first.start, last.end)
+            .map_or((byte, byte, column), |(first, last)| {
+                (first.start, last.end, first.column)
             }),
     );
 }
 
-fn visual_position(rows: &[(usize, usize)], text: &str, cursor: usize) -> (usize, usize) {
+fn visual_position(rows: &[Range], text: &str, cursor: usize) -> (usize, usize) {
     let row = rows
-        .partition_point(|&(start, _)| start <= cursor)
+        .partition_point(|&(start, ..)| start <= cursor)
         .saturating_sub(1)
         .min(rows.len().saturating_sub(1));
-    let (start, end) = rows[row];
-    (row, text[start..cursor.clamp(start, end)].width())
+    let (start, end, column) = rows[row];
+    let cursor = cursor.clamp(start, end);
+    (row, cells_width(&text[start..cursor], column))
 }
 
-fn visual_rows(body: &str, width: u16) -> Vec<(usize, usize)> {
+fn visual_rows(body: &str, width: u16) -> Vec<Range> {
     rows_with(body, |text| wrapped_ranges(text, width))
 }
 
-fn hard_wrapped_ranges(text: &str, width: u16) -> Vec<(usize, usize)> {
+fn hard_wrapped_ranges(text: &str, width: u16) -> Vec<Range> {
     let mut rows = Vec::new();
-    let mut start = 0;
-    let mut used = 0;
-    for (index, symbol) in text.grapheme_indices(true) {
-        let symbol_width = symbol.width() as u16;
-        if index > start && used + symbol_width > width {
-            rows.push((start, index));
-            start = index;
+    let (mut start, mut column, mut used) = (0, 0, 0);
+    for cell in cells(text, 0) {
+        let symbol_width = cell.width as u16;
+        if cell.byte > start && used + symbol_width > width {
+            rows.push((start, cell.byte, column));
+            start = cell.byte;
+            column += usize::from(used);
             used = 0;
         }
         used += symbol_width;
     }
-    rows.push((start, text.len()));
+    rows.push((start, text.len(), column));
     rows
 }
 
-fn rows_with(body: &str, rows: impl Fn(&str) -> Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+fn rows_with(body: &str, rows: impl Fn(&str) -> Vec<Range>) -> Vec<Range> {
     let mut visual = Vec::new();
     let mut body_start = 0;
     for text in body.split('\n') {
         visual.extend(
             rows(text)
                 .into_iter()
-                .map(|(start, end)| (body_start + start, body_start + end)),
+                .map(|(start, end, column)| (body_start + start, body_start + end, column)),
         );
         body_start += text.len() + 1;
     }
@@ -151,7 +168,7 @@ fn rows_with(body: &str, rows: impl Fn(&str) -> Vec<(usize, usize)>) -> Vec<(usi
 pub struct ComposerLayout<'a> {
     body: &'a str,
     cursor: usize,
-    visual_rows: Vec<(usize, usize)>,
+    visual_rows: Vec<Range>,
 }
 
 impl<'a> ComposerLayout<'a> {
@@ -182,11 +199,12 @@ impl<'a> ComposerLayout<'a> {
     }
 
     fn row_at(&self, index: usize) -> Option<Row<'a>> {
-        let &(start, end) = self.visual_rows.get(index)?;
+        let &(start, end, column) = self.visual_rows.get(index)?;
         Some(Row {
             index,
             start,
             text: &self.body[start..end],
+            column,
             final_in_line: end == self.body.len() || self.body.as_bytes().get(end) == Some(&b'\n'),
         })
     }
@@ -237,7 +255,7 @@ impl<'a> ComposerLayout<'a> {
     }
 
     pub fn vertical_offset(&self, down: bool) -> (usize, bool) {
-        let current = self.caret_row();
+        let (current, column) = visual_position(&self.visual_rows, self.body, self.cursor);
         let target = if down {
             (current + 1 < self.visual_rows.len()).then_some(current + 1)
         } else {
@@ -246,9 +264,6 @@ impl<'a> ComposerLayout<'a> {
         let Some(target) = target else {
             return (if down { self.body.len() } else { 0 }, false);
         };
-        let row = self.row_at(current).expect("caret row is in layout");
-        let caret = self.caret_in(row).unwrap_or(0);
-        let column = row.text[..caret].width();
         (
             self.row_at(target)
                 .map_or(self.cursor, |row| offset_in_row(row, column)),
@@ -265,21 +280,18 @@ impl<'a> ComposerLayout<'a> {
 
 fn offset_in_row(row: Row<'_>, column: usize) -> usize {
     let mut offset = row.text.len();
-    let mut cells = 0;
-    for (byte, symbol) in row.text.grapheme_indices(true) {
-        let width = symbol.width();
-        if column < cells + width {
-            offset = byte;
+    let mut used = 0;
+    for cell in cells(row.text, row.column) {
+        if column < used + cell.width {
+            offset = cell.byte;
             break;
         }
-        cells += width;
+        used += cell.width;
     }
     if offset == row.text.len() && !row.final_in_line {
-        offset = row
-            .text
-            .grapheme_indices(true)
-            .next_back()
-            .map_or(0, |(byte, _)| byte);
+        offset = cells(row.text, row.column)
+            .last()
+            .map_or(0, |cell| cell.byte);
     }
     row.start + offset
 }

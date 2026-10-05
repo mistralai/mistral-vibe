@@ -80,9 +80,8 @@ working Rust toolchain and fails if either native component cannot be built.
 On Linux, set `CARGO_BUILD_FLAGS=--no-default-features` to build without ALSA.
 
 `VIBE_SKIP_RUST_TUI=1` may be used by development-only checks that do not need
-the terminal binary. Public releases always build both native components. Vibe
-does not publish a source distribution because installing it would require end
-users to compile both Rust components locally.
+the terminal binary. Public releases always build both native components. The
+source distribution bundles both Rust sources, so building from it needs Rust.
 
 ### Logging Configuration
 

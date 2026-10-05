@@ -60,6 +60,8 @@ if TYPE_CHECKING:
         TTSClient,
         TTSModelConfig,
         TTSProviderConfig,
+        UtilityFeature,
+        UtilityModelsConfig,
     )
     from vibe.core.config.patch import (
         AddOperationPatch,
@@ -176,6 +178,8 @@ __all__ = [
     "TranscribeProviderConfig",
     "TrustResolutionError",
     "UntrustedLayerError",
+    "UtilityFeature",
+    "UtilityModelsConfig",
     "VibeConfigSchema",
     "VibeConfigSchemaType",
     "WithConcatMerge",
@@ -276,6 +280,8 @@ _MAPPING: dict[str, tuple[str, str]] = {
     "TTSClient": ("vibe.core.config.models", "TTSClient"),
     "TTSModelConfig": ("vibe.core.config.models", "TTSModelConfig"),
     "TTSProviderConfig": ("vibe.core.config.models", "TTSProviderConfig"),
+    "UtilityFeature": ("vibe.core.config.models", "UtilityFeature"),
+    "UtilityModelsConfig": ("vibe.core.config.models", "UtilityModelsConfig"),
     "AddOperationPatch": ("vibe.core.config.patch", "AddOperationPatch"),
     "ConfigPatch": ("vibe.core.config.patch", "ConfigPatch"),
     "PatchOp": ("vibe.core.config.patch", "PatchOp"),

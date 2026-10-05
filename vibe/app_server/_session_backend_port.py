@@ -45,6 +45,8 @@ from vibe.app_server.protocol import (
     SessionForkParams,
     SessionForkResponse,
     SessionHistoryClearParams,
+    SessionHistoryListParams,
+    SessionHistoryListResponse,
     SessionListParams,
     SessionListResponse,
     SessionMarkAsSeenParams,
@@ -577,6 +579,15 @@ class SessionBackendHostConfigRead(Protocol):
     """Optional selected-backend ownership of a stored session's configuration."""
 
     async def read_config(self, params: ConfigReadParams) -> ConfigReadResponse: ...
+
+
+@runtime_checkable
+class SessionBackendHostHistoryList(Protocol):
+    """Optional selected-backend paging of a stored session's history."""
+
+    async def list_history(
+        self, params: SessionHistoryListParams
+    ) -> SessionHistoryListResponse: ...
 
 
 @runtime_checkable

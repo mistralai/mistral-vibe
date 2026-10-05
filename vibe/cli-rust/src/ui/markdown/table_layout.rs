@@ -192,7 +192,7 @@ fn proportional(weights: &[usize], total: usize) -> Vec<usize> {
 }
 
 fn longest_word(cell: &[Sc]) -> usize {
-    cell.split(|(character, _)| character.is_whitespace())
+    cell.split(|sc| sc.0.is_whitespace())
         .map(cell_width)
         .max()
         .unwrap_or(0)

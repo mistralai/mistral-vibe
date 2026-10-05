@@ -10,8 +10,10 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path, PurePosixPath
+import posixpath
 import secrets
 import shutil
 import time
@@ -42,6 +44,9 @@ _READ_CHUNK_BYTES = 1 << 20
 _BLOB_MODE = 0o400
 _WRITABLE_DIRECTORY_MODE = 0o700
 _CHECKOUT_DIRECTORY_MODE = 0o500
+_EXECUTABLE_BLOB_MODE = 0o500
+
+_MCP_CONFIGURATION = "mcp.json"
 
 
 class PluginPackageError(RuntimeError):
@@ -186,6 +191,7 @@ class PluginPackageStore:
     """A content-addressed store for plugin package trees and snapshot bytes.
 
     ``blobs/`` holds file contents and snapshots keyed by their own sha256,
+    plus a runnable ``<sha256>.x`` for content a package launches as a server,
     ``manifests/`` holds one tree description per package, and ``packages/``
     holds read-only checkouts that hard-link into ``blobs/``.
     """
@@ -227,8 +233,10 @@ class PluginPackageStore:
             if entry.kind != "file" or self.has(entry.payload):
                 continue
             source = root / PurePosixPath(entry.path)
-            self._publish_blob(
-                entry.payload, lambda path, source=source: _copy_file(source, path)
+            self._publish(
+                self._blob_path(entry.payload),
+                lambda path, source=source: _copy_file(source, path),
+                _BLOB_MODE,
             )
             shards.add(self._blob_path(entry.payload).parent)
         for shard in sorted(shards):
@@ -257,6 +265,7 @@ class PluginPackageStore:
         if final.is_dir():
             return final
         manifest = self._read_manifest(content_digest)
+        executables = self._launched_executables(manifest)
         staging = self._temporary_path(f"package-{content_digest[:16]}")
         try:
             staging.mkdir(mode=_WRITABLE_DIRECTORY_MODE, parents=True)
@@ -273,7 +282,14 @@ class PluginPackageStore:
                     raise PluginPackageUnavailable(
                         content_digest, f"no blob for {entry.path} ({entry.sha256})"
                     )
-                _link_or_copy(blob, target)
+                if entry.path in executables:
+                    _link_or_copy(
+                        self._executable_blob(entry.sha256),
+                        target,
+                        _EXECUTABLE_BLOB_MODE,
+                    )
+                else:
+                    _link_or_copy(blob, target, _BLOB_MODE)
             rebuilt = _digest_entries(_scan_tree(staging))
             if rebuilt != content_digest:
                 raise PluginPackageCorrupt(
@@ -298,7 +314,11 @@ class PluginPackageStore:
     def put_blob(self, payload: bytes) -> Sha256:
         digest = hashlib.sha256(payload).hexdigest()
         if not self.has(digest):
-            self._publish_blob(digest, lambda path: _write_bytes(path, payload))
+            self._publish(
+                self._blob_path(digest),
+                lambda path: _write_bytes(path, payload),
+                _BLOB_MODE,
+            )
             _fsync_directory(self._blob_path(digest).parent)
         return digest
 
@@ -330,14 +350,58 @@ class PluginPackageStore:
         self._tmp.mkdir(mode=_WRITABLE_DIRECTORY_MODE, parents=True, exist_ok=True)
         return self._tmp / f"{label}-{secrets.token_hex(8)}"
 
-    def _publish_blob(self, digest: str, write: Callable[[Path], None]) -> None:
-        path = self._blob_path(digest)
+    def _executable_blob(self, digest: str) -> Path:
+        """The runnable twin of a blob, published from it on first use.
+
+        A checkout file is a hard link, so it has its blob's mode: the bit
+        cannot be set on the shared blob without making the same bytes runnable
+        in every package that holds them.
+        """
+        path = self._blob_path(digest).with_name(f"{digest}.x")
+        if not path.is_file():
+            blob = self._blob_path(digest)
+            self._publish(
+                path, lambda target: _copy_file(blob, target), _EXECUTABLE_BLOB_MODE
+            )
+        return path
+
+    def _launched_executables(self, manifest: PackageManifestV1) -> frozenset[str]:
+        """The package files that its own ``mcp.json`` launches via a ``./`` stdio command."""
+        files = {
+            entry.path: entry.sha256
+            for entry in manifest.entries
+            if isinstance(entry, PackageFileV1)
+        }
+        configuration = files.get(_MCP_CONFIGURATION)
+        if configuration is None:
+            return frozenset()
+        try:
+            document: object = json.loads(self.read_blob(configuration))
+        except (PluginPackageError, ValueError):
+            return frozenset()
+        servers = document.get("mcpServers") if isinstance(document, dict) else None
+        if not isinstance(servers, dict):
+            return frozenset()
+        commands = (
+            server.get("command")
+            for server in servers.values()
+            if isinstance(server, dict) and server.get("type") == "stdio"
+        )
+        return frozenset(
+            path
+            for command in commands
+            if isinstance(command, str) and command.startswith("./")
+            if (path := unicodedata.normalize("NFC", posixpath.normpath(command[2:])))
+            in files
+        )
+
+    def _publish(self, path: Path, write: Callable[[Path], None], mode: int) -> None:
         path.parent.mkdir(mode=_WRITABLE_DIRECTORY_MODE, parents=True, exist_ok=True)
-        temporary = self._temporary_path(f"blob-{digest[:16]}")
+        temporary = self._temporary_path(f"blob-{path.name[:16]}")
         try:
             write(temporary)
             _fsync_file(temporary)
-            os.chmod(temporary, _BLOB_MODE)
+            os.chmod(temporary, mode)
             try:
                 os.rename(temporary, path)
             except OSError:
@@ -526,7 +590,7 @@ def _copy_file(source: Path, target: Path) -> None:
             writer.write(chunk)
 
 
-def _link_or_copy(source: Path, target: Path) -> None:
+def _link_or_copy(source: Path, target: Path, mode: int) -> None:
     try:
         os.link(source, target)
         return
@@ -534,7 +598,7 @@ def _link_or_copy(source: Path, target: Path) -> None:
         # No hard links here, or two volumes. The rebuild is verified either
         # way, so the fallback costs disk and nothing else.
         _copy_file(source, target)
-        os.chmod(target, _BLOB_MODE)
+        os.chmod(target, mode)
 
 
 def _harden_directories(root: Path) -> None:

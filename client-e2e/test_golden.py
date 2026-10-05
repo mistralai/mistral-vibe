@@ -17,6 +17,7 @@ import difflib
 import json
 import os
 from pathlib import Path
+import re
 import warnings
 from xml.etree import ElementTree
 
@@ -48,7 +49,10 @@ _LIVE_DIR = golden_path("_live")
 
 def _assert_scenario_expectations(captured: Capture, scenario: Scenario) -> None:
     if (expected := scenario.expected_actions.get("rust")) is not None:
-        assert captured.actions == expected
+        assert len(captured.actions) == len(expected) and all(
+            want.matches(got)
+            for want, got in zip(expected, captured.actions, strict=True)
+        ), f"rust actions {captured.actions!r} do not match {expected!r}"
     if not captured.snapshots:
         return
 
@@ -86,7 +90,14 @@ def _assert_scenario_expectations(captured: Capture, scenario: Scenario) -> None
 
 @pytest.mark.parametrize(
     ("expected", "actual"),
-    [([Action("open_url", "expected")], []), ([], [Action("open_url", "unexpected")])],
+    [
+        ([Action("open_url", "expected")], []),
+        ([], [Action("open_url", "unexpected")]),
+        (
+            [Action("open_url", re.compile(r"file:///tmp/a-\w+\.png"))],
+            [Action("open_url", "file:///tmp/a-1.png.txt")],
+        ),
+    ],
 )
 def test_scenario_expectations_reject_wrong_actions(
     expected: list[Action], actual: list[Action]
@@ -95,6 +106,15 @@ def test_scenario_expectations_reject_wrong_actions(
 
     with pytest.raises(AssertionError):
         _assert_scenario_expectations(Capture([], actual, []), scenario)
+
+
+def test_scenario_expectations_accept_a_pattern_action() -> None:
+    expected = [Action("open_url", re.compile(r"file:///tmp/a-\w+\.png"))]
+    scenario = Scenario(name="test", steps=[], expected_actions={"rust": expected})
+
+    _assert_scenario_expectations(
+        Capture([], [Action("open_url", "file:///tmp/a-x1.png")], []), scenario
+    )
 
 
 def test_scenario_expectations_reject_wrong_clipboard() -> None:
@@ -207,6 +227,19 @@ def test_golden_keeps_snapshots_in_each_scenario(
     assert load_golden_svgs("two") == []
 
 
+@pytest.mark.parametrize("ending", ["", "\n"])
+def test_golden_loading_ignores_only_the_file_terminator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ending: str
+) -> None:
+    monkeypatch.setattr(golden, "GOLDEN_DIR", tmp_path)
+    directory = tmp_path / "one"
+    directory.mkdir()
+    svg = "<svg>\n<text> keep spaces </text>\n</svg>"
+    (directory / "snapshot_00_step0.svg").write_text(svg + ending)
+
+    assert load_golden_svgs("one") == [svg]
+
+
 def test_golden_requests_are_written_with_sorted_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -228,7 +261,7 @@ def test_rust_matches_golden(name: str) -> None:
     expected_titles = scenario.expected_titles
     if expected_titles is not None and scenario.capture_startup:
         expected_titles = expected_titles[1:]
-    scenario.capture_startup = False
+    scenario.clamp_capture_startup()
     if not os.path.exists(CLIENTS["rust"][0]) or not os.path.exists(REPLAY_BIN):
         pytest.skip("Rust binary missing (run `make build`)")
 

@@ -13,6 +13,7 @@ use crate::core::hooks::{HookToolKey, HookToolTarget};
 use crate::core::step_protocol::ToolDefinition;
 use crate::core::tools::command_environment::CommandEnvironment;
 use crate::core::tools::external::ToolTarget;
+use crate::core::tools::external::provided_tool_qualified_name;
 use crate::core::tools::resolved::self_tools::self_tools;
 
 pub(crate) const SELF_NAMESPACE: &str = "self";
@@ -177,9 +178,13 @@ pub(crate) fn direct_tools(config: &HarnessConfig) -> Vec<ToolDefinition> {
     tools
 }
 
-pub(crate) fn is_reserved_group_name(name: &str) -> bool {
-    name == file_system::NAMESPACE || name == subagents::NAMESPACE
-}
+pub(crate) const RESERVED_TOOL_NAMESPACES: [&str; 5] = [
+    SELF_NAMESPACE,
+    file_system::NAMESPACE,
+    skills::NAMESPACE,
+    background_processes::NAMESPACE,
+    subagents::NAMESPACE,
+];
 
 pub(crate) fn is_reserved_direct_name(environment: CommandEnvironment, name: &str) -> bool {
     file_system::is_direct_name(environment, name)
@@ -211,7 +216,7 @@ pub(crate) fn hook_tool_catalog(config: &HarnessConfig) -> Vec<HookToolKey> {
     keys.extend(config.tool_groups().flat_map(|group| {
         group.tools.iter().map(|tool| HookToolKey {
             target: HookToolTarget::Provided,
-            qualified_name: format!("{}.{}", group.name, tool.name),
+            qualified_name: provided_tool_qualified_name(&group.name, &tool.name),
         })
     }));
     keys.into_iter().collect()
@@ -282,6 +287,36 @@ Example:
             "When false (the default), replace the single `old_string` match. When true, replace every occurrence of `old_string`."
         );
         assert!(tool.parameters["properties"].get("content").is_none());
+    }
+
+    #[test]
+    fn builtin_catalog_should_be_covered_by_reserved_tool_namespaces() {
+        let bindings = filesystem_tools(CommandEnvironment::Unix)
+            .into_iter()
+            .chain(self_tools())
+            .chain(std::iter::once(skill_tool()))
+            .chain(background_process_tools())
+            .chain(subagent_tools())
+            .collect::<Vec<_>>();
+        let mut stable_ids = BTreeSet::new();
+        let mut namespaces = BTreeSet::new();
+        for binding in &bindings {
+            let stable_id = binding.target.hook_tool_key().qualified_name;
+            assert!(
+                stable_ids.insert(stable_id.clone()),
+                "duplicate built-in ID {stable_id}"
+            );
+            namespaces.insert(stable_id.split('.').next().unwrap().to_string());
+            namespaces.insert(binding.descriptor.programmatic_name.namespace.clone());
+        }
+
+        assert_eq!(
+            namespaces,
+            RESERVED_TOOL_NAMESPACES
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
     }
 
     ///

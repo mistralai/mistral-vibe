@@ -65,6 +65,13 @@ def _normalize_request(request: Request, replacement_keys: dict[str, str]) -> Re
         params["idempotencyKey"] = replacement_keys.setdefault(
             key, f"<replacement-idempotency-key-{len(replacement_keys) + 1}>"
         )
+    # `session/start` names the harness's checkout; goldens must not. A
+    # worktree run's `session/resume` names the settled worktree, which is
+    # machine-local the same way.
+    if request.method in {"session/start", "session/resume"} and isinstance(
+        params.get("agentConfig"), dict
+    ):
+        params["agentConfig"]["cwd"] = "<cwd>"
     return Request(request.method, params)
 
 

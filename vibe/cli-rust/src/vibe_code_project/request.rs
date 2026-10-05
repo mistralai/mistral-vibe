@@ -49,7 +49,13 @@ pub(super) fn start(app: &mut App, client: &Arc<Client>, operation: Operation) {
     let mut params = json!({"sessionId": session_id, "pickerId": app.vibe_code_project.picker_id});
     let label = match &operation {
         Operation::Open => {
-            params = json!({"sessionId": session_id, "purpose": "configure", "prompt": null});
+            let state = &app.vibe_code_project;
+            let purpose = if state.teleport_pending {
+                "teleport"
+            } else {
+                "configure"
+            };
+            params = json!({"sessionId": session_id, "purpose": purpose, "prompt": state.teleport_prompt});
             Some("Loading Vibe Code projects")
         }
         Operation::Create { name, branch } => {

@@ -18,6 +18,7 @@ fn a_late_accepted_event_reports_the_submit_session_not_the_current_one() {
         server_message_id: "message-1".to_owned(),
         text: "hi".to_owned(),
         images: Vec::new(),
+        mentions: None,
         sent: true,
         ever_sent: true,
         revision: 1,
@@ -38,6 +39,7 @@ fn a_late_accepted_event_reports_the_submit_session_not_the_current_one() {
             queue_item_id: "queue-1".to_owned(),
             session_id: SUBMITTED.to_owned(),
             images: Vec::new(),
+            mentions: None,
         },
     );
 

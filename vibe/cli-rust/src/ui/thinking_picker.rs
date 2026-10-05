@@ -11,14 +11,13 @@ use super::model_picker::draw_help;
 use super::theme_picker::marker_green;
 use super::{bottom_bar, loading, theme, transcript};
 use crate::app::App;
-use crate::thinking_picker::THINKING_LEVELS;
 
 /// Draw the whole screen with the picker replacing the input box.
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     f.buffer_mut()
         .set_style(area, Style::default().bg(theme::background()));
     let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
-    let picker_height = box_height();
+    let picker_height = box_height(app);
     let chunks = super::bottom_app_chunks(app, area, loading_height, picker_height);
     transcript::draw(app, f, chunks[0]);
     loading::draw(app, f, chunks[1]);
@@ -27,8 +26,8 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     bottom_bar::draw(app, f, chunks[3]);
 }
 
-fn box_height() -> u16 {
-    THINKING_LEVELS.len() as u16 + 5
+fn box_height(app: &App) -> u16 {
+    app.thinking_picker.levels.len() as u16 + 5
 }
 
 fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
@@ -59,7 +58,8 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
     let top = by + 2;
-    for (row, i) in (0..THINKING_LEVELS.len()).enumerate() {
+    let rows = app.thinking_picker.levels.len();
+    for (row, i) in (0..rows).enumerate() {
         draw_option(app, f, bx, top + row as u16, w, i);
     }
     draw_help(f, bx + 2, by + h - 2);
@@ -94,7 +94,7 @@ fn draw_option(app: &App, f: &mut Frame, bx: u16, y: u16, w: u16, i: usize) {
     if is_hl || current {
         name_style = name_style.add_modifier(Modifier::BOLD);
     }
-    let label = THINKING_LEVELS[i];
+    let label = app.thinking_picker.levels[i].as_str();
     let display = capitalize(label);
     f.buffer_mut().set_string(bx + 5, y, display, name_style);
 }

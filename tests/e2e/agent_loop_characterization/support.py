@@ -95,9 +95,8 @@ def _messages(payload: ChatCompletionsRequestPayload) -> list[dict[str, Any]]:
     return [dict(message) for message in raw_messages]
 
 
-def assert_tool_result_contains(
-    payload: ChatCompletionsRequestPayload, *, call_id: str, expected: str
-) -> None:
+def tool_result_content(payload: ChatCompletionsRequestPayload, *, call_id: str) -> str:
+    """The string content of one tool-result message, asserted unique."""
     matching_messages = [
         message
         for message in _messages(payload)
@@ -106,6 +105,13 @@ def assert_tool_result_contains(
     assert len(matching_messages) == 1
     content = matching_messages[0].get("content")
     assert isinstance(content, str)
+    return content
+
+
+def assert_tool_result_contains(
+    payload: ChatCompletionsRequestPayload, *, call_id: str, expected: str
+) -> None:
+    content = tool_result_content(payload, call_id=call_id)
     assert expected in content, content
 
 
@@ -141,6 +147,12 @@ def assert_message_content_present(
 def answer_approval(
     child: pexpect.spawn, captured: io.StringIO, *, tool_name: str, key: str
 ) -> None:
+    """Answer a tool approval prompt.
+
+    ``tool_name`` is the name the prompt title displays: the unified runtime
+    names builtin tools by their canonical route (``file_system.bash`` stands
+    for Vibe's ``bash``).
+    """
     wait_for_rendered_text(
         child, captured, needle=f"Permission for the {tool_name} tool", timeout=10
     )

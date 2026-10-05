@@ -30,8 +30,14 @@ from mistralai_vibe_local_harness.session_protocol import JsonObject
 # ``.codex``, ``.opencode``, ``.aider``, ``.idea``, ``.vscode`` and whatever ships
 # next are an unbounded list nobody can finish, and nothing this agent runs executes
 # them -- a different tool would, later, if the user starts it.
+#
+# ``.vibe/worktrees/`` is not config either: it holds the git worktrees Vibe manages,
+# and a session working in one is told its absolute path, so every path it names
+# passes through that ``.vibe``. Only that segment is exempt. A ``.vibe`` or
+# ``.git/hooks`` inside the checkout still matches, and a ``..`` that climbs back
+# out of ``worktrees`` is caught once ``_normalisations`` cancels it.
 _PROTECTED_PATH = re.compile(
-    r"(?<![\w.-])\.vibe(?![\w-])|"
+    r"(?<![\w.-])\.vibe(?![\w-])(?![/\\]worktrees(?:[/\\]|$))|"
     r"(?<![\w.-])\.git/(hooks|config)(?![\w-])|"
     r"(?<![\w.-])\.(bashrc|zshrc|bash_profile|zshenv|zprofile|profile)(?![\w-])",
     re.IGNORECASE,
@@ -43,6 +49,17 @@ _PROTECTED_PATH = re.compile(
 _WRITE_TOOLS = frozenset({"file_system.write_file", "file_system.search_replace"})
 # Argument names carrying a path on those builtins.
 _PATH_ARGUMENTS = ("path", "file_path")
+
+# Builtins that hand over text a shell executes. A background start runs its
+# command through the shell, so it is a bash call in every way but its name;
+# a write delivers its text to a process the ``process.start`` gate let start,
+# and an interactive one -- a REPL, ``bash -i``, ssh -- executes every line.
+# The token scan over-matches free-form text, and the cost is one prompt.
+_SHELL_TEXT_ARGUMENTS: dict[str, str] = {
+    "file_system.bash": "command",
+    "process.start": "command",
+    "process.write": "text",
+}
 
 # Spellings that reach the same file: a backslash separator, a doubled slash and a
 # "." segment. All three only ever *join* what they sit between, so applying them
@@ -104,20 +121,20 @@ def protected_target(tool_name: str, args: JsonObject) -> str | None:
     """The execution-deciding path this call names, or ``None``.
 
     Two strengths, because the tools differ. A write builtin states its path as an
-    argument, so the answer is exact. ``bash`` hands over a string and we do not
-    parse it: any token that mentions a protected path counts. That over-matches --
-    ``grep zshrc notes.txt`` is caught -- and the cost is one approval prompt, which
-    is the right side to be wrong on.
+    argument, so the answer is exact. The shell-text builtins -- a foreground
+    call, a background start, a write to a live process -- hand over a string we
+    do not parse: any token that mentions a protected path counts. That
+    over-matches -- ``grep zshrc notes.txt`` is caught -- and the cost is one
+    approval prompt, which is the right side to be wrong on.
     """
-    if tool_name == "file_system.bash":
-        command = args.get("command")
-        if not isinstance(command, str):
+    text_argument = _SHELL_TEXT_ARGUMENTS.get(tool_name)
+    if text_argument is not None:
+        text = args.get(text_argument)
+        if not isinstance(text, str):
             return None
-        if not any(
-            _names_protected_path(token) for token in _ARGV_SPAN.findall(command)
-        ):
+        if not any(_names_protected_path(token) for token in _ARGV_SPAN.findall(text)):
             return None
-        return command
+        return text
     if tool_name not in _WRITE_TOOLS:
         return None
     for name in _PATH_ARGUMENTS:

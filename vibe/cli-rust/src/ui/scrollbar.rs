@@ -2,7 +2,7 @@
 
 mod state;
 
-pub use state::State;
+pub use state::{Side, State};
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
@@ -51,6 +51,14 @@ pub fn draw_large(
     }
     if virtual_size > window_size {
         crate::mouse::register_scrollbar(app, target, area, virtual_size, window_size, position);
+    }
+    paint(f, area, virtual_size, window_size, position);
+}
+
+/// Paint the scrollbar into a 1-column `area` (content, viewport, offset).
+fn paint(f: &mut Frame, area: Rect, virtual_size: usize, window_size: usize, position: usize) {
+    if area.width == 0 || area.height == 0 {
+        return;
     }
     // Theme-derived thumb ($scrollbar) and track ($scrollbar-background).
     let bar = theme::scrollbar();

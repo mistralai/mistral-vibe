@@ -13,7 +13,8 @@ use petit_chat::PetitChat;
 
 /// Rust-only hint shown as its own line under the banner info block; suppressed
 /// under the e2e replay harness so it never breaks parity with the Python CLI.
-const RUST_BUILD_HINT: &str = "You are using the Rust version of Vibe (experimental).";
+const RUST_BUILD_HINT: &str =
+    "Experimental Rust TUI - unset `VIBE_CLI` (or set it to `python`) for the legacy Python TUI.";
 
 /// The welcome banner: an animated cat above a static info block.
 #[derive(Default)]
@@ -35,6 +36,11 @@ impl Banner {
     pub fn set_account(&mut self, plan_title: Option<String>, greeting: Option<String>) {
         self.plan_title = plan_title;
         self.greeting = greeting;
+    }
+
+    /// The current cat frame as a braille grid, for screens that reuse it.
+    pub fn chat_frame(&self) -> String {
+        self.chat.render()
     }
 
     /// The full banner: the cat rows followed by the info block.

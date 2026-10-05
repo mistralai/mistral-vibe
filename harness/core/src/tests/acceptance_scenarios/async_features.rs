@@ -52,7 +52,7 @@ fn one_subagent_completion_notification_reaches_the_model() {
     let turn_id = "turn-one-subagent";
     let mut runtime = SynchronousRuntime::new(config());
     let first_completion = runtime.start_turn(turn_id, "delegate one investigation");
-    let source = "async function main() { return tools.agent.spawn({ agentName: 'researcher', message: 'Investigate the issue' }); }";
+    let source = "async function main() { return tools.subagent.spawn({ agentName: 'researcher', message: 'Investigate the issue' }); }";
 
     // Do
     let spawn_action = runtime
@@ -141,7 +141,7 @@ fn parallel_subagents_receive_messages_and_completion_notifications() {
     let turn_id = "turn-parallel-subagents";
     let mut runtime = SynchronousRuntime::new(config());
     let first_completion = runtime.start_turn(turn_id, "coordinate two researchers");
-    let spawn_source = "async function main() { return Promise.all([tools.agent.spawn({ agentName: 'alpha', message: 'Investigate alpha' }), tools.agent.spawn({ agentName: 'beta', message: 'Investigate beta' })]); }";
+    let spawn_source = "async function main() { return Promise.all([tools.subagent.spawn({ agentName: 'alpha', message: 'Investigate alpha' }), tools.subagent.spawn({ agentName: 'beta', message: 'Investigate beta' })]); }";
 
     // Do
     let spawn_actions = runtime
@@ -194,7 +194,7 @@ fn parallel_subagents_receive_messages_and_completion_notifications() {
             model_tool("program-spawn-subagents", "run_typescript"),
         ],
     );
-    let message_source = "async function main() { return Promise.all([tools.agent.sendMessage({ agentName: 'alpha', message: 'Check logs' }), tools.agent.sendMessage({ agentName: 'beta', message: 'Check tests' })]); }";
+    let message_source = "async function main() { return Promise.all([tools.subagent.sendMessage({ agentName: 'alpha', message: 'Check logs' }), tools.subagent.sendMessage({ agentName: 'beta', message: 'Check tests' })]); }";
     let message_actions = runtime
         .complete_with_typescript_program(
             turn_id,
@@ -574,7 +574,7 @@ fn steering_combines_subagent_and_background_process_notifications() {
     let turn_id = "turn-combined-steering";
     let mut runtime = SynchronousRuntime::new(config_with_background_processes());
     let first_completion = runtime.start_turn(turn_id, "delegate research and start the build");
-    let source = "async function main() { return Promise.all([tools.agent.spawn({ agentName: 'researcher', message: 'Investigate' }), tools.process.start({ command: 'build' })]); }";
+    let source = "async function main() { return Promise.all([tools.subagent.spawn({ agentName: 'researcher', message: 'Investigate' }), tools.process.start({ command: 'build' })]); }";
     let tool_actions = runtime
         .complete_with_typescript_program(
             turn_id,

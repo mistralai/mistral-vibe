@@ -4,6 +4,8 @@ import asyncio
 from collections.abc import Callable
 import contextlib
 import json
+from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -463,3 +465,202 @@ async def test_fork_rewind_of_the_only_message_yields_an_empty_child(
     assert result.message == "First"
     assert backend_contract_persistent_session.session_id != source_session_id
     assert _texts(backend_contract_persistent_session) == ["Second", "Second answer"]
+
+
+def _write_file_tool_call(
+    experimental_harness: bool,
+    target: Path,
+    content: str,
+    *,
+    call_id: str = "call_write",
+) -> dict[str, Any]:
+    """One model write of ``target``, in the backend's own tool vocabulary."""
+    name = "write_file"
+    path_key = "path" if experimental_harness else "file_path"
+    return {
+        "id": call_id,
+        "index": 0,
+        "function": {
+            "name": name,
+            "arguments": json.dumps({path_key: str(target), "content": content}),
+        },
+    }
+
+
+def _overwrite_tool_call(
+    experimental_harness: bool, target: Path, original: str, content: str
+) -> dict[str, Any]:
+    """One model overwrite of ``target``.
+
+    The harness write replaces existing files (and reports the replaced text),
+    while the legacy write refuses them, so the legacy leg overwrites through
+    ``edit`` instead: the user-visible contract is the same either way.
+    """
+    if experimental_harness:
+        name = "write_file"
+        arguments: dict[str, Any] = {"path": str(target), "content": content}
+    else:
+        name = "edit"
+        arguments = {
+            "file_path": str(target),
+            "old_string": original,
+            "new_string": content,
+        }
+    return {
+        "id": "call_overwrite",
+        "index": 0,
+        "function": {"name": name, "arguments": json.dumps(arguments)},
+    }
+
+
+@pytest.mark.asyncio
+async def test_in_place_rewind_restores_a_file_the_rewound_turn_created(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    experimental_harness: bool,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "created.txt"
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    _write_file_tool_call(experimental_harness, target, "created")
+                ],
+            ),
+            backend_contract_mistral_response("Done."),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
+        capabilities=ClientCapabilities(),
+    )
+    try:
+        session = await connection.host.open_session()
+        await _act(session, "create the file", "user-1")
+        assert target.read_text(encoding="utf-8") == "created"
+        entry_id = _user_entry_id(session, "create the file")
+
+        paths = await session.resources.sessions.rewind_preview(entry_id)
+        result = await session.resources.sessions.rewind(
+            entry_id, restore_files=True, inplace=True
+        )
+
+        assert paths == [str(target.resolve())]
+        assert result.restored_paths == [str(target.resolve())]
+        assert result.restore_errors == []
+        assert not target.exists()
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_in_place_rewind_restores_a_file_the_rewound_turn_overwrote(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    experimental_harness: bool,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "config.yaml"
+    target.write_text("key: original", encoding="utf-8")
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    _overwrite_tool_call(
+                        experimental_harness,
+                        target,
+                        "key: original",
+                        "key: overwritten",
+                    )
+                ],
+            ),
+            backend_contract_mistral_response("Done."),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
+        capabilities=ClientCapabilities(),
+    )
+    try:
+        session = await connection.host.open_session()
+        await _act(session, "overwrite the config", "user-1")
+        assert target.read_text(encoding="utf-8") == "key: overwritten"
+
+        changes = await session.resources.sessions.rewind_has_file_changes(
+            _user_entry_id(session, "overwrite the config")
+        )
+        result = await session.resources.sessions.rewind(
+            _user_entry_id(session, "overwrite the config"),
+            restore_files=True,
+            inplace=True,
+        )
+
+        assert changes
+        assert result.restored_paths == [str(target.resolve())]
+        assert target.read_text(encoding="utf-8") == "key: original"
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_a_fork_restores_files_of_the_turns_it_inherited(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    experimental_harness: bool,
+    tmp_path: Path,
+) -> None:
+    inherited = tmp_path / "inherited.txt"
+    rewound = tmp_path / "rewound.txt"
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    _write_file_tool_call(experimental_harness, inherited, "first")
+                ],
+            ),
+            backend_contract_mistral_response("Done."),
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    _write_file_tool_call(
+                        experimental_harness, rewound, "second", call_id="call_second"
+                    )
+                ],
+            ),
+            backend_contract_mistral_response("Done."),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
+        capabilities=ClientCapabilities(),
+    )
+    try:
+        session = await connection.host.open_session()
+        await _act(session, "create the first file", "user-1")
+        await _act(session, "create the second file", "user-2")
+        await session.resources.sessions.rewind(
+            _user_entry_id(session, "create the second file"),
+            restore_files=False,
+            inplace=False,
+        )
+        entry_id = _user_entry_id(session, "create the first file")
+
+        paths = await session.resources.sessions.rewind_preview(entry_id)
+        result = await session.resources.sessions.rewind(
+            entry_id, restore_files=True, inplace=True
+        )
+
+        assert paths == [str(inherited.resolve())]
+        assert result.restored_paths == [str(inherited.resolve())]
+        assert not inherited.exists()
+        # The fork never recorded the turn it rewound past.
+        assert rewound.read_text(encoding="utf-8") == "second"
+    finally:
+        await connection.host.close()

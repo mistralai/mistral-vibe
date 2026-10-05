@@ -1,15 +1,13 @@
 //! Keyboard and mouse input for tool approvals.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 
 use crate::app::App;
-use crate::question_app::INPUT_GRACE_PERIOD;
+use crate::question_app::input_grace_period;
 use crate::server::{ApprovalDecisionType, Client};
 
-const INPUT_GRACE_PERIOD_ENV_VAR: &str = "VIBE_INPUT_GRACE_PERIOD_MS";
 const OPTION_COUNT: usize = 4;
 const MOUSE_SCROLL_STEP: usize = 2;
 
@@ -63,14 +61,6 @@ pub fn handle_mouse(app: &mut App, event: MouseEvent) {
     }
 }
 
-fn input_grace_period() -> Duration {
-    let ms = std::env::var(INPUT_GRACE_PERIOD_ENV_VAR)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(INPUT_GRACE_PERIOD.as_millis() as u64);
-    Duration::from_millis(ms)
-}
-
 fn scroll_detail(app: &mut App, down: bool, amount: usize) {
     let max = app
         .approval
@@ -105,4 +95,8 @@ fn choose(app: &mut App, client: &Arc<Client>, option: usize) {
         _ => return,
     };
     super::respond(app, client, decision);
+    // Every deny is a rejection, whichever key sent it.
+    if app.approval.responding && matches!(decision, ApprovalDecisionType::Deny) {
+        crate::telemetry::user_cancelled_action(app, "reject_approval");
+    }
 }

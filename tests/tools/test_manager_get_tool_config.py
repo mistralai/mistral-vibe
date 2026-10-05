@@ -468,6 +468,24 @@ def test_falls_back_to_base_config_for_unknown_tool(tool_manager):
     assert config.permission == ToolPermission.ASK
 
 
+def test_provided_tool_default_permission_does_not_change_other_tools(tool_manager):
+    assert (
+        tool_manager.get_tool_config(
+            "provided_tool", default_permission=ToolPermission.ALWAYS
+        ).permission
+        is ToolPermission.ALWAYS
+    )
+    assert (
+        tool_manager.get_tool_config("provided_tool").permission is ToolPermission.ASK
+    )
+    assert (
+        tool_manager.get_tool_config(
+            "bash", default_permission=ToolPermission.ALWAYS
+        ).permission
+        is ToolPermission.ASK
+    )
+
+
 def test_partial_override_preserves_tool_defaults():
     vibe_config = build_test_vibe_config(
         tools={"read_file": {"sensitive_patterns": ["**/*.key"]}}

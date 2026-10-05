@@ -29,6 +29,11 @@ def _venv_executable(venv_path: Path, name: str) -> Path:
     return venv_path / "bin" / name
 
 
+# CI builds the combined wheel once and passes it here, so this test does not
+# compile both Rust artifacts again. Unset, the test builds its own.
+_PREBUILT_WHEEL_ENV = "VIBE_PREBUILT_WHEEL"
+
+
 def _build_wheel(dist_dir: Path) -> Path:
     subprocess.run(
         ["uv", "build", "--wheel", "--out-dir", str(dist_dir)],
@@ -37,20 +42,27 @@ def _build_wheel(dist_dir: Path) -> Path:
     )
     wheels = sorted(dist_dir.glob("mistral_vibe-*.whl"))
     assert len(wheels) == 1
-    assert "-cp312-abi3-" in wheels[0].name
+    return wheels[0]
+
+
+def _combined_wheel(dist_dir: Path) -> Path:
+    prebuilt = os.environ.get(_PREBUILT_WHEEL_ENV)
+    wheel_path = Path(prebuilt) if prebuilt else _build_wheel(dist_dir)
+    assert wheel_path.name.startswith("mistral_vibe-")
+    assert "-cp312-abi3-" in wheel_path.name
     # The global test fixture mocks sys.platform to Linux; platform.system()
     # reflects the host that actually produced the wheel.
     if platform.system() == "Linux":
-        assert wheels[0].name.endswith(
+        assert wheel_path.name.endswith(
             f"-cp312-abi3-manylinux_2_28_{platform.machine()}.whl"
         )
-    with zipfile.ZipFile(wheels[0]) as wheel:
+    with zipfile.ZipFile(wheel_path) as wheel:
         names = wheel.namelist()
         assert any(name.startswith("vibe/_bin/vibe-rs") for name in names)
         assert any(
             name.startswith("mistralai_vibe_local_harness/_native.") for name in names
         )
-    return wheels[0]
+    return wheel_path
 
 
 def _install_fresh_wheel(tmp_path: Path, wheel_path: Path) -> Path:
@@ -91,7 +103,7 @@ def test_fresh_wheel_install_can_spawn_cli_and_complete_happy_path(
 ) -> None:
     monkeypatch.delenv("VIBE_SKIP_RUST_TUI", raising=False)
     monkeypatch.delenv("VIBE_CLI", raising=False)
-    wheel_path = _build_wheel(tmp_path / "dist")
+    wheel_path = _combined_wheel(tmp_path / "dist")
     vibe_executable = _install_fresh_wheel(tmp_path, wheel_path)
 
     monkeypatch.delenv("PYTHONPATH", raising=False)

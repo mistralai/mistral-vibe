@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum, auto
-from functools import cached_property
+from functools import cached_property, partial
 import os
 from pathlib import Path, PureWindowsPath
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -15,6 +16,11 @@ from vibe.core.git.repo import GitRepo, GitStatus, RepoPaths, _git_python, sanit
 from vibe.core.git.worktree.naming import (
     worktree_name_from_text,
     worktree_name_with_suffix,
+)
+from vibe.core.git.worktree.progress import (
+    WorktreeCreationPhase,
+    WorktreeCreationProgress,
+    WorktreeProgressCallback,
 )
 from vibe.core.git.worktree.record import (
     WorktreeClaim,
@@ -62,6 +68,18 @@ class PendingSessionHold:
         self.claim.remove_holder(self.holder_id)
 
 
+@dataclass(frozen=True, slots=True)
+class RefreshedBase:
+    """Where a new worktree branch starts, resolved and fetched ahead of time.
+
+    Lets a caller refresh the start point while it waits on something else,
+    such as a model naming the worktree, rather than after it. `ref` is None
+    for a repository with no remote to start from.
+    """
+
+    ref: str | None
+
+
 @dataclass(frozen=True)
 class PreparedWorktree:
     name: str
@@ -73,6 +91,7 @@ class PreparedWorktree:
     created: bool
     branch_created: bool
     pending_hold: PendingSessionHold | None = None
+    source_had_uncommitted_changes: bool = False
 
     def inspect_for_cleanup(self) -> WorktreeCleanupState:
         """Inspect worktree state relative to the session-start HEAD.
@@ -319,7 +338,14 @@ class WorktreeRepository:
     def _relative_base(self) -> Path:
         return self._git.relative_base(self._base)
 
-    def prepare(self, name: str, *, branch: str | None = None) -> PreparedWorktree:
+    def prepare(
+        self,
+        name: str,
+        *,
+        branch: str | None = None,
+        on_progress: WorktreeProgressCallback | None = None,
+        base: RefreshedBase | None = None,
+    ) -> PreparedWorktree:
         _validate_worktree_name(name)
         branch = name if branch is None else branch
         self._git.validate_branch(branch)
@@ -375,21 +401,69 @@ class WorktreeRepository:
         # would let a crash leave a worktree with no ownership record, which all
         # automatic cleanup must treat as unmanaged.
         self._record_starting_claim(claim, record, target)
-        return self._create(claim, record, target, branch_created=branch_created)
+        return self._create(
+            claim,
+            record,
+            target,
+            branch_created=branch_created,
+            on_progress=on_progress,
+            base=base,
+        )
 
     def prepare_auto(
-        self, *, prompt: str | None = None, suggested_name: str | None = None
+        self,
+        *,
+        prompt: str | None = None,
+        suggested_name: str | None = None,
+        on_progress: WorktreeProgressCallback | None = None,
+        base: RefreshedBase | None = None,
+    ) -> PreparedWorktree:
+        return self._prepare_auto(
+            _auto_worktree_name(prompt, suggested_name),
+            start_point=None,
+            on_progress=on_progress,
+            base=base,
+        )
+
+    def prepare_fork(self, *, suggested_name: str) -> PreparedWorktree:
+        """Create an automatically named worktree from this checkout's HEAD."""
+        # ``self._git`` may deliberately be opened at the primary checkout while
+        # ``_base`` identifies a linked source worktree. HEAD and dirty state are
+        # worktree-local, so inspect the source path in its own right.
+        with GitRepo.open(self._base) as source:
+            source_head = source.head_commit()
+            source_had_uncommitted_changes = source._has_uncommitted_changes()
+        return replace(
+            self._prepare_auto(
+                _auto_worktree_name(None, suggested_name), start_point=source_head
+            ),
+            source_had_uncommitted_changes=source_had_uncommitted_changes,
+        )
+
+    def _prepare_auto(
+        self,
+        base_name: str,
+        *,
+        start_point: str | None,
+        on_progress: WorktreeProgressCallback | None = None,
+        base: RefreshedBase | None = None,
     ) -> PreparedWorktree:
         paths = self._paths
-        name, branch, target = self._claim_auto_name(
-            _auto_worktree_name(prompt, suggested_name)
-        )
+        name, branch, target = self._claim_auto_name(base_name)
         claim = WorktreeClaim(bucket=self.bucket, name=name)
         record = WorktreeRecord.new(
             name=name, branch=branch, repo_root=paths.repo_root, branch_created=True
         )
         self._record_starting_claim(claim, record, target)
-        return self._create(claim, record, target, branch_created=True)
+        return self._create(
+            claim,
+            record,
+            target,
+            branch_created=True,
+            start_point=start_point,
+            on_progress=on_progress,
+            base=base,
+        )
 
     @staticmethod
     def _record_starting_claim(
@@ -465,7 +539,12 @@ class WorktreeRepository:
 
         return tuple(sorted(linked, key=lambda worktree: str(worktree.path)))
 
-    def _base_ref(self) -> str | None:
+    def refresh_base(
+        self, on_progress: WorktreeProgressCallback | None = None
+    ) -> RefreshedBase:
+        return RefreshedBase(self._base_ref(on_progress))
+
+    def _base_ref(self, on_progress: WorktreeProgressCallback | None) -> str | None:
         """The ref a newly created worktree branch starts from.
 
         The remote's default branch rather than the invoking checkout's HEAD,
@@ -479,6 +558,8 @@ class WorktreeRepository:
         if ref is None:
             return None
         remote, _, branch = ref.partition("/")
+        if on_progress is not None:
+            on_progress(WorktreeCreationProgress(WorktreeCreationPhase.FETCHING))
         try:
             self._git.fetch_branch(remote, branch)
         except GitError as e:
@@ -496,17 +577,32 @@ class WorktreeRepository:
         *,
         branch_created: bool,
         start_point: str | None = None,
+        on_progress: WorktreeProgressCallback | None = None,
+        base: RefreshedBase | None = None,
     ) -> PreparedWorktree:
         branch = record.branch
+        started = time.monotonic()
         if branch_created and start_point is None:
-            start_point = self._base_ref()
+            start_point = base.ref if base is not None else self._base_ref(on_progress)
+        based = time.monotonic()
+        if on_progress is not None:
+            on_progress(WorktreeCreationProgress(WorktreeCreationPhase.CHECKING_OUT))
         try:
             self._git.add_worktree(
-                target, branch, branch_created=branch_created, start_point=start_point
+                target,
+                branch,
+                branch_created=branch_created,
+                start_point=start_point,
+                on_checkout_progress=(
+                    None
+                    if on_progress is None
+                    else partial(_report_checkout_progress, on_progress)
+                ),
             )
         except Exception:
             self._discard_claim(target, branch, branch_created=branch_created)
             raise
+        checked_out = time.monotonic()
         try:
             prepared = self._build_prepared(
                 record.name, branch, target, created=True, branch_created=branch_created
@@ -516,6 +612,7 @@ class WorktreeRepository:
                 e.add_note(note)
             raise
         claim.write(record.model_copy(update={"base_commit": prepared.base_commit}))
+        _log_create_timings(started, based, checked_out, name=record.name)
         return prepared
 
     def restore(
@@ -893,6 +990,104 @@ class ManagedWorktree:
 
         return self._release_unheld(record)
 
+    def probe_release(self, session_id: str | None = None) -> WorktreeRelease:
+        """The outcome a release would have, with no side effect at all.
+
+        The exit prompt's progress line asks before it commits, like Python's
+        inspect-then-remove: "removed" here means a removal now would succeed,
+        not that anything was removed. Holders are discounted, never released.
+        """
+        record = self.claim.read()
+        if record is None:
+            return WorktreeRelease(WorktreeReleaseOutcome.KEPT_UNMANAGED)
+        root = self.root
+        if not root.is_dir():
+            return WorktreeRelease(WorktreeReleaseOutcome.NOT_FOUND)
+        if record.base_commit is None:
+            return WorktreeRelease(WorktreeReleaseOutcome.KEPT_UNMANAGED)
+        others = self.claim.holders_excluding(session_id)
+        if self.claim.is_starting() or others:
+            logger.debug(
+                "Worktree %s would be kept: held by %d other session(s)",
+                self.claim.name,
+                len(others),
+            )
+            return WorktreeRelease(
+                WorktreeReleaseOutcome.KEPT_IN_USE, branch=record.branch
+            )
+        prepared = PreparedWorktree(
+            name=self.claim.name,
+            branch=record.branch,
+            root=root,
+            path=root,
+            repo_root=record.repo_root,
+            base_commit=record.base_commit,
+            created=True,
+            branch_created=record.branch_created,
+        )
+        state = prepared.inspect_for_cleanup()
+        if not state.is_clean:
+            return WorktreeRelease(
+                WorktreeReleaseOutcome.KEPT_DIRTY,
+                root=root,
+                branch=record.branch,
+                reasons=state.reasons,
+            )
+        return WorktreeRelease(
+            WorktreeReleaseOutcome.REMOVED, root=root, branch=record.branch
+        )
+
+    def force_release(
+        self, session_id: str | None = None, delete_branch: bool | None = None
+    ) -> WorktreeRelease:
+        """Remove a managed worktree the caller confirmed discarding.
+
+        Like the retention prune, but with no snapshot: the caller saw the
+        dirty state and chose to drop the work anyway. The branch goes with
+        the worktree when Vibe created it, unless the caller answered the
+        attached-branch question differently.
+        """
+        record = self.claim.read()
+        if record is None:
+            return WorktreeRelease(WorktreeReleaseOutcome.KEPT_UNMANAGED)
+        root = self.root
+        if not root.is_dir():
+            # Before the in-use check, like _release_unheld: a stale claim whose
+            # root is gone must be forgotten, not kept in use forever by a
+            # leftover starting marker.
+            self.claim.delete()
+            return WorktreeRelease(WorktreeReleaseOutcome.NOT_FOUND)
+        # The calling connection's own session does not hold the worktree "in
+        # use": it is the session doing the asking, like Python's holder discount.
+        held_by = self.claim.holders_excluding(session_id)
+        if self.claim.is_starting() or held_by:
+            return WorktreeRelease(
+                WorktreeReleaseOutcome.KEPT_IN_USE, branch=record.branch
+            )
+        if record.base_commit is None:
+            return WorktreeRelease(WorktreeReleaseOutcome.KEPT_UNMANAGED)
+        prepared = PreparedWorktree(
+            name=self.claim.name,
+            branch=record.branch,
+            root=root,
+            path=root,
+            repo_root=record.repo_root,
+            base_commit=record.base_commit,
+            created=True,
+            branch_created=record.branch_created,
+        )
+        resolved_delete_branch = (
+            record.branch_created if delete_branch is None else delete_branch
+        )
+        prepared.remove(delete_branch=resolved_delete_branch)
+        self.claim.delete()
+        return WorktreeRelease(
+            WorktreeReleaseOutcome.REMOVED,
+            root=root,
+            branch=record.branch,
+            branch_deleted=resolved_delete_branch,
+        )
+
     def reap(
         self, *, requester_id: str | None = None, request_id: str | None = None
     ) -> WorktreeRelease:
@@ -1257,6 +1452,30 @@ def _unhooked(repo: Any) -> Any:
     definition.
     """
     return sanitized_git(repo)
+
+
+def _report_checkout_progress(
+    on_progress: WorktreeProgressCallback, completed: int, total: int
+) -> None:
+    on_progress(
+        WorktreeCreationProgress(
+            WorktreeCreationPhase.CHECKING_OUT,
+            completed_files=completed,
+            total_files=total,
+        )
+    )
+
+
+def _log_create_timings(
+    started: float, based: float, checked_out: float, *, name: str
+) -> None:
+    logger.info(
+        "Worktree created name=%s total_ms=%d base_ref_ms=%d checkout_ms=%d",
+        name,
+        (time.monotonic() - started) * 1000,
+        (based - started) * 1000,
+        (checked_out - based) * 1000,
+    )
 
 
 def _validate_worktree_name(name: str) -> None:

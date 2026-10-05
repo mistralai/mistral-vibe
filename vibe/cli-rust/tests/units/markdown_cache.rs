@@ -6,7 +6,8 @@ use std::sync::Arc;
 use serde_json::json;
 use vibe_rs::transcript::Transcript;
 use vibe_rs::ui::markdown::{
-    MarkdownCache, PreparedMarkdown, MAX_MARKDOWN_CACHE_BYTES, MAX_MARKDOWN_CACHE_ENTRIES,
+    LinkedLines, MarkdownCache, PreparedMarkdown, MAX_MARKDOWN_CACHE_BYTES,
+    MAX_MARKDOWN_CACHE_ENTRIES,
 };
 use vibe_rs::utils::transcript_cache::{EntryGeometry, TranscriptCache};
 
@@ -231,7 +232,7 @@ fn effect_body_rows_are_built_once_per_render_key() {
     let mut cache = MarkdownCache::default();
     let build = || {
         calls.set(calls.get() + 1);
-        vec![ratatui::text::Line::from("+ row")]
+        LinkedLines::from(vec![ratatui::text::Line::from("+ row")])
     };
     let first = cache.prepare_lines(5, 9, 80, 1, build);
     let hit = cache.prepare_lines(5, 9, 80, 1, build);

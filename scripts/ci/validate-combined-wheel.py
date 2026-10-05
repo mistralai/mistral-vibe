@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 import mistralai_vibe_local_harness._native as harness_native
+import mistralai_vibe_local_harness.protocol as harness_protocol
 
 import vibe
 
@@ -23,6 +24,10 @@ def main() -> None:
     if not native_path.is_file():
         raise RuntimeError("Harness native extension is missing")
 
+    protocol_path = Path(harness_protocol.__file__ or "")
+    if not protocol_path.is_file():
+        raise RuntimeError("Harness Python runtime is missing")
+
     vibe_module_path = vibe.__file__
     if vibe_module_path is None:
         raise RuntimeError("Vibe package location is unavailable")
@@ -36,6 +41,7 @@ def main() -> None:
 
     print(f"mistral-vibe {vibe_version}")
     print(f"Harness extension: {native_path.name}")
+    print(f"Harness runtime: {protocol_path.name}")
     print(f"Rust CLI: {rust_cli_path.name}")
 
 

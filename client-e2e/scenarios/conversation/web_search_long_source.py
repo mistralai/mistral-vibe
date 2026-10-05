@@ -10,7 +10,7 @@ from e2e.app_server.events import (
     web_search_completed,
     web_search_started,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Action, Timeline
 
 _PROMPT = "web search zidane"
 _ANSWER = "Zinedine Zidane is the France head coach."
@@ -27,10 +27,16 @@ _SOURCES = [
     }
 ]
 
+# The tool group header, then its web-search entry header.
 _EXPAND = "\x1b[<0;1;30M\x1b[<0;1;30m"
-_HOVER = "\x1b[<35;12;29M"
-# The wrapped tail of the same title still answers to the pointer.
-_HOVER_TAIL = "\x1b[<35;12;30M"
+_EXPAND_ENTRY = "\x1b[<0;8;30M\x1b[<0;8;30m"
+# Hovering either row of the wrapped title highlights both; the tail row hangs past the bullet.
+_HOVER = "\x1b[<35;20;29M"
+_HOVER_TAIL = "\x1b[<35;16;30M"
+# Clicking the wrapped tail opens the source.
+_CLICK_TAIL = "\x1b[<0;16;30M\x1b[<0;16;30m"
+
+expected_actions = {"rust": [Action("open_url", _SOURCES[0]["url"])]}
 
 timeline: Timeline = [
     f"{_PROMPT}\r",
@@ -41,6 +47,8 @@ timeline: Timeline = [
     assistant_msg(_ANSWER),
     turn_completed(),
     _EXPAND,
+    _EXPAND_ENTRY,
     _HOVER,
     _HOVER_TAIL,
+    _CLICK_TAIL,
 ]

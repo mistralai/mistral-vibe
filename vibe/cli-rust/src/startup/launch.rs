@@ -101,6 +101,24 @@ pub fn resolve_launch_cwd(invocation_cwd: &Path, configured: Option<&OsStr>) -> 
 
 use std::time::Instant;
 
+/// Process-wide startup clock, mirroring Python's `PROCESS_START_MONOTONIC` and
+/// `_tui_displayed_monotonic`, which `vibe.startup` reports against.
+static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+static FIRST_DRAW: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+pub fn mark_first_draw() {
+    let _ = FIRST_DRAW.set(Instant::now());
+}
+
+pub fn first_frame_duration_ms() -> Option<u64> {
+    let start = PROCESS_START.get()?;
+    Some(FIRST_DRAW.get()?.duration_since(*start).as_millis() as u64)
+}
+
+pub fn agent_ready_duration_ms() -> Option<u64> {
+    Some(PROCESS_START.get()?.elapsed().as_millis() as u64)
+}
+
 pub struct StartupRecorder {
     enabled: bool,
     start: Instant,
@@ -118,9 +136,11 @@ impl StartupRecorder {
         let enabled = std::env::var("VIBE_STARTUP_TIMINGS")
             .map(|v| !v.is_empty())
             .unwrap_or(false);
+        let start = Instant::now();
+        let _ = PROCESS_START.set(start);
         Self {
             enabled,
-            start: Instant::now(),
+            start,
             marks: Vec::new(),
         }
     }

@@ -2,10 +2,10 @@
 
 A completion the Harness runtime makes carries the same session identity as the
 client events for that session, so its ``quota.request_done`` row lands in the
-Vibe request marts. This module owns the shape of that attribution, the
-call-type taxonomy both telemetry channels read, and the late-binding holder a
-derivation hands to its runtime config. The backend adapter only builds a
-session's source and attaches it.
+Vibe request marts. Cache affinity is a separate request concern: forked
+sessions keep their own telemetry identity while routing with their root
+session. This module keeps those two late-bound sources separate for the
+runtime config.
 """
 
 from __future__ import annotations
@@ -18,10 +18,13 @@ from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import LaunchContext, TelemetryCallType
 
 # One session's request attribution, resolved per completion from its purpose
-# and its iteration within the turn.
+# and its iteration within the turn. ``classify`` and ``title`` name the
+# smart-approve risk classifier's completion and the background session title,
+# both issued by the runtime outside a turn's loop.
 type CompletionAttributionSource = Callable[
-    [Literal["agent", "compaction"], int], dict[str, str]
+    [Literal["agent", "compaction", "classify", "title"], int], dict[str, str]
 ]
+type CompletionAffinitySource = Callable[[], str | None]
 
 # Late-binding source of the current user message id, read per completion.
 # The adapter learns the id from history snapshots, so a callable (not a
@@ -30,17 +33,23 @@ type MessageIdSource = Callable[[], str | None]
 
 
 def request_call_type(
-    purpose: Literal["agent", "compaction"], iteration: int
+    purpose: Literal["agent", "compaction", "classify", "title"], iteration: int
 ) -> TelemetryCallType:
     """Map the runtime's purpose/iteration onto the legacy call-type taxonomy.
 
     Legacy marks the first LLM call of a user turn ``main_call`` and every
-    follow-up — tool-driven iterations and compaction — ``secondary_call``.
+    follow-up — tool-driven iterations and compaction — ``secondary_call``. The
+    smart-approve classifier and the background session title answer no user
+    prompt; each gets its own type so request-volume metrics can exclude them.
 
     Both the ``vibe.request_sent`` event and the attribution ridden by the
     provider request itself read this, so the two channels can never disagree
     about what one call was.
     """
+    if purpose == "classify":
+        return "smart_approve"
+    if purpose == "title":
+        return "title_generation"
     if purpose == "agent" and iteration == 0:
         return "main_call"
     return "secondary_call"
@@ -62,7 +71,7 @@ def build_completion_attribution(
     """
 
     def attribution(
-        purpose: Literal["agent", "compaction"], iteration: int
+        purpose: Literal["agent", "compaction", "classify", "title"], iteration: int
     ) -> dict[str, str]:
         metadata = build_request_metadata(
             launch_context=launch_context,
@@ -105,11 +114,27 @@ class CompletionAttributionHolder:
         self._source = source
 
     def metadata(
-        self, purpose: Literal["agent", "compaction"], iteration: int
+        self,
+        purpose: Literal["agent", "compaction", "classify", "title"],
+        iteration: int,
     ) -> dict[str, str]:
         if self._source is None:
             return {}
         return self._source(purpose, iteration)
 
+
+class CompletionAffinityHolder:
+    """One derivation's late-bound cache-routing identity."""
+
+    __slots__ = ("_source",)
+
+    def __init__(self) -> None:
+        self._source: CompletionAffinitySource | None = None
+
+    def bind(self, source: CompletionAffinitySource) -> None:
+        self._source = source
+
     def affinity_id(self) -> str | None:
-        return self.metadata("agent", 0).get("session_id")
+        if self._source is None:
+            return None
+        return self._source()

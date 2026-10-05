@@ -43,7 +43,13 @@ class LaunchContext(BaseModel):
         return {"entrypoint": self.agent_entrypoint, "client_name": self.client_name}
 
 
-TelemetryCallType = Literal["main_call", "secondary_call"]
+# ``smart_approve`` marks the smart-approve tool-gate risk classifier's own
+# completion; ``title_generation`` and ``worktree_title`` mark background naming
+# completions. All three are utility calls that never answer a user prompt, so
+# request-volume metrics can exclude them from model-turn counting.
+TelemetryCallType = Literal[
+    "main_call", "secondary_call", "smart_approve", "title_generation", "worktree_title"
+]
 
 
 class ExperimentAssignment(BaseModel):

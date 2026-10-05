@@ -60,6 +60,7 @@ fn restore(app: &mut App, queued_turn: &Value) {
         server_message_id: message_id.to_owned(),
         text,
         images,
+        mentions: None,
         sent: true,
         ever_sent: true,
         revision,

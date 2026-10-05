@@ -88,6 +88,11 @@ class StdioJsonRpcTransport:
         allow_writer_exit: bool = False,
     ) -> None:
         self._check_writer(writer_task, allow_stopped=allow_writer_exit)
+        try:
+            self._outbox.put_nowait(item)
+            return
+        except asyncio.QueueFull:
+            pass
         put_task = asyncio.create_task(self._outbox.put(item))
         try:
             done, _ = await asyncio.wait(
@@ -119,13 +124,20 @@ class StdioJsonRpcTransport:
             raise RuntimeError("JSON-RPC writer stopped unexpectedly")
 
     async def _write_messages(self) -> None:
-        while (line := await self._outbox.get()) is not None:
-            if not await asyncio.to_thread(self._write_line, line):
+        while True:
+            # One write per burst keeps a thread hop per streamed event off the loop.
+            batch = [await self._outbox.get()]
+            while batch[-1] is not None and not self._outbox.empty():
+                batch.append(self._outbox.get_nowait())
+            lines = b"".join(line for line in batch if line is not None)
+            if lines and not await asyncio.to_thread(self._write, lines):
+                return
+            if batch[-1] is None:
                 return
 
-    def _write_line(self, line: bytes) -> bool:
+    def _write(self, lines: bytes) -> bool:
         try:
-            self._writer.write(line)
+            self._writer.write(lines)
             self._writer.flush()
         except (BrokenPipeError, ConnectionResetError):
             # The peer went away (e.g. client hit Ctrl-C). Stop the writer

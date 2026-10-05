@@ -22,7 +22,7 @@ fn hovering(at: (u16, u16)) -> Shape {
     }));
     app.view.selection_region.area = Rect::new(0, 0, 40, 10);
     mouse::register_region(&mut app, Rect::new(0, 0, 40, 10), MouseTarget::Transcript);
-    app.view.entry_hitmap = vec![(ENTRY_TOP, ENTRY_BOTTOM, "r1".to_owned())];
+    app.view.entry_hitmap = vec![(ENTRY_TOP, ENTRY_BOTTOM, Some(ENTRY_TOP), "r1".to_owned())];
     app.view.input_area = Rect::new(0, 10, 40, 3);
     mouse::register_region(&mut app, Rect::new(0, 10, 40, 3), MouseTarget::Composer);
     app.view.mouse_position = Some(at);

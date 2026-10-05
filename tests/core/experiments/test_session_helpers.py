@@ -16,6 +16,7 @@ from vibe.core.experiments.session import (
     resolve_plan_attributes,
 )
 from vibe.core.identity import IdentityResult
+from vibe.core.paths import EXPERIMENT_EVAL_CACHE_FILE
 from vibe.core.telemetry.types import LaunchContext, TerminalEmulator
 from vibe.setup.auth.whoami import WhoAmIResult
 
@@ -75,6 +76,33 @@ async def test_initialize_returns_false_when_telemetry_disabled(
 
     assert result[0] is False
     persist.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("enable_telemetry", "enable_experiments"), [(False, True), (True, False)]
+)
+async def test_initialize_clears_eval_cache_when_opted_out(
+    monkeypatch: pytest.MonkeyPatch, enable_telemetry: bool, enable_experiments: bool
+) -> None:
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.get_mistral_provider_and_api_key",
+        lambda _config: (MagicMock(), "fake-key"),
+    )
+    cache_path = EXPERIMENT_EVAL_CACHE_FILE.path
+    cache_path.write_text('{"key": {"stored_at_timestamp": 1, "payload": {}}}')
+
+    await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
+        config=_make_config(
+            enable_telemetry=enable_telemetry, enable_experiments=enable_experiments
+        ),
+        manager=ExperimentManager(client=_StubClient(None)),
+        session_logger=MagicMock(persist_experiments=AsyncMock()),
+        launch_context=None,
+    )
+
+    assert not cache_path.exists()
 
 
 @pytest.mark.asyncio

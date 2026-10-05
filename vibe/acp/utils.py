@@ -16,7 +16,7 @@ from acp.schema import (
     ToolCallStart,
 )
 
-from vibe.app_server.config import THINKING_LEVELS, ConfigView, ProxySettingsView
+from vibe.app_server.config import ConfigView, ProxySettingsView
 from vibe.app_server.models import (
     AgentSummary,
     AgentType,
@@ -182,7 +182,7 @@ def make_thinking_response(config: ConfigView) -> SessionConfigOptionSelect:
         type="select",
         options=[
             SessionConfigSelectOption(value=level, name=level.capitalize())
-            for level in THINKING_LEVELS
+            for level in config.active_model.thinking_levels
         ],
     )
 

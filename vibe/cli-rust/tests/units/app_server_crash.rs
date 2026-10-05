@@ -1,5 +1,6 @@
 //! The app-server crash notice renders and settles the session state.
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use serde_json::json;
@@ -111,4 +112,19 @@ fn a_submit_after_a_crash_goes_nowhere() {
     assert!(app.queue.is_empty());
     assert!(app.pending_commands.is_empty());
     assert!(matches!(app.session.status, Status::Failed));
+}
+
+#[test]
+fn ctrl_c_after_a_crash_exits_on_the_first_press() {
+    // The notice says "Press Ctrl+C to exit": no draft clearing, no confirmation.
+    let client = Arc::new(Client::stub());
+    let (config_tx, _config_rx) = tokio::sync::mpsc::channel::<config::Loaded>(1);
+    let mut app = App::default();
+    assert!(surface_server_close(&mut app, true));
+    app.chat_input.input = "hello?".into();
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+    assert!(vibe_rs::input::handle_key(
+        &mut app, &client, &config_tx, ctrl_c
+    ));
 }

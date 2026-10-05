@@ -152,16 +152,23 @@ class SessionProjector:
     ) -> ProjectionUpdate:
         state = self._projection.snapshot
         entries = list(state.history.entries)
+        input_entry_id = _active_input_entry_id(state.latest_turn, action.turn_id)
         if isinstance(action, RustLLMCallAction):
             if action.purpose != "compaction":
                 raise ValueError(
                     "only compaction LLM actions have public start entries"
                 )
             entry = _running_compaction_entry(
-                state.session.id, entries, action, observed_at
+                state.session.id,
+                entries,
+                action,
+                observed_at,
+                input_entry_id=input_entry_id,
             )
         else:
-            entry = _running_effect_entry(state.session.id, action, observed_at)
+            entry = _running_effect_entry(
+                state.session.id, action, observed_at, input_entry_id=input_entry_id
+            )
         if not _replace_entry(entries, cast(str, entry["id"]), entry):
             entries.append(entry)
         public = state.model_copy(
@@ -216,6 +223,10 @@ class SessionProjector:
                 )
                 if existing is None:
                     entries.append(entry)
+                user_entry = existing or entry
+                latest_turn = latest_turn.model_copy(
+                    update={"input_entry_id": cast(str, user_entry["id"])}
+                )
             elif isinstance(observation, RustTurnSteeringReceivedObservation):
                 entries.append(
                     _message_entry(
@@ -229,8 +240,28 @@ class SessionProjector:
                     )
                 )
             elif isinstance(observation, RustTurnSteeredObservation):
-                pass
+                if (
+                    not isinstance(latest_turn, InProgressPublicTurn)
+                    or latest_turn.id != observation.turn_id
+                ):
+                    raise ValueError(
+                        "turn_steered does not match the active public turn"
+                    )
+                input_entry_id = _steered_input_entry_id(
+                    entries,
+                    observation.turn_id,
+                    _active_input_entry_id(latest_turn, observation.turn_id),
+                    observation.content,
+                )
+                if input_entry_id is None:
+                    raise ValueError("turn_steered has no matching public user entry")
+                latest_turn = latest_turn.model_copy(
+                    update={"input_entry_id": input_entry_id}
+                )
             elif isinstance(observation, RustAssistantMessageCommittedObservation):
+                input_entry_id = _active_input_entry_id(
+                    latest_turn, observation.turn_id
+                )
                 reasoning_parts = [
                     part
                     for part in observation.candidate.message.content
@@ -243,6 +274,7 @@ class SessionProjector:
                         f"reasoning-{observation.action_id}-{index}",
                         reasoning_part,
                         observed_at,
+                        input_entry_id=input_entry_id,
                     )
                     if entry is not None and not _replace_entry(
                         entries, cast(str, entry["id"]), entry
@@ -263,6 +295,7 @@ class SessionProjector:
                         content,
                         observed_at,
                         "harness",
+                        input_entry_id=input_entry_id,
                     )
                     if not _replace_entry(
                         entries, cast(str, committed_entry["id"]), committed_entry
@@ -308,19 +341,36 @@ class SessionProjector:
                     )
             elif isinstance(observation, RustToolResultCommittedObservation):
                 entry = _completed_effect_entry(
-                    state.session.id, entries, observation, observed_at
+                    state.session.id,
+                    entries,
+                    observation,
+                    observed_at,
+                    input_entry_id=_active_input_entry_id(
+                        latest_turn, observation.turn_id
+                    ),
                 )
                 if not _replace_entry(entries, cast(str, entry["id"]), entry):
                     entries.append(entry)
             elif isinstance(observation, RustToolDiscoveryFinishedObservation):
                 entry = _completed_tool_discovery_effect_entry(
-                    state.session.id, observation, observed_at
+                    state.session.id,
+                    observation,
+                    observed_at,
+                    input_entry_id=_active_input_entry_id(
+                        latest_turn, observation.turn_id
+                    ),
                 )
                 if not _replace_entry(entries, cast(str, entry["id"]), entry):
                     entries.append(entry)
             elif isinstance(observation, RustContextCompactedObservation):
                 entry = _completed_compaction_entry(
-                    state.session.id, entries, observation, observed_at
+                    state.session.id,
+                    entries,
+                    observation,
+                    observed_at,
+                    input_entry_id=_active_input_entry_id(
+                        latest_turn, observation.turn_id
+                    ),
                 )
                 if not _replace_entry(entries, cast(str, entry["id"]), entry):
                     entries.append(entry)
@@ -337,7 +387,13 @@ class SessionProjector:
                 )
             elif isinstance(observation, RustContextCompactionFailedObservation):
                 entry = _failed_compaction_entry(
-                    state.session.id, entries, observation, observed_at
+                    state.session.id,
+                    entries,
+                    observation,
+                    observed_at,
+                    input_entry_id=_active_input_entry_id(
+                        latest_turn, observation.turn_id
+                    ),
                 )
                 if not _replace_entry(entries, cast(str, entry["id"]), entry):
                     entries.append(entry)
@@ -368,6 +424,9 @@ class SessionProjector:
                     id=observation.turn_id,
                     session_id=state.session.id,
                     queue_item_id=_turn_queue_item_id(latest_turn, observation.turn_id),
+                    input_entry_id=_active_input_entry_id(
+                        latest_turn, observation.turn_id
+                    ),
                     started_at=started_at,
                     completed_at=observed_at,
                 )
@@ -384,6 +443,9 @@ class SessionProjector:
                     id=observation.turn_id,
                     session_id=state.session.id,
                     queue_item_id=_turn_queue_item_id(latest_turn, observation.turn_id),
+                    input_entry_id=_active_input_entry_id(
+                        latest_turn, observation.turn_id
+                    ),
                     started_at=started_at,
                     completed_at=observed_at,
                     reason=observation.reason,
@@ -401,6 +463,9 @@ class SessionProjector:
                     id=observation.turn_id,
                     session_id=state.session.id,
                     queue_item_id=_turn_queue_item_id(latest_turn, observation.turn_id),
+                    input_entry_id=_active_input_entry_id(
+                        latest_turn, observation.turn_id
+                    ),
                     started_at=started_at,
                     completed_at=observed_at,
                     error=PublicError(
@@ -466,17 +531,26 @@ class SessionProjector:
         """
         state = self._projection.snapshot
         entries = list(state.history.entries)
+        input_entry_id = _active_input_entry_id(state.latest_turn, delta.turn_id)
         if delta.restart:
             entries = _cleared_provisional_entries(
                 entries, delta.action_id, observed_at
             )
         if delta.reasoning:
             entries = _merge_provisional_reasoning(
-                entries, state.session.id, delta, observed_at
+                entries,
+                state.session.id,
+                delta,
+                observed_at,
+                input_entry_id=input_entry_id,
             )
         if delta.text:
             entries = _merge_provisional_message(
-                entries, state.session.id, delta, observed_at
+                entries,
+                state.session.id,
+                delta,
+                observed_at,
+                input_entry_id=input_entry_id,
             )
         history = state.history.model_copy(update={"entries": entries})
         public = state.model_copy(
@@ -493,6 +567,28 @@ class SessionProjector:
         entries = list(state.history.entries)
         entry = _model_change_entry(
             state.session.id, model, _model_change_count(entries) + 1, observed_at
+        )
+        entries.append(entry)
+        public = state.model_copy(
+            update={
+                "session": state.session.model_copy(update={"updated_at": observed_at}),
+                "history": state.history.model_copy(update={"entries": entries}),
+            }
+        )
+        return self._advance(public)
+
+    def apply_agent_change(
+        self, agent: str, *, observed_at: int, turn_id: str | None = None
+    ) -> ProjectionUpdate:
+        """Record that the session moved to a different agent profile."""
+        state = self._projection.snapshot
+        entries = list(state.history.entries)
+        entry = _agent_change_entry(
+            state.session.id,
+            agent,
+            _agent_change_count(entries) + 1,
+            observed_at,
+            turn_id,
         )
         entries.append(entry)
         public = state.model_copy(
@@ -539,11 +635,8 @@ class SessionProjector:
         watermark: int,
         delta: ProjectionDelta | None,
     ) -> ProjectionUpdate:
-        self._projection = ProjectionStateV1(
-            session_id=self._projection.session_id,
-            snapshot_sequence=self._projection.snapshot_sequence,
-            watermark=watermark,
-            snapshot=public,
+        self._projection = self._projection.model_copy(
+            update={"watermark": watermark, "snapshot": public}
         )
         return ProjectionUpdate(
             projection=self._projection,
@@ -656,6 +749,7 @@ def settle_stalled_projection(
         id=turn_id,
         session_id=state.session.id,
         queue_item_id=_turn_queue_item_id(state.latest_turn, turn_id),
+        input_entry_id=_active_input_entry_id(state.latest_turn, turn_id),
         started_at=_started_at(state.latest_turn, turn_id, observed_at),
         completed_at=observed_at,
         reason=reason,
@@ -675,6 +769,8 @@ def _reasoning_entry(
     entry_id: str,
     part: RustReasoningPart,
     observed_at: int,
+    *,
+    input_entry_id: str | None = None,
 ) -> JsonObject | None:
     """Build a public ``reasoning`` history entry from a ``RustReasoningPart``.
 
@@ -710,6 +806,7 @@ def _reasoning_entry(
             "generationStatus": "completed",
             "outcome": {"type": "committed"},
             "relatedEntryId": None,
+            "inputEntryId": input_entry_id,
             "text": text,
             "summary": summary_parts,
         },
@@ -724,6 +821,8 @@ def _message_entry(
     content: Sequence[Any],
     observed_at: int,
     source: str,
+    *,
+    input_entry_id: str | None = None,
 ) -> JsonObject:
     client_message_id = _client_message_id(content) if role == "user" else None
     user_display_content = (
@@ -742,6 +841,7 @@ def _message_entry(
             "updatedAt": observed_at,
             "generationStatus": "completed",
             "relatedEntryId": None,
+            "inputEntryId": input_entry_id,
             "role": role,
             "content": [_public_content_block(part) for part in content],
             "source": source,
@@ -832,7 +932,12 @@ def _merge_provisional_entry(
 
 
 def _merge_provisional_message(
-    entries: list[JsonObject], session_id: str, delta: CompletionDelta, observed_at: int
+    entries: list[JsonObject],
+    session_id: str,
+    delta: CompletionDelta,
+    observed_at: int,
+    *,
+    input_entry_id: str | None,
 ) -> list[JsonObject]:
     entry_id = f"assistant-{delta.action_id}"
 
@@ -866,6 +971,7 @@ def _merge_provisional_message(
                 "generationStatus": "in_progress",
                 "outcome": None,
                 "relatedEntryId": None,
+                "inputEntryId": input_entry_id,
                 "role": "assistant",
                 "content": [{"type": "text", "text": delta.text}],
                 "source": "harness",
@@ -877,7 +983,12 @@ def _merge_provisional_message(
 
 
 def _merge_provisional_reasoning(
-    entries: list[JsonObject], session_id: str, delta: CompletionDelta, observed_at: int
+    entries: list[JsonObject],
+    session_id: str,
+    delta: CompletionDelta,
+    observed_at: int,
+    *,
+    input_entry_id: str | None,
 ) -> list[JsonObject]:
     entry_id = f"reasoning-{delta.action_id}-0"
 
@@ -906,6 +1017,7 @@ def _merge_provisional_reasoning(
                 "generationStatus": "in_progress",
                 "outcome": None,
                 "relatedEntryId": None,
+                "inputEntryId": input_entry_id,
                 "text": delta.reasoning,
                 "summary": [],
             },
@@ -994,6 +1106,8 @@ def public_notice_entry(
             "updatedAt": observed_at,
             "generationStatus": "completed",
             "level": level,
+            "relatedEntryId": None,
+            "inputEntryId": None,
             "message": content or _notice_message(kind, hook_name),
             "detail": detail,
         },
@@ -1012,6 +1126,50 @@ def _notice_message(kind: str, hook_name: str | None) -> str:
 
 def _client_message_id(content: Sequence[Any]) -> str | None:
     return _content_meta_value(content, "vibe_client_message_id")
+
+
+def _active_input_entry_id(latest_turn: object, turn_id: str | None) -> str | None:
+    if (
+        isinstance(latest_turn, InProgressPublicTurn)
+        and latest_turn.id == turn_id
+        and latest_turn.input_entry_id is not None
+    ):
+        return latest_turn.input_entry_id
+    return None
+
+
+def _steered_input_entry_id(
+    entries: Sequence[JsonObject],
+    turn_id: str,
+    active_input_entry_id: str | None,
+    content: Sequence[Any],
+) -> str | None:
+    client_message_id = _client_message_id(content)
+    if client_message_id is not None:
+        entry = _find_entry(entries, client_message_id)
+        if _is_steering_user_entry(entry, turn_id):
+            return client_message_id
+
+    after_active_input = active_input_entry_id is None
+    for entry in entries:
+        if entry.get("id") == active_input_entry_id:
+            after_active_input = True
+            continue
+        if after_active_input and _is_steering_user_entry(entry, turn_id):
+            entry_id = entry.get("id")
+            if isinstance(entry_id, str):
+                return entry_id
+    return None
+
+
+def _is_steering_user_entry(entry: JsonObject | None, turn_id: str) -> bool:
+    return (
+        entry is not None
+        and entry.get("type") == "message"
+        and entry.get("role") == "user"
+        and entry.get("source") == "turn_steer"
+        and entry.get("turnId") == turn_id
+    )
 
 
 def _content_meta_value(content: Sequence[Any], key: str) -> str | None:
@@ -1115,7 +1273,11 @@ def _public_content_block(part: Any) -> JsonValue:
 
 
 def _running_effect_entry(
-    session_id: str, action: RustToolCallAction, observed_at: int
+    session_id: str,
+    action: RustToolCallAction,
+    observed_at: int,
+    *,
+    input_entry_id: str | None,
 ) -> JsonObject:
     tool_name, detail = _effect_detail(action)
     return cast(
@@ -1129,6 +1291,7 @@ def _running_effect_entry(
             "updatedAt": observed_at,
             "generationStatus": "in_progress",
             "relatedEntryId": None,
+            "inputEntryId": input_entry_id,
             "title": tool_name,
             "detail": detail,
             "state": {"status": "running", "outputText": ""},
@@ -1141,6 +1304,8 @@ def _running_compaction_entry(
     entries: Sequence[JsonObject],
     action: RustLLMCallAction,
     observed_at: int,
+    *,
+    input_entry_id: str | None,
 ) -> JsonObject:
     compaction_id = action.compaction_id
     attempt = action.attempt
@@ -1160,6 +1325,7 @@ def _running_compaction_entry(
             "updatedAt": observed_at,
             "generationStatus": "in_progress",
             "relatedEntryId": None,
+            "inputEntryId": input_entry_id,
             "kind": "compaction",
             "message": "Compacting context",
             "details": {"trigger": action.trigger, "attempt": attempt},
@@ -1190,9 +1356,39 @@ def _model_change_entry(
             "updatedAt": observed_at,
             "generationStatus": "completed",
             "relatedEntryId": None,
+            "inputEntryId": None,
             "kind": "model_change",
             "message": f"Model changed to {model}",
             "details": {"model": model},
+        },
+    )
+
+
+def _agent_change_count(entries: Sequence[JsonObject]) -> int:
+    return sum(
+        1
+        for entry in entries
+        if entry.get("type") == "checkpoint" and entry.get("kind") == "agent_change"
+    )
+
+
+def _agent_change_entry(
+    session_id: str, agent: str, sequence: int, observed_at: int, turn_id: str | None
+) -> JsonObject:
+    return cast(
+        JsonObject,
+        {
+            "type": "checkpoint",
+            "id": f"checkpoint-agent-change-{sequence}",
+            "sessionId": session_id,
+            "turnId": turn_id,
+            "createdAt": observed_at,
+            "updatedAt": observed_at,
+            "generationStatus": "completed",
+            "relatedEntryId": None,
+            "kind": "agent_change",
+            "message": f"Agent changed to {agent}",
+            "details": {"agent": agent},
         },
     )
 
@@ -1202,6 +1398,8 @@ def _completed_compaction_entry(
     entries: Sequence[JsonObject],
     observation: RustContextCompactedObservation,
     observed_at: int,
+    *,
+    input_entry_id: str | None,
 ) -> JsonObject:
     return _terminal_compaction_entry(
         session_id,
@@ -1209,6 +1407,7 @@ def _completed_compaction_entry(
         compaction_id=observation.compaction_id,
         turn_id=observation.turn_id,
         observed_at=observed_at,
+        input_entry_id=input_entry_id,
         message="Context compacted",
         details={
             "trigger": observation.trigger,
@@ -1247,6 +1446,8 @@ def _failed_compaction_entry(
     entries: Sequence[JsonObject],
     observation: RustContextCompactionFailedObservation,
     observed_at: int,
+    *,
+    input_entry_id: str | None,
 ) -> JsonObject:
     return _terminal_compaction_entry(
         session_id,
@@ -1254,6 +1455,7 @@ def _failed_compaction_entry(
         compaction_id=observation.compaction_id,
         turn_id=observation.turn_id,
         observed_at=observed_at,
+        input_entry_id=input_entry_id,
         message="Context compaction failed",
         details={
             "trigger": observation.trigger,
@@ -1273,12 +1475,21 @@ def _terminal_compaction_entry(
     compaction_id: str,
     turn_id: str | None,
     observed_at: int,
+    input_entry_id: str | None,
     message: str,
     details: JsonObject,
 ) -> JsonObject:
     entry_id = f"checkpoint-compaction-{compaction_id}"
     existing = _find_entry(entries, entry_id)
     created_at = existing.get("createdAt") if existing is not None else observed_at
+    existing_input_entry_id = (
+        existing.get("inputEntryId") if existing is not None else None
+    )
+    effective_input_entry_id = (
+        existing_input_entry_id
+        if isinstance(existing_input_entry_id, str)
+        else input_entry_id
+    )
     return cast(
         JsonObject,
         {
@@ -1290,6 +1501,7 @@ def _terminal_compaction_entry(
             "updatedAt": observed_at,
             "generationStatus": "completed",
             "relatedEntryId": None,
+            "inputEntryId": effective_input_entry_id,
             "kind": "compaction",
             "message": message,
             "details": details,
@@ -1314,6 +1526,8 @@ def _completed_effect_entry(  # noqa: PLR0914 - one cohesive effect entry
     entries: Sequence[JsonObject],
     observation: RustToolResultCommittedObservation,
     observed_at: int,
+    *,
+    input_entry_id: str | None,
 ) -> JsonObject:
     entry_id = f"effect-{observation.action_id}"
     existing = _find_entry(entries, entry_id)
@@ -1390,6 +1604,7 @@ def _completed_effect_entry(  # noqa: PLR0914 - one cohesive effect entry
             "updatedAt": observed_at,
             "generationStatus": "completed",
             "relatedEntryId": None,
+            "inputEntryId": input_entry_id,
             "title": tool_name,
             "detail": {
                 "kind": "tool",
@@ -1443,7 +1658,11 @@ def _approval_meta(result: object) -> JsonObject | None:
 
 
 def _completed_tool_discovery_effect_entry(
-    session_id: str, observation: RustToolDiscoveryFinishedObservation, observed_at: int
+    session_id: str,
+    observation: RustToolDiscoveryFinishedObservation,
+    observed_at: int,
+    *,
+    input_entry_id: str | None,
 ) -> JsonObject:
     """Make the Core-local discovery call visible without exposing its query."""
     message = "for relevant tools"
@@ -1458,6 +1677,7 @@ def _completed_tool_discovery_effect_entry(
             "updatedAt": observed_at,
             "generationStatus": "completed",
             "relatedEntryId": None,
+            "inputEntryId": input_entry_id,
             "title": "Searching for relevant tools",
             "detail": {
                 "kind": "tool",
@@ -1594,6 +1814,7 @@ def _effect_detail(action: RustToolCallAction) -> tuple[str, JsonObject]:
                     "toolName": tool_name,
                     "input": {"task": message, "agent": agent_type},
                     "childSessionId": None,
+                    "agentName": agent_name,
                     "display": {
                         "summary": f"Starting {agent_name}",
                         "verb": "Starting",

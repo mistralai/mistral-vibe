@@ -10,6 +10,7 @@ from tests.stubs.fake_tool import FakeTool, FakeToolArgs
 from vibe.app_server._shell import shell_effect_detail
 from vibe.app_server.events import HistoryEntryAdded
 from vibe.app_server.models import (
+    PublicCheckpointEntry,
     PublicEffectEntry,
     PublicEntryGenerationStatus,
     RunningEffectState,
@@ -255,3 +256,29 @@ async def test_manual_shell_breaks_an_open_group_of_agent_calls() -> None:
 
     await projection.dispatch(_call_event("b"), handler.handle_event)
     assert len(_mounted_groups(mount_callback)) == 2
+
+
+@pytest.mark.asyncio
+async def test_an_agent_change_leaves_the_open_group_alone() -> None:
+    handler, mount_callback, projection = _make_handler()
+
+    await projection.dispatch(_call_event("a"), handler.handle_event)
+    await handler.handle_event(
+        HistoryEntryAdded(
+            PublicCheckpointEntry(
+                id="checkpoint-agent-change-1",
+                session_id="s1",
+                turn_id="t1",
+                created_at=1,
+                updated_at=1,
+                generation_status=PublicEntryGenerationStatus.COMPLETED,
+                kind="agent_change",
+                details={"agent": "plan"},
+            )
+        )
+    )
+    await projection.dispatch(_call_event("b"), handler.handle_event)
+
+    groups = _mounted_groups(mount_callback)
+    assert len(groups) == 1
+    assert handler.current_tool_group is groups[0]

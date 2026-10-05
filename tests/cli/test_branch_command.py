@@ -87,6 +87,7 @@ async def _wait_until(pilot, predicate, timeout: float = 2.0) -> bool:
 async def test_branch_forks_latest_and_shows_resume_hint(tmp_path: Path) -> None:
     app = _build_app(tmp_path)
     captured: dict[str, object] = {}
+    recorded: list[tuple[str, dict[str, str]]] = []
 
     async with app.run_test() as pilot:
         sessions = app.app_server.resources.sessions
@@ -96,7 +97,11 @@ async def test_branch_forks_latest_and_shows_resume_hint(tmp_path: Path) -> None
             captured["attach"] = attach
             return _fork_response("new-branch-session-id", app.app_server.session_id)
 
+        def record(name: str, properties: dict[str, str]) -> None:
+            recorded.append((name, properties))
+
         sessions.fork = recording_fork  # type: ignore[method-assign]
+        app.app_server.resources.telemetry.record = record  # type: ignore[method-assign]
         old_session_id = app.app_server.session_id
 
         handled = await app._handle_command("/branch")
@@ -112,6 +117,41 @@ async def test_branch_forks_latest_and_shows_resume_hint(tmp_path: Path) -> None
         assert "vibe --resume new-bran" in content
         # The current session is left unchanged (no rebind, no widget teardown).
         assert app.app_server.session_id == old_session_id
+        assert [event for event in recorded if event[0] == "vibe.session_branched"] == [
+            (
+                "vibe.session_branched",
+                {
+                    "source_session_id": old_session_id,
+                    "new_session_id": "new-branch-session-id",
+                },
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_branch_does_not_duplicate_unified_server_telemetry(
+    tmp_path: Path,
+) -> None:
+    app = _build_app(tmp_path)
+    recorded: list[tuple[str, dict[str, str]]] = []
+
+    async with app.run_test() as pilot:
+        app.app_server.state.session.harness = "unified"
+        sessions = app.app_server.resources.sessions
+
+        async def recording_fork(entry_id=None, *, attach=True):
+            return _fork_response("new-branch-session-id", app.app_server.session_id)
+
+        def record(name: str, properties: dict[str, str]) -> None:
+            recorded.append((name, properties))
+
+        sessions.fork = recording_fork  # type: ignore[method-assign]
+        app.app_server.resources.telemetry.record = record  # type: ignore[method-assign]
+
+        await app._handle_command("/branch")
+        await pilot.pause()
+
+    assert [event for event in recorded if event[0] == "vibe.session_branched"] == []
 
 
 @pytest.mark.asyncio

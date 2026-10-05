@@ -20,7 +20,7 @@ point's policy. The fail action per point:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 import contextlib
 from dataclasses import dataclass
 import json
@@ -33,6 +33,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustCompletionHookInput,
     RustCompletionHookRetry,
     RustContentBlock,
+    RustExternalToolCall,
     RustHookSkip,
     RustPostAgentTurnHookResult,
     RustPostToolCallHookInput,
@@ -119,12 +120,153 @@ def _stdin_payload(
 ) -> dict[str, Any]:
     tool_call = hook_input.tool_call
     return {
-        "cwd": str(context.config.cwd),
+        **_base_payload(context),
         "hook_event_name": _HOOK_EVENT_NAME,
         "tool_name": qualified_tool_name(tool_call.call),
         "tool_call_id": tool_call.call_id,
-        "tool_input": dict(tool_call.call.arguments),
+        "tool_input": _author_tool_input(tool_call.call),
     }
+
+
+class _HookCommandError(RuntimeError):
+    # Carries the legacy-style failure reason (stderr, stdout, timeout, exit code) so a
+    # fail-open run can surface it instead of vanishing.
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _execution_reason(error: Exception) -> str:
+    if isinstance(error, _HookCommandError):
+        return error.reason
+    return f"hook failed: {error}"
+
+
+def _renamed(arguments: JsonObject, source: str, target: str) -> JsonObject:
+    if source not in arguments:
+        return arguments
+    return {
+        target: arguments[source],
+        **{key: value for key, value in arguments.items() if key != source},
+    }
+
+
+def _search_replace_author_arguments(arguments: JsonObject) -> JsonObject:
+    # The legacy edit shape carries a single search/replace pair at the top level. A
+    # multi-block runtime payload cannot be represented in it, so it is passed through
+    # untouched rather than silently dropping the extra blocks.
+    content = arguments.get("content")
+    if not (
+        isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict)
+    ):
+        return arguments
+    block = content[0]
+    return {
+        **{key: value for key, value in arguments.items() if key != "content"},
+        "old_string": block.get("old_str", ""),
+        "new_string": block.get("new_str", ""),
+        "replace_all": block.get("replace_all", False),
+    }
+
+
+# Runtime argument names to the ones the CLI's tools — and therefore hooks written
+# against the legacy runtime — use. Each translator renames keys on a copy of the full
+# argument set; it must not rebuild a subset, or hooks silently lose fields the Core
+# still executes (offset/limit on read_file, timeout_seconds on bash).
+_AUTHOR_ARGUMENTS: Mapping[str, Callable[[JsonObject], JsonObject]] = {
+    "file_system.read_file": lambda arguments: _renamed(arguments, "path", "file_path"),
+    "file_system.write_file": lambda arguments: _renamed(
+        arguments, "path", "file_path"
+    ),
+    "file_system.search_replace": _search_replace_author_arguments,
+    "file_system.bash": lambda arguments: _renamed(
+        arguments, "timeout_seconds", "timeout"
+    ),
+}
+
+
+def _read_file_runtime_arguments(arguments: JsonObject) -> JsonObject | None:
+    if "file_path" not in arguments or "path" in arguments:
+        return None
+    return _renamed(arguments, "file_path", "path")
+
+
+def _write_file_runtime_arguments(arguments: JsonObject) -> JsonObject | None:
+    if "file_path" not in arguments or "path" in arguments:
+        return None
+    return _renamed(arguments, "file_path", "path")
+
+
+def _bash_runtime_arguments(arguments: JsonObject) -> JsonObject | None:
+    if "timeout" not in arguments or "timeout_seconds" in arguments:
+        return None
+    return _renamed(arguments, "timeout", "timeout_seconds")
+
+
+def _search_replace_runtime_arguments(arguments: JsonObject) -> JsonObject | None:
+    if "old_string" not in arguments and "new_string" not in arguments:
+        return None
+    return {
+        **{
+            key: value
+            for key, value in arguments.items()
+            if key not in {"old_string", "new_string", "replace_all", "content"}
+        },
+        "content": [
+            {
+                "old_str": arguments.get("old_string", ""),
+                "new_str": arguments.get("new_string", ""),
+                "replace_all": arguments.get("replace_all", False),
+            }
+        ],
+    }
+
+
+# The reverse direction, for a pre_tool rewrite: a hook speaks the author-facing names
+# and the Core executes runtime names. ``None`` means the rewrite already looks
+# runtime-shaped and passes through untouched.
+_RUNTIME_ARGUMENTS: Mapping[str, Callable[[JsonObject], JsonObject | None]] = {
+    "file_system.read_file": _read_file_runtime_arguments,
+    "file_system.write_file": _write_file_runtime_arguments,
+    "file_system.search_replace": _search_replace_runtime_arguments,
+    "file_system.bash": _bash_runtime_arguments,
+}
+
+
+def _author_tool_input(call: RustExternalToolCall) -> JsonObject:
+    translate = _AUTHOR_ARGUMENTS.get(qualified_tool_name(call))
+    if translate is None:
+        return dict(call.arguments)
+    return translate(dict(call.arguments))
+
+
+def _runtime_tool_input(
+    call: RustExternalToolCall, rewritten: JsonObject
+) -> JsonObject:
+    translate = _RUNTIME_ARGUMENTS.get(qualified_tool_name(call))
+    if translate is None:
+        return dict(rewritten)
+    return translate(dict(rewritten)) or dict(rewritten)
+
+
+def _base_payload(context: HookContext) -> dict[str, Any]:
+    # The legacy payload's shared session fields, emitted identically by all three
+    # builders so they cannot drift between points.
+    return {
+        "session_id": context.session_id,
+        # The session's storage root; the durable journal lives under it, which is
+        # what per-session audit and transcript-reading hooks key off.
+        "transcript_path": str(context.session_root) if context.session_root else "",
+        "cwd": str(context.config.workspace.cwd),
+        "parent_session_id": context.parent_session_id,
+    }
+
+
+def _system_message(parsed: dict[str, Any]) -> str | None:
+    message = parsed.get("system_message")
+    if isinstance(message, str) and message:
+        return message
+    return None
 
 
 def _text_reason(text: str) -> list[RustContentBlock]:
@@ -143,18 +285,30 @@ def _skip(reason: str) -> RustPreToolCallHookResult:
 
 
 def _fail(
-    strict: bool, original_arguments: JsonObject, *, tool_name: str
+    strict: bool,
+    original_arguments: JsonObject,
+    *,
+    tool_name: str,
+    failure_reason: str | None = None,
 ) -> tuple[RustPreToolCallHookResult, _HookNotice | None]:
     if strict:
         return (
-            _skip(_STRICT_FAILURE_REASON),
+            _skip(failure_reason or _STRICT_FAILURE_REASON),
             _HookNotice(f"Denied tool {tool_name!r} (strict)", "error"),
         )
-    return _continue(original_arguments), None
+    return (
+        _continue(original_arguments),
+        _HookNotice(failure_reason or "hook failed", "warning"),
+    )
 
 
-def _interpret_stdout(
-    stdout: str, original_arguments: JsonObject, *, strict: bool, tool_name: str
+def _interpret_stdout(  # noqa: PLR0911 - one early return per stdout shape
+    stdout: str,
+    original_arguments: JsonObject,
+    *,
+    strict: bool,
+    tool_name: str,
+    call: RustExternalToolCall,
 ) -> tuple[RustPreToolCallHookResult, _HookNotice | None]:
     """Map exit-0 stdout to a result + notice. Empty stdout allows; invalid JSON fails."""
     text = stdout.strip()
@@ -162,10 +316,20 @@ def _interpret_stdout(
         return _continue(original_arguments), None
     try:
         parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return _fail(strict, original_arguments, tool_name=tool_name)
+    except json.JSONDecodeError as error:
+        return _fail(
+            strict,
+            original_arguments,
+            tool_name=tool_name,
+            failure_reason=f"stdout did not match the hook response schema: {error}",
+        )
     if not isinstance(parsed, dict):
-        return _fail(strict, original_arguments, tool_name=tool_name)
+        return _fail(
+            strict,
+            original_arguments,
+            tool_name=tool_name,
+            failure_reason="stdout did not match the hook response schema: not an object",
+        )
 
     if parsed.get("decision") == "deny":
         reason = parsed.get("reason")
@@ -174,6 +338,8 @@ def _interpret_stdout(
             _HookNotice(f"Denied tool {tool_name!r}", "error"),
         )
 
+    system_message = _system_message(parsed)
+
     # Allow (any non-"deny" decision, including absent/unknown), optionally with
     # rewritten arguments via hook_specific_output.tool_input.
     hook_output = parsed.get("hook_specific_output")
@@ -181,9 +347,13 @@ def _interpret_stdout(
         rewritten = hook_output.get("tool_input")
         if isinstance(rewritten, dict):
             return (
-                _continue(rewritten),
-                _HookNotice(f"Rewrote tool_input for {tool_name!r}", "warning"),
+                _continue(_runtime_tool_input(call, rewritten)),
+                _HookNotice(
+                    system_message or f"Rewrote tool_input for {tool_name!r}", "warning"
+                ),
             )
+    if system_message:
+        return _continue(original_arguments), _HookNotice(system_message, "ok")
     return _continue(original_arguments), None
 
 
@@ -235,17 +405,20 @@ async def _run_command(command: str, cwd: Path, timeout_s: float, stdin: bytes) 
     down the whole tree; a hook that spawns children would otherwise orphan them.
     """
     if not command.strip():
-        raise RuntimeError("hook command is empty")
-    process = await asyncio.create_subprocess_shell(
-        command,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=str(cwd),
-        start_new_session=True,
-    )
+        raise _HookCommandError("hook command is empty")
     try:
-        stdout_bytes, _stderr, _ = await asyncio.wait_for(
+        process = await asyncio.create_subprocess_shell(
+            command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(cwd),
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise _HookCommandError(f"failed to start: {error}") from None
+    try:
+        stdout_bytes, stderr_bytes, _ = await asyncio.wait_for(
             asyncio.gather(
                 _read_capped(process.stdout, _MAX_HOOK_OUTPUT_BYTES),
                 _read_capped(process.stderr, _MAX_HOOK_OUTPUT_BYTES),
@@ -253,12 +426,21 @@ async def _run_command(command: str, cwd: Path, timeout_s: float, stdin: bytes) 
             ),
             timeout=timeout_s,
         )
+    except TimeoutError:
+        raise _HookCommandError("timed out") from None
     finally:
         # Kill the process group on timeout, cancellation, or error so a hook never
         # orphans a child. A no-op once the process has exited.
         await _kill(process)
     if process.returncode != 0:
-        raise RuntimeError(f"hook command exited with code {process.returncode}")
+        # Prefer stderr: stdout is reserved for the JSON response and is likely
+        # empty / garbage when the hook crashed.
+        reason = (
+            stderr_bytes.decode("utf-8", errors="replace").strip()
+            or stdout_bytes.decode("utf-8", errors="replace").strip()
+            or f"exited with code {process.returncode}"
+        )
+        raise _HookCommandError(reason)
     return stdout_bytes.decode("utf-8", errors="replace")
 
 
@@ -280,12 +462,24 @@ def build_pre_tool_call_handler(
         try:
             payload = _stdin_payload(hook_input, context)
             stdin = json.dumps(payload).encode("utf-8")
-            stdout = await _run_command(command, context.config.cwd, timeout_s, stdin)
-        except Exception:
-            result, notice = _fail(strict, original_arguments, tool_name=display_name)
+            stdout = await _run_command(
+                command, context.config.workspace.cwd, timeout_s, stdin
+            )
+        except Exception as error:
+            # Any execution failure maps to the point's fail action, never an exception.
+            result, notice = _fail(
+                strict,
+                original_arguments,
+                tool_name=display_name,
+                failure_reason=_execution_reason(error),
+            )
         else:
             result, notice = _interpret_stdout(
-                stdout, original_arguments, strict=strict, tool_name=display_name
+                stdout,
+                original_arguments,
+                strict=strict,
+                tool_name=display_name,
+                call=hook_input.tool_call.call,
             )
         await _emit_completed(
             context,
@@ -328,11 +522,11 @@ def _post_tool_payload(
     result = hook_input.tool_result
     is_failure = isinstance(result, RustToolFailureResult)
     return {
-        "cwd": str(context.config.cwd),
+        **_base_payload(context),
         "hook_event_name": _POST_TOOL_EVENT_NAME,
         "tool_name": qualified_tool_name(tool_call.call),
         "tool_call_id": tool_call.call_id,
-        "tool_input": dict(tool_call.call.arguments),
+        "tool_input": _author_tool_input(tool_call.call),
         "tool_status": "failure" if is_failure else "success",
         # A failed call's structured_content is partial/undefined; report None so a
         # post_tool hook keys off tool_error/tool_output_text, not a leaked payload.
@@ -357,7 +551,7 @@ def _post_tool_payload(
 
 
 def _post_tool_fail(
-    strict: bool, result: RustToolResult
+    strict: bool, result: RustToolResult, *, failure_reason: str | None = None
 ) -> tuple[RustToolResult, _HookNotice | None]:
     # ``strict`` blanks the model-visible result so a failed guard does not leak output it
     # never got to inspect. Both fields are cleared: Core falls back to
@@ -368,10 +562,10 @@ def _post_tool_fail(
             result.model_copy(update={"content": [], "structured_content": None}),
             _HookNotice("Cleared tool result (strict)", "error"),
         )
-    return result, None
+    return result, _HookNotice(failure_reason or "hook failed", "warning")
 
 
-def _interpret_post_tool_stdout(
+def _interpret_post_tool_stdout(  # noqa: PLR0911 - one early return per stdout shape
     stdout: str, result: RustToolResult, *, strict: bool
 ) -> tuple[RustToolResult, _HookNotice | None]:
     """Map exit-0 stdout to the result the model sees + notice. Empty stdout is a no-op."""
@@ -380,12 +574,21 @@ def _interpret_post_tool_stdout(
         return result, None
     try:
         parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return _post_tool_fail(strict, result)
+    except json.JSONDecodeError as error:
+        return _post_tool_fail(
+            strict,
+            result,
+            failure_reason=f"stdout did not match the hook response schema: {error}",
+        )
     if not isinstance(parsed, dict):
-        return _post_tool_fail(strict, result)
+        return _post_tool_fail(
+            strict,
+            result,
+            failure_reason="stdout did not match the hook response schema: not an object",
+        )
 
     extra = _additional_context(parsed)
+    system_message = _system_message(parsed)
 
     if parsed.get("decision") == "deny":
         # The tool already ran; a deny replaces the model-visible content with the reason
@@ -402,7 +605,10 @@ def _interpret_post_tool_stdout(
             replaced_chars += len(extra)
         return (
             result.model_copy(update={"content": content, "structured_content": None}),
-            _HookNotice(f"Replaced tool result ({replaced_chars} chars)", "warning"),
+            _HookNotice(
+                system_message or f"Replaced tool result ({replaced_chars} chars)",
+                "warning",
+            ),
         )
 
     if extra:
@@ -417,8 +623,13 @@ def _interpret_post_tool_stdout(
         appended: list[RustContentBlock] = [*base, RustTextContentBlock(text=extra)]
         return (
             result.model_copy(update={"content": appended}),
-            _HookNotice(f"Appended {len(extra)} chars to tool result", "warning"),
+            _HookNotice(
+                system_message or f"Appended {len(extra)} chars to tool result",
+                "warning",
+            ),
         )
+    if system_message:
+        return result, _HookNotice(system_message, "ok")
     return result, None
 
 
@@ -446,9 +657,14 @@ def build_post_tool_call_handler(
         try:
             payload = _post_tool_payload(hook_input, context)
             stdin = json.dumps(payload).encode("utf-8")
-            stdout = await _run_command(command, context.config.cwd, timeout_s, stdin)
-        except Exception:
-            new_result, notice = _post_tool_fail(strict, result)
+            stdout = await _run_command(
+                command, context.config.workspace.cwd, timeout_s, stdin
+            )
+        except Exception as error:
+            # Any execution failure maps to the point's fail action, never an exception.
+            new_result, notice = _post_tool_fail(
+                strict, result, failure_reason=_execution_reason(error)
+            )
         else:
             new_result, notice = _interpret_post_tool_stdout(
                 stdout, result, strict=strict
@@ -483,7 +699,7 @@ def _retry(feedback: str) -> RustPostAgentTurnHookResult:
 
 
 def _post_agent_payload(context: HookContext) -> dict[str, Any]:
-    return {"cwd": str(context.config.cwd), "hook_event_name": _POST_AGENT_EVENT_NAME}
+    return {**_base_payload(context), "hook_event_name": _POST_AGENT_EVENT_NAME}
 
 
 def _interpret_post_agent_stdout(
@@ -495,16 +711,30 @@ def _interpret_post_agent_stdout(
         return _accept(), None
     try:
         parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return _accept(), None
+    except json.JSONDecodeError as error:
+        return (
+            _accept(),
+            _HookNotice(
+                f"stdout did not match the hook response schema: {error}", "warning"
+            ),
+        )
     if not isinstance(parsed, dict):
-        return _accept(), None
+        return (
+            _accept(),
+            _HookNotice(
+                "stdout did not match the hook response schema: not an object",
+                "warning",
+            ),
+        )
+    system_message = _system_message(parsed)
     if parsed.get("decision") == "deny":
         reason = parsed.get("reason")
         return (
             _retry(str(reason) if reason else _POST_AGENT_DENY_REASON),
-            _HookNotice("Requested turn revision", "warning"),
+            _HookNotice(system_message or "Requested turn revision", "warning"),
         )
+    if system_message:
+        return _accept(), _HookNotice(system_message, "ok")
     return _accept(), None
 
 
@@ -521,8 +751,19 @@ def build_post_agent_turn_handler(
         try:
             payload = _post_agent_payload(context)
             stdin = json.dumps(payload).encode("utf-8")
-            stdout = await _run_command(command, context.config.cwd, timeout_s, stdin)
-        except Exception:
+            stdout = await _run_command(
+                command, context.config.workspace.cwd, timeout_s, stdin
+            )
+        except Exception as error:
+            # A failed review hook always accepts the turn, but the reason still
+            # reaches the notice line so a broken hook is visible.
+            await _emit_completed(
+                context,
+                name=name,
+                scope="post_agent",
+                tool_call_id=None,
+                notice=_HookNotice(_execution_reason(error), "warning"),
+            )
             return _accept()
         result, notice = _interpret_post_agent_stdout(stdout)
         await _emit_completed(

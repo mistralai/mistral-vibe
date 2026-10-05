@@ -1,0 +1,29 @@
+[
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "type": "text",
+       "text": "hi"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ]
+  }
+ },
+ {
+  "method": "feedback/shouldShow",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "pendingUserMessages": 1
+  }
+ }
+]

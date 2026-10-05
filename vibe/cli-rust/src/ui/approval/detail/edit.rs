@@ -66,15 +66,15 @@ fn edit_input(input: &Value) -> Option<FileEditEffectOutput> {
             .collect::<Vec<_>>();
         return (!occurrences.is_empty()).then_some(FileEditEffectOutput {
             file,
-            old_string: String::new(),
-            new_string: String::new(),
+            old_string: None,
+            new_string: None,
             occurrences,
         });
     }
     Some(FileEditEffectOutput {
         file,
-        old_string: input.get("oldString")?.as_str()?.to_owned(),
-        new_string: input.get("newString")?.as_str()?.to_owned(),
+        old_string: Some(input.get("oldString")?.as_str()?.to_owned()),
+        new_string: Some(input.get("newString")?.as_str()?.to_owned()),
         occurrences: Vec::new(),
     })
 }

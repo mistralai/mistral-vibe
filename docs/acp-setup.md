@@ -50,6 +50,24 @@ For using Mistral Vibe in JetBrains IDEs, you'll need to have the [Jetbrains AI 
 
 1. In the AI Chat agent selector, select the new Mistral Vibe agent and start the conversation.
 
+## Xcode
+
+1. Find the absolute path to the `vibe-acp` executable:
+
+```shell
+command -v vibe-acp
+```
+
+2. In Xcode, open `Xcode > Settings > Intelligence`.
+
+3. Under `Agents`, click `Add an Agent`.
+
+4. Set the name to `Mistral Vibe` and the executable to the absolute path from step 1. Leave the interpreter, arguments, and environment variables empty.
+
+5. Click `Add`, then select Mistral Vibe in the coding assistant's agent picker and start a conversation.
+
+See [Apple's Xcode documentation](https://developer.apple.com/documentation/xcode/setting-up-coding-intelligence#Enable-agents) for more information about adding ACP agents.
+
 ## Neovim (using avante.nvim)
 
 Add Mistral Vibe in the acp_providers section of your configuration

@@ -158,7 +158,7 @@ class UpdatePromptDialog(CenterMiddle):
         self.query_one("#update-dialog-status", NoMarkupStatic).display = True
 
         try:
-            succeeded = await do_update()
+            succeeded = await do_update(self.latest_version)
         except Exception as exc:
             logger.warning("do_update raised unexpectedly", exc_info=exc)
             succeeded = False

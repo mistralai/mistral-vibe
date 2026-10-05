@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from nturl2path import url2pathname as windows_url2pathname
-import os
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 import re
 from urllib.parse import unquote, urlparse
@@ -77,15 +76,6 @@ class GlobalPath:
     @property
     def path(self) -> Path:
         return self._resolver()
-
-
-_DEFAULT_VIBE_HOME = Path.home() / ".vibe"
-
-
-def get_vibe_home() -> Path:
-    if vibe_home := os.getenv("VIBE_HOME"):
-        return Path(vibe_home).expanduser().resolve()
-    return _DEFAULT_VIBE_HOME
 
 
 def is_dangerous_directory(path: Path | str = ".") -> tuple[bool, str]:

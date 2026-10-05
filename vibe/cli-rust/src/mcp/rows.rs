@@ -1,7 +1,10 @@
 //! Option rows of the `/mcp` browser (Python `MCPApp._show_{list,detail}_view`).
 
+use caseless::default_case_fold_str as casefold;
+
 use crate::server::{MCPSourceKind, MCPSourceStatus, MCPSourceSummary, MCPState};
 
+use super::labels::{owner_tag, pad, source_status, tool_label};
 use crate::app::MCPApp;
 
 /// One `OptionList` row; only `Source` and `Tool` rows are selectable.
@@ -18,19 +21,26 @@ pub enum Row {
     },
     Source(SourceRow),
     Tool(ToolRow),
+    /// `+ Add more connectors in Studio`, opening `manageConnectorsUrl`.
+    Manage,
 }
+
+pub const MANAGE_CONNECTORS_LABEL: &str = "+ Add more connectors in Studio";
 
 pub struct SourceRow {
     pub name: String,
     pub kind: MCPSourceKind,
-    /// Name, `[transport]` tag and tool count, padded to their group's widths.
+    /// Display name, `[transport]` tag and tool count, padded to their group's widths.
     pub label: String,
     pub transport: String,
+    /// `[plugin:name]` owner tag; empty when no source in the group has one.
+    pub owner: String,
     pub tools: String,
     pub symbol: &'static str,
     pub connected: bool,
     pub status: String,
-    pub needs_auth: bool,
+    /// Enter hands the source to its auth flow (help reads `Connect`).
+    pub awaits_auth: bool,
 }
 
 pub struct ToolRow {
@@ -41,7 +51,7 @@ pub struct ToolRow {
 
 impl Row {
     pub fn selectable(&self) -> bool {
-        matches!(self, Self::Source(_) | Self::Tool(_))
+        matches!(self, Self::Source(_) | Self::Tool(_) | Self::Manage)
     }
 
     /// Stable identity used to keep the highlight across a rebuild.
@@ -49,6 +59,7 @@ impl Row {
         match self {
             Self::Source(row) => Some(format!("{}:{}", row.kind.as_str(), row.name)),
             Self::Tool(row) => Some(format!("tool:{}", row.name)),
+            Self::Manage => Some("action:manage-connectors".to_owned()),
             _ => None,
         }
     }
@@ -82,6 +93,11 @@ pub fn find_source<'a>(
     }
 }
 
+/// Needs auth and bootstrapped; a bootstrap error shows in the detail view instead.
+pub fn awaits_auth(source: &MCPSourceSummary) -> bool {
+    source.status == MCPSourceStatus::NeedsAuth && source.error.is_none()
+}
+
 /// Title line: `MCP Servers[ & Connectors]`, or `MCP Server: name` in detail view.
 pub fn title(app: &MCPApp) -> String {
     if let Some(source) = viewing_source(app) {
@@ -89,12 +105,17 @@ pub fn title(app: &MCPApp) -> String {
             MCPSourceKind::Connector => "Connector",
             MCPSourceKind::Server => "MCP Server",
         };
-        return format!("{prefix}: {}", source.name);
+        return format!("{prefix}: {}", source.label());
     }
-    if sources(&app.state, MCPSourceKind::Connector).is_empty() {
-        "MCP Servers".to_owned()
+    let title = if sources(&app.state, MCPSourceKind::Connector).is_empty() {
+        "MCP Servers"
     } else {
-        "MCP Servers & Connectors".to_owned()
+        "MCP Servers & Connectors"
+    };
+    if app.refreshing {
+        format!("{title}  (refreshing)")
+    } else {
+        title.to_owned()
     }
 }
 
@@ -113,13 +134,14 @@ fn list_rows(state: &MCPState, query: &str) -> Vec<Row> {
     }
     let mut rows = Vec::new();
     if !servers.is_empty() {
-        add_source_group(&mut rows, "Local MCP Servers", &servers);
+        add_source_group(&mut rows, "Local MCP Servers", &servers, false);
     }
     if !connectors.is_empty() {
         if !servers.is_empty() {
             rows.push(Row::Blank);
         }
-        add_source_group(&mut rows, "Available Connectors", &connectors);
+        let manage = state.manage_connectors_url.is_some();
+        add_source_group(&mut rows, "Available Connectors", &connectors, manage);
     }
     rows
 }
@@ -135,7 +157,7 @@ fn sources(state: &MCPState, kind: MCPSourceKind) -> Vec<&MCPSourceSummary> {
         a.tools
             .is_empty()
             .cmp(&b.tools.is_empty())
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| casefold(a.label()).cmp(&casefold(b.label())))
             .then_with(|| a.name.cmp(&b.name))
     });
     sources
@@ -154,18 +176,21 @@ fn filtered_sources<'a>(
     let mut scored: Vec<_> = ordered
         .into_iter()
         .filter_map(|source| {
-            crate::utils::fuzzy::score(query, &source.name).map(|score| (score, source))
+            crate::utils::fuzzy::score(query, source.label()).map(|score| (score, source))
         })
         .collect();
     scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
     scored.into_iter().map(|(_, source)| source).collect()
 }
 
-fn add_source_group(rows: &mut Vec<Row>, title: &str, sources: &[&MCPSourceSummary]) {
+fn add_source_group(rows: &mut Vec<Row>, title: &str, sources: &[&MCPSourceSummary], manage: bool) {
     rows.push(Row::Header(title.to_owned()));
+    if manage {
+        rows.push(Row::Manage);
+    }
     let max_name = sources
         .iter()
-        .map(|s| s.name.chars().count())
+        .map(|s| s.label().chars().count())
         .max()
         .unwrap_or(0);
     let max_transport = sources
@@ -175,18 +200,21 @@ fn add_source_group(rows: &mut Vec<Row>, title: &str, sources: &[&MCPSourceSumma
         .unwrap_or(0);
     let labels: Vec<String> = sources.iter().map(|source| tool_label(source)).collect();
     let max_tools = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    for (source, tools) in sources.iter().zip(labels) {
+    let owners: Vec<String> = sources.iter().map(|source| owner_tag(source)).collect();
+    let max_owner = owners.iter().map(|o| o.chars().count()).max().unwrap_or(0);
+    for ((source, tools), owner) in sources.iter().zip(labels).zip(owners) {
         let (symbol, connected, status) = source_status(source);
         rows.push(Row::Source(SourceRow {
             name: source.name.clone(),
             kind: source.kind,
-            label: pad(&source.name, max_name),
+            label: pad(source.label(), max_name),
             transport: pad(&format!("[{}]", source.transport), max_transport),
+            owner: pad(&owner, max_owner),
             tools: pad(&tools, max_tools),
             symbol,
             connected,
             status,
-            needs_auth: source.status == MCPSourceStatus::NeedsAuth,
+            awaits_auth: awaits_auth(source),
         }));
     }
 }
@@ -232,60 +260,4 @@ fn detail_rows(state: &MCPState, source: &MCPSourceSummary) -> Vec<Row> {
             })
         })
         .collect()
-}
-
-/// Status glyph, whether it reads as connected (green), and its label.
-fn source_status(source: &MCPSourceSummary) -> (&'static str, bool, String) {
-    match source.status {
-        MCPSourceStatus::Connected => ("●", true, "connected".to_owned()),
-        MCPSourceStatus::Enabled => ("●", true, "enabled".to_owned()),
-        MCPSourceStatus::NeedsAuth => ("○", false, "needs auth".to_owned()),
-        MCPSourceStatus::NeedsSetup => ("○", false, "needs setup".to_owned()),
-        MCPSourceStatus::Unavailable => {
-            let hint = match source.kind {
-                MCPSourceKind::Server => "check your config",
-                MCPSourceKind::Connector => "try refreshing",
-            };
-            ("○", false, format!("error - {hint}"))
-        }
-        MCPSourceStatus::Disabled => ("○", false, "disabled".to_owned()),
-    }
-}
-
-fn tool_label(source: &MCPSourceSummary) -> String {
-    let total = source.tools.len();
-    if source.kind == MCPSourceKind::Server
-        && source.status == MCPSourceStatus::Unavailable
-        && total == 0
-    {
-        return "tool discovery failed".to_owned();
-    }
-    let enabled = source.tools.iter().filter(|tool| tool.enabled).count();
-    tool_count_text(enabled, total)
-}
-
-fn tool_count_text(enabled: usize, total: usize) -> String {
-    if enabled < total {
-        return format!("{enabled}/{total} {}", plural(total));
-    }
-    if enabled == 0 {
-        return "no tools".to_owned();
-    }
-    format!("{enabled} {}", plural(enabled))
-}
-
-fn plural(count: usize) -> &'static str {
-    if count == 1 {
-        "tool"
-    } else {
-        "tools"
-    }
-}
-
-fn pad(text: &str, width: usize) -> String {
-    let mut padded = text.to_owned();
-    for _ in text.chars().count()..width {
-        padded.push(' ');
-    }
-    padded
 }

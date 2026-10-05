@@ -37,6 +37,9 @@ def _ask_user_question_factory(
     request_index: int, _payload: ChatCompletionsRequestPayload
 ) -> list[dict[str, object]]:
     if request_index == 0:
+        # The unified runtime validates against the declared input schema,
+        # which serializes multi-word fields with their camelCase aliases
+        # (``hideOther``); the question and option fields are single words.
         return single_tool_call_chunks(
             call_id=QUESTION_CALL_ID,
             tool_name="ask_user_question",
@@ -49,7 +52,7 @@ def _ask_user_question_factory(
                             {"label": "Fast", "description": "Move quickly"},
                             {"label": "Careful", "description": "Add checks"},
                         ],
-                        "hide_other": True,
+                        "hideOther": True,
                     }
                 ]
             },
@@ -60,6 +63,7 @@ def _ask_user_question_factory(
 
 
 @pytest.mark.timeout(25)
+@pytest.mark.unified_default
 @pytest.mark.parametrize(
     "streaming_mock_server",
     [pytest.param(_ask_user_question_factory, id="ask-user-question")],

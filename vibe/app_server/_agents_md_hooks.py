@@ -16,7 +16,7 @@ hooks, and ids there surface public run notices, which a silent builtin must
 not. The binding rides the session's compiled hooks so the Core dispatches it
 and persists it for resume; subagent Cores inherit capabilities, so they
 dispatch it too. The handler rebuilds a per-session
-``HarnessFilesManager`` view from the adapter config (its workspace roots
+``HarnessFilesManager`` view from the session workspace (its additional roots
 minus the cwd, so the trust gate stays in charge of the cwd) and dedups per
 session id, so one Host-global closure serves every session and subagent.
 """
@@ -62,7 +62,7 @@ def _passthrough(tool_result: RustToolResult) -> RustPostToolCallHookResult:
 def _session_files(
     harness_files: HarnessFilesManager, context: HookContext
 ) -> HarnessFilesManager:
-    # The adapter config always lists the cwd among workspace_roots (it is the
+    # The Session workspace always lists the cwd among its roots (it is the
     # file sandbox), but the session manager must never receive it there: a
     # listed cwd becomes a session root, and ``project_roots`` returns the
     # listed roots even when the tree is untrusted, which would inject
@@ -72,13 +72,12 @@ def _session_files(
     # therefore lives at two call sites. The durable home would be
     # ``for_session`` itself ignoring a listed root equal to the cwd; until
     # then, keep the two filters in sync.
-    session_cwd = context.config.cwd.expanduser().resolve()
+    workspace = context.config.workspace
+    session_cwd = workspace.cwd
     listed_roots = [
-        root
-        for root in context.config.workspace_roots or ()
-        if root.expanduser().resolve() != session_cwd
+        root for root in workspace.roots if root.expanduser().resolve() != session_cwd
     ]
-    return harness_files.for_session(context.config.cwd, workspace_roots=listed_roots)
+    return harness_files.for_session(session_cwd, workspace_roots=listed_roots)
 
 
 def _read_file_path(
@@ -89,7 +88,7 @@ def _read_file_path(
         return None
     path = Path(raw_path).expanduser()
     if not path.is_absolute():
-        path = context.config.cwd / path
+        path = context.config.workspace.cwd / path
     try:
         return path.resolve()
     except (OSError, ValueError):

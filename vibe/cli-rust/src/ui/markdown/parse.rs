@@ -3,21 +3,24 @@
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 
-use super::{fence, links, Block, Item, Sc};
+use super::parse_table::TableB;
+use super::text::collapse_ws;
+use super::{fence, Block, Item, Profile, Sc};
 use crate::ui::theme;
 
 pub(super) struct Parsed {
     pub blocks: Vec<Block>,
-    pub links: Vec<(String, String)>,
+    /// Link targets; an `Sc`'s link id indexes them.
+    pub links: Vec<String>,
 }
 
 /// Drive the `pulldown-cmark` event stream into styled blocks, lists nesting by depth.
 pub fn parse(text: &str) -> Vec<Block> {
-    parse_with_links(text).blocks
+    parse_with_links(text, Profile::Assistant).blocks
 }
 
 /// Drive the `pulldown-cmark` event stream into styled blocks and links.
-pub(super) fn parse_with_links(text: &str) -> Parsed {
+pub(super) fn parse_with_links(text: &str, profile: Profile) -> Parsed {
     let base = Style::default().fg(theme::foreground());
     let mut b = Builder {
         blocks: Vec::new(),
@@ -25,19 +28,20 @@ pub(super) fn parse_with_links(text: &str) -> Parsed {
         styles: vec![base],
         stack: Vec::new(),
         in_quote: false,
-        in_link: false,
+        link: None,
+        link_saves: Vec::new(),
+        links: Vec::new(),
         code: None,
         lang: String::new(),
         table: None,
+        profile,
     };
-    let mut links = links::Targets::default();
     for event in Parser::new_ext(text, Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES) {
-        links.event(&event);
         b.event(event);
     }
     Parsed {
         blocks: b.blocks,
-        links: links.finish(),
+        links: b.links,
     }
 }
 
@@ -53,27 +57,22 @@ enum Frame {
     },
 }
 
-/// A table being assembled: headers, rows, the row in progress, and head flag.
-#[derive(Default)]
-struct TableB {
-    headers: Vec<Vec<Sc>>,
-    rows: Vec<Vec<Vec<Sc>>>,
-    row: Vec<Vec<Sc>>,
-    in_head: bool,
-}
-
 struct Builder {
     blocks: Vec<Block>,
     inline: Vec<Sc>,
     styles: Vec<Style>,
     stack: Vec<Frame>,
     in_quote: bool,
-    /// Inside an explicit markdown link, where autolinking must not run again.
-    in_link: bool,
+    /// The open explicit link's index in `links`; autolinking must not run inside it.
+    link: Option<usize>,
+    /// Saved `link` values for an open link or image, restored at its end; Textual's later spans win.
+    link_saves: Vec<Option<usize>>,
+    links: Vec<String>,
     code: Option<String>,
     /// The fence's language, empty for indented blocks and bare fences.
     lang: String,
     table: Option<TableB>,
+    profile: Profile,
 }
 
 impl Builder {
@@ -97,23 +96,32 @@ impl Builder {
         }
     }
 
+    fn open_link(&mut self, target: String) -> usize {
+        self.links.push(target);
+        self.links.len() - 1
+    }
+
+    fn push_chars(&mut self, s: &str, style: Style, link: Option<usize>) {
+        self.inline_mut()
+            .extend(s.chars().map(|c| (c, style, link)));
+    }
+
     fn push_str(&mut self, s: &str) {
-        let style = self.style();
-        self.inline_mut().extend(s.chars().map(|c| (c, style)));
+        self.push_chars(s, self.style(), self.link);
     }
 
     /// Append body text, styling bare URLs and emails as links (markdown-it linkify).
     fn push_body(&mut self, s: &str) {
-        if self.in_link {
+        if self.link.is_some() {
             self.push_str(s);
             return;
         }
         for (run, href) in super::autolink::split(s) {
             match href {
                 None => self.push_str(run),
-                Some(_) => {
-                    let style = link_style(self.style());
-                    self.inline_mut().extend(run.chars().map(|c| (c, style)));
+                Some(href) => {
+                    let link = Some(self.open_link(href));
+                    self.push_chars(run, link_style(self.style()), link);
                 }
             }
         }
@@ -131,13 +139,26 @@ impl Builder {
                 }
             }
             Event::Code(t) => {
-                let style = self
-                    .style()
-                    .fg(theme::md_code_inline())
-                    .add_modifier(Modifier::BOLD);
-                self.inline_mut().extend(t.chars().map(|c| (c, style)));
+                let style = match self.profile {
+                    // Chat overrides `.code_inline` to $success + bold.
+                    Profile::Assistant => self
+                        .style()
+                        .fg(theme::md_code_inline())
+                        .add_modifier(Modifier::BOLD),
+                    // The widget default: no bold, warning-washed fg over a bg.
+                    Profile::Widget => {
+                        let (fg, bg) = theme::md_widget_code_inline();
+                        self.style().fg(fg).bg(bg)
+                    }
+                };
+                self.push_chars(&t, style, self.link);
             }
-            Event::SoftBreak | Event::HardBreak => self.push_str(" "),
+            Event::SoftBreak => self.push_str(" "),
+            Event::HardBreak => self.push_str("\n"),
+            Event::Rule => {
+                // Like fences, rules lift out of quotes and items.
+                self.push_block(Block::Rule);
+            }
             _ => {}
         }
     }
@@ -166,14 +187,28 @@ impl Builder {
                 .styles
                 .push(self.style().add_modifier(Modifier::ITALIC)),
             Tag::Strong => self.styles.push(self.style().add_modifier(Modifier::BOLD)),
-            Tag::Link { .. } => {
-                self.in_link = true;
+            Tag::Strikethrough => self
+                .styles
+                .push(self.style().add_modifier(Modifier::CROSSED_OUT)),
+            Tag::Link { dest_url, .. } => {
+                self.link_saves.push(self.link);
+                self.link = Some(self.open_link(dest_url.into_string()));
                 self.styles.push(link_style(self.style()));
+            }
+            Tag::Image { dest_url, .. } => {
+                self.link_saves.push(self.link);
+                let link = self
+                    .link
+                    .unwrap_or_else(|| self.open_link(dest_url.into_string()));
+                let style = link_style(self.style());
+                self.push_chars("🖼  ", style, Some(link));
+                self.link = Some(link);
+                self.styles.push(style);
             }
             Tag::Table(_) => self.table = Some(TableB::default()),
             Tag::TableHead => {
                 if let Some(t) = &mut self.table {
-                    t.in_head = true;
+                    t.start_head();
                 }
             }
             _ => {}
@@ -215,39 +250,32 @@ impl Builder {
                     self.push_block(Block::Code(fence::lines(code, &lang)));
                 }
             }
-            TagEnd::Emphasis | TagEnd::Strong => {
+            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
                 self.styles.pop();
             }
-            TagEnd::Link => {
-                self.in_link = false;
+            TagEnd::Link | TagEnd::Image => {
+                self.link = self.link_saves.pop().flatten();
                 self.styles.pop();
             }
             TagEnd::TableCell => {
                 let cell = std::mem::take(&mut self.inline);
                 if let Some(t) = &mut self.table {
-                    if t.in_head {
-                        t.headers.push(cell);
-                    } else {
-                        t.row.push(cell);
-                    }
+                    t.end_cell(cell);
                 }
             }
             TagEnd::TableHead => {
                 if let Some(t) = &mut self.table {
-                    t.in_head = false;
+                    t.end_head();
                 }
             }
             TagEnd::TableRow => {
                 if let Some(t) = &mut self.table {
-                    t.rows.push(std::mem::take(&mut t.row));
+                    t.end_row();
                 }
             }
             TagEnd::Table => {
                 if let Some(t) = self.table.take() {
-                    self.push_block(Block::Table {
-                        headers: t.headers,
-                        rows: t.rows,
-                    });
+                    self.push_block(t.finish());
                 }
             }
             _ => {}
@@ -275,17 +303,4 @@ fn link_style(style: Style) -> Style {
     style
         .fg(theme::md_link())
         .add_modifier(Modifier::UNDERLINED)
-}
-
-/// Textual collapses whitespace runs per text token, never across tokens.
-fn collapse_ws(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        if !c.is_whitespace() {
-            out.push(c);
-        } else if !out.ends_with(' ') {
-            out.push(' ');
-        }
-    }
-    out
 }

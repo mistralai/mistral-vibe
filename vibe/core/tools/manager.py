@@ -705,7 +705,9 @@ class ToolManager:
             for name, cls in self.available_tools.items()
         ]
 
-    def get_tool_config(self, tool_name: str) -> BaseToolConfig:
+    def get_tool_config(
+        self, tool_name: str, *, default_permission: ToolPermission = ToolPermission.ASK
+    ) -> BaseToolConfig:
         with self._lock:
             tool_class = self._tool_class_for_config(tool_name)
 
@@ -714,14 +716,14 @@ class ToolManager:
             default_config = config_class()
         else:
             config_class = BaseToolConfig
-            default_config = BaseToolConfig()
+            default_config = BaseToolConfig(permission=default_permission)
 
         user_overrides = self._config.tools.get(tool_name)
         permission_override = (
             self._permission_getter(tool_name) if self._permission_getter else None
         )
         if user_overrides is None and permission_override is None:
-            return config_class()
+            return default_config
 
         merged_dict = {**default_config.model_dump(), **(user_overrides or {})}
         if permission_override is not None:

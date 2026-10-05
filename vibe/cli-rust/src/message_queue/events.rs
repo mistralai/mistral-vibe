@@ -3,6 +3,8 @@
 use std::sync::Arc;
 
 use crate::app::{App, Status, ToastSeverity};
+use serde_json::Value;
+
 use crate::server::{Client, ImageAttachment};
 use crate::transcript::local;
 
@@ -21,6 +23,7 @@ pub enum QueueEvent {
         queue_item_id: String,
         session_id: String,
         images: Vec<ImageAttachment>,
+        mentions: Option<Value>,
     },
     Rejected {
         message_id: String,
@@ -31,7 +34,7 @@ pub enum QueueEvent {
     GroupReplaced {
         server_message_id: String,
         revision: u64,
-        covered: Vec<(String, String, Vec<ImageAttachment>)>,
+        covered: Vec<(String, String, Vec<ImageAttachment>, Option<Value>)>,
         /// Transcript identities delivered by this request, in merged order.
         delivered: Vec<String>,
         outcome: ReplacementOutcome,
@@ -51,6 +54,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: QueueEvent) -> Op
             queue_item_id,
             session_id,
             images,
+            mentions,
         } => {
             let index = app.queue.position(&message_id)?;
             let server_message_id = app.queue.items[index].server_message_id.clone();
@@ -60,6 +64,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: QueueEvent) -> Op
                 }
             }
             app.queue.items[index].images = images.clone();
+            app.queue.items[index].mentions = mentions;
             if app.queue.items[index].sent {
                 let text = app.queue.items[index].text.clone();
                 local::set_prompt(&mut app.view.transcript, &message_id, &text, &images);
@@ -79,6 +84,11 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: QueueEvent) -> Op
             }
         }
         QueueEvent::Rejected { message_id, error } => {
+            let head = app
+                .queue
+                .items
+                .first()
+                .is_some_and(|item| item.server_message_id == message_id);
             while let Some(index) = app
                 .queue
                 .items
@@ -90,6 +100,10 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: QueueEvent) -> Op
             }
             if let Some(error) = error {
                 local::add_command_error(&mut app.view.transcript, &message_id, &error);
+            }
+            if app.session.active_turn_id.is_none() && (head || app.queue.is_empty()) {
+                // The interrupted turn will never start; later prompts were queued after it.
+                app.queue.interrupt_on_start = None;
             }
             if app.queue.is_empty() && app.session.active_turn_id.is_none() {
                 app.set_status(Status::Ready);
@@ -105,7 +119,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: QueueEvent) -> Op
             app.queue.finish_replace(&server_message_id);
             match outcome {
                 ReplacementOutcome::Replaced => {
-                    for (message_id, text, images) in covered {
+                    for (message_id, text, images, mentions) in covered {
                         let Some(index) = app.queue.position(&message_id) else {
                             continue;
                         };
@@ -119,6 +133,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: QueueEvent) -> Op
                                 &images,
                             );
                             app.queue.items[index].images = images;
+                            app.queue.items[index].mentions = mentions;
                             app.queue.items[index].mark_sent();
                         }
                     }
@@ -210,8 +225,8 @@ pub(super) fn consume_group(
 }
 
 /// Deliver the prompts committed to a consumed queue item: they ran with the
-/// turn, so only their queued styling clears. Unsent ones are left to the
-/// replace that owns them.
+/// turn, so only their queued styling clears and their mentions are reported
+/// (Python `_report_prompt`). Unsent ones are left to the replace that owns them.
 pub(super) fn retire_group(app: &mut App, server_message_id: &str) {
     let mut message_ids = Vec::new();
     while let Some(index) = app
@@ -221,6 +236,7 @@ pub(super) fn retire_group(app: &mut App, server_message_id: &str) {
         .position(|item| item.server_message_id == server_message_id && item.sent)
     {
         let item = drop_item(app, index);
+        crate::telemetry::at_mention_inserted(app, item.mentions.as_ref(), &item.message_id);
         message_ids.push(item.message_id);
     }
     local::promote_prompts(&mut app.view.transcript, &message_ids);

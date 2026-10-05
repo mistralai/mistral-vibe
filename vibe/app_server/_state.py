@@ -2,11 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from vibe.app_server._projection import (
-    project_agents,
-    project_message_history,
-    project_workdir,
-)
+from vibe.app_server._history_projection import project_message_history
+from vibe.app_server._projection import project_agents, project_workdir
 from vibe.app_server._utils import now_ms, optional_time_ms, time_ms
 from vibe.app_server.models import (
     BlockedSessionStatus,

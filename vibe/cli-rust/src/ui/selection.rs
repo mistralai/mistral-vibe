@@ -34,14 +34,12 @@ pub fn overlay(app: &mut App, f: &mut Frame) {
     overlay_region(app, f, RegionId::Main);
 }
 
-/// Highlight the selection `owner` published, if it is the one in flight.
+/// Highlight the in-flight selection `owner` published, unless it is still a plain click.
 pub fn overlay_region(app: &mut App, f: &mut Frame, owner: RegionId) {
-    if app
-        .selection
-        .region
-        .as_ref()
-        .is_none_or(|selection| selection.owner != owner)
-    {
+    if app.selection.region.as_ref().is_none_or(|selection| {
+        selection.owner != owner
+            || crate::selection::is_collapsed(selection, app.selection.granularity)
+    }) {
         return;
     }
     // The scrollbar gutter is chrome; selection stops one column short of it.

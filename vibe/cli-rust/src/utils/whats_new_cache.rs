@@ -1,32 +1,45 @@
-//! The what's-new seen-version gate, `[whats_new] seen_version` in `cache.toml`.
-//!
-//! Python stores `seen_whats_new_version` in its `[update_cache]` section, which
-//! its update-notifier seeds from update checks; the e2e whats-new scenario pins
-//! one shared `VIBE_HOME` for both clients, where the first capture's write would
-//! close the second's gate, so the Rust client keeps its own section instead.
+//! The what's-new seen-version gate over the shared `[update_cache]` section
+//! of `cache.toml` (Python `update_notifier/whats_new.py`); the update checks
+//! that seed the cache live in `update_notifier`.
 
-use super::cache_store;
+use super::now_unix;
+use crate::update_notifier::cache::{
+    FileSystemUpdateCacheRepository, UpdateCache, UpdateCacheRepository,
+};
 
-const SECTION: &str = "whats_new";
-const KEY: &str = "seen_version";
-
-/// Python `should_show_whats_new`: show when the stored seen version differs from
-/// the current one. An absent section is a first run: stamp the current version
-/// (no show this run) and let a later version change open the gate. Divergence:
-/// Python's first update check seeds `seen_whats_new_version=None`, so a fresh
-/// install shows what's-new on its next launch; this client stays quiet until
-/// the version actually changes.
+/// Python `should_show_whats_new`: show when a stored cache exists and its seen
+/// version is absent or differs from the current one. No cache at all (or a
+/// section missing the required fields) shows nothing and stamps nothing.
 pub fn should_show(current_version: &str) -> bool {
-    match cache_store::read_string(SECTION, KEY) {
-        None => {
-            cache_store::write_string(SECTION, KEY, current_version);
-            false
-        }
-        Some(seen) => seen != current_version,
-    }
+    let Some(cache) = FileSystemUpdateCacheRepository.get() else {
+        return false;
+    };
+    cache.seen_whats_new_version.as_deref() != Some(current_version)
 }
 
-/// Python `mark_version_as_seen`: stamp the current version as shown.
+/// Python `mark_version_as_seen`: stamp the current version as shown, keeping
+/// the stored latest version and dismissal. Python leaves the write's
+/// `OSError` for the caller's task to log; the banner mount does not handle
+/// it, so the log lives here.
 pub fn mark_seen(current_version: &str) {
-    cache_store::write_string(SECTION, KEY, current_version);
+    let repository = FileSystemUpdateCacheRepository;
+    if let Err(err) = repository.modify(&mut |cache| {
+        Some(match cache {
+            Some(cache) => UpdateCache {
+                seen_whats_new_version: Some(current_version.to_owned()),
+                ..cache
+            },
+            None => UpdateCache {
+                latest_version: current_version.to_owned(),
+                stored_at_timestamp: now_unix(),
+                seen_whats_new_version: Some(current_version.to_owned()),
+                dismissed_version: None,
+                // Not an update check: no manager answered, so no stamp.
+                source: None,
+                source_stored_at: None,
+            },
+        })
+    }) {
+        tracing::debug!(%err, "Failed to mark what's-new version as seen");
+    }
 }

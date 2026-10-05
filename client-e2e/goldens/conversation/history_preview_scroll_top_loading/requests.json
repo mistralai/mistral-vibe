@@ -1,0 +1,23 @@
+[
+ {
+  "method": "session/read",
+  "params": {
+   "history": {
+    "limit": 200
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000003",
+   "turns": null
+  }
+ },
+ {
+  "method": "session/history/list",
+  "params": {
+   "page": {
+    "cursor": "preview-20",
+    "direction": "backward",
+    "limit": 200
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000003"
+  }
+ }
+]

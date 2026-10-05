@@ -3,7 +3,9 @@
 mod dispatch;
 mod scrollbar;
 
-pub use scrollbar::register_scrollbar;
+pub use scrollbar::{drag_scroll, register_scrollbar};
+
+pub use dispatch::toggle_effect_at;
 
 use std::sync::Arc;
 
@@ -51,6 +53,11 @@ pub enum MouseTarget {
     BottomBar,
     TodoRow,
     TodoSidebar,
+    OnboardingThemeList,
+    OnboardingPreview,
+    OnboardingLinks,
+    OnboardingInputs,
+    SubagentList,
 }
 
 /// Render-time hit-test metadata for one screen region.
@@ -63,6 +70,7 @@ pub struct MouseRegion {
 #[derive(Clone, Copy)]
 enum Capture {
     Scrollbar,
+    ScrollbarTrack,
     Target(MouseTarget),
 }
 
@@ -106,8 +114,17 @@ pub(crate) fn scrollbar_at(app: &App, at: (u16, u16)) -> bool {
     scrollbar::contains_track(app, at)
 }
 
+pub fn is_track_paging(app: &App) -> bool {
+    scrollbar::is_track_paging(app)
+}
+
+/// Advance a held scrollbar track click by one auto-scroll tick.
+pub fn repeat_track_page(app: &mut App) {
+    scrollbar::repeat_track(app);
+}
+
 /// Route every terminal mouse event through the latest painted region map.
-pub(crate) fn handle(
+pub fn handle(
     app: &mut App,
     client: &Arc<Client>,
     config_tx: &mpsc::Sender<config::Loaded>,
@@ -133,6 +150,8 @@ pub fn route(app: &mut App, event: MouseEvent) -> Option<MouseTarget> {
             if scrollbar::contains_track(app, at) {
                 if scrollbar::begin(app, at) {
                     app.view.mouse.capture = Some(Capture::Scrollbar);
+                } else if scrollbar::begin_track(app, at) {
+                    app.view.mouse.capture = Some(Capture::ScrollbarTrack);
                 }
                 return None;
             }
@@ -145,18 +164,30 @@ pub fn route(app: &mut App, event: MouseEvent) -> Option<MouseTarget> {
                 scrollbar::drag(app, event.row);
                 None
             }
-            Some(Capture::Target(target)) => Some(target),
-            None => None,
-        },
-        MouseEventKind::Up(MouseButton::Left) => match app.view.mouse.capture.take() {
-            Some(Capture::Scrollbar) => {
-                scrollbar::end(app);
+            Some(Capture::ScrollbarTrack) => {
+                scrollbar::move_track(app, at);
                 None
             }
             Some(Capture::Target(target)) => Some(target),
             None => None,
         },
-        _ => target_at(app, at),
+        MouseEventKind::Up(MouseButton::Left) => match app.view.mouse.capture.take() {
+            Some(Capture::Scrollbar | Capture::ScrollbarTrack) => {
+                scrollbar::cancel(app);
+                None
+            }
+            Some(Capture::Target(target)) => Some(target),
+            None => None,
+        },
+        // Python `on_mouse_move`/`on_leave`: the hover marker follows the mouse
+        // and clears once it leaves the list.
+        _ => {
+            let target = target_at(app, at);
+            if event.kind == MouseEventKind::Moved && target != Some(MouseTarget::SubagentList) {
+                app.subagents.list.mouse_session_id = None;
+            }
+            target
+        }
     }
 }
 
@@ -192,8 +223,13 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
                 scroll.saturating_add(MOUSE_SCROLL_STEP as usize)
             };
         }
+        MouseTarget::SubagentList => {
+            crate::subagents::list::wheel(app, !up, MOUSE_SCROLL_STEP as usize)
+        }
         MouseTarget::Approval => approval::handle_mouse(app, event),
         MouseTarget::Question => crate::question_input::wheel(app, up),
+        // The wizard's own regions never reach the loop: the wizard is a
+        // pre-session surface with its own mouse handling.
         MouseTarget::Blocked
         | MouseTarget::Loading
         | MouseTarget::Toast
@@ -201,6 +237,10 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         | MouseTarget::McpOAuth
         | MouseTarget::ConnectorAuth
         | MouseTarget::BottomBar
+        | MouseTarget::OnboardingThemeList
+        | MouseTarget::OnboardingPreview
+        | MouseTarget::OnboardingLinks
+        | MouseTarget::OnboardingInputs
         | MouseTarget::TodoRow => {}
     }
     true
@@ -230,7 +270,10 @@ pub(crate) fn cancel_capture(app: &mut App) {
 }
 
 fn cancel_scrollbar_capture(app: &mut App) {
-    if matches!(app.view.mouse.capture, Some(Capture::Scrollbar)) {
+    if matches!(
+        app.view.mouse.capture,
+        Some(Capture::Scrollbar | Capture::ScrollbarTrack)
+    ) {
         app.view.mouse.capture = None;
         scrollbar::cancel(app);
     }

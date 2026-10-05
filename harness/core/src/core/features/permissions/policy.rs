@@ -1,18 +1,25 @@
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 use crate::core::features::permissions::public_arguments::PublicArguments;
 use crate::core::tools::external::ExternalToolCall;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum PermissionDecision {
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PermissionDecision {
     Allow,
     Deny,
     Ask,
 }
 
-pub(super) struct PermissionPolicy {
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PermissionPolicy {
     pub(super) default: PermissionDecision,
     pub(super) rules: Vec<PermissionRule>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PermissionRule {
     pub(super) tools: Vec<PermissionPattern>,
     pub(super) decision: PermissionDecision,
@@ -21,10 +28,44 @@ pub(super) struct PermissionRule {
     pub(super) sensitive: Vec<PermissionPattern>,
 }
 
-pub(super) type PermissionPattern = glob::Pattern;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PermissionPattern {
+    pattern: glob::Pattern,
+}
+
+impl PermissionPattern {
+    pub(super) fn new(source: &str) -> Result<Self, glob::PatternError> {
+        Ok(Self {
+            pattern: glob::Pattern::new(source)?,
+        })
+    }
+
+    pub(super) fn matches(&self, value: &str) -> bool {
+        self.pattern.matches(value)
+    }
+}
+
+impl Serialize for PermissionPattern {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.pattern.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for PermissionPattern {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let source = String::deserialize(deserializer)?;
+        Self::new(&source).map_err(serde::de::Error::custom)
+    }
+}
 
 impl PermissionPolicy {
-    pub(super) fn evaluate(&self, call: &ExternalToolCall) -> PermissionDecision {
+    pub(crate) fn evaluate(&self, call: &ExternalToolCall) -> PermissionDecision {
         let stable_tool_id = call.hook_tool_key().qualified_name;
 
         let Some(rule) = self.rules.iter().find(|rule| {

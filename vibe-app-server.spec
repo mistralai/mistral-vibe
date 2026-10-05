@@ -4,32 +4,28 @@
 # Output: dist/vibe-app-server-dir/vibe-app-server  (+  dist/vibe-app-server-dir/_internal/)
 # UPX stays off: it rewrites the Mach-O header and invalidates the macOS code signature.
 
-from importlib.util import find_spec
+import os
+import sys
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
+
+# The Unified Runtime and its native extension are required contents of this
+# executable; the build fails when they cannot be collected.
+sys.path.insert(0, os.path.join(SPECPATH, "pyinstaller"))
+from unified_runtime import collect_unified_runtime
 
 _core_builtins_datas, core_builtins_binaries, core_builtins_hidden_imports = (
     collect_all("vibe.core.tools.builtins")
 )
-has_harness = find_spec("mistralai_vibe_local_harness") is not None
-if not has_harness:
-    _harness_datas, harness_binaries, harness_hidden_imports = [], [], []
-else:
-    _harness_datas, harness_binaries, harness_hidden_imports = collect_all(
-        "mistralai_vibe_local_harness"
-    )
+_harness_datas, harness_binaries, harness_hidden_imports = collect_unified_runtime()
 
 # rich lazily loads Unicode width tables via importlib.import_module() at runtime,
 # which PyInstaller's static analysis cannot discover.
 hidden_imports = [
     "truststore",
+    "vibe.app_server._unified_harness_backend_adapter",
 ] + collect_submodules("rich._unicode_data")
-if has_harness:
-    hidden_imports.append("vibe.app_server._unified_harness_backend_adapter")
-for item in core_builtins_hidden_imports:
-    if isinstance(item, str):
-        hidden_imports.append(item)
-for item in harness_hidden_imports:
+for item in core_builtins_hidden_imports + harness_hidden_imports:
     if isinstance(item, str):
         hidden_imports.append(item)
 

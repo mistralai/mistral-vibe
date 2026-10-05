@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.25.8"
+version = "2.26.0"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -37,6 +37,7 @@ dependencies = [
     "charset-normalizer==3.4.7",
     "click==8.3.3 ; sys_platform != 'emscripten'",
     "colorama==0.4.6 ; sys_platform == 'win32'",
+    "croniter==6.2.4",
     "cryptography==50.0.0",
     "eval-type-backport==0.3.1",
     "gitdb==4.0.12",
@@ -88,7 +89,7 @@ dependencies = [
     "pydantic-core==2.46.4",
     "pydantic-settings==2.14.2",
     "pygments==2.20.0",
-    "pyjwt==2.13.0",
+    "pyjwt==2.15.1",
     "pyperclip==1.11.0",
     "python-dateutil==2.9.0.post0",
     "python-dotenv==1.2.2",
@@ -119,7 +120,7 @@ dependencies = [
     "typing-extensions==4.16.0",
     "typing-inspection==0.4.2",
     "uc-micro-py==2.0.0",
-    "urllib3==2.7.0",
+    "urllib3==2.8.0",
     "uvicorn==0.46.0 ; sys_platform != 'emscripten'",
     "watchfiles==1.2.0",
     "websockets==16.0",
@@ -186,6 +187,8 @@ cache-keys = [
     { file = "harness/core/Cargo.lock" },
     { file = "harness/core/src/**/*.rs" },
     { file = "harness/runtimes/python/python/mistralai_vibe_local_harness/**/*" },
+    # Selects which editable build the backend produces; see build_backend.
+    { env = "VIBE_EXTERNAL_HARNESS" },
 ]
 index-strategy = "first-index"
 package = true
@@ -196,6 +199,15 @@ override-dependencies = [
     # verified); the cap is conservative, so override it to clear GHSA-6w46-j5rx-g56g.
     "pytest>=9.0.3",
 ]
+
+[tool.uv.build-backend]
+# Read only by the builds the backend hands to uv_build: the sdist (the backend
+# appends the Harness sources) and an editable install with VIBE_EXTERNAL_HARNESS=1.
+# Wheels go through Maturin and ignore this table.
+module-name = "vibe"
+module-root = ""
+source-include = ["build_backend/**", "LICENSE"]
+source-exclude = ["vibe/_bin", "vibe/cli-rust/target"]
 
 [dependency-groups]
 dev = [
@@ -235,14 +247,12 @@ pythonVersion = "3.12"
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
 
-include = ["build_backend/**/*.py", "vibe/**/*.py", "tests/**/*.py"]
-exclude = ["pyinstaller/"]
+include = ["build_backend/**/*.py", "vibe/**/*.py", "tests/**/*.py", "pyinstaller/unified_runtime.py"]
 venvPath = "."
 venv = ".venv"
 
 [tool.ruff]
-include = ["build_backend/**/*.py", "vibe/**/*.py", "tests/**/*.py"]
-exclude = ["pyinstaller/"]
+include = ["build_backend/**/*.py", "vibe/**/*.py", "tests/**/*.py", "pyinstaller/unified_runtime.py"]
 line-length = 88
 target-version = "py312"
 preview = true
@@ -306,6 +316,7 @@ addopts = "-p pytest_vibe -vvvv -q -n auto --dist=loadgroup --durations=10 --imp
 timeout = 10
 markers = [
     "unified_supported: backend contract behavior implemented by the Unified Harness",
+    "unified_default: e2e test spawning the unflagged unified-default binary",
 ]
 filterwarnings = [
     # (e2e) streaming mock server is started in a thread; and the cli is spawn in a fork

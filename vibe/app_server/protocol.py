@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from enum import StrEnum, auto
 from functools import cache
 from typing import Annotated, Any, Literal, Self
@@ -92,6 +94,7 @@ from vibe.app_server.models import (
     WorkspaceTrustStatus,
     validate_turn_input_entries,
 )
+from vibe.app_server.provider_auth import ProviderAuthView
 from vibe.app_server.review import (
     ReviewFile,
     ReviewFileStatus,
@@ -152,6 +155,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "plugin/reload",
     "plugins/read",
     "plugin_catalog/read",
+    "providerAuth/read",
     "projectLinks/create",
     "projectLinks/inspectRoot",
     "projectLinks/link",
@@ -169,6 +173,8 @@ SERVER_METHODS: tuple[str, ...] = (
     "review/turnDiff",
     "runtime/read",
     "session/agent/update",
+    "session/backgroundProcess/output",
+    "session/backgroundProcess/stop",
     "session/compact",
     "session/continue",
     "session/context/inject",
@@ -195,6 +201,9 @@ SERVER_METHODS: tuple[str, ...] = (
     "session/stop",
     "session/title/update",
     "session/turns/list",
+    "setup/status",
+    "setup/store-credential",
+    "setup/submit-choices",
     "shell/interrupt",
     "shell/run",
     "skills/catalog",
@@ -646,6 +655,62 @@ class SessionShellCommandResponse(ProtocolModel):
     last_event_id: int
 
 
+class BackgroundProcessStopParams(ProtocolModel):
+    session_id: str
+    process_id: str
+
+
+class BackgroundProcessStopResponse(ProtocolModel):
+    process_id: str
+    status: Literal["running", "completed", "failed", "stopped", "orphaned"]
+    exit_code: int | None = None
+
+
+class BackgroundProcessOutputParams(ProtocolModel):
+    session_id: str
+    process_id: str
+    from_end: bool
+    cursor: int = Field(ge=0, strict=True)
+    wait_ms: int = Field(ge=0, le=5_000, strict=True)
+    max_bytes: int = Field(ge=1, le=64_000, strict=True)
+
+
+class BackgroundProcessOutputAvailableResponse(ProtocolModel):
+    availability: Literal["available"] = "available"
+    process_id: str
+    output_base64: str
+    output_start_cursor: int = Field(ge=0, strict=True)
+    next_cursor: int = Field(ge=0, strict=True)
+    bytes_available: int = Field(ge=0, strict=True)
+    has_more: bool
+    truncated_before: bool
+    is_final: bool
+
+    @model_validator(mode="after")
+    def validate_cursor_range(self) -> Self:
+        if not (self.output_start_cursor <= self.next_cursor <= self.bytes_available):
+            raise ValueError("process output cursors are not ordered")
+        try:
+            output = base64.b64decode(self.output_base64, validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise ValueError("process output is not valid base64") from error
+        if len(output) > self.next_cursor - self.output_start_cursor:
+            raise ValueError("process output bytes exceed its cursor range")
+        return self
+
+
+class BackgroundProcessOutputUnavailableResponse(ProtocolModel):
+    availability: Literal["unavailable"] = "unavailable"
+    process_id: str
+
+
+BackgroundProcessOutputResponse = Annotated[
+    BackgroundProcessOutputAvailableResponse
+    | BackgroundProcessOutputUnavailableResponse,
+    Field(discriminator="availability"),
+]
+
+
 class SessionReadyWaitParams(ProtocolModel):
     session_id: str
 
@@ -677,6 +742,14 @@ class IdentityReadParams(ProtocolModel):
 
 class IdentityReadResponse(ProtocolModel):
     identity: IdentityView | None = None
+
+
+class ProviderAuthReadParams(ProtocolModel):
+    session_id: str
+
+
+class ProviderAuthReadResponse(ProtocolModel):
+    auth: ProviderAuthView
 
 
 class SessionRewindReadParams(ProtocolModel):
@@ -950,6 +1023,13 @@ class ConfigFieldsReadResponse(ProtocolModel):
 
 
 class ConfigWriteOpWire(ProtocolModel):
+    """One config mutation in a ``config/write`` batch.
+
+    Version skew (ADR 0014): this model is strict (``extra="forbid"``), so an
+    older server answers a newer client's unknown field with ``invalidParams``
+    and writes nothing.
+    """
+
     op: Literal["set", "remove"]
     path: str
     value: JsonValue = None
@@ -1578,6 +1658,25 @@ class WorkspaceWorktreeRemoveParams(ProtocolModel):
     cwd: str = Field(min_length=1)
 
 
+# The remove-only extension: `force`/`inspect` are confirm-flow params that
+# exist so a client can ask before it discards (ADR 0014). They live on a
+# subclass, not on the base, so `WorkspaceWorktreeReapParams` keeps inheriting
+# the original `{cwd}` shape and reap never accepts a flag it would ignore.
+class WorkspaceWorktreeRemoveConfirmParams(WorkspaceWorktreeRemoveParams):
+    # Explicit confirmation to discard uncommitted changes, untracked files,
+    # and new commits without saving a snapshot. Absent (the default) keeps the
+    # snapshot path, so old clients are unaffected.
+    force: bool = False
+    # None keeps the server default: delete the branch when Vibe created it.
+    delete_branch: bool | None = None
+    # Report the outcome a removal would have, without removing anything or
+    # releasing holders: the exit flow's "Removing worktree" line asks before
+    # it commits, like the CLI's own inspect before its remove. `outcome` is
+    # then the would-be outcome ("removed" means a removal now would succeed).
+    # Absent (the default) removes, so old clients are unaffected.
+    inspect: bool = False
+
+
 # Spelled out here rather than imported from vibe.core.git.worktree: the protocol
 # is the wire contract and must not pull core into the app-server clients.
 type WorktreeRemoveOutcome = Literal[
@@ -1601,6 +1700,13 @@ class WorkspaceWorktreeRemoveResponse(ProtocolModel):
     branch: str | None = None
     branch_deleted: bool = False
     reasons: list[str] = Field(default_factory=list)
+    # Whether Vibe created the branch, so a caller can prompt before deleting
+    # one that existed before the session. Absent when no record was read.
+    branch_created: bool | None = None
+    # How many other sessions hold the worktree (the asking session's own
+    # holder discounted), so a caller can say "in use by N other session(s)".
+    # None when there was no claim to count.
+    holders: int | None = None
 
 
 class WorkspaceWorktreeReapParams(WorkspaceWorktreeRemoveParams):
@@ -1679,6 +1785,85 @@ class WorkspaceUntrustedConfigParams(ProtocolModel):
 class WorkspaceUntrustedConfigResponse(ProtocolModel):
     dirs: list[str] = Field(default_factory=list)
     settings_path: str = ""
+
+
+class SetupProviderView(ProtocolModel):
+    """The onboarding surface of a resolved provider.
+
+    The six fields are everything the wizard reads and mutates. The server
+    merges them back onto the full resolved provider on
+    ``setup/submit-choices``, so the rest of the provider's settings survive
+    the client round trip.
+    """
+
+    name: str
+    api_base: str
+    api_key_env_var: str = ""
+    browser_auth_base_url: str | None = None
+    browser_auth_api_base_url: str | None = None
+    browser_auth_allow_origin_rewrite: bool = False
+
+
+class SetupStatusParams(ProtocolModel):
+    # The provider a failed session's handshake named, so the wizard seeds
+    # for the provider that actually lacks a key; absent means the server's
+    # own active provider.
+    provider: str | None = None
+
+
+class SetupStatusResponse(ProtocolModel):
+    """The wizard seed: the server's fully-resolved view (ADR 0009 setup)."""
+
+    provider: SetupProviderView
+    console_base_url: str
+    vibe_base_url: str
+    active_model: str
+    theme: str
+    supports_browser_sign_in: bool
+    # The server's view of the key: process env (including the loaded dotenv)
+    # first, then the keyring — the ``resolve_api_key`` order.
+    has_api_key: bool
+    # The server-resolved TLS trust flag (ADR 0015): the fully-resolved
+    # effective config, not just the env var and user config.toml.
+    enable_system_trust_store: bool = False
+
+
+class SetupStoreCredentialParams(ProtocolModel):
+    # The provider name; the server resolves it against its own config so the
+    # client never carries credential-adjacent state it does not own.
+    provider: str
+    api_key: str
+    custom_domain: bool = False
+
+
+class SetupStoreCredentialResponse(ProtocolModel):
+    """The Python key-persist outcome contract — never silent.
+
+    ``completed`` — the key is stored. ``env_var_error`` — the derived env
+    var name is empty or invalid; nothing was saved. ``save_error`` — neither the
+    keyring nor the ``.env`` fallback could store it, so the key lives only in
+    the server process env for this run. ``detail`` carries the env var name
+    or the write error.
+    """
+
+    outcome: Literal["completed", "env_var_error", "save_error"]
+    detail: str | None = None
+
+
+class SetupSubmitChoicesParams(ProtocolModel):
+    """Fields the wizard may have drifted; absent means "keep the config"."""
+
+    provider: SetupProviderView | None = None
+    console_base_url: str | None = None
+    vibe_base_url: str | None = None
+    # Present only when a theme was selected; presence is the write signal
+    # (Python persists /theme on every completed onboarding that selected one).
+    theme: str | None = None
+
+
+class SetupSubmitChoicesResponse(ProtocolModel):
+    outcome: Literal["completed", "provider_config_error"]
+    failures: list[str] = Field(default_factory=list)
 
 
 class ProjectLinksListParams(ProtocolModel):

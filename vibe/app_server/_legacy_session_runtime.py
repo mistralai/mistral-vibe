@@ -85,6 +85,7 @@ from vibe.core.git.errors import GitError
 from vibe.core.git.worktree import PreparedWorktree
 from vibe.core.session import last_session_pointer
 from vibe.core.session.session_lease import SessionBusyError
+from vibe.core.telemetry.types import LaunchContext
 from vibe.core.types import (
     BackgroundWorkEvent,
     SessionTitleUpdatedEvent,
@@ -115,6 +116,7 @@ class LegacySessionRuntimeController:
         connector_catalog_service: ConnectorCatalogService | None = None,
         account_gateway: AccountGateway | None = None,
         identity_gateway: IdentityGateway | None = None,
+        launch_context_getter: Callable[[], LaunchContext | None] | None = None,
     ) -> None:
         self._open_root = open_root
         self._runtime_factory = runtime_factory
@@ -125,6 +127,7 @@ class LegacySessionRuntimeController:
         self._connector_catalog_service = connector_catalog_service
         self._account_gateway = account_gateway
         self._identity_gateway = identity_gateway
+        self._launch_context_getter = launch_context_getter
         self._scheduler_enabled = False
         self._scheduler_task: asyncio.Task[None] | None = None
         self._title_drain_task: asyncio.Task[None] | None = None
@@ -133,7 +136,9 @@ class LegacySessionRuntimeController:
         self._title_drain_loop: AgentLoop | None = None
         self._resume_tasks: set[asyncio.Task[None]] = set()
         self._tasks: set[asyncio.Task[None]] = set()
-        self._worktrees = SessionWorktrees()
+        self._worktrees = SessionWorktrees(
+            launch_context_getter=self._launch_context_getter
+        )
         self._root: LegacySessionBackend | None = None
         self._tool_io = ClientToolIO(services)
         self._sessions = SessionRuntimeRegistry(
@@ -665,7 +670,7 @@ class LegacySessionRuntimeController:
             raise RequestFailure(
                 ProtocolErrorCode.UNAUTHORIZED,
                 str(exc),
-                data={"provider": exc.provider},
+                data={"provider": exc.provider, "env_key": exc.env_key},
             ) from exc
         except (RuntimeConfigurationError, ValueError) as exc:
             raise RequestFailure(
@@ -880,6 +885,7 @@ def create_legacy_session_backend_host(
     connector_catalog_service: ConnectorCatalogService | None = None,
     account_gateway: AccountGateway | None = None,
     identity_gateway: IdentityGateway | None = None,
+    launch_context_getter: Callable[[], LaunchContext | None] | None = None,
 ) -> LegacySessionBackendHost:
     return LegacySessionRuntimeController(
         open_root=open_root,
@@ -891,4 +897,5 @@ def create_legacy_session_backend_host(
         connector_catalog_service=connector_catalog_service,
         account_gateway=account_gateway,
         identity_gateway=identity_gateway,
+        launch_context_getter=launch_context_getter,
     ).create_host()

@@ -127,6 +127,15 @@ pub struct TodoSidebar {
     pub visible: bool,
 }
 
+impl TodoSidebar {
+    /// Undock on Esc; a dropped or already-closed panel lets the key through.
+    pub fn close(&mut self) -> bool {
+        let docked = self.open && self.visible;
+        self.open &= !docked;
+        docked
+    }
+}
+
 /// Python `_record_todos` only ever sees a `PublicEffectEntry`; this port reads raw wire JSON, so it checks the tag itself.
 pub fn todos_from_entry(raw: &Value) -> Option<Vec<TodoItem>> {
     if raw.pointer("/type") != Some(&Value::String("effect".into())) {

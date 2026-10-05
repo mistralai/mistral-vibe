@@ -56,7 +56,10 @@ pub async fn read_stdin_prompt() -> Option<String> {
             eprintln!("Error: piped prompt is not valid UTF-8");
             std::process::exit(1);
         }
-        PipedPrompt::Empty => None,
+        PipedPrompt::Empty => {
+            reattach_controlling_tty();
+            None
+        }
     }
 }
 
@@ -94,5 +97,6 @@ fn reattach_controlling_tty() {
     }
 }
 
+/// Windows needs no reattach: crossterm reads keys from `CONIN$` directly.
 #[cfg(not(unix))]
 fn reattach_controlling_tty() {}

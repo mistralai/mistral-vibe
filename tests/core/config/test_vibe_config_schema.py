@@ -13,7 +13,13 @@ from pydantic.fields import FieldInfo
 import pytest
 import tomli_w
 
-from vibe.core.config import MissingAPIKeyError, ModelConfig, ProviderConfig
+from vibe.core.config import (
+    MissingAPIKeyError,
+    ModelConfig,
+    ProviderConfig,
+    UtilityFeature,
+)
+from vibe.core.config._defaults import DEFAULT_AUTO_COMPACT_THRESHOLD
 from vibe.core.config.layers.environment import EnvironmentLayer
 from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
@@ -22,6 +28,8 @@ from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.utils.merge import MergeStrategy
 
 _ROUTED_TEST_ALIAS = "target-testing-model-alias"
+# The schema resolves unset thresholds to the floor, so the expected model
+# carries it explicitly.
 _ROUTED_TEST_MODEL = ModelConfig(
     name="target-testing-model-name",
     provider="mistral",
@@ -29,6 +37,7 @@ _ROUTED_TEST_MODEL = ModelConfig(
     input_price=0.0,
     output_price=0.0,
     supports_images=False,
+    auto_compact_threshold=DEFAULT_AUTO_COMPACT_THRESHOLD,
 )
 _ROUTED_TEST_MODEL_JSON = _ROUTED_TEST_MODEL.model_dump_json()
 
@@ -512,6 +521,103 @@ def test_unmatched_allowed_model_name_emits_validation_warning() -> None:
     assert "does-not-exist" in config.validation_warnings[0]
 
 
+def test_unknown_utility_model_emits_validation_warning() -> None:
+    models = [ModelConfig(name="model-a", provider="mistral", alias="a")]
+    config = VibeConfigSchema.model_validate({
+        "models": models,
+        "utility_models": {"title": "a", "smart_approve": "does-not-exist"},
+    })
+
+    assert len(config.validation_warnings) == 1
+    assert "does-not-exist" in config.validation_warnings[0]
+    assert "smart_approve" in config.validation_warnings[0]
+
+
+def test_get_utility_model_resolves_aliases_and_the_active_sentinel() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="b"),
+    ]
+    config = VibeConfigSchema.model_validate({
+        "models": models,
+        "active_model": "b",
+        "utility_models": {"title": "a", "smart_approve": "active"},
+    })
+
+    title = config.get_utility_model(UtilityFeature.TITLE)
+    smart_approve = config.get_utility_model(UtilityFeature.SMART_APPROVE)
+
+    assert title is not None
+    assert title.name == "model-a"
+    assert smart_approve is not None
+    assert smart_approve.name == "model-b"
+
+
+def test_get_utility_model_is_none_for_unset_and_unknown_aliases() -> None:
+    models = [ModelConfig(name="model-a", provider="mistral", alias="a")]
+    config = VibeConfigSchema.model_validate({
+        "models": models,
+        "utility_models": {"smart_approve": "typo"},
+    })
+
+    assert config.get_utility_model(UtilityFeature.TITLE) is None
+    assert config.get_utility_model(UtilityFeature.SMART_APPROVE) is None
+
+
+def test_a_utility_model_cannot_bypass_allowed_models_by_alias() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="model-a"),
+    ]
+    config = VibeConfigSchema.model_validate({
+        "models": models,
+        "allowed_models": ["model-a"],
+        "utility_models": {"title": "a", "smart_approve": "model-a"},
+    })
+
+    title = config.get_utility_model(UtilityFeature.TITLE)
+
+    assert title is not None
+    assert title.name == "model-a"
+    assert config.get_utility_model(UtilityFeature.SMART_APPROVE) is None
+
+
+def test_a_model_aliased_active_wins_over_the_selector() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="active"),
+    ]
+    config = VibeConfigSchema.model_validate({
+        "models": models,
+        "active_model": "a",
+        "utility_models": {"title": "active"},
+    })
+
+    title = config.get_utility_model(UtilityFeature.TITLE)
+
+    assert title is not None
+    assert title.name == "model-b"
+
+
+def test_an_allowlist_block_is_not_reported_as_a_typo() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="b"),
+    ]
+    config = VibeConfigSchema.model_validate({
+        "models": models,
+        "allowed_models": ["model-a"],
+        "utility_models": {"title": "b", "smart_approve": "typo"},
+    })
+
+    warnings = config.validation_warnings
+    title_warning = next(w for w in warnings if "'b'" in w)
+    typo_warning = next(w for w in warnings if "'typo'" in w)
+
+    assert "excluded by allowed_models" in title_warning
+    assert "not one of your configured models" in typo_warning
+
+
 def test_matched_allowed_models_emit_no_warning() -> None:
     models = [
         ModelConfig(name="model-a", provider="mistral", alias="a"),
@@ -628,7 +734,7 @@ def test_no_models_raises() -> None:
         VibeConfigSchema.model_validate({"models": []})
 
 
-def test_compaction_model_provider_must_match_active() -> None:
+def test_compaction_model_on_another_provider_yields_to_the_active_model() -> None:
     providers = [
         ProviderConfig(
             name="mistral",
@@ -642,8 +748,14 @@ def test_compaction_model_provider_must_match_active() -> None:
         ),
     ]
     compaction = ModelConfig(name="compact-model", provider="other", alias="compact")
-    with pytest.raises(ValueError, match="must share the same provider"):
-        VibeConfigSchema(compaction_model=compaction, providers=providers)
+
+    config = VibeConfigSchema(compaction_model=compaction, providers=providers)
+
+    assert config.get_compaction_model() == config.get_active_model()
+    assert any(
+        "Compaction model 'compact'" in warning
+        for warning in config.validation_warnings
+    )
 
 
 def test_vision_model_must_support_images() -> None:
@@ -1043,3 +1155,32 @@ async def test_a_mistyped_group_alone_is_reported_as_a_validation_error(
             )
 
     assert "session_logging" in str(exc_info.value)
+
+
+def test_published_schema_does_not_advertise_the_unset_sentinel() -> None:
+    """The sentinel is a merge-internal blank, not a setting default."""
+    schema = VibeConfigSchema.model_json_schema(mode="serialization", by_alias=True)
+
+    assert "default" not in schema["properties"]["auto_compact_threshold"]
+
+
+@pytest.mark.asyncio
+async def test_a_non_positive_context_window_is_reported_as_a_validation_error(
+    tmp_path: Path,
+) -> None:
+    """0 or a negative window would silently disable compaction."""
+    toml_path = tmp_path / "config.toml"
+    toml_path.write_text(
+        '[[models]]\nname = "m"\nprovider = "p"\nalias = "m"\nmax_context_length = 0\n'
+    )
+
+    with patch.dict(os.environ, {}, clear=True):
+        user = UserConfigLayer(path=toml_path)
+        with pytest.raises(ValidationError) as exc_info:
+            _ = await ConfigOrchestrator.create(
+                schema=VibeConfigSchema,
+                layers=[user],
+                default_layer_resolver=lambda: user,
+            )
+
+    assert "max_context_length" in str(exc_info.value)

@@ -111,7 +111,14 @@ _TOOL_KINDS: dict[ToolEffectKind, ToolKind] = {
     ToolEffectKind.SUBAGENT: "think",
     ToolEffectKind.WORKTREE: "other",
     ToolEffectKind.PROCESS: "execute",
+    # Session-private notes, not project files: an editor should not show them
+    # as workspace edits.
+    ToolEffectKind.SCRATCHPAD: "other",
 }
+
+
+# Recorded in the session journal but not shown in the conversation.
+_JOURNAL_ONLY_CHECKPOINT_KINDS = frozenset({"agent_change"})
 
 
 def replay_session_updates(state: PublicSessionState) -> list[SessionUpdate]:
@@ -136,7 +143,11 @@ def replay_history_entry(entry: PublicHistoryEntry) -> list[SessionUpdate]:
         case PublicEffectEntry():
             return _effect_replay_updates(entry)
         case PublicCheckpointEntry():
-            return [_checkpoint_start(entry)]
+            return (
+                []
+                if entry.kind in _JOURNAL_ONLY_CHECKPOINT_KINDS
+                else [_checkpoint_start(entry)]
+            )
         case PublicNoticeEntry(detail=SessionTitleUpdatedNoticeDetail(title=title)):
             return [_session_info_update(title, entry.updated_at)]
         case _:
@@ -187,6 +198,8 @@ def _updated_entry_updates(
     if isinstance(previous, PublicCheckpointEntry) and isinstance(
         entry, PublicCheckpointEntry
     ):
+        if entry.kind in _JOURNAL_ONLY_CHECKPOINT_KINDS:
+            return []
         return [_checkpoint_progress(entry)]
     return []
 

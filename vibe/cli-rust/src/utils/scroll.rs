@@ -36,6 +36,57 @@ pub fn absorb_growth(scroll: &mut u16, target: &mut u16, total: u16, last_total:
     *scroll = scroll.saturating_add_signed(delta);
 }
 
+/// A toggled entry held steady through the relayout its toggle causes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScrollAnchor {
+    /// Transcript index of the entry whose top stays put.
+    pub index: usize,
+    /// Its top row relative to the viewport top in the last frame; negative when cut off.
+    pub row: i32,
+    /// Its height in the last frame.
+    pub height: u16,
+    /// Viewport row its header lands on when the header had scrolled out above.
+    pub landing: u16,
+    /// The clicked toggle key; `None` for the Ctrl+O bulk toggle.
+    pub key: Option<String>,
+    /// Whether the toggle expanded `key`, so its block scrolls into view.
+    pub reveal: bool,
+}
+
+/// Ctrl+O anchor: the entry at the viewport top, or none while pinned to the newest content.
+pub fn bulk_toggle_anchor(target: u16, rows: &[(usize, i32, u16)]) -> Option<ScrollAnchor> {
+    let &(index, row, height) = rows.first().filter(|_| target != 0)?;
+    Some(ScrollAnchor {
+        index,
+        row,
+        height,
+        landing: 0,
+        key: None,
+        reveal: false,
+    })
+}
+
+/// Viewport row for the anchored entry's top once `height` tall; its header sits `header` rows below.
+pub fn anchored_row(anchor: &ScrollAnchor, header: u16, height: u16) -> i32 {
+    let header_hidden = anchor.row + i32::from(header) < 0;
+    if header_hidden && height != anchor.height {
+        return i32::from(anchor.landing) - i32::from(header);
+    }
+    anchor.row
+}
+
+/// Advance viewport top line `position` just enough to show rows `[top, bottom)`, keeping `top` in view.
+pub fn reveal(position: i32, viewport: u16, top: u16, bottom: u16) -> i32 {
+    let overflow = i32::from(bottom) - (position + i32::from(viewport));
+    position + overflow.min(i32::from(top) - position).max(0)
+}
+
+/// Scroll-up offset that puts document line `position` at the viewport top, clamped.
+pub fn offset_at(total: u16, viewport: u16, position: i32) -> u16 {
+    let max_scroll = total.saturating_sub(viewport);
+    max_scroll - position.clamp(0, i32::from(max_scroll)) as u16
+}
+
 /// Given total content height, viewport height, and the requested scroll-up
 /// offset (lines lifted off the bottom), clamp it and resolve the top line.
 pub fn scroll_view(total: u16, viewport: u16, scroll: u16) -> ScrollView {

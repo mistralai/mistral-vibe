@@ -18,9 +18,13 @@ def server(
     status: str = "connected",
     tools: Sequence[Mapping[str, Any]] = (),
     error: str | None = None,
+    plugin_name: str | None = None,
 ) -> dict[str, Any]:
     """One locally configured MCP server."""
-    return _source(name, "server", transport, status, tools, error)
+    source = _source(name, "server", transport, status, tools, error)
+    if plugin_name is not None:
+        source["pluginName"] = plugin_name
+    return source
 
 
 def connector(
@@ -30,9 +34,13 @@ def connector(
     status: str = "connected",
     tools: Sequence[Mapping[str, Any]] = (),
     error: str | None = None,
+    display_name: str | None = None,
 ) -> dict[str, Any]:
     """One workspace connector."""
-    return _source(name, "connector", transport, status, tools, error)
+    source = _source(name, "connector", transport, status, tools, error)
+    if display_name is not None:
+        source["displayName"] = display_name
+    return source
 
 
 def sample_sources() -> list[dict[str, Any]]:
@@ -61,10 +69,14 @@ def handshake(
     discovery_errors: Mapping[str, str] | None = None,
     connector_error: str | None = None,
     toggled: Sequence[Mapping[str, Any]] | None = None,
+    manage_connectors_url: str | None = None,
 ) -> dict[str, Any]:
     """Publish `sources` as the MCP state; `toggled` is what `mcp/toggle` answers."""
     state = _state(sources, discovery_errors, connector_error)
     overrides: dict[str, Any] = {"runtime/read": {"runtime": {"mcp": state}}}
+    # Like the real server, only the connector catalog read carries the Studio link.
+    if manage_connectors_url is not None:
+        overrides["connector_catalog/read"] = {"manageUrl": manage_connectors_url}
     if toggled is not None:
         overrides["mcp/toggle"] = {
             "runtime": {"mcp": _state(toggled, discovery_errors, connector_error)}

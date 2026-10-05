@@ -1,0 +1,63 @@
+{
+  "statusResponse": {
+    "activeModel": "mistral-medium-3.5",
+    "consoleBaseUrl": "https://console.mistral.ai",
+    "enableSystemTrustStore": false,
+    "hasApiKey": false,
+    "provider": {
+      "apiBase": "https://api.mistral.ai/v1",
+      "apiKeyEnvVar": "MISTRAL_API_KEY",
+      "browserAuthAllowOriginRewrite": false,
+      "browserAuthApiBaseUrl": "https://console.mistral.ai/api",
+      "browserAuthBaseUrl": "https://console.mistral.ai",
+      "name": "mistral"
+    },
+    "supportsBrowserSignIn": true,
+    "theme": "auto",
+    "vibeBaseUrl": "https://chat.mistral.ai"
+  },
+  "storeCredentialParams": {
+    "apiKey": "sk-mock-key",
+    "customDomain": true,
+    "provider": "mistral"
+  },
+  "submitChoicesParams": {
+    "consoleBaseUrl": "https://console.mistral.ai",
+    "provider": {
+      "apiBase": "https://api.mistral.ai/v1",
+      "apiKeyEnvVar": "MISTRAL_API_KEY",
+      "browserAuthAllowOriginRewrite": false,
+      "browserAuthApiBaseUrl": "https://console.mistral.ai/api",
+      "browserAuthBaseUrl": "https://console.mistral.ai",
+      "name": "mistral"
+    },
+    "theme": "auto",
+    "vibeBaseUrl": "https://chat.mistral.ai"
+  },
+  "storeResponses": [
+    {
+      "outcome": "completed"
+    },
+    {
+      "outcome": "env_var_error",
+      "detail": ""
+    },
+    {
+      "outcome": "save_error",
+      "detail": "no space left"
+    }
+  ],
+  "submitResponses": [
+    {
+      "outcome": "completed",
+      "failures": []
+    },
+    {
+      "outcome": "provider_config_error",
+      "failures": [
+        "provider",
+        "console_base_url"
+      ]
+    }
+  ]
+}

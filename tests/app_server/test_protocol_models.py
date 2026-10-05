@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 from pydantic import ValidationError
 import pytest
 
@@ -18,6 +20,7 @@ from vibe.app_server.models import (
     PublicTurnQueue,
     PublicTurnStatus,
     TextContentBlock,
+    validate_history_entry,
 )
 from vibe.app_server.protocol import (
     SERVER_METHODS,
@@ -144,6 +147,8 @@ def test_public_session_state_carries_optional_retry_state() -> None:
         "turnId": "turn-1",
         "category": "rate_limited",
         "detail": "HTTP 429",
+        "retryAt": None,
+        "retryAttempt": None,
     }
 
 
@@ -473,6 +478,98 @@ def test_turn_steer_preserves_user_display_content() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("input_fields", "expected_input_entry_id"),
+    [
+        pytest.param({}, None, id="omitted"),
+        pytest.param({"inputEntryId": None}, None, id="null"),
+        pytest.param({"inputEntryId": "steer-1"}, "steer-1", id="linked"),
+    ],
+)
+def test_public_models_serialize_nullable_input_entry_id(
+    input_fields: dict[str, str | None], expected_input_entry_id: str | None
+) -> None:
+    """*Prepare*: Turn, message, and callback payloads with absent or linked input.
+    *Do*: Parse and serialize the public app-server models.
+    *Assert*: Missing input IDs become null without mutating the original payloads.
+    """
+    # Prepare
+    turn = {
+        "id": "turn-1",
+        "sessionId": "session-1",
+        "status": "in_progress",
+        "startedAt": 1,
+        **input_fields,
+    }
+    entry_base = {
+        "sessionId": "session-1",
+        "turnId": "turn-1",
+        "createdAt": 2,
+        "updatedAt": 2,
+        "generationStatus": "completed",
+        "relatedEntryId": None,
+        **input_fields,
+    }
+    entries = [
+        {
+            **entry_base,
+            "type": "message",
+            "id": "assistant-1",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Done"}],
+            "source": "harness",
+        },
+        {
+            **entry_base,
+            "type": "callback",
+            "id": "callback-entry-1",
+            "callbackId": "callback-1",
+            "relatedEntryId": "effect-1",
+            "title": "Choose an option",
+            "detail": {
+                "kind": "user_input",
+                "request": {
+                    "questions": [
+                        {
+                            "question": "Continue?",
+                            "options": [{"label": "Yes"}, {"label": "No"}],
+                        }
+                    ]
+                },
+            },
+            "state": {"status": "open"},
+        },
+    ]
+    original_turn = deepcopy(turn)
+    original_entries = deepcopy(entries)
+
+    # Do
+    parsed_turn = validate_wire(PublicTurn, turn)
+    parsed_entries = [validate_history_entry(entry) for entry in entries]
+    serialized_turn = parsed_turn.model_dump(mode="json", by_alias=True)
+    serialized_entries = [
+        entry.model_dump(mode="json", by_alias=True) for entry in parsed_entries
+    ]
+
+    # Assert
+    assert parsed_turn.input_entry_id == expected_input_entry_id
+    assert serialized_turn["inputEntryId"] == expected_input_entry_id
+    assert [entry.input_entry_id for entry in parsed_entries] == [
+        expected_input_entry_id,
+        expected_input_entry_id,
+    ]
+    assert [entry["inputEntryId"] for entry in serialized_entries] == [
+        expected_input_entry_id,
+        expected_input_entry_id,
+    ]
+    assert [entry["relatedEntryId"] for entry in serialized_entries] == [
+        None,
+        "effect-1",
+    ]
+    assert turn == original_turn
+    assert entries == original_entries
+
+
 def test_canonical_enqueue_requires_the_user_entry_to_be_last() -> None:
     with pytest.raises(ValidationError, match="final turn input entry"):
         TurnEnqueueParams(
@@ -504,6 +601,21 @@ def test_turn_queue_methods_are_advertised() -> None:
         "turn/queue/resume",
         "vibe/turn/queue/replace",
     }.isdisjoint(SERVER_METHODS)
+
+
+def test_background_process_output_method_is_advertised() -> None:
+    """*Prepare*: The app-server's public method catalogue.
+    *Do*: Inspect the background-process output method.
+    *Assert*: Clients can discover the typed output read capability.
+    """
+    # Prepare
+    method = "session/backgroundProcess/output"
+
+    # Do
+    is_advertised = method in SERVER_METHODS
+
+    # Assert
+    assert is_advertised
 
 
 def test_turn_queue_command_results_are_minimal() -> None:

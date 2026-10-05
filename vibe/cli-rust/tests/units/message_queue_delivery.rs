@@ -14,6 +14,7 @@ fn queued(message_id: &str, text: &str) -> QueueItem {
         server_message_id: "message-1".to_string(),
         text: text.to_string(),
         images: Vec::new(),
+        mentions: None,
         sent: true,
         ever_sent: true,
         revision: 1,
@@ -39,7 +40,7 @@ fn consumed(delivered: &[&str], text: &str) -> QueueEvent {
     QueueEvent::GroupReplaced {
         server_message_id: "message-1".to_string(),
         revision: 1,
-        covered: vec![("message-1".to_string(), text.to_string(), Vec::new())],
+        covered: vec![("message-1".to_string(), text.to_string(), Vec::new(), None)],
         delivered: delivered.iter().map(|id| (*id).to_string()).collect(),
         outcome: ReplacementOutcome::Consumed,
     }
@@ -101,6 +102,7 @@ fn consumed_edit_before_enqueue_answer_keeps_the_original_transcript() {
             queue_item_id: "queue-1".to_string(),
             session_id: "session-1".to_string(),
             images: Vec::new(),
+            mentions: None,
         },
     );
 
@@ -134,7 +136,12 @@ fn consumed_edit_preserves_the_delivered_group_order() {
         QueueEvent::GroupReplaced {
             server_message_id: "message-1".to_string(),
             revision: 1,
-            covered: vec![("message-2".to_string(), "edited".to_string(), Vec::new())],
+            covered: vec![(
+                "message-2".to_string(),
+                "edited".to_string(),
+                Vec::new(),
+                None,
+            )],
             delivered: ["message-1", "message-2", "message-3"]
                 .into_iter()
                 .map(str::to_string)

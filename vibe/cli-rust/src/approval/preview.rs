@@ -66,8 +66,8 @@ fn build(input: &Value, cwd: Option<&str>) -> Option<FileEditEffectOutput> {
     }
     Some(FileEditEffectOutput {
         file,
-        old_string: String::new(),
-        new_string: String::new(),
+        old_string: None,
+        new_string: None,
         occurrences,
     })
 }

@@ -1,0 +1,20 @@
+[
+ {
+  "method": "mcp_catalog/read",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "connector_catalog/refresh",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "mcp_catalog/refresh",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

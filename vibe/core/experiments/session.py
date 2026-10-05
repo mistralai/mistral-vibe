@@ -6,7 +6,10 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 from vibe import __version__
 from vibe.core.experiments.active import ExperimentSurface
-from vibe.core.experiments.cache import store_cached_eval_response
+from vibe.core.experiments.cache import (
+    clear_cached_eval_responses,
+    store_cached_eval_response,
+)
 from vibe.core.experiments.manager import ExperimentManager
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
 from vibe.core.identity import IdentityResult, fetch_identity
@@ -110,6 +113,9 @@ async def initialize_experiments(
     resolve_identity: IdentityResolver | None = None,
     resolve_whoami: WhoAmIResolver | None = None,
 ) -> tuple[bool, str | None]:
+    if not config.enable_telemetry or not config.experiments.enable:
+        # The `vibe` launcher reads this cache without the config, so opting out must drop it.
+        clear_cached_eval_responses()
     if not config.enable_telemetry:
         return False, None
     attributes, user_plan = await _fetch_plan_attributes(

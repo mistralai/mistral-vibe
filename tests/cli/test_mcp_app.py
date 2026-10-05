@@ -299,6 +299,19 @@ def test_highlighting_regular_source_uses_tool_help() -> None:
     app._set_help_text.assert_called_once_with(_LIST_VIEW_HELP_TOOLS)
 
 
+def test_highlighting_auth_source_with_bootstrap_error_uses_tool_help() -> None:
+    source = _source("oauth", status=MCPSourceStatus.NEEDS_AUTH, error="boom")
+    app = MCPApp(_state(source))
+    app._viewing_name = None
+    app.query_one = MagicMock(return_value=MagicMock(highlighted=0))
+    app._source_for_option = MagicMock(return_value=source)
+    app._set_help_text = MagicMock()
+
+    app.on_option_list_option_highlighted(MagicMock())
+
+    app._set_help_text.assert_called_once_with(_LIST_VIEW_HELP_TOOLS)
+
+
 def test_oauth_source_detail_requests_server_auth() -> None:
     source = _source("oauth", status=MCPSourceStatus.NEEDS_AUTH)
     app = MCPApp(_state(source))

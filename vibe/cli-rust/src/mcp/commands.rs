@@ -50,7 +50,7 @@ fn status(app: &mut App, client: &Arc<Client>, args: &str) {
 }
 
 fn status_text(value: &Value) -> String {
-    let state = super::state_at(value, "/mcp");
+    let state = super::state_at(value, "/mcp").unwrap_or_default();
     let statuses = state.statuses();
     if statuses.is_empty() {
         return "No MCP servers configured.".to_owned();

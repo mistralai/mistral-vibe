@@ -37,6 +37,10 @@ Detail lives in the [architecture design doc](../design/rust-cli-architecture.md
   widget abstractions) without a second consumer.
 - Preserve first-draw-before-spawn and RAII terminal restoration on all exit
   paths.
+- The client never writes `config.toml`, the OS keyring, or `$VIBE_HOME/.env`.
+  `setup/*` (and `config/write` once a session is attached) are its only
+  persistence channels; read-only pre-spawn parsing to seed the setup wizard
+  is allowed.
 
 ## Flag To User When
 

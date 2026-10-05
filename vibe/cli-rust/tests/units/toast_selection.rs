@@ -1,6 +1,7 @@
 //! Toast text selection: its own region, click granularity, and its lifetime.
 
 use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 
@@ -22,9 +23,10 @@ fn drawn() -> App {
     app
 }
 
-fn redraw(app: &mut App) {
+fn redraw(app: &mut App) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
     terminal.draw(|frame| app.draw(frame)).expect("draw");
+    terminal.backend().buffer().clone()
 }
 
 /// Top-left cell of the newest toast's text, as the last frame painted it.
@@ -177,4 +179,54 @@ fn a_selection_follows_its_toast_when_a_newer_one_shifts_the_rack() {
     assert!(after.y < before.y, "the older toast moved up the rack");
     assert_eq!(selected_text(&app), Some("Slash"));
     assert_eq!(app.view.toast_selection_region.area, after);
+}
+
+#[test]
+fn a_held_press_paints_no_highlight() {
+    let mut app = drawn();
+    let before = redraw(&mut app);
+    let (x, y) = text_origin(&app);
+    selection::press_toast(&mut app, (x + SECOND_WORD, y));
+
+    assert_eq!(redraw(&mut app), before);
+}
+
+#[test]
+fn a_held_press_follows_its_toast_when_a_newer_one_shifts_the_rack() {
+    let mut app = drawn();
+    let (x, y) = text_origin(&app);
+    selection::press_toast(&mut app, (x, y));
+    let (_, before) = app.view.toast_text_areas[0];
+
+    app.show_toast("Second toast".to_owned(), ToastSeverity::Error, TOAST_SECS);
+    redraw(&mut app);
+    let (_, after) = app.view.toast_text_areas[0];
+
+    assert!(after.y < before.y, "the older toast moved up the rack");
+    assert_eq!(app.view.toast_selection_region.area, after);
+
+    selection::drag(&mut app, (after.x + 4, after.y));
+    selection::release(&mut app);
+    redraw(&mut app);
+
+    assert_eq!(selected_text(&app), Some("Slash"));
+}
+
+#[test]
+fn a_held_press_drops_when_its_toast_stops_painting() {
+    let mut app = drawn();
+    let (x, y) = text_origin(&app);
+    selection::press_toast(&mut app, (x, y));
+
+    app.overlays.toasts.clear();
+    redraw(&mut app);
+
+    assert!(app.selection.drag.is_none());
+    assert_eq!(app.view.toast_selection_region.area, Rect::default());
+
+    selection::drag(&mut app, (x + 4, y));
+    selection::release(&mut app);
+    redraw(&mut app);
+
+    assert_eq!(selected_text(&app), None);
 }

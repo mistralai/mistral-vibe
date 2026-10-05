@@ -7,30 +7,32 @@ use unicode_width::UnicodeWidthStr;
 
 use super::Sc;
 
+/// `pad` columns of left padding.
+pub(super) fn pad(pad: usize) -> Span<'static> {
+    Span::raw(" ".repeat(pad))
+}
+
 /// Prefix a run of spans with `pad` columns of left padding.
 pub(super) fn pad_line(mut spans: Vec<Span<'static>>, pad: usize) -> Line<'static> {
-    let mut all = vec![Span::raw(" ".repeat(pad))];
+    let mut all = vec![self::pad(pad)];
     all.append(&mut spans);
     Line::from(all)
 }
 
 /// Greedy word-wrap styled characters to `width`, like Textual's `divide_line`.
-pub(super) fn wrap(chars: &[Sc], width: usize) -> Vec<Vec<Span<'static>>> {
-    wrap_chars(chars, width)
-        .iter()
-        .map(|row| merge(row))
-        .collect()
-}
-
-/// Greedy word-wrap while preserving styles and terminal-cell widths.
-pub(super) fn wrap_chars(chars: &[Sc], width: usize) -> Vec<Vec<Sc>> {
+pub(crate) fn wrap_chars(chars: &[Sc], width: usize) -> Vec<Vec<Sc>> {
     let width = width.max(1);
     let mut rows = Vec::new();
     let mut row = Vec::new();
     let mut used = 0;
     for word in split_words(chars) {
+        if word.len() == 1 && word[0].0 == '\n' {
+            rows.push(trim_end(std::mem::take(&mut row)));
+            used = 0;
+            continue;
+        }
         let widths = WordWidths::new(word);
-        let trailing_spaces = word.iter().rev().take_while(|&&(c, _)| c == ' ').count();
+        let trailing_spaces = word.iter().rev().take_while(|sc| sc.0 == ' ').count();
         let visible = widths.total.saturating_sub(trailing_spaces);
         if !row.is_empty() && used + visible > width {
             rows.push(trim_end(std::mem::take(&mut row)));
@@ -64,12 +66,14 @@ pub(super) fn wrap_chars(chars: &[Sc], width: usize) -> Vec<Vec<Sc>> {
     rows
 }
 
-/// Split into words, each keeping the spaces that follow it.
+/// Split into words, each keeping the spaces that follow it. A hard break
+/// (a `\n` Sc) is its own word.
 fn split_words(chars: &[Sc]) -> Vec<&[Sc]> {
     let mut words = Vec::new();
     let mut start = 0;
     for index in 1..chars.len() {
-        if chars[index].0 != ' ' && chars[index - 1].0 == ' ' {
+        let (prev, cur) = (chars[index - 1].0, chars[index].0);
+        if cur == '\n' || prev == '\n' || (cur != ' ' && prev == ' ') {
             words.push(&chars[start..index]);
             start = index;
         }
@@ -87,10 +91,7 @@ struct WordWidths {
 
 impl WordWidths {
     fn new(chars: &[Sc]) -> Self {
-        let text = chars
-            .iter()
-            .map(|(character, _)| character)
-            .collect::<String>();
+        let text = chars.iter().map(|sc| sc.0).collect::<String>();
         let mut end = 0;
         let mut total = 0;
         let graphemes = text
@@ -106,16 +107,25 @@ impl WordWidths {
     }
 }
 
-pub(super) fn cell_width(chars: &[Sc]) -> usize {
-    chars
-        .iter()
-        .map(|(character, _)| character)
-        .collect::<String>()
-        .width()
+/// Textual collapses whitespace runs per text token, never across tokens.
+pub(super) fn collapse_ws(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if !c.is_whitespace() {
+            out.push(c);
+        } else if !out.ends_with(' ') {
+            out.push(' ');
+        }
+    }
+    out
+}
+
+pub(crate) fn cell_width(chars: &[Sc]) -> usize {
+    chars.iter().map(|sc| sc.0).collect::<String>().width()
 }
 
 fn trim_end(mut chars: Vec<Sc>) -> Vec<Sc> {
-    while chars.last().is_some_and(|&(c, _)| c == ' ') {
+    while chars.last().is_some_and(|sc| sc.0 == ' ') {
         chars.pop();
     }
     chars
@@ -126,7 +136,7 @@ pub(super) fn merge(chars: &[Sc]) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut buf = String::new();
     let mut style: Option<Style> = None;
-    for &(c, s) in chars {
+    for &(c, s, _) in chars {
         if style != Some(s) {
             if let Some(prev) = style {
                 spans.push(Span::styled(std::mem::take(&mut buf), prev));

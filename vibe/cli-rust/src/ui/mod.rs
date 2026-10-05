@@ -33,6 +33,8 @@ pub mod rng;
 pub mod scrollbar;
 pub mod selection;
 mod styled_text;
+pub mod subagent_list;
+pub mod tab_cells;
 pub mod theme;
 pub mod theme_picker;
 pub mod thinking_picker;
@@ -45,14 +47,16 @@ mod trust_folders_paint;
 pub(crate) mod trust_folders_selection;
 mod trust_folders_text;
 pub mod vibe_code_project;
+pub mod voice_app;
 
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::Frame;
 
 use crate::app::App;
 
 /// Lay out the screen and draw every component. Constraints mirror the Python
 pub fn draw(app: &mut App, f: &mut Frame) {
+    app.chat_input.sync_mentions();
     let area = f.area();
     draw_active_screen(app, f, area);
     // The toast stack is a top-level overlay so warnings show on every screen,
@@ -65,6 +69,9 @@ pub fn draw(app: &mut App, f: &mut Frame) {
 fn toast_anchor(app: &App, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
     if app.view.input_area.height > 0 {
         app.view.input_area
+    } else if app.subagents.list.area.height > 0 {
+        // A child view hides the input box; the list sits where it was.
+        app.subagents.list.area
     } else {
         ratatui::layout::Rect::new(0, area.height.saturating_sub(1), area.width, 0)
     }
@@ -114,6 +121,10 @@ fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect
     // bottom-app takes the input box before any user-opened picker can.
     if app.question_app.open {
         question_app::draw(app, f, area);
+        return;
+    }
+    if app.voice_app.open {
+        voice_app::draw(app, f, area);
         return;
     }
     // `/theme` picker open: it replaces the input box with a taller bottom-app,
@@ -188,26 +199,83 @@ fn draw_base(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
     // The shared slash-command/file popup sits above the input box.
     completion_popup::reconcile_scroll(app, area.width);
     let popup_height = completion_popup::popup_height(app, area.width);
+    // Python `set_subagent_view`: the input box is hidden while a child is viewed.
+    let input_height = if app.subagents.viewed_subagent_id.is_some() {
+        0
+    } else {
+        input_box_height(app, area.width, area.height)
+    };
     let chunks = Layout::vertical([
-        Constraint::Min(1),                        // #chat — height: 1fr
-        Constraint::Length(loading_height),        // #loading-area — height: auto
-        Constraint::Length(popup_height),          // #completion-popup — height: auto, max 12
-        Constraint::Length(todo::row_height(app)), // pinned todo line — height: 1
-        Constraint::Length(input_box_height(app, area.width, area.height)), // #input-box (grows with rendered rows)
-        Constraint::Length(1), // #bottom-bar — height: auto
+        Constraint::Min(1),                             // #chat — height: 1fr
+        Constraint::Length(loading_height),             // #loading-area — height: auto
+        Constraint::Length(popup_height),               // #completion-popup — height: auto, max 12
+        Constraint::Length(todo::row_height(app)),      // pinned todo line — height: 1
+        Constraint::Length(input_height),               // #input-box (grows with rendered rows)
+        Constraint::Length(subagent_list::height(app)), // #subagent-list — under the input
+        Constraint::Length(1),                          // #bottom-bar — height: auto
     ])
     .split(area);
 
     app.view.input_area = chunks[4];
+    // A child view swaps the rendered transcript (Python hides the messages
+    // area and mounts the child's transcript in the same scroll region). The
+    // render cache and the last measured height belong to the transcript:
+    // their revision streams are independent, so both must follow the swap.
+    let viewed_child = app.subagents.viewed_subagent_id.clone();
+    let mut swapped = false;
+    if let Some(child_id) = &viewed_child {
+        if let Some(child) = app.subagents.transcripts.child_mut(child_id) {
+            std::mem::swap(&mut app.view.transcript, &mut child.transcript);
+            std::mem::swap(&mut app.view.transcript_cache, &mut child.cache);
+            std::mem::swap(&mut app.view.last_total, &mut child.last_total);
+            swapped = true;
+        }
+    }
     transcript::draw(app, f, chunks[0]);
+    if swapped {
+        let child_id = viewed_child.clone().unwrap_or_default();
+        if let Some(child) = app.subagents.transcripts.child_mut(&child_id) {
+            std::mem::swap(&mut app.view.transcript, &mut child.transcript);
+            std::mem::swap(&mut app.view.transcript_cache, &mut child.cache);
+            std::mem::swap(&mut app.view.last_total, &mut child.last_total);
+        }
+        // Python stacks the placeholder above the transcript content, which is
+        // bottom-anchored: above the first rendered row. With no rendered rows
+        // the placeholder is part of the document under the banner
+        // (transcript::draw), never an overlay at the area bottom.
+        if let Some(placeholder) = app
+            .subagents
+            .transcripts
+            .child(&child_id)
+            .and_then(|child| child.placeholder())
+        {
+            if let Some(top) = app.view.entry_hitmap.first().map(|(top, _, _, _)| *top) {
+                if top > chunks[0].y {
+                    let row = Rect {
+                        y: top - 1,
+                        width: chunks[0].width.saturating_sub(1),
+                        x: chunks[0].x + 1,
+                        height: 1,
+                    };
+                    f.render_widget(
+                        ratatui::widgets::Paragraph::new(placeholder).style(theme::muted_style()),
+                        row,
+                    );
+                }
+            }
+        }
+    }
     if popup_height > 0 {
         crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Completion);
         completion_popup::draw(app, f, chunks[2]);
     }
     todo::draw_row(app, f, chunks[3]);
-    crate::mouse::register_region(app, chunks[4], crate::mouse::MouseTarget::Composer);
-    chat_input::draw(app, f, chunks[4]);
-    bottom_bar::draw(app, f, chunks[5]);
+    if input_height > 0 {
+        crate::mouse::register_region(app, chunks[4], crate::mouse::MouseTarget::Composer);
+        chat_input::draw(app, f, chunks[4]);
+    }
+    subagent_list::draw(app, f, chunks[5]);
+    bottom_bar::draw(app, f, chunks[6]);
     selection::overlay(app, f);
     draw_loading_area(app, f, chunks[1]);
     selection::loading_region(app, f, chunks[1]);

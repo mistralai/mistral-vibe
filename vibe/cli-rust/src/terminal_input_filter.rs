@@ -34,20 +34,29 @@ impl TerminalInputFilter {
         }
 
         if is_osc_terminator(&event) {
-            if is_color_report(&self.payload) {
-                self.clear();
-                return Vec::new();
-            }
-            return self.release_with(event);
+            // Report or not, the buffered bytes are terminal noise, never input.
+            self.clear();
+            return Vec::new();
         }
 
         let Some(character) = plain_character(&event) else {
-            return self.release_with(event);
+            // A real key (an arrow, Enter, …) interrupts the report: drop the
+            // report bytes and deliver the user's key. Replaying the report
+            // as input would type its payload into the composer and the
+            // user's key would join the junk batch.
+            self.clear();
+            return vec![event];
         };
         self.payload.push(character);
+        let diverged =
+            self.pending.len() + 1 >= MAX_REPORT_EVENTS || !is_partial_color_report(&self.payload);
         self.pending.push(event);
-        if self.pending.len() >= MAX_REPORT_EVENTS || !is_partial_color_report(&self.payload) {
-            return self.release();
+        if diverged {
+            // The payload diverged from a report: the buffered bytes stay
+            // dropped, but this character may be the user's own.
+            let event = self.pending.pop().expect("pushed above");
+            self.clear();
+            return vec![event];
         }
         Vec::new()
     }
@@ -57,21 +66,10 @@ impl TerminalInputFilter {
             .started
             .is_some_and(|started| now.duration_since(started) >= PARTIAL_REPORT_TIMEOUT)
         {
-            return self.release();
+            // An unfinished report is terminal noise; it never becomes input.
+            self.clear();
         }
         Vec::new()
-    }
-
-    fn release_with(&mut self, event: Event) -> Vec<Event> {
-        self.pending.push(event);
-        self.release()
-    }
-
-    fn release(&mut self) -> Vec<Event> {
-        let pending = std::mem::take(&mut self.pending);
-        self.payload.clear();
-        self.started = None;
-        pending
     }
 
     fn clear(&mut self) {
@@ -136,21 +134,6 @@ fn plain_character(event: &Event) -> Option<char> {
     }
 }
 
-fn is_color_report(payload: &str) -> bool {
-    let Some(color) = color_payload(payload) else {
-        return false;
-    };
-    let Some((red, remainder)) = color.split_once('/') else {
-        return false;
-    };
-    let Some((green, blue)) = remainder.split_once('/') else {
-        return false;
-    };
-    [red, green, blue].into_iter().all(|component| {
-        !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_hexdigit())
-    })
-}
-
 fn is_partial_color_report(payload: &str) -> bool {
     let Some(payload) = payload.strip_prefix(']') else {
         return false;
@@ -176,13 +159,4 @@ fn is_partial_color_report(payload: &str) -> bool {
         && color
             .iter()
             .all(|byte| byte.is_ascii_hexdigit() || *byte == b'/')
-}
-
-fn color_payload(payload: &str) -> Option<&str> {
-    let payload = payload.strip_prefix(']')?;
-    let digit_count = payload.chars().take_while(char::is_ascii_digit).count();
-    if !(1..=3).contains(&digit_count) {
-        return None;
-    }
-    payload[digit_count..].strip_prefix(";rgb:")
 }

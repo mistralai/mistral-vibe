@@ -44,10 +44,15 @@ def _create_acp_agent(
 ) -> VibeAcpAgent:
     vibe_acp_agent = (
         VibeAcpAgent(
-            session_starter=session_starter, experimental_harness=experimental_harness
+            session_starter=session_starter,
+            experimental_harness=experimental_harness,
+            legacy_harness=not experimental_harness,
         )
         if session_starter is not None
-        else VibeAcpAgent(experimental_harness=experimental_harness)
+        else VibeAcpAgent(
+            experimental_harness=experimental_harness,
+            legacy_harness=not experimental_harness,
+        )
     )
     client = FakeClient()
 
@@ -123,7 +128,9 @@ def acp_agent_with_session_config(
         )
 
     vibe_acp_agent = VibeAcpAgent(
-        session_starter=start_session, experimental_harness=experimental_harness
+        session_starter=start_session,
+        experimental_harness=experimental_harness,
+        legacy_harness=not experimental_harness,
     )
     client = FakeClient()
     vibe_acp_agent.on_connect(client)

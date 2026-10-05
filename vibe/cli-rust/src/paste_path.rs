@@ -1,4 +1,4 @@
-//! Image-path rewriting for pasted text and non-bracketed drag-and-drop input.
+//! Path-mention rewriting for pasted text and non-bracketed drag-and-drop input.
 
 use std::path::PathBuf;
 
@@ -6,22 +6,14 @@ const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
 const QUOTES: [char; 2] = ['\'', '"'];
 const PATH_ROOTS: [char; 2] = ['/', '~'];
 const TOKEN_BOUNDARIES: [char; 3] = ['(', '<', '['];
+const NARROW_NO_BREAK_SPACE: char = '\u{202f}';
 
-pub fn maybe_prepend_at_for_image_path(pasted: &str) -> String {
-    maybe_prepend_at_for_image_path_on(pasted, cfg!(windows))
-}
+mod list;
 
-pub fn maybe_prepend_at_for_image_path_on(pasted: &str, windows: bool) -> String {
-    let text = pasted.trim();
-    if text.is_empty() || text.contains(['\n', '\r']) {
-        return pasted.to_owned();
-    }
-    let candidate = unescape_spaces(strip_matched_quotes(text));
-    if !is_image_path_on(&candidate, windows) {
-        return pasted.to_owned();
-    }
-    image_path_mention_on(&candidate, windows)
-}
+pub use list::{
+    pasted_image_path, pasted_image_path_on, pasted_image_paths, pasted_image_paths_on,
+    path_candidates, path_candidates_on, paths_resolve, paths_resolve_on, MAX_PASTED_PATHS,
+};
 
 pub fn has_supported_path_root(candidate: &str, windows: bool) -> bool {
     candidate.starts_with(PATH_ROOTS)
@@ -73,6 +65,27 @@ pub fn contains_image_path_mention(text: &str, path: &str) -> bool {
     false
 }
 
+/// The image paths of `text`'s `@` mentions, in order.
+pub fn image_mentions_in(text: &str) -> Vec<String> {
+    text.match_indices('@')
+        .filter(|&(anchor, _)| {
+            text[..anchor]
+                .chars()
+                .next_back()
+                .is_none_or(|previous| !previous.is_alphanumeric() && previous != '_')
+        })
+        .filter_map(|(anchor, _)| extract_mention_candidate(text, anchor + 1))
+        .filter(|candidate| {
+            std::path::Path::new(candidate)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    IMAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+                })
+        })
+        .collect()
+}
+
 fn extract_mention_candidate(text: &str, start: usize) -> Option<String> {
     let head = text[start..].chars().next()?;
     if QUOTES.contains(&head) {
@@ -102,8 +115,21 @@ pub fn rewrite_bare_image_paths_in_text(text: &str) -> String {
 }
 
 pub fn rewrite_bare_image_paths_in_text_on(text: &str, windows: bool) -> String {
+    rewrite_bare_image_paths_with_spans_on(text, windows).0
+}
+
+/// Rewrite bare image paths, returning each new mention's byte span too.
+pub fn rewrite_bare_image_paths_with_spans(text: &str) -> (String, Vec<(usize, usize)>) {
+    rewrite_bare_image_paths_with_spans_on(text, cfg!(windows))
+}
+
+fn rewrite_bare_image_paths_with_spans_on(
+    text: &str,
+    windows: bool,
+) -> (String, Vec<(usize, usize)>) {
+    let mut spans = Vec::new();
     if !text.contains(['/', '~', '\'', '"', '\\']) {
-        return text.to_owned();
+        return (text.to_owned(), spans);
     }
     let mut out = String::with_capacity(text.len());
     let mut pos = 0;
@@ -111,8 +137,10 @@ pub fn rewrite_bare_image_paths_in_text_on(text: &str, windows: bool) -> String 
         if at_token_boundary(text, pos) {
             if let Some((token, end)) = extract_path_token(text, pos, windows) {
                 if is_image_path_on(&token, windows) {
+                    let start = out.len();
                     out.push('@');
                     out.push_str(&quote_if_needed(&token, windows));
+                    spans.push((start, out.len()));
                     pos = end;
                     continue;
                 }
@@ -122,21 +150,27 @@ pub fn rewrite_bare_image_paths_in_text_on(text: &str, windows: bool) -> String 
         out.push(ch);
         pos += ch.len_utf8();
     }
-    out
+    (out, spans)
+}
+
+pub fn is_image_path(candidate: &str) -> bool {
+    is_image_path_on(candidate, cfg!(windows))
 }
 
 // Existence is validated by prompt preparation; composer rewriting stays I/O-free.
 fn is_image_path_on(candidate: &str, windows: bool) -> bool {
-    let Some(path) = expanded_path(candidate) else {
-        return false;
-    };
-    (path.is_absolute() || (windows && has_supported_path_root(candidate, true)))
-        && path
-            .extension()
+    rooted_path(candidate, windows).is_some_and(|path| {
+        path.extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| {
                 IMAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
             })
+    })
+}
+
+fn rooted_path(candidate: &str, windows: bool) -> Option<PathBuf> {
+    expanded_path(candidate)
+        .filter(|path| path.is_absolute() || (windows && has_supported_path_root(candidate, true)))
 }
 
 fn expanded_path(candidate: &str) -> Option<PathBuf> {
@@ -170,10 +204,6 @@ fn quote_if_needed(path: &str, windows: bool) -> String {
     }
 }
 
-fn unescape_spaces(text: &str) -> String {
-    text.replace("\\ ", " ")
-}
-
 fn strip_matched_quotes(text: &str) -> &str {
     let mut chars = text.chars();
     let Some(first) = chars.next() else {
@@ -201,7 +231,7 @@ fn extract_path_token(text: &str, pos: usize, windows: bool) -> Option<(String, 
         return extract_quoted(text, pos, head);
     }
     if PATH_ROOTS.contains(&head) || has_supported_path_root(&text[pos..], windows) {
-        return extract_bare(text, pos);
+        return extract_bare(text, pos, windows);
     }
     None
 }
@@ -213,18 +243,27 @@ fn extract_quoted(text: &str, start: usize, quote: char) -> Option<(String, usiz
     Some((text[content_start..end].to_owned(), end + quote.len_utf8()))
 }
 
-fn extract_bare(text: &str, start: usize) -> Option<(String, usize)> {
+/// A backslash escapes a space everywhere, and any non-space character on POSIX.
+fn is_shell_escape(next: char, windows: bool) -> bool {
+    next == ' ' || (!windows && !next.is_whitespace())
+}
+
+// Terminals shell-escape dropped paths but leave U+202F (macOS screenshot names) raw.
+fn extract_bare(text: &str, start: usize, windows: bool) -> Option<(String, usize)> {
     let mut out = String::new();
     let mut chars = text[start..].char_indices().peekable();
     let mut end = start;
     while let Some((offset, ch)) = chars.next() {
-        if ch == '\\' && chars.peek().is_some_and(|(_, next)| *next == ' ') {
+        let escaped = chars
+            .peek()
+            .filter(|(_, next)| ch == '\\' && is_shell_escape(*next, windows));
+        if let Some(&(next_offset, next)) = escaped {
             chars.next();
-            out.push(' ');
-            end = start + offset + 2;
+            out.push(next);
+            end = start + next_offset + next.len_utf8();
             continue;
         }
-        if ch.is_whitespace() {
+        if ch.is_whitespace() && ch != NARROW_NO_BREAK_SPACE {
             break;
         }
         out.push(ch);

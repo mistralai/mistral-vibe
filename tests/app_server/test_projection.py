@@ -139,6 +139,14 @@ def test_config_view_reports_the_configured_default_agent() -> None:
     assert config.model_dump(mode="json", by_alias=True)["defaultAgent"] == "plan"
 
 
+def test_config_view_projects_the_tls_trust_policy() -> None:
+    config = project_config_view(build_test_vibe_config(enable_system_trust_store=True))
+
+    assert (
+        config.model_dump(mode="json", by_alias=True)["enableSystemTrustStore"] is True
+    )
+
+
 def test_stats_projection_includes_cached_token_counts() -> None:
     agent_loop = build_test_agent_loop()
     agent_loop.stats.session_cached_tokens = 42
@@ -206,6 +214,42 @@ def test_config_view_flags_pinned_active_model() -> None:
     assert config.active_model.alias == "beta"
 
 
+def test_config_view_carries_the_active_model_thinking_levels() -> None:
+    from vibe.core.config import ModelConfig
+
+    models = [
+        ModelConfig(
+            name="model-a",
+            provider="mistral",
+            alias="alpha",
+            thinking_levels=["off", "high"],
+        )
+    ]
+    agent_loop = build_test_agent_loop(
+        config=build_test_vibe_config(models=models, active_model="alpha")
+    )
+
+    config = project_config(agent_loop)
+
+    assert list(config.active_model.thinking_levels) == ["off", "high"]
+
+
+def test_model_config_view_defaults_thinking_levels_for_older_clients() -> None:
+    # A payload from an older server lacks thinkingLevels; the view's default
+    # keeps such clients rendering the five (ADR 0014).
+    from vibe.app_server.config import THINKING_LEVELS, ModelConfigView
+
+    view = ModelConfigView.model_validate({
+        "name": "model-a",
+        "alias": "alpha",
+        "thinking": "off",
+        "supportsImages": False,
+        "displayName": "alpha",
+    })
+
+    assert list(view.thinking_levels) == list(THINKING_LEVELS)
+
+
 def test_config_view_reports_unpinned_default_model() -> None:
     from vibe.core.config import ModelConfig
 
@@ -255,6 +299,55 @@ def test_config_view_default_alias_never_follows_the_active_model() -> None:
     assert unflagged.default_model_alias == "alpha"
     assert unpinned.active_model.alias == "alpha"
     assert unpinned.default_model_alias == "alpha"
+
+
+@pytest.mark.parametrize("active_model", ["text", "vision"])
+def test_config_view_reports_file_image_delivery_per_model(active_model: str) -> None:
+    from vibe.core.config import ModelConfig
+
+    config = build_test_vibe_config(
+        models=[
+            ModelConfig(
+                name="text-model",
+                provider="mistral",
+                alias="text",
+                supports_images=False,
+            ),
+            ModelConfig(
+                name="vision-model",
+                provider="mistral",
+                alias="vision",
+                supports_images=True,
+            ),
+        ],
+        active_model=active_model,
+    )
+
+    view = project_config_view(config, image_fallback=True)
+    delivery_by_alias = {model.alias: model.image_delivery for model in view.models}
+
+    assert delivery_by_alias == {"text": "resource_link", "vision": "native"}
+    assert view.active_model.image_delivery == delivery_by_alias[active_model]
+    serialized = view.model_dump(mode="json", by_alias=True)
+    assert serialized["activeModel"]["imageDelivery"] == delivery_by_alias[active_model]
+    assert [model["imageDelivery"] for model in serialized["models"]] == [
+        "resource_link",
+        "native",
+    ]
+
+
+def test_config_view_does_not_advertise_file_delivery_without_runtime_support() -> None:
+    from vibe.core.config import ModelConfig
+
+    config = build_test_vibe_config(
+        models=[ModelConfig(name="text-model", provider="mistral", alias="text")],
+        active_model="text",
+    )
+
+    view = project_config_view(config)
+
+    assert view.active_model.image_delivery is None
+    assert view.models[0].image_delivery is None
 
 
 def test_config_view_image_support_widens_for_a_backend_that_can_fall_back() -> None:

@@ -23,6 +23,7 @@ pub(super) fn enqueue_prompt_with_images(
     text: String,
     images: Vec<ImageAttachment>,
 ) {
+    let images = app.chat_input.pasted_images.attach(&text, images);
     let message_id = new_message_id();
     // Idle with nothing queued: the server promotes this prompt straight away.
     let optimistic =
@@ -41,6 +42,11 @@ pub(super) fn enqueue_prompt_with_images(
             !optimistic,
         );
     }
+    if let Some(display) = app.chat_input.collapsed_pastes.display(&text) {
+        app.view.transcript.patch_local(&message_id, |entry| {
+            entry["userDisplayContent"] = display;
+        });
+    }
     let merge_target = (!optimistic)
         .then(|| app.queue.items.first())
         .flatten()
@@ -48,6 +54,8 @@ pub(super) fn enqueue_prompt_with_images(
             !app.queue.is_consumed(&item.server_message_id)
                 || app.queue.replacement_in_flight(&item.server_message_id)
         })
+        // A prompt never joins a turn the user already interrupted.
+        .filter(|_| !super::interrupt_pending(app))
         .map(|item| (item.server_message_id.clone(), item.queue_item_id.clone()));
     let (server_message_id, queue_item_id) = merge_target
         .clone()
@@ -58,6 +66,7 @@ pub(super) fn enqueue_prompt_with_images(
         server_message_id: server_message_id.clone(),
         text: text.clone(),
         images,
+        mentions: None,
         // Unsent until the enqueue or replace containing this content lands.
         sent: false,
         ever_sent: false,
@@ -113,13 +122,21 @@ pub fn remove_selected(app: &mut App, client: &Arc<Client>) {
     }
 }
 
+/// Whether Ctrl+C removes a prompt shown as queued; the loading hint shares it.
+pub fn has_removable(app: &App) -> bool {
+    app.queue
+        .items
+        .last()
+        .is_some_and(|item| app.view.transcript.is_pending(&item.message_id))
+}
+
 /// Remove the newest queued prompt, the Ctrl+C step of Python's quit ladder.
 pub fn pop_last(app: &mut App, client: &Arc<Client>) -> bool {
+    if !has_removable(app) {
+        return false;
+    }
     if super::mutation_in_flight(app) {
         return true;
-    }
-    if app.queue.is_empty() {
-        return false;
     }
     remove_at(app, client, app.queue.len() - 1);
     true
@@ -176,15 +193,17 @@ fn send(app: &mut App, client: &Arc<Client>, message_id: String, text: String) {
     let tx = app.queue.tx.clone();
     let pending = app.commit_started();
     let client = client.clone();
+    let pastes = app.chat_input.collapsed_pastes.clone();
     tokio::spawn(async move {
-        let event = match prepare(&client, &session_id, &text).await {
+        let event = match prepare(&client, &session_id, &text, &existing_images).await {
             Ok(mut prepared) => {
                 merge_edit_images(&mut prepared, &existing_images, &text);
                 let images = prepared.images.clone();
+                let mentions = prepared.mentions.clone();
                 let params = TurnEnqueueParams {
                     idempotency_key: message_id.clone(),
                     session_id: session_id.clone(),
-                    entries: vec![entry(message_id.clone(), &prepared, &text)],
+                    entries: vec![entry(message_id.clone(), &prepared, &text, &pastes)],
                 };
                 match serde_json::to_value(params) {
                     Ok(value) => match client.request(method::TURN_ENQUEUE, value).await {
@@ -198,6 +217,7 @@ fn send(app: &mut App, client: &Arc<Client>, message_id: String, text: String) {
                                 queue_item_id,
                                 session_id,
                                 images,
+                                mentions,
                             },
                             None => QueueEvent::Rejected {
                                 message_id,
@@ -206,7 +226,7 @@ fn send(app: &mut App, client: &Arc<Client>, message_id: String, text: String) {
                         },
                         Err(error) => QueueEvent::Rejected {
                             message_id,
-                            error: Some(error.to_string()),
+                            error: Some(format!("{error:#}")),
                         },
                     },
                     Err(error) => QueueEvent::Rejected {

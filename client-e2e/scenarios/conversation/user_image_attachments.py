@@ -47,12 +47,17 @@ client_args = ("--continue",)
 capture_startup = False
 
 _ATTACHED_ROWS = (
+    "┝ attached image: ~/pics/cat.png",
+    "┝ attached image: /opt/data/charts.png",
+    "└ attached image: pasted-chart.png",
+)
+_PYTHON_ATTACHED_ROWS = (
     "└ attached image: ~/pics/cat.png",
     "└ attached image: /opt/data/charts.png",
     "└ attached image: pasted-chart.png",
 )
 
-screen_contains = {"rust": _ATTACHED_ROWS, "python": _ATTACHED_ROWS}
+screen_contains = {"rust": _ATTACHED_ROWS, "python": _PYTHON_ATTACHED_ROWS}
 
 _CAT_URL = "file:///home/e2e-user/pics/cat.png"
 _CHARTS_URL = "file:///opt/data/charts.png"

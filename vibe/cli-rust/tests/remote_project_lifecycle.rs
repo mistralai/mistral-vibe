@@ -103,7 +103,7 @@ fn replacing_the_session_closes_its_project_picker() {
     app.vibe_code_project.open = true;
     app.vibe_code_project.pending = false;
 
-    vibe_rs::commands::clear::apply_cleared(&mut app, "new-session".into(), None);
+    vibe_rs::commands::clear::apply_cleared(&mut app, "new-session".into(), None, Vec::new());
 
     assert_eq!(app.session.session_id.as_deref(), Some("new-session"));
     assert!(!app.vibe_code_project.open);

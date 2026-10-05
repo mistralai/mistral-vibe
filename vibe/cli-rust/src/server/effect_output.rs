@@ -3,6 +3,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::web_output::{trimmed_text, web_search_lines};
 use crate::utils::clean::clean_output;
 
 /// Python `FileEditEffectOutput`: the whole-line occurrences the diff view renders.
@@ -12,10 +13,11 @@ pub struct FileEditEffectOutput {
     /// The edited path; its extension picks the diff's highlight language.
     #[serde(default)]
     pub file: String,
+    /// Legacy diff pair; occurrence-only outputs send it as `null`.
     #[serde(default)]
-    pub old_string: String,
+    pub old_string: Option<String>,
     #[serde(default)]
-    pub new_string: String,
+    pub new_string: Option<String>,
     #[serde(default)]
     pub occurrences: Vec<FileEditEffectOccurrence>,
 }
@@ -31,6 +33,39 @@ pub struct FileEditEffectOccurrence {
     pub new_text: String,
 }
 
+/// Marker a web-search source row opens with (Python `"  • "`).
+pub const SOURCE_BULLET: &str = "  • ";
+
+/// One result body line and the URL it opens (a web-search source).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BodyLine {
+    /// Unlinked marker painted before `text`; wrapped rows hang under `text`.
+    pub lead: &'static str,
+    pub text: String,
+    pub link: Option<String>,
+}
+
+impl BodyLine {
+    /// A source bullet: its title opens `link` when set.
+    pub fn source(title: String, link: Option<String>) -> Self {
+        Self {
+            lead: SOURCE_BULLET,
+            text: title,
+            link,
+        }
+    }
+}
+
+impl From<String> for BodyLine {
+    fn from(text: String) -> Self {
+        Self {
+            lead: "",
+            text,
+            link: None,
+        }
+    }
+}
+
 /// Python `TodoResultWidget`: one rendered todo row and its status bucket.
 pub struct TodoRow<'a> {
     pub status: &'a str,
@@ -38,11 +73,11 @@ pub struct TodoRow<'a> {
 }
 
 /// Result body lines shown on expand, formatted from the full public output.
-pub fn format_effect_output(kind: Option<&str>, output: Option<&Value>) -> Vec<String> {
+pub fn format_effect_output(kind: Option<&str>, output: Option<&Value>) -> Vec<BodyLine> {
     let Some(output) = output else {
         return Vec::new();
     };
-    match kind {
+    let lines = match kind {
         Some("file_read") => cleaned_text(output, "content")
             .into_iter()
             .map(|line| strip_line_number(&line))
@@ -50,11 +85,11 @@ pub fn format_effect_output(kind: Option<&str>, output: Option<&Value>) -> Vec<S
         // Rendered as a diff, so there is no text body.
         Some("file_edit") => Vec::new(),
         Some("file_write") => cleaned_text(output, "content"),
-        // Python renders these through `_yield_text`, which sanitizes first.
-        Some("web_fetch") => cleaned_text(output, "content"),
+        // Python renders this through `_yield_text`, which trims then sanitizes.
+        Some("web_fetch") => trimmed_text(output, "content"),
         Some("file_search") => cleaned_text(output, "matches"),
         Some("shell") => shell_lines(output),
-        Some("web_search") => web_search_lines(output),
+        Some("web_search") => return web_search_lines(output),
         // Python's `AskUserQuestionResultWidget` composes nothing: the answer is
         // already on the call line, so the raw result must never be dumped.
         Some("user_question") => Vec::new(),
@@ -68,7 +103,8 @@ pub fn format_effect_output(kind: Option<&str>, output: Option<&Value>) -> Vec<S
                 content
             }
         }
-    }
+    };
+    lines.into_iter().map(BodyLine::from).collect()
 }
 
 /// Python `BashResultWidget`: an output with nothing to show keeps the body
@@ -137,46 +173,6 @@ fn cleaned_text(output: &Value, key: &str) -> Vec<String> {
         .and_then(Value::as_str)
         .map(|text| lines(&clean_output(text)))
         .unwrap_or_default()
-}
-
-fn web_search_lines(output: &Value) -> Vec<String> {
-    let mut lines = output
-        .get("query")
-        .and_then(Value::as_str)
-        .map(|query| vec![format!("query: {query}")])
-        .unwrap_or_default();
-    if let Some(answer) = output.get("answer").and_then(Value::as_str) {
-        lines.extend(lines_with_prefix("answer: ", &clean_output(answer)));
-    }
-    if let Some(sources) = output.get("sources").and_then(Value::as_array) {
-        if !sources.is_empty() {
-            lines.push(String::new());
-        }
-        if sources.len() > 1 {
-            lines.push("Sources:".to_string());
-        }
-        lines.extend(
-            sources
-                .iter()
-                .filter_map(source_label_url)
-                .map(|(label, _)| format!("  • {label}")),
-        );
-    }
-    lines
-}
-
-/// Python labels a source with its title, falling back to the bare URL.
-pub(super) fn source_label_url(source: &Value) -> Option<(String, String)> {
-    let url = source
-        .get("url")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let label = source
-        .get("title")
-        .and_then(Value::as_str)
-        .filter(|title| !title.is_empty())
-        .unwrap_or(url);
-    (!label.is_empty()).then(|| (label.to_owned(), url.to_owned()))
 }
 
 /// Python `_format_generic_result` then `_yield_text`: format the payload,
@@ -264,16 +260,8 @@ fn json_value(value: &Value) -> String {
     }
 }
 
-fn lines(text: &str) -> Vec<String> {
+pub(super) fn lines(text: &str) -> Vec<String> {
     text.lines().map(str::to_owned).collect()
-}
-
-fn lines_with_prefix(prefix: &str, text: &str) -> Vec<String> {
-    let mut lines = lines(text);
-    if let Some(first) = lines.first_mut() {
-        first.insert_str(0, prefix);
-    }
-    lines
 }
 
 fn strip_line_number(line: &str) -> String {

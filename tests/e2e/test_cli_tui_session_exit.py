@@ -50,22 +50,29 @@ def _usage_by_run_factory(
 def _saved_session_has_usage(
     vibe_home: Path, expected_prompt_tokens: int, expected_completion_tokens: int
 ) -> bool:
-    session_log_dir = vibe_home / "logs" / "session"
-    if not session_log_dir.exists():
+    """Read the cumulative session usage from the unified session store.
+
+    The unified runtime persists each generation's projection state, whose
+    ``snapshot.session.tokenUsage`` carries the session's cumulative input
+    and output tokens. An early generation may carry ``null`` usage — this
+    reader is polled while the session runs, so that state must read as
+    "not yet" rather than crash.
+    """
+    session_root = vibe_home / "logs" / "session" / "unified"
+    if not session_root.exists():
         return False
 
-    for metadata_path in session_log_dir.glob("session_*/meta.json"):
+    for projection_path in session_root.glob("*/generations/*/projection-state.json"):
         try:
-            metadata = json.loads(read_safe(metadata_path).text)
+            state = json.loads(read_safe(projection_path).text)
         except (OSError, json.JSONDecodeError):
             continue
 
-        stats = metadata.get("stats", {})
-        if not isinstance(stats, dict):
-            continue
+        usage = (state.get("snapshot") or {}).get("session", {}).get("tokenUsage")
         if (
-            stats.get("session_prompt_tokens") == expected_prompt_tokens
-            and stats.get("session_completion_tokens") == expected_completion_tokens
+            isinstance(usage, dict)
+            and usage.get("inputTokens") == expected_prompt_tokens
+            and usage.get("outputTokens") == expected_completion_tokens
         ):
             return True
 
@@ -130,6 +137,7 @@ def _finish_turn(
 
 
 @pytest.mark.timeout(30)
+@pytest.mark.unified_default
 @pytest.mark.parametrize(
     "streaming_mock_server",
     [pytest.param(_usage_by_run_factory, id="fresh-usage-after-resume")],

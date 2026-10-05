@@ -25,7 +25,9 @@ _NEW = "alpha\nBETA\ngamma\ndelta\nEPSILON\nzeta\n"
 _DRAG = "\x1b[<0;12;25M\x1b[<32;20;25M\x1b[<0;20;25m"
 # A double-click on a diff body word snaps to that word, gutter excluded.
 _DOUBLE = "\x1b[<0;17;25M\x1b[<0;17;25m\x1b[<0;17;25M\x1b[<0;17;25m"
-_EXPAND = "\x1b[<0;1;30M\x1b[<0;1;30m"
+_EXPAND_GROUP = "\x1b[<0;1;30M\x1b[<0;1;30m"
+# A different column, so the click chain does not turn it into a double-click.
+_EXPAND_EDIT = "\x1b[<0;3;30M\x1b[<0;3;30m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",
@@ -34,9 +36,10 @@ timeline: Timeline = [
     edit_file("notes.txt", [(3, _OLD, _NEW)]),
     assistant_msg("Done."),
     turn_completed(),
-    _EXPAND,
+    _EXPAND_GROUP,
+    _EXPAND_EDIT,
     _DRAG,
     _DOUBLE,
 ]
 
-capture_steps = {2, 3}
+capture_steps = {3, 4}

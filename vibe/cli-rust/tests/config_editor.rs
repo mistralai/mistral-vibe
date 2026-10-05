@@ -155,3 +155,26 @@ fn tiny_config_browser_remains_visible_and_modal() {
             });
     assert!(screen.contains("Enlarge terminal"));
 }
+
+#[test]
+fn caret_inside_a_grapheme_is_drawn_on_that_grapheme() {
+    let mut app = App::default();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    let mut field = enum_field("1\u{FE0F}\u{20E3} x");
+    field.kind = "str".into();
+    field.enum_choices = Vec::new();
+    config_edit::open(&mut app, field);
+    app.config_screen.edit.as_mut().unwrap().cursor = 1;
+    terminal
+        .draw(|frame| ui::config::draw(&mut app, frame, frame.area()))
+        .unwrap();
+    let caret: Vec<&str> = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .filter(|cell| cell.bg == ui::theme::block_cursor_bg())
+        .map(|cell| cell.symbol())
+        .collect();
+    assert_eq!(caret, ["1\u{FE0F}\u{20E3}"]);
+}

@@ -1,6 +1,7 @@
 //! Client-owned transcript messages preserved until the server supersedes them.
 
 mod positions;
+pub mod teleport;
 
 pub(super) use positions::preserve_file_image_links;
 pub use positions::{preserve, restore, restore_positions};

@@ -1,4 +1,4 @@
-"""Mouse focus and filtered clicks open the correct source, and reopening clears search."""
+"""Mouse focus and filtered clicks open the right source; Esc in search closes and reopening clears it."""
 
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ timeline: Timeline = [
     _click(20, 37),
     "\x7f",
     "/",
-    "\x1b",
     "\x1b",
     "/mcp\r",
 ]

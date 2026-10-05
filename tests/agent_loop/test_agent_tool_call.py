@@ -1037,6 +1037,28 @@ async def test_parallel_conversation_history_has_all_tool_messages() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enable_streaming", [False, True])
+async def test_tool_call_id_reused_across_completions_is_made_unique(
+    enable_streaming: bool,
+) -> None:
+    reused_call = [
+        mock_llm_chunk(content="", tool_calls=[make_todo_tool_call("call_0")])
+    ]
+    agent_loop = build_test_agent_loop(
+        config=make_config(),
+        agent_name=BuiltinAgentName.AUTO_APPROVE,
+        backend=FakeBackend([reused_call, reused_call, [mock_llm_chunk("Done.")]]),
+        enable_streaming=enable_streaming,
+    )
+
+    events = await act_and_collect_events(agent_loop, "Check twice")
+
+    result_ids = [e.tool_call_id for e in events if isinstance(e, ToolResultEvent)]
+    assert result_ids[0] == "call_0"
+    assert len(set(result_ids)) == 2
+
+
+@pytest.mark.asyncio
 async def test_pending_injected_message_continues_loop_after_tool_result() -> None:
     tool_call = make_todo_tool_call("call_inject")
     backend = FakeBackend([

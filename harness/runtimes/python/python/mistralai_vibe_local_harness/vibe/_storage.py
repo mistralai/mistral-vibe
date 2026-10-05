@@ -89,9 +89,14 @@ STORE_FORMAT = "mistral.vibe.unified-session-store/v1"
 # 2: projection deltas; 3: checkpoint-derived interop exports;
 # 4: chunked transcripts; 5: checkpoint capability baselines;
 # 6: self-describing reservations and abandoned receipts;
-# 7: checkpoint configuration baselines and recorded transition shapes.
+# 7: checkpoint configuration baselines and recorded transition shapes;
+# 8: pruned request and result bodies on any settled Action but a process, and
+#    pooled capability catalogs.
+# An additive field needs no bump: an older reader keeps what it cannot
+# interpret and writes it back. Bump only for a change an older reader must not
+# attempt, which is the one thing this number is allowed to mean.
 # Downgrading after a newer build writes the store is unsupported.
-STORE_FORMAT_MINOR = 7
+STORE_FORMAT_MINOR = 8
 # Sealing a chunk once its contents pass this size makes a chunk's identity a
 # function of the list prefix alone, so appending leaves every sealed chunk
 # byte-identical and only the open tail is rewritten.
@@ -106,6 +111,7 @@ _CHUNK_FILE_PATTERN = re.compile(r"^[0-9a-f]{64}\.json$")
 # costs re-reads, never correctness.
 _CHUNK_CACHE_BYTES = 16 * 1024 * 1024
 _CHECKPOINT_MESSAGES_PATH = ("context", "messages")
+_CAPABILITY_CATALOG_KEY = "core_capabilities"
 _PROJECTION_HISTORY_PATH = ("snapshot", "history", "entries")
 _GENERATION_PATTERN = re.compile(r"^[0-9]{16}$")
 _MAX_GENERATION = 9_999_999_999_999_999
@@ -139,10 +145,30 @@ type Timestamp = Annotated[
 
 
 class _StoredModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """Base of every persisted document shape.
+
+    Unknown fields are kept, not rejected. One store is read and rewritten by
+    whichever build a machine happens to run, and a product may ship several
+    surfaces that each carry their own Runtime, so meeting a document written by
+    a newer build is ordinary rather than exceptional. Allowing extras lets that
+    load succeed, and pydantic carries the unknown keys back out through
+    ``model_dump``, so the older build's next publication cannot silently erase
+    state it never understood. That holds only for a document advanced from the
+    loaded instance with ``model_copy``: one rebuilt from the fields this build
+    names drops the rest. The pointer and the manifest are the exception, because
+    they describe the generation being written and are rebuilt for each one.
+    What protects a reader from a store it must not touch is
+    ``STORE_FORMAT_MINOR``, not field-level strictness.
+    """
+
+    model_config = ConfigDict(extra="allow")
 
 
 class HarnessStoreCapacityError(RuntimeError):
+    pass
+
+
+class JournalRecordExceedsPageError(HarnessStoreCapacityError):
     pass
 
 
@@ -160,11 +186,11 @@ class CurrentPointerV1(_StoredModel):
         """Return the pointer minor when it is newer than this reader understands.
 
         A newer writer records a higher ``store_format_minor`` and may add
-        pointer fields alongside it. Strict validation would reject those unknown
-        fields and hide the cause, so a reader reads the minor from the raw
-        document first: a higher minor means the store needs a newer reader. A
-        pointer at this reader's minor still passes through strict validation, so
-        an unexpected field there is rejected as a broken store.
+        pointer fields alongside it. The minor is read from the raw document
+        first so that the reason is the minor rather than whichever unknown field
+        happened to appear next to it: a higher minor means the store needs a
+        newer reader. A pointer at this reader's minor describes a store it can
+        read, so anything recorded beside the minor is carried unread.
         """
         if not isinstance(document, dict):
             return None
@@ -228,8 +254,14 @@ class GenerationManifestV1(_StoredModel):
     def validate_sequence(self) -> Self:
         if self.recovery_journal_segment.first_sequence != self.snapshot_sequence + 1:
             raise ValueError("journal segment must begin after the snapshot sequence")
-        if self.runtime_state.chunks is not None:
-            raise ValueError("the runtime state carries no transcript to pool")
+        if (
+            self.runtime_state.chunks is not None
+            and len(self.runtime_state.chunks) != 1
+        ):
+            # The runtime state has no transcript. Its one poolable field is the
+            # capability catalog, which travels as a single item and so always
+            # seals into exactly one chunk.
+            raise ValueError("a pooled capability catalog must be one chunk")
         # A quiescent generation may or may not name an export, depending on which
         # build wrote it. A recoverable one never had a committed history to export.
         if self.execution_state == "recoverable" and self.interop_export is not None:
@@ -257,6 +289,15 @@ class CommandReceiptV1(_StoredModel):
     restored from a generation written before this field existed has none --
     that reservation is unresumable and is reported as orphaned instead.
     """
+    abandon_on_restart: bool = False
+    """Whether recovery settles this reservation as failed if it is still open.
+
+    Set when nothing will ever re-send the command, because the Runtime made
+    up its ID from state a restart discards. Kept reserved, it would hold the
+    Session off quiescence for good. Unset, a sender that comes back -- a
+    client retrying, or a parent recovering its subagent Action -- finds the
+    reservation still open and resumes it.
+    """
 
     @model_validator(mode="after")
     def validate_params_digest(self) -> Self:
@@ -267,6 +308,22 @@ class CommandReceiptV1(_StoredModel):
         if self.params_sha256 != sha256_json(self.params):
             raise ValueError("command parameter digest does not match its content")
         return self
+
+
+_PRUNABLE_ACTION_KINDS: frozenset[str] = frozenset({
+    "completion",
+    "tool",
+    "hook",
+    "callback",
+    "child",
+    "filesystem",
+})
+"""Kinds whose settled bodies no reader needs once Core has released the Action.
+
+Naming them rather than excluding ``process`` keeps this fail-closed: a kind added
+to the Literal is unprunable until someone audits its read-back paths and lists it
+here, and ``test_every_action_kind_is_classified_for_pruning`` fails until they do.
+"""
 
 
 class RuntimeActionV1(_StoredModel):
@@ -286,13 +343,13 @@ class RuntimeActionV1(_StoredModel):
     prepared_process_start: PreparedProcessStartV1 | None = None
     result: JsonValue = None
     request_pruned: bool = False
-    """Whether a settled completion's ``request`` was dropped.
+    """Whether a settled Action's ``request`` was dropped.
 
     ``request_sha256`` still describes the original request. Generations written
     before this field existed restore with it false and keep their request.
     """
     result_pruned: bool = False
-    """Whether a settled completion's ``result`` was dropped.
+    """Whether a settled Action's ``result`` was dropped.
 
     Only ``_resolve_action``'s redelivery short-circuit reads a result back, and
     only for Actions Core still holds, which the prune excludes. The flag separates
@@ -305,8 +362,8 @@ class RuntimeActionV1(_StoredModel):
         if self.request_pruned:
             if self.request is not None:
                 raise ValueError("a pruned action request must be empty")
-            if self.kind != "completion":
-                raise ValueError("only a completion action request can be pruned")
+            if self.kind not in _PRUNABLE_ACTION_KINDS:
+                raise ValueError(f"a {self.kind} action request cannot be pruned")
             if self.state in {"pending", "running"}:
                 raise ValueError("an unsettled action request cannot be pruned")
         elif self.request_sha256 != sha256_json(self.request):
@@ -314,8 +371,8 @@ class RuntimeActionV1(_StoredModel):
         if self.result_pruned:
             if self.result is not None:
                 raise ValueError("a pruned action result must be empty")
-            if self.kind != "completion":
-                raise ValueError("only a completion action result can be pruned")
+            if self.kind not in _PRUNABLE_ACTION_KINDS:
+                raise ValueError(f"a {self.kind} action result cannot be pruned")
             if self.state in {"pending", "running"}:
                 raise ValueError("an unsettled action result cannot be pruned")
         dispatch_values = (
@@ -773,16 +830,12 @@ def compute_projection_delta(
     Ops are derived from the independently authored ``new`` snapshot, so a
     forgotten mutation cannot silently vanish: ``apply_projection_delta(prior,
     delta)`` would then diverge from ``new`` and the projector's oracle test
-    fails. The projector never reorders surviving entries and only appends new
-    ones at the tail, so removals (prior order) followed by appends/replaces
-    (``new`` order) reconstruct ``new`` exactly.
+    fails. The ordinary path handles tail changes; a changed-suffix rewrite
+    handles insertion before a later entry.
 
-    Entry ids are not guaranteed unique (the subagent catch-up path can append an
-    identical entry twice), so the incremental entry ops are self-checked against
-    ``new``; if they do not reconstruct it, they are replaced by a single
-    ``set_history_entries`` op that carries the entries whole. This makes
-    "``apply_projection_delta(prior, compute_projection_delta(prior, new))``
-    equals ``new``" a guaranteed postcondition for any input.
+    Entry ids are not guaranteed unique, so each incremental result is checked
+    against ``new`` before falling back to ``set_history_entries``. For every input,
+    ``apply_projection_delta(prior, compute_projection_delta(prior, new)) == new``.
     """
     prior_entries = prior.history.entries
     new_entries = new.history.entries
@@ -800,17 +853,33 @@ def compute_projection_delta(
             entry_ops.append(AppendEntryOp(entry=entry))
         elif existing != entry:
             entry_ops.append(ReplaceEntryOp(id=entry_id, entry=entry))
-    # Self-check the incremental entry ops; fall back to a whole-list replacement
-    # when a by-id diff cannot reproduce duplicate ids or any other quirk. The
-    # check itself can raise — duplicate ids produce two remove_entry ops for the
-    # same id, and the second finds nothing to remove — so any failure to
-    # reconstruct ``new`` is treated as "fall back", never propagated.
+    # Duplicate IDs can emit repeated removes for one ID.
     try:
         reconstructs = apply_projection_delta(prior, entry_ops).history.entries == list(
             new_entries
         )
     except ValueError:
         reconstructs = False
+    if (
+        not reconstructs
+        and len(prior_by_id) == len(prior_entries)
+        and len(new_ids) == len(new_entries)
+    ):
+        common_prefix = 0
+        for prior_entry, new_entry in zip(prior_entries, new_entries, strict=False):
+            if prior_entry != new_entry:
+                break
+            common_prefix += 1
+        entry_ops = [
+            RemoveEntryOp(id=cast(str, entry.get("id")))
+            for entry in prior_entries[common_prefix:]
+        ]
+        entry_ops.extend(
+            AppendEntryOp(entry=entry) for entry in new_entries[common_prefix:]
+        )
+        reconstructs = apply_projection_delta(prior, entry_ops).history.entries == list(
+            new_entries
+        )
     if not reconstructs:
         entry_ops = [SetHistoryEntriesOp(entries=list(new_entries))]
     ops: list[ProjectionOp] = list(entry_ops)
@@ -972,6 +1041,7 @@ class CommandReservedPayloadV1(_StoredModel):
     method: str
     params: dict[str, JsonValue]
     params_sha256: Sha256
+    abandon_on_restart: bool = False
 
     @model_validator(mode="after")
     def validate_params_digest(self) -> Self:
@@ -1727,11 +1797,18 @@ class _ChunkCache:
 
 
 class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
-    def __init__(self, root: Path, session_id: str) -> None:
+    def __init__(
+        self, root: Path, session_id: str, *, lease: SessionLease | None = None
+    ) -> None:
         _validate_session_id(session_id)
+        if lease is not None and lease.path != SessionLease(root, session_id).path:
+            raise ValueError("session lease belongs to another session")
         self.root = root
         self.session_id = session_id
         self.session_root = root / "unified" / session_id
+        # Every writer holds the lease, so while this store holds it nothing else
+        # can move the generation or journal its cache was read from.
+        self._lease = lease
         self._journal_capacity_lock = RLock()
         self._journal_capacity_reservations: dict[str, int] = {}
         self._journal_reservation_owner: ContextVar[str | None] = ContextVar(
@@ -1783,7 +1860,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             checkpoint_messages(checkpoint)
         runtime_state = _discard_provider_operation_results(runtime_state)
         if core_action_ids is not None:
-            runtime_state = _prune_settled_completions(runtime_state, core_action_ids)
+            runtime_state = _prune_settled_action_bodies(runtime_state, core_action_ids)
 
         generation_root = self.session_root / "generations"
         journal_root = self.session_root / "journal"
@@ -1811,12 +1888,20 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             projection_envelope, projection_transcript = _detach_projection_history(
                 projection_state
             )
+            runtime_envelope, capability_catalog = _detach_pooled_value(
+                cast(
+                    dict[str, JsonValue],
+                    runtime_state.model_dump(mode="json", by_alias=True),
+                ),
+                _CAPABILITY_CATALOG_KEY,
+            )
             checkpoint_plan = self._plan_transcript("checkpoint", checkpoint_transcript)
             projection_plan = self._plan_transcript("projection", projection_transcript)
+            capability_plan = self._plan_transcript("capabilities", capability_catalog)
             chunk_stats = sum(
                 (
                     _write_chunks(chunk_root, plan)
-                    for plan in (checkpoint_plan, projection_plan)
+                    for plan in (checkpoint_plan, projection_plan, capability_plan)
                 ),
                 ChunkPublicationStats(),
             )
@@ -1831,7 +1916,8 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             runtime_record = _write_generation_record(
                 staging,
                 "runtime-state.json",
-                runtime_state.model_dump(mode="json", by_alias=True),
+                runtime_envelope,
+                capability_plan.digests if capability_plan is not None else None,
             )
             projection_record = _write_generation_record(
                 staging,
@@ -1898,6 +1984,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
         for key, plan in (
             ("checkpoint", checkpoint_plan),
             ("projection", projection_plan),
+            ("capabilities", capability_plan),
         ):
             if plan is not None:
                 self._chunk_plans[key] = plan
@@ -1931,9 +2018,9 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
         try:
             with self._cache_lock:
                 cached = self._cache
-                if (
-                    cached is not None
-                    and self._read_cache_key(cached.key.journal_path) == cached.key
+                if cached is not None and (
+                    (self._lease is not None and self._lease.held)
+                    or self._read_cache_key(cached.key.journal_path) == cached.key
                 ):
                     return cached.session
                 self._cache = None
@@ -2019,9 +2106,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
     def _read_cache_key(self, journal_path: Path) -> _GenerationCacheKey | None:
         # A hit skips the checks a full load runs, so a store directory swapped for a
         # link after the cache was filled would otherwise go unnoticed.
-        _reject_symlink_components(self.root, self.session_root)
-        _reject_symlink(self.session_root / "generations")
-        _reject_symlink_components(self.session_root, journal_path)
+        self._reject_linked_store(journal_path)
         try:
             current = (self.session_root / "CURRENT").read_bytes()
             # lstat so a journal swapped for a symlink misses the cache and is
@@ -2035,6 +2120,11 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             journal_size=stat.st_size,
             journal_mtime_ns=stat.st_mtime_ns,
         )
+
+    def _reject_linked_store(self, journal_path: Path) -> None:
+        _reject_symlink_components(self.root, self.session_root)
+        _reject_symlink(self.session_root / "generations")
+        _reject_symlink_components(self.session_root, journal_path)
 
     def _load(self) -> tuple[StoredSession, _GenerationCacheKey]:  # noqa: PLR0914 - one cohesive generation load
         _reject_symlink_components(self.root, self.session_root)
@@ -2081,6 +2171,14 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
         runtime_state_value = _read_referenced_document(
             generation_dir, manifest.runtime_state
         )
+        if manifest.runtime_state.chunks is not None:
+            _attach_pooled_value(
+                runtime_state_value,
+                _CAPABILITY_CATALOG_KEY,
+                _read_chunked_transcript(
+                    chunk_root, manifest.runtime_state.chunks, self._chunk_cache
+                ),
+            )
         projection_value = _read_referenced_document(
             generation_dir, manifest.projection_state
         )
@@ -2262,18 +2360,24 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             if previous is not None
             else stored.manifest.recovery_journal_segment.first_sequence
         )
-        envelope: dict[str, JsonValue] = {
+        header: dict[str, JsonValue] = {
             "recovery_journal_record_version": 1,
             "sequence": sequence,
             "type": record_type,
             "previous_record_sha256": (
                 previous.record_sha256 if previous is not None else None
             ),
-            "payload": payload.model_dump(mode="json", by_alias=True),
         }
-        envelope["record_sha256"] = sha256_json(envelope)
-        record = _JOURNAL_RECORD_ADAPTER.validate_python(envelope)
+        payload_value = payload.model_dump(mode="json", by_alias=True)
+        payload_bytes = canonical_json(payload_value)
+        header["record_sha256"] = _sha256(_journal_record_bytes(payload_bytes, header))
+        data = _journal_record_bytes(payload_bytes, header) + b"\n"
+        record = _JOURNAL_RECORD_ADAPTER.validate_python({
+            **header,
+            "payload": payload_value,
+        })
         journal_path = self.session_root / stored.manifest.recovery_journal_segment.path
+        self._reject_linked_store(journal_path)
         owner = self._journal_reservation_owner.get()
         owner_bytes = (
             self._journal_capacity_reservations.get(owner, 0)
@@ -2284,7 +2388,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             sum(self._journal_capacity_reservations.values()) - owner_bytes
         )
         written = _append_journal_record(
-            journal_path, record, protected_bytes=protected_bytes
+            journal_path, data, protected_bytes=protected_bytes
         )
         self._extend_cache(stored, record, journal_path, written)
         if owner is not None and owner in self._journal_capacity_reservations:
@@ -2411,7 +2515,12 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             self._journal_reservation_owner.reset(token)
 
     def reserve_command(
-        self, client_command_id: str, method: str, params: dict[str, JsonValue]
+        self,
+        client_command_id: str,
+        method: str,
+        params: dict[str, JsonValue],
+        *,
+        abandon_on_restart: bool = False,
     ) -> CommandReservation:
         stored = self.load()
         params_sha256 = sha256_json(params)
@@ -2445,6 +2554,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
                 method=method,
                 params=params,
                 params_sha256=params_sha256,
+                abandon_on_restart=abandon_on_restart,
             ),
         )
         return CommandReservation(newly_reserved=True)
@@ -2509,6 +2619,17 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             )
             for receipt in self._reserved_internal_receipts(namespace)
             if receipt.params is None
+        )
+
+    def reservations_to_abandon_on_restart(self) -> tuple[OrphanedInternalCommand, ...]:
+        """Open reservations marked to be settled as failed if a restart finds them."""
+        return tuple(
+            OrphanedInternalCommand(
+                client_command_id=receipt.client_command_id,
+                reason="nothing will re-send this command after a restart",
+            )
+            for receipt in self.load().runtime_state.command_receipts
+            if receipt.state == "reserved" and receipt.abandon_on_restart
         )
 
     def resolve_internal_command_id(self, namespace: str) -> str:
@@ -3120,31 +3241,43 @@ def committed_history_from_checkpoint(
 
 
 def canonical_json(value: JsonValue) -> bytes:
-    if _standard_encoder_is_canonical(value):
+    standard = _standard_encoder_form(value)
+    if standard is not _RFC8785_ONLY:
         try:
             return json.dumps(
-                value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                standard, sort_keys=True, separators=(",", ":"), ensure_ascii=False
             ).encode()
         except UnicodeEncodeError:
             pass
     return rfc8785.dumps(value)
 
 
-def _standard_encoder_is_canonical(value: JsonValue) -> bool:
-    """Whether `json.dumps` would emit exactly what RFC 8785 asks for.
+_RFC8785_ONLY: Any = object()
+# Python's `repr` switches to exponent notation below this magnitude; ES6 only
+# does below 1e-6, so smaller fractions take the fallback.
+_MIN_FIXED_NOTATION_FLOAT = 1e-4
+
+
+def _standard_encoder_form(value: JsonValue) -> JsonValue:
+    """What `json.dumps` must encode to emit exactly what RFC 8785 asks for.
 
     Everything the store persists is digested, and the documents being digested
     hold whole conversations, so canonicalization is most of what a load costs.
     The standard library encoder is several times faster than the pure-Python
     canonicalizer and agrees with it byte for byte -- but only away from the
-    three places they part ways: floats (RFC 8785 formats numbers the way ES6
-    does, which is not Python's `repr`), integers outside the range RFC 8785
-    admits, and object keys past ASCII (RFC 8785 orders them by UTF-16 code
-    unit, Python by code point). Anything holding one of those falls back.
+    places they part ways. Floats: both print the shortest round-tripping
+    digits, but ES6 prints an integral float without ``.0`` and switches to
+    exponent notation at other magnitudes than `repr`, so integral floats are
+    encoded as the integers they equal and fractions below
+    ``_MIN_FIXED_NOTATION_FLOAT`` fall back. Integers outside the range RFC 8785
+    admits and object keys past ASCII (RFC 8785 orders them by UTF-16 code unit,
+    Python by code point) fall back too, as do non-finite floats, which RFC 8785
+    rejects.
 
     Exact type checks rather than `isinstance`, so that an exotic subclass takes
     the fallback instead of an encoder that may not agree about it.
     """
+    integral_floats = False
     pending: list[JsonValue] = [value]
     while pending:
         item = pending.pop()
@@ -3154,7 +3287,7 @@ def _standard_encoder_is_canonical(value: JsonValue) -> bool:
         if item_type is dict:
             for key, nested in cast(dict[str, JsonValue], item).items():
                 if type(key) is not str or not key.isascii():
-                    return False
+                    return _RFC8785_ONLY
                 pending.append(nested)
             continue
         if item_type is list:
@@ -3162,10 +3295,48 @@ def _standard_encoder_is_canonical(value: JsonValue) -> bool:
             continue
         if item_type is int:
             if item not in _CANONICAL_INTEGER_RANGE:
-                return False
+                return _RFC8785_ONLY
             continue
-        return False
-    return True
+        if item_type is float:
+            number = cast(float, item)
+            if number.is_integer():
+                if abs(number) > _MAX_SAFE_JSON_INTEGER:
+                    return _RFC8785_ONLY
+                integral_floats = True
+                continue
+            if _MIN_FIXED_NOTATION_FLOAT <= abs(number) < float("inf"):
+                continue
+        return _RFC8785_ONLY
+    return _integral_floats_as_ints(value) if integral_floats else value
+
+
+def _integral_floats_as_ints(value: JsonValue) -> JsonValue:
+    # Only containers on the way to an integral float are copied: a whole
+    # transcript is otherwise duplicated for one float in its metadata.
+    value_type = type(value)
+    if value_type is float and cast(float, value).is_integer():
+        return int(cast(float, value))
+    if value_type is dict:
+        document = cast(dict[str, JsonValue], value)
+        rewritten: dict[str, JsonValue] | None = None
+        for key, nested in document.items():
+            converted = _integral_floats_as_ints(nested)
+            if converted is not nested:
+                if rewritten is None:
+                    rewritten = dict(document)
+                rewritten[key] = converted
+        return document if rewritten is None else rewritten
+    if value_type is list:
+        items = cast(list[JsonValue], value)
+        converted_items: list[JsonValue] | None = None
+        for index, item in enumerate(items):
+            converted = _integral_floats_as_ints(item)
+            if converted is not item:
+                if converted_items is None:
+                    converted_items = list(items)
+                converted_items[index] = converted
+        return items if converted_items is None else converted_items
+    return value
 
 
 def sha256_json(value: JsonValue) -> str:
@@ -3313,16 +3484,23 @@ def _normalize_llm_action_for_replay_with_model_input(
         tool_catalog.pop("tools", None)
 
 
-def _prune_settled_completions(
+def _prune_settled_action_bodies(
     runtime: RuntimeStateV3, core_action_ids: frozenset[str]
 ) -> RuntimeStateV3:
-    """Drop the request and result bodies of settled completions Core no longer holds.
+    """Drop the request and result bodies of settled Actions Core no longer holds.
 
-    A completion request embeds the whole transcript, so retaining one per turn
-    grows the ledger with the square of the session's length: on a real session
-    six of them were 2.16 MB of a 2.27 MB snapshot, and that snapshot is what
-    every load reparses. Results are smaller individually but there is one per
-    turn for the life of the session — 2.18 MB across 90 turns of 24 KB replies.
+    The ledger holds every Action for the life of the Session, so whatever each
+    one retains is reparsed by every load from here on. A completion request
+    embeds the whole transcript, so retaining one per turn grows the ledger with
+    the square of the session's length: on a real session six of them were
+    2.16 MB of a 2.27 MB snapshot. Results are smaller individually but there is
+    one per turn for the life of the session — 2.18 MB across 90 turns of 24 KB
+    replies.
+
+    Every other kind grows linearly rather than quadratically, which bounds
+    nothing: a tool entry holds the arguments and complete output of every call
+    ever made, and a ``filesystem`` request holds a whole offloaded large output
+    a second time, after the write that put that payload on disk.
 
     Recovery rehydrates a request whenever Core retains an Action across a
     restart: ``_start_transition_actions`` calls ``action_from_recovery_state``
@@ -3361,15 +3539,25 @@ def _prune_settled_completions(
     still pending or running, and ``model_copy`` does not revalidate, so pruning
     one publishes a generation that only fails on the way back in.
 
-    Keep the predicate completion-only. ``record_action_result`` treats a repeat
-    call as a no-op when the stored state and result already match, and the one
-    caller that can re-enter it across a generation boundary is
-    ``_retry_process_action_result``, gated on ``_process_action_reservations``.
-    A process Action therefore does read its own result back, and pruning that
-    kind would turn the idempotent retry into a spurious mismatch.
+    Exclude ``process``, the one kind read outside that guard, on both fields.
+    Its start request outlives its settlement: a start Action succeeds as soon as
+    the process is running, while ``_validate_process_relationships`` resolves
+    that request's operation name on every load for as long as the process is in
+    the ledger, so dropping it turns a surviving process into a load failure. Its
+    result is read back too — ``record_action_result`` treats a repeat call as a
+    no-op when the stored state and result already match, and the one caller that
+    can re-enter it across a generation boundary is
+    ``_retry_process_action_result``, gated on ``_process_action_reservations`` —
+    so pruning that would turn the idempotent retry into a spurious mismatch.
+
+    A ``child`` Action outlives its settlement the same way — a stateful subagent
+    runs on after its spawn Action succeeds — but is prunable, because the
+    dependency is materialized into ``children`` when the intent is folded.
+    Nothing reads the spawn request back off the snapshot to rebuild it.
     """
     actions = [
-        _prune_settled_completion(action, core_action_ids) for action in runtime.actions
+        _prune_settled_action_body(action, core_action_ids)
+        for action in runtime.actions
     ]
     if all(
         pruned is original
@@ -3379,11 +3567,11 @@ def _prune_settled_completions(
     return runtime.model_copy(update={"actions": actions})
 
 
-def _prune_settled_completion(
+def _prune_settled_action_body(
     action: RuntimeActionV1, core_action_ids: frozenset[str]
 ) -> RuntimeActionV1:
     if (
-        action.kind != "completion"
+        action.kind not in _PRUNABLE_ACTION_KINDS
         or action.state in {"pending", "running"}
         or action.action_id in core_action_ids
     ):
@@ -3455,6 +3643,7 @@ def _apply_journal(  # noqa: PLR0912, PLR0914, PLR0915 - one branch per journal 
                     params_sha256=payload.params_sha256,
                     state="reserved",
                     params=dict(payload.params),
+                    abandon_on_restart=payload.abandon_on_restart,
                 )
             case ReceiptSucceededRecordV1(payload=payload):
                 receipt = receipts.get(payload.client_command_id)
@@ -3601,22 +3790,24 @@ def _apply_journal(  # noqa: PLR0912, PLR0914, PLR0915 - one branch per journal 
             case ProjectionAdvancedRecordV1(payload=payload):
                 if payload.watermark < current_projection.watermark:
                     raise ValueError("projection watermark moved backwards")
-                current_projection = ProjectionStateV1(
-                    session_id=current_projection.session_id,
-                    snapshot_sequence=record.sequence,
-                    watermark=payload.watermark,
-                    snapshot=payload.snapshot,
+                current_projection = current_projection.model_copy(
+                    update={
+                        "snapshot_sequence": record.sequence,
+                        "watermark": payload.watermark,
+                        "snapshot": payload.snapshot,
+                    }
                 )
             case ProjectionDeltaRecordV1(payload=payload):
                 if payload.watermark < current_projection.watermark:
                     raise ValueError("projection watermark moved backwards")
-                current_projection = ProjectionStateV1(
-                    session_id=current_projection.session_id,
-                    snapshot_sequence=record.sequence,
-                    watermark=payload.watermark,
-                    snapshot=apply_projection_delta(
-                        current_projection.snapshot, payload.delta
-                    ),
+                current_projection = current_projection.model_copy(
+                    update={
+                        "snapshot_sequence": record.sequence,
+                        "watermark": payload.watermark,
+                        "snapshot": apply_projection_delta(
+                            current_projection.snapshot, payload.delta
+                        ),
+                    }
                 )
             case CoreInputRecordV1():
                 pass
@@ -3798,11 +3989,18 @@ def _read_journal(path: Path, first_sequence: int) -> tuple[JournalRecordV1, ...
     return tuple(records)
 
 
-def _append_journal_record(
-    path: Path, record: JournalRecordV1, *, protected_bytes: int = 0
-) -> int:
+def _journal_record_bytes(payload: bytes, header: dict[str, JsonValue]) -> bytes:
+    # "payload" sorts before every header key, so this is the canonical form of
+    # the whole record without canonicalizing the payload a second time.
+    return b'{"payload":' + payload + b"," + canonical_json(header)[1:]
+
+
+def _append_journal_record(path: Path, data: bytes, *, protected_bytes: int = 0) -> int:
     _reject_symlink(path)
-    data = canonical_json(record.model_dump(mode="json", by_alias=True)) + b"\n"
+    if len(data) + protected_bytes > _MAX_DOCUMENT_BYTES:
+        raise JournalRecordExceedsPageError(
+            "recovery journal record exceeds page capacity"
+        )
     with path.open("r+b", buffering=0) as file:
         file.seek(0, os.SEEK_END)
         size = file.tell()
@@ -3825,6 +4023,38 @@ def _write_generation_record(
 ) -> StoredFileV1:
     data = _write_document(directory / name, value)
     return StoredFileV1(path=name, sha256=_sha256(data), chunks=chunks)
+
+
+def _detach_pooled_value(
+    document: dict[str, JsonValue], key: str
+) -> tuple[dict[str, JsonValue], list[JsonValue] | None]:
+    """Split one whole field out of a document so the chunk pool can hold it.
+
+    A transcript is pooled because it grows by a tail; the capability catalog is
+    pooled for the opposite reason. It does not grow at all -- every publication
+    of a Session repeats the same catalog byte for byte -- so holding it by
+    digest means the second and every later generation add nothing, where
+    inlining rewrites it whole each time.
+
+    It is a single value rather than a list, so it travels as a one-item list
+    and the pool needs no special case. A Session with no catalog detaches
+    nothing and stores its document monolithically, which is also how a
+    generation written before this existed reads back.
+    """
+    value = document.get(key)
+    if value is None:
+        return document, None
+    envelope = dict(document)
+    envelope[key] = None
+    return envelope, [value]
+
+
+def _attach_pooled_value(document: JsonValue, key: str, items: list[JsonValue]) -> None:
+    if not isinstance(document, dict) or document.get(key) is not None:
+        raise ValueError("pooled document envelope must hold an empty field")
+    if len(items) != 1:
+        raise ValueError("a pooled value restores from exactly one item")
+    document[key] = items[0]
 
 
 def _detach_transcript(
@@ -4032,6 +4262,7 @@ def _collect_chunks(session_root: Path, generation_root: Path) -> None:
             return
         referenced.update(manifest.checkpoint.chunks or ())
         referenced.update(manifest.projection_state.chunks or ())
+        referenced.update(manifest.runtime_state.chunks or ())
     for path in pooled:
         # The generation is already published, so nothing here may fail the
         # commit. What survives stays unreachable and the next sweep collects it.
@@ -4168,6 +4399,7 @@ def _record_recovery_in_history(
         "updatedAt": now,
         "generationStatus": "completed",
         "relatedEntryId": None,
+        "inputEntryId": None,
         "kind": "recovered",
         "message": "Recovered after an interrupted session",
         "details": {"discardedEntries": discarded},
@@ -4412,6 +4644,7 @@ __all__ = [
     "InteropSystemMessageV1",
     "InteropToolMessageV1",
     "InteropUserMessageV1",
+    "JournalRecordExceedsPageError",
     "LegacyInteropSourceV1",
     "ManagedProcessV1",
     "PendingInternalCommand",

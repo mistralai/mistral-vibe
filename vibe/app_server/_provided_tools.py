@@ -39,6 +39,18 @@ if TYPE_CHECKING:
         ToolApprovalMode,
     )
 
+from vibe.app_server._cron import (
+    CRON_TOOL_DESCRIPTION,
+    CRON_TOOL_NAME,
+    CronArgs,
+    CronResult,
+    cron_input_schema,
+    run_cron,
+)
+from vibe.app_server._unified_scheduled_loops import (
+    ScheduledLoopStoreError,
+    UnifiedScheduledLoops,
+)
 from vibe.app_server._unified_scratchpad import (
     SCRATCHPAD_TOOL_DESCRIPTION,
     SCRATCHPAD_TOOL_NAME,
@@ -47,6 +59,7 @@ from vibe.app_server._unified_scratchpad import (
     run_scratchpad,
     scratchpad_dir,
 )
+from vibe.core.loop import LoopError
 from vibe.core.tools.builtins.todo import (
     Todo,
     TodoArgs,
@@ -64,15 +77,17 @@ TODO_TOOL_NAME = "todo"
 
 # Routes the Runtime gates by, mapped to the names Vibe configures the tools under,
 # so the permission resolver reads `[tools.todo]` for `vibe.todo`.
-VIBE_PROVIDED_TOOL_NAMES = {f"{VIBE_TOOL_GROUP}.{TODO_TOOL_NAME}": TODO_TOOL_NAME}
+VIBE_PROVIDED_TOOL_NAMES = {
+    f"{VIBE_TOOL_GROUP}.{TODO_TOOL_NAME}": TODO_TOOL_NAME,
+    f"{VIBE_TOOL_GROUP}.{CRON_TOOL_NAME}": CRON_TOOL_NAME,
+}
 
-# Per tool, because the two do not share an approval bar. Todo sits at "ask" so the
-# permission resolver -- not the smart-approve classifier -- answers it, which is
-# what makes `[tools.todo] permission` mean the same thing on both harnesses. The
-# scratchpad writes only inside the session's own storage and has no legacy
-# counterpart to read a permission from, so it is pinned allowed.
+# "ask" routes through Vibe's permission resolver. Cron defaults to allowed there,
+# while explicit config and session permission overrides still take precedence.
+# Scratchpad writes only inside the session's own storage and is pinned allowed.
 VIBE_PROVIDED_TOOL_MODES: dict[str, ToolApprovalMode] = {
     TODO_TOOL_NAME: "ask",
+    CRON_TOOL_NAME: "ask",
     SCRATCHPAD_TOOL_NAME: "allow",
 }
 
@@ -111,6 +126,18 @@ def vibe_tool_groups(
                 exposure="direct",
             )
         )
+    if _passes_tool_filters(
+        CRON_TOOL_NAME, enabled=enabled_tools, disabled=disabled_tools
+    ):
+        tools.append(
+            RustProvidedToolDefinition(
+                name=CRON_TOOL_NAME,
+                description=CRON_TOOL_DESCRIPTION,
+                input_schema=cron_input_schema(),
+                output_schema=CronResult.model_json_schema(),
+                exposure="direct",
+            )
+        )
     if not tools:
         return []
 
@@ -137,7 +164,11 @@ class VibeProvidedTools:
         self._todos: dict[str, list[TodoItem]] = {}
 
     def executor_factory(
-        self, storage_root: str | Path, *, max_todos: Callable[[], int]
+        self,
+        storage_root: str | Path,
+        *,
+        max_todos: Callable[[], int],
+        scheduled_loops: Callable[[str], UnifiedScheduledLoops] | None = None,
     ) -> ProvidedToolExecutorFactory:
         root = Path(storage_root).expanduser().resolve()
 
@@ -149,15 +180,31 @@ class VibeProvidedTools:
                 action: RustProvidedToolCallAction,
             ) -> RustToolSucceededEvent | RustToolFailedEvent:
                 try:
-                    result = await _run(
-                        action.call,
-                        todos=todos,
-                        directory=directory,
-                        max_todos=max_todos(),
-                    )
+                    if action.call.tool_name == CRON_TOOL_NAME:
+                        if scheduled_loops is None:
+                            raise ValueError(
+                                "Scheduled prompts are not available for this session"
+                            )
+                        result = await run_cron(
+                            CronArgs.model_validate(action.call.arguments),
+                            scheduled_loops=scheduled_loops(session_id),
+                        )
+                    else:
+                        result = await _run(
+                            action.call,
+                            todos=todos,
+                            directory=directory,
+                            max_todos=max_todos(),
+                        )
                 # A rejected call reaches the model as a correctable tool failure
                 # rather than killing the turn.
-                except (ValidationError, ValueError, OSError) as error:
+                except (
+                    ValidationError,
+                    ValueError,
+                    OSError,
+                    LoopError,
+                    ScheduledLoopStoreError,
+                ) as error:
                     return _failed(action, error)
                 return _succeeded(action, result)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -62,13 +63,28 @@ from mistralai_vibe_local_harness.protocol import (
     parse_apply_result,
 )
 from mistralai_vibe_local_harness.session_protocol import (
+    BackgroundProcessOutputAvailable,
+    BackgroundProcessOutputRead,
+    BackgroundProcessOutputResult,
+    BackgroundProcessOutputUnavailable,
+    BackgroundProcessStopResult,
     JsonObject,
+    PublicBackgroundProcess,
     PublicSessionState,
     TitleSource,
 )
 from mistralai_vibe_local_harness.vibe._errors import (
+    HarnessForkActiveTurnError,
+    HarnessForkEntryNotFoundError,
+    HarnessForkEntryRequiredError,
+    HarnessHistoryEntryConflictError,
     HarnessInvalidSessionStoreError,
+    HarnessSessionError,
     HarnessStaleTurnError,
+)
+from mistralai_vibe_local_harness.vibe._fork import (
+    SessionForkSnapshot,
+    history_for_fork,
 )
 from mistralai_vibe_local_harness.vibe._observability import (
     add_recovery_failure,
@@ -117,6 +133,7 @@ from mistralai_vibe_local_harness.vibe._storage import (
     CommandReservedRecordV1,
     CoreInputRecordV1,
     HarnessStoreCapacityError,
+    JournalRecordExceedsPageError,
     JournalRecordV1,
     ManagedProcessV1,
     PendingInternalCommand,
@@ -127,8 +144,11 @@ from mistralai_vibe_local_harness.vibe._storage import (
     RuntimeStateV3,
     SessionIdentity,
     StoredSession,
+    UnifiedInteropSourceV1,
     UnifiedSessionStore,
+    apply_projection_delta,
     canonical_json,
+    committed_history_from_checkpoint,
     restore_core_from_checkpoint,
     sha256_json,
 )
@@ -145,7 +165,10 @@ type ActionExecutor = Callable[[RustAction], Awaitable[RustEvent]]
 type ActionRecoverer = Callable[[RuntimeActionV1, RustAction], Awaitable[RustEvent]]
 type EventSink = Callable[[JsonObject], Awaitable[None] | None]
 type ActionAppliedSink = Callable[[RustAction, RustEvent], Awaitable[None] | None]
-type ApprovalRequester = Callable[[RustRuntimeBuiltinToolCallAction], Awaitable[bool]]
+type ProcessGate = Callable[
+    [RustRuntimeBuiltinToolCallAction], Awaitable[RustEvent | None]
+]
+type ApprovalNoteRider = Callable[[RustEvent, str], RustEvent]
 type WorkStateCallback = Callable[[], Awaitable[None] | None]
 type ResponseFactory = Callable[[RustSessionTransition], JsonValue]
 type RuntimeStateUpdate = Callable[[RuntimeStateV3], RuntimeStateV3]
@@ -233,9 +256,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         config: RustHarnessConfig,
         store: UnifiedSessionStore,
         core: HarnessSession,
-        projection: PublicSessionState,
-        projection_watermark: int,
-        projection_sequence: int,
+        projection: ProjectionStateV1,
         replayed_transitions: tuple[RustSessionTransition, ...] = (),
         replayed_core_inputs: tuple[_ReplayedCoreInput, ...] = (),
         execute_action: ActionExecutor | None = None,
@@ -243,7 +264,8 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         event_sink: EventSink | None = None,
         process_manager: SessionProcessManager | None = None,
         process_config: LocalRuntimeAdapterConfig | None = None,
-        request_process_approval: ApprovalRequester | None = None,
+        process_gate: ProcessGate | None = None,
+        process_note_rider: ApprovalNoteRider | None = None,
         identity: SessionIdentity | None = None,
     ) -> None:
         self._config = config
@@ -252,16 +274,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         self._store = store
         self._core = core
         self._identity = identity
-        from mistralai_vibe_local_harness.vibe._storage import ProjectionStateV1
-
-        self._projector = SessionProjector(
-            ProjectionStateV1(
-                session_id=store.session_id,
-                snapshot_sequence=projection_sequence,
-                watermark=projection_watermark,
-                snapshot=projection,
-            )
-        )
+        self._projector = SessionProjector(projection)
         self._replayed_transition = (
             replayed_transitions[-1] if replayed_transitions else None
         )
@@ -279,7 +292,8 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 != process_manager.backend.command_environment
             ):
                 raise ValueError("process manager and command environment do not match")
-        self._request_process_approval = request_process_approval
+        self._process_gate = process_gate
+        self._process_note_rider = process_note_rider
         self._process_start_barriers: dict[
             str, asyncio.Future[Literal["accepted", "failed"]]
         ] = {}
@@ -321,7 +335,8 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         event_sink: EventSink | None = None,
         process_manager: SessionProcessManager | None = None,
         process_config: LocalRuntimeAdapterConfig | None = None,
-        request_process_approval: ApprovalRequester | None = None,
+        process_gate: ProcessGate | None = None,
+        process_note_rider: ApprovalNoteRider | None = None,
     ) -> DurableSessionRuntime:
         core, transitions = stored.restore_core_with_transitions(config)
         replayed_config = stored.replayed_config(config)
@@ -346,9 +361,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             config=replayed_config,
             store=store,
             core=core,
-            projection=stored.projection_state.snapshot,
-            projection_watermark=stored.projection_state.watermark,
-            projection_sequence=stored.projection_state.snapshot_sequence,
+            projection=stored.projection_state,
             replayed_transitions=replayed_transitions,
             replayed_core_inputs=replayed_core_inputs,
             execute_action=execute_action,
@@ -356,7 +369,8 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             event_sink=event_sink,
             process_manager=process_manager,
             process_config=process_config,
-            request_process_approval=request_process_approval,
+            process_gate=process_gate,
+            process_note_rider=process_note_rider,
             identity=stored.runtime_state.identity,
         )
         if replayed_config.capabilities != config.capabilities:
@@ -385,6 +399,145 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     @property
     def runtime_state(self) -> RuntimeStateV3:
         return self._store.load().runtime_state
+
+    @property
+    def background_processes(self) -> list[PublicBackgroundProcess]:
+        processes = sorted(
+            self.runtime_state.processes,
+            key=lambda process: (process.created_at, process.process_id),
+        )
+        return [
+            PublicBackgroundProcess(
+                process_id=process.process_id,
+                command=process.command,
+                status=process.status,
+                exit_code=process.exit_code,
+                created_at=process.created_at,
+            )
+            for process in processes
+        ]
+
+    async def stop_background_process(
+        self, process_id: str
+    ) -> BackgroundProcessStopResult:
+        try:
+            process = await self._require_process(process_id)
+        except ProcessActionError as error:
+            raise _harness_process_error(error) from error
+        if process.status != "running":
+            return BackgroundProcessStopResult(
+                process_id=process.process_id,
+                status=process.status,
+                exit_code=process.exit_code,
+            )
+        manager = self._process_manager
+        if manager is None or not manager.has_live_process(process_id):
+            raise HarnessSessionError(
+                "process_unavailable",
+                "Background process is not attached to this runtime",
+                details={"process_id": process_id},
+            )
+        operation_id = f"ui-stop:{process_id}:{secrets.token_hex(8)}"
+        request = ValidatedProcessStop(process_id=process_id)
+        digest = process_request_sha256(request)
+        try:
+            await manager.stop(operation_id, digest, process_id)
+            snapshot = manager.terminal_snapshot(process_id)
+            if snapshot is not None:
+                self.submit_terminal_snapshot(snapshot)
+            await self._wait_for_terminal_updates(process_id)
+        except ProcessManagerError as error:
+            raise HarnessSessionError(
+                error.code, error.message, details=error.details
+            ) from error
+        finally:
+            receipt = manager.receipt(operation_id)
+            if receipt is not None and receipt.future.done():
+                manager.acknowledge(operation_id, digest)
+        try:
+            terminal = await self._require_process(process_id)
+        except ProcessActionError as error:
+            raise _harness_process_error(error) from error
+        self._notify_work_state_changed()
+        return BackgroundProcessStopResult(
+            process_id=terminal.process_id,
+            status=terminal.status,
+            exit_code=terminal.exit_code,
+        )
+
+    async def read_background_process_output(
+        self, request: BackgroundProcessOutputRead
+    ) -> BackgroundProcessOutputResult:
+        try:
+            process = await self._require_process(request.process_id)
+        except ProcessActionError as error:
+            raise _harness_process_error(error) from error
+
+        manager = self._process_manager
+        output_status = process.status
+        try:
+            if process.status == "running":
+                if manager is None:
+                    raise HarnessSessionError(
+                        "process_unavailable",
+                        "Background process is not attached to this runtime",
+                        details={"process_id": request.process_id},
+                    )
+                page, output_status, _ = await manager.output(
+                    request.process_id,
+                    from_end=request.from_end,
+                    cursor=request.cursor,
+                    wait_ms=request.wait_ms,
+                    max_bytes=request.max_bytes,
+                )
+            else:
+                output = await asyncio.to_thread(
+                    ProcessOutputStore.recover,
+                    self._store.session_root,
+                    request.process_id,
+                )
+                page = await asyncio.to_thread(
+                    output.read,
+                    from_end=request.from_end,
+                    cursor=request.cursor,
+                    max_bytes=request.max_bytes,
+                )
+        except ProcessManagerError as error:
+            raise HarnessSessionError(
+                "process_unavailable",
+                "Background process is not attached to this runtime",
+                details={"process_id": request.process_id},
+            ) from error
+        except OutputUnavailableError:
+            return BackgroundProcessOutputUnavailable(process_id=request.process_id)
+        except InvalidCursorError as error:
+            raise HarnessSessionError(
+                "invalid_cursor",
+                "Cursor is outside retained process output",
+                details={
+                    "process_id": request.process_id,
+                    "cursor": error.cursor,
+                    "output_start_cursor": error.output_start_cursor,
+                    "bytes_available": error.bytes_available,
+                },
+            ) from error
+        except OSError as error:
+            raise HarnessSessionError(
+                "process_io_failed",
+                "Background process output could not be read",
+                details={"process_id": request.process_id},
+            ) from error
+
+        return BackgroundProcessOutputAvailable(
+            process_id=request.process_id,
+            output_base64=base64.b64encode(page.output).decode("ascii"),
+            output_start_cursor=page.output_start_cursor,
+            next_cursor=page.next_cursor,
+            bytes_available=page.bytes_available,
+            has_more=page.has_more,
+            truncated_before=page.truncated_before,
+            is_final=output_status != "running",
+        )
 
     @property
     def identity(self) -> SessionIdentity:
@@ -420,6 +573,69 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     @property
     def pending_action_ids(self) -> frozenset[str]:
         return frozenset(action.action_id for action in self.inspection.pending_actions)
+
+    async def snapshot_for_fork(
+        self, entry_id: str | None, *, include_entry: bool
+    ) -> SessionForkSnapshot:
+        """Copy completed history without stopping active work.
+
+        A running session requires an entry ID so the active Turn can be excluded.
+        An idle session may omit it to copy all committed history.
+        """
+        async with self._lock:
+            self._guard_open()
+            await self._catch_up_projection()
+            inspection = self.inspection
+            if inspection.active_turn_id is not None and entry_id is None:
+                raise HarnessForkEntryRequiredError()
+            capture = asyncio.create_task(
+                asyncio.to_thread(self._capture_core_generation),
+                name=f"fork-snapshot-capture-{self._store.session_id}",
+            )
+            try:
+                checkpoint, _core_last_input_id = await asyncio.shield(capture)
+            except asyncio.CancelledError:
+                await capture
+                raise
+            stored = await asyncio.to_thread(self._store.load)
+            source = UnifiedInteropSourceV1(
+                session_id=self._store.session_id,
+                generation=stored.manifest.generation,
+                snapshot_sequence=stored.runtime_state.snapshot_sequence,
+            )
+            history = committed_history_from_checkpoint(source, checkpoint).history
+            try:
+                fork_history = history_for_fork(
+                    history, entry_id, include_entry=include_entry
+                )
+            except HarnessForkEntryNotFoundError as exc:
+                if entry_id is not None and self._is_active_turn_entry(
+                    entry_id, inspection.active_turn_id
+                ):
+                    raise HarnessForkActiveTurnError(entry_id) from exc
+                raise
+            if entry_id is not None and self._is_active_turn_entry(
+                entry_id, inspection.active_turn_id
+            ):
+                raise HarnessForkActiveTurnError(entry_id)
+            return SessionForkSnapshot(
+                source=source,
+                history=tuple(fork_history),
+                session_metadata=stored.runtime_state.session_metadata.model_copy(
+                    deep=True
+                ),
+                plugin_lock=stored.runtime_state.plugin_lock.model_copy(deep=True),
+            )
+
+    def _is_active_turn_entry(self, entry_id: str, active_turn_id: str | None) -> bool:
+        if active_turn_id is None:
+            return False
+        return any(
+            entry.get("id") == entry_id
+            and entry.get("role") == "user"
+            and entry.get("turnId") == active_turn_id
+            for entry in self._projector.projection.snapshot.history.entries
+        )
 
     async def commit_runtime_state(self, runtime_state: RuntimeStateV3) -> None:
         """Publish a complete private state generation at a safe effect boundary."""
@@ -506,31 +722,28 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         checkpoint = cast(dict[str, JsonValue], json.loads(self._core.checkpoint()))
         return checkpoint, self.inspection.last_input_id
 
-    def _commit_runtime_state_locked(
-        self, stored: StoredSession, runtime_state: RuntimeStateV3
+    def _pending_transition_for_generation(self) -> RustSessionTransition | None:
+        if self.inspection.status in {"running", "compacting"}:
+            return self._replayed_transition
+        return None
+
+    def _write_live_generation(
+        self,
+        stored: StoredSession,
+        *,
+        runtime_state: RuntimeStateV3,
+        projection_state: ProjectionStateV1,
+        reuse_stored_checkpoint: bool = False,
     ) -> None:
         inspection = self.inspection
-        pending_transition = (
-            self._replayed_transition
-            if inspection.status in {"running", "compacting"}
-            else None
-        )
-        projection_state = stored.projection_state.model_copy(
-            update={"snapshot_sequence": runtime_state.snapshot_sequence}
-        )
-        # Most private-state edits publish a generation the Core did not contribute to:
-        # a subagent lifecycle commits about 23 times while the Core takes input on only
-        # a handful of them. Serialising the Core to rediscover the checkpoint we already
-        # hold costs ~94 ms per MB of transcript, so reuse it when nothing has landed.
-        checkpoint = (
-            cast(dict[str, JsonValue], json.loads(self._core.checkpoint()))
-            if self._core_advanced_since(stored, inspection)
-            else stored.checkpoint
-        )
-        # The cursor has to describe the checkpoint beside it. Both readings come from
-        # the same locked instant, and a skipped commit republishes the stored pair
-        # unchanged, so the two never drift apart.
-        core_last_input_id = inspection.last_input_id
+        pending_transition = self._pending_transition_for_generation()
+        if reuse_stored_checkpoint and not self._core_advanced_since(
+            stored, inspection
+        ):
+            checkpoint = stored.checkpoint
+            core_last_input_id = inspection.last_input_id
+        else:
+            checkpoint, core_last_input_id = self._capture_core_generation()
         runtime_state = runtime_state.model_copy(
             update={
                 "pending_transition": pending_transition,
@@ -549,6 +762,19 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         self._projector = self._projector.rebased(projection_state)
         self._replayed_transition = pending_transition
         self._replayed_core_inputs = ()
+
+    def _commit_runtime_state_locked(
+        self, stored: StoredSession, runtime_state: RuntimeStateV3
+    ) -> None:
+        projection_state = stored.projection_state.model_copy(
+            update={"snapshot_sequence": runtime_state.snapshot_sequence}
+        )
+        self._write_live_generation(
+            stored,
+            runtime_state=runtime_state,
+            projection_state=projection_state,
+            reuse_stored_checkpoint=True,
+        )
 
     async def deliver_notification(
         self, notification: RustHarnessNotification
@@ -579,11 +805,13 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         self,
         manager: SessionProcessManager,
         config: LocalRuntimeAdapterConfig,
-        request_approval: ApprovalRequester | None,
+        process_gate: ProcessGate | None,
+        process_note_rider: ApprovalNoteRider | None = None,
     ) -> None:
         self._process_manager = manager
         self._process_config = config
-        self._request_process_approval = request_approval
+        self._process_gate = process_gate
+        self._process_note_rider = process_note_rider
 
     def configure_process_config(self, config: LocalRuntimeAdapterConfig) -> None:
         validate_process_config(config)
@@ -642,6 +870,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 self._guard_open()
                 await self._catch_up_projection()
                 if not self.inspection.pending_actions:
+                    await self._abandon_reservations_marked_for_restart_locked()
                     await self._settle_idle_locked()
                     record_session_operation(
                         time.perf_counter() - started,
@@ -668,6 +897,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 # A recovery that lands blocked (an approval still outstanding, say)
                 # keeps its pending actions, so the deferred configuration is adopted
                 # by whichever drive next leaves the session idle instead.
+                await self._abandon_reservations_marked_for_restart_locked()
                 await self._settle_idle_locked()
         except Exception as exc:
             add_recovery_failure(failure_code=type(exc).__name__, phase="replay")
@@ -738,6 +968,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         command: RustEvent,
         response_factory: ResponseFactory,
         accepted_public_history_entries: Sequence[JsonObject] = (),
+        abandon_on_restart: bool = False,
     ) -> DurableCommandResult:
         self._terminal_retry_wakeup.set()
         transition: RustSessionTransition | None = None
@@ -747,7 +978,11 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 self._guard_open()
                 await self._catch_up_projection()
                 reservation = await asyncio.to_thread(
-                    self._store.reserve_command, client_command_id, method, params
+                    self._store.reserve_command,
+                    client_command_id,
+                    method,
+                    params,
+                    abandon_on_restart=abandon_on_restart,
                 )
                 if reservation.completed:
                     return DurableCommandResult(
@@ -875,7 +1110,9 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         while its turn was still running keeps its reservations instead, which
         is what lets a client re-send the command and have the turn picked up
         where it left off -- and a Session that never reached this code at all,
-        because the process died, keeps them for the same reason.
+        because the process died, keeps them for the same reason, unless one is
+        marked to be abandoned on restart (see
+        ``_abandon_reservations_marked_for_restart_locked``).
 
         The fold runs whether or not there was an answer to write, because a
         caller cancelled after its own answer landed leaves the journal
@@ -909,12 +1146,17 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         params: dict[str, JsonValue],
         command: RustEvent,
         response_factory: ResponseFactory,
+        abandon_on_restart: bool = False,
     ) -> DurableCommandResult:
         async with self._lock:
             self._guard_open()
             await self._catch_up_projection()
             reservation = await asyncio.to_thread(
-                self._store.reserve_command, client_command_id, method, params
+                self._store.reserve_command,
+                client_command_id,
+                method,
+                params,
+                abandon_on_restart=abandon_on_restart,
             )
             if reservation.completed:
                 return DurableCommandResult(
@@ -939,6 +1181,19 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         async with self._lock:
             self._guard_open()
             await self._catch_up_projection()
+            known_ids = {
+                entry_id
+                for entry in self._projector.projection.snapshot.history.entries
+                for entry_id in [entry.get("id")]
+                if isinstance(entry_id, str)
+            }
+            for entry in entries:
+                if isinstance(entry, dict):
+                    entry_id = entry.get("id")
+                    if isinstance(entry_id, str):
+                        if entry_id in known_ids:
+                            raise HarnessHistoryEntryConflictError(entry_id)
+                        known_ids.add(entry_id)
             now = time.time_ns() // 1_000_000
             await self._record_projection_update(
                 self._projector.append_public_history_entries(entries, observed_at=now)
@@ -1095,8 +1350,23 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             )
             await self._record_projection_update(update)
 
+    async def record_agent_change(
+        self, agent: str, *, turn_id: str | None = None
+    ) -> None:
+        """Record a move to a different agent profile. The Session decides it is one."""
+        async with self._lock:
+            self._guard_open()
+            update = self._projector.apply_agent_change(
+                agent, observed_at=time.time_ns() // 1_000_000, turn_id=turn_id
+            )
+            await self._record_projection_update(update)
+
     async def compact_context(
-        self, *, client_command_id: str, instructions: str
+        self,
+        *,
+        client_command_id: str,
+        instructions: str,
+        abandon_on_restart: bool = False,
     ) -> ContextCompactionResult:
         result = await self.command(
             client_command_id=client_command_id,
@@ -1104,6 +1374,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             params={"instructions": instructions},
             command=RustCompactEvent(extra_instructions=instructions),
             response_factory=_context_compaction_response,
+            abandon_on_restart=abandon_on_restart,
         )
         return _parse_context_compaction_response(result.response)
 
@@ -1120,11 +1391,12 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 )
             sequence = stored.runtime_state.snapshot_sequence
             watermark = stored.projection_state.watermark + 1
-            projection_state = ProjectionStateV1(
-                session_id=self._store.session_id,
-                snapshot_sequence=sequence,
-                watermark=watermark,
-                snapshot=projection,
+            projection_state = stored.projection_state.model_copy(
+                update={
+                    "snapshot_sequence": sequence,
+                    "watermark": watermark,
+                    "snapshot": projection,
+                }
             )
             self._store.write_generation(
                 checkpoint=checkpoint,
@@ -1249,6 +1521,41 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 },
             )
 
+    async def _abandon_reservations_marked_for_restart_locked(self) -> None:
+        """Settle what a stopped process left reserved and marked to abandon on restart.
+
+        A reservation is marked because nothing will ever re-send it, so kept it
+        would hold the Session off quiescence for good. Only reservations this
+        Runtime is not itself driving count, and only once Core is idle, which is
+        what makes settling one without its caller honest.
+        """
+        if self.inspection.pending_actions:
+            return
+        driving = (
+            self._in_flight_commands.keys()
+            | self._unanswered_commands.keys()
+            | self._cancelled_commands
+        )
+        for orphan in await asyncio.to_thread(
+            self._store.reservations_to_abandon_on_restart
+        ):
+            if orphan.client_command_id in driving:
+                continue
+            await asyncio.to_thread(
+                self._store.fail_command, orphan.client_command_id, orphan.reason
+            )
+            add_recovery_failure(failure_code="StrandedReservation", phase="replay")
+            logger.warning(
+                "Unified session abandoned a reservation nothing will re-send",
+                extra={
+                    "harness_backend": "unified",
+                    "session_id": self._store.session_id,
+                    "store_format": "mistral.vibe.unified-session-store/v1",
+                    "client_command_id": orphan.client_command_id,
+                    "abandon_reason": orphan.reason,
+                },
+            )
+
     async def _reconfigure_capabilities_locked(
         self, capabilities: RustHarnessCapabilitySet, revision: str
     ) -> None:
@@ -1342,7 +1649,8 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
 
         Only commands this Runtime cancelled are closed. A reservation left
         behind by a process that stopped, by contrast, is one a client may
-        still re-send to have the turn picked up where it left off.
+        still re-send to have the turn picked up where it left off -- unless it
+        is marked to be abandoned on restart, and recovery settles it instead.
 
         The outcome recorded is the empty response every command driven this
         way answers with -- starting a turn is the only one there is.
@@ -1761,12 +2069,11 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                         except ProcessActionError:
                             pass
                         else:
-                            denied_start = (
-                                action.call.name == "process.start"
-                                and config.tool_modes.get("process.start", "allow")
+                            denied = (
+                                config.tool_modes.get(action.call.name, "allow")
                                 == "deny"
                             )
-                            if not denied_start:
+                            if not denied:
                                 try:
                                     await self._reserve_process_action_storage(
                                         action, stored
@@ -1834,6 +2141,8 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                     event = await self._resolve_process_action(
                         durable, action, recovering=recovering
                     )
+                if self._process_note_rider is not None:
+                    event = self._process_note_rider(event, action.action_id)
             elif recovering:
                 event = await self._recover(durable, action)
             else:
@@ -1917,7 +2226,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 action.action_id, completed.process_request_sha256
             )
 
-    async def _resolve_process_action(  # noqa: PLR0911 - one return per process action
+    async def _resolve_process_action(  # noqa: PLR0911, PLR0912 - one return per process action, one branch per policy check
         self,
         durable: RuntimeActionV1,
         action: RustRuntimeBuiltinToolCallAction,
@@ -1954,6 +2263,29 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             recovered = await self._recover_process_action(durable, action, request)
             if recovered is not None:
                 return recovered
+        if self._process_gate is not None:
+            # The adapter gate owns policy here: mode, resolver, approval callback.
+            if durable.prepared_process_start is None:
+                denial = await self._process_gate(action)
+                if denial is not None:
+                    return denial
+        else:
+            # A standalone runtime has no adapter, so the configured mode is the
+            # whole policy and only an explicit allow may run.
+            mode = config.tool_modes.get(action.call.name, "allow")
+            if mode == "ask" and config.bypass_approval:
+                mode = "allow"
+            if mode != "allow":
+                return process_failed(
+                    action,
+                    process_error(
+                        "tool_denied" if mode == "deny" else "approval_required",
+                        "Tool execution denied by approval policy"
+                        if mode == "deny"
+                        else "Approval callbacks are not implemented yet",
+                        {"tool": action.call.name},
+                    ),
+                )
         try:
             if isinstance(request, ValidatedProcessStart):
                 return await self._start_process(
@@ -1981,9 +2313,6 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     ) -> RustEvent:
         prepared = durable.prepared_process_start
         if prepared is None:
-            denial = await self._approve_process_start(action, config)
-            if denial is not None:
-                return process_failed(action, denial)
             created_at = _timestamp()
             prepared = PreparedProcessStartV1(
                 process_id=request.process_id,
@@ -2273,44 +2602,6 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                     ],
                 )
             },
-        )
-
-    async def _approve_process_start(
-        self,
-        action: RustRuntimeBuiltinToolCallAction,
-        config: LocalRuntimeAdapterConfig,
-    ) -> RustProtocolError | None:
-        mode = config.tool_modes.get("process.start", "allow")
-        if mode == "ask" and config.bypass_approval:
-            mode = "allow"
-        if mode == "deny":
-            return process_error(
-                "tool_denied",
-                "Tool execution denied by approval policy",
-                {"tool": "process.start"},
-            )
-        if mode == "allow":
-            return None
-        if self._request_process_approval is None:
-            return process_error(
-                "approval_required",
-                "Approval callbacks are not implemented yet",
-                {"tool": "process.start"},
-            )
-        try:
-            approved = await self._request_process_approval(action)
-        except Exception:
-            return process_error(
-                "tool_denied",
-                "Tool execution denied because approval failed",
-                {"tool": "process.start", "reason": "callback_failed"},
-            )
-        if approved:
-            return None
-        return process_error(
-            "tool_denied",
-            "Tool execution denied by approval callback",
-            {"tool": "process.start"},
         )
 
     def _start_barrier(
@@ -3355,28 +3646,88 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 raise RuntimeError("conflicting public projection persistence retry")
             self._projector = self._projector.rebased(effective)
             return
-        await self._advance_projection(update.projection.watermark, delta)
+        await self._advance_projection(
+            update.projection.watermark, delta, update.journaled_snapshot
+        )
         if self._event_sink is not None:
             emitted = self._event_sink(update.event)
             if isinstance(emitted, Awaitable):
                 await emitted
 
-    async def _advance_projection(self, watermark: int, delta: ProjectionDelta) -> None:
+    async def _advance_projection(
+        self, watermark: int, delta: ProjectionDelta, snapshot: PublicSessionState
+    ) -> None:
+        persistence = asyncio.create_task(
+            self._advance_projection_durably(watermark, delta, snapshot),
+            name=f"projection-persistence-{self._store.session_id}",
+        )
+        try:
+            await asyncio.shield(persistence)
+        except asyncio.CancelledError:
+            await persistence
+            raise
+
+    async def _advance_projection_durably(
+        self, watermark: int, delta: ProjectionDelta, snapshot: PublicSessionState
+    ) -> None:
         try:
             await asyncio.to_thread(
                 self._store.advance_projection_delta, watermark, delta
             )
-        except HarnessStoreCapacityError:
-            # Last-resort net: compaction folds the journal into a fresh
-            # generation whose baseline equals the delta's prior snapshot, so the
-            # retried delta reconstructs the same advance. Proactive compaction in
-            # ``_apply`` should keep this from ever firing.
-            await self._compact_store(allow_recoverable=True)
+        except JournalRecordExceedsPageError:
             await asyncio.to_thread(
-                self._store.advance_projection_delta, watermark, delta
+                self._publish_projection_generation_sync, watermark, delta, snapshot
             )
+            return
+        except HarnessStoreCapacityError:
+            compacted = await self._compact_store(allow_recoverable=True)
+            if compacted:
+                try:
+                    await asyncio.to_thread(
+                        self._store.advance_projection_delta, watermark, delta
+                    )
+                except HarnessStoreCapacityError:
+                    pass
+                else:
+                    effective = (
+                        await asyncio.to_thread(self._store.load)
+                    ).projection_state
+                    self._projector = self._projector.rebased(effective)
+                    return
+            await asyncio.to_thread(
+                self._publish_projection_generation_sync, watermark, delta, snapshot
+            )
+            return
         effective = (await asyncio.to_thread(self._store.load)).projection_state
         self._projector = self._projector.rebased(effective)
+
+    def _publish_projection_generation_sync(
+        self, watermark: int, delta: ProjectionDelta, snapshot: PublicSessionState
+    ) -> None:
+        stored = self._store.load()
+        projection = stored.projection_state
+        if projection.watermark >= watermark:
+            if projection.watermark != watermark or projection.snapshot != snapshot:
+                raise RuntimeError("conflicting public projection persistence retry")
+            self._projector = self._projector.rebased(projection)
+            return
+        if apply_projection_delta(projection.snapshot, delta) != snapshot:
+            raise RuntimeError("projection changed before generation rollover")
+        sequence = stored.runtime_state.snapshot_sequence + 1
+        projection = projection.model_copy(
+            update={
+                "snapshot_sequence": sequence,
+                "watermark": watermark,
+                "snapshot": snapshot,
+            }
+        )
+        self._write_live_generation(
+            stored,
+            runtime_state=stored.runtime_state.model_copy(
+                update={"snapshot_sequence": sequence}
+            ),
+            projection_state=projection,
+        )
 
     async def _catch_up_projection(self) -> None:
         projected_sequence = self._projector.projection.snapshot_sequence
@@ -3391,7 +3742,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             )
             if update.delta is not None:
                 await self._advance_projection(
-                    update.projection.watermark, update.delta
+                    update.projection.watermark, update.delta, update.journaled_snapshot
                 )
         self._replayed_core_inputs = ()
 
@@ -3443,19 +3794,8 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     def _compact_store_sync(self, allow_recoverable: bool = False) -> bool:
         started = time.perf_counter()
         stored = self._store.load()
-        runtime_state = stored.runtime_state
-        # Mirror _commit_runtime_state_locked: a mid-turn (recoverable) fold must
-        # record the in-flight transition as pending_transition so recover() can
-        # re-drive its still-pending actions; a quiescent fold clears any stale
-        # one. Without this, a crash after a mid-turn compaction leaves pending
-        # actions with no transition to replay and recover() raises.
-        pending_transition = (
-            self._replayed_transition
-            if self.inspection.status in {"running", "compacting"}
-            else None
-        )
-        runtime_state = runtime_state.model_copy(
-            update={"pending_transition": pending_transition}
+        runtime_state = stored.runtime_state.model_copy(
+            update={"pending_transition": self._pending_transition_for_generation()}
         )
         if not allow_recoverable and not runtime_state.quiescent:
             return False
@@ -3463,36 +3803,17 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             return False
         journal_bytes = self._store.journal_bytes()
         sequence = stored.runtime_state.snapshot_sequence
-        checkpoint, core_last_input_id = self._capture_core_generation()
-        self._store.write_generation(
-            checkpoint=checkpoint,
+        self._write_live_generation(
+            stored,
             runtime_state=runtime_state.model_copy(
-                update={
-                    "snapshot_sequence": sequence,
-                    "core_last_input_id": core_last_input_id,
-                    "core_capabilities": self._config.capabilities,
-                    "core_settings": self._config.settings,
-                    "core_plugins": list(self._config.plugins),
-                }
+                update={"snapshot_sequence": sequence}
             ),
             projection_state=stored.projection_state.model_copy(
                 update={"snapshot_sequence": sequence}
             ),
-            core_action_ids=self.pending_action_ids,
         )
         published = self._store.last_publication
-        # Compaction rewrites the store, not the conversation: the generation above
-        # carries the checkpoint just taken from the live Core, so restoring one from
-        # it would land on the state already in hand and lose the delivery cursor with
-        # it. Only the journal-derived state is reset.
         refreshed = self._store.load()
-        self._projector = self._projector.rebased(refreshed.projection_state)
-        # Keep the in-memory transition consistent with the pending_transition just
-        # written: a recoverable fold retains the in-flight transition (mirroring
-        # _commit_runtime_state_locked), a quiescent fold clears it. Setting None
-        # here would disagree with the durable generation after a mid-turn fold.
-        self._replayed_transition = pending_transition
-        self._replayed_core_inputs = ()
         record_session_operation(
             time.perf_counter() - started,
             operation="compaction",
@@ -3729,6 +4050,15 @@ def build_terminal_notification(process: ManagedProcessV1) -> RustHarnessNotific
         ),
         level=cast(Literal["info", "warning", "error"], level),
         message=message,
+    )
+
+
+def _harness_process_error(error: ProcessActionError) -> HarnessSessionError:
+    details = error.error.details
+    return HarnessSessionError(
+        error.error.code,
+        error.error.message,
+        details=details if isinstance(details, dict) else None,
     )
 
 

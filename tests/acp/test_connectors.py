@@ -110,7 +110,10 @@ MUTATED_PAYLOAD = {
 async def connectors_agent(
     tmp_path: Path, experimental_harness: bool
 ) -> AsyncIterator[tuple[VibeAcpAgent, str, FakeMCPResource]]:
-    agent = VibeAcpAgent(experimental_harness=experimental_harness)
+    agent = VibeAcpAgent(
+        experimental_harness=experimental_harness,
+        legacy_harness=not experimental_harness,
+    )
     client = FakeClient()
     agent.on_connect(client)
     client.on_connect(agent)

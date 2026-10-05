@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Coroutine, Mapping, Sequence
-from concurrent.futures import CancelledError
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from html import escape
 from http import HTTPStatus
 import logging
+import random
 import re
+import time
 from typing import Any, Literal, cast
 
 import httpx
 from mistralai.client import Mistral
+from mistralai.client.errors import MistralError
 from mistralai.client.models.chatcompletionstreamrequest import (
     ChatCompletionStreamRequestMessageTypedDict,
 )
@@ -40,6 +44,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustUserMessage,
     tool_call_wire_arguments,
 )
+from mistralai_vibe_local_harness.session_protocol import PublicRetryCategory
 from mistralai_vibe_local_harness.vibe._credentials import ProviderCredentialSnapshot
 from mistralai_vibe_local_harness.vibe._runtime_config import (
     LocalModelRoute,
@@ -56,33 +61,14 @@ logger = logging.getLogger(__name__)
 
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 _RETRYABLE_ERRORS = (httpx.NetworkError, httpx.TimeoutException)
-# A retry notice is a UI nicety. A loop that is servicing callbacks answers in
-# microseconds; anything past this is a loop that has stopped, and the notice is
-# not worth blocking a worker thread on.
-_RETRY_NOTICE_TIMEOUT_S = 5.0
-
-
-class _RetryNoticeHook:
-    def __init__(self, report: Callable[[Exception], None]) -> None:
-        self._report = report
-
-    def after_error(
-        self, hook_ctx: Any, response: httpx.Response | None, error: Exception | None
-    ) -> tuple[httpx.Response | None, Exception | None]:
-        if error is not None:
-            self._report(error)
-        return response, error
-
-
-def _register_retry_hook(client: Mistral, hook: _RetryNoticeHook) -> None:
-    registry = client.sdk_configuration.__dict__.get("_hooks")
-    register = getattr(registry, "register_after_error_hook", None)
-    if not callable(register):
-        logger.warning(
-            "Mistral SDK does not expose retry hooks; retry notices are disabled"
-        )
-        return
-    register(hook)
+# Retries run in _call_with_retries, which needs each backoff before sleeping.
+_NO_SDK_RETRIES = RetryConfig(
+    strategy="none", backoff=BackoffStrategy(0, 0, 0, 0), retry_connection_errors=False
+)
+_INITIAL_RETRY_DELAY_S = 0.5
+_RETRY_BACKOFF = 1.5
+_MAX_RETRY_DELAY_S = 30.0
+_MAX_RETRY_JITTER_S = 1.0
 
 
 type ReasoningEffort = Literal["none", "high"]
@@ -107,7 +93,6 @@ async def execute_mistral_completion(
     on_retry: ProviderRetryObserver | None = None,
     on_delta: ProviderDeltaObserver | None = None,
 ) -> RustCompletionResult:
-    loop = asyncio.get_running_loop()
     retry_active = False
 
     async def report_retry(retry: ProviderRetry | None) -> None:
@@ -116,51 +101,9 @@ async def execute_mistral_completion(
         if on_retry is not None:
             await on_retry(retry)
 
-    async def report_retryable_response(response: httpx.Response) -> None:
-        if on_retry is None:
-            return
-        if response.status_code in _RETRYABLE_STATUS_CODES:
-            category = (
-                "rate_limited"
-                if response.status_code == HTTPStatus.TOO_MANY_REQUESTS
-                else "server_error"
-            )
-            await report_retry(
-                ProviderRetry(category=category, detail=f"HTTP {response.status_code}")
-            )
-        elif response.is_success and retry_active:
+    async def clear_retry_after_response(response: httpx.Response) -> None:
+        if response.is_success and retry_active:
             await report_retry(None)
-
-    def report_error(error: Exception) -> None:
-        if on_retry is None or not isinstance(error, _RETRYABLE_ERRORS):
-            return
-        # The SDK runs error hooks on a worker thread. Wait for the event-loop
-        # notification so completion cleanup cannot clear before this report
-        # lands -- but only while there is a loop to answer, and never for long:
-        # shutdown stops the loop without closing it, and an unbounded wait there
-        # pins a non-daemon worker thread and hangs interpreter exit.
-        if not loop.is_running():
-            return
-        category = (
-            "timed_out" if isinstance(error, httpx.TimeoutException) else "connection"
-        )
-        notice = cast(
-            Coroutine[Any, Any, None],
-            report_retry(ProviderRetry(category=category, detail=type(error).__name__)),
-        )
-        try:
-            future = asyncio.run_coroutine_threadsafe(notice, loop)
-        except RuntimeError:
-            # The loop closed in the gap above. Nothing will await the notice.
-            notice.close()
-            return
-        try:
-            future.result(timeout=_RETRY_NOTICE_TIMEOUT_S)
-        except CancelledError:
-            return
-        except Exception:
-            future.cancel()
-            logger.warning("Could not report retry", exc_info=True)
 
     async with httpx.AsyncClient(
         timeout=config.timeout_s,
@@ -169,17 +112,17 @@ async def execute_mistral_completion(
         # Capture the provider correlation id at the transport level so both the
         # streaming and non-streaming paths report it; the parsed complete_async
         # response drops headers.
-        event_hooks={"response": [correlation_hook(config), report_retryable_response]},
+        event_hooks={
+            "response": [correlation_hook(config), clear_retry_after_response]
+        },
     ) as http_client:
         client = Mistral(
             api_key=credential.token,
             server_url=_server_url_from_api_base(config.base_url),
             async_client=http_client,
-            retry_config=_retry_config(config.retry_max_elapsed_time_s),
+            retry_config=_NO_SDK_RETRIES,
             timeout_ms=int(config.timeout_s * 1000),
         )
-        if on_retry is not None:
-            _register_retry_hook(client, _RetryNoticeHook(report_error))
         kwargs: dict[str, Any] = {
             "model": route.model,
             "messages": [_message_payload(message) for message in messages],
@@ -197,10 +140,95 @@ async def execute_mistral_completion(
             kwargs["tools"] = [_tool_payload(tool) for tool in tools]
             kwargs["parallel_tool_calls"] = True
         if stream:
-            response_stream = await client.chat.stream_async(**kwargs)
+            response_stream = await _call_with_retries(
+                lambda: client.chat.stream_async(**kwargs),
+                max_elapsed_time_s=config.retry_max_elapsed_time_s,
+                on_retry=report_retry,
+            )
             return await _read_stream(response_stream, on_delta)
-        response = await client.chat.complete_async(**kwargs)
+        response = await _call_with_retries(
+            lambda: client.chat.complete_async(**kwargs),
+            max_elapsed_time_s=config.retry_max_elapsed_time_s,
+            on_retry=report_retry,
+        )
         return _read_completion(response)
+
+
+async def _call_with_retries[T](
+    call: Callable[[], Awaitable[T]],
+    *,
+    max_elapsed_time_s: float,
+    on_retry: ProviderRetryObserver,
+) -> T:
+    start = time.monotonic()
+    attempt = 0
+    while True:
+        try:
+            return await call()
+        except Exception as exc:
+            budget_spent = time.monotonic() - start >= max_elapsed_time_s
+            if budget_spent or not _is_retryable_error(exc):
+                raise
+            delay = _next_retry_delay(exc, attempt)
+            logger.warning(
+                "Retrying Mistral completion (attempt %d, delay %.2fs): %r",
+                attempt + 1,
+                delay,
+                exc,
+            )
+            category, detail = _retry_reason(exc)
+            await on_retry(
+                ProviderRetry(
+                    category=category,
+                    detail=detail,
+                    delay_s=delay,
+                    retry_attempt=attempt + 1,
+                )
+            )
+            await asyncio.sleep(delay)
+            attempt += 1
+
+
+def _is_retryable_error(error: Exception) -> bool:
+    if isinstance(error, MistralError):
+        return error.status_code in _RETRYABLE_STATUS_CODES
+    return isinstance(error, _RETRYABLE_ERRORS)
+
+
+def _retry_reason(error: Exception) -> tuple[PublicRetryCategory, str]:
+    if isinstance(error, MistralError):
+        if error.status_code == HTTPStatus.TOO_MANY_REQUESTS:
+            return "rate_limited", f"HTTP {error.status_code}"
+        return "server_error", f"HTTP {error.status_code}"
+    if isinstance(error, httpx.TimeoutException):
+        return "timed_out", type(error).__name__
+    return "connection", type(error).__name__
+
+
+def _next_retry_delay(error: Exception, attempt: int) -> float:
+    retry_after = _retry_after_s(error)
+    if retry_after is not None:
+        return min(retry_after, _MAX_RETRY_DELAY_S)
+    backoff = _INITIAL_RETRY_DELAY_S * _RETRY_BACKOFF**attempt
+    jitter = random.uniform(0, _MAX_RETRY_JITTER_S)
+    return min(backoff + jitter, _MAX_RETRY_DELAY_S)
+
+
+def _retry_after_s(error: Exception) -> float | None:
+    if not isinstance(error, MistralError):
+        return None
+    value = error.headers.get("retry-after", "").strip()
+    if not value:
+        return None
+    if value.isascii() and value.isdigit():
+        return float(value)
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=UTC)
+    return max((retry_at - datetime.now(UTC)).total_seconds(), 0.0)
 
 
 def _read_completion(response: Any) -> RustCompletionResult:
@@ -370,19 +398,6 @@ def _thinking_meta(chunk: object) -> JsonObject:
     if isinstance(closed := _read_field(chunk, "closed"), bool):
         meta["closed"] = closed
     return meta
-
-
-def _retry_config(max_elapsed_time_s: float) -> RetryConfig:
-    return RetryConfig(
-        strategy="backoff",
-        backoff=BackoffStrategy(
-            initial_interval=500,
-            max_interval=30000,
-            exponent=1.5,
-            max_elapsed_time=int(max_elapsed_time_s * 1000),
-        ),
-        retry_connection_errors=True,
-    )
 
 
 def _server_url_from_api_base(api_base: str) -> str | None:

@@ -124,8 +124,8 @@ fn occurrence(old: &str, new: &str, start_line: Option<u32>) -> DiffOccurrence {
 fn occurrences_fall_back_to_the_bare_strings() {
     let output = FileEditEffectOutput {
         file: "f.rs".into(),
-        old_string: "old".into(),
-        new_string: "new".into(),
+        old_string: Some("old".into()),
+        new_string: Some("new".into()),
         occurrences: vec![],
     };
     let found = occurrences(&output);

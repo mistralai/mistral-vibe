@@ -45,19 +45,38 @@ static INITIALIZE_V8: Once = Once::new();
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 const INITIAL_HEAP_BYTES: usize = 4 * 1024 * 1024;
 const MAX_HEAP_BYTES: usize = 16 * 1024 * 1024;
+/// Largest program source that is evaluated, measured in V8's string
+/// representation. The source embeds every replayed tool result. A larger
+/// source cannot fit in the heap, so it fails before an isolate is created.
+const MAX_SOURCE_BYTES: usize = MAX_HEAP_BYTES;
+/// How far the near-heap-limit callback raises the heap limit each time it
+/// runs. After one raise, V8 can allocate the source string and the parser's
+/// copy of its largest string literal before it checks the limit again, so a
+/// raise must hold about twice `MAX_SOURCE_BYTES`. Four times leaves the same
+/// amount again as margin.
+const HEAP_LIMIT_HEADROOM_BYTES: usize = 4 * MAX_SOURCE_BYTES;
 
 struct HeapLimitMonitor {
     limit_reached: AtomicBool,
     isolate_handle: v8::IsolateHandle,
 }
 
-struct HeapLimitCallbackGuard<'i, 'm> {
-    isolate: &'i mut v8::OwnedIsolate,
+/// An isolate whose near-heap-limit callback stays registered until V8 has
+/// disposed it.
+///
+/// Disposal can enforce the heap limit again: when incremental marking is
+/// still running, V8 finishes it with a final garbage collection that checks
+/// the limit. Without a callback that raises the limit, that check aborts the
+/// host process, including when the callback never fired while the program
+/// ran. Dropping this value disposes the isolate while the borrowed monitor is
+/// still alive, so the callback is never unregistered.
+struct HeapLimitedIsolate<'m> {
+    isolate: v8::OwnedIsolate,
     monitor: &'m HeapLimitMonitor,
 }
 
-impl<'i, 'm> HeapLimitCallbackGuard<'i, 'm> {
-    fn new(isolate: &'i mut v8::OwnedIsolate, monitor: &'m HeapLimitMonitor) -> Self {
+impl<'m> HeapLimitedIsolate<'m> {
+    fn new(mut isolate: v8::OwnedIsolate, monitor: &'m HeapLimitMonitor) -> Self {
         let data = std::ptr::from_ref(monitor).cast_mut().cast::<c_void>();
         isolate.add_near_heap_limit_callback(terminate_on_near_heap_limit, data);
 
@@ -65,18 +84,11 @@ impl<'i, 'm> HeapLimitCallbackGuard<'i, 'm> {
     }
 
     fn isolate_mut(&mut self) -> &mut v8::OwnedIsolate {
-        self.isolate
+        &mut self.isolate
     }
 
     fn limit_reached(&self) -> bool {
         self.monitor.limit_reached.load(Ordering::SeqCst)
-    }
-}
-
-impl Drop for HeapLimitCallbackGuard<'_, '_> {
-    fn drop(&mut self) {
-        self.isolate
-            .remove_near_heap_limit_callback(terminate_on_near_heap_limit, MAX_HEAP_BYTES);
     }
 }
 
@@ -85,18 +97,21 @@ unsafe extern "C" fn terminate_on_near_heap_limit(
     current_heap_limit: usize,
     _initial_heap_limit: usize,
 ) -> usize {
-    // SAFETY: `data` is the pointer registered by `HeapLimitCallbackGuard::new`.
-    // The guard borrows the monitor for as long as the callback is registered
-    // and unregisters it in `Drop`, so the monitor outlives every invocation.
-    // The callback reads `isolate_handle` and writes `limit_reached`; the write
-    // is sound through a shared reference because it is an `AtomicBool`.
+    // SAFETY: `data` is the pointer registered by `HeapLimitedIsolate::new`.
+    // The isolate borrows the monitor until V8 has disposed it, so the monitor
+    // outlives every invocation, including those during disposal. The callback
+    // reads `isolate_handle` and writes `limit_reached`; the write is sound
+    // through a shared reference because it is an `AtomicBool`.
     let monitor = unsafe { &*data.cast::<HeapLimitMonitor>() };
     monitor.limit_reached.store(true, Ordering::SeqCst);
+    // During disposal the handle no longer refers to a live isolate, and this
+    // call does nothing.
     monitor.isolate_handle.terminate_execution();
 
-    // V8 crashes the process if the callback does not increase the limit.
-    // Give termination enough headroom to unwind the current allocation.
-    current_heap_limit.saturating_mul(2)
+    // V8 aborts the process when the raised limit still cannot fit the
+    // allocation in flight. Termination stops the program at its next interrupt
+    // check, so the headroom is short-lived.
+    current_heap_limit.saturating_add(HEAP_LIMIT_HEADROOM_BYTES)
 }
 
 struct ExecutionWatchdog {
@@ -200,21 +215,22 @@ fn run_typescript_with_timeout(
             Ok(source) => source,
             Err(error) => return Ok(error_result("SerializationError", error)),
         };
+        if v8_string_bytes(&source) > MAX_SOURCE_BYTES {
+            return Ok(memory_limit_result(evaluation.tool_state));
+        }
 
         initialize_v8();
         let params = v8::CreateParams::default().heap_limits(INITIAL_HEAP_BYTES, MAX_HEAP_BYTES);
-        let mut isolate = v8::Isolate::new(params);
+        let isolate = v8::Isolate::new(params);
         let isolate_handle = isolate.thread_safe_handle();
         let heap_limit_monitor = HeapLimitMonitor {
             limit_reached: AtomicBool::new(false),
             isolate_handle: isolate_handle.clone(),
         };
-        let mut heap_limit_callback =
-            HeapLimitCallbackGuard::new(&mut isolate, &heap_limit_monitor);
+        let mut isolate = HeapLimitedIsolate::new(isolate, &heap_limit_monitor);
         let _watchdog = ExecutionWatchdog::start(isolate_handle, timeout);
-        let result = execute(heap_limit_callback.isolate_mut(), &source);
-        let heap_limit_reached = heap_limit_callback.limit_reached();
-        drop(heap_limit_callback);
+        let result = execute(isolate.isolate_mut(), &source);
+        let heap_limit_reached = isolate.limit_reached();
         if heap_limit_reached {
             return Ok(memory_limit_result(evaluation.tool_state));
         }
@@ -559,6 +575,24 @@ fn build_source(
         ("__MAX_PROGRAM_OPERATIONS__", &max_program_operations),
         ("__USER_PROGRAM__", &transpiled),
     ])
+}
+
+/// Size of `source` once V8 stores it: one byte per character when every
+/// character is in Latin-1, otherwise two bytes per UTF-16 code unit.
+fn v8_string_bytes(source: &str) -> usize {
+    let mut characters = 0;
+    let mut utf16_units = 0;
+    let mut one_byte = true;
+    for character in source.chars() {
+        characters += 1;
+        utf16_units += character.len_utf16();
+        one_byte &= u32::from(character) <= 0xFF;
+    }
+    if one_byte {
+        characters
+    } else {
+        utf16_units * 2
+    }
 }
 
 #[derive(Serialize)]
@@ -3493,5 +3527,120 @@ async function main() {
                 ..
             } if value == json!(42)
         ));
+    }
+
+    #[test]
+    fn disposes_isolate_after_heap_limit_warning() {
+        // Prepare
+        initialize_v8();
+        let params = v8::CreateParams::default().heap_limits(INITIAL_HEAP_BYTES, MAX_HEAP_BYTES);
+        let isolate = v8::Isolate::new(params);
+        let isolate_handle = isolate.thread_safe_handle();
+        let heap_limit_monitor = HeapLimitMonitor {
+            limit_reached: AtomicBool::new(false),
+            isolate_handle: isolate_handle.clone(),
+        };
+        let mut isolate = HeapLimitedIsolate::new(isolate, &heap_limit_monitor);
+        let _watchdog = ExecutionWatchdog::start(isolate_handle, DEFAULT_TIMEOUT);
+        let recorded = (0..2048)
+            .map(|index| format!("\"item-{index}\": \"{}\"", "x".repeat(4096)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let memory_exhausting_source = format!(
+            "(async function () {{ const data = {{ {recorded} }}; const encoded = JSON.stringify(data); globalThis.result = JSON.parse(encoded); return Object.keys(data).length; }})();"
+        );
+
+        // Do
+        let _ = execute(isolate.isolate_mut(), &memory_exhausting_source);
+        let heap_limit_reached = isolate.limit_reached();
+        drop(isolate);
+
+        // Assert
+        assert!(
+            heap_limit_reached,
+            "the program should reach the heap limit"
+        );
+    }
+
+    #[test]
+    fn returns_memory_limit_error_for_a_replayed_result_at_the_source_limit() {
+        // Prepare
+        let tools = [tool("fetch")];
+        let program = partial(
+            r#"
+async function main() {
+  const page = await tools.test.fetch({ id: "page" });
+  return page.text.length;
+}
+"#,
+        );
+        let paused = pending(run(&program, &tools, "fetch"));
+        let replay = resolve_all(
+            paused,
+            &[json!({ "text": "x".repeat(MAX_SOURCE_BYTES - 64 * 1024) })],
+        );
+        let source = build_source(
+            &replay,
+            &tools,
+            "fetch",
+            &transpile(&replay.code).unwrap(),
+            determinism(),
+            128,
+            1024,
+        )
+        .unwrap();
+        assert!(
+            v8_string_bytes(&source) <= MAX_SOURCE_BYTES,
+            "the replayed source should be evaluated"
+        );
+
+        // Do
+        let result = run(&replay, &tools, "fetch");
+
+        // Assert
+        assert!(
+            matches!(
+                &result,
+                TypeScriptRunResult::CodeResult {
+                    result: CodeResult::Error { error },
+                    ..
+                } if error["name"] == "MemoryLimitError"
+            ),
+            "expected a MemoryLimitError result"
+        );
+    }
+
+    #[test]
+    fn returns_memory_limit_error_without_evaluating_a_source_beyond_the_limit() {
+        // Prepare
+        let tools = [tool("fetch")];
+        let program = partial(
+            r#"
+async function main() {
+  const page = await tools.test.fetch({ id: "page" });
+  return page.text.length;
+}
+"#,
+        );
+        let paused = pending(run(&program, &tools, "fetch"));
+        let replay = resolve_all(
+            paused,
+            &[json!({ "text": "x".repeat(3 * MAX_SOURCE_BYTES) })],
+        );
+
+        // Do
+        let result = run(&replay, &tools, "fetch");
+
+        // Assert
+        assert!(
+            matches!(
+                &result,
+                TypeScriptRunResult::CodeResult {
+                    result: CodeResult::Error { error },
+                    ..
+                } if error["name"] == "MemoryLimitError"
+            ),
+            "expected a MemoryLimitError result"
+        );
     }
 }

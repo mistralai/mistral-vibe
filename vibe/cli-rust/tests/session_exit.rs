@@ -2,8 +2,8 @@
 
 use vibe_rs::server::TokenUsage;
 use vibe_rs::session_exit::{
-    format_session_usage, orange_span, session_resume_message, usage_since_baseline,
-    SessionExitSummary,
+    colors_enabled, format_session_usage, orange_span, session_resume_message,
+    usage_since_baseline, SessionExitSummary,
 };
 
 /// rich's `[bold dark_orange]` span on a 256-color-or-better terminal.
@@ -27,6 +27,7 @@ fn usage_line_matches_python_with_thousands_separators() {
         format_session_usage(TokenUsage {
             input_tokens: 1234567,
             output_tokens: 890,
+            total_tokens: 1235457,
         }),
         "Total tokens used this session: input=1,234,567 output=890 (total=1,235,457)"
     );
@@ -54,6 +55,7 @@ fn resume_lines_carry_richs_sgr_spans() {
                 TokenUsage {
                     input_tokens: 1000,
                     output_tokens: 250,
+                    total_tokens: 1250,
                 }
             )),
             Some(ORANGE)
@@ -92,10 +94,12 @@ fn baseline_delta_clamps_each_component_at_zero() {
         TokenUsage {
             input_tokens: 100,
             output_tokens: 50,
+            total_tokens: 150,
         },
         TokenUsage {
             input_tokens: 150,
             output_tokens: 30,
+            total_tokens: 180,
         },
     );
     assert_eq!(
@@ -103,6 +107,7 @@ fn baseline_delta_clamps_each_component_at_zero() {
         TokenUsage {
             input_tokens: 0,
             output_tokens: 20,
+            total_tokens: 20,
         }
     );
     assert_eq!(
@@ -141,4 +146,16 @@ fn orange_span_matches_richs_color_tiers() {
     std::env::set_var("TERM", "unknown");
     assert_eq!(orange_span(true), None);
     std::env::remove_var("TERM");
+    // colors_enabled shares rich's gate for the exit prompts: colors only on
+    // a TTY that is neither dumb nor NO_COLOR.
+    std::env::set_var("TERM", "xterm-256color");
+    assert!(colors_enabled(true));
+    assert!(!colors_enabled(false));
+    std::env::set_var("TERM", "dumb");
+    assert!(!colors_enabled(true));
+    std::env::set_var("TERM", "xterm-256color");
+    std::env::set_var("NO_COLOR", "1");
+    assert!(!colors_enabled(true));
+    std::env::remove_var("NO_COLOR");
+    assert!(!colors_enabled(false));
 }

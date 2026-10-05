@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 
 use super::expand_marker;
 use crate::transcript::grouping::{Group, Outcome};
+use crate::ui::markdown::LinkedLines;
 use crate::ui::{pulse, theme};
 
 /// Columns the border occupies before a row: two pad cells, the glyph, one pad.
@@ -25,7 +26,7 @@ pub(super) fn prefix(last: bool, style: Style) -> Span<'static> {
 }
 
 pub(super) fn push_group_header(
-    lines: &mut Vec<Line<'static>>,
+    lines: &mut LinkedLines,
     group: &Group<'_>,
     expanded: bool,
     running: bool,
@@ -51,10 +52,7 @@ pub(super) fn push_group_header(
     ]));
 }
 
-pub(super) fn prefix_group_body(lines: &mut [Line<'static>], group_last: bool) {
+pub(super) fn prefix_group_body(lines: &mut LinkedLines, group_last: bool) {
     let last = lines.len().saturating_sub(1);
-    for (index, line) in lines.iter_mut().enumerate() {
-        line.spans
-            .insert(0, prefix(group_last && index == last, theme::muted_style()));
-    }
+    lines.prefix(|index| prefix(group_last && index == last, theme::muted_style()));
 }

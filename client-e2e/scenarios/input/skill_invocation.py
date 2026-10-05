@@ -22,12 +22,11 @@ handshake = {
 }
 
 _typed = "/Review-PR concise"
-_submitted = "/review-pr concise"
 
 timeline: Timeline = [
     f"{_typed}\r",
     turn_started(),
-    user_msg(_submitted),
+    user_msg(_typed),
     assistant_msg("Review started."),
     turn_completed(),
 ]

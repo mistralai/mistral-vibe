@@ -87,6 +87,12 @@ the empty, unpinned sentinel. Normal default resolution then applies, including
 the routed default and `allowed_models`; the invalid source value is left
 untouched and reported as a validation warning.
 
+A `compaction_model` on another provider than the active model yields to the
+active model: compaction rides the active model's connection, so it has no route
+to a second provider. The source value is left untouched and reported as a
+validation warning rather than rejected, so a model pick, including a restored
+session pin, never fails on it.
+
 Clients that let a user pick a scope (the `/config` screen) offer the default
 target, the trusted project layer, and the session override layer, in that
 order; each write op names its target layer explicitly.
@@ -176,10 +182,14 @@ config schema. A local hardware failure may produce a client warning, but it
 must not silently mutate server config.
 
 Before a session is attached, CLI and ACP launchers still load dotenv values,
-create initial files, run onboarding, and read startup config for process-level
-setup. This is bootstrap staging, not a second attached runtime. After
-attachment, live config reads, writes, reloads, trust decisions, and derived
-resource refreshes are server operations.
+create initial files, run onboarding, and read startup config for
+process-level setup. This is bootstrap staging, not a second attached runtime.
+Onboarding configuration writes go through the server: the session-less
+`setup/*` surface persists the wizard's choices, and `config/write` serves an
+attached session. The server owns keyring and `$VIBE_HOME/.env` credential
+custody — no client-side credential exception remains. After attachment,
+live config reads, writes, reloads, trust decisions, and derived resource
+refreshes are server operations.
 
 ## Rationale
 

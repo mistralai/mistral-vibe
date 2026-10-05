@@ -156,6 +156,25 @@ def test_find_wheel_raises_on_multiple_wheels(tmp_path: Path) -> None:
         mod._find_wheel(dist_dir)
 
 
+def test_wheel_to_measure_uses_a_prebuilt_wheel_without_building(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prebuilt = tmp_path / "mistral_vibe-1.0.0-cp312-abi3-manylinux_2_28_x86_64.whl"
+    prebuilt.write_text("")
+
+    def fail_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a prebuilt wheel must not trigger a build")
+
+    monkeypatch.setattr(mod, "_run", fail_run)
+
+    assert mod._wheel_to_measure(tmp_path, prebuilt, tmp_path / "dist") == prebuilt
+
+
+def test_wheel_to_measure_rejects_a_missing_prebuilt_wheel(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="wheel not found"):
+        mod._wheel_to_measure(tmp_path, tmp_path / "missing.whl", tmp_path / "dist")
+
+
 def test_measure_strace_skips_on_non_zero_exit(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

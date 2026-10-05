@@ -12,6 +12,7 @@ use crate::app::{App, Status};
 use crate::server::{Client, PublicSessionState};
 use crate::session_exit;
 
+pub(crate) use notice::load_history;
 pub use notice::rebase;
 use request::Call;
 
@@ -60,12 +61,12 @@ fn call(app: &mut App, client: &Arc<Client>) -> Option<Call> {
 }
 
 fn begin(app: &mut App) {
+    app.resume_picker.preview_request += 1;
     app.resume_picker.open = true;
     app.resume_picker.sessions.clear();
     app.resume_picker.selected = 0;
     app.resume_picker.scroll = 0;
     app.resume_picker.free_scroll = false;
-    app.resume_picker.preview_request = 0;
     app.resume_picker.previewing = false;
     app.resume_picker.resuming = false;
     app.resume_picker.delete_confirm = None;
@@ -146,8 +147,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
         Event::Preview { request, state }
             if app.resume_picker.open && request == app.resume_picker.preview_request =>
         {
-            app.view.transcript.load_snapshot(&state);
-            app.expand_rebuilt_tools();
+            load_history(app, &state);
         }
         Event::Resumed { id, state } => {
             if !notice::finish_resume(app) {
@@ -173,12 +173,17 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             crate::turn_summary::on_turn_end(app, client);
             crate::turn_summary::cancel(app);
             app.queue.clear();
+            // Python `_reset_presentation_after_resume` -> `_reset_subagent_views`;
+            // the resumed state owns its own children.
+            crate::subagents::reset_views(app);
+            app.subagents.seed_snapshot(state.child_sessions.clone());
+            crate::subagents::refresh(app);
             // Python remounts every history widget fresh on resume, so manual
             // expansion state resets to the fold flag.
             app.view.expanded.clear();
             app.todo_tracker.seed_from_history(state.history.as_ref());
-            app.view.transcript.load_snapshot(&state);
-            app.expand_rebuilt_tools();
+            load_history(app, &state);
+            crate::worktree::track_state(app, &state);
             // Python rebuilds the transcript on resume and re-decides the
             // custom-tools deprecation against the resumed session.
             crate::startup::banners::rebuild_custom_tools_deprecation(app);
@@ -231,6 +236,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
 /// leaves the picker without resuming.
 fn drop_initial_prompt(app: &mut App) {
     app.session.initial_prompt = None;
+    app.session.teleport_on_start = false;
 }
 
 fn navigate(app: &mut App, client: &Arc<Client>, down: bool) {
@@ -262,6 +268,7 @@ pub fn wheel(app: &mut App, down: bool) {
 }
 
 fn preview(app: &mut App, client: &Arc<Client>) {
+    notice::scroll_to_bottom(app);
     let Some(session) = app.resume_picker.sessions.get(app.resume_picker.selected) else {
         return;
     };

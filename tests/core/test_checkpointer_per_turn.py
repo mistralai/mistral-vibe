@@ -678,3 +678,35 @@ class TestRewindTruncation:
         remaining = cp.view({"f": _txt("A1\n")}).regions("f")
         assert all(tr.decision is Decision.PENDING for tr in remaining)
         assert {tr.owner for tr in remaining} == {AgentTurn(1), ManualEdit(1)}
+
+    def test_prefix_before_returns_a_truncated_copy_for_a_fork(self) -> None:
+        cp = Checkpointer()
+        _turn(cp, 1, "f", "a\n", "A\n")
+        _turn(cp, 2, "f", "A\n", "A2\n")
+
+        forked = cp.prefix_before(2)
+
+        assert cp.view().restore_plan_to_turn(1) == {"f": _txt("a\n")}
+        assert forked.view().restore_plan_to_turn(1) == {"f": _txt("a\n")}
+        assert forked.view().restore_plan_to_turn(2) == {}
+
+    def test_prefix_before_of_an_unknown_turn_is_empty(self) -> None:
+        cp = Checkpointer()
+        _turn(cp, 1, "f", "a\n", "A\n")
+
+        assert cp.prefix_before(7).view().restore_plan_to_turn(1) == {}
+
+    def test_prefix_before_keeps_the_source_counters(self) -> None:
+        cp = Checkpointer()
+        _turn(cp, 1, "f", "a\n", "A\n")
+        cp.reconcile("f", _txt("A1\n"))
+        _turn(cp, 2, "f", "A1\n", "A2\n")
+
+        forked = cp.prefix_before(2)
+        forked.begin_turn(2)
+        forked.record_pre_edit("g", _txt("g\n"))
+        forked.record_post_edit("g", _txt("G\n"))
+        forked.seal_turn()
+
+        regions = forked.view({"f": _txt("A1\n")}).regions("f")
+        assert {tr.owner for tr in regions} == {AgentTurn(1), ManualEdit(1)}

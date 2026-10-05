@@ -6,6 +6,8 @@ pub struct Command {
     pub aliases: &'static [&'static str],
     pub description: &'static str,
     pub side_channel: bool,
+    /// Inline hint shown after `/command ` until an argument is typed; empty when none.
+    pub arguments: &'static str,
 }
 
 const fn cmd(
@@ -17,6 +19,13 @@ const fn cmd(
         aliases,
         description,
         side_channel,
+        arguments: "",
+    }
+}
+
+impl Command {
+    const fn args(self, arguments: &'static str) -> Self {
+        Self { arguments, ..self }
     }
 }
 
@@ -26,7 +35,7 @@ const COMMANDS: &[Command] = &[
     cmd(&["/model"], "Select active model", false),
     cmd(&["/thinking"], "Select thinking level", false),
     cmd(&["/reload"], "Reload configuration, agent instructions, and skills from disk", false),
-    cmd(&["/clear", "/new"], "Start a new conversation. Optionally pass a prompt to seed it.", false),
+    cmd(&["/clear", "/new"], "Start a new conversation. Optionally pass a prompt to seed it.", false).args("[prompt]"),
     cmd(&["/copy"], "Copy the last agent message to the clipboard", true),
     cmd(&["/log"], "Show path to current interaction log file", true),
     cmd(&["/log-level"], "Change the log level for this session or persist it to config.toml.", false),
@@ -35,21 +44,23 @@ const COMMANDS: &[Command] = &[
         &["/stress"],
         "Repeat renderable history entries to load-test rendering. Optional arg: entries (default 100).",
         true,
-    ),
-    cmd(&["/compact"], "Compact conversation history by summarizing. Optionally pass instructions to guide the summary", false),
+    )
+    .args("[entries]"),
+    cmd(&["/compact"], "Compact conversation history by summarizing. Optionally pass instructions to guide the summary", false).args("[instructions]"),
     cmd(&["/exit", ":q", ":quit", "exit", "quit"], "Exit the application", true),
-    cmd(&["/status"], "Display agent statistics", true),
+    cmd(&["/status"], "Display agent statistics and model and provider details", true),
     cmd(&["/whoami"], "Display the Mistral signed-in user, workspace, and plan", true),
     cmd(&["/proxy-setup"], "Configure proxy and SSL certificate settings", false),
     cmd(&["/resume", "/continue"], "Browse, resume, or delete saved sessions", false),
-    cmd(&["/rename"], "Rename the current session", true),
-    cmd(&["/mcp", "/connectors"], "Display available MCP servers and connectors. Pass a name to list tools; subcommands: add <url> [--transport http|streamable-http], status, login <alias>, logout <alias>", false),
+    cmd(&["/rename"], "Rename the current session", true).args("<title>"),
+    cmd(&["/mcp", "/connectors"], "Display available MCP servers and connectors. Pass a name to list tools; subcommands: add <url> [--transport http|streamable-http], status, login <alias>, logout <alias>", false)
+        .args("[name] | add <url> | status | login <alias> | logout <alias>"),
     cmd(&["/voice"], "Configure voice settings", false),
     cmd(&["/leanstall"], "Install the Lean 4 agent (leanstral)", false),
     cmd(&["/unleanstall"], "Uninstall the Lean 4 agent", false),
     cmd(&["/rewind"], "Rewind to a previous message (or press Esc twice)", false),
-    cmd(&["/retry"], "Continue an interrupted model response; optionally pass additional instructions", false),
-    cmd(&["/loop"], "Schedule a recurring prompt. Use `/loop <interval> <prompt>`, `/loop list`, or `/loop cancel <id|all>`", false),
+    cmd(&["/retry"], "Continue an interrupted model response; optionally pass additional instructions", false).args("[instructions]"),
+    cmd(&["/loop"], "Schedule a recurring prompt: /loop [schedule] [prompt]", false).args("[schedule] [prompt]"),
     cmd(&["/data-retention"], "Show data retention information", true),
     cmd(&["/theme"], "Select theme", false),
     cmd(&["/teleport"], "Teleport session to Vibe Code Web", false),
@@ -60,18 +71,41 @@ const COMMANDS: &[Command] = &[
     ),
 ];
 
-/// `/paste-image`: only available on macOS, matching Python's `is_available`.
-#[cfg(target_os = "macos")]
-const PASTE_IMAGE: Option<Command> = Some(cmd(
+const PASTE_IMAGE: Command = cmd(
     &["/paste-image"],
     "Paste an image from the OS clipboard into the prompt",
     true,
-));
-#[cfg(not(target_os = "macos"))]
-const PASTE_IMAGE: Option<Command> = None;
+);
 
+/// `/paste-image` is macOS-only (Python `is_available`); the e2e replay hides it so goldens match on every OS.
 fn available() -> impl Iterator<Item = &'static Command> {
-    COMMANDS.iter().chain(PASTE_IMAGE.iter())
+    let paste_image = crate::paste_image::is_supported() && !crate::utils::is_replaying();
+    COMMANDS.iter().chain(paste_image.then_some(&PASTE_IMAGE))
+}
+
+/// Whether a built-in command with this canonical alias is registered (Python `has_command`).
+pub fn has_command(label: &str) -> bool {
+    available().any(|command| command.aliases[0] == label)
+}
+
+/// Arguments hint shown after `/command ` until the first argument character is typed; `prefix` is the input-mode prefix.
+pub fn argument_hint(prefix: Option<char>, body: &str) -> Option<&'static str> {
+    let body = body.strip_suffix(' ')?;
+    let word = match prefix {
+        Some('/') => body,
+        None => body.strip_prefix('/')?,
+        Some(_) => return None,
+    };
+    available()
+        .find(|command| {
+            command.aliases.iter().any(|alias| {
+                alias
+                    .strip_prefix('/')
+                    .is_some_and(|alias| alias.eq_ignore_ascii_case(word))
+            })
+        })
+        .map(|command| command.arguments)
+        .filter(|arguments| !arguments.is_empty())
 }
 
 /// Whether the command runs while a turn is generating (Python `side_channel=True`).

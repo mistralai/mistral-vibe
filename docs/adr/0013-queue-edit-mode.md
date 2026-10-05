@@ -15,8 +15,14 @@ In selection mode:
 - Escape exits queue mode and restores the original draft.
 
 Submitting an edit calls `session/turn/queue/replace`. The server
-keeps the prompt's queue ID and FIFO position. Shell commands and slash commands
-are never present because the app-server queue accepts user turns only.
+keeps the prompt's queue ID and FIFO position. Saving the edit also
+exits queue selection mode entirely: the highlight, edit state, and
+consumed-edit state are cleared and the pre-queue draft is restored,
+so the normal bindings resume — a later empty Enter steers the running
+turn and Escape interrupts it. Escape while editing still discards
+the edit and returns to selection with its controls hint. Shell
+commands and slash commands are never present because the app-server
+queue accepts user turns only.
 
 When the agent is busy and the queue is empty, Up falls back to normal history
 navigation.

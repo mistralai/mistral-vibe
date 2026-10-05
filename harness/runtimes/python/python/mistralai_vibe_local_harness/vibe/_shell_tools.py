@@ -104,7 +104,7 @@ async def _spawn_bash_command(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         stdin=asyncio.subprocess.DEVNULL,
-        cwd=config.cwd,
+        cwd=config.workspace.cwd,
         env=env,
         start_new_session=sys.platform != "win32",
     )

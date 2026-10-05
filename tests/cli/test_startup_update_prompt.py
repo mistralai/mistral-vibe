@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 import time
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -289,6 +289,90 @@ def test_failed_update_prints_error_message(
     out = capsys.readouterr().out
     assert "could not update automatically" in out
     assert "package manager" in out
+
+
+def _run_failed_update(
+    repository: FileSystemUpdateCacheRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    uv_install: bool,
+    answer: str,
+    reinstalled: bool = True,
+) -> tuple[int | str | None, AsyncMock]:
+    config = build_test_vibe_config(enable_update_checks=True)
+    _write_pending_update(repository, "999.0.0")
+    force_reinstall = AsyncMock(return_value=reinstalled)
+    monkeypatch.setattr("vibe.cli.cli.is_uv_tool_install", lambda: uv_install)
+    monkeypatch.setattr("vibe.cli.cli.force_reinstall_latest", force_reinstall)
+    monkeypatch.setattr("builtins.input", lambda: answer)
+
+    with (
+        patch(
+            "vibe.setup.update_prompt.ask_update_prompt",
+            return_value=UpdatePromptResult.UPDATE_FAILED,
+        ),
+        pytest.raises(SystemExit) as exit_info,
+    ):
+        _maybe_run_startup_update_prompt(config, repository)
+
+    return exit_info.value.code, force_reinstall
+
+
+def test_failed_uv_update_reinstalls_latest_when_user_answers_yes(
+    repository: FileSystemUpdateCacheRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, force_reinstall = _run_failed_update(
+        repository, monkeypatch, uv_install=True, answer="y"
+    )
+
+    out = capsys.readouterr().out
+    assert "uv tool install --force mistral-vibe@latest" in out
+    assert "updated from" in out
+    assert code == 0
+    force_reinstall.assert_awaited_once_with("999.0.0")
+
+
+def test_failed_uv_update_does_not_reinstall_when_user_answers_no(
+    repository: FileSystemUpdateCacheRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, force_reinstall = _run_failed_update(
+        repository, monkeypatch, uv_install=True, answer=""
+    )
+
+    assert "could not update automatically" in capsys.readouterr().out
+    assert code == 1
+    force_reinstall.assert_not_awaited()
+
+
+def test_failed_reinstall_prints_error_message(
+    repository: FileSystemUpdateCacheRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, _ = _run_failed_update(
+        repository, monkeypatch, uv_install=True, answer="y", reinstalled=False
+    )
+
+    assert "could not update automatically" in capsys.readouterr().out
+    assert code == 1
+
+
+def test_failed_non_uv_update_does_not_offer_reinstall(
+    repository: FileSystemUpdateCacheRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, force_reinstall = _run_failed_update(
+        repository, monkeypatch, uv_install=False, answer="y"
+    )
+
+    assert "--force" not in capsys.readouterr().out
+    assert code == 1
+    force_reinstall.assert_not_awaited()
 
 
 def test_failed_update_does_not_dismiss_so_user_is_reprompted_on_next_launch(

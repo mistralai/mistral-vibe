@@ -1,8 +1,16 @@
 from __future__ import annotations
 
-from vibe.acp.utils import ToolOption, build_mode_state, build_permission_options
+from tests.conftest import build_test_vibe_config
+from vibe.acp.utils import (
+    ToolOption,
+    build_mode_state,
+    build_permission_options,
+    make_thinking_response,
+)
 from vibe.agents import AgentSafety, AgentType
+from vibe.app_server._projection import project_config_view
 from vibe.app_server.models import AgentSummary
+from vibe.core.config import ModelConfig
 from vibe.permissions import PathGrantScope, PermissionScope, RequiredPermission
 
 
@@ -149,3 +157,40 @@ def test_build_mode_state_excludes_subagents_but_keeps_active() -> None:
     mode_ids = [mode.id for mode in state.available_modes]
     assert "explore" not in mode_ids
     assert "smart-approve" in mode_ids
+
+
+def test_make_thinking_response_offers_the_model_set() -> None:
+    config = build_test_vibe_config(
+        models=[
+            ModelConfig(
+                name="m",
+                provider="p",
+                alias="m",
+                thinking="high",
+                thinking_levels=["off", "high"],
+            )
+        ],
+        active_model="m",
+    )
+
+    response = make_thinking_response(project_config_view(config))
+
+    assert response.current_value == "high"
+    assert [option.value for option in response.options] == ["off", "high"]
+
+
+def test_make_thinking_response_offers_the_five_without_a_set() -> None:
+    config = build_test_vibe_config(
+        models=[ModelConfig(name="m", provider="p", alias="m", thinking="off")],
+        active_model="m",
+    )
+
+    response = make_thinking_response(project_config_view(config))
+
+    assert [option.value for option in response.options] == [
+        "off",
+        "low",
+        "medium",
+        "high",
+        "max",
+    ]

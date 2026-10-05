@@ -65,7 +65,6 @@ fn copy_native(text: &str) -> bool {
 /// writing through the same descriptor also works in PTYs without relying on a
 /// separately reopenable `/dev/tty`.
 /// Wrapped in tmux passthrough when running inside tmux, matching Python.
-#[cfg(unix)]
 fn copy_osc52(text: &str) {
     use base64::Engine as _;
 
@@ -84,6 +83,3 @@ fn copy_osc52(text: &str) {
     let _ = terminal.write_all(seq.as_bytes());
     let _ = terminal.flush();
 }
-
-#[cfg(not(unix))]
-fn copy_osc52(_text: &str) {}

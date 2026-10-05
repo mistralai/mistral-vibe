@@ -15,7 +15,7 @@ use crate::core::wire::tool::ToolCall;
 
 use super::context::ProgramContext;
 use super::execution::start_program_execution;
-use super::{CompletedProgramResult, ProgramOutcome};
+use super::{AcceptedProgramResult, CompletedProgramResult, ProgramOutcome};
 
 pub(crate) const RUN_TYPESCRIPT_NAME: &str = "run_typescript";
 const RUN_TYPESCRIPT_DESCRIPTION: &str = r#"
@@ -129,10 +129,13 @@ pub(crate) fn dispatch(
     context: ProgramContext<'_>,
     call: &ToolCall,
     determinism: DeterminismContext,
+    accepted_results: &mut Vec<AcceptedProgramResult>,
 ) -> Option<Result<(ProgramOutcome, Vec<Action>), CoreError>> {
     let name = tool_name(&call.name)?;
     let result = match name {
-        ToolName::RunTypeScript => start_program_execution(context, call, determinism),
+        ToolName::RunTypeScript => {
+            start_program_execution(context, call, determinism, accepted_results)
+        }
     };
     Some(match result {
         Ok(outcome) => Ok(outcome),

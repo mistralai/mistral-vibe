@@ -9,15 +9,31 @@ use crossterm::event::{
 use crossterm::execute;
 use crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
 
+use crate::resync_backend::ResyncBackend;
+
+pub type Tui = ratatui::Terminal<ResyncBackend<std::io::Stdout>>;
+
 pub struct TerminalGuard {
     active: bool,
     keyboard_pushed: bool,
 }
 
-pub fn init() -> std::io::Result<(ratatui::DefaultTerminal, TerminalGuard)> {
+/// Ratatui's `try_init`, with the resyncing backend.
+fn try_init() -> std::io::Result<Tui> {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        ratatui::restore();
+        hook(info);
+    }));
+    enable_raw_mode()?;
+    execute!(std::io::stdout(), EnterAlternateScreen)?;
+    Tui::new(ResyncBackend::new(std::io::stdout()))
+}
+
+pub fn init() -> std::io::Result<(Tui, TerminalGuard)> {
     // Own the terminal before arming the guard: a failed `try_init` must not
     // write teardown sequences to a terminal we never took over.
-    let terminal = ratatui::try_init()?;
+    let terminal = try_init()?;
     let mut guard = TerminalGuard {
         active: true,
         keyboard_pushed: false,
@@ -32,7 +48,7 @@ pub fn init() -> std::io::Result<(ratatui::DefaultTerminal, TerminalGuard)> {
 
 /// Give the Ratatui terminal back, skipping its Drop when the terminal is gone:
 /// Ratatui 0.29 panics there if showing the cursor and stderr both fail.
-pub fn release(mut terminal: ratatui::DefaultTerminal) {
+pub fn release(mut terminal: Tui) {
     if terminal.show_cursor().is_err() {
         std::mem::forget(terminal);
     }

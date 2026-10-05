@@ -107,6 +107,28 @@ def _find_wheel(dist_dir: Path) -> Path:
     return wheels[0]
 
 
+def _wheel_to_measure(project: Path, prebuilt: Path | None, dist_dir: Path) -> Path:
+    if prebuilt is not None:
+        if not prebuilt.is_file():
+            raise SystemExit(f"wheel not found: {prebuilt}")
+        return prebuilt
+
+    # Import-cost timing needs only the Python package, so skip the Rust terminal build.
+    _run(
+        [
+            "uv",
+            "build",
+            "--directory",
+            str(project),
+            "--wheel",
+            "--out-dir",
+            str(dist_dir),
+        ],
+        env={**os.environ, "VIBE_SKIP_RUST_TUI": "1"},
+    )
+    return _find_wheel(dist_dir)
+
+
 def _venv_python(root: Path) -> Path:
     _run(["uv", "venv", "--python", sys.executable, str(root)])
     bin_dir = "Scripts" if sys.platform == "win32" else "bin"
@@ -257,6 +279,12 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="config TOML; defaults to <project>/scripts/startup_import_cost.<project>.toml",
     )
+    parser.add_argument(
+        "--wheel",
+        type=Path,
+        default=None,
+        help="measure this prebuilt wheel instead of building one",
+    )
     return parser.parse_args()
 
 
@@ -283,21 +311,7 @@ def main() -> None:
         dist_dir = tmp_path / "dist"
         dist_dir.mkdir()
 
-        # Import-cost timing needs only the Python package, so skip the Rust terminal build.
-        _run(
-            [
-                "uv",
-                "build",
-                "--directory",
-                str(project),
-                "--wheel",
-                "--out-dir",
-                str(dist_dir),
-            ],
-            env={**os.environ, "VIBE_SKIP_RUST_TUI": "1"},
-        )
-
-        wheel = _find_wheel(dist_dir)
+        wheel = _wheel_to_measure(project, args.wheel, dist_dir)
         python = _venv_python(tmp_path / "env")
         _install(python, wheel, project)
 

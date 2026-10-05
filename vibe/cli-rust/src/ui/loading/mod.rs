@@ -156,6 +156,24 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
         ..area
     };
 
+    // Python hides the main loading widget while a subagent is viewed and
+    // shows the subagent's own status instead (Running / Waiting for input).
+    if let Some(child) = app.subagents.viewed_child() {
+        if let Some(status) = crate::subagents::subagent_loading_status(child.status) {
+            let anim = &app.view.loading;
+            let color = |pos: usize| Style::default().fg(anim.color_at(pos));
+            f.render_widget(
+                Line::from(vec![
+                    Span::styled(anim.snake.render(), color(0)),
+                    Span::raw(" "),
+                    Span::styled(status.to_owned(), color(1)),
+                ]),
+                content,
+            );
+        }
+        return;
+    }
+
     // A crashed app server lands in `Failed`; its transcript notice explains
     // the failure, so the startup-error line stays out of the way.
     if app.session.status == Status::Failed && !app.server_closed {
@@ -173,7 +191,9 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
         );
         return;
     }
+    let teleport_since = crate::teleport::loading_since(app);
     if !app.view.command_loading
+        && teleport_since.is_none()
         && !matches!(
             app.session.status,
             Status::Starting | Status::Generating { .. }
@@ -214,7 +234,7 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
         .add_modifier(Modifier::BOLD);
     // Startup keeps queue cancellation available without offering turn interruption.
     if app.session.status == Status::Starting {
-        if !app.queue.is_empty() {
+        if crate::message_queue::has_removable(app) {
             spans.push(Span::styled("(", muted));
             spans.push(Span::styled("Ctrl+C", key));
             spans.push(Span::styled(" to cancel last queued message)", muted));
@@ -227,22 +247,23 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
     let elapsed = match (app.session.shell_started_at, app.session.status) {
         (Some(since), _) => anim.elapsed(since),
         (None, Status::Generating { since }) => anim.elapsed(since),
-        _ => Duration::default(),
+        _ => teleport_since.map_or_else(Duration::default, |since| anim.elapsed(since)),
     };
     spans.push(Span::styled(
         format!("({} ", format_elapsed(elapsed.as_secs())),
         muted,
     ));
-    // With queued prompts Ctrl+C cancels the newest one instead of interrupting,
-    // so the hint splits the two keys (Python `LoadingWidget._format_hint`).
-    if app.session.active_turn_id.is_none() || app.queue.is_empty() {
+    // Ctrl+C cancels a queued prompt before interrupting (Python `LoadingWidget._format_hint`).
+    if !crate::message_queue::has_removable(app) {
         spans.push(Span::styled("Esc/Ctrl+C", key));
         spans.push(Span::styled(" to interrupt)", muted));
     } else {
         spans.push(Span::styled("Esc", key));
         spans.push(Span::styled(" to interrupt · ", muted));
-        spans.push(Span::styled("Enter", key));
-        spans.push(Span::styled(" to steer · ", muted));
+        if app.session.active_turn_id.is_some() {
+            spans.push(Span::styled("Enter", key));
+            spans.push(Span::styled(" to steer · ", muted));
+        }
         spans.push(Span::styled("Ctrl+C", key));
         spans.push(Span::styled(" to cancel last queued message)", muted));
     }

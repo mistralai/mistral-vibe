@@ -85,6 +85,46 @@ pub async fn run(options: HeadlessOptions, cwd: Option<String>, launch: Launch) 
         }
     };
 
+    // Python prints "Using worktree" once the preparation it waited out has
+    // produced the session path; headless waits the server's settle the same
+    // way, before the first turn. Notifications that land while waiting are
+    // replayed into the turn pump, so nothing absorbed here is lost.
+    let mut settled: Vec<Notification> = Vec::new();
+    if options.worktree.is_some() {
+        let deadline = tokio::time::Instant::now() + crate::worktree_gate::SETTLE_WAIT;
+        let waited = tokio::select! {
+            waited = crate::worktree_gate::absorb_until_settled(
+                &mut notifications,
+                deadline,
+            ) => waited,
+            _ = &mut interrupt => {
+                stop_created_session(&client, &created).await;
+                return Ok(());
+            }
+        };
+        match waited {
+            Ok((settle, waited)) => {
+                if let Some(cwd) = settle.cwd {
+                    crate::worktree_gate::print_using(&cwd);
+                } else {
+                    tracing::warn!("worktree settle timed out; continuing");
+                }
+                settled = waited.notifications;
+            }
+            // Python prints `Error: {message}` and exits 1; the session this
+            // leaves behind never prepared its workspace, so it is stopped
+            // before the error takes over (ADR 0009).
+            Err(message) => {
+                let _ = tokio::time::timeout(
+                    SESSION_STOP_TIMEOUT,
+                    client.request(method::SESSION_STOP, json!({ "sessionId": &session_id })),
+                )
+                .await;
+                return Err(anyhow!(message));
+            }
+        }
+    }
+
     // From here on, session/stop must run on every exit path (ADR 0009).
     // Any shutdown signal cancels the turn but still falls through to the
     // bounded cleanup, so SIGINT/SIGTERM/SIGHUP never skip session/stop,
@@ -97,6 +137,7 @@ pub async fn run(options: HeadlessOptions, cwd: Option<String>, launch: Launch) 
             &prompt,
             &session_id,
             cwd.as_deref(),
+            settled,
         ) => r,
         _ = &mut interrupt => Ok(()),
     };
@@ -142,6 +183,7 @@ async fn run_session(
     prompt: &str,
     session_id: &str,
     cwd: Option<&str>,
+    settled: Vec<Notification>,
 ) -> Result<()> {
     client
         .request(method::SESSION_READY_WAIT, json!({"sessionId": session_id}))
@@ -152,8 +194,15 @@ async fn run_session(
     warn_if_untrusted(client, cwd).await?;
 
     let mut output = Output::new(options.output.clone());
-    let result =
-        start_turn_and_consume(client, notifications, &mut output, prompt, session_id).await;
+    let result = start_turn_and_consume(
+        client,
+        notifications,
+        &mut output,
+        prompt,
+        session_id,
+        settled,
+    )
+    .await;
 
     // Only finalize on success; on error the message goes to stderr (Python programmatic.py).
     if let Err(ref err) = result {
@@ -188,6 +237,8 @@ async fn initialize(client: &Arc<Client>) -> Result<()> {
             name: "vibe_programmatic".into(),
             entrypoint: Some("programmatic".into()),
             version: env!("CARGO_PKG_VERSION").into(),
+            title: Some("Vibe programmatic CLI".into()),
+            terminal_emulator: crate::terminal_detect::detect().into(),
         },
         capabilities: ClientCapabilities {
             callback_kinds: CALLBACK_KINDS.iter().map(|k| (*k).into()).collect(),
@@ -242,6 +293,7 @@ pub fn agent_config(options: &HeadlessOptions, cwd: Option<String>) -> Result<Ag
         headless: true,
         trust_workspace: options.trust,
         workspace_roots: resolve_add_dirs(&options.add_dir)?,
+        worktree: options.worktree.clone(),
     })
 }
 
@@ -261,6 +313,7 @@ async fn start_turn_and_consume(
     output: &mut Output,
     prompt: &str,
     session_id: &str,
+    settled: Vec<Notification>,
 ) -> Result<()> {
     let params = TurnStartParams {
         idempotency_key: None,
@@ -281,11 +334,17 @@ async fn start_turn_and_consume(
         .context("turn/start")?;
     let turn_id = turn_id_from(&turn_response)?;
 
+    // The worktree settle wait may have absorbed notifications before the
+    // turn; they are the head of the stream, in order.
+    let mut settled = settled.into_iter();
     loop {
-        let notification = notifications
-            .recv()
-            .await
-            .ok_or_else(|| anyhow!("app-server closed"))?;
+        let notification = match settled.next() {
+            Some(notification) => notification,
+            None => notifications
+                .recv()
+                .await
+                .ok_or_else(|| anyhow!("app-server closed"))?,
+        };
         match notification.method.as_str() {
             notification::HISTORY_ENTRY_ADDED | notification::HISTORY_ENTRY_UPDATED => {
                 if let Some(entry) = output.consume_entry(&notification.params)? {

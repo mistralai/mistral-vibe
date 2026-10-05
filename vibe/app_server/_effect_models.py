@@ -151,6 +151,12 @@ class FileWriteEffectInput(ProtocolModel):
 class FileWriteEffectOutput(ProtocolModel):
     file_path: str
     content: str
+    # A reader diffs an overwrite from these. `previous_content` is absent when
+    # the Runtime could not read the file back as text. `file_existed` defaults
+    # only for the legacy `write_file` builtin, whose result does not carry it;
+    # the Unified Harness path always states it (`_WriteResult`).
+    file_existed: bool = False
+    previous_content: str | None = None
 
 
 class WebSearchEffectInput(ProtocolModel):
@@ -208,6 +214,14 @@ class WorktreeEffectInput(ProtocolModel):
     name: str
     branch: str
     path: str
+
+
+# Replaced by patch while the worktree is being prepared. File counts are set
+# only while checking out, and only once git has reported them.
+class WorktreeEffectProgress(ProtocolModel):
+    phase: Literal["naming", "fetching", "checking_out"]
+    completed_files: int | None = None
+    total_files: int | None = None
 
 
 class _EffectDetailBase(ProtocolModel):
@@ -270,20 +284,53 @@ class SkillEffectDetail(_EffectDetailBase):
     input: SkillEffectInput | None = None
 
 
+# The card is built when the call starts -- before its arguments finish
+# streaming and before a child session exists -- then filled in by patch. `None`
+# here means "not known yet", not "this shape carries no such field".
 class SubagentEffectDetail(_EffectDetailBase):
     kind: Literal[ToolEffectKind.SUBAGENT] = ToolEffectKind.SUBAGENT
     input: SubagentEffectInput | None = None
     child_session_id: str | None = None
+    # `input.agent` is the profile a spawn ran, not the name it gave the child.
+    agent_name: str | None = None
 
 
 class WorktreeEffectDetail(_EffectDetailBase):
     kind: Literal[ToolEffectKind.WORKTREE] = ToolEffectKind.WORKTREE
     input: WorktreeEffectInput | None = None
+    progress: WorktreeEffectProgress | None = None
 
 
 class ProcessEffectDetail(_EffectDetailBase):
     kind: Literal[ToolEffectKind.PROCESS] = ToolEffectKind.PROCESS
     input: JsonValue = None
+
+
+class ScratchpadListInput(ProtocolModel):
+    action: Literal["list"] = "list"
+
+
+class ScratchpadReadInput(ProtocolModel):
+    action: Literal["read"] = "read"
+    path: str
+
+
+class ScratchpadWriteInput(ProtocolModel):
+    action: Literal["write"] = "write"
+    path: str
+    content: str
+
+
+# A list names no file, a read names one, and a write carries the note it saved.
+ScratchpadEffectInput = Annotated[
+    ScratchpadListInput | ScratchpadReadInput | ScratchpadWriteInput,
+    Field(discriminator="action"),
+]
+
+
+class ScratchpadEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.SCRATCHPAD] = ToolEffectKind.SCRATCHPAD
+    input: ScratchpadEffectInput
 
 
 EffectDetail = Annotated[
@@ -300,7 +347,8 @@ EffectDetail = Annotated[
     | SkillEffectDetail
     | SubagentEffectDetail
     | WorktreeEffectDetail
-    | ProcessEffectDetail,
+    | ProcessEffectDetail
+    | ScratchpadEffectDetail,
     Field(discriminator="kind"),
 ]
 

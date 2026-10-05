@@ -623,7 +623,10 @@ class VibeAcpAgent(AcpAgent):
                 intent, ResumeSessionIntent
             ):
                 raise SessionNotFoundError(intent.session_id) from exc
-            raise ConfigurationError(exc.error.message) from exc
+            # ``str`` renders the app-server error with its field-level detail
+            # (``message (path: reason)``); ``error.message`` alone is the bare
+            # protocol code name, which tells an ACP client nothing actionable.
+            raise ConfigurationError(str(exc)) from exc
         except ValueError as exc:
             raise ConfigurationError(str(exc)) from exc
         session_id = acp_session_id or app_server.session_id

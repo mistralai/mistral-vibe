@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+import tomllib
+
 import pytest
+import tomli_w
 
 from tests.update_notifier.adapters.fake_update_cache_repository import (
     FakeUpdateCacheRepository,
@@ -11,6 +15,9 @@ from vibe.cli.update_notifier import (
     UpdateCache,
     UpdateGatewayCause,
     UpdateGatewayError,
+)
+from vibe.cli.update_notifier.adapters.filesystem_update_cache_repository import (
+    FileSystemUpdateCacheRepository,
 )
 from vibe.cli.update_notifier.update import (
     UpdateError,
@@ -466,3 +473,72 @@ async def test_writing_cache_preserves_seen_whats_new_and_dismissed_version(
     assert update_cache_repository.update_cache.latest_version == "1.0.2"
     assert update_cache_repository.update_cache.seen_whats_new_version == "1.0.0"
     assert update_cache_repository.update_cache.dismissed_version == "1.0.1"
+
+
+@pytest.mark.asyncio
+async def test_a_cache_write_voids_a_stale_rust_source_tag(
+    tmp_path: Path, current_timestamp: int
+) -> None:
+    # A Rust install tagged this entry as uv's answer in the same second this
+    # write reuses, so a surviving pairing would pass the new version off as
+    # uv's deliverable.
+    with (tmp_path / "cache.toml").open("wb") as f:
+        tomli_w.dump(
+            {
+                "update_cache": {
+                    "latest_version": "1.0.1",
+                    "stored_at_timestamp": current_timestamp,
+                    "source": "uv",
+                    "source_stored_at": current_timestamp,
+                }
+            },
+            f,
+        )
+    repository = FileSystemUpdateCacheRepository(base_path=tmp_path)
+    update_notifier = FakeUpdateGateway(update=Update(latest_version="1.0.2"))
+
+    update = await get_update_if_available(
+        update_notifier,
+        current_version="1.0.0",
+        update_cache_repository=repository,
+        get_current_timestamp=lambda: current_timestamp,
+        force_check=True,
+    )
+
+    assert update is not None
+    assert update.latest_version == "1.0.2"
+    section = tomllib.loads((tmp_path / "cache.toml").read_text())["update_cache"]
+    assert section["latest_version"] == "1.0.2"
+    assert section["stored_at_timestamp"] == current_timestamp
+    # The key merge preserves the tag, but its pairing is voided, so the Rust
+    # client reads the entry as a legacy PyPI one and re-checks.
+    assert section["source"] == "uv"
+    assert section["source_stored_at"] == -1
+
+
+@pytest.mark.asyncio
+async def test_marking_dismissed_preserves_the_rust_source_tag_pairing(
+    tmp_path: Path, current_timestamp: int
+) -> None:
+    # Dismissal does not change the entry's answer, so the pairing Python
+    # would void on a version rewrite must survive it untouched.
+    with (tmp_path / "cache.toml").open("wb") as f:
+        tomli_w.dump(
+            {
+                "update_cache": {
+                    "latest_version": "1.0.1",
+                    "stored_at_timestamp": current_timestamp,
+                    "source": "uv",
+                    "source_stored_at": current_timestamp,
+                }
+            },
+            f,
+        )
+    repository = FileSystemUpdateCacheRepository(base_path=tmp_path)
+
+    await mark_update_as_dismissed(repository, "1.0.1")
+
+    section = tomllib.loads((tmp_path / "cache.toml").read_text())["update_cache"]
+    assert section["dismissed_version"] == "1.0.1"
+    assert section["source"] == "uv"
+    assert section["source_stored_at"] == current_timestamp

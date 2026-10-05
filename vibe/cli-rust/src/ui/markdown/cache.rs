@@ -3,9 +3,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use ratatui::text::Line;
-
-use super::PreparedMarkdown;
+use super::{LinkedLines, PreparedMarkdown};
 
 pub const MAX_MARKDOWN_CACHE_ENTRIES: usize = 64;
 pub const MAX_MARKDOWN_CACHE_BYTES: usize = 8 * 1024 * 1024;
@@ -44,14 +42,14 @@ impl MarkdownCache {
         })
     }
 
-    /// Cache non-markdown entry rows (effect result bodies) under the same key and bounds.
+    /// Cache non-markdown entry rows and their links (effect result bodies) under the same key and bounds.
     pub fn prepare_lines(
         &mut self,
         entry: usize,
         revision: u64,
         width: u16,
         theme: usize,
-        build: impl FnOnce() -> Vec<Line<'static>>,
+        build: impl FnOnce() -> LinkedLines,
     ) -> Arc<PreparedMarkdown> {
         self.get_or_build(entry, revision, width, theme, || {
             PreparedMarkdown::from_lines(build())

@@ -32,8 +32,10 @@ pub(crate) use crate::core::features::notifications::{
     AsyncToolNotificationStatus, Notification, NotificationLevel, NotificationSource,
     NotificationState, ProcessTerminalStatus, SubagentNotificationStatus,
 };
-pub(crate) use crate::core::features::programmatic_tool_calling::ProgramExecution;
 pub(crate) use crate::core::features::programmatic_tool_calling::Settings as ProgrammaticToolSettings;
+pub(crate) use crate::core::features::programmatic_tool_calling::{
+    ProgramExecution, typescript_execution_id,
+};
 pub(crate) use crate::core::features::skills::SkillDefinition;
 pub(crate) use crate::core::features::subagents::Mode as SubagentMode;
 pub(crate) use crate::core::hooks::{
@@ -62,7 +64,7 @@ pub(crate) use crate::core::tools::context::ToolContext;
 pub(crate) use crate::core::tools::execution::{ToolBatch, ToolExecution, ToolExecutionState};
 pub(crate) use crate::core::tools::external::{
     ExternalTool, ExternalToolCall, HookToolCall, ProvidedToolCall, RuntimeBuiltinToolCall,
-    RuntimeBuiltinToolName, ToolOrigin, ToolTarget,
+    RuntimeBuiltinToolName, ToolOrigin, ToolTarget, effect_id_for_operation,
 };
 use crate::core::tools::resolved;
 pub(crate) use crate::core::turn::PendingLifecycleHook;
@@ -281,6 +283,7 @@ pub(crate) fn config() -> HarnessConfig {
                 subagents: SubagentMode::Enabled,
                 background_processes: BackgroundProcessMode::Disabled,
                 command_environment: CommandEnvironment::Unix,
+                permissions: None,
             },
         },
         capabilities: Default::default(),

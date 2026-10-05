@@ -27,9 +27,9 @@ from vibe.config_values import (
     TranscriptionEncoding,
 )
 from vibe.core.config._defaults import (
-    DEFAULT_AUTO_COMPACT_THRESHOLD,
     DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
     DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
+    UNSET_AUTO_COMPACT_THRESHOLD,
 )
 from vibe.core.paths import SESSION_LOG_DIR
 from vibe.core.types import Backend
@@ -61,6 +61,41 @@ class ExperimentsConfig(BaseSettings):
     client_key: str = "sdk-OE8yJgTXZY6tj"
 
 
+class UtilityFeature(StrEnum):
+    """A background feature with its own model; values are ``[utility_models]`` keys."""
+
+    TITLE = "title"
+    SMART_APPROVE = "smart_approve"
+
+
+# The ``[utility_models]`` value that selects the session's active model.
+ACTIVE_MODEL_SELECTOR = "active"
+
+
+class UtilityModelsConfig(BaseSettings):
+    """Per-feature model aliases; empty means automatic selection."""
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+    title: str = ""
+    smart_approve: str = ""
+
+    def alias_for(self, feature: UtilityFeature) -> str:
+        match feature:
+            case UtilityFeature.TITLE:
+                return self.title.strip()
+            case UtilityFeature.SMART_APPROVE:
+                return self.smart_approve.strip()
+
+    def configured(self) -> list[tuple[UtilityFeature, str]]:
+        """Features with a non-empty override."""
+        return [
+            (feature, alias)
+            for feature in UtilityFeature
+            if (alias := self.alias_for(feature))
+        ]
+
+
 class SessionLoggingConfig(BaseSettings):
     # Matches its sibling groups. Under per-field merging the union of keys
     # from every layer reaches the validator, so forbidding extras would turn
@@ -72,11 +107,9 @@ class SessionLoggingConfig(BaseSettings):
     session_prefix: str = "session"
     enabled: bool = True
     # Background LLM-generated session titles (shown in --resume and the
-    # terminal tab). Off falls back to the first-message preview. Default off:
-    # the utility model (mistral-vibe-cli-fast) is not served by every Mistral
-    # deployment (dedicated/on-prem), where these calls return 400s, so titling
-    # is opt-in.
-    generate_titles: bool = False
+    # terminal tab) for CLI and Desktop clients. False falls back to the
+    # first-message preview.
+    generate_titles: bool = True
 
     @field_validator("save_dir", mode="before")
     @classmethod
@@ -447,9 +480,47 @@ class ModelConfig(BaseModel):
         None  # Price per million cached input tokens; None bills them at input_price
     )
     thinking: ThinkingLevel = "off"
+    # The levels this model offers, in display order. Defaults to the CLI's
+    # five; a narrowed set resets a stored level that falls outside it.
+    thinking_levels: list[ThinkingLevel] = Field(
+        default_factory=lambda: list(THINKING_LEVELS)
+    )
     supports_images: bool = False
-    auto_compact_threshold: int = DEFAULT_AUTO_COMPACT_THRESHOLD
+    # None when the window is unknown; 0 or a negative would silently disable
+    # compaction by deriving an unreachable threshold, so it must be rejected.
+    max_context_length: int | None = Field(default=None, ge=1)
+    auto_compact_threshold: int = UNSET_AUTO_COMPACT_THRESHOLD
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
+
+    @field_validator("thinking_levels", mode="after")
+    @classmethod
+    def _empty_set_offers_off(cls, value: list[ThinkingLevel]) -> list[ThinkingLevel]:
+        # An empty set means "no thinking control", not "nothing offered":
+        # distinct from unset, which keeps the five. The catalog mapping relies
+        # on the distinction (unspecified vs explicitly none). Duplicates are
+        # dropped in first-seen order: the picker renders one row per level.
+        return list(dict.fromkeys(value)) or ["off"]
+
+    @property
+    def default_thinking(self) -> ThinkingLevel:
+        """The level a model lands on when its stored one is not offered.
+
+        ``high`` when the set offers it, else the set's last entry: rank comes
+        from list order, the same order the pickers render, so a level the CLI
+        does not know yet still ranks.
+        """
+        if "high" in self.thinking_levels:
+            return "high"
+        return self.thinking_levels[-1]
+
+    @model_validator(mode="after")
+    def _reset_thinking_outside_levels(self) -> ModelConfig:
+        # Curation can narrow a set under a level the user already stored.
+        # Re-derived on every load, like the active-model fallback: the stored
+        # value stays in the user's file and applies again if the set widens.
+        if self.thinking not in self.thinking_levels:
+            self.thinking = self.default_thinking
+        return self
 
 
 def normalize_model_configs(value: Any) -> Any:
@@ -483,10 +554,15 @@ def serialize_model_configs(value: Any) -> Any:
 
 def _serialize_model_entry(model: Any) -> Any:
     if isinstance(model, ModelConfig):
-        return model.model_dump(exclude_none=True)
-    if isinstance(model, Mapping):
-        return {key: value for key, value in model.items() if value is not None}
-    return model
+        entry = model.model_dump(exclude_none=True)
+    elif isinstance(model, Mapping):
+        entry = {key: value for key, value in model.items() if value is not None}
+    else:
+        return model
+    # The unset sentinel is merge-internal; it must never reach a TOML file.
+    if entry.get("auto_compact_threshold") == UNSET_AUTO_COMPACT_THRESHOLD:
+        del entry["auto_compact_threshold"]
+    return entry
 
 
 def normalize_model_configs_with_defaults(value: Any, defaults: Any) -> Any:

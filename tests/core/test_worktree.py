@@ -66,6 +66,11 @@ def _prepare_auto(
         return repository.prepare_auto(prompt=prompt, suggested_name=suggested_name)
 
 
+def _prepare_fork(base: Path, *, suggested_name: str) -> PreparedWorktree:
+    with WorktreeRepository.open(base) as repository:
+        return repository.prepare_fork(suggested_name=suggested_name)
+
+
 def _finish_starts(*worktrees: PreparedWorktree) -> None:
     for worktree in worktrees:
         _hold(worktree.root, "test-session")
@@ -680,6 +685,29 @@ def test_release_keeps_a_worktree_another_session_still_holds(tmp_path: Path) ->
     assert not worktree.root.exists()
 
 
+def test_force_release_forgets_a_stale_claim_whose_root_is_gone(tmp_path: Path) -> None:
+    # A crashed start can leave the starting marker behind with the root
+    # already gone: the claim is forgotten, not kept in use forever.
+    repo = _init_repo(tmp_path)
+    target = _managed_worktree_root(repo) / "stale"
+    target.mkdir(parents=True)
+    claim = _claim(repo, "stale")
+    claim.mark_starting()
+    claim.write(
+        WorktreeRecord.new(
+            name="stale", branch="vibe/stale", repo_root=tmp_path, branch_created=True
+        )
+    )
+    shutil.rmtree(target)
+
+    stale = ManagedWorktree.at(target)
+    assert stale is not None
+    release = stale.force_release("session-a")
+
+    assert release.outcome is WorktreeReleaseOutcome.NOT_FOUND
+    assert claim.read() is None
+
+
 def test_release_ignores_a_worktree_vibe_did_not_create(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     linked_root = tmp_path.parent / f"{tmp_path.name}-feature"
@@ -1087,13 +1115,8 @@ def test_prune_snapshots_dirty_and_untracked_but_keeps_held_worktrees(
         repo.commit(dirty_recovery.snapshot_ref).tree["file.txt"].data_stream.read()
         == b"changed\n"
     )
-    assert (
-        repo
-        .commit(untracked_recovery.snapshot_ref)
-        .tree["untracked.txt"]
-        .data_stream.read()
-        == b"local\n"
-    )
+    untracked_snapshot = repo.commit(untracked_recovery.snapshot_ref)
+    assert untracked_snapshot.tree["untracked.txt"].data_stream.read() == b"local\n"
 
 
 def test_prune_keeps_a_worktree_when_snapshot_fails(
@@ -2036,6 +2059,117 @@ def test_create_error_identifies_worktree_and_branch(tmp_path: Path) -> None:
         _prepare("second", tmp_path, branch="feat/shared")
 
 
+def _record_checkout_config(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    extra: list[str] = []
+    sanitized = git_repo_module.sanitized_git
+
+    def record(repo: Repo, *extra_config: str, cwd: Path | None = None) -> Git:
+        extra.extend(extra_config)
+        return sanitized(repo, *extra_config, cwd=cwd)
+
+    monkeypatch.setattr(git_repo_module, "sanitized_git", record)
+    return extra
+
+
+def test_worktree_creation_checks_out_in_parallel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _init_repo(tmp_path)
+    monkeypatch.setattr(git_repo_module, "_CHECKOUT_WORKERS", 3)
+    extra = _record_checkout_config(monkeypatch)
+
+    worktree = _prepare("feature", tmp_path)
+
+    assert extra == ["checkout.workers=3"]
+    assert (worktree.root / "file.txt").read_text() == "hello\n"
+
+
+def test_worktree_creation_reports_checkout_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Git holds progress back for its first two seconds, which a checkout this
+    # small never reaches.
+    monkeypatch.setenv("GIT_PROGRESS_DELAY", "0")
+    repo = _init_repo(tmp_path)
+    for index in range(150):
+        (tmp_path / f"extra-{index}.txt").write_text(f"{index}\n")
+    repo.index.add([f"extra-{index}.txt" for index in range(150)])
+    repo.index.commit("more files")
+    reported: list[tuple[int, int]] = []
+    target = tmp_path.parent / f"{tmp_path.name}-progress"
+
+    with git_repo_module.GitRepo.open(tmp_path) as git:
+        git.add_worktree(
+            target,
+            "feat/progress",
+            branch_created=True,
+            on_checkout_progress=lambda done, total: reported.append((done, total)),
+        )
+
+    assert reported
+    assert reported[-1] == (151, 151)
+    assert all(total == 151 for _, total in reported)
+    assert _track_repo(Repo(target)).active_branch.name == "feat/progress"
+    assert _track_repo(Repo(target)).is_dirty(untracked_files=True) is False
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            GitError("disk full"),
+            "Failed to create worktree 'feature' for branch 'feature'",
+        ),
+        (RuntimeError("progress report failed"), "progress report failed"),
+    ],
+)
+def test_worktree_creation_unregisters_a_worktree_whose_checkout_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception, expected: str
+) -> None:
+    repo = _init_repo(tmp_path)
+
+    def fail_checkout(*_args: Any, **_kwargs: Any) -> None:
+        raise error
+
+    monkeypatch.setattr(git_repo_module.GitRepo, "_check_out", fail_checkout)
+
+    with pytest.raises(type(error), match=expected):
+        _prepare("feature", tmp_path)
+
+    assert _linked(tmp_path) == ()
+    assert "feature" not in (head.name for head in repo.heads)
+
+
+def test_worktree_creation_keeps_the_users_checkout_worker_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    repo.config_writer().set_value("checkout", "workers", "2").release()
+    extra = _record_checkout_config(monkeypatch)
+
+    _prepare("feature", tmp_path)
+
+    assert extra == []
+
+
+def test_worktree_creation_logs_its_phase_timings(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _init_repo(tmp_path)
+
+    with caplog.at_level("INFO", logger="vibe"):
+        _prepare("feature", tmp_path)
+
+    [message] = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Worktree created")
+    ]
+    assert message.startswith("Worktree created name=feature total_ms=")
+    assert "base_ref_ms=" in message
+    assert "checkout_ms=" in message
+
+
 def test_named_worktree_reserves_its_claim_before_creating(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2218,6 +2352,73 @@ def test_auto_worktree_still_dedupes_a_suggested_name(tmp_path: Path) -> None:
     assert first.name == "repair-oauth"
     assert second.name == "repair-oauth-2"
     assert first.root != second.root
+
+
+def test_fork_worktree_starts_from_source_head_in_an_independent_checkout(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A managed worktree with a commit absent from the primary checkout.
+    *Do*: Fork that worktree through the repository lifecycle.
+    *Assert*: The fork has that commit on a distinct branch and filesystem path.
+    """
+    # Prepare
+    _init_repo(tmp_path)
+    source = _prepare("source", tmp_path, branch="vibe/source")
+    source_project = source.path / "project"
+    source_project.mkdir()
+    source_file = source_project / "source-only.txt"
+    source_file.write_text("committed in source\n")
+    source_repo = _track_repo(Repo(source.root))
+    source_repo.index.add([str(source_file.relative_to(source.root))])
+    source_repo.index.commit("source change")
+
+    # Do
+    forked = _prepare_fork(source_project, suggested_name="source-fork")
+
+    # Assert
+    assert forked.path == forked.root / "project"
+    assert forked.path != source_project
+    assert forked.branch == "vibe/source-fork"
+    assert (forked.path / source_file.name).read_text() == "committed in source\n"
+    assert forked.source_had_uncommitted_changes is False
+    (forked.path / "fork-only.txt").write_text("fork\n")
+    assert not (source_project / "fork-only.txt").exists()
+
+
+def test_fork_worktree_reports_changes_left_in_the_source(tmp_path: Path) -> None:
+    """*Prepare*: A managed source with an untracked file after its latest commit.
+    *Do*: Fork the source from its committed HEAD.
+    *Assert*: The fork records that source-only work was not copied.
+    """
+    # Prepare
+    _init_repo(tmp_path)
+    source = _prepare("source", tmp_path, branch="vibe/source")
+    (source.path / "untracked.txt").write_text("source only\n")
+
+    # Do
+    forked = _prepare_fork(source.path, suggested_name="source-fork")
+
+    # Assert
+    assert forked.source_had_uncommitted_changes is True
+    assert not (forked.path / "untracked.txt").exists()
+
+
+def test_fork_dirty_check_ignores_the_primary_checkout(tmp_path: Path) -> None:
+    """*Prepare*: A clean source worktree and dirty primary checkout.
+    *Do*: Fork the source from its committed HEAD.
+    *Assert*: Only source-local changes control the omitted-work warning.
+    """
+    # Prepare
+    _init_repo(tmp_path)
+    source = _prepare("source", tmp_path, branch="vibe/source")
+    (tmp_path / "primary-untracked.txt").write_text("primary only\n")
+
+    # Do
+    forked = _prepare_fork(source.path, suggested_name="source-fork")
+
+    # Assert
+    assert forked.source_had_uncommitted_changes is False
+    assert not (forked.path / "primary-untracked.txt").exists()
 
 
 def test_auto_worktree_uses_random_slug_without_prompt(

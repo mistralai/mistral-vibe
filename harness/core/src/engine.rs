@@ -203,6 +203,7 @@ mod tests {
                     subagents: SubagentMode::Enabled,
                     background_processes: BackgroundProcessMode::Disabled,
                     command_environment: CommandEnvironment::Unix,
+                    permissions: None,
                 },
             },
             capabilities: Default::default(),

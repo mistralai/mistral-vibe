@@ -79,7 +79,9 @@ class ScheduledLoopCommands:
         )
 
 
-def _format_duration(seconds: int, *, short: bool = False) -> str:
+def _format_duration(seconds: int | None, *, short: bool = False) -> str:
+    if seconds is None:
+        return "unknown"
     units = ((86400, "d"), (3600, "h"), (60, "m"), (1, "s"))
     parts: list[str] = []
     for unit_seconds, suffix in units:

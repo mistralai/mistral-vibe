@@ -118,15 +118,19 @@ class ContextWarningMiddleware:
         if self.has_warned:
             return MiddlewareResult()
 
-        max_context = context.config.get_active_model().auto_compact_threshold
-        if max_context <= 0:
+        model = context.config.get_active_model()
+        threshold = model.auto_compact_threshold
+        if threshold <= 0:
             return MiddlewareResult()
 
-        if context.stats.context_tokens >= max_context * self.threshold_percent:
+        if context.stats.context_tokens >= threshold * self.threshold_percent:
             self.has_warned = True
 
-            percentage_used = (context.stats.context_tokens / max_context) * 100
-            warning_msg = f"<{VIBE_WARNING_TAG}>You have used {percentage_used:.0f}% of your total context ({context.stats.context_tokens:,}/{max_context:,} tokens)</{VIBE_WARNING_TAG}>"
+            # Report the compaction point, not the model's full window: a
+            # user who deliberately capped the conversation must not be told
+            # they have capacity they gave up.
+            percentage_used = (context.stats.context_tokens / threshold) * 100
+            warning_msg = f"<{VIBE_WARNING_TAG}>You have used {percentage_used:.0f}% of your context budget ({context.stats.context_tokens:,}/{threshold:,} tokens before older messages are summarized)</{VIBE_WARNING_TAG}>"
 
             return MiddlewareResult(
                 action=MiddlewareAction.INJECT_MESSAGE, message=warning_msg

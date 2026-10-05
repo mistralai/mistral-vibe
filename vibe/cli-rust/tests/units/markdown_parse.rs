@@ -1,10 +1,11 @@
-//! Markdown event-stream parsing: blocks, fences, autolinks and link targets.
+//! Markdown event-stream parsing: blocks, fences, autolinks, rules, tasks, images, and styles.
 
-use ratatui::style::{Modifier, Style};
-use vibe_rs::ui::markdown::{parse, Block};
+use ratatui::style::Modifier;
+use vibe_rs::ui::markdown::{parse, render, Block, Sc};
+use vibe_rs::ui::theme;
 
-fn text(inline: &[(char, Style)]) -> String {
-    inline.iter().map(|(c, _)| *c).collect()
+fn text(inline: &[Sc]) -> String {
+    inline.iter().map(|sc| sc.0).collect()
 }
 
 fn heading(blocks: &[Block]) -> (u8, String) {
@@ -147,10 +148,314 @@ fn bare_urls_autolink_inside_paragraphs() {
     };
     let underlined: String = inline
         .iter()
-        .filter(|(_, style)| style.add_modifier.contains(Modifier::UNDERLINED))
-        .map(|(c, _)| *c)
+        .filter(|sc| sc.1.add_modifier.contains(Modifier::UNDERLINED))
+        .map(|sc| sc.0)
         .collect();
     assert_eq!(underlined, "https://example.com/x");
+}
+
+#[test]
+fn strikethrough_styles_text_without_markers() {
+    let blocks = parse("~~gone~~");
+    let Block::Paragraph(inline) = &blocks[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(text(inline), "gone");
+    assert!(inline
+        .iter()
+        .all(|sc| sc.1.add_modifier.contains(Modifier::CROSSED_OUT)));
+}
+
+#[test]
+fn strikethrough_composes_with_emphasis() {
+    let blocks = parse("~~a *b*~~");
+    let Block::Paragraph(inline) = &blocks[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(text(inline), "a b");
+    assert!(inline
+        .iter()
+        .all(|sc| sc.1.add_modifier.contains(Modifier::CROSSED_OUT)));
+    let b: String = inline
+        .iter()
+        .filter(|sc| sc.1.add_modifier.contains(Modifier::ITALIC))
+        .map(|sc| sc.0)
+        .collect();
+    assert_eq!(b, "b");
+}
+
+#[test]
+fn rules_parse_between_paragraphs() {
+    let blocks = parse("a\n\n---\n\nb");
+    assert_eq!(blocks.len(), 3);
+    assert!(matches!(blocks[0], Block::Paragraph(_)));
+    assert!(matches!(blocks[1], Block::Rule));
+    assert!(matches!(blocks[2], Block::Paragraph(_)));
+}
+
+#[test]
+fn rules_accept_all_three_marker_forms() {
+    for src in ["---", "***", "___"] {
+        let blocks = parse(src);
+        assert_eq!(blocks.len(), 1, "{src:?}");
+        assert!(matches!(blocks[0], Block::Rule), "{src:?}");
+    }
+}
+
+#[test]
+fn rules_render_as_a_blank_padded_thematic_row() {
+    let lines = render("a\n\n---\n\nb", 12);
+    let rendered: Vec<String> = lines
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![
+            "".to_string(),
+            "  a".to_string(),
+            "".to_string(),
+            "  ────────".to_string(),
+            "".to_string(),
+            "  b".to_string(),
+        ]
+    );
+    assert_eq!(lines[3].spans[1].style.fg, Some(theme::md_rule()));
+}
+
+#[test]
+fn rules_lift_out_of_quotes_like_fences() {
+    let blocks = parse("> ---");
+    assert!(matches!(blocks[0], Block::Rule));
+}
+
+#[test]
+fn degenerate_widths_render_no_rule_cells() {
+    let lines = render("---", 2);
+    assert!(!lines
+        .iter()
+        .any(|line| line.spans.iter().any(|s| s.content.contains('─'))));
+}
+
+#[test]
+fn task_list_markers_stay_literal_item_text() {
+    let blocks = parse("- [ ] todo\n- [x] done\n- [X] upper");
+    let Block::List { start, items } = &blocks[0] else {
+        panic!("expected a list");
+    };
+    assert_eq!(*start, None);
+    assert_eq!(items.len(), 3);
+    assert_eq!(text(&items[0].inline), "[ ] todo");
+    assert_eq!(text(&items[1].inline), "[x] done");
+    assert_eq!(text(&items[2].inline), "[X] upper");
+}
+
+#[test]
+fn task_list_marker_appears_once_per_item() {
+    let blocks = parse("- [x] done");
+    let Block::List { items, .. } = &blocks[0] else {
+        panic!("expected a list");
+    };
+    assert_eq!(items[0].inline.iter().filter(|sc| sc.0 == 'x').count(), 1);
+    assert_eq!(text(&items[0].inline).matches("[x]").count(), 1);
+}
+
+#[test]
+fn alt_text_after_an_inner_link_keeps_the_image_link() {
+    let blocks = parse("![see [x](inner) more](img.png)");
+    let Block::Paragraph(inline) = &blocks[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(text(inline), "🖼  see x more");
+    let by_link = |id: Option<usize>| -> String {
+        inline
+            .iter()
+            .filter(|sc| sc.2 == id)
+            .map(|sc| sc.0)
+            .collect()
+    };
+    assert_eq!(by_link(Some(0)), "🖼  see  more");
+    assert_eq!(by_link(Some(1)), "x");
+    assert_eq!(by_link(None), "");
+}
+
+#[test]
+fn text_after_an_autolink_inside_a_link_keeps_the_outer_link() {
+    let blocks = parse("[see https://x.io tail](page)");
+    let Block::Paragraph(inline) = &blocks[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(text(inline), "see https://x.io tail");
+    let linked: String = inline
+        .iter()
+        .filter(|sc| sc.2.is_some())
+        .map(|sc| sc.0)
+        .collect();
+    assert_eq!(linked, "see https://x.io tail");
+}
+
+#[test]
+fn an_image_inside_an_image_keeps_the_outer_target() {
+    let blocks = parse("![a ![b](i2.png)](i1.png)");
+    let Block::Paragraph(inline) = &blocks[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(text(inline), "🖼  a 🖼  b");
+    let ids: Vec<Option<usize>> = inline.iter().map(|sc| sc.2).collect();
+    assert!(ids.iter().all(|id| *id == Some(0)));
+}
+
+#[test]
+fn images_render_as_an_emoji_prefixed_linked_alt() {
+    let blocks = parse("![alt text](https://example.com/i.png) tail");
+    let Block::Paragraph(inline) = &blocks[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(text(inline), "🖼  alt text tail");
+    let linked: String = inline
+        .iter()
+        .filter(|sc| sc.2.is_some())
+        .map(|sc| sc.0)
+        .collect();
+    assert_eq!(linked, "🖼  alt text");
+    let underlined: String = inline
+        .iter()
+        .filter(|sc| sc.1.add_modifier.contains(Modifier::UNDERLINED))
+        .map(|sc| sc.0)
+        .collect();
+    assert_eq!(underlined, "🖼  alt text");
+}
+
+#[test]
+fn hard_breaks_split_the_rendered_row_soft_breaks_do_not() {
+    let Block::Paragraph(inline) = &parse("line one,  \nline two.")[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(text(inline), "line one,\nline two.");
+    let rows: Vec<String> = render("line one,  \nline two.", 40)
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            "".to_string(),
+            "  line one,".to_string(),
+            "  line two.".to_string()
+        ]
+    );
+
+    let Block::Paragraph(soft) = &parse("line one\nline two.")[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(text(soft), "line one line two.");
+    assert_eq!(render("line one\nline two.", 40).len(), 2);
+}
+
+#[test]
+fn backslash_hard_breaks_also_split_the_row() {
+    let rows: Vec<String> = render("line one\\\nline two.", 40)
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            "".to_string(),
+            "  line one".to_string(),
+            "  line two.".to_string()
+        ]
+    );
+}
+
+#[test]
+fn emphasis_and_strong_style_their_text() {
+    let Block::Paragraph(inline) = &parse("plain *italic* **bold**")[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(text(inline), "plain italic bold");
+    let italic: String = inline
+        .iter()
+        .filter(|sc| sc.1.add_modifier.contains(Modifier::ITALIC))
+        .map(|sc| sc.0)
+        .collect();
+    assert_eq!(italic, "italic");
+    let bold: String = inline
+        .iter()
+        .filter(|sc| sc.1.add_modifier.contains(Modifier::BOLD))
+        .map(|sc| sc.0)
+        .collect();
+    assert_eq!(bold, "bold");
+}
+
+#[test]
+fn inline_code_keeps_its_text_and_gains_the_code_style() {
+    let Block::Paragraph(inline) = &parse("run `cargo test` now")[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(text(inline), "run cargo test now");
+    let code: String = inline
+        .iter()
+        .filter(|sc| sc.1.fg == Some(theme::md_code_inline()))
+        .map(|sc| sc.0)
+        .collect();
+    assert_eq!(code, "cargo test");
+}
+
+#[test]
+fn consecutive_hard_breaks_render_a_blank_row() {
+    let rows: Vec<String> = render("one\\\n\\\ntwo", 40)
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            "".to_string(),
+            "  one".to_string(),
+            "  ".to_string(),
+            "  two".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn hard_breaks_split_inside_quotes_and_list_items() {
+    let quote: Vec<String> = render("> one,  \ntwo", 40)
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    assert_eq!(
+        quote,
+        vec![
+            "".to_string(),
+            "".to_string(),
+            "  ▌ one,".to_string(),
+            "  ▌ two".to_string(),
+        ]
+    );
+
+    let item: Vec<String> = render("- one,  \ntwo", 40)
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    assert_eq!(
+        item,
+        vec![
+            "".to_string(),
+            "  • one,".to_string(),
+            "    two".to_string()
+        ]
+    );
+}
+
+#[test]
+fn raw_html_is_not_rendered() {
+    let blocks = parse("<div>ignored</div>\n\nsay <b>bold</b> inline");
+    let Block::Paragraph(inline) = &blocks[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(text(inline), "say bold inline");
 }
 
 #[test]
@@ -184,27 +489,37 @@ fn autolink_recognizes_emails_and_rejects_non_hosts() {
 }
 
 #[test]
-fn link_targets_pair_labels_with_urls_in_document_order() {
-    use vibe_rs::ui::markdown::targets as link_targets;
-    let pairs = link_targets("[docs](https://docs.example) and [code](https://x.io)");
-    assert_eq!(pairs[0], ("docs".into(), "https://docs.example".into()));
-    assert_eq!(pairs[1], ("code".into(), "https://x.io".into()));
+fn strikethrough_crosses_out_the_text() {
+    let blocks = parse("~~gone~~ kept");
+    let Block::Paragraph(inline) = &blocks[0] else {
+        panic!("expected a paragraph");
+    };
+    assert!(inline[0].1.add_modifier.contains(Modifier::CROSSED_OUT));
+    assert!(!inline
+        .last()
+        .unwrap()
+        .1
+        .add_modifier
+        .contains(Modifier::CROSSED_OUT));
 }
 
 #[test]
-fn link_targets_include_autolinks_and_code_labels() {
-    use vibe_rs::ui::markdown::targets as link_targets;
-    let pairs = link_targets("bare https://example.com plus [`flag`](https://c.io)");
-    assert_eq!(pairs[0].0, "https://example.com");
-    assert_eq!(pairs[0].1, "https://example.com");
-    assert_eq!(pairs[1].0, "flag");
-    assert_eq!(pairs[1].1, "https://c.io");
+fn task_list_items_keep_their_checkbox_text() {
+    let blocks = parse("- [ ] open\n- [x] done");
+    let Block::List { start: None, items } = &blocks[0] else {
+        panic!("expected a list");
+    };
+    assert_eq!(text(&items[0].inline), "[ ] open");
+    assert_eq!(text(&items[1].inline), "[x] done");
 }
 
 #[test]
-fn link_targets_skip_empty_labels_and_breaks_join_with_spaces() {
-    use vibe_rs::ui::markdown::targets as link_targets;
-    let pairs = link_targets("[](https://empty) then [two\nlines](https://split)");
-    assert_eq!(pairs.len(), 1);
-    assert_eq!(pairs[0].0, "two lines");
+fn images_render_the_glyph_pair_and_alt_as_a_link_label() {
+    let blocks = parse("![alt text](https://example.com/img.png)");
+    let Block::Paragraph(inline) = &blocks[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(text(inline), "\u{1f5bc}  alt text");
+    assert!(inline[0].1.add_modifier.contains(Modifier::UNDERLINED));
+    assert_eq!(inline[0].2, Some(0), "the image registers a link target");
 }

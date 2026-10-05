@@ -16,6 +16,13 @@ struct Drag {
     position: usize,
 }
 
+/// Where a track click lands relative to the thumb.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Above,
+    Below,
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct State {
     geometry: Option<Geometry>,
@@ -78,6 +85,41 @@ impl State {
         true
     }
 
+    /// Track side of `at` relative to the thumb; `None` on the thumb or outside the track.
+    pub fn track_side(&self, at: (u16, u16)) -> Option<Side> {
+        let geometry = self.geometry?;
+        let row = geometry.track_row(at)?;
+        let (start, end) = geometry.thumb();
+        if row < start {
+            return Some(Side::Above);
+        }
+        (row >= end).then_some(Side::Below)
+    }
+
+    /// Adopt `live` geometry while keeping this state's position, clamped to the new bounds.
+    pub fn follow(&mut self, live: State) {
+        let position = self.geometry.map(|geometry| geometry.position);
+        self.geometry = live.geometry.map(|mut geometry| {
+            if let Some(position) = position {
+                let max = geometry.virtual_size.saturating_sub(geometry.window_size);
+                geometry.position = position.min(max);
+            }
+            geometry
+        });
+    }
+
+    /// Move one page toward `side` (Textual `scroll_page_up`/`down`) and return the new position.
+    pub fn page(&mut self, side: Side) -> Option<usize> {
+        let geometry = self.geometry.as_mut()?;
+        let max = geometry.virtual_size.saturating_sub(geometry.window_size);
+        let position = match side {
+            Side::Above => geometry.position.saturating_sub(geometry.window_size),
+            Side::Below => geometry.position.saturating_add(geometry.window_size),
+        };
+        geometry.position = position.min(max);
+        Some(geometry.position)
+    }
+
     pub fn drag_to(&self, row: u16) -> Option<usize> {
         let (geometry, drag) = (self.geometry?, self.drag?);
         let delta = f64::from(row) - f64::from(drag.row);
@@ -117,22 +159,23 @@ impl State {
 }
 
 impl Geometry {
-    fn hits_thumb(self, (column, row): (u16, u16)) -> bool {
-        if column < self.area.x
-            || column >= self.area.right()
-            || row < self.area.y
-            || row >= self.area.bottom()
-        {
-            return false;
-        }
-        let (start, end) = thumb_rows(
+    fn hits_thumb(self, at: (u16, u16)) -> bool {
+        let (start, end) = self.thumb();
+        self.track_row(at)
+            .is_some_and(|row| row >= start && row < end)
+    }
+
+    fn track_row(self, at: (u16, u16)) -> Option<u16> {
+        self.area.contains(at.into()).then(|| at.1 - self.area.y)
+    }
+
+    fn thumb(self) -> (u16, u16) {
+        thumb_rows(
             self.area.height,
             self.virtual_size,
             self.window_size,
             self.position,
-        );
-        let local_row = row - self.area.y;
-        local_row >= start && local_row < end
+        )
     }
 }
 

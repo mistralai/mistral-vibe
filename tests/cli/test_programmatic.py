@@ -30,7 +30,11 @@ from vibe.core.types import Backend
 
 
 def _options() -> LocalHarnessOptions:
+    # These tests exercise the legacy programmatic lane end to end with the
+    # mock backend factory; the unflagged default is now the Unified Harness,
+    # so the legacy lane is selected explicitly.
     return LocalHarnessOptions(
+        legacy_harness=True,
         client=ClientDescriptor(
             info=ClientInfo(
                 name="vibe_programmatic", version="test", entrypoint="programmatic"

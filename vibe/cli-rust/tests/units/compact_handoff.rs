@@ -98,6 +98,7 @@ fn the_manual_response_adopts_the_replacement_session_and_drops_the_queue() {
         server_message_id: "queued-row".into(),
         text: "queued".into(),
         images: Vec::new(),
+        mentions: None,
         sent: true,
         ever_sent: true,
         revision: 1,

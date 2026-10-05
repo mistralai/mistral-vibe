@@ -99,7 +99,10 @@ def test_experimental_harness_factory_comes_from_harness_distribution(
 
     monkeypatch.setattr(_experimental_harness, "import_module", import_stub)
 
-    with pytest.raises(NotImplementedError, match="Harness stub selected"):
+    with pytest.raises(
+        _experimental_harness.ExperimentalHarnessUnavailableError,
+        match="Harness stub selected",
+    ):
         _experimental_harness.create_experimental_harness_host()
 
     assert imported_modules == ["mistralai_vibe_local_harness.vibe"]
@@ -109,15 +112,19 @@ def test_experimental_harness_factory_reports_unavailable_package(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def unavailable(_module_name: str):
-        raise ModuleNotFoundError
+        raise ModuleNotFoundError("No module named 'mistralai_vibe_local_harness'")
 
     monkeypatch.setattr(_experimental_harness, "import_module", unavailable)
 
     with pytest.raises(
-        _experimental_harness.ExperimentalHarnessUnavailableError,
-        match="^The Unified Harness backend is not available$",
-    ):
+        _experimental_harness.ExperimentalHarnessUnavailableError
+    ) as exc_info:
         _experimental_harness.create_experimental_harness_host()
+
+    message = str(exc_info.value)
+    assert "could not be loaded" in message
+    assert "--legacy-harness" in message
+    assert "uv tool upgrade mistral-vibe" in message
 
 
 def test_worktree_defaults_to_none(monkeypatch: pytest.MonkeyPatch) -> None:

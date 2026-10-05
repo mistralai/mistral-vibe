@@ -7,6 +7,10 @@ fn effect(entry: Value) -> EffectEntry {
     serde_json::from_value(entry).unwrap()
 }
 
+fn body(effect: &EffectEntry) -> Vec<String> {
+    effect.body().into_iter().map(|line| line.text).collect()
+}
+
 #[test]
 fn summary_reads_settled_suffix_and_running_status_text() {
     let running = effect(json!({
@@ -72,13 +76,13 @@ fn body_renders_error_reason_and_output_text_fallback() {
     let effect = |state: Value| effect(json!({"detail": base, "state": state}));
 
     let failed = effect(json!({"status": "failed", "error": {"message": "boom"}}));
-    assert_eq!(failed.body(), ["Error: boom"]);
+    assert_eq!(body(&failed), ["Error: boom"]);
 
     let skipped = effect(json!({"status": "skipped", "reason": "hook deny"}));
-    assert_eq!(skipped.body(), ["Skipped: hook deny"]);
+    assert_eq!(body(&skipped), ["Skipped: hook deny"]);
 
     let fallback = effect(json!({"status": "completed", "outputText": "deny reason"}));
-    assert_eq!(fallback.body(), ["deny reason"]);
+    assert_eq!(body(&fallback), ["deny reason"]);
 }
 
 #[test]
@@ -99,25 +103,25 @@ fn subagent_body_keeps_status_paths_and_generic_output() {
         spawn.clone(),
         json!({"status": "failed", "error": {"message": "boom"}}),
     );
-    assert_eq!(failed.body(), ["Error: boom"]);
+    assert_eq!(body(&failed), ["Error: boom"]);
 
     let skipped = effect(
         spawn.clone(),
         json!({"status": "skipped", "reason": "hook deny"}),
     );
-    assert_eq!(skipped.body(), ["Skipped: hook deny"]);
+    assert_eq!(body(&skipped), ["Skipped: hook deny"]);
 
     let cancelled = effect(
         wait.clone(),
         json!({"status": "cancelled", "reason": "user"}),
     );
-    assert_eq!(cancelled.body(), ["Skipped: user"]);
+    assert_eq!(body(&cancelled), ["Skipped: user"]);
 
     let fallback = effect(
         spawn.clone(),
         json!({"status": "completed", "outputText": "deny reason"}),
     );
-    assert_eq!(fallback.body(), ["deny reason"]);
+    assert_eq!(body(&fallback), ["deny reason"]);
 
     let success = effect(
         spawn,
@@ -125,11 +129,11 @@ fn subagent_body_keeps_status_paths_and_generic_output() {
             "response": "\x1b[31mdone\x1b[0m", "completed": true
         }}),
     );
-    assert_eq!(success.body(), ["response: done", "completed: True"]);
+    assert_eq!(body(&success), ["response: done", "completed: True"]);
 
     let wait_ok = effect(
         wait,
         json!({"status": "completed", "output": {"type": "success"}}),
     );
-    assert_eq!(wait_ok.body(), ["type: success"]);
+    assert_eq!(body(&wait_ok), ["type: success"]);
 }

@@ -39,8 +39,8 @@ pub fn occurrences(output: &crate::server::FileEditEffectOutput) -> Vec<DiffOccu
     if output.occurrences.is_empty() {
         return vec![DiffOccurrence {
             start_line: None,
-            old_lines: output.old_string.clone(),
-            new_lines: output.new_string.clone(),
+            old_lines: output.old_string.clone().unwrap_or_default(),
+            new_lines: output.new_string.clone().unwrap_or_default(),
         }];
     }
     output

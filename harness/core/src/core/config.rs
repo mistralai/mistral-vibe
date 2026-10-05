@@ -1,6 +1,5 @@
 use crate::core::error::CoreError;
-use serde::Deserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::capabilities::HarnessCapabilitySet;
@@ -11,6 +10,8 @@ use crate::core::features::large_output;
 use crate::core::features::programmatic_tool_calling;
 use crate::core::features::subagents;
 use crate::core::tools::command_environment::CommandEnvironment;
+
+use crate::core::features::permissions::PermissionPolicy;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct ProvidedToolDefinition {
@@ -116,6 +117,8 @@ pub(crate) struct ToolSettings {
     pub subagents: subagents::Mode,
     pub background_processes: background_processes::Mode,
     pub command_environment: CommandEnvironment,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<PermissionPolicy>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -342,5 +345,74 @@ mod tests {
             initial_state(config).unwrap_err().detail(),
             "direct tool name \"bash\" conflicts with a built-in tool"
         );
+    }
+
+    #[test]
+    fn preserves_permission_policy_when_harness_config_round_trips() {
+        let mut value = serde_json::to_value(config()).unwrap();
+        let permissions = json!({
+            "rules": [{
+                "tools": ["file_system.bash"],
+                "decision": "ask",
+                "allowlist": ["*git status*"],
+                "denylist": ["*production*"],
+                "sensitive": ["*sudo*"],
+            }],
+            "default": "deny",
+        });
+        value["settings"]["tools"]["permissions"] = permissions.clone();
+
+        let config: HarnessConfig =
+            serde_json::from_value(value).expect("permission policy deserializes");
+        let serialized = serde_json::to_value(config).expect("permission policy serializes");
+
+        assert_eq!(serialized["settings"]["tools"]["permissions"], permissions);
+    }
+
+    #[test]
+    fn rejects_harness_config_with_invalid_permission_pattern() {
+        let mut value = serde_json::to_value(config()).unwrap();
+        value["settings"]["tools"]["permissions"] = json!({
+            "rules": [{
+                "tools": ["["],
+                "decision": "deny",
+                "allowlist": [],
+                "denylist": [],
+                "sensitive": [],
+            }],
+            "default": "allow",
+        });
+
+        assert!(serde_json::from_value::<HarnessConfig>(value).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_permission_policy_field() {
+        let mut value = serde_json::to_value(config()).unwrap();
+        value["settings"]["tools"]["permissions"] = json!({
+            "rules": [],
+            "default": "allow",
+            "unexpected": true,
+        });
+
+        assert!(serde_json::from_value::<HarnessConfig>(value).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_permission_rule_field() {
+        let mut value = serde_json::to_value(config()).unwrap();
+        value["settings"]["tools"]["permissions"] = json!({
+            "rules": [{
+                "tools": ["file_system.read_file"],
+                "decision": "deny",
+                "allowlist": [],
+                "denylist": [],
+                "sensitive": [],
+                "unexpected": true,
+            }],
+            "default": "allow",
+        });
+
+        assert!(serde_json::from_value::<HarnessConfig>(value).is_err());
     }
 }

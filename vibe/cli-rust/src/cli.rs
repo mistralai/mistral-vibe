@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser};
 
-use crate::server::AgentConfig;
+use crate::server::{AgentConfig, WorktreeInput};
 
 const DELETED_CWD_ERROR: &str = "Error: Current working directory no longer exists.\n\n\
 The directory you started vibe from has been deleted. Please change to an existing directory \
@@ -25,7 +25,7 @@ pub enum OutputFormat {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "vibe", bin_name = "vibe", version = env!("CARGO_PKG_VERSION"), disable_version_flag = true, about = "Rust TUI for Vibe (PoC)")]
+#[command(name = "vibe", bin_name = "vibe", version = env!("CARGO_PKG_VERSION"), disable_version_flag = true, about = "Rust TUI for Vibe (PoC)", after_help = "Commands:\n  update         Check for a Vibe update now (same as --check-upgrade).")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<CliCommand>,
@@ -45,6 +45,10 @@ pub struct Cli {
     /// Resume a session. Without SESSION_ID, shows an interactive picker.
     #[arg(long = "resume", num_args = 0..=1, conflicts_with_all = ["continue_session", "prompt"])]
     pub resume: Option<Option<String>>,
+
+    /// Run onboarding/setup (Python CLI fallback).
+    #[arg(long = "setup", action = ArgAction::SetTrue)]
+    pub setup: bool,
 
     /// Initial prompt for the interactive session, or the prompt in headless mode.
     #[arg(num_args = 0..=1)]
@@ -97,6 +101,14 @@ pub struct Cli {
     #[arg(long = "trust", action = ArgAction::SetTrue)]
     pub trust: bool,
 
+    /// Run inside a git worktree under $VIBE_HOME/worktrees. With NAME,
+    /// create (or reuse) a worktree and branch named NAME. Without NAME,
+    /// create a new one named after the prompt (or a random slug). Combines
+    /// with `-c`/`--resume` like Python: the worktree is prepared first and
+    /// the resume is then scoped to the worktree directory.
+    #[arg(long = "worktree", num_args = 0..=1)]
+    pub worktree: Option<Option<String>>,
+
     /// Additional working directory for file access. Repeat the flag.
     #[arg(long = "add-dir")]
     pub add_dir: Vec<PathBuf>,
@@ -104,6 +116,25 @@ pub struct Cli {
     /// Feature flag for teleport (hidden).
     #[arg(long = "teleport", action = ArgAction::SetTrue, hide = true, conflicts_with = "prompt")]
     pub teleport: bool,
+
+    /// Check for a Vibe update now, prompt to install it, and exit.
+    #[arg(long = "check-upgrade", action = ArgAction::SetTrue)]
+    pub check_upgrade: bool,
+}
+
+/// Python `parse_arguments`: a leading bare `update` is the `--check-upgrade`
+/// command. Only a first-position exact match rewrites — `-- update` and
+/// `--prompt update` stay untouched. The vector includes the program name at
+/// index 0, matching the argv `Cli::parse_from` expects.
+pub fn rewrite_update_argv(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let mut args = args;
+    if args
+        .get(1)
+        .is_some_and(|first| first.as_os_str() == std::ffi::OsStr::new("update"))
+    {
+        args[1] = std::ffi::OsString::from("--check-upgrade");
+    }
+    args
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -260,6 +291,7 @@ pub struct HeadlessOptions {
     pub disabled_tools: Vec<String>,
     pub trust: bool,
     pub add_dir: Vec<PathBuf>,
+    pub worktree: Option<WorktreeInput>,
 }
 
 /// The execution-control config resolved from the CLI flags, sent to the
@@ -329,6 +361,26 @@ impl Cli {
         }
     }
 
+    /// The `--worktree` flag resolved into the wire `WorktreeInput` sent with
+    /// `session/start`. `--worktree NAME` creates (or reuses) a worktree whose
+    /// branch defaults to the name, as in Python `prepare(name)`. Bare
+    /// `--worktree` asks the server to name one from `auto_prompt` (the
+    /// interactive initial prompt or the headless prompt), falling back to a
+    /// random slug when there is none. An empty NAME is falsy in Python
+    /// (`if args.worktree:`) and means no worktree at all.
+    pub fn worktree_request(&self, auto_prompt: Option<String>) -> Option<WorktreeInput> {
+        match &self.worktree {
+            Some(Some(name)) if !name.is_empty() => Some(WorktreeInput::Create {
+                branch: name.clone(),
+                name: name.clone(),
+            }),
+            Some(None) => Some(WorktreeInput::Auto {
+                prompt: auto_prompt,
+            }),
+            Some(Some(_)) | None => None,
+        }
+    }
+
     /// Build headless options from the parsed CLI + stdin prompt. Agent and
     /// auto-approve go through `execution_control()` so `--smart-approve`
     /// resolves the agent in headless mode too, as in Python's post-parse
@@ -336,8 +388,8 @@ impl Cli {
     pub fn headless_options(&self, stdin_prompt: Option<String>) -> Option<HeadlessOptions> {
         let prompt = self.resolve_prompt(stdin_prompt)?;
         let execution_control = self.execution_control();
+        let worktree = self.worktree_request(Some(prompt.clone()));
         Some(HeadlessOptions {
-            prompt,
             output: self.output.clone(),
             max_turns: self.max_turns,
             max_price: self.max_price,
@@ -346,17 +398,25 @@ impl Cli {
             auto_approve: execution_control.auto_approve,
             enabled_tools: self.enabled_tools.clone(),
             disabled_tools: self.disabled_tools.clone(),
-            trust: self.trust,
+            // Python: `trust_workspace = bool(args.trust or args.worktree)`
+            // in programmatic mode (cli.py), where an empty NAME is falsy.
+            trust: self.trust || worktree.is_some(),
             add_dir: self.add_dir.clone(),
+            worktree,
+            prompt,
         })
     }
 
     /// The shared session flags for interactive mode, mirroring the Python
     /// interactive `SessionOptions` (cli.py): `--agent`, `--auto-approve` /
     /// `--yolo`, and `--smart-approve` (resolved via `execution_control()`),
-    /// the tool filters, `--trust`, and `--add-dir`. Budget flags stay
-    /// headless-only, as in Python.
-    pub fn interactive_agent_config(&self, cwd: Option<String>) -> Result<AgentConfig> {
+    /// the tool filters, `--trust`, `--add-dir`, and the resolved
+    /// `--worktree` request. Budget flags stay headless-only, as in Python.
+    pub fn interactive_agent_config(
+        &self,
+        cwd: Option<String>,
+        worktree: Option<WorktreeInput>,
+    ) -> Result<AgentConfig> {
         let execution_control = self.execution_control();
         Ok(AgentConfig {
             cwd,
@@ -368,8 +428,11 @@ impl Cli {
             max_price: None,
             max_session_tokens: None,
             headless: false,
-            trust_workspace: self.trust,
+            // Python: `trust_workspace = bool(args.trust or args.worktree)`
+            // (cli.py `_run_interactive_mode`).
+            trust_workspace: self.trust || worktree.is_some(),
             workspace_roots: crate::utils::paths::resolve_add_dirs(&self.add_dir)?,
+            worktree,
         })
     }
 

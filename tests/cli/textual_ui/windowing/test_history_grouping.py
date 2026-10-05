@@ -109,6 +109,24 @@ def test_history_assistant_message_breaks_group() -> None:
     assert isinstance(widgets[2], ToolGroup)
 
 
+def test_history_agent_change_does_not_break_group() -> None:
+    agent_change = PublicCheckpointEntry(
+        id="checkpoint-agent-change-1",
+        session_id="s1",
+        created_at=1,
+        updated_at=1,
+        generation_status=PublicEntryGenerationStatus.COMPLETED,
+        kind="agent_change",
+        details={"agent": "plan"},
+    )
+    batch: list[PublicHistoryEntry] = [_effect(0), agent_change, _effect(2)]
+    widgets = build_history_widgets(
+        batch, start_index=0, history_widget_indices=_indices(), tools_collapsed=True
+    )
+    assert len(widgets) == 1
+    assert isinstance(widgets[0], ToolGroup)
+
+
 def test_history_file_edit_grouped_with_reads() -> None:
     batch: list[PublicHistoryEntry] = [
         _effect(0, ToolEffectKind.FILE_READ),

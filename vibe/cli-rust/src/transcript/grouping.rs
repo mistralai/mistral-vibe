@@ -3,7 +3,7 @@
 use super::StoredEntry;
 use crate::server::{HistoryEntry, NoticeDetail};
 
-pub(super) const KEY_PREFIX: &str = "tool-group:";
+pub(crate) const KEY_PREFIX: &str = "tool-group:";
 
 #[derive(Clone, Copy)]
 pub enum Outcome {
@@ -65,7 +65,29 @@ pub fn effect_kind(entry: &HistoryEntry) -> Option<&str> {
     let HistoryEntry::Effect(effect) = entry else {
         return None;
     };
-    effect.detail.as_ref()?.kind.as_deref()
+    effect.kind()
+}
+
+/// Whether the entry paints no transcript row: a callback (the approval panel
+/// is transient), a server notice that only drives side effects (`push_notice`
+/// in `ui/transcript/entry/notice.rs` is the dispatch this must mirror), a
+/// server checkpoint other than a compaction or model change, or an
+/// unrecognized type. Python mounts no widget for them either, so such rows
+/// must not break a run of tool calls into consecutive blocks: all calls
+/// between them collapse into one block.
+pub fn renders_nothing(entry: &HistoryEntry, local: bool) -> bool {
+    if groups_with_tools(entry) {
+        return false;
+    }
+    match entry {
+        HistoryEntry::Callback(_) | HistoryEntry::Unknown => true,
+        HistoryEntry::Checkpoint(checkpoint) => {
+            !local && !matches!(checkpoint.kind.as_str(), "compaction" | "model_change")
+        }
+        // A fired loop paints on its prompt, so no server notice paints a row.
+        HistoryEntry::Notice(_) => !local,
+        _ => false,
+    }
 }
 
 pub fn outcome(entry: &HistoryEntry) -> Option<Outcome> {

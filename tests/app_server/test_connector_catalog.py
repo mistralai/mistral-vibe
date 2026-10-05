@@ -37,7 +37,7 @@ from vibe.app_server.connector_catalog import (
     connector_tool_enabled,
     resolve_connector_selection,
 )
-from vibe.app_server.protocol import ProtocolErrorCode
+from vibe.app_server.protocol import ConnectorAuthRequiredParams, ProtocolErrorCode
 from vibe.core.config import ConnectorConfig, VibeConfigSchema
 from vibe.core.identity import IdentityResult
 
@@ -1392,3 +1392,87 @@ async def test_successful_accept_discards_stale_pending_candidate(
     assert root.state.accepted_selection_revision == (
         accepted_selection.selection_revision
     )
+
+
+@pytest.mark.asyncio
+async def test_toggle_applies_to_the_accepted_catalog_after_the_cache_expires(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    now = [1_000]
+
+    async def fetch(_base_url: str, _api_key: str) -> object:
+        return {"connectors": [_connector()]}
+
+    orchestrator = _orchestrator()
+    service = ConnectorCatalogService(
+        implicit_source_enabled=False,
+        cache_path=tmp_path / "connectors.json",
+        fetch_bootstrap=fetch,
+        clock=lambda: now[0],
+    )
+    catalog = await service.resolve_catalog(orchestrator)
+    assert catalog is not None
+    root = _BusyConnectorControl(
+        orchestrator,
+        SessionConnectorState(
+            accepted_catalog_revision=catalog.revision,
+            accepted_selection_revision=service.resolve_selection(
+                orchestrator, catalog
+            ).selection_revision,
+            route_revision="routes:1",
+            sources=(
+                SessionConnectorSourceState(
+                    raw_id="connector-1",
+                    alias="wiki",
+                    display_name="wiki",
+                    status="connected",
+                ),
+            ),
+            discovery_errors={},
+        ),
+    )
+    root.busy = False
+    now[0] = 1_000 + 11 * 60
+
+    async def notify(*_args: object) -> None:
+        return None
+
+    await service.dispatch(
+        "connector_catalog/toggle",
+        {"sessionId": root.session_id, "alias": "wiki", "disabled": True},
+        root=cast(SessionBackend, root),
+        notify=notify,
+    )
+
+    assert [attempt[0] for attempt in root.attempts] == [catalog]
+    assert orchestrator.config.connectors[0].disabled is True
+
+
+@pytest.mark.asyncio
+async def test_an_auth_event_for_another_session_is_dropped_not_raised() -> None:
+    """*Prepare*: A root session and an auth event a subagent session raised.
+    *Do*: Accept the event.
+    *Assert*: It is dropped rather than failing the event loop that forwards it.
+    """
+    # Prepare
+    service = ConnectorCatalogService(implicit_source_enabled=False)
+    root = MagicMock(spec=SessionBackend)
+    root.session_id = "root-session"
+
+    # Do
+    accepted = await service.accept_auth_required(
+        ConnectorAuthRequiredParams(
+            session_id="child-session",
+            alias="github",
+            accepted_catalog_revision="catalog-1",
+            reason="gateway_rejected",
+        ),
+        raw_connector_id="github-id",
+        action="oauth",
+        root=root,
+        notify=AsyncMock(),
+    )
+
+    # Assert
+    assert accepted is None

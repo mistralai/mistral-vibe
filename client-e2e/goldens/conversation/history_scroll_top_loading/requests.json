@@ -1,0 +1,34 @@
+[
+ {
+  "method": "session/resume",
+  "params": {
+   "agentConfig": {
+    "cwd": "<cwd>"
+   },
+   "historyLimit": 200,
+   "sessionId": "00000000-0000-4000-8000-000000000003"
+  }
+ },
+ {
+  "method": "session/history/list",
+  "params": {
+   "page": {
+    "cursor": "saved-40",
+    "direction": "backward",
+    "limit": 200
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000003"
+  }
+ },
+ {
+  "method": "session/history/list",
+  "params": {
+   "page": {
+    "cursor": "saved-20",
+    "direction": "backward",
+    "limit": 200
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000003"
+  }
+ }
+]

@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import Any, assert_never, cast
 from uuid import uuid4
 
+from vibe.app_server._history_projection import project_message_content
 from vibe.app_server._patch import apply_json_patch
-from vibe.app_server._projection import project_message_content
 from vibe.app_server._root_session import rebind_history
 from vibe.app_server._tool_projection import project_effect_detail, project_effect_state
 from vibe.app_server._utils import now_ms

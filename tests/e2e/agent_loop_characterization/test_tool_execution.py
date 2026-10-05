@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from tests.e2e.agent_loop_characterization.support import (
     multi_tool_call_chunks,
     set_tool_denylist,
     single_tool_call_chunks,
+    tool_result_content,
     wait_for_request_count_while_draining_child_output,
 )
 from tests.e2e.common import (
@@ -123,6 +125,7 @@ def test_denylisted_bash_tool_does_not_run_and_is_reported_to_the_model(
 
 
 @pytest.mark.timeout(40)
+@pytest.mark.unified_default
 @pytest.mark.parametrize(
     "streaming_mock_server",
     [pytest.param(_failing_bash_factory, id="failing-bash-tool")],
@@ -146,7 +149,9 @@ def test_failed_bash_tool_result_is_reported_to_the_model_and_turn_recovers(
             expected_count=1,
             timeout=10,
         )
-        answer_approval(child, captured, tool_name="bash", key="y")
+        # The unified runtime names builtins by their canonical route
+        # (``file_system.bash`` stands for Vibe's ``bash``).
+        answer_approval(child, captured, tool_name="file_system.bash", key="y")
         wait_for_request_count_while_draining_child_output(
             child,
             captured,
@@ -161,11 +166,15 @@ def test_failed_bash_tool_result_is_reported_to_the_model_and_turn_recovers(
         send_ctrl_c_until_quit_confirmation(child, captured, timeout=5)
         child.expect(pexpect.EOF, timeout=10)
 
-    assert_tool_result_contains(
-        streaming_mock_server.requests[1],
-        call_id=FAILING_BASH_CALL_ID,
-        expected="Return code: 1",
+    # The unified runtime reports the failed shell as a structured result
+    # (JSON fields) rather than legacy's prose summary. Parse the payload
+    # instead of pinning the exact serialization.
+    shell_outcome = json.loads(
+        tool_result_content(
+            streaming_mock_server.requests[1], call_id=FAILING_BASH_CALL_ID
+        )
     )
+    assert shell_outcome["returncode"] == 1
     assert_tool_result_contains(
         streaming_mock_server.requests[1],
         call_id=FAILING_BASH_CALL_ID,

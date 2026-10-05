@@ -22,14 +22,13 @@ proto  ── serde types for the SUBSET of methods/notifications we use
 - Keep pure-logic tests in `tests/units/<name>.rs` and register them in `tests/units.rs` so they share one integration-test binary. Keep tests that need process-global isolation in separate `tests/<name>.rs` binaries. Cover Rust rendering and interaction behavior with `client-e2e` scenarios and goldens -- see the `migrate-cli-to-rust` skill.
 - No files with >300 lines of code allowed, simplicity is very important, keep things in separate modules.
 - This is the rewrite of the python code, when naming things, try to keep the same names as in the python code.
-- Care about bijection principle, you must respect it at all costs
+- When implementing a feature, port it from the Python CLI and keep its behavior by default. Diverge only when it yields a more coherent design, a bug fix, or a better UX, or when a Rust-only feature is explicitly requested. Such divergences do not require updating the Python CLI.
 - No multi line comments ! Very short modeule docstrings
-- When asked to fix something in the rust side or migration eval, don't fix the code directly, if you are on the paulvezia/rewrite_rust branch, always create a worktree and fix the code there
-- No unit tests allowed in rust files !!
+- Unit tests are welcome, but never inline in source files: no `#[cfg(test)] mod tests { ... }` blocks under `src/`. Test through the crate API from `tests/` (see the layout rule above). When a test needs private items, put it in a child module file under the module's directory (`src/foo/tests.rs` for `src/foo.rs` or `src/foo/mod.rs`), declared with `#[cfg(test)] mod tests;`.
 
 ## First MVP
 
-- We need basic conversation working, same UI, all other features can be there but failing gracefully like "not implemented"
+- We need basic conversation working, same UI by default, all other features can be there but failing gracefully like "not implemented"
 
 ## Client end-to-end scenarios
 

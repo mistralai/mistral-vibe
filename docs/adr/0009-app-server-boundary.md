@@ -64,6 +64,7 @@ session durability, or shared runtime:
 | Private session storage and public projections | Rendering public models |
 | Canonical cwd, workspace roots, trust, and prompt preparation | Display aliases and autocomplete presentation |
 | Effective config, persistence, agents, and model selection | Applying an accepted theme |
+| Credential custody: keyring and `$VIBE_HOME/.env` persistence (`setup/store-credential`) | Presenting credentials; the client never writes them |
 | Tools, permissions, effects, and model-visible results | Clipboard integration |
 | Skills, hooks, MCP, connectors, and subagents | Microphone, speaker, recording, and playback |
 | Scheduled loops, shell effects, reviews, and integrations | Advertised client-hosted filesystem or terminal calls |
@@ -165,7 +166,11 @@ once per connection. Creating a server does not eagerly create an agent runtime
 or load a workspace session.
 
 `AppServerHost` supports passive session list/read/history/delete, config-schema,
-and workspace-trust operations. Opening a session transfers that connection to
+and workspace-trust operations. It also owns the session-less setup method
+family — `setup/status`, `setup/store-credential`, and `setup/submit-choices` —
+which is valid on an initialized connection before any session: no session, no
+trust gate, and no runtime exist yet, so setup persistence is a host operation
+rather than a session one. Opening a session transfers that connection to
 `AppServerSession`; the same facade is not both a passive host and an attached
 runtime client.
 

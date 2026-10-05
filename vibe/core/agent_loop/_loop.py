@@ -37,7 +37,12 @@ from vibe.core.compaction.context import (
     reorder_for_tool_adjacency,
     select_model_context,
 )
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
+from vibe.core.config import (
+    ModelConfig,
+    ProviderConfig,
+    UtilityFeature,
+    VibeConfigSchema,
+)
 from vibe.core.config.harness_files import (
     HarnessFilesManager,
     get_harness_files_manager,
@@ -658,6 +663,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._user_plan: str | None = None
 
         self.format_handler = APIToolFormatHandler()
+        self._seen_tool_call_ids: set[str] = set()
 
         self._injected_backend = backend
         self.backend = self.backend_factory()
@@ -2177,7 +2183,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         # Only refresh periodically when the title runs on the cheap fast model;
         # otherwise it falls back to the active model and must stay bounded.
-        periodic = is_fast_utility_model(self.config)
+        periodic = is_fast_utility_model(self.config, feature=UtilityFeature.TITLE)
         ticket = self._title_cadence.begin_if_due(
             periodic=periodic, turn_completing=turn_completing
         )
@@ -2243,6 +2249,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 config=self.config,
                 previous_title=self.session_logger.title,
                 policy=self._title_policy,
+                launch_context=self.launch_context,
+                session_id=session_id,
+                telemetry=self.telemetry_client,
             )
             if title is None:
                 self._title_cadence.restore(ticket)
@@ -3199,6 +3208,28 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 f"API error from {provider.name} (model: {model.name}): {e}"
             ) from e
 
+    def _unique_tool_call_ids(
+        self, message: LLMMessage, renamed: dict[str, str]
+    ) -> LLMMessage:
+        # Some backends restart tool call ids (call_0) on every completion.
+        if not message.tool_calls:
+            return message
+        if not renamed:
+            self._seen_tool_call_ids.update(
+                tc.id for m in self.messages for tc in m.tool_calls or [] if tc.id
+            )
+        tool_calls: list[ToolCall] = []
+        for tc in message.tool_calls:
+            if tc.id is None:
+                tool_calls.append(tc)
+                continue
+            if tc.id not in renamed:
+                seen = tc.id in self._seen_tool_call_ids
+                renamed[tc.id] = uuid4().hex[:9] if seen else tc.id
+                self._seen_tool_call_ids.add(renamed[tc.id])
+            tool_calls.append(tc.model_copy(update={"id": renamed[tc.id]}))
+        return message.model_copy(update={"tool_calls": tool_calls})
+
     async def _chat(
         self,
         model_override: ModelConfig | None = None,
@@ -3214,6 +3245,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             tools=self.format_handler.get_available_tools(self.tool_manager),
             tool_choice=self.format_handler.get_tool_choice(),
             call_type=call_type,
+        )
+        result = result.model_copy(
+            update={"message": self._unique_tool_call_ids(result.message, {})}
         )
         self.messages.append(result.message)
         if result.stop and result.stop.is_refusal:
@@ -3253,6 +3287,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         )
 
         chunk_agg: LLMChunk | None = None
+        renamed_tool_call_ids: dict[str, str] = {}
         start_time = time.perf_counter()
         try:
             logger.debug(
@@ -3276,8 +3311,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             ):
                 if chunk.correlation_id:
                     self.telemetry_client.last_correlation_id = chunk.correlation_id
-                processed_message = self.format_handler.process_api_response_message(
-                    chunk.message
+                processed_message = self._unique_tool_call_ids(
+                    self.format_handler.process_api_response_message(chunk.message),
+                    renamed_tool_call_ids,
                 )
                 processed_chunk = LLMChunk(
                     message=processed_message, usage=chunk.usage, stop=chunk.stop

@@ -16,8 +16,13 @@ from vibe.cli.update_notifier import (
     UpdateGatewayCause,
     UpdateGatewayError,
 )
+from vibe.cli.update_notifier.gateway_factory import uv_tool_receipt_path
 
 UPDATE_CACHE_TTL_SECONDS = 24 * 60 * 60
+
+# Sentinel stored in `source_stored_at` to void the Rust client's `source`
+# tag pairing; a real stored timestamp is never negative.
+_UNPAIRED_SOURCE_TAG = -1
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,13 +82,26 @@ async def _write_update_cache(
 ) -> None:
     previous = await repository.get()
     timestamp = get_current_timestamp()
+    # This write replaces the entry's answer without knowing a manager, so it
+    # voids the Rust client's `source` pairing (-1 never matches a stored
+    # timestamp): a stale tag must not keep speaking for the new version, not
+    # even when the rewrite lands in the same whole second as the tagged write.
     if previous is None:
         await repository.set(
-            UpdateCache(latest_version=version, stored_at_timestamp=timestamp)
+            UpdateCache(
+                latest_version=version,
+                stored_at_timestamp=timestamp,
+                source_stored_at=_UNPAIRED_SOURCE_TAG,
+            )
         )
         return
     await repository.set(
-        replace(previous, latest_version=version, stored_at_timestamp=timestamp)
+        replace(
+            previous,
+            latest_version=version,
+            stored_at_timestamp=timestamp,
+            source_stored_at=_UNPAIRED_SOURCE_TAG,
+        )
     )
 
 
@@ -164,25 +182,55 @@ async def get_update_if_available(
 
 
 UPDATE_COMMANDS = ["uv tool upgrade mistral-vibe", "brew upgrade mistral-vibe"]
+FORCE_REINSTALL_COMMAND = "uv tool install --force mistral-vibe@latest"
+INSTALLED_VERSION_COMMAND = "vibe --version"
 
 
-async def do_update() -> bool:
-    any_succeeded = False
+async def do_update(latest_version: str) -> bool:
     for command in UPDATE_COMMANDS:
-        process = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            stdin=asyncio.subprocess.DEVNULL,
-        )
-        try:
-            await process.wait()
-        except asyncio.CancelledError:
-            await _terminate(process)
-            raise
-        if process.returncode == 0:
-            any_succeeded = True
-    return any_succeeded
+        await _run_shell(command)
+    return await _is_installed(latest_version)
+
+
+def is_uv_tool_install() -> bool:
+    return uv_tool_receipt_path().is_file()
+
+
+async def force_reinstall_latest(latest_version: str) -> bool:
+    await _run_shell(FORCE_REINSTALL_COMMAND)
+    return await _is_installed(latest_version)
+
+
+async def _is_installed(latest_version: str) -> bool:
+    latest = _parse_version(latest_version)
+    installed = await _read_installed_version()
+    return latest is not None and installed is not None and installed >= latest
+
+
+async def _read_installed_version() -> Version | None:
+    returncode, stdout = await _run_shell(INSTALLED_VERSION_COMMAND)
+    if returncode != 0 or not (words := stdout.decode(errors="replace").split()):
+        return None
+    return _parse_version(words[-1])
+
+
+async def _run_shell(command: str) -> tuple[int | None, bytes]:
+    process = await asyncio.create_subprocess_shell(
+        command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        stdin=asyncio.subprocess.DEVNULL,
+    )
+    return await _communicate(process)
+
+
+async def _communicate(process: asyncio.subprocess.Process) -> tuple[int | None, bytes]:
+    try:
+        stdout, _ = await process.communicate()
+    except asyncio.CancelledError:
+        await _terminate(process)
+        raise
+    return process.returncode, stdout
 
 
 async def _terminate(process: asyncio.subprocess.Process) -> None:

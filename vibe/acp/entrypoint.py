@@ -7,7 +7,11 @@ import os
 import sys
 
 from vibe import __version__
-from vibe._experimental_harness import add_experimental_harness_argument
+from vibe._experimental_harness import (
+    ExperimentalHarnessUnavailableError,
+    add_experimental_harness_argument,
+    require_experimental_harness,
+)
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.harness_files import init_harness_files_manager
 from vibe.core.paths import LOG_FILE, bootstrap_vibe_home
@@ -40,7 +44,10 @@ def parse_arguments() -> Arguments:
         "--legacy-harness",
         action="store_true",
         default=False,
-        help="Force the legacy Python harness, overriding the GrowthBook rollout.",
+        help=(
+            "Force the legacy Python harness. Temporary escape hatch, kept "
+            "until the legacy runtime is removed."
+        ),
     )
     args = parser.parse_args()
     return Arguments(
@@ -101,11 +108,21 @@ def main() -> None:
         except Exception:
             pass  # error reporting disabled
 
-    run_acp_server(
-        environ_before_dotenv_load=environ_before_dotenv_load,
-        experimental_harness=args.experimental_harness,
-        legacy_harness=args.legacy_harness,
-    )
+    # The Unified Harness is the required default runtime. Fail before the
+    # ACP server starts serving: a missing or incompatible Runtime must abort
+    # startup with an actionable error, not surface as a per-session failure
+    # on the live protocol.
+    try:
+        if not args.legacy_harness:
+            require_experimental_harness()
+        run_acp_server(
+            environ_before_dotenv_load=environ_before_dotenv_load,
+            experimental_harness=args.experimental_harness,
+            legacy_harness=args.legacy_harness,
+        )
+    except ExperimentalHarnessUnavailableError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

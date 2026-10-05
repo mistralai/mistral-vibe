@@ -1,0 +1,62 @@
+[
+ {
+  "method": "session/start",
+  "params": {
+   "agentConfig": {
+    "cwd": "<cwd>",
+    "trustWorkspace": true,
+    "worktree": {
+     "branch": "feature",
+     "kind": "create",
+     "name": "feature"
+    }
+   },
+   "historyLimit": 200
+  }
+ },
+ {
+  "method": "setup/status",
+  "params": {
+   "provider": "mistral"
+  }
+ },
+ {
+  "method": "setup/store-credential",
+  "params": {
+   "apiKey": "test-key-123",
+   "customDomain": false,
+   "provider": "mistral"
+  }
+ },
+ {
+  "method": "setup/submit-choices",
+  "params": {
+   "consoleBaseUrl": "https://console.mistral.ai",
+   "provider": {
+    "apiBase": "https://api.mistral.ai/v1",
+    "apiKeyEnvVar": "MISTRAL_API_KEY",
+    "browserAuthAllowOriginRewrite": false,
+    "browserAuthApiBaseUrl": "https://console.mistral.ai/api",
+    "browserAuthBaseUrl": "https://console.mistral.ai",
+    "name": "mistral"
+   },
+   "theme": "ansi-dark",
+   "vibeBaseUrl": "https://chat.mistral.ai"
+  }
+ },
+ {
+  "method": "session/start",
+  "params": {
+   "agentConfig": {
+    "cwd": "<cwd>",
+    "trustWorkspace": true,
+    "worktree": {
+     "branch": "feature",
+     "kind": "create",
+     "name": "feature"
+    }
+   },
+   "historyLimit": 200
+  }
+ }
+]

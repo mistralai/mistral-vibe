@@ -11,7 +11,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from vibe.app_server._connection_protocol import ClientInfo
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
+from vibe.app_server._history_projection import project_message_history
 from vibe.app_server._model import ProtocolModel, validate_wire
 from vibe.app_server._project_links import (
     ProjectLinksAuthError,
@@ -22,10 +24,10 @@ from vibe.app_server._project_links import (
 )
 from vibe.app_server._projection import (
     project_config_view,
-    project_message_history,
     project_unified_agent_summaries,
 )
 from vibe.app_server._session_model import active_model_is_pinned
+from vibe.app_server._setup import SetupRequestHandler
 from vibe.app_server._state import build_stored_public_state, history_page
 from vibe.app_server._utils import now_ms, optional_time_ms, time_ms
 from vibe.app_server._workspace import (
@@ -91,7 +93,7 @@ from vibe.app_server.protocol import (
     WorkspaceWorktreeReapCancelParams,
     WorkspaceWorktreeReapParams,
     WorkspaceWorktreeReapResponse,
-    WorkspaceWorktreeRemoveParams,
+    WorkspaceWorktreeRemoveConfirmParams,
     WorkspaceWorktreeRemoveResponse,
     WorktreeRemoveOutcome,
 )
@@ -151,6 +153,9 @@ _HOST_METHODS = frozenset({
     # holding it, so the move is the record and nothing else.
     "session/relocate",
     "session/rename",
+    "setup/status",
+    "setup/store-credential",
+    "setup/submit-choices",
     "workspace/trust/decision",
     "workspace/trust/untrustedConfig",
     "workspace/trust/status",
@@ -170,11 +175,18 @@ class HostRequestHandler:
         harness_files: HarnessFilesManager,
         startup_issue: ConfigIssue | None = None,
         harness_selection_source: str | None = None,
+        *,
+        image_fallback: bool = False,
     ) -> None:
         self._harness_files = harness_files
+        # Always None from this server since VIBE-4903 (a Runtime that cannot
+        # load aborts startup); kept for wire compatibility with older servers
+        # that still fall back and report a startup issue.
         self._startup_issue = startup_issue
         self._harness_selection_source = harness_selection_source
+        self._image_fallback = image_fallback
         self._project_links = ProjectLinksController()
+        self._setup = SetupRequestHandler(harness_files)
 
     def handles(self, method: str) -> bool:
         return method in _HOST_METHODS
@@ -200,9 +212,18 @@ class HostRequestHandler:
         )
         return target.session_id, target.cwd or None
 
-    async def dispatch(self, method: str, raw_params: dict[str, Any]) -> DispatchResult:
+    async def dispatch(
+        self,
+        method: str,
+        raw_params: dict[str, Any],
+        *,
+        session_id: str | None = None,
+        client_info: ClientInfo | None = None,
+    ) -> DispatchResult:
         try:
-            response = await self._dispatch(method, raw_params)
+            response = await self._dispatch(
+                method, raw_params, session_id=session_id, client_info=client_info
+            )
         except WorkspaceTrustError as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
         except GitError as exc:
@@ -219,7 +240,14 @@ class HostRequestHandler:
             raise RequestFailure(ProtocolErrorCode.NOT_FOUND, str(exc)) from exc
         return DispatchResult(response)
 
-    async def _dispatch(self, method: str, raw_params: dict[str, Any]) -> ProtocolModel:
+    async def _dispatch(
+        self,
+        method: str,
+        raw_params: dict[str, Any],
+        *,
+        session_id: str | None = None,
+        client_info: ClientInfo | None = None,
+    ) -> ProtocolModel:
         match method:
             case "config/schema":
                 validate_wire(ConfigSchemaReadParams, raw_params)
@@ -232,10 +260,19 @@ class HostRequestHandler:
                 response = await self._list_agents(
                     validate_wire(AgentsListParams, raw_params)
                 )
+            case _ if method.startswith("setup/"):
+                # The server rejects pre-initialize requests, so a live
+                # setup call always carries the handshake's client info.
+                assert client_info is not None
+                response = await self._setup.dispatch(
+                    method, raw_params, client_info=client_info
+                )
             case _ if method.startswith("session/"):
                 response = await self._dispatch_session(method, raw_params)
             case _ if method.startswith("workspace/"):
-                response = await self._dispatch_workspace(method, raw_params)
+                response = await self._dispatch_workspace(
+                    method, raw_params, session_id=session_id
+                )
             case _ if method.startswith("projectLinks/"):
                 response = await self._dispatch_project_links(method, raw_params)
             case _:
@@ -325,7 +362,9 @@ class HostRequestHandler:
         orchestrator = await self._load_orchestrator(params.cwd)
         config = orchestrator.config
         view = project_config_view(
-            config, active_model_pinned=active_model_is_pinned(orchestrator)
+            config,
+            active_model_pinned=active_model_is_pinned(orchestrator),
+            image_fallback=self._image_fallback,
         )
         session_files = self._harness_files.for_session(self._cwd(params.cwd))
 
@@ -418,7 +457,7 @@ class HostRequestHandler:
         return response
 
     async def _dispatch_workspace(
-        self, method: str, raw_params: dict[str, Any]
+        self, method: str, raw_params: dict[str, Any], *, session_id: str | None = None
     ) -> ProtocolModel:
         match method:
             case "workspace/trust/status":
@@ -499,9 +538,14 @@ class HostRequestHandler:
                     Path(checkouts.session_cwd) if checkouts.session_cwd else None,
                 )
             case "workspace/git/worktrees/remove":
-                params = validate_wire(WorkspaceWorktreeRemoveParams, raw_params)
+                params = validate_wire(WorkspaceWorktreeRemoveConfirmParams, raw_params)
                 response = await asyncio.to_thread(
-                    worktree_remove_response, self._cwd(params.cwd)
+                    worktree_remove_response,
+                    self._cwd(params.cwd),
+                    force=params.force,
+                    delete_branch=params.delete_branch,
+                    session_id=session_id,
+                    inspect=params.inspect,
                 )
             case _:
                 raise method_not_found(method)
@@ -914,24 +958,63 @@ _WORKTREE_REMOVE_OUTCOMES: dict[WorktreeReleaseOutcome, WorktreeRemoveOutcome] =
 }
 
 
-def worktree_remove_response(cwd: Path) -> WorkspaceWorktreeRemoveResponse:
+def worktree_remove_response(
+    cwd: Path,
+    force: bool = False,
+    delete_branch: bool | None = None,
+    session_id: str | None = None,
+    inspect: bool = False,
+) -> WorkspaceWorktreeRemoveResponse:
     managed = ManagedWorktree.at(cwd)
     if managed is None:
         return WorkspaceWorktreeRemoveResponse(outcome="kept_unmanaged")
+    # Keeping a worktree is never a fault the caller can act on, and a failed
+    # removal leaves the work intact, so report it as kept.
     try:
-        release = managed.release()
+        # Read before releasing: the caller needs `branch_created` even on the
+        # outcomes that keep the worktree, to decide whether to ask about the branch.
+        record = managed.claim.read()
+        # The asking session's own holder is not "in use" on any path, so the count
+        # a caller reports is always the other holders.
+        held_by = managed.claim.holders_excluding(session_id)
     except (GitError, OSError) as e:
-        # Keeping a worktree is never a fault the caller can act on, and a
-        # failed removal leaves the work intact, so report it as kept.
-        logger.warning("Failed to remove worktree cwd=%s: %s", cwd, e)
+        logger.warning("Failed to read worktree claim cwd=%s: %s", cwd, e)
         return WorkspaceWorktreeRemoveResponse(outcome="kept_error", reasons=[str(e)])
-
+    branch_created = None if record is None else record.branch_created
+    holders = len(held_by)
+    # Every failure on every path maps to kept_error: keeping a worktree is
+    # never a fault the caller can act on, and a failed probe or removal
+    # leaves the work intact, so it is reported as kept.
+    try:
+        if inspect:
+            # The exit prompt's progress line: what a removal would do, asked
+            # before anything commits. The probe never mutates the claim.
+            release = managed.probe_release(session_id)
+        elif force:
+            release = managed.force_release(session_id, delete_branch)
+        else:
+            # The plain call keeps its historical contract: snapshot-then-remove,
+            # no holder discount. Desktop removes a deleted session's worktree
+            # this way, and the caller's own session was never passed before.
+            release = managed.release()
+    except (GitError, OSError) as e:
+        logger.warning(
+            "Failed to %s worktree cwd=%s: %s", "probe" if inspect else "remove", cwd, e
+        )
+        return WorkspaceWorktreeRemoveResponse(
+            outcome="kept_error",
+            reasons=[str(e)],
+            branch_created=branch_created,
+            holders=holders,
+        )
     return WorkspaceWorktreeRemoveResponse(
         outcome=_WORKTREE_REMOVE_OUTCOMES[release.outcome],
         root=None if release.root is None else str(release.root),
         branch=release.branch,
         branch_deleted=release.branch_deleted,
         reasons=list(release.reasons),
+        branch_created=branch_created,
+        holders=holders,
     )
 
 

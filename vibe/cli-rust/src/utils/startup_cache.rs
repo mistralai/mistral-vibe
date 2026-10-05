@@ -3,15 +3,15 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::now_unix;
 use crate::server::{AgentSafety, AgentSummary};
 use crate::utils::paths;
 
-const SCHEMA_VERSION: u32 = 8;
+const SCHEMA_VERSION: u32 = 9;
 const FILE_NAME: &str = "ui_startup_config.json";
 const MAX_CACHED_SKILLS: usize = 256;
 /// Maximum age of a cache entry, in unix seconds.
@@ -79,7 +79,8 @@ pub struct StartupConfig {
     pub autocopy_to_clipboard: bool,
     pub active_model: String,
     pub active_model_display_name: String,
-    pub active_model_supports_images: bool,
+    /// Python `config.images_supported`: model vision or a backend image describer.
+    pub images_supported: bool,
     pub models_count: usize,
     /// Configured default used to choose the startup label from `agents`.
     pub default_agent: String,
@@ -96,6 +97,14 @@ pub struct StartupConfig {
     pub context_window: u64,
     /// Whether the narrator requests turn summaries (Python `narrator_enabled`).
     pub narrator_enabled: bool,
+    /// Whether update checks run (Python `enable_update_checks`). Additive:
+    /// entries from before this field default to checking.
+    #[serde(default = "default_enable_update_checks")]
+    pub enable_update_checks: bool,
+    /// Whether update checks use the OS trust store (ADR 0015). Additive:
+    /// entries from before this field default to the bundled roots.
+    #[serde(default = "default_enable_system_trust_store")]
+    pub enable_system_trust_store: bool,
     /// Unix seconds when the cache was written; drives the TTL check.
     pub cached_at: i64,
 }
@@ -110,7 +119,7 @@ impl Default for StartupConfig {
             autocopy_to_clipboard: true,
             active_model: String::new(),
             active_model_display_name: String::new(),
-            active_model_supports_images: false,
+            images_supported: false,
             models_count: 0,
             default_agent: DEFAULT_AGENT.into(),
             agents: builtin_agents(),
@@ -123,16 +132,19 @@ impl Default for StartupConfig {
             mcp_servers_total: 0,
             context_window: 0,
             narrator_enabled: false,
+            enable_update_checks: true,
+            enable_system_trust_store: false,
             cached_at: 0,
         }
     }
 }
 
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or(0)
+fn default_enable_update_checks() -> bool {
+    true
+}
+
+fn default_enable_system_trust_store() -> bool {
+    false
 }
 
 fn release_prefix(version: &str) -> Option<(u64, u64)> {
@@ -226,8 +238,9 @@ impl StartupConfig {
                 .unwrap_or(true),
             active_model: format!("{model_name}[{thinking}]"),
             active_model_display_name: model_name.to_owned(),
-            active_model_supports_images: model
-                .get("supportsImages")
+            images_supported: config
+                .get("imagesSupported")
+                .or_else(|| model.get("supportsImages"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             models_count: config
@@ -276,6 +289,14 @@ impl StartupConfig {
                 .unwrap_or(0),
             narrator_enabled: config
                 .get("narratorEnabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            enable_update_checks: config
+                .get("enableUpdateChecks")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            enable_system_trust_store: config
+                .get("enableSystemTrustStore")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         })

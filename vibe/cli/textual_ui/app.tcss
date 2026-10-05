@@ -704,6 +704,15 @@ Markdown {
         & > MarkdownBlock:last-child {
             margin-bottom: 0;
         }
+
+        /* Headings inside a command message carry no margins: a rule that
+           touches one margin edge replaces the whole margin, so this zeroes
+           top and bottom together. A heading therefore follows its content
+           directly, and the gap before it is only the previous block's
+           bottom margin. */
+        MarkdownHeader {
+            margin: 0;
+        }
     }
 }
 

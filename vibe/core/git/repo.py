@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import cached_property
+import os
 from pathlib import Path
+import re
 import subprocess
 from typing import TYPE_CHECKING, Self
 
@@ -46,6 +50,17 @@ _NON_INTERACTIVE_GIT_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "neve
 # Every guarded call site pairs this with core.fsmonitor=, so both keys a
 # repository can use to make git run a command are neutralized.
 _NO_HOOKS_CONFIG = "core.hooksPath=/nonexistent-vibe-disabled-git-hooks"
+# Git writes a checkout's files one at a time by default, which dominates
+# `worktree add` on a large repository: for ~70k files it measured 12-19s
+# sequential against 6-10s parallel on a macOS laptop. Half the cores plus one
+# leaves room for the rest of the machine; the curve is flat past that point.
+# Only applied when the user has not chosen a worker count, since a -c override
+# would otherwise replace their setting.
+_CHECKOUT_WORKERS = (os.cpu_count() or 1) // 2 + 1
+# Git prints this on stderr for every percent a checkout advances, once asked
+# with --progress; it stays silent on a pipe otherwise. Matched in the C locale,
+# which the checkout is run under.
+_CHECKOUT_PROGRESS = re.compile(rb"Updating files:\s+\d+% \((\d+)/(\d+)\)")
 # Ordered by how likely each is to be the trunk of a repository that never set
 # origin/HEAD.
 CONVENTIONAL_BASE_BRANCHES = ("main", "master", "develop")
@@ -119,7 +134,7 @@ class RepoPaths:
     repo_root: Path
 
 
-def sanitized_git(repo: Repo) -> Git:
+def sanitized_git(repo: Repo, *extra_config: str, cwd: Path | None = None) -> Git:
     """A repository's git with the config keys that name commands
     overridden, for one command.
 
@@ -130,8 +145,14 @@ def sanitized_git(repo: Repo) -> Git:
     shared handle and then resets them, so a handle stored for reuse
     would run every command after the first unsanitized. Call this
     per command.
+
+    `cwd` runs the command in another checkout of the repository, such
+    as a linked worktree, through git's own -C.
     """
-    return repo.git(c=["core.fsmonitor=", _NO_HOOKS_CONFIG])
+    config = ["core.fsmonitor=", _NO_HOOKS_CONFIG, *extra_config]
+    if cwd is None:
+        return repo.git(c=config)
+    return repo.git(c=config, C=str(cwd))
 
 
 class GitRepo:
@@ -212,6 +233,14 @@ class GitRepo:
             branch=self.branch(),
             base_branch=self.base_branch(),
             repo_url=find_remote_url(self._repo),
+        )
+
+    def _has_uncommitted_changes(self) -> bool:
+        """Whether tracked or untracked work exists outside the current HEAD."""
+        return bool(
+            sanitized_git(self._repo)
+            .status("--porcelain", "--untracked-files=all")
+            .strip()
         )
 
     def github_remote(self) -> GitHubRemoteInfo | None:
@@ -464,23 +493,77 @@ class GitRepo:
         *,
         branch_created: bool,
         start_point: str | None = None,
+        on_checkout_progress: Callable[[int, int], None] | None = None,
     ) -> None:
+        """Create the worktree, then check its files out.
+
+        Two commands rather than one, because `worktree add` runs its checkout
+        in a child whose progress git only prints to a terminal. Checking out
+        separately with --progress reports it on a pipe too, as
+        `on_checkout_progress(completed_files, total_files)`, called on this
+        thread. It costs nothing measurable over the single command.
+        """
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
+            git = sanitized_git(self._repo)
             if branch_created:
-                create = ["add", "-b", branch, str(target)]
+                create = ["add", "--no-checkout", "-b", branch, str(target)]
                 # Omitted rather than defaulted, because git's own default is
                 # the invoking checkout's HEAD and that is the right answer for
                 # a repository with no remote to start from.
                 if start_point is not None:
                     create.append(start_point)
-                sanitized_git(self._repo).worktree(*create)
+                git.worktree(*create)
             else:
-                sanitized_git(self._repo).worktree("add", str(target), branch)
+                git.worktree("add", "--no-checkout", str(target), branch)
         except self._gitpy.git_command_error as e:
             raise GitError(
                 f"Failed to create worktree {target.name!r} for branch {branch!r}: {e}"
             ) from e
+        try:
+            self._check_out(target, on_checkout_progress)
+        except Exception as e:
+            # The worktree is registered by now, and git only cleans up after a
+            # failed `worktree add`, not after a failed checkout into one.
+            with suppress(GitError):
+                self.remove_worktree(target)
+            if not isinstance(e, GitError):
+                raise
+            raise GitError(
+                f"Failed to create worktree {target.name!r} for branch {branch!r}: {e}"
+            ) from e
+
+    def _check_out(
+        self, target: Path, on_progress: Callable[[int, int], None] | None
+    ) -> None:
+        git = sanitized_git(self._repo, *self._checkout_config(), cwd=target)
+        # Held for the whole read: GitPython kills the process and closes its
+        # pipes once this wrapper is garbage collected.
+        process = git.checkout(
+            "--progress",
+            "--force",
+            "--no-recurse-submodules",
+            as_process=True,
+            with_stdout=False,
+        )
+        proc = process.proc
+        errors: list[bytes] = []
+        pending = b""
+        while chunk := proc.stderr.read1(4096):
+            *lines, pending = re.split(rb"[\r\n]", pending + chunk)
+            for line in lines:
+                if match := _CHECKOUT_PROGRESS.search(line):
+                    if on_progress is not None:
+                        on_progress(int(match[1]), int(match[2]))
+                elif line.strip():
+                    errors.append(line)
+        if proc.wait() != 0:
+            raise GitError(b"\n".join([*errors, pending]).decode(errors="replace"))
+
+    def _checkout_config(self) -> tuple[str, ...]:
+        if self._repo.config_reader().has_option("checkout", "workers"):
+            return ()
+        return (f"checkout.workers={_CHECKOUT_WORKERS}",)
 
     # Carries git's error text and nothing else: this is a cleanup primitive,
     # and only the caller knows whether the failure is worth reporting and in

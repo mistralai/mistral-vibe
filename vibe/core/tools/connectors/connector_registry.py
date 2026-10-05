@@ -25,6 +25,11 @@ from vibe.core.tools.remote import MCPTool, MCPToolResult, RemoteTool, _OpenArgs
 from vibe.core.tools.ui import ToolResultDisplay
 from vibe.core.types import ToolStreamEvent
 from vibe.core.utils import run_sync
+from vibe.core.utils.exceptions import (
+    describe_exception,
+    first_of_type,
+    leaf_exceptions,
+)
 from vibe.observability.logging import logger
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
@@ -34,6 +39,7 @@ if TYPE_CHECKING:
 _BOOTSTRAP_TIMEOUT = 30.0
 _BOOTSTRAP_CACHE_TTL_SECONDS = 10 * 60
 _SERVER_ERROR_STATUS = 500
+_MCP_SESSION_TERMINATED_CODE = 32600
 
 
 async def call_tool_http(
@@ -269,24 +275,27 @@ def _bootstrap_error_message(exc: Exception) -> str:
 
 def _unwrap_http_status_error(exc: Exception) -> httpx.HTTPStatusError | None:
     """Extract an HTTPStatusError from an exception or ExceptionGroup."""
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc
-    if isinstance(exc, ExceptionGroup):
-        for inner in exc.exceptions:
-            if found := _unwrap_http_status_error(inner):
-                return found
-    if cause := exc.__cause__:
-        if isinstance(cause, httpx.HTTPStatusError):
-            return cause
+    if found := first_of_type(exc, httpx.HTTPStatusError):
+        return found
+    if isinstance(exc.__cause__, httpx.HTTPStatusError):
+        return exc.__cause__
     return None
 
 
-def _connector_error_message(
-    exc: Exception, connector_id: str, connector_name: str
+def _is_mcp_session_terminated(exc: BaseException) -> bool:
+    from mcp.shared.exceptions import McpError
+
+    # The MCP SDK reports any HTTP 404 from the server as this synthetic error.
+    return (
+        isinstance(exc, McpError)
+        and exc.error.code == _MCP_SESSION_TERMINATED_CODE
+        and exc.error.message == "Session terminated"
+    )
+
+
+def _single_connector_error_message(
+    exc: BaseException, connector_id: str, connector_name: str
 ) -> str:
-    """Return an actionable error message for connector proxy failures."""
-    if http_err := _unwrap_http_status_error(exc):
-        return _format_http_status_error(http_err, connector_name, connector_id)
     if isinstance(exc, httpx.TimeoutException):
         return (
             f"Connector '{connector_name}' timed out. "
@@ -295,15 +304,30 @@ def _connector_error_message(
     if isinstance(exc, httpx.ConnectError):
         return (
             f"Cannot reach connector proxy for '{connector_name}'. "
-            "Check your network connection."
+            f"Check your network connection. ({describe_exception(exc)})"
         )
-    if isinstance(exc, ExceptionGroup):
-        messages = [str(e) for e in exc.exceptions]
+    if _is_mcp_session_terminated(exc):
         return (
-            f"Connector '{connector_name}' call failed with multiple errors: "
-            + "; ".join(messages)
+            f"Connector '{connector_name}' (id: {connector_id}) gateway returned "
+            "HTTP 404 (MCP session terminated). If the API is behind a proxy, "
+            "check that it routes /v1/connectors-gateway/ to the Mistral API."
         )
-    return f"Connector '{connector_name}' call failed: {exc}"
+    return f"Connector '{connector_name}' call failed: {describe_exception(exc)}"
+
+
+def _connector_error_message(
+    exc: Exception, connector_id: str, connector_name: str
+) -> str:
+    """Return an actionable error message for connector proxy failures."""
+    if http_err := _unwrap_http_status_error(exc):
+        return _format_http_status_error(http_err, connector_name, connector_id)
+    leaves = leaf_exceptions(exc)
+    if len(leaves) == 1:
+        return _single_connector_error_message(leaves[0], connector_id, connector_name)
+    return (
+        f"Connector '{connector_name}' call failed with multiple errors: "
+        + "; ".join(describe_exception(leaf) for leaf in leaves)
+    )
 
 
 def create_connector_proxy_tool_class(
@@ -351,6 +375,12 @@ def create_connector_proxy_tool_class(
                     url, self._remote_name, payload, headers=headers
                 )
             except Exception as exc:
+                logger.warning(
+                    "Connector call failed connector=%s tool=%s",
+                    self._connector_name,
+                    self._remote_name,
+                    exc_info=exc,
+                )
                 msg = _connector_error_message(
                     exc, self._connector_id, self._connector_name
                 )

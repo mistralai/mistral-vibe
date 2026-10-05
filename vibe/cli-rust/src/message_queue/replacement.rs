@@ -34,7 +34,9 @@ pub(super) fn replace_group(app: &mut App, client: &Arc<Client>, server_message_
             (
                 item.message_id.clone(),
                 item.text.clone(),
-                item.images.clone(),
+                app.chat_input
+                    .pasted_images
+                    .attach(&item.text, item.images.clone()),
                 item.sent,
             )
         })
@@ -50,11 +52,12 @@ pub(super) fn replace_group(app: &mut App, client: &Arc<Client>, server_message_
     let tx = app.queue.tx.clone();
     let pending = app.commit_started();
     let client = client.clone();
+    let pastes = app.chat_input.collapsed_pastes.clone();
     tokio::spawn(async move {
         let prepared = async {
             let mut prompts = Vec::with_capacity(items.len());
             for (message_id, text, existing_images, sent) in items {
-                let mut prompt = prepare(&client, &session_id, &text).await?;
+                let mut prompt = prepare(&client, &session_id, &text, &existing_images).await?;
                 merge_edit_images(&mut prompt, &existing_images, &text);
                 prompts.push((message_id, text, prompt, sent));
             }
@@ -72,7 +75,9 @@ pub(super) fn replace_group(app: &mut App, client: &Arc<Client>, server_message_
             let covered = prompts
                 .into_iter()
                 .filter(|(_, _, _, sent)| !sent)
-                .map(|(message_id, text, prompt, _)| (message_id, text, prompt.images))
+                .map(|(message_id, text, prompt, _)| {
+                    (message_id, text, prompt.images, prompt.mentions)
+                })
                 .collect();
             Ok::<_, String>((text, merged, covered))
         }
@@ -83,7 +88,7 @@ pub(super) fn replace_group(app: &mut App, client: &Arc<Client>, server_message_
                     idempotency_key: new_message_id(),
                     session_id,
                     queue_item_id,
-                    entries: vec![entry(server_message_id.clone(), &prepared, &text)],
+                    entries: vec![entry(server_message_id.clone(), &prepared, &text, &pastes)],
                 };
                 (covered, replace_request(&client, params).await)
             }

@@ -70,6 +70,7 @@ from vibe.cli.textual_ui.widgets.tools import (
     entry_keeps_tool_group,
     is_manual_shell_entry,
 )
+from vibe.cli.textual_ui.windowing.history import history_entry_renders_widget
 from vibe.utils.tool_presentation import ToolEffectKind
 
 if TYPE_CHECKING:
@@ -164,6 +165,10 @@ class EventHandler:
     async def _handle_entry_added(
         self, entry: PublicHistoryEntry, loading_widget: LoadingWidget | None
     ) -> ToolCallMessage | None:
+        if isinstance(
+            entry, PublicCheckpointEntry
+        ) and not history_entry_renders_widget(entry):
+            return None
         if self.current_tool_group is not None and not entry_keeps_tool_group(entry):
             self._finalize_tool_group()
 

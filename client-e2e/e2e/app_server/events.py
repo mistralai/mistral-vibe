@@ -14,6 +14,7 @@ _fixture = json.loads(FIXTURE_PATH.read_text())
 SESSION_ID: str = _fixture["sessionId"]
 TURN_ID: str = _fixture["turnId"]
 QUEUE_ITEM_ID: str = _fixture["handshake"]["session/turn/enqueue"]["queueItemId"]
+CLEARED_SESSION_ID = "00000000-0000-4000-8000-000000000003"
 _TIMESTAMP = 1_787_593_260_000
 
 
@@ -26,11 +27,12 @@ def _entry(
     *,
     entry_id: str | None = None,
     generation_status: str = "completed",
+    session_id: str | None = None,
     **fields: Any,
 ) -> dict[str, Any]:
     return {
         "id": entry_id or str(uuid.uuid4()),
-        "sessionId": SESSION_ID,
+        "sessionId": session_id or SESSION_ID,
         "turnId": TURN_ID,
         "createdAt": _TIMESTAMP,
         "updatedAt": _TIMESTAMP,
@@ -41,11 +43,11 @@ def _entry(
     }
 
 
-def _added(entry: dict[str, Any]) -> AppServerEvent:
+def _added(entry: dict[str, Any], session_id: str | None = None) -> AppServerEvent:
     return _event(
         "history/entryAdded",
         {
-            "sessionId": SESSION_ID,
+            "sessionId": session_id or SESSION_ID,
             "emittedAt": _TIMESTAMP,
             "turnId": TURN_ID,
             "entry": entry,
@@ -66,15 +68,18 @@ def _updated(entry_id: str, patch: list[dict[str, Any]]) -> AppServerEvent:
     )
 
 
-def _turn(*, completed: bool, stop_reason: str | None = None) -> AppServerEvent:
+def _turn(
+    *, completed: bool, stop_reason: str | None = None, session_id: str | None = None
+) -> AppServerEvent:
+    resolved = session_id or SESSION_ID
     return _event(
         "turn/completed" if completed else "turn/started",
         {
-            "sessionId": SESSION_ID,
+            "sessionId": resolved,
             "emittedAt": _TIMESTAMP,
             "turn": {
                 "id": TURN_ID,
-                "sessionId": SESSION_ID,
+                "sessionId": resolved,
                 "status": "completed" if completed else "in_progress",
                 "startedAt": _TIMESTAMP,
                 "completedAt": _TIMESTAMP if completed else None,
@@ -86,18 +91,28 @@ def _turn(*, completed: bool, stop_reason: str | None = None) -> AppServerEvent:
     )
 
 
+def cleared_state() -> dict[str, Any]:
+    """Build the empty replacement state a `session/history/clear` answers with."""
+    state = json.loads(json.dumps(_fixture["handshake"]["session/start"]["state"]))
+    state["session"]["id"] = CLEARED_SESSION_ID
+    state["history"] = []
+    return state
+
+
 def paste(text: str) -> str:
     """Wrap clipboard text in terminal bracketed-paste markers."""
     return f"\x1b[200~{text}\x1b[201~"
 
 
-def turn_started() -> AppServerEvent:
-    return _turn(completed=False)
+def turn_started(session_id: str | None = None) -> AppServerEvent:
+    return _turn(completed=False, session_id=session_id)
 
 
-def turn_completed(stop_reason: str | None = None) -> AppServerEvent:
+def turn_completed(
+    stop_reason: str | None = None, session_id: str | None = None
+) -> AppServerEvent:
     """Build a `turn/completed`, optionally stopped for a reason (e.g. `limit`)."""
-    return _turn(completed=True, stop_reason=stop_reason)
+    return _turn(completed=True, stop_reason=stop_reason, session_id=session_id)
 
 
 def turn_failed(
@@ -161,6 +176,7 @@ def user_msg(
     *,
     images: list[dict[str, Any]] | None = None,
     entry_id: str | None = None,
+    session_id: str | None = None,
 ) -> AppServerEvent:
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     content.extend(
@@ -170,11 +186,13 @@ def user_msg(
         _entry(
             "message",
             entry_id=entry_id,
+            session_id=session_id,
             role="user",
             content=content,
             source="turn_start",
             userDisplayContent=None,
-        )
+        ),
+        session_id,
     )
 
 
@@ -218,18 +236,24 @@ def user_msg_with_images(
 
 
 def assistant_msg(
-    text: str, *, entry_id: str | None = None, generation_status: str = "completed"
+    text: str,
+    *,
+    entry_id: str | None = None,
+    generation_status: str = "completed",
+    session_id: str | None = None,
 ) -> AppServerEvent:
     return _added(
         _entry(
             "message",
             entry_id=entry_id,
             generation_status=generation_status,
+            session_id=session_id,
             role="assistant",
             content=[{"type": "text", "text": text}],
             source=None,
             userDisplayContent=None,
-        )
+        ),
+        session_id,
     )
 
 
@@ -634,6 +658,69 @@ def subagent_wait_completed(response: str) -> AppServerEvent:
     )
 
 
+def child_entry(entry: dict[str, Any], child_session_id: str) -> dict[str, Any]:
+    """Re-stamp a history entry as belonging to a child session."""
+    return {**entry, "sessionId": child_session_id}
+
+
+def child_history_state(
+    child_session_id: str, history: Sequence[dict[str, Any]]
+) -> dict[str, Any]:
+    """The session-scoped pin answering a child transcript `session/read`."""
+    return {
+        "state": {
+            "eventId": 9,
+            "session": {"id": child_session_id},
+            "history": list(history),
+        }
+    }
+
+
+def child_session_updated(
+    status: str = "running",
+    *,
+    child_session_id: str = "child-session",
+    name: str = "explore-1",
+    agent_type: str = "explore",
+    total_tokens: int = 0,
+    context_tokens: int | None = None,
+    created_at: int = _TIMESTAMP,
+) -> AppServerEvent:
+    """Build a `session/childSessionUpdated` notification (PublicChildSession)."""
+    status_union: dict[str, Any] = {"type": status}
+    if status in {"running", "blocked"}:
+        status_union["activeTurnId"] = TURN_ID
+    if status == "blocked":
+        status_union["callbackId"] = "callback-1"
+        status_union["reason"] = "waiting for input"
+    elif status == "failed":
+        status_union["message"] = "the subagent failed"
+
+    def usage(tokens: int) -> dict[str, Any]:
+        half = tokens // 2
+        return {
+            "inputTokens": half,
+            "outputTokens": tokens - half,
+            "totalTokens": tokens,
+        }
+
+    child: dict[str, Any] = {
+        "id": child_session_id,
+        "name": name,
+        "agentType": agent_type,
+        "status": status_union,
+        "tokenUsage": usage(total_tokens),
+        "createdAt": created_at,
+        "updatedAt": _TIMESTAMP,
+    }
+    if context_tokens is not None:
+        child["contextUsage"] = usage(context_tokens)
+    return _event(
+        "session/childSessionUpdated",
+        {"sessionId": SESSION_ID, "emittedAt": _TIMESTAMP, "childSession": child},
+    )
+
+
 def subagent_notification(response: str) -> AppServerEvent:
     """Build the parent-session message carrying a completed subagent response."""
     notification = {
@@ -707,10 +794,14 @@ def edit_file(
     occurrences: list[tuple[int | None, str, str]],
     *,
     replace_all: bool = False,
+    occurrences_only: bool = False,
 ) -> AppServerEvent:
     """Build a completed file-edit effect from `(start_line, old_text, new_text)`."""
     old_string = occurrences[0][1] if occurrences else ""
     new_string = occurrences[0][2] if occurrences else ""
+    # The unified harness projection reports occurrences with a null legacy pair.
+    output_old = None if occurrences_only else old_string
+    output_new = None if occurrences_only else new_string
     return _added(
         _entry(
             "effect",
@@ -739,8 +830,8 @@ def edit_file(
                 "status": "completed",
                 "output": {
                     "file": path,
-                    "oldString": old_string,
-                    "newString": new_string,
+                    "oldString": output_old,
+                    "newString": output_new,
                     "occurrences": [
                         {
                             "startLine": start_line,
@@ -1014,6 +1105,26 @@ def tool_approval_added(
     )
 
 
+def tool_approval_answered(
+    *, callback_id: str = "callback-tool-approval", decision: str = "approve"
+) -> AppServerEvent:
+    """Move the approval history entry to `answered`, as the projector does on reply."""
+    return _updated(
+        callback_id,
+        [
+            {
+                "op": "replace",
+                "path": "/state",
+                "value": {
+                    "status": "answered",
+                    "output": {"type": "approval", "decision": {"type": decision}},
+                },
+            },
+            {"op": "replace", "path": "/generationStatus", "value": "completed"},
+        ],
+    )
+
+
 def tool_approval(
     tool_name: str,
     effect_kind: str,
@@ -1148,4 +1259,161 @@ def web_search_completed(
             {"op": "replace", "path": "/generationStatus", "value": "completed"},
             {"op": "replace", "path": "/updatedAt", "value": _TIMESTAMP},
         ],
+    )
+
+
+def web_connector_call(
+    tool: str,
+    arguments: dict[str, Any],
+    structured_content: dict[str, Any],
+    *,
+    label: tuple[str, str, str],
+) -> AppServerEvent:
+    """Build a completed Unified `connector_web_search.<tool>` effect as the app server labels it."""
+    verb, noun, settled_verb = label
+    return _added(
+        _entry(
+            "effect",
+            title=f"connector_web_search.{tool}",
+            detail={
+                "toolName": f"connector_web_search.{tool}",
+                "display": {
+                    "summary": f"{verb} {noun}",
+                    "verb": verb,
+                    "message": noun,
+                    "settledVerb": settled_verb,
+                    "settledMessage": noun,
+                    "statusText": f"{verb} {noun}",
+                },
+                "kind": "tool",
+                "input": arguments,
+            },
+            state={
+                "status": "completed",
+                "output": {
+                    "type": "success",
+                    "content": [
+                        {"type": "text", "text": json.dumps(structured_content)}
+                    ],
+                    "structured_content": structured_content,
+                    "_meta": {"approval": {"decision": "execute"}},
+                },
+                "display": {"success": True, "verb": settled_verb, "message": noun},
+            },
+        )
+    )
+
+
+def worktree_settled(
+    *, cwd: str, name: str, branch: str, path: str, created: bool = True
+) -> AppServerEvent:
+    """Build the move announce (`session/updated` with `/cwd` + `/worktree`).
+
+    The real server sends it as soon as the worktree exists, before the move's
+    context rebuild; a client gating its UI on the worktree settles on it.
+    """
+    return _event(
+        "session/updated",
+        {
+            "eventId": 0,
+            "sessionId": SESSION_ID,
+            "emittedAt": _TIMESTAMP,
+            "patch": [
+                {"op": "replace", "path": "/cwd", "value": cwd},
+                {
+                    "op": "replace",
+                    "path": "/worktree",
+                    "value": {
+                        "name": name,
+                        "branch": branch,
+                        "path": path,
+                        "created": created,
+                    },
+                },
+            ],
+        },
+    )
+
+
+def worktree_failed(name: str, message: str) -> AppServerEvent:
+    """Build the pushed failed session-start worktree entry.
+
+    The real server emits one because a client gating its UI on the worktree
+    has no turn to carry the failure.
+    """
+    return _added(
+        _entry(
+            "effect",
+            title="worktree",
+            detail={
+                "toolName": "worktree",
+                "kind": "worktree",
+                "input": {"name": name, "branch": name, "path": ""},
+                "display": {
+                    "summary": f"worktree: {name}",
+                    "content": None,
+                    "suffix": "",
+                    "verb": "Creating",
+                    "message": name,
+                    "settledVerb": "Created",
+                    "settledMessage": name,
+                    "statusText": "Creating worktree",
+                },
+            },
+            state={
+                "status": "failed",
+                "error": {"code": "WorktreeError", "message": message},
+                "display": {
+                    "success": False,
+                    "verb": "Failed",
+                    "message": "Worktree creation failed",
+                },
+            },
+        )
+    )
+
+
+def worktree(
+    name: str,
+    *,
+    branch: str | None = None,
+    path: str,
+    created: bool = True,
+    session_id: str | None = None,
+) -> AppServerEvent:
+    """Build the settled session-start worktree effect (WorktreeEffect shape)."""
+    branch = branch if branch is not None else name
+    present_verb = "Creating" if created else "Reusing"
+    settled_verb = "Created" if created else "Reused"
+    settled_message = f"{name} on {branch}"
+    return _added(
+        _entry(
+            "effect",
+            title="worktree",
+            session_id=session_id,
+            detail={
+                "toolName": "worktree",
+                "kind": "worktree",
+                "input": {"name": name, "branch": branch, "path": path},
+                "display": {
+                    "summary": f"worktree: {name}",
+                    "content": None,
+                    "suffix": "",
+                    "verb": present_verb,
+                    "message": name,
+                    "settledVerb": settled_verb,
+                    "settledMessage": settled_message,
+                    "statusText": f"{present_verb} worktree",
+                },
+            },
+            state={
+                "status": "completed",
+                "display": {
+                    "success": True,
+                    "verb": settled_verb,
+                    "message": settled_message,
+                },
+            },
+        ),
+        session_id,
     )

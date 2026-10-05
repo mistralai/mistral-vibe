@@ -18,7 +18,6 @@ pub struct Search {
     pub anchor: Option<usize>,
     pub focused: bool,
     pub area: Rect,
-    pub recorded: bool,
 }
 
 pub fn focus(app: &mut App) {
@@ -56,7 +55,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return false;
     }
     match key.code {
-        KeyCode::Esc => app.mcp.search.focused = false,
+        // Esc closes the browser from the search field too, as in Python.
+        KeyCode::Esc => return false,
         KeyCode::Up => focus_list(app, true),
         KeyCode::Down | KeyCode::Enter | KeyCode::Tab => focus_list(app, false),
         _ => {

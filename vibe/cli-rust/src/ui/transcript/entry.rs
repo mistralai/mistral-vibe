@@ -13,7 +13,8 @@ mod startup;
 mod status;
 mod user;
 
-use super::super::{markdown, pulse, theme};
+use super::super::markdown::{self, LinkedLines};
+use super::super::{pulse, theme};
 use crate::transcript::TranscriptEntry;
 use bordered::{prefix, prefix_group_body, push_group_header};
 use effect::{push_effect, EffectView};
@@ -38,58 +39,57 @@ pub(super) struct ExpansionView {
 }
 
 pub(super) struct RenderedEntry {
-    lines: Vec<Line<'static>>,
+    lines: LinkedLines,
     prepared: Option<Arc<markdown::PreparedMarkdown>>,
     table_cells: bool,
-    links: Vec<(String, String)>,
-    link_kind: markdown::LinkKind,
 }
 
 pub(super) struct RenderedParts {
-    pub lines: Vec<Line<'static>>,
+    pub lines: LinkedLines,
     pub prepared: Option<Arc<markdown::PreparedMarkdown>>,
-    pub links: Vec<(String, String)>,
-    pub link_kind: markdown::LinkKind,
 }
 
 impl RenderedEntry {
-    fn owned(lines: Vec<Line<'static>>) -> Self {
+    fn owned(lines: LinkedLines) -> Self {
         Self {
             lines,
             prepared: None,
             table_cells: false,
-            links: Vec::new(),
-            link_kind: markdown::LinkKind::External,
         }
     }
 
     fn prepared(prepared: Arc<markdown::PreparedMarkdown>, table_cells: bool) -> Self {
         Self {
-            lines: Vec::new(),
+            lines: LinkedLines::default(),
             prepared: Some(prepared),
             table_cells,
-            links: Vec::new(),
-            link_kind: markdown::LinkKind::External,
         }
     }
 
-    fn prepend(&mut self, mut prefix: Vec<Line<'static>>) {
-        if let Some(prepared) = self.prepared.take() {
-            self.lines.extend_from_slice(prepared.lines());
+    fn prepend(&mut self, mut prefix: LinkedLines) {
+        match self.prepared.take() {
+            Some(prepared) => prefix.append(prepared.linked().clone()),
+            None => prefix.append(std::mem::take(&mut self.lines)),
         }
-        prefix.append(&mut self.lines);
         self.lines = prefix;
     }
 
     pub fn lines(&self) -> &[Line<'static>] {
         self.prepared
             .as_ref()
-            .map_or(&self.lines, |prepared| prepared.lines())
+            .map_or(self.lines.lines(), |prepared| prepared.lines())
     }
 
     pub fn prewrapped(&self, width: u16) -> bool {
         self.prepared.as_ref().map_or_else(
-            || width > 0 && self.lines.iter().all(|line| line.width() <= width as usize),
+            || {
+                width > 0
+                    && self
+                        .lines
+                        .lines()
+                        .iter()
+                        .all(|line| line.width() <= width as usize)
+            },
             |prepared| prepared.prewrapped(),
         )
     }
@@ -105,8 +105,6 @@ impl RenderedEntry {
         RenderedParts {
             lines: self.lines,
             prepared: self.prepared,
-            links: self.links,
-            link_kind: self.link_kind,
         }
     }
 }
@@ -125,14 +123,14 @@ pub(super) fn render(
     if let H::Message(value) = entry.entry {
         let mut rendered = message::render(entry, value, width, queue, rewind, pulse_frame, cache);
         if entry.queue_header {
-            let mut header = Vec::new();
+            let mut header = LinkedLines::default();
             push_queue_header(&mut header, width, queue.paused);
             rendered.prepend(header);
         }
         return rendered;
     }
 
-    let mut lines = Vec::new();
+    let mut lines = LinkedLines::default();
     if let Some(group) = &entry.group {
         if group.first {
             lines.push(Line::from(""));
@@ -148,7 +146,7 @@ pub(super) fn render(
             return RenderedEntry::owned(lines);
         }
     }
-    let mut content = Vec::new();
+    let mut content = LinkedLines::default();
     let content_width = width.saturating_sub(if entry.group.is_some() { 4 } else { 0 });
     let in_progress = entry.entry.in_progress();
     match entry.entry {
@@ -203,13 +201,8 @@ pub(super) fn render(
     if let Some(group) = &entry.group {
         prefix_group_body(&mut content, group.last);
     }
-    lines.extend(content);
-    let mut rendered = RenderedEntry::owned(lines);
-    if let H::Effect(effect) = entry.entry {
-        rendered.links = effect.source_links();
-        rendered.link_kind = markdown::LinkKind::External;
-    }
-    rendered
+    lines.append(content);
+    RenderedEntry::owned(lines)
 }
 
 /// Gutter width of the edit diff this entry paints, or `None` when it paints none.
@@ -223,14 +216,14 @@ pub(super) fn diff_gutter(entry: &TranscriptEntry<'_>, expanded: bool) -> Option
 }
 
 /// `.tool-group` packs its members, so only the entry opening the group is preceded by a gap.
-fn push_group_gap(lines: &mut Vec<Line<'static>>, grouped: bool) {
+fn push_group_gap(lines: &mut LinkedLines, grouped: bool) {
     if !grouped {
         lines.push(Line::from(""));
     }
 }
 
 fn push_reasoning(
-    lines: &mut Vec<Line<'static>>,
+    lines: &mut LinkedLines,
     text: &str,
     in_progress: bool,
     local: bool,
@@ -257,7 +250,7 @@ fn push_reasoning(
     }
 }
 
-fn push_interrupt(lines: &mut Vec<Line<'static>>) {
+fn push_interrupt(lines: &mut LinkedLines) {
     lines.push(Line::from(vec![
         prefix(true, theme::text(theme::foreground())),
         Span::styled(

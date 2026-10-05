@@ -8,6 +8,8 @@ use super::super::super::{pulse, theme};
 use super::super::diff;
 use super::effect_body::{push_edit_diff, push_effect_body, push_todo_body};
 use super::expand_marker;
+use crate::server::BodyLine;
+use crate::ui::markdown::LinkedLines;
 use crate::utils::{clean::clean_output, text};
 
 pub(super) struct EffectView<'a> {
@@ -43,7 +45,7 @@ pub(super) fn diff_gutter(
 }
 
 pub(super) fn push_effect(
-    lines: &mut Vec<Line<'static>>,
+    lines: &mut LinkedLines,
     effect: &crate::server::EffectEntry,
     view: EffectView<'_>,
     attached_output: Option<&str>,
@@ -61,14 +63,24 @@ pub(super) fn push_effect(
         stream_delta,
     } = view;
     let (verb, message, suffix) = effect.summary();
-    let mut body = effect.body();
-    if body.is_empty() {
-        body = attached_output
-            .map(|text| clean_output(text).lines().map(str::to_owned).collect())
-            .unwrap_or_default();
-    }
+    // Built only when shown: a collapsed row must not format its whole result every frame.
+    let body = || {
+        let body = effect.body();
+        if !body.is_empty() {
+            return body;
+        }
+        attached_output
+            .map(|text| {
+                clean_output(text)
+                    .lines()
+                    .map(|line| BodyLine::from(line.to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     let settled_open = settled_open(effect, in_progress);
-    let has_body = effect.has_body() || !body.is_empty();
+    let has_body =
+        effect.has_body() || attached_output.is_some_and(|text| !clean_output(text).is_empty());
     let shown = (expanded && has_body) || settled_open;
     // Python `has_body`: a settled collapsible result with nothing to unfold
     // shows the inert marker in the disclosure slot instead of the fold triangle.
@@ -176,21 +188,21 @@ pub(super) fn push_effect(
     match cache {
         Some(cache) => {
             let prepared = cache.prepare_lines(index, rev, width, theme::active_index(), || {
-                let mut result = Vec::new();
-                push_result(&mut result, effect, &body, width);
+                let mut result = LinkedLines::default();
+                push_result(&mut result, effect, &body(), width);
                 result
             });
-            lines.extend_from_slice(prepared.lines());
+            lines.append(prepared.linked().clone());
         }
-        None => push_result(lines, effect, &body, width),
+        None => push_result(lines, effect, &body(), width),
     }
 }
 
 /// The result body under the header: a pure function of the effect, its body, and width.
 fn push_result(
-    lines: &mut Vec<Line<'static>>,
+    lines: &mut LinkedLines,
     effect: &crate::server::EffectEntry,
-    body: &[String],
+    body: &[BodyLine],
     width: u16,
 ) {
     if let Some(output) = effect.file_edit_output() {

@@ -33,9 +33,6 @@ pub(super) fn list(call: Call, cwd: Option<String>) {
 
 pub(super) fn preview(client: Arc<Client>, tx: Sender<Event>, id: String, request: u64) {
     tokio::spawn(async move {
-        // Python debounces highlights without counting the timer as off-thread
-        // work, so a quick key sequence can settle before preview I/O starts.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let params = json!({"sessionId": id, "history": {"limit": PREVIEW_LIMIT}, "turns": null});
         let event = state(client.request(method::SESSION_READ, params).await)
             .map(|state| Event::Preview { request, state })

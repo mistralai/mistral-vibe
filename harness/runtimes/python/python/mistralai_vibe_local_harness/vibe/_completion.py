@@ -31,6 +31,7 @@ from mistralai_vibe_local_harness.vibe._credentials import (
 from mistralai_vibe_local_harness.vibe._runtime_config import (
     CompletionDelta,
     CompletionDeltaSink,
+    CompletionPurpose,
     LocalModelRoute,
     LocalRuntimeAdapterConfig,
     ProviderRetry,
@@ -336,16 +337,20 @@ def _text_length(content: Iterable[object]) -> int:
     )
 
 
-def _emit_request_sent(
-    action: RustLLMCallAction,
+def report_request_sent(
     messages: list[RustMessage],
     config: LocalRuntimeAdapterConfig,
     route: LocalModelRoute,
+    *,
+    purpose: CompletionPurpose,
+    iteration: int,
 ) -> None:
-    """Report the request's shape to the Host's per-completion telemetry sink.
+    """Report a completion request's shape to the Host's telemetry sink.
 
     Counts text characters across the whole context and uses the last user
-    message as the prompt size.
+    message as the prompt size. Shared by Core-driven LLM call actions and
+    Runtime-issued utility completions (the smart-approve classifier) so every
+    provider call is counted the same way.
     """
     sink = config.request_sent_sink
     if sink is None:
@@ -360,12 +365,23 @@ def _emit_request_sent(
     sink(
         RequestSentTelemetry(
             model=route.model,
-            purpose=action.purpose,
-            iteration=action.iteration,
+            purpose=purpose,
+            iteration=iteration,
             nb_context_chars=nb_context_chars,
             nb_context_messages=len(messages),
             nb_prompt_chars=nb_prompt_chars,
         )
+    )
+
+
+def _emit_request_sent(
+    action: RustLLMCallAction,
+    messages: list[RustMessage],
+    config: LocalRuntimeAdapterConfig,
+    route: LocalModelRoute,
+) -> None:
+    report_request_sent(
+        messages, config, route, purpose=action.purpose, iteration=action.iteration
     )
 
 

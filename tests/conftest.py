@@ -204,7 +204,7 @@ def config_dir(
     config_file = config_dir / "config.toml"
     config_file.write_text(tomli_w.dumps(get_base_config()), encoding="utf-8")
 
-    monkeypatch.setattr("vibe.utils.paths._DEFAULT_VIBE_HOME", config_dir)
+    monkeypatch.setattr("vibe.utils.vibe_home._DEFAULT_VIBE_HOME", config_dir)
     agents_dir = tmp_path / ".agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr("vibe.core.paths._agents_home._DEFAULT_AGENTS_HOME", agents_dir)
@@ -228,6 +228,8 @@ def _reset_trusted_folders_manager(config_dir: Path) -> None:
     """
     from vibe.core.trusted_folders import trusted_folders_manager
 
+    # Instance monkeypatches can leave restored methods bound to the singleton.
+    vars(trusted_folders_manager).clear()
     trusted_folders_manager._file_path = config_dir / "trusted_folders.toml"
     trusted_folders_manager._trusted = []
     trusted_folders_manager._untrusted = []
@@ -310,6 +312,26 @@ def _disable_auto_title_generation(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr("vibe.core.session.title_model.generate_session_title", _noop)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_model_availability(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep availability checks off the network; reset their state per test.
+
+    A test that needs a verdict records one with ``MODEL_AVAILABILITY.remember``.
+    """
+    from vibe.core.llm import model_probe
+
+    class _NoVerdictSource:
+        async def check(self, **_: Any) -> dict[str, bool]:
+            return {}
+
+    async def _no_verdict(**_: Any) -> None:
+        return None
+
+    monkeypatch.setattr(model_probe, "_probe", _no_verdict)
+    monkeypatch.setattr(model_probe.MODEL_AVAILABILITY, "_source", _NoVerdictSource())
+    model_probe.MODEL_AVAILABILITY.reset()
 
 
 @pytest.fixture(autouse=True)

@@ -22,14 +22,19 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
             .map(collapse_home)
             .unwrap_or_else(|| "-".into()),
     );
-    // While a Ctrl+C quit is pending the path is replaced by the confirm hint.
+    // While a quit is pending the path is replaced by the confirm hint.
     let pid = crate::replay::footer_pid_label(format!(" [PID {}]", std::process::id()));
     let muted = theme::muted_style();
-    let left = if app.quit_confirm_active() {
+    let left = if let Some(pending) = app.quit.active() {
+        let extra = if pending.extra.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", pending.extra)
+        };
         Line::from(vec![
             Span::styled("Press ", muted),
-            Span::styled("Ctrl+C", Style::default().fg(theme::primary())),
-            Span::styled(" again to quit", muted),
+            Span::styled(pending.key.label(), Style::default().fg(theme::primary())),
+            Span::styled(format!(" again to quit{extra}"), muted),
             Span::styled(pid, muted),
         ])
     } else {
@@ -167,7 +172,7 @@ fn format_context((current, max): (u64, u64)) -> String {
 }
 
 /// Abbreviate a token count: `x.yM`, `Nk`, or the raw number below one thousand.
-fn format_token_count(tokens: u64) -> String {
+pub(crate) fn format_token_count(tokens: u64) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
     } else if tokens >= 1_000 {

@@ -7,12 +7,13 @@ use ratatui::text::{Line, Span};
 
 use super::bordered::{body_width, prefix};
 use super::startup;
-use super::status::push_compact_status;
-use super::user::push_user;
+use super::status::{push_compact_status, push_teleport_status};
+use super::user::{push_user, UserView};
 use super::{QueueView, RenderedEntry};
 use crate::server::{MessageContent, MessageEntry};
 use crate::transcript::TranscriptEntry;
-use crate::ui::{markdown, theme};
+use crate::ui::markdown::{self, LinkedLines};
+use crate::ui::theme;
 use crate::utils::clean;
 use crate::utils::text;
 
@@ -25,21 +26,32 @@ pub(super) fn render(
     pulse_frame: usize,
     cache: Option<&mut markdown::MarkdownCache>,
 ) -> RenderedEntry {
-    let mut lines = Vec::new();
+    let mut lines = LinkedLines::default();
     match message.role.as_str() {
         "user" => push_user(
             &mut lines,
             message,
             width,
-            entry.pending,
-            queue.selected || rewind,
-            entry.follows_user,
-            entry.followed_by_user,
+            UserView::of(entry, queue.selected || rewind),
+        ),
+        "teleport_user" => push_user(&mut lines, message, width, UserView::default()),
+        "teleport_status" | "teleport_complete" => push_teleport_status(
+            &mut lines,
+            &message_text(message),
+            message.role == "teleport_complete",
+            entry.entry.in_progress(),
+            pulse_frame,
         ),
         "command" => push_command(&mut lines, &message_text(message)),
         "command_result" => push_command_result(&mut lines, &message_text(message), width),
         "command_error" => push_command_error(&mut lines, &message_text(message), width),
         "warning" => startup::push_warning(&mut lines, &message_text(message), width),
+        "subagent_info" => {
+            push_subagent_severity(&mut lines, &message_text(message), width, theme::success())
+        }
+        "subagent_error" => {
+            push_subagent_severity(&mut lines, &message_text(message), width, theme::error())
+        }
         "whats_new" => startup::push_whats_new(
             &mut lines,
             &message_text(message),
@@ -67,20 +79,7 @@ pub(super) fn render(
             return RenderedEntry::prepared(prepared, message.role == "assistant");
         }
     }
-    let mut rendered = RenderedEntry::owned(lines);
-    if message.role == "user" {
-        rendered.links = super::user::attachment_links(message);
-        rendered.link_kind = markdown::LinkKind::Attachment;
-    }
-    // The guttered banners carry markdown links; `warning` is a plain
-    // `NoMarkupStatic` and never a link source.
-    if matches!(
-        message.role.as_str(),
-        "whats_new" | "custom_tools_deprecation"
-    ) {
-        rendered.links = markdown::targets(&message_text(message));
-    }
-    rendered
+    RenderedEntry::owned(lines)
 }
 
 pub(super) fn message_text(message: &MessageEntry) -> String {
@@ -95,7 +94,7 @@ pub(super) fn message_text(message: &MessageEntry) -> String {
         .join("\n")
 }
 
-fn push_command(lines: &mut Vec<Line<'static>>, text: &str) {
+fn push_command(lines: &mut LinkedLines, text: &str) {
     let style = theme::text(theme::ORANGE).add_modifier(Modifier::BOLD);
     lines.push(Line::from(""));
     lines.push(Line::from(""));
@@ -105,19 +104,16 @@ fn push_command(lines: &mut Vec<Line<'static>>, text: &str) {
     )));
 }
 
-pub(super) fn push_command_result(lines: &mut Vec<Line<'static>>, text: &str, width: u16) {
-    let mut body = markdown::render(text, width.saturating_sub(2));
+pub(super) fn push_command_result(lines: &mut LinkedLines, text: &str, width: u16) {
+    // The command renderer already carries the `.user-command-content` tcss:
+    // first/last block margins zeroed and every heading tight against its
+    // content, so only the leading blank rows the plain renderer inserts
+    // still need dropping.
+    let mut body = markdown::command_result(text, width.saturating_sub(2));
     let is_blank =
         |line: &Line<'static>| line.spans.iter().all(|span| span.content.trim().is_empty());
-    while body.first().is_some_and(&is_blank) {
+    while body.first().is_some_and(is_blank) {
         body.remove(0);
-    }
-    // Textual's Markdown container sits the first block against the second with
-    // no blank line, then separates each later block by one. Drop only the first
-    // paragraph break (wherever the first block ends, even when it soft-wraps),
-    // keeping every later blank.
-    if let Some(position) = body.iter().position(&is_blank) {
-        body.remove(position);
     }
     let last = body.len().saturating_sub(1);
     for (index, mut line) in body.into_iter().enumerate() {
@@ -128,7 +124,7 @@ pub(super) fn push_command_result(lines: &mut Vec<Line<'static>>, text: &str, wi
     }
 }
 
-fn push_command_error(lines: &mut Vec<Line<'static>>, text: &str, width: u16) {
+fn push_command_error(lines: &mut LinkedLines, text: &str, width: u16) {
     let style = theme::text(theme::error()).add_modifier(Modifier::BOLD);
     // Python `ErrorMessage.compose`: sanitize, prefix, wrap the whole content.
     let content = format!("Error: {}", clean::clean_output(text));
@@ -138,6 +134,28 @@ fn push_command_error(lines: &mut Vec<Line<'static>>, text: &str, width: u16) {
         lines.push(Line::from(vec![
             prefix(index == last, Style::default()),
             Span::styled(row, style),
+        ]));
+    }
+}
+
+/// Python `UserMessage(severity=...)`: a heavy left border in the severity
+/// color, the content colored the same, one blank row above (the wrapper's
+/// `margin-top: 1`), no prompt char and no separator.
+fn push_subagent_severity(
+    lines: &mut LinkedLines,
+    text: &str,
+    width: u16,
+    color: ratatui::style::Color,
+) {
+    lines.push(Line::from(""));
+    let style = theme::text(color);
+    let border = Style::default().fg(color);
+    let body_width = (width.saturating_sub(3)) as usize;
+    for row in text::wrap_hard(text, body_width) {
+        lines.push(Line::from(vec![
+            Span::styled("┃ ", border),
+            Span::styled(row, style),
+            Span::raw(" "),
         ]));
     }
 }

@@ -64,16 +64,26 @@ pub mod method {
     pub const CONFIG_WRITE: &str = "config/write";
     /// Re-read config and runtime after a change (Python `_reload_config`).
     pub const CONFIG_RELOAD: &str = "config/reload";
+    /// The pre-session setup surface (Python app-server `_setup.py`).
+    pub const SETUP_STATUS: &str = "setup/status";
+    pub const SETUP_STORE_CREDENTIAL: &str = "setup/store-credential";
+    pub const SETUP_SUBMIT_CHOICES: &str = "setup/submit-choices";
     pub const SESSION_LOG_READ: &str = "session/log/read";
     pub const SESSION_RENAME: &str = "session/rename";
     pub const IDENTITY_READ: &str = "identity/read";
     pub const ACCOUNT_READ: &str = "account/read";
+    /// Redacted active-provider snapshot behind the `/status` section.
+    pub const PROVIDER_AUTH_READ: &str = "providerAuth/read";
     /// MCP servers and workspace connectors browsed by `/mcp`.
     pub const MCP_READ: &str = "mcp_catalog/read";
     pub const MCP_REFRESH: &str = "mcp_catalog/refresh";
     pub const MCP_TOGGLE: &str = "mcp_catalog/toggle";
     /// Connectors are toggled on their own catalog, keyed by alias.
     pub const CONNECTOR_TOGGLE: &str = "connector_catalog/toggle";
+    /// The connector catalog; the only answer carrying the Studio `manageUrl`.
+    pub const CONNECTOR_CATALOG_READ: &str = "connector_catalog/read";
+    /// Re-fetch the workspace connector catalog (Python `refresh_connectors`).
+    pub const CONNECTOR_CATALOG_REFRESH: &str = "connector_catalog/refresh";
     pub const MCP_ADD: &str = "mcp_catalog/add";
     pub const MCP_REMOVE: &str = "mcp_catalog/remove";
     pub const MCP_LOGIN: &str = "mcp_catalog/login";
@@ -92,6 +102,8 @@ pub mod method {
     pub const TELEMETRY_RECORD: &str = "telemetry/record";
     /// Ask the narration resource for the spoken summary of a finished turn.
     pub const NARRATION_SUMMARIZE: &str = "narration/summarize";
+    /// Remove a managed worktree (Python `WorkspaceWorktreeRemoveParams`).
+    pub const WORKSPACE_WORKTREE_REMOVE: &str = "workspace/git/worktrees/remove";
 }
 
 /// Callback kinds the client advertises at `initialize` and knows how to answer.
@@ -121,6 +133,10 @@ pub mod notification {
     pub const SESSION_STATS_UPDATED: &str = "session/statsUpdated";
     /// The server finished compacting the conversation history.
     pub const SESSION_COMPACTED: &str = "session/compacted";
+    /// A child (subagent) session was added or changed.
+    pub const CHILD_SESSION_UPDATED: &str = "session/childSessionUpdated";
+    /// The session's context was cleared and replaced (Python `SessionContextCleared`).
+    pub const SESSION_CONTEXT_CLEARED: &str = "session/contextCleared";
     /// Operational warning pushed by the server (Python `ServerWarning`).
     pub const WARNING: &str = "warning";
     /// Operational error pushed by the server (Python `ServerError`).
@@ -132,6 +148,8 @@ pub mod notification {
     /// Compatibility duplicate the catalog publishes alongside the canonical
     /// notification; consumed without acting on it, like the Python client.
     pub const MCP_AUTH_URL_LEGACY: &str = "mcp/authUrl";
+    /// Progress of a `vibeCode/teleport/start` operation.
+    pub const TELEPORT_EVENT: &str = "vibeCode/teleport/event";
 }
 
 // JSON-RPC envelopes.
@@ -202,6 +220,31 @@ impl RpcError {
             None => self.code.to_string(),
         }
     }
+
+    /// Whether this is an authentication error (`unauthorized` code).
+    pub fn is_unauthorized(&self) -> bool {
+        self.code() == "unauthorized"
+    }
+
+    /// Whether this is a config validation error (`data.kind == "configuration"`).
+    pub fn is_config_error(&self) -> bool {
+        self.code() == "invalid_params"
+            && self
+                .data
+                .as_ref()
+                .and_then(|d| d.get("kind"))
+                .and_then(Value::as_str)
+                == Some("configuration")
+    }
+
+    /// Construct a synthetic error for transport/serialization failures.
+    pub fn synthetic(code: &str, message: &str) -> Self {
+        Self {
+            code: Value::String(code.to_owned()),
+            message: message.to_owned(),
+            data: None,
+        }
+    }
 }
 
 // Request params (client -> server). camelCase, no extra fields.
@@ -214,6 +257,7 @@ pub struct InitializeParams {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClientInfo {
     pub name: String,
     /// Python `ClientInfo.entrypoint`: `programmatic` in headless mode, `cli`
@@ -221,6 +265,13 @@ pub struct ClientInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<String>,
     pub version: String,
+    /// Python `ClientInfo.title`: the human-facing client name, `None` when the
+    /// surface has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Python `ClientInfo.terminal_emulator`: the detected host terminal, one
+    /// of `terminal_detect`'s `TerminalEmulator` values.
+    pub terminal_emulator: String,
 }
 
 /// Advertises the callback kinds the client answers (`approval`, `user_input`).
@@ -237,6 +288,22 @@ pub struct ClientCapabilities {
 pub struct SessionStartParams {
     pub agent_config: AgentConfig,
     pub history_limit: u32,
+}
+
+/// Python `WorktreeInput` (protocol.py): create-or-reuse a named worktree,
+/// or let the server name one from the prompt. Field order matches the Python
+/// models so the wire shape is identical.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum WorktreeInput {
+    Create {
+        branch: String,
+        name: String,
+    },
+    Auto {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
 }
 
 /// Fields of the Python `AgentConfig` / `SessionOptions` the client sends at
@@ -267,6 +334,8 @@ pub struct AgentConfig {
     pub trust_workspace: bool,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub workspace_roots: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeInput>,
 }
 
 fn skip_default_bool(b: &bool) -> bool {
@@ -330,7 +399,7 @@ pub struct TurnQueueSteerParams {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnInputEntry {
-    pub annotations: BTreeMap<String, String>,
+    pub annotations: BTreeMap<String, serde_json::Value>,
     pub content: Vec<ContentBlock>,
     /// Client-assigned id echoed back as the user entry's `id` for dedupe.
     pub entry_id: String,
@@ -445,6 +514,9 @@ pub struct PublicSessionState {
     pub session: PublicSession,
     #[serde(default)]
     pub history: Option<Vec<Value>>,
+    /// Oldest returned entry id while older history remains on the server.
+    #[serde(default)]
+    pub history_before_cursor: Option<String>,
     #[serde(default)]
     pub turns: Option<Vec<Value>>,
     #[serde(default)]
@@ -452,6 +524,9 @@ pub struct PublicSessionState {
     /// Provider retry in flight (Python `PublicRetryState`); `None` when idle.
     #[serde(default)]
     pub retrying: Option<PublicRetryState>,
+    /// Child (subagent) sessions in creation order (Python `child_sessions`).
+    #[serde(default)]
+    pub child_sessions: Vec<crate::server::PublicChildSession>,
 }
 
 /// A provider retry in progress: which turn, why, and the transport detail.
@@ -470,6 +545,23 @@ pub struct TokenUsage {
     pub input_tokens: u64,
     #[serde(default)]
     pub output_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+}
+
+/// `PublicSessionWorktree`: the managed worktree a session runs in, as the
+/// session state reports it (additive; absent on older servers).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicSessionWorktree {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub branch: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub created: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -480,6 +572,9 @@ pub struct PublicSession {
     pub title: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
+    // Boxed: the state rides CommandEvent, whose variant sizes clippy bounds.
+    #[serde(default)]
+    pub worktree: Option<Box<PublicSessionWorktree>>,
     #[serde(default)]
     pub token_usage: Option<TokenUsage>,
 }
@@ -533,6 +628,8 @@ pub struct MessageEntry {
     pub source: Option<String>,
     #[serde(default, deserialize_with = "deserialize_message_content")]
     pub content: Vec<MessageContent>,
+    #[serde(default)]
+    pub user_display_content: Option<serde_json::Value>,
 }
 
 fn assistant_role() -> String {
@@ -607,6 +704,8 @@ pub struct NoticeEntry {
     pub message: String,
     #[serde(default)]
     pub detail: Option<NoticeDetail>,
+    #[serde(default, rename = "createdAt")]
+    pub created_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -627,6 +726,51 @@ pub struct NoticeDetail {
     /// `ok` / `warning` / `error`; absent means warning.
     #[serde(default)]
     pub status: Option<String>,
+    /// `ScheduledLoopFiredNoticeDetail`: the loop whose prompt started this turn.
+    #[serde(default, rename = "loopId")]
+    pub loop_id: Option<String>,
+}
+
+/// `workspace/git/worktrees/remove` params. `force`, `deleteBranch`, and
+/// `inspect` stay off the wire unless set, so an older app-server
+/// (`extra="forbid"`) accepts the non-force probe (ADR 0014).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeRemoveParams {
+    pub cwd: String,
+    #[serde(skip_serializing_if = "is_false")]
+    pub force: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete_branch: Option<bool>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub inspect: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// `workspace/git/worktrees/remove` response, parsed leniently: a kept
+/// worktree is a normal outcome the caller renders, not a fault.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeRemoveResponse {
+    #[serde(default)]
+    pub outcome: String,
+    #[serde(default)]
+    pub root: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub branch_deleted: bool,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+    #[serde(default)]
+    pub branch_created: Option<bool>,
+    /// How many other sessions hold the worktree (the asking session's own
+    /// holder discounted); additive, absent on an older app-server.
+    #[serde(default)]
+    pub holders: Option<u32>,
 }
 
 /// `workspace/trust/untrustedConfig` response (Python `WorkspaceUntrustedConfigResponse`).
@@ -657,38 +801,4 @@ pub struct FeedbackShouldShowResponse {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn narration_summarize_params_go_out_camelcase() {
-        let params = NarrationSummarizeParams {
-            session_id: "s1".into(),
-            user_message: "hello".into(),
-            assistant_text: "hi there".into(),
-            error: None,
-            message_id: Some("m1".into()),
-        };
-        let json = serde_json::to_value(&params).unwrap();
-        assert_eq!(json["sessionId"], "s1");
-        assert_eq!(json["userMessage"], "hello");
-        assert_eq!(json["assistantText"], "hi there");
-        assert_eq!(json["error"], Value::Null);
-        assert_eq!(json["messageId"], "m1");
-    }
-
-    #[test]
-    fn narration_summarize_response_tolerates_null_and_missing_summary() {
-        let text = r#"{"summary":"all done"}"#;
-        let summary = serde_json::from_str::<NarrationSummarizeResponse>(text)
-            .unwrap()
-            .summary;
-        assert_eq!(summary.as_deref(), Some("all done"));
-        let none = serde_json::from_str::<NarrationSummarizeResponse>(r#"{"summary":null}"#)
-            .unwrap()
-            .summary;
-        assert!(none.is_none());
-        let missing = serde_json::from_str::<NarrationSummarizeResponse>(r#"{}"#).unwrap();
-        assert!(missing.summary.is_none());
-    }
-}
+mod tests;

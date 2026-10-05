@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -225,6 +226,12 @@ class TrustedFoldersManager:
         self._session_trusted: list[str] = []
         self._load()
 
+    def for_session(self) -> TrustedFoldersManager:
+        """Share persisted decisions without inheriting temporary grants."""
+        manager = copy(self)
+        manager._session_trusted = []
+        return manager
+
     def trust_for_session(self, path: Path) -> None:
         self._session_trusted.append(self._normalize_path(path))
 
@@ -244,19 +251,19 @@ class TrustedFoldersManager:
 
     def _load(self) -> None:
         if not self._file_path.is_file():
-            self._trusted = []
-            self._untrusted = []
+            self._trusted.clear()
+            self._untrusted.clear()
             self._save()
             return
 
         try:
             with self._file_path.open("rb") as f:
                 data = tomllib.load(f)
-            self._trusted = list(data.get("trusted", []))
-            self._untrusted = list(data.get("untrusted", []))
+            self._trusted[:] = list(data.get("trusted", []))
+            self._untrusted[:] = list(data.get("untrusted", []))
         except (OSError, tomllib.TOMLDecodeError):
-            self._trusted = []
-            self._untrusted = []
+            self._trusted.clear()
+            self._untrusted.clear()
             self._save()
 
     def _save(self) -> None:

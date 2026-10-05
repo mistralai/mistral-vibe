@@ -16,10 +16,17 @@ from vibe.app_server.models import PublicCheckpointEntry, PublicMessageEntry
 from vibe.app_server.protocol import (
     AppServerResponseError,
     ClientCapabilities,
+    PageRequest,
     ProtocolErrorCode,
     SessionCompactParams,
     SessionCompactResponse,
+    SessionHistoryListParams,
+    SessionHistoryListResponse,
     SessionOptions,
+    SessionReadParams,
+    SessionReadResponse,
+    SessionResumeParams,
+    SessionResumeResponse,
 )
 from vibe.app_server.session import AppServerSession
 
@@ -397,6 +404,43 @@ async def test_compaction_survives_a_new_host_with_the_same_public_identity(
 
 
 @pytest.mark.asyncio
+async def test_an_agent_change_survives_a_new_host(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_connection: BackendContractConnection,
+    experimental_harness: bool,
+) -> None:
+    """An agent-mode switch is kept in the persisted session journal."""
+    if not experimental_harness:
+        pytest.skip("only the unified harness Runtime records agent changes")
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("Answered under ask")
+    )
+    session = await backend_contract_persistent_connection.host.open_session()
+    try:
+        _ = [event async for event in session.act("first question")]
+        session_id = session.session_id
+        await session.resources.agents.switch("plan")
+    finally:
+        await session.close()
+
+    resumed_connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+    )
+    resumed = await resumed_connection.host.resume_session(session_id)
+    try:
+        assert [
+            entry.details
+            for entry in resumed.history
+            if isinstance(entry, PublicCheckpointEntry) and entry.kind == "agent_change"
+        ] == [{"agent": "plan"}]
+    finally:
+        await resumed.close()
+
+
+@pytest.mark.asyncio
 async def test_in_place_rewind_preserves_identity_and_truncates_public_history(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
@@ -437,3 +481,154 @@ async def test_in_place_rewind_preserves_identity_and_truncates_public_history(
         isinstance(entry, PublicCheckpointEntry) and entry.kind == "rewind"
         for entry in backend_contract_persistent_session.history
     )
+
+
+async def _read_state(
+    connection: BackendContractConnection, session_id: str, limit: int
+) -> SessionReadResponse:
+    return SessionReadResponse.model_validate(
+        await connection.client.request(
+            "session/read",
+            SessionReadParams(
+                session_id=session_id, history=PageRequest(limit=limit), turns=None
+            ),
+        )
+    )
+
+
+async def _page_from_the_tail(
+    connection: BackendContractConnection, session_id: str
+) -> tuple[str | None, list[str]]:
+    tail = await _read_state(connection, session_id, 2)
+    paged = [entry.id for entry in tail.state.history or []]
+    cursor = tail.state.history_before_cursor
+    while cursor is not None:
+        page = SessionHistoryListResponse.model_validate(
+            await connection.client.request(
+                "session/history/list",
+                SessionHistoryListParams(
+                    session_id=session_id, page=PageRequest(cursor=cursor, limit=2)
+                ),
+            )
+        )
+        paged = [*(entry.id for entry in page.items), *paged]
+        cursor = page.next_cursor
+    return tail.state.history_before_cursor, paged
+
+
+async def _answer_three_times(
+    session: AppServerSession,
+    mistral_api: respx.Route,
+    mistral_response: Callable[[str], httpx.Response],
+) -> None:
+    mistral_api.mock(
+        side_effect=[mistral_response(f"answer {index}") for index in range(3)]
+    )
+    for index in range(3):
+        _ = [event async for event in session.act(f"ask {index}")]
+
+
+@pytest.mark.asyncio
+async def test_a_bounded_read_pages_back_to_the_first_entry(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_session: AppServerSession,
+) -> None:
+    await _answer_three_times(
+        backend_contract_session,
+        backend_contract_mistral_api,
+        backend_contract_mistral_response,
+    )
+    session_id = backend_contract_session.session_id
+
+    full = await _read_state(backend_contract_connection, session_id, 500)
+    first_cursor, paged = await _page_from_the_tail(
+        backend_contract_connection, session_id
+    )
+
+    assert full.state.history_before_cursor is None
+    assert first_cursor is not None
+    assert paged == [entry.id for entry in full.state.history or []]
+
+
+@pytest.mark.asyncio
+async def test_a_stored_session_preview_pages_back_to_the_first_entry(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_connection: BackendContractConnection,
+    experimental_harness: bool,
+) -> None:
+    session = await backend_contract_persistent_connection.host.open_session()
+    try:
+        await _answer_three_times(
+            session, backend_contract_mistral_api, backend_contract_mistral_response
+        )
+        session_id = session.session_id
+    finally:
+        await session.close()
+    viewer = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+    )
+    current = await viewer.host.open_session()
+    try:
+        full = await _read_state(viewer, session_id, 500)
+        first_cursor, paged = await _page_from_the_tail(viewer, session_id)
+    finally:
+        await current.close()
+        await viewer.host.close()
+
+    assert current.session_id != session_id
+    assert full.state.history_before_cursor is None
+    assert first_cursor is not None
+    assert paged == [entry.id for entry in full.state.history or []]
+
+
+@pytest.mark.asyncio
+async def test_a_bounded_resume_pages_back_to_the_first_entry(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_connection: BackendContractConnection,
+    experimental_harness: bool,
+) -> None:
+    session = await backend_contract_persistent_connection.host.open_session()
+    try:
+        await _answer_three_times(
+            session, backend_contract_mistral_api, backend_contract_mistral_response
+        )
+        session_id = session.session_id
+    finally:
+        await session.close()
+    resumed = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+    )
+    try:
+        response = SessionResumeResponse.model_validate(
+            await resumed.client.request(
+                "session/resume",
+                SessionResumeParams(session_id=session_id, history_limit=2),
+            )
+        )
+        full = await _read_state(resumed, session_id, 500)
+        paged = [entry.id for entry in response.state.history or []]
+        cursor = response.state.history_before_cursor
+        while cursor is not None:
+            page = SessionHistoryListResponse.model_validate(
+                await resumed.client.request(
+                    "session/history/list",
+                    SessionHistoryListParams(
+                        session_id=session_id, page=PageRequest(cursor=cursor, limit=2)
+                    ),
+                )
+            )
+            paged = [*(entry.id for entry in page.items), *paged]
+            cursor = page.next_cursor
+    finally:
+        await resumed.host.close()
+
+    assert response.state.history_before_cursor is not None
+    assert paged == [entry.id for entry in full.state.history or []]

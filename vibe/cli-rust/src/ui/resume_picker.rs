@@ -12,7 +12,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     f.buffer_mut()
         .set_style(area, Style::default().bg(theme::background()));
     let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
-    let height = (app.resume_picker.sessions.len().max(1) as u16 + 6).min(area.height / 2 + 6);
+    let height = (app.resume_picker.sessions.len().max(1) as u16 + 6).min(max_height(area));
     let chunks = super::bottom_app_chunks(app, area, loading_height, height);
     transcript::draw(app, f, chunks[0]);
     loading::draw(app, f, chunks[1]);
@@ -20,6 +20,11 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     draw_box(app, f, chunks[2]);
     super::todo::draw_row(app, f, chunks[4]);
     bottom_bar::draw(app, f, chunks[3]);
+}
+
+/// The whole picker takes at most 40% of the screen, keeping one session row.
+fn max_height(area: Rect) -> u16 {
+    (area.height * 2 / 5).max(7)
 }
 
 fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {

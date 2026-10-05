@@ -1,8 +1,11 @@
 //! Effect (tool call) wire types: Python `PublicEffectEntry` and its results.
 
+use std::sync::OnceLock;
+
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::connector_web;
 use super::effect_output::*;
 use crate::utils::clean::clean_output;
 
@@ -15,6 +18,8 @@ pub struct EffectEntry {
     pub detail: Option<EffectSide>,
     #[serde(default)]
     pub state: Option<EffectState>,
+    #[serde(skip)]
+    connector_header: OnceLock<Option<connector_web::Header>>,
 }
 
 impl EffectEntry {
@@ -38,6 +43,9 @@ impl EffectEntry {
 
     /// Header verb, message, and suffix, following the Textual effect state mapping.
     pub fn summary(&self) -> (&str, &str, &str) {
+        if let Some((verb, message, suffix)) = self.connector_header() {
+            return (verb, message.as_str(), suffix);
+        }
         let detail = self.detail.as_ref().and_then(|side| side.display.as_ref());
         if self.status() == Some("failed") {
             if let Some(display) = detail {
@@ -61,6 +69,25 @@ impl EffectEntry {
         (&display.verb, &display.message, &display.suffix)
     }
 
+    /// A web connector call's built-in header, computed once per entry revision.
+    fn connector_header(&self) -> Option<&connector_web::Header> {
+        // Muted calls and error results keep the server's own message.
+        let completed = self.status() == Some("completed");
+        if self.is_muted() || (completed && !self.success()) {
+            return None;
+        }
+        let call = connector_web::Call {
+            tool_name: self.tool_name(),
+            input: self.input(),
+            output: self.output(),
+            completed,
+            terminal: self.is_terminal(),
+        };
+        self.connector_header
+            .get_or_init(|| connector_web::header(&call))
+            .as_ref()
+    }
+
     pub fn is_muted(&self) -> bool {
         matches!(self.status(), Some("cancelled" | "skipped"))
     }
@@ -75,8 +102,8 @@ impl EffectEntry {
     }
 
     /// Result body lines shown on expand, following Python `_render_result_collapsible`.
-    pub fn body(&self) -> Vec<String> {
-        match self.status() {
+    pub fn body(&self) -> Vec<BodyLine> {
+        let lines = match self.status() {
             Some("failed") => format!("Error: {}", clean_output(self.error_message()))
                 .lines()
                 .map(str::to_owned)
@@ -86,7 +113,13 @@ impl EffectEntry {
                 python_json_lines(self.output())
             }
             Some("completed") if self.output().is_some() => {
-                format_effect_output(self.kind(), self.output())
+                let web = self
+                    .output()
+                    .and_then(|out| connector_web::output(self.tool_name(), self.input(), out));
+                return match web {
+                    Some(web) => format_effect_output(self.kind(), Some(&web)),
+                    None => format_effect_output(self.detail_kind(), self.output()),
+                };
             }
             // A hook that replaces a tool result leaves no structured output; the
             // model-facing text lives in outputText.
@@ -98,16 +131,13 @@ impl EffectEntry {
                 }
             }
             _ => Vec::new(),
-        }
+        };
+        lines.into_iter().map(BodyLine::from).collect()
     }
 
-    /// Python `EFFECT_WIDGETS[kind].result.COLLAPSIBLE`: diff- and answer-shaped
-    /// results are always rendered in full, with no disclosure header.
+    /// Whether the result folds under a disclosure header; answers always render in full.
     pub fn is_collapsible(&self) -> bool {
-        !matches!(
-            self.kind(),
-            Some("file_edit" | "file_write" | "user_question")
-        )
+        self.kind() != Some("user_question")
     }
 
     /// Python `_effect_is_terminal`: the state carries a settled verdict.
@@ -162,6 +192,9 @@ impl EffectEntry {
 
     /// The call display's `statusText`, which steers the loading label.
     pub fn status_text(&self) -> &str {
+        if let Some(text) = connector_web::status_text(self.tool_name()) {
+            return text;
+        }
         self.detail
             .as_ref()
             .and_then(|side| side.display.as_ref())
@@ -184,23 +217,28 @@ impl EffectEntry {
         self.output().map(todo_rows)
     }
 
-    /// `(label, url)` per web-search source, for link hit testing on the body.
-    pub fn source_links(&self) -> Vec<(String, String)> {
-        if self.kind() != Some("web_search") {
-            return Vec::new();
-        }
-        self.output()
-            .and_then(|output| output.get("sources"))
-            .and_then(Value::as_array)
-            .map(|sources| sources.iter().filter_map(source_label_url).collect())
-            .unwrap_or_default()
+    /// The effect's call category (Python `ToolEffectKind`); web connectors read as built-ins.
+    pub fn kind(&self) -> Option<&str> {
+        connector_web::kind(self.tool_name()).or(self.detail_kind())
     }
 
-    /// The effect's call category (Python `ToolEffectKind`).
-    pub fn kind(&self) -> Option<&str> {
+    /// The category the server sent, before any connector reinterpretation.
+    fn detail_kind(&self) -> Option<&str> {
         self.detail
             .as_ref()
             .and_then(|detail| detail.kind.as_deref())
+    }
+
+    fn tool_name(&self) -> Option<&str> {
+        self.detail
+            .as_ref()
+            .and_then(|detail| detail.tool_name.as_deref())
+    }
+
+    /// The call's structured input (Python `EffectDetail.input`), parsed by
+    /// the kind-specific consumers (e.g. `worktree::WorktreeInfo`).
+    pub fn input(&self) -> Option<&Value> {
+        self.detail.as_ref()?.input.as_ref()
     }
 
     /// The written path, whose extension picks the body's highlight language.
@@ -249,6 +287,9 @@ pub struct EffectSide {
     pub kind: Option<String>,
     #[serde(default)]
     pub tool_name: Option<String>,
+    /// The call's structured input (Python `EffectDetail.input`).
+    #[serde(default)]
+    pub input: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -3,7 +3,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
-use crate::mcp::rows::{Row, SourceRow, ToolRow};
+use crate::mcp::rows::{Row, SourceRow, ToolRow, MANAGE_CONNECTORS_LABEL};
 use crate::ui::theme;
 use crate::ui::theme_picker::marker_green;
 
@@ -66,10 +66,14 @@ fn styled(row: &Row, highlighted: bool) -> Vec<Sc> {
         }
         Row::Source(source) => source_chars(source, base, dim, bg),
         Row::Tool(tool) => tool_chars(tool, base, dim),
+        Row::Manage => text(
+            MANAGE_CONNECTORS_LABEL,
+            base.add_modifier(Modifier::UNDERLINED),
+        ),
     }
 }
 
-/// `  name  [transport]  n tools  ● status`, columns padded by the row builder.
+/// `  name  [transport]  [plugin:x]  n tools  ● status`, columns padded by the row builder.
 fn source_chars(source: &SourceRow, base: Style, dim: Style, bg: Color) -> Vec<Sc> {
     // Column separators carry no modifier, so each span re-emits its own bold
     // and dim; ratatui's diff would otherwise drop bold after a dim span.
@@ -84,6 +88,10 @@ fn source_chars(source: &SourceRow, base: Style, dim: Style, bg: Color) -> Vec<S
     chars.extend(text("  ", gap));
     chars.extend(text(&source.transport, dim));
     chars.extend(text("  ", gap));
+    if !source.owner.is_empty() {
+        chars.extend(text(&source.owner, dim));
+        chars.extend(text("  ", gap));
+    }
     chars.extend(text(&source.tools, dim));
     chars.extend(text("  ", gap));
     chars.extend(text(source.symbol, symbol));
@@ -109,13 +117,26 @@ fn tool_chars(tool: &ToolRow, base: Style, dim: Style) -> Vec<Sc> {
     chars
 }
 
+/// Keeps `\n` for `wrap` to break on; other control characters never render.
 fn text(value: &str, style: Style) -> Vec<Sc> {
-    value.chars().map(|character| (character, style)).collect()
+    value
+        .chars()
+        .filter(|character| *character == '\n' || !character.is_control())
+        .map(|character| (character, style))
+        .collect()
+}
+
+/// Hard-break on `\n` as Rich does, then word-wrap each line.
+fn wrap(chars: &[Sc], width: usize) -> Vec<Vec<Sc>> {
+    chars
+        .split(|(character, _)| *character == '\n')
+        .flat_map(|line| wrap_line(line, width))
+        .collect()
 }
 
 /// Greedy word wrap keeping runs of spaces, so padded columns stay aligned.
 /// The space run a break happens on is dropped, like Textual's fold.
-fn wrap(chars: &[Sc], width: usize) -> Vec<Vec<Sc>> {
+fn wrap_line(chars: &[Sc], width: usize) -> Vec<Vec<Sc>> {
     let width = width.max(1);
     let mut rows: Vec<Vec<Sc>> = Vec::new();
     let mut row: Vec<Sc> = Vec::new();

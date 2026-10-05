@@ -75,6 +75,59 @@ async def test_a_turn_that_wins_the_push_leaves_the_write_parked() -> None:
 
 
 @pytest.mark.asyncio
+async def test_apply_through_reports_its_own_push_not_later_parked_state() -> None:
+    """*Prepare*: A derivation that can be pushed through a reserved turn.
+    *Do*: Apply it successfully, then park a later configuration.
+    *Assert*: The completed apply still reports that its own push landed.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._deferred_config import DeferredConfiguration
+
+    # Prepare
+    deferred = DeferredConfiguration(
+        derive=lambda: asyncio.sleep(0, result="picked"),
+        push=lambda _value: asyncio.sleep(0),
+        adopt=lambda _value: None,
+        turn_running=lambda: False,
+    )
+
+    # Do
+    applied = await deferred.apply_through(lambda _value: asyncio.sleep(0))
+    deferred.park()
+
+    # Assert
+    assert applied is True
+    assert deferred.parked is True
+
+
+@pytest.mark.asyncio
+async def test_settle_through_reports_its_own_push_not_later_parked_state() -> None:
+    """*Prepare*: A parked derivation that can land through a reserved turn.
+    *Do*: Settle it successfully, then park a later configuration.
+    *Assert*: The completed settle still reports that its own push landed.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._deferred_config import DeferredConfiguration
+
+    # Prepare
+    deferred = DeferredConfiguration(
+        derive=lambda: asyncio.sleep(0, result="picked"),
+        push=lambda _value: asyncio.sleep(0),
+        adopt=lambda _value: None,
+        turn_running=lambda: False,
+    )
+    deferred.park()
+
+    # Do
+    applied = await deferred.settle_through(lambda _value: asyncio.sleep(0))
+    deferred.park()
+
+    # Assert
+    assert applied is True
+    assert deferred.parked is True
+
+
+@pytest.mark.asyncio
 async def test_a_cancelled_apply_leaves_the_write_parked() -> None:
     """*Prepare*: A push that is cancelled while it waits, as the event pump is
     when the session's stream ends mid-apply.

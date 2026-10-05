@@ -7,6 +7,8 @@ Runtime only needs to preserve and project their wire representation.
 
 from __future__ import annotations
 
+import base64
+import binascii
 from typing import Annotated, Literal, Self
 
 from pydantic import (
@@ -30,6 +32,11 @@ type PublicCallbackId = str
 type PublicCallbackKind = Literal["approval", "user_input"]
 type PublicRetryCategory = Literal[
     "rate_limited", "server_error", "timed_out", "connection", "unknown"
+]
+# Public projection of ``vibe._storage.ManagedProcessV1.status``. The protocol
+# layer deliberately stays independent from its persistence implementation.
+type BackgroundProcessStatus = Literal[
+    "running", "completed", "failed", "stopped", "orphaned"
 ]
 type TitleSource = Literal["auto", "manual"]
 type HarnessHookPoint = Literal[
@@ -354,6 +361,26 @@ class HistoryCursor(SessionProtocolModel):
     after: EntryId | None = None
 
 
+class HostEffectRecord(SessionProtocolModel):
+    """One terminal transcript effect entry authored by the Host.
+
+    The Host, not a model tool call, produces the effect (a user-run shell
+    command is one example). Presentation stays raw JSON at this boundary --
+    `detail` and `state` use the same public-entry shapes clients validate --
+    while the Runtime owns durability, id uniqueness, and the session-scoped
+    envelope fields. Only terminal records belong here: streaming state lives
+    in the live event stream, never in the durable projection.
+    """
+
+    id: EntryId
+    title: str
+    turn_id: TurnId | None = None
+    created_at: UnixTimeMilliseconds
+    updated_at: UnixTimeMilliseconds
+    detail: JsonObject
+    state: JsonObject
+
+
 class PublicHistoryPageBase(SessionProtocolModel):
     """A window of public history, always ordered from oldest to newest.
 
@@ -383,6 +410,7 @@ class InProgressPublicTurn(SessionProtocolModel):
     session_id: SessionId
     status: Literal["in_progress"] = "in_progress"
     queue_item_id: str | None = None
+    input_entry_id: EntryId | None = None
     started_at: UnixTimeMilliseconds
 
 
@@ -391,6 +419,7 @@ class CompletedPublicTurn(SessionProtocolModel):
     session_id: SessionId
     status: Literal["completed"] = "completed"
     queue_item_id: str | None = None
+    input_entry_id: EntryId | None = None
     started_at: UnixTimeMilliseconds
     completed_at: UnixTimeMilliseconds
     stop_reason: Literal["limit"] | None = None
@@ -401,6 +430,7 @@ class FailedPublicTurn(SessionProtocolModel):
     session_id: SessionId
     status: Literal["failed"] = "failed"
     queue_item_id: str | None = None
+    input_entry_id: EntryId | None = None
     started_at: UnixTimeMilliseconds
     completed_at: UnixTimeMilliseconds
     error: PublicError
@@ -411,6 +441,7 @@ class InterruptedPublicTurn(SessionProtocolModel):
     session_id: SessionId
     status: Literal["interrupted"] = "interrupted"
     queue_item_id: str | None = None
+    input_entry_id: EntryId | None = None
     started_at: UnixTimeMilliseconds
     completed_at: UnixTimeMilliseconds
     reason: str | None = None
@@ -446,6 +477,65 @@ class PublicRetryState(SessionProtocolModel):
     turn_id: TurnId
     category: PublicRetryCategory
     detail: str
+    retry_at: UnixTimeMilliseconds
+    retry_attempt: int
+
+
+class PublicBackgroundProcess(SessionProtocolModel):
+    process_id: str
+    command: str
+    status: BackgroundProcessStatus
+    exit_code: int | None = None
+    created_at: str
+
+
+class BackgroundProcessStopResult(SessionProtocolModel):
+    process_id: str
+    status: BackgroundProcessStatus
+    exit_code: int | None = None
+
+
+class BackgroundProcessOutputRead(SessionProtocolModel):
+    process_id: str
+    from_end: bool
+    cursor: int = Field(ge=0, strict=True)
+    wait_ms: int = Field(ge=0, le=5_000, strict=True)
+    max_bytes: int = Field(ge=1, le=64_000, strict=True)
+
+
+class BackgroundProcessOutputAvailable(SessionProtocolModel):
+    availability: Literal["available"] = "available"
+    process_id: str
+    output_base64: str
+    output_start_cursor: int = Field(ge=0, strict=True)
+    next_cursor: int = Field(ge=0, strict=True)
+    bytes_available: int = Field(ge=0, strict=True)
+    has_more: bool
+    truncated_before: bool
+    is_final: bool
+
+    @model_validator(mode="after")
+    def validate_cursor_range(self) -> Self:
+        if not (self.output_start_cursor <= self.next_cursor <= self.bytes_available):
+            raise ValueError("process output cursors are not ordered")
+        try:
+            output = base64.b64decode(self.output_base64, validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise ValueError("process output is not valid base64") from error
+        if len(output) > self.next_cursor - self.output_start_cursor:
+            raise ValueError("process output bytes exceed its cursor range")
+        return self
+
+
+class BackgroundProcessOutputUnavailable(SessionProtocolModel):
+    availability: Literal["unavailable"] = "unavailable"
+    process_id: str
+
+
+BackgroundProcessOutputResult = Annotated[
+    BackgroundProcessOutputAvailable | BackgroundProcessOutputUnavailable,
+    Field(discriminator="availability"),
+]
 
 
 class PublicSessionState(SessionProtocolModel):
@@ -457,6 +547,9 @@ class PublicSessionState(SessionProtocolModel):
     active_callbacks: list[JsonObject] = Field(default_factory=list)
     latest_turn: PublicTurn | None = None
     turn_queue: TurnQueue
+    background_processes: list[PublicBackgroundProcess] = Field(
+        default_factory=list, exclude_if=lambda value: not value
+    )
     retrying: PublicRetryState | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -593,6 +686,12 @@ __all__ = [
     "PUBLIC_SESSION_STATE_FORMAT",
     "TURN_QUEUE_MAX_ITEMS",
     "ArchivedSessionStatus",
+    "BackgroundProcessOutputAvailable",
+    "BackgroundProcessOutputRead",
+    "BackgroundProcessOutputResult",
+    "BackgroundProcessOutputUnavailable",
+    "BackgroundProcessStatus",
+    "BackgroundProcessStopResult",
     "BlockedSessionStatus",
     "ClientSessionExtensions",
     "CompletedPublicTurn",
@@ -605,6 +704,7 @@ __all__ = [
     "FailedSessionStatus",
     "HarnessHookPoint",
     "HistoryCursor",
+    "HostEffectRecord",
     "IdleSessionStatus",
     "ImageContentBlock",
     "InProgressPublicTurn",
@@ -618,6 +718,7 @@ __all__ = [
     "PluginInfo",
     "Procedure",
     "ProtocolError",
+    "PublicBackgroundProcess",
     "PublicCallbackId",
     "PublicCallbackKind",
     "PublicError",

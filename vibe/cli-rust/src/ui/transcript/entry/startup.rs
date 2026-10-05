@@ -3,12 +3,13 @@
 use ratatui::style::Color;
 use ratatui::text::{Line, Span};
 
-use crate::ui::{markdown, theme};
+use crate::ui::markdown::{self, LinkedLines};
+use crate::ui::theme;
 use crate::utils::text;
 
 /// Python `WarningMessage` with `show_border=False`: a plain `NoMarkupStatic`
 /// whose text wraps in `$warning`, mounted straight into the messages area.
-pub(super) fn push_warning(lines: &mut Vec<Line<'static>>, text: &str, width: u16) {
+pub(super) fn push_warning(lines: &mut LinkedLines, text: &str, width: u16) {
     let style = theme::text(theme::warning());
     // `.warning-content` keeps a two-cell right padding free.
     let body_width = width.saturating_sub(2) as usize;
@@ -19,12 +20,7 @@ pub(super) fn push_warning(lines: &mut Vec<Line<'static>>, text: &str, width: u1
 
 /// Python `WhatsNewMessage`: the markdown body under a heavy `$mistral_orange`
 /// left border, one blank above it when history widgets existed at mount time.
-pub(super) fn push_whats_new(
-    lines: &mut Vec<Line<'static>>,
-    text: &str,
-    width: u16,
-    after_history: bool,
-) {
+pub(super) fn push_whats_new(lines: &mut LinkedLines, text: &str, width: u16, after_history: bool) {
     if after_history {
         lines.push(Line::from(""));
     }
@@ -33,6 +29,6 @@ pub(super) fn push_whats_new(
 
 /// A markdown banner under a heavy left border: the promo (`$mistral_orange`),
 /// the what's-new body, and the custom-tools deprecation (`$warning`).
-pub(super) fn push_guttered(lines: &mut Vec<Line<'static>>, text: &str, width: u16, color: Color) {
-    lines.extend(markdown::guttered(text, width, color));
+pub(super) fn push_guttered(lines: &mut LinkedLines, text: &str, width: u16, color: Color) {
+    lines.append(markdown::guttered(text, width, color));
 }

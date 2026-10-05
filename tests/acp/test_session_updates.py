@@ -1010,6 +1010,7 @@ def test_interrupted_subagent_is_failed_and_keeps_task_metadata() -> None:
             tool_name="extension_delegate",
             input=SubagentEffectInput(task="Explore", agent="explore"),
             child_session_id="child-1",
+            agent_name="explore",
             display=_display("Running subagent"),
         ),
         state=CompletedEffectState(
@@ -1034,6 +1035,27 @@ def test_interrupted_subagent_is_failed_and_keeps_task_metadata() -> None:
         "turn_count": 2,
         "response": "Interrupted",
     }
+
+
+def test_an_agent_change_checkpoint_stays_out_of_the_conversation() -> None:
+    checkpoint = PublicCheckpointEntry(
+        **_entry_fields("agent-change-1", PublicEntryGenerationStatus.COMPLETED),
+        kind="agent_change",
+        message="Agent changed to plan",
+        details={"agent": "plan"},
+    )
+
+    assert replay_history_entry(checkpoint) == []
+    assert (
+        session_updates_for_event(
+            HistoryEntryUpdated(
+                previous=checkpoint,
+                entry=checkpoint,
+                patch=[JsonPatchOperation(op="replace", path="/message", value="x")],
+            )
+        )
+        == []
+    )
 
 
 def test_checkpoints_and_session_titles_use_public_identity_and_metadata() -> None:

@@ -60,6 +60,7 @@ def _tool_call_factory(
 
 
 @pytest.mark.timeout(25)
+@pytest.mark.unified_default
 @pytest.mark.parametrize(
     "streaming_mock_server",
     [pytest.param(_tool_call_factory, id="tool-call-stream")],
@@ -83,8 +84,13 @@ def test_spawn_cli_asks_bash_permission_and_shows_tool_output_after_approval(
             expected_count=1,
             timeout=10,
         )
+        # The unified runtime names builtins by their canonical route
+        # (``file_system.bash`` stands for Vibe's ``bash``).
         wait_for_rendered_text(
-            child, captured, needle="Permission for the bash tool", timeout=10
+            child,
+            captured,
+            needle="Permission for the file_system.bash tool",
+            timeout=10,
         )
         child.send("y")
         child.send("\r")

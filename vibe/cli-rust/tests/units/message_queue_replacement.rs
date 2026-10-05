@@ -14,6 +14,7 @@ fn queued(message_id: &str, text: &str) -> QueueItem {
         server_message_id: message_id.to_string(),
         text: text.to_string(),
         images: Vec::new(),
+        mentions: None,
         sent: true,
         ever_sent: true,
         revision: 1,
@@ -36,7 +37,7 @@ fn replacement(
         revision,
         covered: covered
             .iter()
-            .map(|(id, text)| ((*id).to_string(), (*text).to_string(), Vec::new()))
+            .map(|(id, text)| ((*id).to_string(), (*text).to_string(), Vec::new(), None))
             .collect(),
         delivered,
         outcome,
@@ -130,7 +131,7 @@ fn successful_replacement_settles_an_edit_promoted_while_saving() {
     );
 
     assert!(app.queue.items.is_empty());
-    assert_eq!(app.view.transcript.user_messages()[0].2, "edited");
+    assert_eq!(app.view.transcript.user_messages()[0].2.text, "edited");
 }
 
 #[test]
@@ -227,10 +228,11 @@ fn consumed_group_requeues_more_than_the_event_history_limit() {
                 format!("message-{index}"),
                 format!("text-{index}"),
                 Vec::new(),
+                None,
             )
         })
         .collect();
-    for (message_id, text, _) in &covered {
+    for (message_id, text, _, _) in &covered {
         let mut item = queued(message_id, text);
         item.server_message_id = "message-0".to_string();
         item.sent = false;
@@ -246,7 +248,7 @@ fn consumed_group_requeues_more_than_the_event_history_limit() {
             revision: 1,
             delivered: covered
                 .iter()
-                .map(|(message_id, _, _)| message_id.clone())
+                .map(|(message_id, _, _, _)| message_id.clone())
                 .collect(),
             covered,
             outcome: ReplacementOutcome::Consumed,

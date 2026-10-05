@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::testing::{BackgroundProcessMode, SubagentMode};
 
 fn config_with_direct_tool_hooks() -> HarnessConfig {
     let mut config = config();
@@ -79,66 +80,86 @@ fn pending_direct_pre_hook(
 }
 
 ///
-/// *Prepare*: Provided tool groups use a reserved namespace, a built-in direct name, or the same direct name twice.
+/// *Prepare*: Provided tool groups use a reserved namespace, a built-in direct name, or the same stable ID twice.
 /// *Do*: Create a Harness session from each invalid configuration.
-/// *Assert*: Session creation rejects each collision with the existing exact error.
+/// *Assert*: Session creation rejects each collision with the exact configuration error.
 ///
 #[test]
 fn provided_tool_name_collisions_reject_session_creation() {
     // Prepare
-    let tool = |name: &str| {
+    let tool = |name: &str, exposure: &str| {
         json!({
             "name": name,
             "description": "Provided tool.",
             "input_schema": {"type": "object"},
-            "exposure": "direct",
+            "exposure": exposure,
         })
     };
-    let mut reserved_group = config();
-    reserved_group.capabilities.tool_groups = serde_json::from_value(json!([{
-        "name": "file_system",
-        "tools": [],
+    let reserved_configs =
+        crate::core::tools::resolved::RESERVED_TOOL_NAMESPACES.map(|namespace| {
+            let mut config = config();
+            config.settings.tools.background_processes = BackgroundProcessMode::Disabled;
+            config.settings.tools.subagents = SubagentMode::Disabled;
+            config.capabilities.tool_groups = serde_json::from_value(json!([{
+                "name": namespace,
+                "tools": [],
+            }]))
+            .expect("reserved group remains structurally valid");
+            config
+        });
+    let mut duplicate_stable_id = config();
+    duplicate_stable_id.capabilities.tool_groups = serde_json::from_value(json!([{
+        "name": "calendar",
+        "tools": [tool("lookup", "programmatic"), tool("lookup", "programmatic")],
     }]))
-    .expect("reserved group remains structurally valid");
+    .expect("duplicate stable IDs remain structurally valid");
     let mut reserved_direct_name = config();
     reserved_direct_name.capabilities.tool_groups = serde_json::from_value(json!([{
         "name": "client",
-        "tools": [tool("bash")],
+        "tools": [tool("bash", "direct")],
     }]))
     .expect("reserved direct tool remains structurally valid");
     let mut duplicate_direct_name = config();
     duplicate_direct_name.capabilities.tool_groups = serde_json::from_value(json!([
-        {"name": "first", "tools": [tool("choose")]},
-        {"name": "second", "tools": [tool("choose")]},
+        {"name": "first", "tools": [tool("choose", "direct")]},
+        {"name": "second", "tools": [tool("choose", "direct")]},
     ]))
     .expect("duplicate direct tools remain structurally valid");
-    let cases = [
-        (
-            reserved_group,
-            "tool group name \"file_system\" is reserved",
-        ),
-        (
-            reserved_direct_name,
-            "direct tool name \"bash\" conflicts with a built-in tool",
-        ),
-        (
-            duplicate_direct_name,
-            "ambiguous duplicate direct tool name \"choose\"",
-        ),
-    ];
 
     // Do
-    let errors = cases.map(|(config, expected)| {
+    let reserved_errors = reserved_configs.map(|config| {
+        let namespace = config.capabilities.tool_groups[0].name.clone();
         let error = HarnessSession::create(config)
             .err()
-            .expect("invalid provided tools reject session creation");
-        (error.to_string(), expected)
+            .expect("reserved namespace rejects session creation");
+        (namespace, error)
     });
+    let duplicate_stable_error = HarnessSession::create(duplicate_stable_id)
+        .err()
+        .expect("duplicate stable ID rejects session creation");
+    let reserved_direct_error = HarnessSession::create(reserved_direct_name)
+        .err()
+        .expect("reserved direct name rejects session creation");
+    let duplicate_direct_error = HarnessSession::create(duplicate_direct_name)
+        .err()
+        .expect("duplicate direct name rejects session creation");
 
     // Assert
-    for (actual, expected) in errors {
-        assert_eq!(actual, expected);
+    for (namespace, error) in reserved_errors {
+        assert_eq!(error, format!("tool group name {namespace:?} is reserved"));
     }
+    assert_eq!(
+        duplicate_stable_error,
+        "duplicate stable tool ID \"calendar.lookup\""
+    );
+    assert_eq!(
+        reserved_direct_error,
+        "direct tool name \"bash\" conflicts with a built-in tool"
+    );
+    assert_eq!(
+        duplicate_direct_error,
+        "ambiguous duplicate direct tool name \"choose\""
+    );
 }
 
 ///

@@ -39,6 +39,7 @@ class FakeBackend:
         self._requests_extra_headers: list[dict[str, str] | None] = []
         self._requests_metadata: list[dict[str, str] | None] = []
         self._requests_max_tokens: list[int | None] = []
+        self._requests_temperatures: list[float] = []
         self._requests_tools: list[Any] = []
         self._requests_tool_choices: list[Any] = []
         self._exception_to_raise = exception_to_raise
@@ -78,6 +79,10 @@ class FakeBackend:
     @property
     def requests_max_tokens(self) -> list[int | None]:
         return self._requests_max_tokens
+
+    @property
+    def requests_temperatures(self) -> list[float]:
+        return self._requests_temperatures
 
     @property
     def requests_tools(self) -> list[Any]:
@@ -121,6 +126,7 @@ class FakeBackend:
         self._requests_extra_headers.append(extra_headers)
         self._requests_metadata.append(metadata)
         self._requests_max_tokens.append(max_tokens)
+        self._requests_temperatures.append(temperature)
         self._requests_tools.append(tools)
         self._requests_tool_choices.append(tool_choice)
 
@@ -154,6 +160,7 @@ class FakeBackend:
         self._requests_extra_headers.append(extra_headers)
         self._requests_metadata.append(metadata)
         self._requests_max_tokens.append(max_tokens)
+        self._requests_temperatures.append(temperature)
         self._requests_tools.append(tools)
         self._requests_tool_choices.append(tool_choice)
 

@@ -240,7 +240,7 @@ fn programmatic_subagent_route_matrix_survives_restore() {
         ),
     )));
     let completion_action_id = dispatched_action_id(&started).to_string();
-    let source = "async function main() { return Promise.all([tools.agent.list({}), tools.agent.spawn({ agentName: 'researcher', message: 'Investigate the issue', agentType: 'reviewer' }), tools.agent.wait({ agentName: 'researcher', timeoutMs: 1000 }), tools.agent.sendMessage({ agentName: 'researcher', message: 'Check the latest evidence' }), tools.agent.interrupt({ agentName: 'researcher' }), tools.agent.close({ agentName: 'researcher' })]); }";
+    let source = "async function main() { return Promise.all([tools.subagent.list({}), tools.subagent.spawn({ agentName: 'researcher', message: 'Investigate the issue', agentType: 'reviewer' }), tools.subagent.wait({ agentName: 'researcher', timeoutMs: 1000 }), tools.subagent.sendMessage({ agentName: 'researcher', message: 'Check the latest evidence' }), tools.subagent.interrupt({ agentName: 'researcher' }), tools.subagent.close({ agentName: 'researcher' })]); }";
 
     // Do
     let pending = accepted_value(session.apply(input(
@@ -306,7 +306,7 @@ fn programmatic_subagent_route_matrix_survives_restore() {
 
 ///
 /// *Prepare*: The same root and plugin agent types are supplied to sessions using the tagged enabled and disabled subagent settings.
-/// *Do*: Start both sessions, then attempt `tools.agent.list` in the disabled session.
+/// *Do*: Start both sessions, then attempt `tools.subagent.list` in the disabled session.
 /// *Assert*: The settings keep their exact JSON format, enabled model context contains escaped and sorted guidance, and disabled mode hides every subagent route.
 ///
 #[test]
@@ -345,7 +345,7 @@ fn disabled_subagents_hide_agent_context_and_runtime_routes() {
         run_typescript_completion(
             &completion_action_id,
             "call-disabled-subagents",
-            "async function main() { return tools.agent.list({}); }",
+            "async function main() { return tools.subagent.list({}); }",
         ),
     )));
 
@@ -426,7 +426,7 @@ fn subagent_tool_hooks_use_the_canonical_runtime_identity() {
         run_typescript_completion(
             &completion_action_id,
             "call-subagent-hook",
-            "async function main() { return tools.agent.spawn({ agentName: 'researcher', message: 'Investigate' }); }",
+            "async function main() { return tools.subagent.spawn({ agentName: 'researcher', message: 'Investigate' }); }",
         ),
     )));
     let hook_action = &hook_pending["transition"]["next"]["directives"][0]["action"];

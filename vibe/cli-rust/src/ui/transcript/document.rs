@@ -24,9 +24,10 @@ pub(crate) fn selection_slice(app: &App) -> Option<SelectionSlice> {
     }
 
     let banner = view.banner.view(&app.session.startup_config);
-    let layout = view
-        .transcript_cache
-        .layout(view.transcript.revision(), width)?;
+    // The child view's selection must extract the child's document: the
+    // render swap is over by the time the overlay runs.
+    let (transcript, cache) = crate::subagents::active_transcript(app);
+    let layout = cache.layout(transcript.revision(), width)?;
     let total = document_height(&banner, layout, width);
     let start = selection.anchor.1.min(selection.head.1).max(0) as u16;
     let end = selection
@@ -58,7 +59,7 @@ pub(crate) fn selection_slice(app: &App) -> Option<SelectionSlice> {
         if y.saturating_add(positioned.height) <= area.y {
             continue;
         }
-        let Some(value) = view.transcript.entry(positioned.index) else {
+        let Some(value) = transcript.entry(positioned.index) else {
             continue;
         };
         let entry_expanded = view.expanded.contains(value.id);

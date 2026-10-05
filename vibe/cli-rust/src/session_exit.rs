@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use crate::app::App;
 use crate::resume_picker;
 use crate::server::{method, Client, TokenUsage};
+use crate::utils::text::thousands;
 
 /// Bound on the quit-time `session/log/read`: Python answers from cached state,
 /// so a hung server must not stall the exit; a timeout just drops the summary.
@@ -31,17 +32,23 @@ const RESET: &str = "\x1b[0m";
 
 /// Token usage the app currently projects (Python `_current_usage`).
 pub fn current_usage(app: &App) -> TokenUsage {
+    let input_tokens = app.session.stats.session_prompt_tokens;
+    let output_tokens = app.session.stats.session_completion_tokens;
     TokenUsage {
-        input_tokens: app.session.stats.session_prompt_tokens,
-        output_tokens: app.session.stats.session_completion_tokens,
+        input_tokens,
+        output_tokens,
+        total_tokens: input_tokens + output_tokens,
     }
 }
 
 /// Python `usage_since_baseline`: per-component clamp at zero.
 pub fn usage_since_baseline(current: TokenUsage, baseline: TokenUsage) -> TokenUsage {
+    let input_tokens = current.input_tokens.saturating_sub(baseline.input_tokens);
+    let output_tokens = current.output_tokens.saturating_sub(baseline.output_tokens);
     TokenUsage {
-        input_tokens: current.input_tokens.saturating_sub(baseline.input_tokens),
-        output_tokens: current.output_tokens.saturating_sub(baseline.output_tokens),
+        input_tokens,
+        output_tokens,
+        total_tokens: input_tokens + output_tokens,
     }
 }
 
@@ -53,19 +60,6 @@ pub fn format_session_usage(usage: TokenUsage) -> String {
         thousands(usage.output_tokens),
         thousands(usage.input_tokens + usage.output_tokens),
     )
-}
-
-/// Python's `:,` integer format: digits grouped in threes by commas.
-fn thousands(value: u64) -> String {
-    let digits = value.to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
-    grouped
 }
 
 /// Python `print_session_resume_message` as one block: nothing at all without a
@@ -145,21 +139,26 @@ pub async fn exit_summary(app: &App, client: &Arc<Client>) -> SessionExitSummary
             usage,
         };
     };
-    let persisted = tokio::time::timeout(
-        EXIT_READ_TIMEOUT,
+    let resumable = is_resumable(client, &session_id, EXIT_READ_TIMEOUT).await;
+    SessionExitSummary {
+        session_id: resumable.then_some(session_id),
+        usage,
+    }
+}
+
+/// Whether `vibe --resume <id>` can reopen the session; a timeout or request error counts as no.
+pub async fn is_resumable(client: &Client, session_id: &str, timeout: Duration) -> bool {
+    tokio::time::timeout(
+        timeout,
         client.request(method::SESSION_LOG_READ, json!({"sessionId": session_id})),
     )
     .await
     .ok()
     .and_then(|response| response.ok())
-    .filter(|log| {
+    .is_some_and(|log| {
         log.pointer("/log/enabled") == Some(&Value::Bool(true))
             && log.pointer("/log/persisted") == Some(&Value::Bool(true))
-    });
-    SessionExitSummary {
-        session_id: persisted.map(|_| session_id),
-        usage,
-    }
+    })
 }
 
 /// The `[bold dark_orange]` prefix rich emits for a stdout with this tty bit and
@@ -176,7 +175,7 @@ pub fn orange_span(is_tty: bool) -> Option<&'static str> {
 }
 
 /// rich's NO_COLOR check: any non-empty value turns colors off.
-fn no_color() -> bool {
+pub(crate) fn no_color() -> bool {
     std::env::var("NO_COLOR")
         .map(|v| !v.is_empty())
         .unwrap_or(false)
@@ -184,7 +183,11 @@ fn no_color() -> bool {
 
 /// rich's terminal detection (`Console._detect_color_system`): no SGR off-TTY
 /// or on a dumb terminal, else the depth-appropriate escape.
-fn color_span(is_tty: bool, deep: &'static str, shallow: &'static str) -> Option<&'static str> {
+pub(crate) fn color_span(
+    is_tty: bool,
+    deep: &'static str,
+    shallow: &'static str,
+) -> Option<&'static str> {
     if !is_tty || dumb_term() {
         return None;
     }
@@ -213,4 +216,10 @@ fn dumb_term() -> bool {
         .trim()
         .to_lowercase();
     term == "dumb" || term == "unknown"
+}
+
+/// rich's color gate for one stream: colors only on a TTY that is neither
+/// dumb nor NO_COLOR.
+pub fn colors_enabled(is_tty: bool) -> bool {
+    is_tty && !dumb_term() && !no_color()
 }

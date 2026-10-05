@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 use crate::core::error::CoreError;
 use serde_json::Value;
 use serde_json::json;
@@ -9,7 +11,7 @@ use crate::core::features::programmatic_tool_calling::model::PartialEvaluation;
 use crate::core::features::programmatic_tool_calling::model::ToolKind;
 use crate::core::features::programmatic_tool_calling::model::ToolState;
 use crate::core::features::programmatic_tool_calling::state::{
-    PendingProgramHook, PendingProgramOperation, ProgramExecution,
+    PendingProgramHook, PendingProgramOperation, ProgramContinuation, ProgramExecution,
 };
 use crate::core::features::programmatic_tool_calling::{
     CompletedProgramResult, ProgramContext, ProgramOutcome, TypeScriptTool,
@@ -30,6 +32,7 @@ pub(super) fn start_program_execution(
     context: ProgramContext<'_>,
     call: &ToolCall,
     determinism: DeterminismContext,
+    accepted_results: &mut Vec<AcceptedProgramResult>,
 ) -> Result<(ProgramOutcome, Vec<Action>), CoreError> {
     let code = call
         .arguments
@@ -39,13 +42,16 @@ pub(super) fn start_program_execution(
     drive_program_execution(
         context,
         call,
-        PartialEvaluation {
-            code: code.to_string(),
-            input: json!({}),
-            tool_state: Vec::new(),
+        ProgramContinuation {
+            partial_evaluation: PartialEvaluation {
+                code: code.to_string(),
+                input: json!({}),
+                tool_state: Vec::new(),
+            },
+            round: 0,
         },
-        0,
         determinism,
+        accepted_results,
     )
 }
 
@@ -67,6 +73,18 @@ enum ProgramToolResultDisposition {
 struct ClassifiedProgramInput {
     accepted_result: Option<AcceptedProgramResult>,
     transition: ProgramInputTransition,
+}
+
+impl ClassifiedProgramInput {
+    fn resume_after_hook(action_id: &str, call: &ExternalToolCall, result: ToolResult) -> Self {
+        Self {
+            accepted_result: Some(accepted_program_result(call, result.clone())),
+            transition: ProgramInputTransition::ResumeHook {
+                action_id: action_id.to_owned(),
+                result,
+            },
+        }
+    }
 }
 
 enum ProgramInputTransition {
@@ -123,16 +141,37 @@ pub(crate) enum ProgramAdvance {
 
 pub(crate) struct ProgramTransition {
     pub(crate) advance: ProgramAdvance,
-    pub(crate) accepted_result: Option<AcceptedProgramResult>,
+    pub(crate) accepted_results: Vec<AcceptedProgramResult>,
 }
 
 fn drive_program_execution(
     context: ProgramContext<'_>,
     call: &ToolCall,
-    partial_evaluation: PartialEvaluation,
-    round: u32,
+    mut continuation: ProgramContinuation,
     determinism: DeterminismContext,
+    accepted_results: &mut Vec<AcceptedProgramResult>,
 ) -> Result<(ProgramOutcome, Vec<Action>), CoreError> {
+    // One Step can settle many permission-denied replay rounds.
+    // Keep replay iterative so each round does not grow the call stack.
+    loop {
+        match evaluate_program_round(context, call, continuation, determinism, accepted_results)? {
+            ControlFlow::Break(outcome) => return Ok(outcome),
+            ControlFlow::Continue(next) => continuation = next,
+        }
+    }
+}
+
+fn evaluate_program_round(
+    context: ProgramContext<'_>,
+    call: &ToolCall,
+    continuation: ProgramContinuation,
+    determinism: DeterminismContext,
+    accepted_results: &mut Vec<AcceptedProgramResult>,
+) -> Result<ControlFlow<(ProgramOutcome, Vec<Action>), ProgramContinuation>, CoreError> {
+    let ProgramContinuation {
+        partial_evaluation,
+        round,
+    } = continuation;
     let execution_id = typescript_execution_id(context.message_count(), &call.id, round);
     match code_mode::evaluate(EvaluationRequest {
         partial_evaluation: &partial_evaluation,
@@ -146,7 +185,7 @@ fn drive_program_execution(
     {
         EvaluationOutcome::PartialEvaluation { partial_evaluation } => {
             let mut pending_operations = Vec::new();
-            let mut effects = Vec::new();
+            let mut permission_denials = Vec::new();
             for (operation_id, function) in
                 partial_evaluation
                     .tool_state
@@ -164,7 +203,7 @@ fn drive_program_execution(
                             function.name
                         ))
                     })?;
-                let call = ExternalToolCall {
+                let operation_call = ExternalToolCall {
                     action_id: effect_id_for_operation(ToolOrigin::Programmatic, operation_id),
                     call_id: operation_id.clone(),
                     origin: ToolOrigin::Programmatic,
@@ -172,23 +211,18 @@ fn drive_program_execution(
                 };
                 let hook_binding_ids = resolved.pre_hook_binding_ids;
                 let operation = if !hook_binding_ids.is_empty() {
-                    let hook_action_id = hook_action_id(&call.action_id, HookPoint::PreToolCall);
-                    effects.push(Action::hook(
-                        hook_action_id.clone(),
-                        context.turn_id(),
-                        hook_binding_ids.clone(),
-                        HookCall::PreToolCall {
-                            tool_call: (&call).into(),
-                        },
-                    )?);
+                    let hook_action_id =
+                        hook_action_id(&operation_call.action_id, HookPoint::PreToolCall);
                     PendingProgramOperation::awaiting_pre_hook(
-                        call,
+                        operation_call,
                         hook_action_id,
                         hook_binding_ids,
                     )
                 } else {
-                    effects.push(Action::external_tool(&call, context.turn_id()));
-                    PendingProgramOperation::pending(call)
+                    if let Some(result) = context.permission_denial(&operation_call) {
+                        permission_denials.push(accepted_program_result(&operation_call, result));
+                    }
+                    PendingProgramOperation::pending(operation_call)
                 };
                 pending_operations.push(operation);
             }
@@ -197,14 +231,23 @@ fn drive_program_execution(
                     "TypeScript partial evaluation contains no pending effects",
                 ));
             }
-            Ok((
-                ProgramOutcome::Pending(ProgramExecution::new(
-                    partial_evaluation,
-                    pending_operations,
-                    round,
-                )),
-                effects,
-            ))
+            let mut execution =
+                ProgramExecution::new(partial_evaluation, pending_operations, round);
+
+            for denial in permission_denials {
+                let continuation =
+                    execution.resolve_pending_tool(&denial.action_id, denial.result.clone())?;
+                accepted_results.push(denial);
+                if let Some(continuation) = continuation {
+                    return Ok(ControlFlow::Continue(continuation));
+                }
+            }
+
+            let pending_actions = execution.pending_actions(context.turn_id());
+            Ok(ControlFlow::Break((
+                ProgramOutcome::Pending(execution),
+                pending_actions,
+            )))
         }
         EvaluationOutcome::CodeResult {
             stdout,
@@ -219,17 +262,17 @@ fn drive_program_execution(
                 &tool_state,
                 result,
             )?;
-            Ok((
+            Ok(ControlFlow::Break((
                 ProgramOutcome::Completed(Box::new(CompletedProgramResult { result })),
                 Vec::new(),
-            ))
+            )))
         }
         EvaluationOutcome::Error { error } => {
             let result = failed_program_tool_result(context.descriptors(), None, None, &[], error)?;
-            Ok((
+            Ok(ControlFlow::Break((
                 ProgramOutcome::Completed(Box::new(CompletedProgramResult { result })),
                 Vec::new(),
-            ))
+            )))
         }
     }
 }
@@ -445,37 +488,41 @@ impl ProgramExecution {
                         HookResult::PreToolCall(PreToolCallOutput::Continue {
                             effective_arguments,
                         }),
-                    ) => Ok(ClassifiedProgramInput {
-                        accepted_result: None,
-                        transition: ProgramInputTransition::ContinueAfterPreHook {
-                            action_id: action_id.clone(),
-                            effective_call: context
-                                .effective_call(original, effective_arguments.clone())?,
-                        },
-                    }),
+                    ) => {
+                        let effective_call =
+                            context.effective_call(original, effective_arguments.clone())?;
+                        Ok(match context.permission_denial(&effective_call) {
+                            Some(denial) => ClassifiedProgramInput::resume_after_hook(
+                                action_id,
+                                &effective_call,
+                                denial,
+                            ),
+                            None => ClassifiedProgramInput {
+                                accepted_result: None,
+                                transition: ProgramInputTransition::ContinueAfterPreHook {
+                                    action_id: action_id.clone(),
+                                    effective_call,
+                                },
+                            },
+                        })
+                    }
                     (
                         Some(PendingProgramHook::Pre(call)),
                         HookResult::PreToolCall(PreToolCallOutput::Skip { reason }),
                     ) => {
                         let result = skipped_tool_result(reason.clone())?;
-                        Ok(ClassifiedProgramInput {
-                            accepted_result: Some(accepted_program_result(call, result.clone())),
-                            transition: ProgramInputTransition::ResumeHook {
-                                action_id: action_id.clone(),
-                                result,
-                            },
-                        })
+                        Ok(ClassifiedProgramInput::resume_after_hook(
+                            action_id, call, result,
+                        ))
                     }
                     (
                         Some(PendingProgramHook::Post(call)),
                         HookResult::PostToolCall { tool_result },
-                    ) => Ok(ClassifiedProgramInput {
-                        accepted_result: Some(accepted_program_result(call, tool_result.clone())),
-                        transition: ProgramInputTransition::ResumeHook {
-                            action_id: action_id.clone(),
-                            result: tool_result.clone(),
-                        },
-                    }),
+                    ) => Ok(ClassifiedProgramInput::resume_after_hook(
+                        action_id,
+                        call,
+                        tool_result.clone(),
+                    )),
                     (Some(PendingProgramHook::Pre(_)), _) => Err(CoreError::invalid_command(
                         "pre-tool hook requires a pre_tool_call result",
                     )),
@@ -491,13 +538,9 @@ impl ProgramExecution {
                     .ok_or_else(|| CoreError::invariant("pending program hook was not found"))?;
                 let call = pending.call();
                 let result = hook_failure_tool_result(error.clone());
-                Ok(ClassifiedProgramInput {
-                    accepted_result: Some(accepted_program_result(call, result.clone())),
-                    transition: ProgramInputTransition::ResumeHook {
-                        action_id: action_id.clone(),
-                        result,
-                    },
-                })
+                Ok(ClassifiedProgramInput::resume_after_hook(
+                    action_id, call, result,
+                ))
             }
         }
     }
@@ -526,6 +569,7 @@ impl ProgramExecution {
             accepted_result,
             transition,
         } = self.classify_input(context, &input)?;
+        let mut accepted_results = Vec::from_iter(accepted_result);
         let advance = match transition {
             ProgramInputTransition::ResumeTool { action_id, result } => self.resume(
                 context,
@@ -535,6 +579,7 @@ impl ProgramExecution {
                 },
                 result,
                 determinism,
+                &mut accepted_results,
             ),
             ProgramInputTransition::AwaitPostHook {
                 action_id,
@@ -574,11 +619,12 @@ impl ProgramExecution {
                 },
                 result,
                 determinism,
+                &mut accepted_results,
             ),
         }?;
         Ok(ProgramTransition {
             advance,
-            accepted_result,
+            accepted_results,
         })
     }
 
@@ -589,9 +635,17 @@ impl ProgramExecution {
         resume: ProgramResume<'_>,
         result: ToolResult,
         determinism: DeterminismContext,
+        accepted_results: &mut Vec<AcceptedProgramResult>,
     ) -> Result<ProgramAdvance, CoreError> {
-        let Some((outcome, actions)) =
-            resume_program_execution(context, parent_call, self, resume, result, determinism)?
+        let Some((outcome, actions)) = resume_program_execution(
+            context,
+            parent_call,
+            self,
+            resume,
+            result,
+            determinism,
+            accepted_results,
+        )?
         else {
             return Ok(ProgramAdvance::Pending {
                 actions: Vec::new(),
@@ -629,22 +683,24 @@ fn resume_program_execution(
     resume: ProgramResume<'_>,
     result: ToolResult,
     determinism: DeterminismContext,
+    accepted_results: &mut Vec<AcceptedProgramResult>,
 ) -> Result<Option<(ProgramOutcome, Vec<Action>)>, CoreError> {
     let continuation = match resume {
         ProgramResume::Tool { action_id } => program.resolve_pending_tool(action_id, result)?,
         ProgramResume::Hook { action_id } => program.resolve_pending_hook(action_id, result)?,
     };
-    if let Some(continuation) = continuation {
-        let (next_state, next_effects) = drive_program_execution(
-            context,
-            parent_call,
-            continuation.partial_evaluation,
-            continuation.round,
-            determinism,
-        )?;
-        return Ok(Some((next_state, next_effects)));
-    }
-    Ok(None)
+    let Some(continuation) = continuation else {
+        return Ok(None);
+    };
+    let outcome = drive_program_execution(
+        context,
+        parent_call,
+        continuation,
+        determinism,
+        accepted_results,
+    )?;
+
+    Ok(Some(outcome))
 }
 
 /// A replay-stable identity for one TypeScript evaluation.
@@ -1391,7 +1447,7 @@ mod tests {
             assistant_tool(
                 "run_typescript",
                 json!({
-                    "code": "async function main() { return tools.agent.spawn({ agentName: 'researcher', description: 'Investigate' }); }"
+                    "code": "async function main() { return tools.subagent.spawn({ agentName: 'researcher', description: 'Investigate' }); }"
                 }),
             ),
         );
@@ -1409,7 +1465,7 @@ mod tests {
             started(),
             assistant_tool(
                 "run_typescript",
-                json!({"code": "async function main() { return tools.agent.spawn({agentName: 'researcher', message: 'Investigate'}); }"}),
+                json!({"code": "async function main() { return tools.subagent.spawn({agentName: 'researcher', message: 'Investigate'}); }"}),
             ),
         );
 

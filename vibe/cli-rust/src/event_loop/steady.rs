@@ -5,17 +5,18 @@ use anyhow::Result;
 use crate::app::Status;
 use crate::{completion_manager, event_handler, turn_summary, ui};
 
-use super::helpers::{
-    apply_command, approval_pause_deadline, draw_synchronized, emit_idle_marker, feedback_deadline,
-    handle_input_event, preview_deadline, spinner_deadline, step_scroll, typing_pause_deadline,
-    InputOutcome, LoopState,
+use super::deadlines::{
+    approval_pause_deadline, feedback_deadline, preview_deadline, spinner_deadline,
+    subagent_refresh_deadline, typing_pause_deadline,
 };
+use super::helpers::{apply_command, redraw_frame, replay_marker};
+use super::keys::{handle_input_event, InputOutcome, LoopState};
 use super::notifications::{absorb_notification, surface_server_close};
 use super::suspend::suspend_once;
-use super::{EventLoop, REDRAW_INTERVAL};
+use super::{EventLoop, LoopExit, REDRAW_INTERVAL};
 
 impl EventLoop {
-    pub(super) async fn steady(&mut self) -> Result<()> {
+    pub(super) async fn steady(&mut self) -> Result<LoopExit> {
         let sources = &mut self.sources;
         let input = &mut self.input;
         let shutdown = &mut self.shutdown;
@@ -33,11 +34,6 @@ impl EventLoop {
         voice_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut selection_scroll = tokio::time::interval(std::time::Duration::from_millis(50));
         selection_scroll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut mcp_refresh = tokio::time::interval_at(
-            tokio::time::Instant::now() + crate::mcp::BACKGROUND_REFRESH_INTERVAL,
-            crate::mcp::BACKGROUND_REFRESH_INTERVAL,
-        );
-        mcp_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut redraw_tick = tokio::time::interval(REDRAW_INTERVAL);
         redraw_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut state = LoopState::new();
@@ -68,33 +64,45 @@ impl EventLoop {
                 // First: a signal must land even while other sources are
                 // continuously ready, and Ctrl+Z suspension must not leave a
                 // Burst backlog of missed animation ticks.
-                _ = shutdown.wait() => return Ok(()),
-                _ = selection_scroll.tick(), if crate::selection::is_auto_scrolling(&self.app) => {
-                    crate::selection::auto_scroll(&mut self.app);
+                _ = shutdown.wait() => return Ok(LoopExit::Quit),
+                _ = selection_scroll.tick(), if crate::selection::is_auto_scrolling(&self.app)
+                    || crate::mouse::is_track_paging(&self.app) =>
+                {
+                    if crate::selection::is_auto_scrolling(&self.app) {
+                        crate::selection::auto_scroll(&mut self.app);
+                    }
+                    crate::mouse::repeat_track_page(&mut self.app);
                     state.idle_marker_emitted = false;
                     state.redraw_pending = true;
                     state.real_event_pending = true;
                 }
+                // A drawn frame is always behind the loop: the keyed launch
+                // painted the unready frame, the replay fold drew its
+                // convergence, and every wizard round painted its relaunch
+                // before re-entering.
                 _ = redraw_tick.tick(), if state.redraw_pending => {
-                    let animating = step_scroll(&mut self.app, replaying);
-                    draw_synchronized(&mut self.terminal, &mut self.app)?;
-                    let indexing = *sources.files.borrow() == 0
-                        && completion_manager::active_is_file(&self.app);
-                    let settled = if settle_busy {
-                        self.app.is_settled()
-                    } else {
-                        self.app.is_idle()
-                    };
-                    if replaying && state.real_event_pending && !state.marker_held && !indexing {
-                        if !settled || crate::selection::is_auto_scrolling(&self.app) {
-                            state.idle_marker_emitted = false;
-                        } else if !state.idle_marker_emitted {
-                            emit_idle_marker();
-                            state.idle_marker_emitted = true;
-                        }
+                    let (animating, mounting, indexing) = redraw_frame(
+                        &mut self.app,
+                        &self.client,
+                        &mut sources.files,
+                        &mut self.terminal,
+                        replaying,
+                    )?;
+                    if mounting {
+                        // Slow draws must leave time for input and newer session replies.
+                        redraw_tick.reset();
                     }
-                    state.redraw_pending = animating;
-                    state.real_event_pending = false;
+                    replay_marker(
+                        &self.app,
+                        &mut state,
+                        replaying,
+                        settle_busy,
+                        animating,
+                        mounting,
+                        indexing,
+                    );
+                    state.redraw_pending = animating || mounting;
+                    state.real_event_pending &= mounting || animating;
                     continue;
                 }
                 _ = frame.tick() => {
@@ -104,9 +112,16 @@ impl EventLoop {
                     state.redraw_pending |= changed;
                 }
                 _ = spin.tick() => {
+                    let subagent_loading = self
+                        .app
+                        .subagents
+                        .viewed_child()
+                        .is_some_and(|child| crate::subagents::is_active(child.status));
                     let active = !settle_busy
                         && (self.app.view.command_loading
                             || self.app.compacting
+                            || subagent_loading
+                            || crate::teleport::busy(&self.app)
                             || crate::commands::stress::running(&self.app)
                             || matches!(self.app.session.status, Status::Starting | Status::Generating { .. }));
                     if active {
@@ -119,7 +134,9 @@ impl EventLoop {
                     }
                     state.redraw_pending |= active || switching;
                 }
-                _ = blink.tick(), if !replaying && self.app.view.app_focus => {
+                _ = blink.tick(), if !replaying
+                    && self.app.view.app_focus =>
+                {
                     self.app.view.cursor_on = !self.app.view.cursor_on;
                     state.redraw_pending = true;
                 }
@@ -142,14 +159,35 @@ impl EventLoop {
                     state.redraw_pending = true;
                     state.real_event_pending = true;
                 }
+                // Draws nothing and settles nothing: analytics never alter the UI.
+                Some(event) = sources.telemetry.recv() => {
+                    if let Some(session_id) = self.app.session.session_id.clone() {
+                        crate::telemetry::send(&self.client, &session_id, event);
+                    }
+                }
                 Some(event) = sources.narrator.recv() => {
                     turn_summary::apply_event(&mut self.app, event);
                     state.redraw_pending = true;
                     state.real_event_pending = true;
                 }
                 Some(event) = sources.ready.recv() => {
-                    if event_handler::apply_startup_event(&mut self.app, &self.client, &self.config_tx, event) {
-                        return Ok(());
+                    // The missing-key verdict is a typed loop exit (the
+                    // wizard is a pre-session surface, Python `run_onboarding`
+                    // parity): the loop unwinds and the entrypoint reruns the
+                    // wizard against a fresh child, seeded for the provider
+                    // the verdict names.
+                    if let crate::startup::StartupEvent::MissingApiKey { provider, env_key } =
+                        event
+                    {
+                        return Ok(LoopExit::NeedsOnboarding { provider, env_key });
+                    }
+                    if crate::event_handler::apply_startup_event(
+                        &mut self.app,
+                        &self.client,
+                        &self.config_tx,
+                        event,
+                    ) {
+                        return Ok(LoopExit::Quit);
                     }
                     if self.app.trust.open {
                         // Keys typed at the chat frame must not answer a gate
@@ -207,6 +245,23 @@ impl EventLoop {
                 _ = tokio::time::sleep_until(feedback_deadline(&self.app)), if self.app.feedback.hide_at.is_some() => {
                     crate::feedback::hide_expired(&mut self.app);
                     state.redraw_pending = true;
+                }
+                _ = tokio::time::sleep_until(subagent_refresh_deadline(&self.app)), if self.app.subagents.refresh_at.is_some() => {
+                    // Python's drain: one fetch per 50ms window, even while updates stream.
+                    crate::subagents::start_refresh(&mut self.app, &self.client);
+                    state.redraw_pending = true;
+                }
+                Some(event) = sources.subagents.recv() => {
+                    self.app.commit_finished();
+                    crate::subagents::apply_event(&mut self.app, event);
+                    state.redraw_pending = true;
+                    state.real_event_pending = true;
+                }
+                Some(event) = sources.older_history.recv() => {
+                    self.app.commit_finished();
+                    crate::older_history::apply_event(&mut self.app, event);
+                    state.redraw_pending = true;
+                    state.real_event_pending = true;
                 }
                 Some(event) = sources.theme.recv() => {
                     crate::theme_picker::apply_event(&mut self.app, event);
@@ -290,8 +345,8 @@ impl EventLoop {
                     state.redraw_pending = true;
                     state.real_event_pending = true;
                 }
-                _ = mcp_refresh.tick(), if self.app.mcp.open => {
-                    crate::mcp::refresh(&mut self.app, &self.client);
+                _ = tokio::time::sleep_until(crate::mcp::refresh_deadline(&self.app)), if self.app.mcp.open => {
+                    crate::mcp::background_refresh(&mut self.app, &self.client);
                 }
                 Some(command) = sources.commands.recv() => {
                     apply_command(&mut self.app, &self.client, command);
@@ -305,8 +360,12 @@ impl EventLoop {
                     event,
                     replaying,
                 ) {
-                    InputOutcome::Exit => return Ok(()),
-                    outcome => state.apply_input(outcome, &mut blink),
+                    InputOutcome::Exit => return Ok(LoopExit::Quit),
+                    outcome => {
+                        if state.apply_input(outcome) {
+                            blink.reset();
+                        }
+                    }
                 },
                 changed = self.crash_rx.changed(), if !self.app.server_closed => {
                     if surface_server_close(&mut self.app, changed.is_ok() && *self.crash_rx.borrow()) {

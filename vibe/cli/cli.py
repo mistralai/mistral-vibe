@@ -11,17 +11,23 @@ from rich import print as rprint
 from rich.markup import escape
 
 from vibe import __version__
+from vibe._experimental_harness import ExperimentalHarnessUnavailableError
 from vibe.cli.session_exit import print_session_resume_message
 from vibe.cli.terminal_detect import detect_terminal
 from vibe.cli.update_notifier import (
     FileSystemUpdateCacheRepository,
-    PyPIUpdateGateway,
     UpdateCacheRepository,
     UpdateError,
     UpdateGateway,
+    create_update_gateway,
     get_pending_update_from_cache,
     get_update_if_available,
     mark_update_as_dismissed,
+)
+from vibe.cli.update_notifier.update import (
+    FORCE_REINSTALL_COMMAND,
+    force_reinstall_latest,
+    is_uv_tool_install,
 )
 from vibe.core.config import MissingAPIKeyError, VibeConfigSchema, load_dotenv_values
 from vibe.core.config.default_orchestrator import build_default_orchestrator
@@ -220,6 +226,11 @@ def _run_programmatic_mode(args: argparse.Namespace, stdin_prompt: str | None) -
     except AppServerResponseError as e:
         print(f"Error: {e.error.message}", file=sys.stderr)
         sys.exit(1)
+    except ExperimentalHarnessUnavailableError as e:
+        # The Unified Harness is the required default runtime: startup aborts
+        # here with an actionable message instead of falling back to legacy.
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     except (RuntimeError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -305,6 +316,13 @@ def _run_interactive_mode(
     except AppServerResponseError as exc:
         rprint(f"[red]Error:[/] {exc.error.message}")
         sys.exit(1)
+    except ExperimentalHarnessUnavailableError as e:
+        # The Unified Harness is the required default runtime: startup aborts
+        # here with an actionable message instead of falling back to legacy.
+        # The reason text is escaped: an exception message containing square
+        # brackets would otherwise be read as rich markup.
+        rprint(f"[red]Error:[/] {escape(str(e))}")
+        sys.exit(1)
     print_session_resume_message(summary)
 
 
@@ -333,13 +351,14 @@ def _show_update_prompt(
         case UpdatePromptResult.QUIT:
             sys.exit(0)
         case UpdatePromptResult.UPDATED:
-            rprint(
-                f"[green]✔ Vibe was updated from {__version__} to "
-                f"{latest_version}.[/]\n  Run [bold]vibe[/] to start using the "
-                "new version."
-            )
+            _print_update_succeeded(latest_version)
             sys.exit(0)
         case UpdatePromptResult.UPDATE_FAILED:
+            if _confirm_force_reinstall():
+                rprint("Reinstalling mistral-vibe…")
+                if asyncio.run(force_reinstall_latest(latest_version)):
+                    _print_update_succeeded(latest_version)
+                    sys.exit(0)
             rprint(
                 "[yellow]Vibe could not update automatically.[/]\n"
                 "  Update manually with your package manager (for example "
@@ -347,6 +366,32 @@ def _show_update_prompt(
                 f"the current version ({__version__}) for now."
             )
             sys.exit(1)
+
+
+def _print_update_succeeded(latest_version: str) -> None:
+    rprint(
+        f"[green]✔ Vibe was updated from {__version__} to "
+        f"{latest_version}.[/]\n  Run [bold]vibe[/] to start using the "
+        "new version."
+    )
+
+
+def _confirm_force_reinstall() -> bool:
+    if not is_uv_tool_install():
+        return False
+    rprint(
+        "[yellow]The update didn't apply, your uv install is likely pinned.[/]\n"
+        f"  [bold]{FORCE_REINSTALL_COMMAND}[/] installs the latest version "
+        "but drops the pin, extras and --with packages."
+    )
+    sys.stdout.write("Run it now? [y/N] ")
+    sys.stdout.flush()
+    try:
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        sys.stdout.write("\n")
+        return False
+    return answer in {"y", "yes"}
 
 
 def _maybe_run_startup_update_prompt(
@@ -385,7 +430,7 @@ def _run_check_upgrade(
 ) -> None:
     from vibe.setup.update_prompt import UpdatePromptMode
 
-    notifier = update_notifier or PyPIUpdateGateway(project_name="mistral-vibe")
+    notifier = update_notifier or create_update_gateway("mistral-vibe")
     try:
         update = asyncio.run(
             get_update_if_available(

@@ -80,12 +80,15 @@ fn live_snapshot_keeps_local_file_image_metadata() {
             id: "session-1".to_owned(),
             title: None,
             cwd: None,
+            worktree: None,
             token_usage: None,
         },
         history: Some(vec![server_message()]),
+        history_before_cursor: None,
         turns: None,
         turn_queue: None,
         retrying: None,
+        child_sessions: Vec::new(),
     };
 
     transcript.load_live_snapshot(&state);

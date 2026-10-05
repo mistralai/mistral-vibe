@@ -77,6 +77,10 @@ def build_history_widgets(
     ):
         if not show_thinking and isinstance(entry, PublicReasoningEntry):
             continue
+        if isinstance(
+            entry, PublicCheckpointEntry
+        ) and not history_entry_renders_widget(entry):
+            continue
         if current_group is not None and not entry_keeps_tool_group(entry):
             _resolve_pending_errors(escalate=True)
             current_group.set_collapsed(tools_collapsed)

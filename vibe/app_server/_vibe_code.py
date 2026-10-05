@@ -590,7 +590,7 @@ class VibeCodeController:
         try:
             from vibe.core.teleport.git import GitRepository
 
-            async with GitRepository() as repository:
+            async with GitRepository(workdir=self._session.cwd) as repository:
                 return await repository.get_info()
         except ServiceTeleportError as exc:
             raise VibeCodeError(str(exc)) from exc

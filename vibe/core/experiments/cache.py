@@ -16,16 +16,15 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any
 
+from vibe.core.experiments._constants import EVAL_CACHE_TTL_SECONDS
 from vibe.core.experiments.models import EvalResponse
 from vibe.core.paths import EXPERIMENT_EVAL_CACHE_FILE
 from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
-
-_EVAL_CACHE_TTL_SECONDS: Final = 7 * 24 * 60 * 60
 
 
 def load_cached_eval_response(config: VibeConfigSchema) -> EvalResponse | None:
@@ -39,7 +38,7 @@ def load_cached_eval_response(config: VibeConfigSchema) -> EvalResponse | None:
     payload = entry.get("payload")
     if not isinstance(stored_at, int) or not isinstance(payload, dict):
         return None
-    if stored_at <= int(time.time()) - _EVAL_CACHE_TTL_SECONDS:
+    if stored_at <= int(time.time()) - EVAL_CACHE_TTL_SECONDS:
         return None
     try:
         return EvalResponse.model_validate(payload)
@@ -59,6 +58,13 @@ def store_cached_eval_response(
         "payload": response.model_dump(mode="json"),
     }
     _write_entries(entries)
+
+
+def clear_cached_eval_responses() -> None:
+    try:
+        EXPERIMENT_EVAL_CACHE_FILE.path.unlink(missing_ok=True)
+    except OSError:
+        logger.debug("Failed to delete experiment eval cache file", exc_info=True)
 
 
 def _cache_key(config: VibeConfigSchema) -> str | None:

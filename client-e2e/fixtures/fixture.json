@@ -8,6 +8,29 @@
         "version": "0.0.0-eval"
       }
     },
+    "setup/status": {
+      "provider": {
+        "name": "mistral",
+        "apiBase": "https://api.mistral.ai/v1",
+        "apiKeyEnvVar": "MISTRAL_API_KEY",
+        "browserAuthBaseUrl": "https://console.mistral.ai",
+        "browserAuthApiBaseUrl": "https://console.mistral.ai/api",
+        "browserAuthAllowOriginRewrite": false
+      },
+      "consoleBaseUrl": "https://console.mistral.ai",
+      "vibeBaseUrl": "https://chat.mistral.ai",
+      "activeModel": "mistral-medium-3.5",
+      "theme": "ansi-dark",
+      "supportsBrowserSignIn": true,
+      "hasApiKey": true
+    },
+    "setup/store-credential": {
+      "outcome": "completed"
+    },
+    "setup/submit-choices": {
+      "outcome": "completed",
+      "failures": []
+    },
     "workspace/trust/status": {
       "status": "trusted",
       "details": null
@@ -23,7 +46,8 @@
           "alias": "mistral-medium-3.5",
           "thinking": "medium",
           "supportsImages": true,
-          "displayName": "mistral-medium-3.5"
+          "displayName": "mistral-medium-3.5",
+          "thinkingLevels": ["off", "medium", "high"]
         },
         "activeModelPinned": false,
         "awaitingExperimentModel": false,
@@ -248,7 +272,8 @@
             "alias": "mistral-medium-3.5",
             "thinking": "medium",
             "supportsImages": true,
-            "displayName": "mistral-medium-3.5"
+            "displayName": "mistral-medium-3.5",
+            "thinkingLevels": ["off", "medium", "high"]
           },
           "activeModelPinned": false,
           "awaitingExperimentModel": false,
@@ -470,6 +495,13 @@
     },
     "identity/read": {
       "identity": null
+    },
+    "providerAuth/read": {
+      "auth": {
+        "modelDisplayName": "mistral-medium-3.5",
+        "providerName": "mistral",
+        "apiBase": "https://api.mistral.ai/v1"
+      }
     },
     "session/ready/wait": {
       "ready": true,
@@ -1789,6 +1821,22 @@
               }
             }
           ]
+        },
+        {
+          "name": "max_context_length",
+          "kind": "int",
+          "description": "Context window of the active model (mistral-medium-3.5). The compaction threshold defaults to 80% of it.",
+          "value": null,
+          "path": "/models/mistral-medium-3.5/max_context_length",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": null
+            }
+          ]
         }
       ],
       "targets": [
@@ -1811,7 +1859,8 @@
             "alias": "mistral-medium-3.5",
             "thinking": "medium",
             "supportsImages": true,
-            "displayName": "mistral-medium-3.5"
+            "displayName": "mistral-medium-3.5",
+            "thinkingLevels": ["off", "medium", "high"]
           },
           "activeModelPinned": false,
           "awaitingExperimentModel": false,

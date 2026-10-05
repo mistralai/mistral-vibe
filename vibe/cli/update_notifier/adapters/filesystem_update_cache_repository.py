@@ -9,7 +9,7 @@ from vibe.cli.update_notifier.ports.update_cache_repository import (
     UpdateCacheRepository,
 )
 from vibe.utils.cache_store import CacheStore, FileSystemCacheStore
-from vibe.utils.paths import get_vibe_home
+from vibe.utils.vibe_home import get_vibe_home
 
 _CACHE_SECTION = "update_cache"
 
@@ -40,6 +40,8 @@ class FileSystemUpdateCacheRepository(UpdateCacheRepository):
             payload["seen_whats_new_version"] = update_cache.seen_whats_new_version
         if update_cache.dismissed_version is not None:
             payload["dismissed_version"] = update_cache.dismissed_version
+        if update_cache.source_stored_at is not None:
+            payload["source_stored_at"] = update_cache.source_stored_at
         await asyncio.to_thread(
             self._cache_store.write_section, _CACHE_SECTION, payload
         )

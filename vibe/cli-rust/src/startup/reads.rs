@@ -15,6 +15,10 @@ pub struct ConfigRead {
     pub transcription: Option<TranscriptionConfig>,
     pub log_level: Option<String>,
     pub enable_telemetry: bool,
+    pub enable_update_checks: bool,
+    pub enable_system_trust_store: bool,
+    /// How the server picked the harness, reported by `vibe.startup`.
+    pub harness_selection_source: Option<String>,
 }
 
 impl Default for ConfigRead {
@@ -26,6 +30,11 @@ impl Default for ConfigRead {
             log_level: None,
             // Absent on an older server: stay silent rather than assume consent.
             enable_telemetry: false,
+            // Absent on an older server: keep checking, like Python's default.
+            enable_update_checks: true,
+            // Absent on an older server: the bundled roots, Python's default.
+            enable_system_trust_store: false,
+            harness_selection_source: None,
         }
     }
 }
@@ -78,6 +87,18 @@ pub(super) async fn read_config(client: &Arc<Client>, cwd: Option<String>) -> Co
             .get("enableTelemetry")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        enable_update_checks: config
+            .get("enableUpdateChecks")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        enable_system_trust_store: config
+            .get("enableSystemTrustStore")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        harness_selection_source: result
+            .get("harnessSelectionSource")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
     }
 }
 
@@ -108,6 +129,22 @@ pub fn read_show_thinking_nodes(result: &Value) -> bool {
         .pointer("/runtime/config/showThinkingNodes")
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+/// Whether the subagent status list is shown (Python `show_subagent_status_list`).
+pub fn read_show_subagent_status_list(result: &Value) -> bool {
+    result
+        .pointer("/runtime/config/showSubagentStatusList")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// Whether Ctrl+D asks for a second press (Python `ask_confirmation_on_exit`).
+pub fn read_ask_confirmation_on_exit(result: &Value) -> bool {
+    result
+        .pointer("/runtime/config/askConfirmationOnExit")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 pub fn read_tokens(result: &Value) -> (u64, u64) {

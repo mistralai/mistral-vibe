@@ -5,6 +5,164 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.26.0] - 2026-10-05
+
+### Added
+
+- The app-server can discover built-in plugins from roots an embedding application ships, alongside the ones inside the package.
+- Vibe Code warns when the selected model cannot view attached images.
+- Vibe Code sessions list their background processes in a side panel with live status indicators and a Stop action for running ones.
+- The `~/.vibe/.env` fallback for the API key when the OS keyring is unavailable is now created owner-only (0600), so a saved key is no longer readable by other accounts on the machine.
+- Rust CLI: first-run onboarding wizard with theme selection, API key entry stored in the OS keyring, and browser sign-in; it opens automatically when the API key is missing, and `--setup` runs it and exits.
+- Rust CLI: `/teleport`, `&<prompt>` and `--teleport` send the session to Vibe Code Web, with push approval and Esc to cancel.
+- Rust CLI: Configure voice mode and narration with `/voice`.
+- Rust CLI: Schedule recurring prompts in natural language with `/loop` and model-managed cron tools.
+- Rust CLI: Undo and redo composer edits with platform-aware keyboard shortcuts.
+- Rust CLI: `vibe update` and `--check-upgrade` ask the install's own package manager (uv, Homebrew, or PyPI) what it can deliver and prompt to upgrade the CLI.
+- Rust CLI: update checks honor `enable_system_trust_store` — bundled Mozilla roots by default, the OS trust store when enabled.
+- Rust CLI: Clicking the scrollbar track scrolls one page; holding it keeps scrolling until the thumb reaches the pointer.
+- Rust CLI: Client usage telemetry now reaches the analytics pipeline: startup timings, slash commands, @-mentions, copies, cancellations and voice transcription events, with the detected terminal reported at launch.
+- Models accept a `thinking_levels` field to offer only the thinking levels they support.
+- Rust CLI: `/mcp` shows connector display names, plugin owners, and a link to add connectors in Studio.
+- `/mcp <name>` also accepts the display name shown in the browser, and unknown names list those display names.
+- Per-model `max_context_length` setting, editable in `/config`.
+- Rust CLI: Mention skills anywhere in a prompt with `/skill-name`, with the same caret-based completion popup as `@` file mentions.
+- Rust CLI: Accepted `/skill` and `@file` completions and pasted images are highlighted in the prompt and edited as a single unit.
+- Rust CLI: Long pastes show as a `[Pasted n characters]` placeholder, also once sent or rewound; paste the same text again right away to show it in full.
+- Rust CLI: Scrolling to the top of a resumed session or a `/resume` preview loads its older messages automatically.
+- Rust CLI: the startup banner hint now explains that unsetting `VIBE_CLI` (or setting it to `python`) switches to the legacy Python TUI.
+- Documented the `VIBE_CLI` selector, including the Windows session-variable forms, for running the legacy Python TUI.
+- Publish a source distribution on PyPI again, so Homebrew can build new releases.
+- Rust CLI: Typing a command followed by a space shows its arguments inline (e.g. `/loop`, `/mcp`, `/rename`) until the first argument is typed.
+- Fork an earlier completed response while a session continues generating.
+- A plugin can bundle its own MCP server executable and launch it with a `./` command in its `mcp.json`.
+- Project-links and teleport support in the VS Code extension: link a local workspace to a Vibe Code Web project and teleport the current conversation to continue it in the browser.
+- While the model provider is unavailable, Vibe shows which retry it is on and counts down to the next attempt.
+- `/status` shows the active model, provider, and API base.
+- You can now choose the model behind session titles and smart approve with `[utility_models]` in your config; `active` pins a feature to the model your session runs.
+- The worktree step of a new session shows what it is doing while it is created, including how many files have been checked out.
+- Xcode setup instructions for using Mistral Vibe as an ACP agent.
+
+### Changed
+
+- `workspace/git/worktrees/remove` gained additive `inspect`, `force`, and `deleteBranch` params plus `branchCreated`/`holders` response fields, so a client can probe a removal before committing to it.
+- A session that starts in a worktree now announces the prepared worktree over `session/updated` before the session moves, so clients that gate their UI on it can proceed as soon as it exists.
+- Unified backend: a tool set to `permission = "never"` now denies a sensitive path instead of prompting for it.
+- Packaged `vibe`, `vibe-acp`, and `vibe-app-server` executables now always ship the Unified Runtime; a build that cannot collect it fails instead of producing a legacy-only binary.
+- Vibe now always runs on the Unified Harness by default and exits with an actionable error when the runtime is missing or broken, instead of silently falling back to the legacy engine.
+- Rust CLI: Pasted images show as numbered `[Image #N]` placeholders instead of their file path.
+- Rust CLI: Several images attached to one message are listed as a tree.
+- Rust CLI: Web search queries and source titles are sanitized, and long source titles wrap aligned under their bullet.
+- hooks.toml hooks on the unified harness receive session_id, transcript_path and parent_session_id on stdin again, matching the legacy runtime.
+- Builtin tool_input reaches hooks with the CLI's author-facing argument names, and a pre_tool rewrite of those names takes effect.
+- A hook's system_message shows as the hook's result line, and a hook that fails to run reports the real reason instead of a generic message.
+- Rust CLI: The `/resume` picker takes at most 40% of the screen height.
+- Previewing a saved session in the resume picker is much faster.
+- Rust CLI: The command and skill completion menu closes as soon as anything is typed after the command.
+- Rust CLI: Tab-completing a command or skill adds a trailing space, ready for its arguments.
+- A compaction model on a different provider than the active model is now ignored with a warning instead of rejecting the configuration.
+- CLI session titles now describe the whole task, stop changing after a single confirmation pass, and survive resume unchanged
+- Session titles now draw on tool results (fetched PRs, changed files) so terse prompts still get a useful title
+- Session titles are now generated by default for CLI (opt out with `session_logging.generate_titles = false`) and run on the session's own model and provider.
+- Session titles and smart approve now check once whether your deployment serves a small fast model, instead of assuming it from the endpoint's address.
+- Custom and self-hosted Mistral deployments that serve a small model now get fast session titles and a fast smart-approve classifier, rather than falling back to your coding model.
+- Where your deployment serves no small model, session titles and smart approve run on your session's model, which costs more per call; name a cheaper one under `[utility_models]`.
+- New session worktrees check their files out in parallel, roughly halving creation time in large repositories.
+
+### Fixed
+
+- Forked Unified Harness sessions now keep their original cache affinity to improve prompt cache reuse.
+- Forked Unified Harness sessions running in managed worktrees now use independent managed worktrees.
+- Forking a live Unified Harness session preserves its active configuration.
+- Isolated forks no longer inherit or revoke the caller's --trust grant.
+- Worktree sessions now use one configuration update for the displayed, executed, and model-visible working directory.
+- Managed-worktree forks warn when uncommitted source changes remain outside the fork.
+- Smart Approve no longer asks for approval on every command or edit that names a file in a managed worktree under `~/.vibe/worktrees`.
+- Smart approve no longer sends every classification to a model name your deployment may not serve, which made it ask for approval on every call.
+- Closing one session no longer stops other sessions sharing the same harness.
+- Plugins cannot claim the reserved `subagent` or `skill` namespaces.
+- Auto-update only reports success once the new version is installed, and offers a forced reinstall when a pinned uv install stays on the old version.
+- Teleport no longer fails with "Failed to summarize context" on the experimental harness when the model uses thinking.
+- Rust CLI: Show microphone-access guidance when voice recordings capture no audio.
+- Rust CLI: Dictated text is inserted at the caret, and the caret follows it.
+- Rust CLI: Markdown horizontal rules, strikethrough, task lists, images, and hard line breaks now render with Textual parity.
+- Rust CLI: Enable clipboard copying over SSH on Windows.
+- Rust CLI: Keep keyboard input working after an empty piped prompt.
+- Rust CLI: Clean up Windows app-server child processes on exit.
+- Rust CLI: Avoid unsupported suspension hints on Windows.
+- Rust CLI: `/clear` shows the previous session id and how to resume it.
+- Rust CLI: tool calls separated only by an answered approval or a background notice now stay in the same folded block instead of opening a new one.
+- Rust CLI: Expanding a tool result or group scrolls it into view, and expanding or collapsing keeps the clicked header in place.
+- Rust CLI: Ctrl+O keeps the view on the same content instead of jumping to earlier messages.
+- Telemetry now labels background calls (session titles, worktree names, smart-approve checks) with their own call type, so they no longer count as regular model calls.
+- Unified harness turns report legacy turn error codes again (rate-limited, incomplete-stream, refused-key), so auto-retry and the `/retry` hint work; request telemetry carries attachment counts again.
+- A background start asks before running, honors the shell's allowlist and denylist, and remembers your approval for later starts; a start that sets its own environment or working directory always asks.
+- Reading a background process's output or the process list no longer prompts, writing to one asks for that process only in the current session, and stopping one never prompts.
+- Unified backend: a file tool set to `permission = "never"` with an `allowlist` now writes where the allowlist permits, instead of refusing everything
+- Unified backend: the `plan` agent can write its plan file again
+- Rust CLI: The interactive question free-text input now shares the composer keybindings (Ctrl+A, Ctrl+E, Ctrl+U, Ctrl+K, word navigation, Home/End, Delete).
+- Rust CLI: Ctrl+D respects `ask_confirmation_on_exit`, and the quit hint names the pressed key and warns about queued messages.
+- Rust CLI: Saving an edit to a queued prompt now leaves queue selection mode, so Enter steers the running turn instead of reopening the editor.
+- Rust CLI: Inline code inside a Markdown link label now opens the link when clicked.
+- Rust CLI: Hovering a wrapped link highlights every row of it.
+- Restored the subagents list and transcripts after resuming a session.
+- Rust CLI: Pasted tabs and zero-width characters no longer leave undeletable ghost characters in the chat input.
+- Rust CLI: Tabs in submitted prompts now show in the transcript instead of disappearing.
+- Rust CLI: Scripts like Khmer no longer shift the rest of the row or break the scrollbar.
+- Rust CLI: Wrapped lines of a user message now align with the start of its text instead of the prompt marker.
+- Rewind in the Rust CLI now offers to restore files changed since the chosen message, and restores them.
+- Rust CLI: Refreshing `/mcp` also reloads workspace connectors and no longer piles up requests or floods the transcript with errors.
+- Refreshing `/mcp` still re-discovers MCP servers when workspace connectors fail to load.
+- Rust CLI: Rejected `/mcp` toggles roll back only their own row with a warning, enabling no longer shows a status early, and plugin servers cannot be toggled.
+- Rust CLI: `/mcp <name>` on a server that needs auth opens its login instead of an empty panel.
+- Rust CLI: A viewed `/mcp` source that starts needing auth opens its login instead of an empty panel.
+- Rust CLI: After an MCP login, the login panel shows `Connecting...` until `/mcp` reopens instead of going blank.
+- `/mcp` no longer offers `Connect` on a source whose bootstrap failed.
+- `/mcp` reports when connectors fail to load instead of saying nothing is configured.
+- Rust CLI: Multi-line `/mcp` errors keep their line breaks instead of running together.
+- Refreshing a connector after signing in no longer resets token stats and skill completions.
+- Toggling a connector in `/mcp` no longer fails once the connector cache is over ten minutes old.
+- `/mcp` shows tools disabled by the global `disabled_tools`/`enabled_tools` patterns as disabled.
+- Plugin MCP servers show their session connection status and prompt for login when needed.
+- Rust CLI: Starting a background process no longer flashes the full command in the loading spinner.
+- Rust CLI: Pasting an image path into a `!` shell command keeps the raw path.
+- Rust CLI: Resumed sessions show each attached image under the name its prompt gave it, and clicking it opens the image.
+- Rust CLI: Scrolling no longer lags when an expanded tool group holds large tool outputs.
+- Manual `!` shell commands stay in the transcript after an app-server restart or session resume on the experimental harness.
+- Resuming a session imported from an older Vibe version no longer fails when its transcript carries embedded resource blocks.
+- Rust CLI: Esc closes the open todo panel instead of rejecting a pending tool approval or question.
+- Rust CLI: Web search and URL fetch results from the Unified harness render as readable sources and page text instead of raw JSON.
+- Rust CLI: Web fetch and web search results trim blank edges and only make http(s) sources clickable, matching the Python CLI.
+- Resumed Unified Harness sessions report older history, so clients can page past the latest 200 messages.
+- Rust CLI: A malformed older-history reply warns about the failed load instead of silently ending paging.
+- Update checks for uv tool installs now respect uv settings such as `exclude-newer`.
+- Building Vibe from source without Rust now fails early with install instructions
+- Wheel builds missing the bundled Harness Python runtime or Rust CLI now fail loudly instead of shipping a broken package.
+- Rust CLI: Ctrl+C interrupts a running turn or teleport whenever the loading hint offers it.
+- Rust CLI: The loading hint offers Ctrl+C to cancel a queued message whenever that is what Ctrl+C does.
+- Rust CLI: Interrupting a prompt before the server starts its turn now interrupts that turn once it starts.
+- Rust CLI: Ctrl+C rejects a pending tool approval or cancels an open question, as Esc does.
+- Rust CLI: Ctrl+C exits on the first press after the app server crashes, as its notice says.
+- Rust CLI: Pasting or dropping several files from Finder inserts one image placeholder or `@` mention per file.
+- Rust CLI: Ctrl+V and `/paste-image` insert the images copied in Finder instead of their icon.
+- Rust CLI: Image pastes are accepted when the backend can describe images for a text-only model.
+- Rust CLI: A message holding the same image file twice is sent instead of failing to enqueue.
+- Rust CLI: Pasted clipboard images are saved as `vibe-pasted-images/clipboard-<timestamp>.png`, like the Python CLI.
+- Rust CLI: A rejected prompt shows the server's reason, not only the failing request.
+- Failed connector tool calls now show the underlying cause (e.g. gateway HTTP 404, SSL error) instead of an opaque TaskGroup error.
+- Rust CLI: Clicking a tool call group header no longer flashes a text selection before toggling.
+- Opening a session over ACP now reports the app-server's field-level error detail (e.g. which transcript field failed validation) instead of the bare 'Invalid request parameters' protocol code name.
+- Resuming a session no longer fails when its model is on a different provider than the configured compaction model.
+- A session created by a newer Vibe resumes on an older one instead of failing to validate, and keeps the settings that older build cannot read.
+- Overwriting a file shows what changed, instead of reading as a newly created file.
+- Resuming a session whose transcript holds an @-mention no longer fails on embedded resources stored without a kind tag.
+- Preserve pending permission prompts and running status when reconnecting to a chat.
+- Teleport now resolves git at the session's workspace instead of the agent process's cwd, fixing 'requires a git repository' errors on eligible projects.
+- Rust CLI: Edit and write tool results start collapsed and expand or collapse on click.
+- Rust CLI: Expanded edit results show their diff again.
+- Turns no longer crash with "Completed public history entry is frozen" when a backend reuses tool call ids.
+- A new worktree session accepts its first message right away instead of after the worktree is created.
+
 ## [2.25.8] - 2026-09-23
 
 ### Added

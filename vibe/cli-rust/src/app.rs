@@ -96,6 +96,8 @@ pub struct SelectionState {
     pub press: Option<(u16, u16)>,
     /// Whether the pointer moved since the press (a drag, not a click).
     pub dragged: bool,
+    /// Python `_had_selection_at_press`: a selection showed when the button went down.
+    pub had_selection_at_press: bool,
 }
 
 /// An inline status line (Python `InlineNotice`), shown until `until`; `None`
@@ -155,6 +157,18 @@ pub struct ChatInput {
     pub cursor_moved_since_load: bool,
     /// Input history recalled with Up/Down, persisted to `$VIBE_HOME/vibehistory`.
     pub history: HistoryManager,
+    pub edit_history: crate::edit_history::EditHistory,
+    /// Accepted `/skill`, `@file`, and image mentions, drawn colored and edited atomically.
+    pub mentions: crate::mentions::Mentions,
+    /// Pasted images behind the `[Image #N]` placeholders typed or recalled into the input.
+    pub pasted_images: crate::image_placeholders::PastedImages,
+    /// Long pastes collapsed in the input, so sent prompts can keep them collapsed.
+    pub collapsed_pastes: crate::collapsed_pastes::CollapsedPastes,
+    /// The paste just collapsed, which pasting it again shows in full until the next edit.
+    pub expandable_paste: Option<std::sync::Arc<str>>,
+    /// The composer as history recall found it, mentions and mode included,
+    /// given back whole when Down leaves the recalled entries.
+    pub recall_draft: Option<crate::edit_history::Snapshot>,
     /// When the last key reached the chat input, so a bottom-app that wants to
     /// replace it can wait for a pause first (Textual `_last_keystroke_time`).
     pub last_keystroke: Option<Instant>,
@@ -185,6 +199,14 @@ pub struct Session {
     pub status: Status,
     /// Working directory resolved once at startup; sent on `session/start` and shown in the footer.
     pub cwd: Option<String>,
+    /// The app-server-prepared worktree the session moved into (`--worktree`),
+    /// tracked from the `worktree` transcript effect; follows the footer.
+    pub worktree: Option<crate::worktree::WorktreeInfo>,
+    /// The worktree THIS run's `--worktree` prepared, from the move announce:
+    /// a resumed session's restored effect carries the original run's
+    /// `created` verdict, so the exit cleanup pins this run's own (Python's
+    /// `worktree_session.created`).
+    pub prepared_worktree: Option<crate::worktree::WorktreeInfo>,
     /// Context budget `(current_tokens, max_tokens)`; `(_, 0)` renders as empty.
     pub tokens: (u64, u64),
     pub stats: AgentStats,
@@ -197,8 +219,15 @@ pub struct Session {
     /// The positional `vibe <prompt>` argument (Python `_initial_prompt`), sent
     /// once startup has converged.
     pub initial_prompt: Option<String>,
+    /// `--teleport`: teleport the initial prompt instead of sending it.
+    pub teleport_on_start: bool,
     /// A `session/resume` has landed, so the handshake's own session is stale.
     pub resumed: bool,
+    /// The workspace-trust gate opened during this startup (Python
+    /// `_startup_prompt_for_workspace_trust`).
+    pub trust_prompted: bool,
+    /// `vibe.startup` properties held until the first frame is painted.
+    pub startup_telemetry: Option<std::collections::BTreeMap<String, Value>>,
     /// Whether the last turn was interrupted, so `/retry` can continue it
     /// (Python `_retry_presentation is not None`).
     pub can_retry: bool,
@@ -255,8 +284,8 @@ pub struct View {
     /// Python `_tools_collapsed`: the Ctrl+O bulk fold state applied to every
     /// group and collapsible result body at once.
     pub tools_collapsed: bool,
-    /// Per-frame hit map `(top, bottom, id)` in screen rows, used to route a click to its entry.
-    pub entry_hitmap: Vec<(u16, u16, String)>,
+    /// Per-frame hit map `(top, bottom, header, id)` in screen rows, used to route a click to its entry.
+    pub entry_hitmap: Vec<(u16, u16, Option<u16>, String)>,
     /// Markdown links painted in the current frame, used for hover and click routing.
     pub link_hitmap: Vec<ui::markdown::Link>,
     /// Per-frame `(top, bottom, gutter_width)` of every edit-diff view on screen.
@@ -315,6 +344,12 @@ pub struct View {
     /// Entry index the next frame must bring to the top of the viewport
     /// (Python `scroll_to_widget(..., top=True)`), consumed by the render.
     pub scroll_to_entry: Option<usize>,
+    /// Entry an expand/collapse toggle holds steady, consumed by the next render.
+    pub scroll_anchor: Option<crate::utils::scroll::ScrollAnchor>,
+    /// Per-frame `(index, viewport-relative top, height)` of each painted entry, bounded by the viewport.
+    pub entry_rows: Vec<(usize, i32, u16)>,
+    /// Whether the last transcript frame showed the document's first row.
+    pub at_top: bool,
 }
 
 impl Default for View {
@@ -355,6 +390,9 @@ impl Default for View {
             cursor_on: true,
             app_focus: true,
             scroll_to_entry: None,
+            scroll_anchor: None,
+            entry_rows: Vec::new(),
+            at_top: false,
         }
     }
 }
@@ -368,8 +406,6 @@ pub struct Overlays {
     pub toasts: VecDeque<Toast>,
     /// Identity handed to the next toast; only ever moves forward.
     next_toast_id: u64,
-    /// When the last Ctrl+C armed quit confirmation on empty input (Python `QuitManager`).
-    pub quit_pending: Option<Instant>,
     /// When the last unhandled Escape landed, so a second one within
     /// `DOUBLE_ESC_DELAY` clears the input or enters rewind mode (Python
     /// `App._last_escape_time`).
@@ -412,6 +448,8 @@ pub struct Voice {
     pub tx: Option<Sender<VoiceEvent>>,
     /// Frame counter driving the flushing-indicator animation (advanced per voice tick).
     pub frame: usize,
+    /// Per-recording analytics bookkeeping (Python `VoiceManager._tracking`).
+    pub tracking: crate::voice::tracking::RecordingTracking,
 }
 
 /// `/config` settings screen state (Python's `ConfigScreen` modal).
@@ -539,16 +577,17 @@ pub struct LogLevelPicker {
 }
 
 /// `/thinking` picker state (Python's `ThinkingPickerApp` bottom-app).
-#[derive(Default)]
 pub struct ThinkingPicker {
     /// While set the picker replaces the input box.
     pub open: bool,
-    /// Highlighted level index into `THINKING_LEVELS`.
+    /// Highlighted level index into `levels`.
     pub selected: usize,
     /// Top line offset of the option list.
     pub scroll: usize,
     /// The active model's current thinking level (`activeModel.thinking`).
     pub current_level: String,
+    /// The levels the active model offers (`activeModel.thinkingLevels`).
+    pub levels: Vec<String>,
     /// Sender carrying the `config/write` and `config/reload` answers.
     pub tx: Option<Sender<crate::thinking_picker::Event>>,
 }
@@ -587,7 +626,7 @@ pub struct Rewind {
     /// History entry id of the highlighted user message, or `None` when none is.
     pub entry_id: Option<String>,
     /// Text of the highlighted user message, shown in the panel title.
-    pub preview: String,
+    pub preview: crate::collapsed_pastes::Collapsed,
     /// Whether rewinding here would restore files (`session/rewind/read`).
     pub has_file_changes: bool,
     /// Which of the two option sets is shown: the action, then the persistence.
@@ -605,11 +644,11 @@ pub struct Rewind {
 pub struct QuestionApp {
     /// While set the app replaces the input box and owns every key.
     pub open: bool,
-    /// A delivered callback still waiting for a pause in the user's typing
-    /// (Python `_wait_for_typing_pause`), as `(callback id, request)`.
-    pub pending: Option<(String, UserQuestionRequest)>,
-    /// The `user_input` callback this app answers with `callback/result`.
-    pub callback_id: String,
+    /// A delivered question still waiting for a pause in the user's typing
+    /// (Python `_wait_for_typing_pause`), as `(source, request)`.
+    pub pending: Option<(crate::question_app::QuestionSource, UserQuestionRequest)>,
+    /// Who the open app answers: a `user_input` callback or a local question.
+    pub source: Option<crate::question_app::QuestionSource>,
     pub questions: Vec<UserQuestion>,
     pub footer_note: Option<String>,
     pub current_question_idx: usize,
@@ -642,6 +681,12 @@ pub struct MCPApp {
     pub open: bool,
     /// Latest `mcp/read` projection, refreshed by `mcp/refresh` and `mcp/toggle`.
     pub state: crate::server::MCPState,
+    /// Last server-confirmed state, restored when a toggle is rejected.
+    pub confirmed: crate::server::MCPState,
+    /// A refresh is in flight; further refreshes are coalesced into it.
+    pub refreshing: bool,
+    /// When the open browser next re-discovers sources in the background.
+    pub refresh_at: Option<Instant>,
     /// Source whose tools are listed, or `None` in the source list view.
     pub viewing_name: Option<String>,
     pub viewing_kind: Option<crate::server::MCPSourceKind>,
@@ -749,6 +794,7 @@ pub struct App {
     pub completion: Completion,
     pub paste_image: crate::paste_image::State,
     pub voice: Voice,
+    pub voice_app: crate::voice_app::VoiceApp,
     pub config_screen: ConfigScreen,
     pub theme_picker: ThemePicker,
     pub model_picker: ModelPicker,
@@ -756,6 +802,8 @@ pub struct App {
     pub thinking_picker: ThinkingPicker,
     pub resume_picker: ResumePicker,
     pub vibe_code_project: crate::vibe_code_project::State,
+    /// The running `/teleport` operation, if any.
+    pub teleport: Option<crate::teleport::Operation>,
     /// The latest written todo list (Python `TodoTracker`), never seeded from history.
     pub todo_tracker: crate::todo_tracker::TodoTracker,
     pub todo_sidebar: crate::todo_tracker::TodoSidebar,
@@ -773,8 +821,12 @@ pub struct App {
     pub narrator: Narrator,
     /// The app server's accepted prompt queue and its selection/edit mode.
     pub queue: QueueController,
+    /// Ctrl+C / Ctrl+D double-press quit confirmation.
+    pub quit: crate::quit_manager::QuitManager,
     /// Async slash-command results, reduced by the main event loop.
     pub command_tx: Option<tokio::sync::mpsc::Sender<CommandEvent>>,
+    /// Analytics events queued by the reducer, sent by the main event loop.
+    pub telemetry_tx: Option<tokio::sync::mpsc::Sender<crate::telemetry::TelemetryEvent>>,
     /// Identity and account reads reused by `/whoami`.
     pub whoami: WhoamiCache,
     /// Handle to the `/stress` firehose task, or `None` when it is off. A second
@@ -794,24 +846,19 @@ pub struct App {
     pub suspend_requested: bool,
     /// App-server child exited unexpectedly (stdout EOF during steady state).
     pub server_closed: bool,
+    /// Sub-agents view state: child sessions, the status list, the viewed child.
+    pub subagents: crate::subagents::Subagents,
+    /// Older history paged in once the transcript is scrolled to its top.
+    pub older_history: crate::older_history::OlderHistory,
 }
-
-/// Window in which a second Ctrl+C confirms quit (Python's `QUIT_CONFIRM_DELAY`).
-pub const QUIT_CONFIRM_DELAY: Duration = Duration::from_secs(1);
 
 impl App {
     pub fn set_session_id(&mut self, session_id: String) {
         if self.session.session_id.as_deref() != Some(session_id.as_str()) {
             self.vibe_code_project = Default::default();
+            crate::teleport::reset(self);
         }
         self.session.session_id = Some(session_id);
-    }
-
-    /// True while a Ctrl+C quit confirmation is still pending.
-    pub fn quit_confirm_active(&self) -> bool {
-        self.overlays
-            .quit_pending
-            .is_some_and(|t| t.elapsed() < QUIT_CONFIRM_DELAY)
     }
 
     /// Transition status; entering `Generating` resets the spinner, re-entering keeps the original start.
@@ -821,11 +868,16 @@ impl App {
         match (self.session.status, status) {
             (Status::Generating { .. }, Status::Generating { .. }) => {}
             (_, Status::Generating { .. }) => {
-                self.view.loading = LoadingAnim::default();
+                self.restart_loading();
                 self.session.status = status;
             }
             _ => self.session.status = status,
         }
+    }
+
+    /// Restart the spinner and its timer for a new job.
+    pub fn restart_loading(&mut self) {
+        self.view.loading = LoadingAnim::default();
     }
 
     /// `--resume`'s picker owns the screen: it opens on the session list read
@@ -843,10 +895,14 @@ impl App {
             return true;
         }
         self.is_settled()
+            // A pending child-transcript refresh owes the frame a re-fetch.
+            && self.subagents.refresh_at.is_none()
             && matches!(self.session.status, Status::Ready | Status::Failed)
             // An accepted prompt the server has not promoted yet is still work
             // in flight (Python `_is_busy` counts `_queue.has_server_work`).
             && self.queue.is_empty()
+            // A teleport reports progress by notification, like a turn.
+            && !crate::teleport::busy(self)
     }
 
     /// True once client-owned work has landed: startup finished, no request of
@@ -863,6 +919,8 @@ impl App {
             // A debounced theme preview repaints later; stay busy until it lands
             // so the frame matches Python (whose pending timer defers idle).
             && self.theme_picker.preview_at.is_none()
+            // A scheduled child-transcript refresh owes the frame a re-fetch.
+            && self.subagents.refresh_at.is_none()
     }
 
     /// Mark a picker commit as in flight, keeping the app busy until its answer
@@ -881,6 +939,16 @@ impl App {
     pub fn set_app_focus(&mut self, focused: bool) {
         self.view.app_focus = focused;
         self.view.cursor_on = focused;
+    }
+
+    /// Terminal focus regained only lights the input while the composer owns
+    /// it (Python `on_app_focus`: `viewed_subagent_id is None and not
+    /// SubagentList.has_focus`); a child view or the focused list keeps it off.
+    pub fn set_app_focus_from_terminal(&mut self, focused: bool) {
+        if !focused || (self.subagents.viewed_subagent_id.is_none() && !self.subagents.list.focused)
+        {
+            self.set_app_focus(focused);
+        }
     }
 
     /// Show the hint-free `Loading` spinner while a slash command fetches.
@@ -938,6 +1006,7 @@ impl App {
     pub fn toggle_tools(&mut self) {
         self.view.tools_collapsed = !self.view.tools_collapsed;
         let expand = !self.view.tools_collapsed;
+        let viewed_child = self.subagents.viewed_subagent_id.clone();
         let mut expanded = std::mem::take(&mut self.view.expanded);
         expanded.clear();
         if expand {
@@ -945,8 +1014,25 @@ impl App {
                 expanded.insert(id);
             }
         }
+        // Python `action_toggle_tool` flips every mounted section; the viewed
+        // child's transcript is only swapped in at render time, so its ids and
+        // cache are handled here — in both directions, or a collapse keeps the
+        // cached expanded layout.
+        if let Some(child) = viewed_child
+            .as_deref()
+            .and_then(|child_id| self.subagents.transcripts.child_mut(child_id))
+        {
+            if expand {
+                expanded.extend(child.transcript.expandable_ids());
+            }
+            child.cache.invalidate_layouts();
+        }
         self.view.expanded = expanded;
         self.view.transcript_cache.invalidate_layouts();
+        self.view.scroll_anchor = crate::utils::scroll::bulk_toggle_anchor(
+            self.view.scroll_target,
+            &self.view.entry_rows,
+        );
     }
 
     /// Python consults `_tools_collapsed` whenever history (re)builds mount
@@ -982,6 +1068,7 @@ impl App {
             Ok(rec) => {
                 self.voice.recording = Some(rec);
                 self.voice.transcribe_state = TranscribeState::Recording;
+                self.voice.tracking.start();
             }
             Err(msg) => self.show_toast(msg, ToastSeverity::Warning, TOAST_SECS),
         }
@@ -995,6 +1082,7 @@ impl App {
         if let Some(rec) = &self.voice.recording {
             rec.stop();
         }
+        self.voice.tracking.mark_stopped();
         self.voice.transcribe_state = TranscribeState::Flushing;
     }
 
@@ -1006,16 +1094,64 @@ impl App {
         if let Some(rec) = self.voice.recording.take() {
             rec.cancel();
         }
+        crate::telemetry::record(
+            self,
+            crate::telemetry::event::TRANSCRIPTION_CANCEL,
+            self.voice.tracking.cancel_properties(),
+        );
         self.voice.transcribe_state = TranscribeState::Idle;
     }
 
     /// Reduce a pipeline update: append transcript, surface notices, settle state.
     pub fn apply_voice_event(&mut self, ev: VoiceEvent) {
         match ev {
-            VoiceEvent::TextDelta(text) => self.chat_input.input.push_str(&text),
+            VoiceEvent::TextDelta(text) => {
+                self.voice.tracking.add_transcript(&text);
+                self.chat_input.normalize_positions();
+                let before = crate::edit_history::Snapshot::capture(&self.chat_input);
+                self.chat_input.anchor = None;
+                self.chat_input.scroll = None;
+                crate::input::reset_history_state(self);
+                crate::utils::input_edit::insert(
+                    &mut self.chat_input.input,
+                    &mut self.chat_input.cursor,
+                    &text,
+                );
+                self.chat_input.record_edit(before, true, Instant::now());
+                crate::completion_manager::input_changed(self);
+            }
+            // A cancelled recording already reported; its late session is noise.
+            VoiceEvent::SessionCreated(_)
+                if self.voice.transcribe_state == TranscribeState::Idle => {}
+            VoiceEvent::SessionCreated(request_id) => {
+                self.voice.tracking.recording_id = request_id;
+                crate::telemetry::record(
+                    self,
+                    crate::telemetry::event::TRANSCRIPTION_START,
+                    self.voice.tracking.start_properties(),
+                );
+            }
             VoiceEvent::Notice(msg) => self.show_voice_notice(msg),
-            VoiceEvent::Error(msg) => self.show_toast(msg, ToastSeverity::Error, TOAST_SECS),
+            VoiceEvent::Error(msg) => {
+                crate::telemetry::record(
+                    self,
+                    crate::telemetry::event::TRANSCRIPTION_ERROR,
+                    self.voice.tracking.error_properties(&msg),
+                );
+                self.voice.recording = None;
+                self.voice.transcribe_state = TranscribeState::Idle;
+                self.show_toast(
+                    format!("Voice transcription failed: {msg}"),
+                    ToastSeverity::Error,
+                    TOAST_SECS,
+                );
+            }
             VoiceEvent::Finished => {
+                crate::telemetry::record(
+                    self,
+                    crate::telemetry::event::TRANSCRIPTION_DONE,
+                    self.voice.tracking.done_properties(),
+                );
                 self.voice.recording = None;
                 self.voice.transcribe_state = TranscribeState::Idle;
             }

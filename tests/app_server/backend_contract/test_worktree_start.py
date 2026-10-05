@@ -15,6 +15,7 @@ import asyncio
 from collections.abc import Callable
 import json
 from pathlib import Path
+import re
 import subprocess
 from typing import cast
 
@@ -29,6 +30,7 @@ from vibe.app_server._worktree_session import SessionWorktrees, WorktreeResoluti
 from vibe.app_server.events import CallbackRequested
 from vibe.app_server.models import (
     CompletedEffectState,
+    FailedEffectState,
     PublicEffectEntry,
     PublicMessageEntry,
     TextContentBlock,
@@ -36,15 +38,17 @@ from vibe.app_server.models import (
     WorktreeEffectInput,
 )
 from vibe.app_server.protocol import (
+    AgentSwitchParams,
     AutoWorktreeInput,
     ClientCapabilities,
     NewWorktreeInput,
+    RuntimeMutationResponse,
     SessionOptions,
     TurnStartParams,
     TurnStartResponse,
 )
 from vibe.app_server.session import AppServerSession, AppServerTurnError
-from vibe.core.git.worktree import ManagedWorktree
+from vibe.core.git.worktree import ManagedWorktree, WorktreeProgressCallback
 
 
 def _cwd(session: AppServerSession) -> Path:
@@ -191,13 +195,15 @@ async def test_first_turn_response_does_not_wait_for_worktree_creation(
     original = SessionWorktrees.resolve_for_start
 
     async def blocked_resolve(
-        worktrees: SessionWorktrees, options: SessionOptions
+        worktrees: SessionWorktrees,
+        options: SessionOptions,
+        on_progress: WorktreeProgressCallback | None = None,
     ) -> WorktreeResolution:
         if options.worktree is None:
-            return await original(worktrees, options)
+            return await original(worktrees, options, on_progress)
         setup_started.set()
         await release_setup.wait()
-        return await original(worktrees, options)
+        return await original(worktrees, options, on_progress)
 
     monkeypatch.setattr(SessionWorktrees, "resolve_for_start", blocked_resolve)
     connection = await connect_backend_contract_host(
@@ -230,6 +236,146 @@ async def test_first_turn_response_does_not_wait_for_worktree_creation(
 
         assert response.turn.status.value == "in_progress"
         assert not release_setup.is_set()
+    finally:
+        release_setup.set()
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_an_agent_switch_does_not_wait_for_worktree_creation(
+    tmp_path: Path, experimental_harness: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client picks the agent before its first message, and that pick must
+    not hold the message back for the whole checkout.
+    """
+    if not experimental_harness:
+        pytest.skip("legacy creates the worktree before session/start")
+
+    _init_repo(tmp_path)
+    setup_started = asyncio.Event()
+    release_setup = asyncio.Event()
+    original = SessionWorktrees.resolve_for_start
+
+    async def blocked_resolve(
+        worktrees: SessionWorktrees,
+        options: SessionOptions,
+        on_progress: WorktreeProgressCallback | None = None,
+    ) -> WorktreeResolution:
+        if options.worktree is None:
+            return await original(worktrees, options, on_progress)
+        setup_started.set()
+        await release_setup.wait()
+        return await original(worktrees, options, on_progress)
+
+    monkeypatch.setattr(SessionWorktrees, "resolve_for_start", blocked_resolve)
+    connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            worktree=NewWorktreeInput(branch="jun/agent", name="agent"),
+        ),
+        capabilities=ClientCapabilities(),
+    )
+    try:
+        session = await connection.host.start_session()
+        await setup_started.wait()
+
+        switched = validate_wire(
+            RuntimeMutationResponse,
+            await asyncio.wait_for(
+                connection.client.request(
+                    "session/agent/update",
+                    AgentSwitchParams(session_id=session.session_id, agent_name="plan"),
+                ),
+                timeout=1,
+            ),
+        )
+
+        assert switched.runtime.active_agent.name == "plan"
+        assert not release_setup.is_set()
+    finally:
+        release_setup.set()
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_claimed_before_a_failed_worktree_reports_it_once(
+    tmp_path: Path, experimental_harness: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn claimed while the worktree prepares still learns of a failure once.
+
+    The claimed turn and the setup task both observe a failed preparation; a
+    client must see one failed worktree entry, not one per observer.
+    """
+    if not experimental_harness:
+        pytest.skip("legacy creates the worktree before session/start")
+
+    _init_repo(tmp_path)
+    setup_started = asyncio.Event()
+    release_setup = asyncio.Event()
+    original = SessionWorktrees.resolve_for_start
+
+    async def failing_resolve(
+        worktrees: SessionWorktrees,
+        options: SessionOptions,
+        on_progress: WorktreeProgressCallback | None = None,
+    ) -> WorktreeResolution:
+        if options.worktree is None:
+            return await original(worktrees, options, on_progress)
+        setup_started.set()
+        await release_setup.wait()
+        raise RuntimeError("worktree preparation failed")
+
+    monkeypatch.setattr(SessionWorktrees, "resolve_for_start", failing_resolve)
+    connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            worktree=NewWorktreeInput(branch="jun/claimfail", name="claimfail"),
+        ),
+        capabilities=ClientCapabilities(),
+    )
+    try:
+        session = await connection.host.start_session()
+        await setup_started.wait()
+
+        # Claim the turn while the preparation is still blocked, then fail it.
+        response = validate_wire(
+            TurnStartResponse,
+            await asyncio.wait_for(
+                connection.client.request(
+                    "turn/start",
+                    TurnStartParams(
+                        session_id=session.session_id,
+                        message=[TextContentBlock(text="start now")],
+                        client_user_message_id="message-1",
+                    ),
+                ),
+                timeout=5,
+            ),
+        )
+        assert response.turn.status.value == "in_progress"
+        release_setup.set()
+
+        def _worktree_entries() -> list[PublicEffectEntry]:
+            return [
+                entry
+                for entry in session.state.history or []
+                if isinstance(entry, PublicEffectEntry)
+                and isinstance(entry.detail, WorktreeEffectDetail)
+            ]
+
+        async with asyncio.timeout(5):
+            while not _worktree_entries():
+                await asyncio.sleep(0.01)
+        # A duplicate, if the single-emit guard regressed, rides the same
+        # failure wave; let the wave finish before counting.
+        await asyncio.sleep(0.5)
+        entries = _worktree_entries()
+        assert len(entries) == 1
+        assert isinstance(entries[0].state, FailedEffectState)
     finally:
         release_setup.set()
         await connection.host.close()
@@ -471,5 +617,111 @@ async def test_a_worktree_that_cannot_be_raised_refuses_the_turn(
         # visible turn instead of making session creation wait for the checkout.
         with pytest.raises(AppServerTurnError):
             _ = [event async for event in session.act("write something")]
+
+        # Exactly one failed worktree entry: the failure reaches the client
+        # once, not once per observer of the failed preparation.
+        worktree_entries = [
+            entry
+            for entry in session.state.history or []
+            if isinstance(entry, PublicEffectEntry)
+            and isinstance(entry.detail, WorktreeEffectDetail)
+        ]
+        assert len(worktree_entries) == 1
+        assert isinstance(worktree_entries[0].state, FailedEffectState)
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_smart_approve_does_not_treat_the_worktree_as_agent_config(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    experimental_harness: bool,
+    tmp_path: Path,
+) -> None:
+    """Calls naming files inside a managed worktree run when the classifier allows.
+
+    Managed worktrees live under ``.vibe/worktrees/``, and the model is told the
+    worktree's absolute path. Reading that ``.vibe`` segment as the agent's own
+    config forced a human prompt on every classified command and edit there.
+    """
+    if not experimental_harness:
+        pytest.skip("smart approve's classify gate is unified-harness only")
+
+    _init_repo(tmp_path)
+    classifier_requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if "tools" not in body:
+            classifier_requests.append(request)
+            return backend_contract_mistral_response(
+                json.dumps({
+                    "safe": True,
+                    "risk_level": "low",
+                    "user_authorization": "high",
+                    "reason": "requested by the user",
+                })
+            )
+        if body["messages"][-1]["role"] == "tool":
+            return backend_contract_mistral_response("done")
+        system = next(m["content"] for m in body["messages"] if m["role"] == "system")
+        worktree = re.search(r"Absolute path: (\S+)", system)
+        assert worktree is not None
+        root = worktree.group(1)
+        return backend_contract_mistral_response(
+            "",
+            tool_calls=[
+                {
+                    "id": "bash-1",
+                    "index": 0,
+                    "function": {
+                        "name": "bash",
+                        "arguments": json.dumps({
+                            "command": f"python3 -c 'print(open(\"{root}/file.txt\").read())'",
+                            "timeout_seconds": 5,
+                        }),
+                    },
+                },
+                {
+                    "id": "write-1",
+                    "index": 1,
+                    "function": {
+                        "name": "write_file",
+                        "arguments": json.dumps({
+                            "path": f"{root}/notes.md",
+                            "content": "written\n",
+                        }),
+                    },
+                },
+            ],
+        )
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+    connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            worktree=NewWorktreeInput(branch="jun/smart", name="smart"),
+            enabled_tools=["bash", "write_file"],
+            agent="smart-approve",
+            trust_workspace=True,
+        ),
+        capabilities=ClientCapabilities(callback_kinds=["approval"]),
+    )
+    approvals: list[CallbackRequested] = []
+    try:
+        session = await connection.host.open_session()
+        async for event in session.act("print file.txt and write notes.md"):
+            if isinstance(event, CallbackRequested):
+                approvals.append(event)
+                await session.deny_callback(event.callback)
+
+        cwd = _cwd(session)
+        assert ".vibe" in cwd.parts
+        assert classifier_requests
+        assert not approvals
+        assert (cwd / "notes.md").read_text() == "written\n"
     finally:
         await connection.host.close()

@@ -24,12 +24,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+import re
 from typing import Any, Literal, cast
 
 from mistralai_vibe_local_harness.protocol import RustRuntimeBuiltinToolName
 from mistralai_vibe_local_harness.vibe._permissions import PermissionOutcome
 from pydantic import BaseModel
 
+from vibe.app_server._cron import CRON_TOOL_NAME
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.tools.base import BaseTool
@@ -46,13 +48,58 @@ from vibe.permissions import RequiredPermission
 
 # The Rust Runtime's builtin tools and Vibe's tool catalogue are separate
 # namespaces; this is the only overlap the local adapter can currently execute.
+# The process family rides the shell tools: a background start runs
+# ``[shell, "-lc", command]``, and the family only exists where a shell does, so
+# a shell denied at the catalogue level takes the process tools down with it.
+_SHELL_TOOL_SOURCES = frozenset({"bash", "powershell", "git_bash"})
+"""The shell tools: everything a foreground shell call and a background start do."""
+
 RUST_BUILTIN_TOOL_SOURCES: dict[RustRuntimeBuiltinToolName, frozenset[str]] = {
     "file_system.read_file": frozenset({"read_file"}),
     "file_system.write_file": frozenset({"write_file"}),
     "file_system.search_replace": frozenset({"edit"}),
-    "file_system.bash": frozenset({"bash", "powershell", "git_bash"}),
+    "file_system.bash": _SHELL_TOOL_SOURCES,
     "skill.read": frozenset({"skill"}),
+    "process.start": _SHELL_TOOL_SOURCES,
+    "process.output": _SHELL_TOOL_SOURCES,
+    "process.write": _SHELL_TOOL_SOURCES,
+    "process.list": _SHELL_TOOL_SOURCES,
+    "process.stop": _SHELL_TOOL_SOURCES,
 }
+
+# Process calls whose authority the ``process.start`` gate already settled.
+# The reads only ever observe a process this session started, and a stop only
+# revokes one, so no call here can expand what the session was allowed to do
+# and each carries nothing to scope a prompt to: the resolver clears them
+# instead of training the human to click through a prompt that guards nothing.
+# Gating the stop would be worse than useless -- a denied stop strands a
+# runaway process with no human in the loop. The mode layer still denies the
+# whole family when the user disables its shell sources.
+_PROCESS_UNGATED_BUILTINS: frozenset[RustRuntimeBuiltinToolName] = frozenset({
+    "process.output",
+    "process.list",
+    "process.stop",
+})
+
+# A write mutates a live process. Its grant is scoped to the process id, which
+# names an object that cannot outlive the session, so an "always" answer is
+# remembered for the session and never written to config.
+_PROCESS_SESSION_GRANT_BUILTINS: frozenset[RustRuntimeBuiltinToolName] = frozenset({
+    "process.write"
+})
+
+# Builtins where a non-empty ``allowlist`` is an exception to the configured
+# permission, so a ``never`` on one still has to reach this resolver rather than
+# collapsing to the Runtime's ``deny`` (see ``_rust_tool_modes``). Their allowlist
+# defaults to empty, so a non-empty one is always a deliberate carve-out.
+# ``file_system.bash`` is not here: a shell's allowlist ships pre-populated and the
+# config migration writes that default into most users' config, so honouring it
+# there would silently un-disable a bash someone turned off.
+ALLOWLIST_EXEMPTED_BUILTINS: frozenset[RustRuntimeBuiltinToolName] = frozenset({
+    "file_system.read_file",
+    "file_system.write_file",
+    "file_system.search_replace",
+})
 
 
 class ProvidedToolNames:
@@ -116,6 +163,8 @@ _ARGUMENT_TRANSLATORS: dict[
     "file_system.search_replace": _search_replace_args,
     "file_system.bash": lambda args: {"command": args.get("command", "")},
     "skill.read": lambda args: {"name": args.get("name", "")},
+    # A background start is the shell's own question: the command it will run.
+    "process.start": lambda args: {"command": args.get("command", "")},
 }
 
 _OUTCOME_BY_PERMISSION: dict[ToolPermission, Literal["allow", "deny"]] = {
@@ -139,6 +188,25 @@ def _shell_command_scope(arguments: Mapping[str, Any]) -> str | None:
     return command
 
 
+_PROCESS_ID = re.compile(r"process-[0-9a-f]+-[0-9a-f]+")
+
+
+def _process_id_scope(arguments: Mapping[str, Any]) -> str | None:
+    """The process a mutation call targets, as the grant's whole scope.
+
+    The harness mints a process id as ``process-<hex>-<hex>`` over session and
+    call ids, so a real one matches itself under wildcard matching and nothing
+    else. Anything else is not a process id the harness would ever hand back --
+    ``*`` above all -- and granting it would record model-chosen text as a
+    command pattern on the shell, so the call asks unscoped instead: approving
+    it releases exactly that call and nothing after it.
+    """
+    process_id = arguments.get("processId")
+    if not isinstance(process_id, str):
+        return None
+    return process_id if _PROCESS_ID.fullmatch(process_id) else None
+
+
 # A shell call is never really unscopeable. A shell returns nothing to scope
 # when it cannot split the command into parts -- and the two Windows shells use
 # different splitters, so either can come back empty on a command the other
@@ -146,9 +214,15 @@ def _shell_command_scope(arguments: Mapping[str, Any]) -> str | None:
 # narrower than "every command" that a grant can be recorded against: the
 # alternative is ``ToolPermission.ALWAYS`` on the shell tool, which
 # ``_is_unconditionally_allowed`` reads as "allow everything from here on".
+# A start falls back to the same command scope; a write falls back to the
+# process id, which is the only thing narrower than "every process".
 _FALLBACK_SCOPES: dict[
     RustRuntimeBuiltinToolName, Callable[[Mapping[str, Any]], str | None]
-] = {"file_system.bash": _shell_command_scope}
+] = {
+    "file_system.bash": _shell_command_scope,
+    "process.start": _shell_command_scope,
+    "process.write": _process_id_scope,
+}
 
 
 class UnifiedPermissionResolver:
@@ -187,7 +261,7 @@ class UnifiedPermissionResolver:
         available = self._tools.available_tools
         return tuple(sorted(name for name in sources if name in available))
 
-    async def resolve(
+    async def resolve(  # noqa: PLR0911 - explicit deny/ask/allow ladder
         self, builtin: str, arguments: Mapping[str, Any]
     ) -> PermissionOutcome:
         """Decide one call the way ``AgentLoop._should_execute_tool`` would.
@@ -205,6 +279,14 @@ class UnifiedPermissionResolver:
             # The Runtime reserves the builtin namespaces for itself, so a name that is
             # not a builtin is a provided tool's ``group.tool`` route and nothing else.
             return self._resolve_provided_tool(builtin)
+        if builtin in _PROCESS_UNGATED_BUILTINS:
+            # Reads observe and a stop revokes a process this session started
+            # under the start gate; see _PROCESS_UNGATED_BUILTINS.
+            return PermissionOutcome(decision="allow")
+        unjudged = self._resolve_start_with_hidden_environment(builtin, arguments)
+        if unjudged is not None:
+            return unjudged
+
         names = self.vibe_tool_names(builtin)
         if not names:
             # The mode already denies a builtin with no catalogue entry; leaving
@@ -273,7 +355,12 @@ class UnifiedPermissionResolver:
     def _resolve_provided_tool(self, route: str) -> PermissionOutcome:
         """A provided tool has no call-scoped rules, so its permission is the verdict."""
         name = self._provided_names.resolve(route)
-        permission = self._tools.get_tool_config(name).permission
+        permission = self._tools.get_tool_config(
+            name,
+            default_permission=(
+                ToolPermission.ALWAYS if name == CRON_TOOL_NAME else ToolPermission.ASK
+            ),
+        ).permission
         match permission:
             case ToolPermission.ALWAYS:
                 return PermissionOutcome(decision="allow")
@@ -283,6 +370,48 @@ class UnifiedPermissionResolver:
                 )
             case _:
                 return PermissionOutcome(decision="ask")
+
+    def _resolve_start_with_hidden_environment(
+        self, builtin: str, arguments: Mapping[str, Any]
+    ) -> PermissionOutcome | None:
+        """A start that also picks its env or working directory, or ``None``.
+
+        Those parts reach the tool unseen by any command rule, so no
+        command-pattern grant or allowlist entry can honestly speak for them:
+        ask unscoped instead of running the call off the command alone. A
+        working directory that is the shell's own adds nothing the tool does
+        not already run in, so only a start run from somewhere else counts as
+        hidden. A configured deny of the command still denies, and the ask
+        carrying no permissions means ``grant`` records nothing -- the answer
+        releases exactly this call.
+        """
+        if builtin != "process.start":
+            return None
+        if not arguments.get("env"):
+            cwd = arguments.get("cwd")
+            if not isinstance(cwd, str):
+                return PermissionOutcome(decision="ask") if cwd else None
+            for name in self.vibe_tool_names(builtin):
+                try:
+                    tool = self._tools.get(name)
+                    tool_cwd = Path(tool.cwd).resolve()
+                except (NoSuchToolError, ValueError, OSError):
+                    continue
+                try:
+                    cwd_path = Path(cwd).expanduser()
+                    if not cwd_path.is_absolute():
+                        cwd_path = tool_cwd / cwd_path
+                    if cwd_path.resolve() == tool_cwd:
+                        return None
+                except (ValueError, OSError):
+                    continue
+        for name in self.vibe_tool_names(builtin):
+            context = self._context_for(
+                name, self._tool_and_args(name, builtin, arguments)
+            )
+            if _OUTCOME_BY_PERMISSION.get(context.permission) == "deny":
+                return PermissionOutcome(decision="deny", reason=context.reason)
+        return PermissionOutcome(decision="ask")
 
     def _fallback_permission(
         self, builtin: str, arguments: Mapping[str, Any]
@@ -312,6 +441,11 @@ class UnifiedPermissionResolver:
         """
         if self._store.covers(name, fallback):
             return True
+        # A process id is not a command; only wildcard-match command patterns
+        # against the shell allowlist. Process ids must match exactly via the
+        # session store above.
+        if _PROCESS_ID.fullmatch(fallback.invocation_pattern):
+            return False
         return any(
             wildcard_match(fallback.invocation_pattern, pattern)
             for pattern in self._tools.get_tool_config(name).allowlist
@@ -367,7 +501,30 @@ class UnifiedPermissionResolver:
         if pair is None:
             return configured
         tool, args = pair
-        return tool.resolve_permission(args) or configured
+        try:
+            resolved = tool.resolve_permission(args) or configured
+        except Exception:
+            # The path rules raise on a path the OS cannot even stat (an embedded
+            # NUL, an over-long name), and the Harness answers a resolver that
+            # raised with a prompt -- which under a `never` is the refusal offered
+            # back to the user as an approvable question. Decide it here instead.
+            # Anything else keeps the Harness's fallback: for an `always` tool a
+            # prompt is the safe answer, and `configured` would auto-allow the very
+            # call whose rules failed to run.
+            if configured.permission is not ToolPermission.NEVER:
+                raise
+            return configured
+        if (
+            configured.permission is ToolPermission.NEVER
+            and resolved.permission is not ToolPermission.ALWAYS
+        ):
+            # A `never` tool reaches the resolver at all only because an allowlist
+            # might excuse this call (``ALLOWLIST_EXEMPTED_BUILTINS``), and a match
+            # is the one thing that can. Letting a sensitive-path or outside-workdir
+            # `ask` through would turn a configured refusal into a prompt nobody
+            # authorised -- legacy prompts there, this is deliberately stricter.
+            return configured
+        return resolved
 
     async def grant(
         self,
@@ -393,7 +550,9 @@ class UnifiedPermissionResolver:
             if permanent:
                 await self._persist(name, required_permissions)
             return
-        if not required_permissions and builtin in _FALLBACK_SCOPES:
+        if not required_permissions and (
+            builtin in _FALLBACK_SCOPES or builtin in _PROCESS_UNGATED_BUILTINS
+        ):
             # A builtin that can always scope a call it can read has no honest
             # tool-wide grant. What still arrives here with nothing attached is a
             # call no resolver could read at all -- arguments the tool will itself
@@ -416,7 +575,10 @@ class UnifiedPermissionResolver:
                     )
             else:
                 self._store.set_tool_permission(name, ToolPermission.ALWAYS)
-            if permanent:
+            if permanent and builtin not in _PROCESS_SESSION_GRANT_BUILTINS:
+                # A grant scoped to a process id names an object that dies with
+                # the session; the config layer outlives it and has no place to
+                # record one. Session-scoped memory is the whole grant.
                 await self._persist(name, required_permissions)
 
     def _allowlist_scopes(self, name: str) -> frozenset[PermissionScope]:
@@ -473,6 +635,7 @@ class UnifiedPermissionResolver:
 
 
 __all__ = [
+    "ALLOWLIST_EXEMPTED_BUILTINS",
     "RUST_BUILTIN_TOOL_SOURCES",
     "ProvidedToolNames",
     "UnifiedPermissionResolver",

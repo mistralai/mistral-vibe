@@ -1,9 +1,28 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import shlex
 import sys
+import time
+from typing import Final
+
+from vibe.core.experiments._constants import (
+    EVAL_CACHE_FILE_NAME,
+    EVAL_CACHE_TTL_SECONDS,
+)
+from vibe.utils.vibe_home import get_vibe_home
+
+ROLLOUT_EXPERIMENT_KEY: Final = "vibe_cli_rust_tui_rollout"
+# Tells vibe-rs it was picked by the rollout, so failures print the Python fallback hint.
+ROLLOUT_ENV: Final = "VIBE_RUST_ROLLOUT"
+# Python CLI flags the Rust CLI rejects: the rollout must not break these invocations.
+_PYTHON_ONLY_FLAGS: Final = frozenset({
+    "--setup",
+    "--legacy-harness",
+    "--experimental-harness",
+})
 
 if sys.platform == "win32":
     _BIN_NAME = "vibe-rs.exe"
@@ -30,9 +49,59 @@ _RELEASE_BIN = _PKG_ROOT / "cli-rust" / "target" / "release" / _BIN_NAME
 _PROJECT_ROOT = _PKG_ROOT.parent
 
 
-def exec_rust_cli(passthrough: list[str]) -> None:
+def rust_rollout_selected(option_args: list[str]) -> bool:
+    # Never triggers the cargo fallback build: the rollout only targets wheel installs.
+    if not _BUNDLED_BIN.exists():
+        return False
+    if any(arg.split("=", 1)[0] in _PYTHON_ONLY_FLAGS for arg in option_args):
+        return False
+    return _cached_rollout_variant() == "rust"
+
+
+def _cached_rollout_variant() -> object:
+    try:
+        with (get_vibe_home() / EVAL_CACHE_FILE_NAME).open(encoding="utf-8") as f:
+            entries = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(entries, dict):
+        return None
+    min_stored_at = int(time.time()) - EVAL_CACHE_TTL_SECONDS
+    fresh: list[tuple[int, object]] = [
+        (entry["stored_at_timestamp"], entry.get("payload"))
+        for entry in entries.values()
+        if isinstance(entry, dict)
+        and isinstance(entry.get("stored_at_timestamp"), int)
+        and entry["stored_at_timestamp"] > min_stored_at
+    ]
+    if not fresh:
+        return None
+    # One entry per API key: the most recent eval belongs to the active key.
+    _, payload = max(fresh, key=lambda item: item[0])
+    features = payload.get("features") if isinstance(payload, dict) else None
+    if not isinstance(features, dict):
+        return None
+    return _resolved_value(features.get(ROLLOUT_EXPERIMENT_KEY))
+
+
+def _resolved_value(feature: object) -> object:
+    # Mirrors FeatureDefinition.resolved_value without importing pydantic.
+    if not isinstance(feature, dict):
+        return None
+    rules = feature.get("rules")
+    for rule in rules if isinstance(rules, list) else []:
+        if isinstance(rule, dict) and rule.get("force") is not None:
+            return rule["force"]
+    return feature.get("defaultValue")
+
+
+def exec_rust_cli(passthrough: list[str], *, rollout: bool = False) -> None:
     """Run the Rust TUI, keeping the caller's cwd."""
     env = {**os.environ}
+    if rollout:
+        env[ROLLOUT_ENV] = "1"
+    else:
+        env.pop(ROLLOUT_ENV, None)
     if _BUNDLED_BIN.exists():
         binary = _BUNDLED_BIN
         # Wheel install: point the Rust client at the installed vibe-app-server

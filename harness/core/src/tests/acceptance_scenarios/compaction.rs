@@ -183,6 +183,100 @@ fn first_action_block_with_type<'a>(action: &'a Value, block_type: &str) -> &'a 
 }
 
 #[test]
+fn preserves_stored_message_fields_in_completion_actions() {
+    let turn_id = "turn-content-metadata";
+    let content = json!([{
+        "type": "resource_link",
+        "uri": "https://example.test/image.png",
+        "name": "image.png",
+        "annotations": {"audience": ["assistant"]},
+        "_meta": {"provider.example/materialization": {"type": "image_url"}},
+    }]);
+    let assistant_message = json!({
+        "role": "assistant",
+        "content": [
+            {
+                "type": "text",
+                "text": "answer",
+                "annotations": {"audience": ["assistant"]},
+                "_meta": {"provider.example/content": "content-metadata"},
+            },
+            {
+                "type": "reasoning",
+                "content": [{"type": "text", "text": "thinking"}],
+                "_meta": {"provider.example/reasoning": "reasoning-metadata"},
+            },
+            {
+                "type": "tool_call",
+                "id": "call-1",
+                "name": "lookup",
+                "arguments": {"type": "json", "raw": "{}", "value": {}},
+                "_meta": {"provider.example/tool-call": "tool-call-metadata"},
+            },
+        ],
+    });
+    let tool_message = json!({
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "name": "lookup",
+        "outcome": "success",
+        "content": [{
+            "type": "text",
+            "text": "result",
+            "_meta": {"provider.example/content": "tool-content-metadata"},
+        }],
+        "_meta": {"provider.example/tool-message": "tool-message-metadata"},
+    });
+    let history = [&assistant_message, &tool_message]
+        .into_iter()
+        .map(|message| serde_json::from_value(message.clone()).expect("history message is valid"))
+        .collect();
+    let mut runtime = SynchronousRuntime::new_with_history(config(), history);
+
+    let action = runtime
+        .apply(
+            user_message_with_content(turn_id, content.clone()),
+            running(turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_started_with_content(turn_id, content.clone())),
+        )
+        .only_action();
+
+    let messages = action_messages(&action);
+    assert!(messages.contains(&assistant_message));
+    assert!(messages.contains(&tool_message));
+    assert!(messages.contains(&json!({"role": "user", "content": content})));
+}
+
+#[test]
+fn preserves_assistant_resource_link_metadata_in_completion_actions() {
+    let turn_id = "turn-assistant-resource-link-metadata";
+    let assistant_message = json!({
+        "role": "assistant",
+        "content": [{
+            "type": "resource_link",
+            "uri": "provider://references",
+            "name": "references",
+            "_meta": {"provider.example/materialization": {"type": "reference"}},
+        }],
+    });
+    let history =
+        vec![serde_json::from_value(assistant_message.clone()).expect("history message is valid")];
+    let mut runtime = SynchronousRuntime::new_with_history(config(), history);
+
+    let action = runtime
+        .apply(
+            user_message(turn_id, "use the previous references", "queue"),
+            running(turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_started(turn_id, "use the previous references")),
+        )
+        .only_action();
+
+    assert!(action_messages(&action).contains(&assistant_message));
+}
+
+#[test]
 fn oversized_agent_input_compacts_before_any_agent_provider_call() {
     let turn_id = "turn-preflight-compaction";
     let request = large_text("current request");
@@ -357,7 +451,11 @@ fn compaction_uses_a_file_link_then_resumes_the_agent_with_the_native_image() {
     assert_eq!(resumed["model_input"]["messages"]["type"], "replace");
     let image = first_action_block_with_type(&resumed, "image");
     assert_eq!(image["data"].as_str().map(str::len), Some(200_000));
-    assert!(image.get("_meta").is_none());
+    assert!(
+        image["_meta"]
+            .get("mistralai.vibe.harness/file-image-resource-link")
+            .is_some()
+    );
 }
 
 #[test]
@@ -438,7 +536,11 @@ fn changing_agent_image_delivery_replaces_the_runtime_message_cache() {
     assert_eq!(second_action["model_input"]["messages"]["type"], "replace");
     let image = first_action_block_with_type(&second_action, "image");
     assert_eq!(image["data"].as_str().map(str::len), Some(200_000));
-    assert!(image.get("_meta").is_none());
+    assert!(
+        image["_meta"]
+            .get("mistralai.vibe.harness/file-image-resource-link")
+            .is_some()
+    );
     let checkpoint = runtime.checkpoint_value();
     let stored_image = checkpoint["context"]["messages"]
         .as_array()
@@ -456,6 +558,39 @@ fn changing_agent_image_delivery_replaces_the_runtime_message_cache() {
         stored_image["_meta"]
             .get("mistralai.vibe.harness/file-image-resource-link")
             .is_some()
+    );
+}
+
+#[test]
+fn keeps_agent_message_cache_when_only_compaction_image_delivery_changes() {
+    let first_turn_id = "turn-before-compaction-model-switch";
+    let mut config = config();
+    let mut runtime = SynchronousRuntime::new(config.clone());
+    let first_action = runtime.start_turn(first_turn_id, "first request");
+    runtime.finish_turn_with_text(first_turn_id, &first_action, "done");
+
+    config.settings.context.image_delivery.compaction = ImageDeliveryMode::ResourceLink;
+    runtime.reconfigure_settings(
+        config.settings,
+        completed(first_turn_id, vec![json!({"type": "text", "text": "done"})]),
+    );
+    let second_turn_id = "turn-after-compaction-model-switch";
+    let second_action = runtime
+        .apply(
+            user_message(second_turn_id, "second request", "queue"),
+            running(second_turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_started(second_turn_id, "second request")),
+        )
+        .only_action();
+
+    runtime.assert_last_model_message_update(
+        &second_action,
+        "append",
+        &[
+            model_assistant_text("done"),
+            model_user_text("second request"),
+        ],
     );
 }
 

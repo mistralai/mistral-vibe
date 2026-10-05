@@ -1,15 +1,159 @@
-//! Link hit testing for rendered markdown links.
+//! Rendered lines carrying the link runs painted on each, and their on-screen hit areas.
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{buffer::Buffer, layout::Rect};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
+use super::Sc;
 use crate::ui::theme;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkKind {
     External,
     Attachment,
+    /// An inline image, named by `inline_images::target`, written to a file when clicked.
+    InlineImage,
+}
+
+#[derive(Clone)]
+struct Target {
+    url: String,
+    kind: LinkKind,
+}
+
+/// `width` cells from column `x` of one line, painted for link `link`.
+#[derive(Clone, Copy)]
+struct Run {
+    link: usize,
+    x: usize,
+    width: usize,
+}
+
+/// Lines and the link runs painted on each: a run moves with its line, so they never drift apart.
+#[derive(Clone, Default)]
+pub struct LinkedLines {
+    lines: Vec<Line<'static>>,
+    runs: Vec<Vec<Run>>,
+    targets: Vec<Target>,
+}
+
+impl LinkedLines {
+    pub fn lines(&self) -> &[Line<'static>] {
+        &self.lines
+    }
+
+    pub fn into_lines(self) -> Vec<Line<'static>> {
+        self.lines
+    }
+
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// Register a link target; its id tags the `Sc`s a later `push_row` paints for it.
+    pub fn link(&mut self, url: String, kind: LinkKind) -> usize {
+        self.targets.push(Target { url, kind });
+        self.targets.len() - 1
+    }
+
+    pub fn push(&mut self, line: Line<'static>) {
+        self.lines.push(line);
+        self.runs.push(Vec::new());
+    }
+
+    /// Push `row` after its `lead` spans, recording the cells its linked characters land on.
+    pub fn push_row(&mut self, mut lead: Vec<Span<'static>>, row: &[Sc]) {
+        let mut runs: Vec<Run> = Vec::new();
+        let mut x: usize = lead.iter().map(Span::width).sum();
+        let text: String = row.iter().map(|sc| sc.0).collect();
+        let mut at = 0;
+        for grapheme in text.graphemes(true) {
+            let width = grapheme.width();
+            if let Some(link) = row[at].2.filter(|_| width > 0) {
+                match runs.last_mut() {
+                    Some(run) if run.link == link && run.x + run.width == x => run.width += width,
+                    _ => runs.push(Run { link, x, width }),
+                }
+            }
+            at += grapheme.chars().count();
+            x += width;
+        }
+        lead.extend(super::text::merge(row));
+        self.lines.push(Line::from(lead));
+        self.runs.push(runs);
+    }
+
+    pub fn append(&mut self, other: LinkedLines) {
+        let base = self.targets.len();
+        self.lines.extend(other.lines);
+        self.runs.extend(other.runs.into_iter().map(|mut runs| {
+            runs.iter_mut().for_each(|run| run.link += base);
+            runs
+        }));
+        self.targets.extend(other.targets);
+    }
+
+    /// Insert `span(index)` at the start of each line, shifting its runs by the span's width.
+    pub fn prefix(&mut self, span: impl Fn(usize) -> Span<'static>) {
+        for (index, (line, runs)) in self.lines.iter_mut().zip(&mut self.runs).enumerate() {
+            let span = span(index);
+            let width = span.width();
+            line.spans.insert(0, span);
+            runs.iter_mut().for_each(|run| run.x += width);
+        }
+    }
+
+    /// Keep only the lines `keep(index, line)` accepts, with their runs.
+    pub fn retain(&mut self, mut keep: impl FnMut(usize, &Line<'static>) -> bool) {
+        let lines = std::mem::take(&mut self.lines);
+        let runs = std::mem::take(&mut self.runs);
+        (self.lines, self.runs) = lines
+            .into_iter()
+            .zip(runs)
+            .enumerate()
+            .filter(|(index, (line, _))| keep(*index, line))
+            .map(|(_, pair)| pair)
+            .unzip();
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.lines.capacity() * std::mem::size_of::<Line<'static>>()
+            + self.runs.capacity() * std::mem::size_of::<Vec<Run>>()
+            + self
+                .runs
+                .iter()
+                .map(|runs| runs.capacity() * std::mem::size_of::<Run>())
+                .sum::<usize>()
+            + self.targets.capacity() * std::mem::size_of::<Target>()
+            + self
+                .targets
+                .iter()
+                .map(|target| target.url.capacity())
+                .sum::<usize>()
+    }
+}
+
+impl Extend<Line<'static>> for LinkedLines {
+    fn extend<I: IntoIterator<Item = Line<'static>>>(&mut self, lines: I) {
+        lines.into_iter().for_each(|line| self.push(line));
+    }
+}
+
+impl From<Vec<Line<'static>>> for LinkedLines {
+    fn from(lines: Vec<Line<'static>>) -> Self {
+        let runs = std::iter::repeat_with(Vec::new).take(lines.len()).collect();
+        Self {
+            lines,
+            runs,
+            targets: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -21,24 +165,27 @@ pub struct Link {
 }
 
 impl Link {
-    pub(crate) fn contains(&self, at: (u16, u16)) -> bool {
+    pub fn contains(&self, at: (u16, u16)) -> bool {
         self.rows
             .iter()
             .any(|&(y, x, w)| at.1 == y && at.0 >= x && at.0 < x + w)
     }
 
-    pub(crate) fn target(&self) -> &str {
+    pub fn target(&self) -> &str {
         &self.target
     }
 
-    pub(crate) fn kind(&self) -> LinkKind {
+    pub fn kind(&self) -> LinkKind {
         self.kind
     }
 
-    /// Textual repaints only the row the pointer is on, not every row a wrapped
-    /// label covers.
-    pub(crate) fn paint_hover(&self, buffer: &mut Buffer, at: (u16, u16)) {
-        for &(y, x, w) in self.rows.iter().filter(|&&(y, ..)| y == at.1) {
+    pub fn rows(&self) -> &[(u16, u16, u16)] {
+        &self.rows
+    }
+
+    /// Hovering any row of a wrapped label highlights every row of it.
+    pub fn paint_hover(&self, buffer: &mut Buffer) {
+        for &(y, x, w) in &self.rows {
             for x in x..x + w {
                 buffer[(x, y)].set_style(theme::link_hover_style());
             }
@@ -46,156 +193,50 @@ impl Link {
     }
 }
 
-/// One horizontal stretch of link-styled cells.
-struct Run {
-    y: u16,
-    x: u16,
-    w: u16,
-    text: String,
-}
-
-/// Pair the link-styled cells painted in `area` with the targets they came from.
-pub(super) fn collect(
-    buffer: &Buffer,
-    area: Rect,
-    pairs: &[(String, String)],
-    kind: LinkKind,
-) -> Vec<Link> {
-    let runs = runs(buffer, area, kind);
-    let mut links = Vec::new();
-    let (mut r, mut t) = (0, 0);
-    while r < runs.len() && t < pairs.len() {
-        let head = runs[r].text.trim();
-        let Some(start) = (t..pairs.len()).find(|&i| opens(&pairs[i].0, head)) else {
-            // A label clipped by the viewport top leaves runs no target claims.
-            r += 1;
+/// Place `linked`'s runs on screen in `rect`, scrolled `offset` rows; lines `Paragraph` wraps get none.
+pub fn screen_links(linked: &LinkedLines, prewrapped: bool, rect: Rect, offset: u16) -> Vec<Link> {
+    if linked.targets.is_empty() {
+        return Vec::new();
+    }
+    let mut rows: Vec<Vec<(u16, u16, u16)>> = vec![Vec::new(); linked.targets.len()];
+    let mut start = 0usize;
+    for (line, runs) in linked.lines.iter().zip(&linked.runs) {
+        let height = match prewrapped {
+            true => 1,
+            false => Paragraph::new(line.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(rect.width),
+        };
+        let row = start.checked_sub(offset as usize);
+        start += height;
+        let Some(row) = row else {
             continue;
         };
-        let label = normalize(&pairs[start].0);
-        let mut at = 0;
-        let mut rows = Vec::new();
-        while r < runs.len() {
-            let text = runs[r].text.trim();
-            if text.is_empty() {
-                break;
-            }
-            // Inline code inside a label keeps its own style, so runs may skip ahead.
-            let Some(pos) = label[at..].find(text) else {
-                break;
+        if row >= rect.height as usize {
+            break;
+        }
+        if height > 1 {
+            continue;
+        }
+        for run in runs {
+            let Ok(x) = u16::try_from(run.x) else {
+                continue;
             };
-            at += pos + text.len();
-            rows.push((runs[r].y, runs[r].x, runs[r].w));
-            r += 1;
-            if at == label.len() {
-                break;
+            let width = u16::try_from(run.width)
+                .unwrap_or(u16::MAX)
+                .min(rect.width.saturating_sub(x));
+            if width > 0 {
+                rows[run.link].push((rect.y + row as u16, rect.x + x, width));
             }
         }
-        links.push(Link {
-            target: pairs[start].1.clone(),
-            kind,
+    }
+    rows.into_iter()
+        .zip(&linked.targets)
+        .filter(|(rows, _)| !rows.is_empty())
+        .map(|(rows, target)| Link {
+            target: target.url.clone(),
+            kind: target.kind,
             rows,
-        });
-        t = start + 1;
-    }
-    links
-}
-
-fn runs(buffer: &Buffer, area: Rect, kind: LinkKind) -> Vec<Run> {
-    let mut out = Vec::new();
-    for y in area.y..area.bottom() {
-        let mut cur: Option<Run> = None;
-        for x in area.x..area.right() {
-            let cell = &buffer[(x, y)];
-            if is_link(cell.style(), kind) {
-                let run = cur.get_or_insert(Run {
-                    y,
-                    x,
-                    w: 0,
-                    text: String::new(),
-                });
-                run.w += 1;
-                run.text.push_str(cell.symbol());
-            } else if let Some(run) = cur.take() {
-                out.push(run);
-            }
-        }
-        out.extend(cur);
-    }
-    out
-}
-
-fn is_link(style: Style, kind: LinkKind) -> bool {
-    let color = match kind {
-        LinkKind::External => theme::md_link(),
-        LinkKind::Attachment => theme::success(),
-    };
-    style.fg == Some(color) && style.add_modifier.contains(Modifier::UNDERLINED)
-}
-
-/// Whether `text` is how the rendered `label` starts.
-fn opens(label: &str, text: &str) -> bool {
-    !text.is_empty() && normalize(label).starts_with(text)
-}
-
-fn normalize(label: &str) -> String {
-    label.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// The `(label, url)` pairs a markdown source declares, in document order.
-pub fn targets(source: &str) -> Vec<(String, String)> {
-    let mut targets = Targets::default();
-    for event in Parser::new_ext(
-        source,
-        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES,
-    ) {
-        targets.event(&event);
-    }
-    targets.finish()
-}
-
-/// Collect link targets from the same event stream that builds Markdown blocks.
-#[derive(Default)]
-pub(super) struct Targets {
-    values: Vec<(String, String)>,
-    active: Option<(String, String)>,
-}
-
-impl Targets {
-    pub fn event(&mut self, event: &Event<'_>) {
-        match event {
-            Event::Start(Tag::Link { dest_url, .. }) => {
-                self.active = Some((String::new(), dest_url.to_string()));
-            }
-            Event::Code(text) => {
-                if let Some((label, _)) = &mut self.active {
-                    label.push_str(text);
-                }
-            }
-            Event::Text(text) => match &mut self.active {
-                Some((label, _)) => label.push_str(text),
-                None => self.values.extend(
-                    super::autolink::split(text)
-                        .into_iter()
-                        .filter_map(|(run, href)| Some((run.to_owned(), href?))),
-                ),
-            },
-            Event::SoftBreak | Event::HardBreak => {
-                if let Some((label, _)) = &mut self.active {
-                    label.push(' ');
-                }
-            }
-            Event::End(TagEnd::Link) => {
-                if let Some((label, target)) =
-                    self.active.take().filter(|(label, _)| !label.is_empty())
-                {
-                    self.values.push((label, target));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    pub fn finish(self) -> Vec<(String, String)> {
-        self.values
-    }
+        })
+        .collect()
 }

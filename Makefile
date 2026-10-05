@@ -22,7 +22,7 @@ QUIET ?=
 QUIET_FLAGS = $(if $(QUIET),-q,)
 CARGO_QUIET = $(if $(QUIET),-- --quiet,)
 
-.PHONY: start run build build_test release fmt lint check clean sweep test test_rust test_golden store_golden profile-stress view-stress
+.PHONY: start run build build_test release fmt fmt_check lint lint_test check clean sweep test test_rust test_golden store_golden profile-stress view-stress
 
 # The golden snapshot pytest run (Rust-only), shared by `test` and `test_golden`.
 GOLDEN_CMD = uv run --no-project --with "pyte==0.8.2" --with "rich==15.0.0" --with pytest --with pytest-timeout --with pytest-xdist \
@@ -56,6 +56,12 @@ fmt:            ## Format
 
 lint:           ## Clippy, warnings as errors
 	cargo clippy $(M) --all-targets $(CARGO_BUILD_FLAGS) -- -D warnings
+
+fmt_check:      ## Check formatting without writing
+	cargo fmt $(M) --check
+
+lint_test: fmt_check ## Format check + clippy in the CI configuration
+	cargo clippy $(M) --all-targets $(TEST_CARGO_FLAGS) -- -D warnings
 
 check: fmt lint ## Format + lint
 	cargo check $(M) $(CARGO_BUILD_FLAGS)

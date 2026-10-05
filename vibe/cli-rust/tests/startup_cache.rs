@@ -51,6 +51,28 @@ fn an_older_runtime_without_default_agent_uses_the_builtin_default() {
 }
 
 #[test]
+fn image_support_follows_the_backend_promise_with_a_model_fallback() {
+    let mut runtime = runtime("safe");
+    let config = &mut runtime["runtime"]["config"];
+    config["activeModel"]["supportsImages"] = false.into();
+    config["imagesSupported"] = true.into();
+    assert!(
+        StartupConfig::from_runtime("1.0.0", &runtime)
+            .unwrap()
+            .images_supported
+    );
+
+    let config = &mut runtime["runtime"]["config"];
+    config.as_object_mut().unwrap().remove("imagesSupported");
+    config["activeModel"]["supportsImages"] = true.into();
+    assert!(
+        StartupConfig::from_runtime("1.0.0", &runtime)
+            .unwrap()
+            .images_supported
+    );
+}
+
+#[test]
 fn with_no_cache_the_builtins_are_cycleable() {
     let config = StartupConfig::default();
     assert_eq!(config.default_agent, "accept-edits");

@@ -30,6 +30,7 @@ from vibe.app_server._session_backend_port import (
     SessionBackendHostBackgroundTasks,
     SessionBackendHostConfigRead,
     SessionBackendHostDelete,
+    SessionBackendHostHistoryList,
     SessionBackendHostPin,
     SessionBackendHostSeenState,
     SessionBackendNotificationSink,
@@ -90,6 +91,7 @@ from vibe.app_server.protocol import (
     SessionHandoffParams,
     SessionHistoryClearParams,
     SessionHistoryClearResponse,
+    SessionHistoryListParams,
     SessionListParams,
     SessionMarkAsSeenParams,
     SessionPinParams,
@@ -748,6 +750,9 @@ class AppServer:
         if method in {
             "config/schema",
             "session/history/get",
+            "setup/status",
+            "setup/store-credential",
+            "setup/submit-choices",
             "workspace/git/checkouts",
             "workspace/git/worktrees/limit/update",
             "workspace/git/worktrees/list",
@@ -758,7 +763,16 @@ class AppServer:
             "workspace/trust/status",
             "workspace/trust/untrustedConfig",
         } or method.startswith("projectLinks/"):
-            return await self._host_handler.dispatch(method, raw_params)
+            # The attached session is the caller; its own worktree holder does
+            # not count as in use for the worktree-remove questions it asks.
+            # The setup methods are session-less by construction: the wizard
+            # runs before any session, so they never build or read a runtime.
+            return await self._host_handler.dispatch(
+                method,
+                raw_params,
+                session_id=self._root.session_id if self._root is not None else None,
+                client_info=self._initialized_client_info(),
+            )
         if method == "session/delete":
             return await self._delete_session(raw_params)
         if _omits_session_id(method, raw_params):
@@ -824,6 +838,8 @@ class AppServer:
             return await self._open_initial_session(method, raw_params)
         if result := await self._dispatch_backend_host_operation(method, raw_params):
             return result
+        if method == "session/history/list":
+            return await self._dispatch_stored_session(method, raw_params)
         if self._host_handler.handles(method):
             return await self._host_handler.dispatch(method, raw_params)
         return await self._open_initial_session(method, raw_params)
@@ -859,7 +875,7 @@ class AppServer:
                 "session/read",
                 "session/history/list",
             }:
-                return await self._host_handler.dispatch(method, raw_params)
+                return await self._dispatch_stored_session(method, raw_params)
             raise
         if result.session_attached and root.session_id != previous_session_id:
             subscription = await root.subscribe(
@@ -873,6 +889,24 @@ class AppServer:
             )
         await self._flush_backend_events(root)
         return result
+
+    async def _dispatch_stored_session(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> DispatchResult:
+        host = self._session_backend_host
+        if method == "session/history/list" and isinstance(
+            host, SessionBackendHostHistoryList
+        ):
+            try:
+                return DispatchResult(
+                    await host.list_history(
+                        validate_wire(SessionHistoryListParams, raw_params)
+                    )
+                )
+            except SessionBackendError as exc:
+                if exc.code is not ProtocolErrorCode.NOT_FOUND:
+                    raise
+        return await self._host_handler.dispatch(method, raw_params)
 
     async def _dispatch_backend_host_operation(
         self, method: str, raw_params: dict[str, Any]

@@ -14,6 +14,7 @@ use super::{dispatch, is_side_channel, parse};
 use crate::app::{App, QueuedPrompt, Status, ToastSeverity};
 use crate::input_modes::{classify, ClassifiedInput};
 use crate::startup::banners;
+use crate::telemetry::TelemetrySender;
 use crate::transcript::local;
 use crate::{completion_manager, config, message_queue};
 
@@ -38,24 +39,36 @@ pub fn flush_pending(
     // Preserve text typed after the commands were deferred; replay must not
     // clear it or record it in history (history.add skips the empty string
     // that run_command's clear_and_remember sees).
+    let saved_draft = crate::edit_history::Snapshot::capture(&app.chat_input);
+    let saved_history = std::mem::take(&mut app.chat_input.edit_history);
     let mut saved_input = app.chat_input.full_text();
-    let saved_cursor = app.chat_input.cursor;
     let mut restore_rejected = false;
+    // The first rejected input refills an empty composer.
+    let mut reject = |app: &mut App, value: String, message: String| {
+        if saved_input.is_empty() {
+            saved_input = value;
+            restore_rejected = true;
+        }
+        app.show_toast(message, ToastSeverity::Warning, TOAST_SECS);
+    };
     for value in pending {
+        if let ClassifiedInput::Teleport { target } = classify(&value, &[]) {
+            match reject_hint(app) {
+                Some(hint) => reject(app, value, teleport_rejection(hint)),
+                None => crate::teleport::submit(app, client, target),
+            }
+            continue;
+        }
         let Some(command) = parse(&value) else {
             continue;
         };
         // A queued prompt may have started a turn before deferred commands replay.
         if !is_side_channel(command) {
             if let Some(hint) = reject_hint(app) {
-                if saved_input.is_empty() {
-                    saved_input = value;
-                    restore_rejected = true;
-                }
-                app.show_toast(
+                reject(
+                    app,
+                    value,
                     format!("Slash commands cannot be queued — {hint}"),
-                    ToastSeverity::Warning,
-                    TOAST_SECS,
                 );
                 continue;
             }
@@ -64,12 +77,13 @@ pub fn flush_pending(
             return true;
         }
     }
-    app.chat_input.load_full_text(saved_input);
-    app.chat_input.cursor = if restore_rejected {
-        0
+    if restore_rejected {
+        app.chat_input.load_full_text(saved_input);
+        app.chat_input.cursor = 0;
     } else {
-        saved_cursor.min(app.chat_input.input.len())
-    };
+        saved_draft.restore(&mut app.chat_input);
+        app.chat_input.edit_history = saved_history;
+    }
     completion_manager::input_changed(app);
     false
 }
@@ -80,7 +94,7 @@ pub fn submit(
     client: &Arc<Client>,
     config_tx: &mpsc::Sender<config::Loaded>,
 ) -> bool {
-    let value = app.chat_input.full_text().trim().to_owned();
+    let value = app.chat_input.submitted_text().trim().to_owned();
     if matches!(app.session.status, Status::Failed) {
         return false;
     }
@@ -107,8 +121,7 @@ pub fn submit(
         if message_queue::finish_consumed_edit(app) {
             message_queue::enqueue_prompt(app, client, value);
         } else {
-            message_queue::replace_selected(app, client, value);
-            message_queue::end_edit(app);
+            message_queue::save_edit(app, client, value);
         }
         return false;
     }
@@ -125,8 +138,28 @@ pub fn submit(
             );
             return false;
         }
+        if app.teleport.is_some()
+            && matches!(
+                &classified,
+                ClassifiedInput::Prompt { .. } | ClassifiedInput::Skill { .. }
+            )
+        {
+            reject_input(app, &value, "Wait for the teleport to finish.".into());
+            return false;
+        }
     }
     match classified {
+        ClassifiedInput::Teleport { target } => {
+            if matches!(app.session.status, Status::Starting) {
+                clear_and_remember(app, &value);
+                app.pending_commands.push(value);
+            } else if let Some(hint) = reject_hint(app) {
+                reject_input(app, &value, teleport_rejection(hint));
+            } else {
+                clear_and_remember(app, &value);
+                crate::teleport::submit(app, client, target);
+            }
+        }
         ClassifiedInput::SlashCommand { command } => {
             // Defer every slash command until the session is ready, matching
             // Python's `_dispatch_idle_input` which awaits `_session_ready` before
@@ -155,11 +188,11 @@ pub fn submit(
             if message_queue::mutation_in_flight(app) {
                 if message_queue::defer_prompt(app, command) {
                     clear_and_remember(app, &value);
-                    super::usage::record_usage(app, client, name, "skill");
+                    crate::telemetry::slash_command_used(app, &name, "skill");
                 }
             } else {
                 clear_and_remember(app, &value);
-                super::usage::record_usage(app, client, name, "skill");
+                crate::telemetry::slash_command_used(app, &name, "skill");
                 message_queue::enqueue_prompt(app, client, command);
                 message_queue::resume(app, client);
             }
@@ -191,9 +224,11 @@ pub fn submit(
             if message_queue::mutation_in_flight(app) {
                 if message_queue::defer_prompt(app, text) {
                     clear_and_remember(app, &value);
+                    record_loop_usage(app, &value);
                 }
             } else {
                 clear_and_remember(app, &value);
+                record_loop_usage(app, &value);
                 message_queue::enqueue_prompt(app, client, text);
                 message_queue::resume(app, client);
             }
@@ -215,11 +250,22 @@ fn reject_while_shell_runs(app: &mut App, value: &str) -> bool {
     true
 }
 
+/// `/loop` reaches the model as a prompt, so its usage is recorded on submission.
+fn record_loop_usage(app: &App, value: &str) {
+    if parse(value) == Some("/loop") {
+        crate::telemetry::slash_command_used(app, "/loop", "builtin");
+    }
+}
+
 fn reject_input(app: &mut App, value: &str, message: String) {
     app.show_toast(message, ToastSeverity::Warning, TOAST_SECS);
     remember(app, value);
     app.chat_input.cursor = 0;
     completion_manager::input_changed(app);
+}
+
+fn teleport_rejection(hint: &str) -> String {
+    format!("Teleport cannot be queued — {hint}")
 }
 
 /// Why a non-side-channel command cannot run now (Python `_REJECT_HINT_*`).
@@ -231,6 +277,7 @@ fn reject_hint(app: &App) -> Option<&'static str> {
     if matches!(app.session.status, Status::Generating { .. })
         || app.compacting
         || app.vibe_code_project.pending
+        || app.teleport.is_some()
         || !app.queue.is_empty()
     {
         return Some("wait for the current job to finish.");
@@ -239,23 +286,43 @@ fn reject_hint(app: &App) -> Option<&'static str> {
 }
 
 pub(super) fn clear_and_remember(app: &mut App, value: &str) {
+    // Python's text-changed watcher drops the loaded-entry state whenever the
+    // text changes; a submitted recall must not leave the composer pretending
+    // it still shows a history entry, or every later Down feeds the recall.
+    crate::input::reset_history_state(app);
     app.chat_input.clear();
     completion_manager::input_changed(app);
     remember(app, value);
 }
 
 fn remember(app: &mut App, value: &str) {
-    app.chat_input.history.add(value);
+    // History outlives this process, and with it the placeholders' images.
+    let value = app.chat_input.pasted_images.with_paths(value);
+    app.chat_input.history.add(&value);
     app.chat_input.history.reset_navigation();
     app.chat_input.history.persist();
 }
 
 /// Escape while a turn runs (Python `_interrupt_turn`): cancel the active turn,
-/// drop the loading spinner, and mount the local interrupt marker. A spinner the
-/// server has not promoted yet has no turn id: drop it locally, without an RPC.
+/// drop the loading spinner, and mount the local interrupt marker. A turn the
+/// server has not started yet has no id: interrupt it once it starts.
 pub fn interrupt_turn(app: &mut App, client: &Arc<Client>) {
+    let unstarted = app.session.active_turn_id.is_none();
     app.set_status(Status::Ready);
+    if unstarted && crate::message_queue::interrupt_pending(app) {
+        return;
+    }
+    crate::telemetry::user_cancelled_action(app, "interrupt_agent");
     local::add_interrupt(&mut app.view.transcript, &new_message_id());
+    if unstarted {
+        crate::message_queue::interrupt_on_start(app);
+        return;
+    }
+    send_interrupt(app, client);
+}
+
+/// Ask the server to interrupt the active turn, which the client stops tracking.
+pub fn send_interrupt(app: &mut App, client: &Arc<Client>) {
     let (Some(session_id), Some(turn_id)) = (
         app.session.session_id.clone(),
         app.session.active_turn_id.take(),
@@ -278,8 +345,13 @@ pub fn interrupt_turn(app: &mut App, client: &Arc<Client>) {
 /// `_send_prompt` does before `session.start_turn`. When `injected` is true,
 /// use `turn/start` with `injected=true` so the projection suppresses the
 /// user-message entry (Python `session.act(injected=True)`).
-pub(super) async fn start_turn(client: Arc<Client>, session_id: String, prompt: QueuedPrompt) {
-    let _ = start_turn_with(client, session_id, prompt, false).await;
+pub(super) async fn start_turn(
+    client: Arc<Client>,
+    session_id: String,
+    prompt: QueuedPrompt,
+    telemetry: Option<TelemetrySender>,
+) {
+    let _ = start_turn_with(client, session_id, prompt, false, telemetry).await;
 }
 
 /// Like `start_turn` but marks the prompt as injected, matching Python's
@@ -290,7 +362,7 @@ pub(super) async fn start_injected_turn(
     session_id: String,
     prompt: QueuedPrompt,
 ) -> anyhow::Result<()> {
-    start_turn_with(client, session_id, prompt, true).await
+    start_turn_with(client, session_id, prompt, true, None).await
 }
 
 async fn start_turn_with(
@@ -298,6 +370,7 @@ async fn start_turn_with(
     session_id: String,
     prompt: QueuedPrompt,
     injected: bool,
+    telemetry: Option<TelemetrySender>,
 ) -> anyhow::Result<()> {
     if injected {
         let params = TurnStartParams {
@@ -329,6 +402,11 @@ async fn start_turn_with(
             return Ok(());
         };
         let prepared = PreparedPrompt::from_response(&prepared, &prompt.text);
+        crate::telemetry::record_mentions(
+            telemetry.as_ref(),
+            prepared.mentions.as_ref(),
+            &prompt.message_id,
+        );
         let params = TurnEnqueueParams {
             idempotency_key: prompt.message_id.clone(),
             session_id,

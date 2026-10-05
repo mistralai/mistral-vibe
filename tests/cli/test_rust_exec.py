@@ -58,6 +58,26 @@ def test_bundled_binary_execs_with_app_server_bin(
     assert "VIBE_APP_SERVER_CMD" not in env
 
 
+@pytest.mark.parametrize("rollout", [True, False])
+def test_rollout_flag_sets_rollout_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rollout: bool
+) -> None:
+    bundled = tmp_path / "vibe-rs"
+    bundled.touch()
+    monkeypatch.setattr(rust, "_BUNDLED_BIN", bundled)
+    monkeypatch.setattr("sys.platform", "linux")
+    # Inherited from a parent rollout launch; a VIBE_CLI=rust launch must drop it.
+    monkeypatch.setenv(rust.ROLLOUT_ENV, "1")
+    calls = _capture_execvpe(monkeypatch)
+
+    rust.exec_rust_cli([], rollout=rollout)
+
+    (call,) = calls
+    env = call["env"]
+    assert isinstance(env, dict)
+    assert env.get(rust.ROLLOUT_ENV) == ("1" if rollout else None)
+
+
 def test_source_checkout_execs_release_binary(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

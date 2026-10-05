@@ -43,7 +43,7 @@ from vibe.app_server import (
     AppServerSession,
     SessionExitSummary,
 )
-from vibe.app_server.config import THINKING_LEVELS, ConfigView, ThinkingLevel
+from vibe.app_server.config import ConfigView, ThinkingLevel
 from vibe.app_server.events import (
     AppServerEvent,
     CallbackRequested,
@@ -156,6 +156,7 @@ from vibe.cli.textual_ui.notifications import (
     NotificationPort,
     TextualNotificationAdapter,
 )
+from vibe.cli.textual_ui.provider_auth_status import render_provider_auth_section
 from vibe.cli.textual_ui.quit_manager import QuitManager
 from vibe.cli.textual_ui.scheduled_loop_runner import ScheduledLoopCommands
 from vibe.cli.textual_ui.todo_tracker import TodoTracker, todo_deltas
@@ -261,10 +262,10 @@ from vibe.cli.textual_ui.windowing import (
 from vibe.cli.textual_ui.word_selection import WordSelectScreen
 from vibe.cli.theme import resolve_auto_theme, resolve_theme, resolve_theme_name
 from vibe.cli.update_notifier import (
-    PyPIUpdateGateway,
     UpdateCacheRepository,
     UpdateError,
     UpdateGateway,
+    create_update_gateway,
     get_update_if_available,
     load_whats_new_content,
     mark_version_as_seen,
@@ -2088,6 +2089,13 @@ class VibeApp(App):  # noqa: PLR0904
                 ErrorMessage(str(error), collapsed=self._tools_collapsed)
             )
             return False
+        if (resolved := self.commands.parse_command(content)) is not None:
+            cmd_name, command, _ = resolved
+            if command.forwards_to_model:
+                self.app_server.resources.telemetry.record(
+                    "vibe.slash_command_used",
+                    {"command": cmd_name, "command_type": "builtin"},
+                )
         return True
 
     def _is_busy(self) -> bool:
@@ -2129,6 +2137,9 @@ class VibeApp(App):  # noqa: PLR0904
         self, message: ApprovalApp.ApprovalRejected
     ) -> None:
         await self._respond_to_approval(ApprovalDecisionType.DENY)
+        self.app_server.resources.telemetry.record(
+            "vibe.user_cancelled_action", {"action": "reject_approval"}
+        )
 
         if self._loading_widget and self._loading_widget.parent:
             await self._remove_loading_widget()
@@ -3949,7 +3960,11 @@ class VibeApp(App):  # noqa: PLR0904
         # clearing the registries mid-initialization briefly empties the list
         # (the panel collapses then expands once discovery repopulates it).
         await self.app_server.resources.runtime.wait_until_ready()
-        await self.app_server.resources.mcp.refresh_connectors()
+        # A connector outage must not keep local servers from being re-discovered.
+        try:
+            await self.app_server.resources.mcp.refresh_connectors()
+        except AppServerResponseError as exc:
+            logger.warning("Connector catalog refresh failed: %s", exc)
         await self.app_server.resources.mcp.refresh()
         await self.app_server.resources.mcp.read()
         self._refresh_banner()
@@ -4122,12 +4137,12 @@ class VibeApp(App):  # noqa: PLR0904
         if self._current_bottom_app == BottomApp.MCP:
             return
         name = cmd_args.strip()
-        all_names = [source.name for source in state.sources]
-        if name and name not in all_names:
+        source = state.resolve_source(name)
+        if name and source is None:
             await self._mount_and_scroll(
                 ErrorMessage(
                     f"Unknown MCP server or connector: {name}. Known: "
-                    + ", ".join(all_names),
+                    + ", ".join(known.display_name for known in state.sources),
                     collapsed=self._tools_collapsed,
                 )
             )
@@ -4137,7 +4152,7 @@ class VibeApp(App):  # noqa: PLR0904
         await self._switch_from_input(
             mcp_app_class(
                 state=state,
-                initial_source=name,
+                initial_source=source.name if source is not None else "",
                 state_getter=lambda: self.app_server.resources.mcp.state,
                 refresh_callback=self._refresh_mcp_browser,
             )
@@ -4216,7 +4231,26 @@ class VibeApp(App):  # noqa: PLR0904
 - **Last Turn Tokens**: {stats.last_turn_total_tokens:,}{last_turn_cached}
 - **Cost**: ${stats.session_cost:.4f}
 """
+        auth_section = await self._provider_auth_section()
+        if auth_section:
+            status_text = f"{status_text}\n{auth_section}"
         await self._mount_and_scroll(UserCommandMessage(status_text))
+
+    async def _provider_auth_section(self) -> str:
+        """The read-only "Model & Provider" section; empty when unavailable.
+
+        Unified Harness sessions only. A Legacy session keeps the
+        statistics-only ``/status``, and so does any failed read: the command
+        never grows an error or an empty section.
+        """
+        if not self.app_server.resources.runtime.experimental_harness:
+            return ""
+        try:
+            view = await self.app_server.resources.provider_auth.read()
+        except Exception as exc:
+            logger.warning("Provider auth status read failed (%s)", type(exc).__name__)
+            return ""
+        return render_provider_auth_section(view)
 
     async def _show_whoami(self, **kwargs: Any) -> None:
         loading = LoadingWidget(status="Loading", show_hint=False)
@@ -4402,10 +4436,13 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         new_session_id = response.state.session.id
-        self.app_server.resources.telemetry.record(
-            "vibe.session_branched",
-            {"source_session_id": old_session_id, "new_session_id": new_session_id},
-        )
+        # Unified records the successful fork in its host adapter. Legacy has
+        # no server-side event, so keep the existing client emission there.
+        if self.app_server.state.session.harness != "unified":
+            self.app_server.resources.telemetry.record(
+                "vibe.session_branched",
+                {"source_session_id": old_session_id, "new_session_id": new_session_id},
+            )
         await self._mount_and_scroll(
             BranchCreatedMessage(
                 old_session_id=old_session_id, new_session_id=new_session_id
@@ -5156,7 +5193,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         await self._switch_from_input(
             ThinkingPickerApp(
-                thinking_levels=THINKING_LEVELS,
+                thinking_levels=self.config.active_model.thinking_levels,
                 current_thinking=self.config.active_model.thinking,
             )
         )
@@ -5282,9 +5319,6 @@ class VibeApp(App):  # noqa: PLR0904
             approval_app = self.query_one(ApprovalApp)
             if not approval_app.is_within_grace_period():
                 approval_app.action_reject()
-                self.app_server.resources.telemetry.record(
-                    "vibe.user_cancelled_action", {"action": "reject_approval"}
-                )
         except Exception:
             pass
         self._last_escape_time = None
@@ -6600,7 +6634,7 @@ def run_textual_ui(
     async def run() -> SessionExitSummary | None:
         app_server = await start_app_server()
         effective_startup = startup or StartupOptions()
-        update_notifier = PyPIUpdateGateway(project_name="mistral-vibe")
+        update_notifier = create_update_gateway("mistral-vibe")
         vscode_extension_promo_repository = FileSystemVscodeExtensionPromoRepository()
         vscode_extension_promo = VscodeExtensionPromo(
             repository=vscode_extension_promo_repository,

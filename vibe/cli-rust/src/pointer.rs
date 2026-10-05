@@ -94,7 +94,10 @@ pub fn shape(app: &App) -> Shape {
             Shape::Default
         };
     }
-    if target != crate::mouse::MouseTarget::Transcript {
+    if !matches!(
+        target,
+        crate::mouse::MouseTarget::Transcript | crate::mouse::MouseTarget::OnboardingLinks
+    ) {
         return Shape::Default;
     }
     if app.view.link_hitmap.iter().any(|link| link.contains(at)) {
@@ -111,9 +114,12 @@ fn expandable_at(app: &App, at: (u16, u16)) -> bool {
     if !app.view.selection_region.contains(at) {
         return false;
     }
+    // The child view swaps its transcript in only at render time; the hit
+    // test follows the viewed child so its group headers show the hand too.
+    let (transcript, _) = crate::subagents::active_transcript(app);
     app.view
         .entry_hitmap
         .iter()
-        .find(|(top, bottom, _)| at.1 >= *top && at.1 < *bottom)
-        .is_some_and(|(_, _, id)| app.view.transcript.is_expandable(id))
+        .find(|(top, bottom, _, _)| at.1 >= *top && at.1 < *bottom)
+        .is_some_and(|(_, _, _, id)| transcript.is_expandable(id))
 }

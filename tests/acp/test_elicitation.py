@@ -77,7 +77,9 @@ def _agent(
         )
 
     agent = VibeAcpAgent(
-        session_starter=start_session, experimental_harness=experimental_harness
+        session_starter=start_session,
+        experimental_harness=experimental_harness,
+        legacy_harness=not experimental_harness,
     )
     client = FakeClient()
     agent.on_connect(client)

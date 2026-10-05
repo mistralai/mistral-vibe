@@ -34,11 +34,13 @@ SESSION_PERMISSION_OUTPUT = "__E2E_SESSION_PERMISSION__"
 def _write_file_factory(
     request_index: int, _payload: ChatCompletionsRequestPayload
 ) -> list[dict[str, object]]:
+    # The unified runtime declares write_file with ``path`` — its canonical
+    # builtin schema — and reports the outcome as a structured result.
     if request_index == 0:
         return single_tool_call_chunks(
             call_id=WRITE_APPROVED_CALL_ID,
             tool_name="write_file",
-            arguments={"file_path": APPROVED_FILE, "content": "approved content\n"},
+            arguments={"path": APPROVED_FILE, "content": "approved content\n"},
             created=120,
         )
     if request_index == 1:
@@ -47,7 +49,7 @@ def _write_file_factory(
         return single_tool_call_chunks(
             call_id=WRITE_REJECTED_CALL_ID,
             tool_name="write_file",
-            arguments={"file_path": REJECTED_FILE, "content": "rejected content\n"},
+            arguments={"path": REJECTED_FILE, "content": "rejected content\n"},
             created=140,
         )
 
@@ -81,6 +83,7 @@ def _session_permission_factory(
 
 
 @pytest.mark.timeout(35)
+@pytest.mark.unified_default
 @pytest.mark.parametrize(
     "streaming_mock_server",
     [pytest.param(_write_file_factory, id="write-file-approval-and-rejection")],
@@ -115,7 +118,9 @@ def test_write_file_approval_creates_file_and_rejection_leaves_file_absent(
             expected_count=1,
             timeout=10,
         )
-        answer_approval(child, captured, tool_name="write_file", key="y")
+        # The unified runtime names builtins by their canonical route
+        # (``file_system.write_file`` stands for Vibe's ``write_file``).
+        answer_approval(child, captured, tool_name="file_system.write_file", key="y")
         wait_for_request_count_while_draining_child_output(
             child,
             captured,
@@ -145,19 +150,23 @@ def test_write_file_approval_creates_file_and_rejection_leaves_file_absent(
 
     assert approved_path.read_text(encoding="utf-8") == "approved content\n"
     assert not rejected_path.exists()
+    # The unified runtime reports the write as a structured result carrying
+    # the resolved path.
     assert_tool_result_contains(
         streaming_mock_server.requests[1],
         call_id=WRITE_APPROVED_CALL_ID,
-        expected="approved content",
+        expected=APPROVED_FILE,
     )
     assert_tool_result_contains(
         streaming_mock_server.requests[3],
         call_id=WRITE_REJECTED_CALL_ID,
-        expected="permanently disabled",
+        # The unified runtime's deny result for a path-denylisted write.
+        expected="Tool execution denied by approval policy",
     )
 
 
 @pytest.mark.timeout(40)
+@pytest.mark.unified_default
 @pytest.mark.parametrize(
     "streaming_mock_server",
     [pytest.param(_session_permission_factory, id="session-permission-memory")],
@@ -181,7 +190,9 @@ def test_allow_for_session_reuses_bash_permission_without_prompting_again(
             expected_count=1,
             timeout=10,
         )
-        answer_approval(child, captured, tool_name="bash", key="2")
+        # The unified runtime names builtins by their canonical route
+        # (``file_system.bash`` stands for Vibe's ``bash``).
+        answer_approval(child, captured, tool_name="file_system.bash", key="2")
         wait_for_request_count_while_draining_child_output(
             child,
             captured,

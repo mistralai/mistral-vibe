@@ -33,7 +33,9 @@ async def test_review_extensions_delegate_to_app_server(
         )
 
     agent = VibeAcpAgent(
-        session_starter=start_session, experimental_harness=experimental_harness
+        session_starter=start_session,
+        experimental_harness=experimental_harness,
+        legacy_harness=not experimental_harness,
     )
     client = FakeClient()
     agent.on_connect(client)
@@ -113,7 +115,9 @@ async def test_review_mutation_extensions_delegate_to_app_server(
         )
 
     agent = VibeAcpAgent(
-        session_starter=start_session, experimental_harness=experimental_harness
+        session_starter=start_session,
+        experimental_harness=experimental_harness,
+        legacy_harness=not experimental_harness,
     )
     client = FakeClient()
     agent.on_connect(client)
@@ -144,7 +148,10 @@ async def test_review_mutation_extensions_delegate_to_app_server(
 async def test_review_mutation_rejects_invalid_target(
     tmp_path: Path, experimental_harness: bool
 ) -> None:
-    agent = VibeAcpAgent(experimental_harness=experimental_harness)
+    agent = VibeAcpAgent(
+        experimental_harness=experimental_harness,
+        legacy_harness=not experimental_harness,
+    )
     client = FakeClient()
     agent.on_connect(client)
     client.on_connect(agent)

@@ -173,6 +173,13 @@ fn teleport_is_rejected_until_headless_support_exists() {
 }
 
 #[test]
+fn teleport_takes_the_positional_prompt() {
+    let cli = Cli::try_parse_from(["vibe-rs", "--teleport", "fix the tests"]).unwrap();
+    assert!(cli.teleport);
+    assert_eq!(cli.initial_prompt.as_deref(), Some("fix the tests"));
+}
+
+#[test]
 fn positional_prompt_is_initial_prompt_not_headless() {
     let cli = Cli::parse_from(["vibe-rs", "hello"]);
     assert!(!cli.is_headless());

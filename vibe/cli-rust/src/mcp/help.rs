@@ -46,7 +46,7 @@ pub fn help_text(app: &App) -> &'static [(&'static str, &'static str)] {
         };
     }
     match rows.get(app.mcp.selected) {
-        Some(Row::Source(row)) if row.needs_auth => LIST_VIEW_HELP_AUTH,
+        Some(Row::Source(row)) if row.awaits_auth => LIST_VIEW_HELP_AUTH,
         _ => LIST_VIEW_HELP_TOOLS,
     }
 }

@@ -73,6 +73,8 @@ async fn execute(client: &Client, command: &McpCommand) -> Result<()> {
             name: "vibe_mcp".into(),
             entrypoint: Some("cli".into()),
             version: env!("CARGO_PKG_VERSION").into(),
+            title: None,
+            terminal_emulator: crate::terminal_detect::detect().into(),
         },
         capabilities: ClientCapabilities::default(),
     };

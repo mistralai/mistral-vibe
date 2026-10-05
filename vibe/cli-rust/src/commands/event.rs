@@ -11,10 +11,16 @@ use crate::post_ready::AccountReads;
 /// per dispatch, so the reducer can tell when the UI is settled again.
 pub enum CommandEvent {
     RemoteProject(Box<crate::vibe_code_project::Reply>),
+    Teleport(Box<crate::teleport::Reply>),
     Result(String),
     Renamed(String),
     Error(String),
     Runtime(Value, String),
+    VoiceSettings {
+        runtime: Value,
+        previous_enabled: bool,
+        enabling_audio: bool,
+    },
     /// The post-ready account and identity reads, for the banner.
     PostReady {
         reads: Option<AccountReads>,
@@ -35,11 +41,14 @@ pub enum CommandEvent {
     Cleared {
         session_id: String,
         usage: Option<crate::server::TokenUsage>,
+        child_sessions: Vec<crate::server::PublicChildSession>,
+        /// The replaced session, when its log can be resumed.
+        previous_session_id: Option<String>,
         seed: Option<QueuedPrompt>,
     },
     /// `session/compact` answered with the replacement state.
     Compacted {
-        state: crate::server::PublicSessionState,
+        state: Box<crate::server::PublicSessionState>,
         status_id: String,
     },
     /// `session/compact` failed; settle the compact status in place.

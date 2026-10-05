@@ -1,6 +1,6 @@
 [package]
 name = "vibe-rs"
-version = "2.25.8"
+version = "2.26.0"
 edition = "2021"
 license = "Proprietary"
 publish = false
@@ -46,7 +46,17 @@ two-face = { version = "0.5", default-features = false, features = [
 toml_edit = "0.25"
 tempfile = "3"
 url = "2"
+sha2 = "0.11"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+getrandom = "0.4"
+# reqwest 0.13 renamed 0.12's `rustls-tls` feature to `rustls`; `system-proxy`
+# keeps Python's getproxies() parity for OS-configured proxies.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "system-proxy"] }
+# ADR 0015: the bundled Mozilla root set the Vibe-owned clients verify against
+# while `enable_system_trust_store` is disabled (Python's certifi bundle).
+webpki-root-certs = "1"
 sentry = { version = "0.49.2", default-features = false, features = ["backtrace", "contexts", "reqwest", "rustls", "tracing"] }
+percent-encoding = "2"
 
 [features]
 # Voice capture pulls in `cpal`, whose Linux backend links ALSA via pkg-config
@@ -57,6 +67,25 @@ voice = ["dep:cpal"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# OS keyring on Linux (Secret Service via zbus, pure Rust) and Windows
+# (Credential Manager). macOS keeps the `security` shell-out in
+# `src/credentials/keyring.rs`, like Python.
+keyring = "4.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows pins credentials to Python `keyring`'s WinVault naming via the
+# target modifier, which the keyring facade does not expose.
+keyring-core = "1.0"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [profile.release]
 opt-level = 3

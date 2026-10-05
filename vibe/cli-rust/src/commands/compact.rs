@@ -57,7 +57,7 @@ pub fn start_compact(app: &mut App, client: &Arc<Client>, value: &str) {
                 serde_json::from_value::<crate::server::PublicSessionState>(state).ok()
             }) {
                 Some(state) => CommandEvent::Compacted {
-                    state,
+                    state: Box::new(state),
                     status_id: status_id.clone(),
                 },
                 None => CommandEvent::CompactError {
@@ -80,24 +80,40 @@ pub fn settle_compact(app: &mut App) {
 }
 
 /// Settle and adopt the session a compaction handed off to (Python `replace_state`).
-pub fn apply_compacted(app: &mut App, session_id: String) {
+pub fn apply_compacted(
+    app: &mut App,
+    session_id: String,
+    child_sessions: Vec<crate::server::PublicChildSession>,
+) {
     settle_compact(app);
     app.set_session_id(session_id);
+    // The replacement session owns its own child sessions (Python `replace_state`).
+    app.subagents.seed_snapshot(child_sessions);
+    crate::subagents::refresh(app);
 }
 
-/// Read the replacement session a `session/compacted` handoff carries.
+/// Read the replacement session a `session/compacted` handoff carries, with
+/// the child sessions the replacement state owns. The bare `sessionId`
+/// fallback has no state, so the replacement starts a fresh lineage.
 pub fn compacted_session_id(params: &Value) -> Option<String> {
+    compacted_handoff(params).map(|(id, _)| id)
+}
+
+/// The id and child sessions a compaction handoff carries, in one parse.
+pub fn compacted_handoff(
+    params: &Value,
+) -> Option<(String, Vec<crate::server::PublicChildSession>)> {
     params
         .get("state")
         .cloned()
         .and_then(|state| serde_json::from_value::<crate::server::PublicSessionState>(state).ok())
-        .map(|state| state.session.id)
+        .map(|state| (state.session.id, state.child_sessions))
         .or_else(|| {
             params
                 .get("sessionId")
                 .and_then(Value::as_str)
                 .filter(|id| !id.is_empty())
-                .map(str::to_owned)
+                .map(|id| (id.to_owned(), Vec::new()))
         })
 }
 
@@ -107,7 +123,7 @@ pub fn apply_manual_compacted(
     state: crate::server::PublicSessionState,
     status_id: &str,
 ) {
-    apply_compacted(app, state.session.id);
+    apply_compacted(app, state.session.id, state.child_sessions);
     // Python `clear_server_queue`: dropped prompts lose their rows too.
     let ids: Vec<String> = app
         .queue
@@ -120,5 +136,6 @@ pub fn apply_manual_compacted(
     }
     app.queue.clear();
     app.session.tokens = (0, app.session.tokens.1);
+    app.subagents.main_tokens = app.session.tokens;
     local::settle_compact_status(&mut app.view.transcript, status_id, None);
 }

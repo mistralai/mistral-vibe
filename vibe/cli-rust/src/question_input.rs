@@ -1,11 +1,15 @@
-//! Keyboard and mouse input for the `ask_user_question` bottom-app.
+//! Keyboard and mouse input for the `ask_user_question` bottom-app: the
+//! question-owned keys first, then the shared composer keymap on the
+//! free-text row.
 
 use std::sync::Arc;
 
 use crate::server::Client;
-use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::app::App;
+use crate::chat_input::{apply, Action};
+use crate::keymap;
 use crate::mouse::MOUSE_SCROLL_STEP;
 use crate::question_app::{
     cancel, current_question, is_other_selected, is_within_grace_period, move_down, move_up,
@@ -16,8 +20,8 @@ use crate::selection;
 use crate::utils::input_edit;
 
 /// The question app owns every key while it is open (Python `QuestionApp.on_key`).
-/// The free-text row is focused exactly when the cursor sits on it, and then it
-/// takes the printable keys, Backspace and the horizontal arrows.
+/// It answers Esc, Up/Down, and Enter itself; every other key on the focused
+/// free-text row goes through the shared composer keymap, minus selection.
 pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     let other_focused = is_other_selected(app);
     if !other_focused && handle_number_key(app, client, key) {
@@ -29,14 +33,17 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
         KeyCode::Down => move_down(app),
         KeyCode::Char('k') if !other_focused => move_up(app),
         KeyCode::Char('j') if !other_focused => move_down(app),
-        KeyCode::Enter if other_focused => submit_other(app, client),
-        KeyCode::Enter => select(app, client),
-        KeyCode::Left if other_focused => move_caret(app, false),
-        KeyCode::Right if other_focused => move_caret(app, true),
-        KeyCode::Left if app.question_app.questions.len() > 1 => prev_question(app),
-        KeyCode::Right if app.question_app.questions.len() > 1 => next_question(app),
-        KeyCode::Backspace if other_focused => edit_other(app, None),
-        KeyCode::Char(ch) if other_focused => edit_other(app, Some(ch)),
+        KeyCode::Enter if !other_focused => select(app, client),
+        // Only plain Enter submits (Textual `Input`); modified Enters fall
+        // through to the keymap, which skips the newline inserts.
+        KeyCode::Enter if key.modifiers == KeyModifiers::NONE => submit_other(app, client),
+        KeyCode::Left if !other_focused && app.question_app.questions.len() > 1 => {
+            prev_question(app)
+        }
+        KeyCode::Right if !other_focused && app.question_app.questions.len() > 1 => {
+            next_question(app)
+        }
+        _ if other_focused => apply_other_key(app, key),
         _ => {}
     }
 }
@@ -67,26 +74,35 @@ fn handle_number_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) -> bool
     true
 }
 
-fn move_caret(app: &mut App, right: bool) {
-    let text = other_text(app, app.question_app.current_question_idx).to_owned();
-    let cursor = &mut app.question_app.other_cursor;
-    if right {
-        input_edit::cursor_right(&text, cursor);
-    } else {
-        input_edit::cursor_left(&text, cursor);
+/// Run one key through the shared composer keymap on the focused free-text
+/// row (the config-edit pattern: the row draws no selection, so the anchor
+/// is discarded).
+fn apply_other_key(app: &mut App, key: KeyEvent) {
+    let Some(action) = keymap::action_for(&key) else {
+        return;
+    };
+    // A single-line field never takes a newline (Ctrl+J, Shift+Enter).
+    if action == Action::Insert('\n') {
+        return;
     }
+    edit_other_text(app, |text, cursor| {
+        let mut anchor = None;
+        apply(&action, text, cursor, &mut anchor);
+    });
 }
 
-/// Insert a character, or delete the one before the caret, then re-sync the
-/// free-text tick (Python `on_input_changed` -> `_sync_free_choice_selection`).
-fn edit_other(app: &mut App, ch: Option<char>) {
+/// Apply one text mutation to the focused free-text row; the free-text tick
+/// re-syncs only when the value actually changed, like Python's `Input.Changed`
+/// -> `_sync_free_choice_selection` (a no-op edit or caret move fires nothing).
+fn edit_other_text(app: &mut App, edit: impl FnOnce(&mut String, &mut usize)) {
     let idx = app.question_app.current_question_idx;
-    let text = app.question_app.other_texts.entry(idx).or_default();
-    let cursor = &mut app.question_app.other_cursor;
-    match ch {
-        Some(ch) => input_edit::insert(text, cursor, &ch.to_string()),
-        None => input_edit::delete_left(text, cursor),
+    let before = other_text(app, idx).to_owned();
+    let mut text = before.clone();
+    edit(&mut text, &mut app.question_app.other_cursor);
+    if text == before {
+        return;
     }
+    app.question_app.other_texts.insert(idx, text);
     sync_free_choice_selection(app);
 }
 
@@ -97,11 +113,7 @@ pub fn handle_paste(app: &mut App, text: String) {
         return;
     }
     let line = first_paste_line(&text);
-    let idx = app.question_app.current_question_idx;
-    let text = app.question_app.other_texts.entry(idx).or_default();
-    let cursor = &mut app.question_app.other_cursor;
-    input_edit::insert(text, cursor, line);
-    sync_free_choice_selection(app);
+    edit_other_text(app, |text, cursor| input_edit::insert(text, cursor, line));
 }
 
 const PASTE_LINE_BREAKS: [char; 10] = [

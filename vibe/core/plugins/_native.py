@@ -80,7 +80,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_RESERVED_NAMESPACES = {"file_system", "self", "process", "agent", "vibe"}
+_RESERVED_NAMESPACES = {"file_system", "self", "process", "skill", "subagent", "vibe"}
 _VIBE_EXTENSION = "ai.mistral.vibe"
 _TYPESCRIPT_IDENTIFIER_PATTERN = r"^[A-Za-z_$][A-Za-z0-9_$]*$"
 _PLUGIN_PLACEHOLDER_PATTERN = re.compile(r"\$\{PLUGIN_(?:ROOT|DATA)\}")

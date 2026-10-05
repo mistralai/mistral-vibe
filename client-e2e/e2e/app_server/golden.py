@@ -38,7 +38,7 @@ def store_golden(
     for i, snap in enumerate(snapshots):
         slug = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in snap.label)
         svg = to_svg(snap, f"{scenario} [{snap.label}]")
-        (directory / f"snapshot_{i:02d}_{slug}.svg").write_text(svg)
+        (directory / f"snapshot_{i:02d}_{slug}.svg").write_text(svg + "\n")
     (directory / "requests.json").write_text(
         json.dumps(
             [
@@ -56,7 +56,10 @@ def store_golden(
 def load_golden_svgs(scenario: str) -> list[str]:
     """Load committed golden SVG strings for a scenario, sorted by index."""
     directory = golden_path(scenario)
-    return [p.read_text() for p in sorted(directory.glob("snapshot_*.svg"))]
+    return [
+        p.read_text().removesuffix("\n")
+        for p in sorted(directory.glob("snapshot_*.svg"))
+    ]
 
 
 def load_golden_requests(scenario: str) -> list[Request]:

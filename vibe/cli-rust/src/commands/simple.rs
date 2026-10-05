@@ -58,6 +58,7 @@ pub(super) fn copy_last_agent_message(app: &mut App) {
         return;
     };
     crate::clipboard::copy_to_clipboard(&text);
+    crate::telemetry::user_copied_text(app, &text);
     ui::notice::show(
         app,
         "Last agent message copied to clipboard",

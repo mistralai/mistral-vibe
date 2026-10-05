@@ -9,11 +9,12 @@ import shutil
 import tempfile
 
 from e2e.app_server.config import E2E_DIR, MINIMAL_HOME_CONFIG
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Action, Timeline
 
 # The harness's isolated home is fresh, so the what's-new gate never trips;
 # pin a VIBE_HOME seeded with a stale seen-version instead. The rust client
-# must read its own seen-version store from this home as well.
+# reads its seen-version from the same shared [update_cache] section Python's
+# update checks seed, so the stale latest_version doubles as the gate input.
 _home = tempfile.mkdtemp(prefix="e2e_whatsnew_")
 # Both captures of a session must read the same seeded home, so clean it up
 # only when the pytest session exits.
@@ -22,9 +23,6 @@ Path(_home, "config.toml").write_text(MINIMAL_HOME_CONFIG)
 Path(_home, "cache.toml").write_text(
     '[update_cache]\nlatest_version = "0.0.0"\nstored_at_timestamp = 0\n'
     'seen_whats_new_version = "0.0.0"\n'
-    # The rust client keeps its own seen-version section in the same file so the
-    # first capture's write cannot close the other client's gate.
-    '[whats_new]\nseen_version = "0.0.0"\n'
 )
 
 env = {
@@ -37,6 +35,12 @@ env = {
 
 screen_contains = {"rust": ("What's new in v9.9.9-fixture",)}
 
+_URI = "vscode:extension/mistralai.mistral-vibe-code"
+expected_actions = {"rust": [Action("open_url", _URI)]}
+
+# The fixture's `VS Code extension` link spans one-based columns 13-29 on its bullet row.
+_CLICK = "\x1b[<0;16;31M\x1b[<0;16;31m"
+
 # The banner mounts after startup; the capture after typing settles it.
 capture_startup = False
-timeline: Timeline = ["x"]
+timeline: Timeline = ["x", _CLICK]

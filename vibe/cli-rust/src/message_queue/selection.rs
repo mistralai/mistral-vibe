@@ -51,7 +51,8 @@ pub fn enter(app: &mut App) -> bool {
     if !is_available(app) || app.queue.selected.is_some() {
         return false;
     }
-    app.queue.draft = app.chat_input.full_text();
+    app.queue.draft = app.chat_input.submitted_text();
+    app.queue.draft_snapshot = Some(crate::edit_history::Snapshot::capture(&app.chat_input));
     app.queue.editing = false;
     app.queue.consumed_edit = None;
     select(app, app.queue.len() - 1);
@@ -99,8 +100,9 @@ pub fn edit_selected(app: &mut App) {
     }
     app.queue.editing = true;
     app.queue.consumed_edit = None;
-    app.chat_input
-        .load_full_text(app.queue.items[position].edit_text());
+    let text = app.queue.items[position].raw_edit_text();
+    crate::long_paste::load_collapsed(app, text);
+    crate::composer_paths::rewrite_image_paths(&mut app.chat_input);
     ui::notice::pin(app, EDIT_HINT);
 }
 
@@ -135,7 +137,8 @@ pub fn confirm_consumed_edit(app: &mut App) -> bool {
     true
 }
 
-/// Re-snapshot queue selection before the confirmed copy-on-write enqueue.
+/// Submit the confirmed copy-on-write edit, leaving queue mode entirely: the
+/// draft comes back and the normal bindings resume for the enqueued copy.
 pub fn finish_consumed_edit(app: &mut App) -> bool {
     if !matches!(
         app.queue.consumed_edit,
@@ -143,7 +146,10 @@ pub fn finish_consumed_edit(app: &mut App) -> bool {
     ) {
         return false;
     }
-    end_edit(app);
+    app.queue.editing = false;
+    ui::notice::clear(app);
+    exit(app);
+    crate::completion_manager::input_changed(app);
     true
 }
 
@@ -154,10 +160,18 @@ pub fn exit(app: &mut App) {
     app.queue.selected = None;
     app.queue.editing = false;
     app.queue.consumed_edit = None;
-    // Python reloads the draft with `load_text`, which parks the caret at the start.
-    app.chat_input
-        .load_full_text(std::mem::take(&mut app.queue.draft));
+    let draft = std::mem::take(&mut app.queue.draft);
+    let snapshot = app.queue.draft_snapshot.take();
+    // Browsing leaves this draft in place; do not reset its mode or edit history.
+    if app.chat_input.submitted_text() != draft {
+        match snapshot {
+            Some(snapshot) => snapshot.restore(&mut app.chat_input),
+            None => crate::long_paste::load_collapsed(app, draft),
+        }
+    }
     app.chat_input.cursor = 0;
+    app.chat_input.anchor = None;
+    app.chat_input.scroll = None;
     if was_editing {
         clear_input(app);
         ui::notice::clear(app);
