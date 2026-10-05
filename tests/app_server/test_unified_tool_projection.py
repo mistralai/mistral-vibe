@@ -4,6 +4,8 @@ import asyncio
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
+
 from mistralai_vibe_local_harness.protocol import (
     JsonObject,
     RustEvent,
@@ -11,8 +13,6 @@ from mistralai_vibe_local_harness.protocol import (
     RustProvidedToolCallAction,
     RustToolSucceededEvent,
 )
-import pytest
-
 from vibe.app_server._provided_tools import VIBE_TOOL_GROUP, VibeProvidedTools
 from vibe.app_server._unified_scratchpad import SCRATCHPAD_TOOL_NAME
 from vibe.app_server._unified_tool_projection import (

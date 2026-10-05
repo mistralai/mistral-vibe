@@ -24,6 +24,8 @@ import time
 from typing import Any, Final, Literal, Never, Protocol, assert_never, cast
 from uuid import uuid4
 
+from pydantic import JsonValue, ValidationError
+
 from mistralai_vibe_local_harness.protocol import RustHarnessConfig
 import mistralai_vibe_local_harness.session_protocol as harness_session_protocol
 from mistralai_vibe_local_harness.session_protocol import (
@@ -96,8 +98,6 @@ from mistralai_vibe_local_harness.vibe._mcp_naming import build_route_snapshot
 from mistralai_vibe_local_harness.vibe._storage import SessionPin, sha256_json
 from mistralai_vibe_local_harness.vibe._subagents._models import ChildSessionRecord
 from mistralai_vibe_local_harness.vibe.plugins import SessionPluginBinding
-from pydantic import JsonValue, ValidationError
-
 from vibe import __version__
 from vibe.app_server._account import AccountController, AccountGateway
 from vibe.app_server._admin_config import (

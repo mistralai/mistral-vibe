@@ -3,6 +3,9 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from pydantic import JsonValue
+import pytest
+
 from mistralai_vibe_local_harness.protocol import (
     JsonObject,
     JsonSchema,
@@ -12,9 +15,6 @@ from mistralai_vibe_local_harness.protocol import (
     RustToolFailedEvent,
     RustToolSucceededEvent,
 )
-from pydantic import JsonValue
-import pytest
-
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from vibe.app_server._cron import CRON_TOOL_NAME, CronArgs

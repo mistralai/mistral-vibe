@@ -15,6 +15,8 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pydantic import BaseModel, ValidationError
+
 from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
     RustProtocolError,
     RustProvidedToolCall,
@@ -27,7 +29,6 @@ from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMis
     RustToolSucceededEvent,
     RustToolSuccessResult,
 )
-from pydantic import BaseModel, ValidationError
 
 if TYPE_CHECKING:
     # Deferred, unlike `protocol` above: this subpackage pulls in `mcp` and

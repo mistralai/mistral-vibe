@@ -43,7 +43,6 @@ from mistralai_vibe_local_harness.vibe import (
     HookHandlers,
     PostToolCallHookHandler,
 )
-
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.utils import VIBE_WARNING_TAG
 

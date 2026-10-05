@@ -23,7 +23,6 @@ from mistralai_vibe_local_harness.vibe import (
     ProviderCredentialResult,
     ProviderCredentialSnapshot,
 )
-
 from vibe.core.types import Backend
 from vibe.observability.logging import logger
 from vibe.utils.api_keys import resolve_api_key_with_origin
@@ -32,7 +31,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from mistralai_vibe_local_harness.vibe import ProviderRejectionReason
-
     from vibe.core.config import ProviderConfig, VibeConfigSchema
     from vibe.core.config.orchestrator import ConfigOrchestrator
 

@@ -33,7 +33,6 @@ if TYPE_CHECKING:
         RustPluginContextDefinition,
         RustSkillDefinition,
     )
-
     from vibe.core.config import VibeConfigSchema
     from vibe.core.config.harness_files import HarnessFilesManager
 

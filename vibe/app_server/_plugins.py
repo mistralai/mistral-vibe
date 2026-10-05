@@ -72,6 +72,8 @@ from vibe.core.plugins import (
 from vibe.core.skills.models import SkillInfo, SkillScope
 
 if TYPE_CHECKING:
+    from pydantic import JsonValue
+
     from mistralai_vibe_local_harness.protocol import (
         RustAgentTypeDefinition,
         RustKnowledgeFolderDefinition,
@@ -88,8 +90,6 @@ if TYPE_CHECKING:
         RestoredPlugins,
         SessionPluginProjection,
     )
-    from pydantic import JsonValue
-
     from vibe.app_server._plugin_mcp import PluginMCPCatalog
     from vibe.core.config.models import MCPServer
     from vibe.core.tools.connectors.connector_registry import ConnectorRegistry

@@ -15,8 +15,23 @@ certifi = "certifi"
 AIMD = "AIMD"
 # E2E fixture string: "abcd" with 'c' deleted, not the word "and".
 abd = "abd"
+# French fixture names ("veille-presse-cdc", "rde-veille-collecte") in
+# harness/core/src/tests/skills.rs and harness/core/src/core/helpers/strings.rs;
+# "presse" and "collecte" are intentional, not misspellings of
+# "press"/"collective".
+presse = "presse"
+collecte = "collecte"
+# Deliberate API term in the Harness Python runtime
+# (mistralai_vibe_local_harness/vibe/_mcp_models.py), not a misspelling of
+# "unparsable".
+unparseable = "unparseable"
 
 [default.extend-identifiers]
 # macOS pasteboard four-char-code for the PNG flavor — required verbatim
 # by AppleScript syntax (`the clipboard as «class PNGf»`).
 PNGf = "PNGf"
+
+[files]
+# SVG snapshot goldens embed rendered pixels as path data; excluded so
+# config-driven typos runs match pre-commit exactly.
+extend-exclude = ["__snapshots__/**/*.svg", "client-e2e/goldens/**/*.svg"]

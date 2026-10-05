@@ -288,8 +288,7 @@ ignore = ["D203", "D205", "D213", "ANN401", "PLR6301"]
 ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
-known-first-party = ["vibe"]
-known-third-party = ["mistralai_vibe_local_harness"]
+known-first-party = ["vibe", "mistralai_vibe_local_harness"]
 force-sort-within-sections = true
 split-on-trailing-comma = false
 combine-as-imports = true

@@ -34,7 +34,6 @@ if TYPE_CHECKING:
         RustRuntimeBuiltinToolName,
     )
     from mistralai_vibe_local_harness.vibe.plugins import DeclaredAgentTypeProfile
-
     from vibe.app_server.models import ConfigIssue
     from vibe.core.agents.manager import AgentManager
     from vibe.core.agents.models import AgentProfile
@@ -242,7 +241,6 @@ def _profile(
     # first is a widening, since the policy ceiling grants exactly one completion, and
     # the second gates nothing today.
     from mistralai_vibe_local_harness.vibe.plugins import DeclaredAgentTypeProfile
-
     from vibe.app_server._runtime import (
         agent_ceiling_downgrades,
         rust_agent_tool_ceiling,

@@ -8,7 +8,6 @@ from pathlib import Path
 
 import mistralai_vibe_local_harness._native as harness_native
 import mistralai_vibe_local_harness.protocol as harness_protocol
-
 import vibe
 
 

@@ -37,7 +37,6 @@ from mistralai_vibe_local_harness.vibe import (
     ProviderCredentialSnapshot,
     invalid_api_key_message,
 )
-
 from vibe.app_server._provider_credentials import ProviderCredentialService
 
 # The header names that carry credential material. The port owns these and

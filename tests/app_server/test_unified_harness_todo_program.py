@@ -21,7 +21,6 @@ from mistralai_vibe_local_harness.protocol import (
     RustTextContentBlock,
     RustTokenUsage,
 )
-
 from vibe.app_server._runtime import HarnessProcess
 from vibe.app_server._session_backend_port import SessionBackend, SessionBackendHost
 from vibe.app_server._unified_harness_backend_adapter import (

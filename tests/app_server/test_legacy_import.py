@@ -8,10 +8,10 @@ import sys
 import textwrap
 from typing import Any, cast
 
-from mistralai_vibe_local_harness.vibe._storage import _INTEROP_HISTORY_ADAPTER
 from pydantic import TypeAdapter
 import pytest
 
+from mistralai_vibe_local_harness.vibe._storage import _INTEROP_HISTORY_ADAPTER
 from tests.conftest import build_test_vibe_config
 from vibe.app_server._legacy_import import LegacySessionStore
 from vibe.app_server.models import PublicMessageEntry, TextContentBlock

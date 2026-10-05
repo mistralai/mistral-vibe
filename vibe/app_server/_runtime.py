@@ -320,7 +320,6 @@ if TYPE_CHECKING:
         LocalProviderRoute,
         ProviderCredentialProvider,
     )
-
     from vibe.app_server._account import AccountGateway
     from vibe.app_server._identity import IdentityGateway
     from vibe.app_server._mcp_auth import MCPAuthenticationService
@@ -1406,7 +1405,6 @@ class HarnessProcess:
             compile_foreign_hooks,
             tool_catalog_for_config,
         )
-
         from vibe.app_server._agents_md_hooks import merge_agents_md_hook
         from vibe.app_server._plugins import (
             core_plugins,

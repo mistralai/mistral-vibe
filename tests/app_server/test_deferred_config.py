@@ -53,7 +53,6 @@ async def test_a_turn_that_wins_the_push_leaves_the_write_parked() -> None:
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe import HarnessTurnConflictError
-
     from vibe.app_server._deferred_config import DeferredConfiguration
 
     async def derive() -> str:

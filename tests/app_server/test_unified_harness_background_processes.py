@@ -26,7 +26,6 @@ from mistralai_vibe_local_harness.protocol import (
 )
 from mistralai_vibe_local_harness.vibe._processes._output import ProcessOutputStore
 from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
-
 from vibe.app_server._runtime import HarnessProcess
 from vibe.app_server._session_backend_port import (
     SessionBackend,

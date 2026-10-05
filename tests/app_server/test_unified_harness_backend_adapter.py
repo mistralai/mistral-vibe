@@ -19,6 +19,9 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, Mock
 
 from git import Repo
+import pytest
+import tomli_w
+
 import mistralai_vibe_local_harness.session_protocol as harness_session_protocol
 from mistralai_vibe_local_harness.vibe import (
     DeferredTurnPreparationContext as HarnessDeferredTurnPreparationContext,
@@ -27,9 +30,6 @@ from mistralai_vibe_local_harness.vibe import (
     DeferredTurnStartParams as HarnessDeferredTurnStartParams,
     DeferredTurnStartResult as HarnessDeferredTurnStartResult,
 )
-import pytest
-import tomli_w
-
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.app_server import FakeSessionBackendServices, build_test_app_server
@@ -741,7 +741,6 @@ def test_published_mcp_names_invert_the_routes_the_runtime_normalized() -> None:
         ResolvedMCPServerConfig,
     )
     from mistralai_vibe_local_harness.vibe._mcp_naming import build_route_snapshot
-
     from vibe.app_server._unified_harness_backend_adapter import _published_mcp_names
 
     server = ResolvedMCPServerConfig(
@@ -784,7 +783,6 @@ def test_published_connector_names_invert_the_routes_the_runtime_normalized() ->
     from mistralai_vibe_local_harness.vibe._connector_naming import (
         build_connector_snapshot,
     )
-
     from vibe.app_server._unified_harness_backend_adapter import (
         _published_connector_names,
     )
@@ -831,7 +829,6 @@ def test_unified_connector_state_flattens_remote_tool_descriptions() -> None:
     from mistralai_vibe_local_harness.vibe._connector_models import (
         ConnectorToolDescriptor,
     )
-
     from vibe.app_server._unified_harness_backend_adapter import (
         _session_connector_state,
     )
@@ -1045,7 +1042,6 @@ async def test_unified_runtime_enables_large_output_offloading(
     # Prepare
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.protocol import RustFilesystemLargeOutputPolicy
-
     from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
 
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
@@ -1695,7 +1691,6 @@ async def test_unified_adapter_records_only_an_approval_that_outlives_the_call(
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe._session import _approval_callback
-
     from vibe.app_server.protocol import CallbackResult, CallbackResultParams
 
     # Prepare
@@ -1758,7 +1753,6 @@ async def test_unified_adapter_forwards_an_unoffered_path_scope_without_granting
     """An invalid sticky scope must not leave the Harness callback open."""
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe._session import _approval_callback
-
     from vibe.app_server.protocol import CallbackResult, CallbackResultParams
 
     class FakeSession:
@@ -2126,7 +2120,6 @@ def test_unified_tool_discovery_projection_is_a_visible_effect() -> None:
     )
     from mistralai_vibe_local_harness.vibe._projection import SessionProjector
     from mistralai_vibe_local_harness.vibe._storage import ProjectionStateV1
-
     from vibe.app_server._unified_harness_backend_adapter import _project_history_entry
 
     session_id = "019ffb1e-741d-7f90-84df-ef66011876ca"
@@ -2226,7 +2219,6 @@ def test_unified_turn_error_maps_internal_harness_code_to_public_error(
         FailedPublicTurn as HarnessFailedPublicTurn,
         PublicError as HarnessPublicError,
     )
-
     from vibe.app_server._unified_harness_backend_adapter import _public_turn
 
     # Do
@@ -2359,7 +2351,6 @@ def test_unified_turn_error_refines_stream_failure_from_http_status(
         FailedPublicTurn as HarnessFailedPublicTurn,
         PublicError as HarnessPublicError,
     )
-
     from vibe.app_server._unified_harness_backend_adapter import _public_turn
 
     # Do
@@ -2389,7 +2380,6 @@ def test_unified_turn_error_keeps_unknown_harness_code_as_is():
         FailedPublicTurn as HarnessFailedPublicTurn,
         PublicError as HarnessPublicError,
     )
-
     from vibe.app_server._unified_harness_backend_adapter import _public_turn
 
     # Do
@@ -2423,7 +2413,6 @@ async def test_unified_stale_turn_errors_match_legacy_protocol_codes(
 ) -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe import HarnessStaleTurnError
-
     from vibe.app_server._unified_harness_backend_adapter import _harness_call
 
     async def fail() -> None:
@@ -3030,7 +3019,6 @@ def test_mid_turn_graft_carries_the_classifier_provider() -> None:
         LocalRuntimeAdapterConfig,
         StaticProviderCredentials,
     )
-
     from vibe.app_server._unified_harness_backend_adapter import (
         graft_live_approval_policy,
     )
@@ -3646,7 +3634,6 @@ async def test_unified_picking_the_default_leaves_the_session_unpinned(
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe._storage import SessionPin
-
     from vibe.app_server._runtime import HarnessProcess
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedHarnessBackendAdapter,
@@ -3696,7 +3683,6 @@ async def test_unified_a_thinking_pick_is_pinned_to_the_session(
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe._storage import SessionPin
-
     from vibe.app_server._runtime import HarnessProcess
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedHarnessBackendAdapter,
@@ -3740,7 +3726,6 @@ async def test_unified_a_model_pick_moves_the_pinned_thinking_to_that_model(
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe._storage import SessionPin
-
     from vibe.app_server._runtime import HarnessProcess
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedHarnessBackendAdapter,
@@ -3801,7 +3786,6 @@ async def test_unified_moving_to_a_profile_owned_model_clears_the_pinned_thinkin
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe._storage import SessionPin
-
     from vibe.app_server._runtime import HarnessProcess
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedHarnessBackendAdapter,
@@ -3866,7 +3850,6 @@ async def test_unified_queueing_a_turn_leaves_the_running_one_on_its_model(
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe._storage import SessionPin
-
     from vibe.app_server._runtime import HarnessProcess
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedHarnessBackendAdapter,
@@ -4092,7 +4075,6 @@ async def test_unified_model_pick_pins_the_session_before_the_next_turn(
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe._storage import SessionPin
-
     from vibe.app_server._runtime import HarnessProcess
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedHarnessBackendAdapter,
@@ -7814,7 +7796,6 @@ def test_unified_read_projects_provider_retry_and_accepts_older_harness_state(
         PublicSession as HarnessPublicSession,
         TurnQueue as HarnessTurnQueue,
     )
-
     from vibe.app_server._unified_harness_backend_adapter import _read_response
 
     state = {
@@ -7875,7 +7856,6 @@ def test_unified_read_ignores_new_background_process_fields(tmp_path: Path) -> N
         PublicSession as HarnessPublicSession,
         TurnQueue as HarnessTurnQueue,
     )
-
     from vibe.app_server._unified_harness_backend_adapter import _read_response
 
     process = SimpleNamespace(
@@ -8811,7 +8791,6 @@ def test_request_sent_carries_turn_attachment_counts(
 ) -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe import RequestSentTelemetry
-
     from vibe.core.config import ModelConfig
 
     telemetry = TelemetryClient(
@@ -8869,7 +8848,6 @@ def test_request_sent_tracks_queued_entry_attachments(
 ) -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe import RequestSentTelemetry
-
     from vibe.app_server.models import SessionImageContentBlock
     from vibe.core.config import ModelConfig
 
@@ -10640,7 +10618,6 @@ async def test_clear_preserves_compiled_hook_bindings_and_handlers(
         compile_foreign_hooks,
     )
     from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
-
     from vibe.app_server._unified_harness_backend_adapter import adapt_harness_host
 
     compiled = compile_foreign_hooks(
@@ -11191,7 +11168,6 @@ def test_hooks_toml_on_disk_compiles_to_bindings(tmp_path: Path) -> None:
     # (which the fs loader never populates) instead of result.hooks.
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe import compile_foreign_hooks
-
     from vibe.app_server._runtime import _foreign_hook_definitions
     from vibe.core.config.harness_files import HarnessFilesManager
     from vibe.core.hooks.config import load_hooks_from_fs
@@ -11242,7 +11218,6 @@ def test_untrusted_workspace_yields_no_hooks(tmp_path: Path) -> None:
     # untrusted workspace compiles to no bindings even though the file exists on disk.
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe import compile_foreign_hooks
-
     from vibe.app_server._runtime import _foreign_hook_definitions
     from vibe.core.config.harness_files import HarnessFilesManager
     from vibe.core.hooks.config import load_hooks_from_fs
@@ -11689,7 +11664,6 @@ async def test_unified_activity_receipt_bumps_once_across_concurrent_retries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
     from mistralai_vibe_local_harness.vibe import HarnessSessionNotFoundError
-
     from vibe.app_server.protocol import CallbackResult, CallbackResultParams
     from vibe.core.session.session_logger import SessionLogger
 
@@ -12548,7 +12522,6 @@ async def test_unified_resume_keeps_a_model_pin_on_another_provider_than_compact
     follow it, so that is the one that yields.
     """
     from mistralai_vibe_local_harness.vibe._storage import SessionPin
-
     from vibe.core.config import ModelConfig
     from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
 
@@ -12615,7 +12588,6 @@ async def test_unified_config_read_keeps_a_model_pin_on_another_provider_than_co
     stopped new sessions from starting.
     """
     from mistralai_vibe_local_harness.vibe._storage import SessionPin
-
     from vibe.app_server.protocol import ConfigReadParams
     from vibe.core.config import ModelConfig
     from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
@@ -13229,7 +13201,6 @@ async def test_unified_list_uses_latest_matching_session_for_continue(
         HarnessSessionListItem,
         HarnessSessionListResult,
     )
-
     from vibe.app_server._unified_harness_backend_adapter import adapt_harness_host
 
     project = tmp_path / "project"
@@ -13604,7 +13575,6 @@ async def test_read_only_host_operations_build_no_session_context(
 
 def _read_context_builder(config: VibeConfigSchema, storage_root: str) -> Any:
     from mistralai_vibe_local_harness.vibe import LegacyImportSource
-
     from vibe.app_server._unified_harness_backend_adapter import UnifiedReadContext
 
     orchestrator = FakeConfigOrchestrator(config)
@@ -13767,7 +13737,6 @@ def _test_session_runtime_builder(
             SessionWorkspace,
         )
         from mistralai_vibe_local_harness.vibe._host import _core_config
-
         from vibe.app_server._plugins import (
             UnifiedPluginProvider,
             installed_plugin_scopes,
@@ -14229,7 +14198,6 @@ def test_a_harness_hook_notice_entry_is_a_valid_public_notice() -> None:
     # backend shows. Feeds the real runtime builder to the real client validator.
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe._projection import public_notice_entry
-
     from vibe.app_server.models import (
         HookNoticeDetail,
         HookScope,
@@ -15598,7 +15566,6 @@ async def test_resume_replays_a_legacy_connector_journal(
     vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe._runtime import DurableSessionRuntime
     from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
-
     from vibe.app_server._unified_harness_backend_adapter import adapt_harness_host
 
     config = build_test_vibe_config(
@@ -15742,7 +15709,6 @@ async def test_resume_retries_the_catalog_when_replay_diverges_without_it(
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.vibe import HarnessReplayDivergenceError
-
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedHarnessBackendHostAdapter,
     )
@@ -18653,7 +18619,6 @@ async def test_cron_tool_uses_the_live_hosts_scheduler(tmp_path: Path) -> None:
         RustProvidedToolCallAction,
         RustToolSucceededEvent,
     )
-
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedHarnessBackendAdapter,
         UnifiedHarnessBackendHostAdapter,
@@ -19057,7 +19022,6 @@ def test_session_mcp_state_reads_tools_and_plugin_sources_off_the_harness() -> N
         ResolvedMCPServerConfig,
     )
     from mistralai_vibe_local_harness.vibe._mcp_naming import build_route_snapshot
-
     from vibe.app_server._plugin_mcp import PluginMCPServerEntry, PluginMCPSource
     from vibe.app_server._unified_harness_backend_adapter import _session_mcp_state
     from vibe.core.config import MCPHttp, MCPStdio
@@ -19152,7 +19116,6 @@ async def test_a_failed_connector_load_reaches_the_mcp_state(tmp_path: Path) -> 
     from mistralai_vibe_local_harness.vibe._connector_models import (
         empty_connector_snapshot,
     )
-
     from vibe.app_server.connector_catalog import ConnectorCatalogUnavailableError
 
     # Prepare
@@ -19243,7 +19206,6 @@ def test_session_mcp_state_judges_tools_by_the_names_the_harness_routes() -> Non
         ResolvedMCPServerConfig,
     )
     from mistralai_vibe_local_harness.vibe._mcp_naming import build_route_snapshot
-
     from vibe.app_server._unified_harness_backend_adapter import _session_mcp_state
     from vibe.core.config import MCPStdio
 

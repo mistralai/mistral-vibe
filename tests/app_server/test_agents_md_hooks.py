@@ -22,7 +22,6 @@ from mistralai_vibe_local_harness.vibe import (
     HookContext,
     LocalRuntimeAdapterConfig,
 )
-
 from vibe.app_server._agents_md_hooks import (
     AGENTS_MD_HOOK_BINDING_ID,
     agents_md_hook,
