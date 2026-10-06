@@ -573,7 +573,11 @@ class EventProjector:
 
     def _project_assistant(self, event: AssistantEvent) -> ProjectedUpdate:
         key = event.message_id or "assistant"
-        if entry_id := self._assistant_entries.get(key):
+        entry_id = self._assistant_entries.get(key)
+        if entry_id is not None and (
+            self._entries[entry_id].generation_status
+            is not PublicEntryGenerationStatus.COMPLETED
+        ):
             return self._patch(
                 entry_id,
                 [
@@ -582,7 +586,15 @@ class EventProjector:
                     )
                 ],
             )
+        # A tool call earlier in this streamed response force-completes the
+        # entry it was appended to (see _patch's frozen check above), but some
+        # OpenAI-compatible backends (seen with reasoning + speculative
+        # decoding) keep reusing the same message_id for text that streams in
+        # afterwards. Reusing it here would either patch an entry _patch
+        # already refuses to touch, or collide in _add, so start a fresh one.
         entry_id = event.message_id or str(uuid4())
+        if entry_id in self._entries:
+            entry_id = str(uuid4())
         self._assistant_entries[key] = entry_id
         return self._add(
             PublicMessageEntry(
@@ -594,12 +606,20 @@ class EventProjector:
 
     def _project_reasoning(self, event: ReasoningEvent) -> ProjectedUpdate:
         key = event.message_id or "reasoning"
-        if entry_id := self._reasoning_entries.get(key):
+        entry_id = self._reasoning_entries.get(key)
+        if entry_id is not None and (
+            self._entries[entry_id].generation_status
+            is not PublicEntryGenerationStatus.COMPLETED
+        ):
             return self._patch(
                 entry_id,
                 [JsonPatchOperation(op="append", path="/text", value=event.content)],
             )
+        # Same rationale as _project_assistant: a reused reasoning_message_id
+        # can name an entry a tool call already completed and froze.
         entry_id = event.message_id or str(uuid4())
+        if entry_id in self._entries:
+            entry_id = str(uuid4())
         self._reasoning_entries[key] = entry_id
         return self._add(
             PublicReasoningEntry(
