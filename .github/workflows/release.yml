@@ -170,10 +170,14 @@ jobs:
           toolchain: stable
 
       # uv unpacks the sdist into a clean temporary directory before building.
+      # Pin the build to the interpreter the smoke venv below validates on:
+      # unpinned, uv uses the runner's ambient Python and ubuntu-22.04's 3.10
+      # produces a cp310 wheel the 3.12 venv refuses to install. ci.yml's
+      # build-install-smoke sdist legs mirror this job; keep both in sync.
       - name: Build and validate wheel from sdist
         shell: bash
         run: |
-          uv build --wheel "$RUNNER_TEMP"/sdist/*.tar.gz --out-dir "$RUNNER_TEMP/wheel"
+          uv build --python 3.12 --wheel "$RUNNER_TEMP"/sdist/*.tar.gz --out-dir "$RUNNER_TEMP/wheel"
           uv venv --python 3.12 "$RUNNER_TEMP/smoke"
           uv pip install --python "$RUNNER_TEMP/smoke/bin/python" "$RUNNER_TEMP"/wheel/*.whl
           "$RUNNER_TEMP/smoke/bin/python" scripts/ci/validate-combined-wheel.py

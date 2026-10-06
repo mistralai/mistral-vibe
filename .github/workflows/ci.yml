@@ -104,7 +104,7 @@ jobs:
           exit 1
 
   build-install-smoke:
-    name: "Build+install smoke: ${{ matrix.os }}-${{ matrix.arch }}"
+    name: "Build+install smoke: ${{ matrix.os }}-${{ matrix.arch }}${{ matrix.from_sdist && ' (sdist)' || '' }}"
     permissions:
       contents: read
     strategy:
@@ -137,6 +137,20 @@ jobs:
             os: windows
             arch: x86_64
             cargo_flags: ""
+          # Sdist legs: build the wheel from the sdist the way release.yml's
+          # check-sdist does, so a packaging change that only breaks the sdist
+          # path fails PR CI instead of the release publish. Keep the build
+          # command in sync with release.yml's check-sdist job.
+          - runner: ubuntu-22.04
+            os: linux
+            arch: x86_64
+            cargo_flags: "--no-default-features"
+            from_sdist: true
+          - runner: macos-14
+            os: darwin
+            arch: aarch64
+            cargo_flags: ""
+            from_sdist: true
     runs-on: ${{ matrix.runner }}
     env:
       CARGO_BUILD_FLAGS: ${{ matrix.cargo_flags }}
@@ -167,7 +181,16 @@ jobs:
 
       - name: Build wheel
         shell: bash
-        run: uv build --wheel --out-dir dist
+        run: |
+          if [ "${{ matrix.from_sdist }}" = "true" ]; then
+            uv build --sdist --out-dir dist
+            # Pin the wheel to the interpreter the smoke venv uses, like
+            # release.yml's check-sdist: unpinned, uv builds with the runner's
+            # ambient Python and a mismatched wheel cannot be installed.
+            uv build --python 3.12 --wheel dist/mistral_vibe-*.tar.gz --out-dir dist
+          else
+            uv build --wheel --out-dir dist
+          fi
 
       - name: Install wheel into a clean environment
         shell: bash
