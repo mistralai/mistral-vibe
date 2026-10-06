@@ -7,6 +7,7 @@ from html import escape
 from http import HTTPStatus
 import logging
 import re
+import ssl
 from typing import Any, Literal, cast
 
 import httpx
@@ -15,7 +16,6 @@ from mistralai.client.models.chatcompletionstreamrequest import (
     ChatCompletionStreamRequestMessageTypedDict,
 )
 from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
-
 from mistralai_vibe_local_harness.protocol import (
     JsonObject,
     RustAssistantMessage,
@@ -60,6 +60,47 @@ _RETRYABLE_ERRORS = (httpx.NetworkError, httpx.TimeoutException)
 # microseconds; anything past this is a loop that has stopped, and the notice is
 # not worth blocking a worker thread on.
 _RETRY_NOTICE_TIMEOUT_S = 5.0
+
+
+class _SSLTranslatingTransport(httpx.AsyncBaseTransport):
+    """Translate raw ``ssl.SSLError`` into ``httpx.ReadError``.
+
+    httpcore/httpx only map ``ssl.SSLEOFError`` to a network error. Other TLS
+    alerts — notably ``bad_record_mac`` from reusing a keep-alive connection
+    the server has half-closed — propagate as a raw ``ssl.SSLError`` that
+    bypasses every retry layer: the Mistral SDK only retries
+    ``httpx.NetworkError`` / ``httpx.TimeoutException``. Translating it here
+    lets the SDK's existing retry logic handle it automatically with a fresh
+    connection.
+    """
+
+    def __init__(self, wrapped: httpx.AsyncBaseTransport) -> None:
+        self._wrapped = wrapped
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        try:
+            return await self._wrapped.handle_async_request(request)
+        except ssl.SSLError as exc:
+            raise httpx.ReadError(str(exc) or repr(exc), request=request) from exc
+
+    async def aclose(self) -> None:
+        await self._wrapped.aclose()
+
+
+def _wrap_ssl_translating_transport(client: httpx.AsyncClient) -> None:
+    """Wrap every transport on ``client`` so raw ``ssl.SSLError`` becomes ``httpx.ReadError``.
+
+    ``bad_record_mac`` from reusing a keep-alive connection the server has
+    half-closed propagates as a raw ``ssl.SSLError`` that bypasses the SDK's
+    retry layer (it only retries ``httpx.NetworkError``). Translating it to
+    ``httpx.ReadError`` (a ``NetworkError`` subclass) lets the SDK retry
+    automatically with a fresh connection.
+    """
+    client._transport = _SSLTranslatingTransport(client._transport)
+    client._mounts = {
+        pattern: _SSLTranslatingTransport(transport) if transport is not None else None
+        for pattern, transport in client._mounts.items()
+    }
 
 
 class _RetryNoticeHook:
@@ -162,7 +203,7 @@ async def execute_mistral_completion(
             future.cancel()
             logger.warning("Could not report retry", exc_info=True)
 
-    async with httpx.AsyncClient(
+    http_client = httpx.AsyncClient(
         timeout=config.timeout_s,
         verify=build_ssl_context(),
         follow_redirects=True,
@@ -170,7 +211,9 @@ async def execute_mistral_completion(
         # streaming and non-streaming paths report it; the parsed complete_async
         # response drops headers.
         event_hooks={"response": [correlation_hook(config), report_retryable_response]},
-    ) as http_client:
+    )
+    _wrap_ssl_translating_transport(http_client)
+    async with http_client:
         client = Mistral(
             api_key=credential.token,
             server_url=_server_url_from_api_base(config.base_url),
@@ -197,10 +240,24 @@ async def execute_mistral_completion(
             kwargs["tools"] = [_tool_payload(tool) for tool in tools]
             kwargs["parallel_tool_calls"] = True
         if stream:
-            response_stream = await client.chat.stream_async(**kwargs)
-            return await _read_stream(response_stream, on_delta)
+            return await _stream_completion(client, kwargs, on_delta, config.base_url)
         response = await client.chat.complete_async(**kwargs)
         return _read_completion(response)
+
+
+async def _stream_completion(
+    client: Mistral,
+    kwargs: dict[str, Any],
+    on_delta: ProviderDeltaObserver | None,
+    base_url: str,
+) -> RustCompletionResult:
+    try:
+        response_stream = await client.chat.stream_async(**kwargs)
+        return await _read_stream(response_stream, on_delta)
+    except ssl.SSLError as exc:
+        raise httpx.ReadError(
+            str(exc) or repr(exc), request=httpx.Request("POST", base_url)
+        ) from exc
 
 
 def _read_completion(response: Any) -> RustCompletionResult:
