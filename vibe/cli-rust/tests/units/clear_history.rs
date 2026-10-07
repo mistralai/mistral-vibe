@@ -35,6 +35,8 @@ fn clearing_adopts_the_replacement_session() {
 
     let mut app = App::default();
     app.session.session_id = Some("dead-session".into());
+    app.session.tokens = (1234, 200000);
+    app.subagents.main_tokens = app.session.tokens;
     app.session.active_turn_id = Some("turn-1".into());
     app.session.usage_baseline = Some(TokenUsage {
         input_tokens: 1000,
@@ -44,6 +46,9 @@ fn clearing_adopts_the_replacement_session() {
     apply_cleared(&mut app, session_id, usage, Vec::new());
     assert_eq!(app.session.session_id.as_deref(), Some("new-session"));
     assert!(app.session.active_turn_id.is_none());
+    // The gauge resets instead of waiting for the fresh session's first stats.
+    assert_eq!(app.session.tokens, (0, 200000));
+    assert_eq!(app.subagents.main_tokens, app.session.tokens);
     // The clear adopt restarts the usage delta from the fresh session.
     assert_eq!(
         app.session.usage_baseline,

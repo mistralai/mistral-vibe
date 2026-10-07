@@ -105,6 +105,10 @@ pub fn apply_cleared(
     // stats still held when the fresh state carries no usage.
     let baseline = usage.unwrap_or_else(|| crate::session_exit::current_usage(app));
     app.session.usage_baseline = Some(baseline);
+    // Python `_refresh_context_progress` after the clear: the replacement
+    // session reports no stats until its first model call.
+    app.session.tokens = (0, app.session.tokens.1);
+    app.subagents.main_tokens = app.session.tokens;
 }
 
 /// Python `_clear_history`'s notice, naming the previous session when it can be resumed.
