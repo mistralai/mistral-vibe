@@ -22,7 +22,11 @@ async def _kill_process_group(group: int, grace_seconds: float) -> None:
                 os.killpg(group, 0)
                 await asyncio.sleep(min(0.05, remaining))
     finally:
-        os.killpg(group, signal.SIGKILL)
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except ProcessLookupError:
+            # Preserve cancellation if the group exited during the grace period.
+            pass
 
 
 async def kill_async_subprocess(

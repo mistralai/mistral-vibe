@@ -1,19 +1,39 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 import signal
 import sys
 
 import pytest
 
-from vibe.core.utils.async_subprocess import kill_async_subprocess
+from vibe.core.utils.async_subprocess import _kill_process_group, kill_async_subprocess
 from vibe.utils.platform import is_windows
 
 pytestmark = [
     pytest.mark.asyncio,
     pytest.mark.skipif(is_windows(), reason="POSIX signals"),
 ]
+
+
+async def test_exited_group_does_not_hide_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminated = asyncio.Event()
+
+    def signal_group(group: int, signum: int) -> None:
+        if signum == signal.SIGTERM:
+            terminated.set()
+        elif signum == signal.SIGKILL:
+            raise ProcessLookupError("Group exited during the grace period")
+
+    monkeypatch.setattr(os, "killpg", signal_group)
+    task = asyncio.create_task(_kill_process_group(123, grace_seconds=10))
+    await terminated.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 async def test_grace_allows_child_cleanup_after_group_leader_exits(
