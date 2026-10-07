@@ -10,8 +10,26 @@ from vibe.utils.platform import is_windows
 logger = logging.getLogger(__name__)
 
 
+async def _kill_process_group(group: int, grace_seconds: float) -> None:
+    try:
+        if grace_seconds > 0:
+            os.killpg(group, signal.SIGTERM)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + grace_seconds
+            while (remaining := deadline - loop.time()) > 0:
+                # Waiting only for the shell can kill a child's cleanup handler
+                # as soon as the shell responds to SIGTERM.
+                os.killpg(group, 0)
+                await asyncio.sleep(min(0.05, remaining))
+    finally:
+        os.killpg(group, signal.SIGKILL)
+
+
 async def kill_async_subprocess(
-    proc: asyncio.subprocess.Process, *, kill_process_group: bool = True
+    proc: asyncio.subprocess.Process,
+    *,
+    kill_process_group: bool = True,
+    grace_seconds: float = 0,
 ) -> None:
     """Force-terminate an asyncio child process and wait until it exits.
 
@@ -20,6 +38,11 @@ async def kill_async_subprocess(
     when the child is isolated in its own group (for example
     ``start_new_session=True`` with ``create_subprocess_shell``); otherwise the
     group id may match the parent's and unrelated processes could be killed.
+
+    A positive ``grace_seconds`` gives a Unix process group SIGTERM before
+    SIGKILL, allowing children to release external resources. The whole group
+    receives the grace period even if its shell exits first. Other platforms
+    and single-process termination retain their force-termination behavior.
 
     On Windows, ``kill_process_group=True`` runs ``taskkill /F /T`` to kill the
     process tree.
@@ -50,7 +73,7 @@ async def kill_async_subprocess(
                 proc.terminate()
         else:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                await _kill_process_group(os.getpgid(proc.pid), grace_seconds)
             except (ProcessLookupError, PermissionError):
                 pass
             except Exception:

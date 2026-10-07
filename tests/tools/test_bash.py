@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
+import shlex
 import subprocess
 import sys
 from typing import cast
@@ -141,6 +143,27 @@ async def test_handles_timeout(bash):
         await collect_result(bash.run(BashArgs(command="sleep 2", timeout=1)))
 
     assert "Command timed out after 1s" in str(err.value)
+
+
+@pytest.mark.skipif(is_windows(), reason="POSIX signals")
+@pytest.mark.asyncio
+async def test_timeout_allows_external_job_cleanup(bash: Bash, tmp_path: Path) -> None:
+    script = tmp_path / "client.py"
+    marker = tmp_path / "cancelled"
+    script.write_text(
+        "import signal, sys, time\n"
+        "from pathlib import Path\n"
+        "def stop(signum, frame):\n"
+        "    time.sleep(0.1)\n"
+        "    Path(sys.argv[1]).write_text('cancelled')\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        "while True: signal.pause()\n"
+    )
+    command = shlex.join([sys.executable, str(script), str(marker)])
+    with pytest.raises(ToolError, match="Command timed out after 1s"):
+        await collect_result(bash.run(BashArgs(command=command, timeout=1)))
+    assert marker.read_text() == "cancelled"
 
 
 @pytest.mark.asyncio
