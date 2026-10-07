@@ -2525,11 +2525,14 @@ class UnifiedHarnessBackendHostAdapter:
                 return
             if not changed or services is None:
                 return
-            # The fetch can land before the lifecycle response does, and a
-            # notification for a session the client has not been handed yet is
-            # unroutable. Only the notification waits: the fetch still starts at
-            # open, so ``session/ready/wait`` has a task to wait on either way.
-            await backend.wait_announced()
+            # The fetch can land before the lifecycle response does, but the
+            # server's notification routing already handles that: during
+            # attachment notifications are queued and flushed after the
+            # response, so the client always sees the response first. Waiting
+            # for ``wait_announced`` here would deadlock with
+            # ``session/ready/wait``, which awaits this task — if
+            # ``after_response`` (which calls ``mark_announced``) is delayed or
+            # never fires, both hang forever.
             if not backend._closed:
                 await services.notify(
                     "runtime/updated", backend.runtime_updated_params()
