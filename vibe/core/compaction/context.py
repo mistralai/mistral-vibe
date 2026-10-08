@@ -26,6 +26,8 @@ _PREVIOUS_USER_MESSAGE_RE = re.compile(
     re.DOTALL,
 )
 
+_TOOL_ROUND_CLOSER = "(Tool results received.)"
+
 _SUMMARY_OPEN = "<summary>"
 _SUMMARY_CLOSE = "</summary>"
 _SUMMARY_RE = re.compile(
@@ -38,6 +40,21 @@ def extract_summary(text: str) -> str | None:
     if match is None:
         return None
     return match.group(1).strip() or None
+
+
+def close_incomplete_tool_round(messages: Sequence[LLMMessage]) -> list[LLMMessage]:
+    """Copy of ``messages`` that never ends on a tool result.
+
+    Auto-compaction fires mid-turn, so the snapshot can end on a tool message
+    the assistant has not answered yet. Appending the summary request to that
+    history yields ``tool -> user``, which strict chat templates reject
+    ("Unexpected role 'user' after role 'tool'"). Closing the round with a
+    short assistant turn keeps every tool payload available to the summarizer
+    while restoring the ``assistant -> user`` sequence backends expect.
+    """
+    if not messages or messages[-1].role != Role.tool:
+        return list(messages)
+    return [*messages, LLMMessage(role=Role.assistant, content=_TOOL_ROUND_CLOSER)]
 
 
 def drop_oldest_round(messages: Sequence[LLMMessage]) -> list[LLMMessage] | None:
