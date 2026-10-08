@@ -71,7 +71,6 @@ class CompactionManager:
         config_getter: Callable[[], VibeConfigSchema],
         complete: CompletionFn,
         available_tools: Callable[[], list[AvailableTool]],
-        tool_choice: Callable[[], StrToolChoice | AvailableTool],
         save: Callable[[], Awaitable[None]],
         telemetry_client: TelemetryClient,
         session_ids: Callable[[], tuple[str, str | None]],
@@ -81,7 +80,6 @@ class CompactionManager:
         self._config = config_getter
         self._complete = complete
         self._available_tools = available_tools
-        self._tool_choice = tool_choice
         self._save = save
         self._telemetry = telemetry_client
         self._session_ids = session_ids
@@ -145,7 +143,8 @@ class CompactionManager:
             lambda history: [*history, request_message],
             model=self._config().get_compaction_model(),
             tools=self._available_tools(),
-            tool_choice=self._tool_choice(),
+            # Keep tool definitions for the cached prefix, but require a summary.
+            tool_choice="none",
         )
         if result.message.tool_calls:
             return None, working, "tool_call"

@@ -11,6 +11,8 @@ from vibe.core.compaction.context import parse_previous_user_messages
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.types import (
     AgentStats,
+    AvailableFunction,
+    AvailableTool,
     ContextTooLongError,
     FunctionCall,
     LLMChunk,
@@ -79,6 +81,7 @@ def _build_manager(
     messages: MessageList,
     stats: AgentStats,
     raise_on_failure: bool = False,
+    available_tools: list[AvailableTool] | None = None,
 ) -> tuple[CompactionManager, _FakeComplete, _FakeTelemetry]:
     cfg = build_test_vibe_config(
         models=make_test_models(auto_compact_threshold=999),
@@ -91,8 +94,7 @@ def _build_manager(
         stats_getter=lambda: stats,
         config_getter=lambda: cfg,
         complete=complete,
-        available_tools=lambda: [],
-        tool_choice=lambda: "auto",
+        available_tools=lambda: available_tools or [],
         save=_noop,
         telemetry_client=cast(TelemetryClient, telemetry),
         session_ids=lambda: ("sid", None),
@@ -138,6 +140,37 @@ async def test_primary_success_appends_compaction_boundary() -> None:
         "newest ask",
     ]
     assert stats.context_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_primary_requests_text_summary_with_cached_tool_context() -> None:
+    messages = _conversation()
+    snapshot = list(messages)
+    tools = [
+        AvailableTool(
+            function=AvailableFunction(
+                name="bash",
+                description="Execute a shell command",
+                parameters={"type": "object"},
+            )
+        )
+    ]
+    manager, complete, telemetry = _build_manager(
+        [mock_llm_chunk(content="<summary>handoff</summary>")],
+        messages=messages,
+        stats=AgentStats(),
+        raise_on_failure=True,
+        available_tools=tools,
+    )
+
+    assert await manager.compact() == "handoff"
+
+    assert len(complete.calls) == 1
+    request = complete.calls[0]
+    assert request["tool_choice"] == "none"
+    assert request["tools"] == tools
+    assert request["messages"][:-1] == snapshot
+    assert not telemetry.failures
 
 
 @pytest.mark.asyncio
