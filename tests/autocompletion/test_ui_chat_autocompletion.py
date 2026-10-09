@@ -82,16 +82,21 @@ def ensure_selected_command(popup: CompletionPopup, expected_alias: str) -> None
 
 
 @pytest.mark.asyncio
-async def test_arrow_navigation_updates_selected_suggestion(vibe_app: VibeApp) -> None:
+@pytest.mark.parametrize(("down_key", "up_key"), [("down", "up"), ("ctrl+n", "ctrl+p")])
+async def test_arrow_navigation_updates_selected_suggestion(
+    vibe_app: VibeApp, down_key: str, up_key: str
+) -> None:
     async with vibe_app.run_test() as pilot:
         popup = vibe_app.query_one(CompletionPopup)
 
         await pilot.press(*"/c")
 
         ensure_selected_command(popup, "/config")
-        await pilot.press("down")
+        await pilot.press(down_key)
+        await pilot.pause()
         ensure_selected_command(popup, "/clear")
-        await pilot.press("up")
+        await pilot.press(up_key)
+        await pilot.pause()
         ensure_selected_command(popup, "/config")
 
 

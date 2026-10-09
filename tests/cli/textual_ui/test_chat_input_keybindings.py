@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import pytest
+from textual import events
 from textual.geometry import Offset
 from textual.message import Message
 from textual.selection import Selection
 
 from tests.conftest import build_test_vibe_app
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer, ChatTextArea
+from vibe.cli.textual_ui.widgets.chat_input.body import ChatInputBody
 from vibe.cli.textual_ui.widgets.messages import UserMessage
 
-OPTION_WORD_LEFT_KEYS = ["alt+left", "ctrl+left"]
-OPTION_WORD_RIGHT_KEYS = ["alt+right", "ctrl+right"]
+OPTION_WORD_LEFT_KEYS = ["alt+left", "ctrl+left", "alt+b"]
+OPTION_WORD_RIGHT_KEYS = ["alt+right", "ctrl+right", "alt+f"]
 
 
 @pytest.mark.asyncio
@@ -224,3 +226,137 @@ async def test_steer_chord_does_nothing_when_input_has_text() -> None:
         assert posted == []
         assert submitted == []
         assert app.query_one(ChatInputContainer).value == "draft message"
+
+
+@pytest.mark.asyncio
+async def test_emacs_ctrl_b_and_ctrl_f_move_by_character() -> None:
+    app = build_test_vibe_app()
+    async with app.run_test() as pilot:
+        text_area = app.query_one(ChatTextArea)
+        text_area.focus()
+        text_area.insert("hello")
+        await pilot.pause()
+
+        await pilot.press("ctrl+b", "ctrl+b")
+        assert text_area.cursor_location == (0, 3)
+
+        await pilot.press("ctrl+f")
+        assert text_area.cursor_location == (0, 4)
+        assert app.query_one(ChatInputContainer).value == "hello"
+
+
+@pytest.mark.asyncio
+async def test_emacs_alt_d_deletes_word_right() -> None:
+    app = build_test_vibe_app()
+    async with app.run_test() as pilot:
+        text_area = app.query_one(ChatTextArea)
+        text_area.focus()
+        text_area.insert("hello brave world")
+        text_area.move_cursor((0, len("hello ")))
+        await pilot.pause()
+
+        # A terminal sends ESC d, which Textual parses with a printable character.
+        app.post_message(events.Key("alt+d", "d"))
+        await pilot.pause()
+
+        assert app.query_one(ChatInputContainer).value == "hello  world"
+
+
+@pytest.mark.asyncio
+async def test_emacs_alt_b_and_alt_f_with_character_move_by_word() -> None:
+    app = build_test_vibe_app()
+    async with app.run_test() as pilot:
+        text_area = app.query_one(ChatTextArea)
+        text_area.focus()
+        text_area.insert("hello brave world")
+        await pilot.pause()
+
+        app.post_message(events.Key("alt+b", "b"))
+        await pilot.pause()
+        assert text_area.cursor_location == (0, len("hello brave "))
+
+        app.post_message(events.Key("alt+f", "f"))
+        await pilot.pause()
+        assert text_area.cursor_location == (0, len("hello brave world"))
+        assert app.query_one(ChatInputContainer).value == "hello brave world"
+
+
+@pytest.mark.asyncio
+async def test_emacs_ctrl_underscore_undoes() -> None:
+    app = build_test_vibe_app()
+    async with app.run_test() as pilot:
+        text_area = app.query_one(ChatTextArea)
+        text_area.focus()
+        await pilot.pause()
+
+        await pilot.press(*"hello")
+        await pilot.press("ctrl+w")
+        assert app.query_one(ChatInputContainer).value == ""
+
+        await pilot.press("ctrl+underscore")
+
+        assert app.query_one(ChatInputContainer).value == "hello"
+
+
+@pytest.mark.asyncio
+async def test_emacs_ctrl_p_and_ctrl_n_navigate_history() -> None:
+    app = build_test_vibe_app()
+    async with app.run_test() as pilot:
+        text_area = app.query_one(ChatTextArea)
+        input_body = app.query_one(ChatInputBody)
+        assert input_body.history is not None
+        input_body.history.add("first prompt")
+        input_body.history.add("second prompt")
+        text_area.focus()
+        await pilot.pause()
+
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        assert text_area.text == "second prompt"
+
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        assert text_area.text == "first prompt"
+
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        assert text_area.text == "second prompt"
+
+
+@pytest.mark.asyncio
+async def test_emacs_ctrl_p_and_ctrl_n_move_between_lines() -> None:
+    app = build_test_vibe_app()
+    async with app.run_test() as pilot:
+        text_area = app.query_one(ChatTextArea)
+        text_area.focus()
+        text_area.insert("first\nsecond\nthird")
+        text_area.move_cursor((1, 2))
+        await pilot.pause()
+
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        assert text_area.cursor_location == (0, 2)
+
+        await pilot.press("ctrl+n", "ctrl+n")
+        await pilot.pause()
+        assert text_area.cursor_location == (2, 2)
+        assert app.query_one(ChatInputContainer).value == "first\nsecond\nthird"
+
+
+@pytest.mark.asyncio
+async def test_emacs_ctrl_h_acts_like_backspace() -> None:
+    app = build_test_vibe_app()
+    async with app.run_test() as pilot:
+        text_area = app.query_one(ChatTextArea)
+        text_area.focus()
+        text_area.set_mode("!")
+        await pilot.press("a", "b")
+        await pilot.pause()
+
+        await pilot.press("ctrl+h")
+        await pilot.pause()
+        assert app.query_one(ChatInputContainer).value == "!a"
+
+        await pilot.press("ctrl+h", "ctrl+h")
+        await pilot.pause()
+        assert text_area.input_mode == ">"

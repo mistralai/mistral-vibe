@@ -42,6 +42,14 @@ FEEDBACK_RATING_KEYS: dict[str, str] = {"1": "good", "2": "fine", "3": "bad"}
 FEEDBACK_SNOOZE_KEY = "0"
 FEEDBACK_SNOOZE_LABEL = "snooze"
 
+# Emacs keys replayed as the key they alias, so they also drive history,
+# completion popups, queue selection and mode reset, not just the cursor.
+_EMACS_KEY_ALIASES: dict[str, str] = {
+    "ctrl+p": "up",
+    "ctrl+n": "down",
+    "ctrl+h": "backspace",
+}
+
 
 class ChatTextArea(TextArea):
     ALLOW_SELECT: ClassVar[bool] = False
@@ -68,6 +76,17 @@ class ChatTextArea(TextArea):
         Binding(
             "alt+right", "cursor_word_right", "Word Right", show=False, priority=True
         ),
+        # Emacs-style editing; ctrl+a/e/k/u/w/d and ESC b/f come from TextArea.
+        Binding("ctrl+b", "cursor_left", "Cursor Left", show=False),
+        Binding("ctrl+f", "cursor_right", "Cursor Right", show=False),
+        # Alt keys carry a printable character, so they need priority to beat
+        # TextArea's character insertion.
+        Binding("alt+b", "cursor_word_left", "Word Left", show=False, priority=True),
+        Binding("alt+f", "cursor_word_right", "Word Right", show=False, priority=True),
+        Binding(
+            "alt+d", "delete_word_right", "Delete word right", show=False, priority=True
+        ),
+        Binding("ctrl+underscore", "undo", "Undo", show=False),
         # Ctrl+V triggers an explicit clipboard-image paste on platforms where
         # we support it. On other platforms the binding is not registered, so
         # Textual's default text-paste action handles the key instead and the
@@ -562,6 +581,12 @@ class ChatTextArea(TextArea):
         return time.monotonic() - self._last_keystroke_time
 
     async def _on_key(self, event: events.Key) -> None:  # noqa: PLR0911, PLR0912, PLR0915
+        if alias := _EMACS_KEY_ALIASES.get(event.key):
+            event.prevent_default()
+            event.stop()
+            self.app.post_message(events.Key(alias, None))
+            return
+
         self._last_keystroke_time = time.monotonic()
 
         if await self._handle_voice_key(event):
