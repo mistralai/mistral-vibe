@@ -127,7 +127,7 @@ pub(super) fn rename_session(app: &mut App, client: &Arc<Client>, value: &str) {
     if title.is_empty() {
         if let Some(tx) = app.command_tx.clone() {
             app.commit_started();
-            let _ = tx.try_send(CommandEvent::Result("Usage: /rename <title>".to_owned()));
+            let _ = tx.try_send(CommandEvent::Error("Usage: /rename <title>".to_owned()));
         }
         return;
     }

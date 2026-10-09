@@ -91,6 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rust CLI: Clean up Windows app-server child processes on exit.
 - Rust CLI: Avoid unsupported suspension hints on Windows.
 - Rust CLI: `/clear` shows the previous session id and how to resume it.
+- Rust CLI: The `/rename` usage tip shows its full `Usage: /rename <title>` line instead of stopping at `/rename`.
 - Rust CLI: tool calls separated only by an answered approval or a background notice now stay in the same folded block instead of opening a new one.
 - Rust CLI: Expanding a tool result or group scrolls it into view, and expanding or collapsing keeps the clicked header in place.
 - Rust CLI: Ctrl+O keeps the view on the same content instead of jumping to earlier messages.

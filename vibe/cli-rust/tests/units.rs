@@ -152,6 +152,8 @@ mod queue_images;
 mod quit_confirmation;
 #[path = "units/reader_frame_split.rs"]
 mod reader_frame_split;
+#[path = "units/rename_usage.rs"]
+mod rename_usage;
 #[path = "units/resume_agent_config.rs"]
 mod resume_agent_config;
 #[path = "units/retry_presentation.rs"]
