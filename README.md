@@ -253,6 +253,7 @@ Most modern terminals should work, but older or minimal terminal emulators may h
 Simply run `vibe` to enter the interactive chat loop.
 
 - **Multi-line Input**: Press `Ctrl+J` or `Shift+Enter` for select terminals to insert a newline.
+- **Emacs-style Editing**: The prompt supports readline keys: `Ctrl+A`/`Ctrl+E` (line start/end), `Ctrl+B`/`Ctrl+F` (character), `Alt+B`/`Alt+F` (word), `Ctrl+P`/`Ctrl+N` (previous/next line, history and completions, like the arrow keys), `Ctrl+K`/`Ctrl+U` (delete to end/start of line), `Ctrl+W` (delete word left), `Alt+D` (delete word right), `Ctrl+H` (delete character left) and `Ctrl+_` (undo).
 - **File Paths**: Reference files in your prompt using the `@` symbol for smart autocompletion (e.g., `> Read the file @src/agent.py`). A bare `@` quickly lists immediate non-hidden entries; after a path character, Git workspaces suggest tracked and non-ignored files. Pasting a standalone existing absolute or home-relative file or folder also creates a mention.
 - **Shell Commands**: Prefix any command with `!` to execute it directly in your shell, bypassing the agent (e.g., `> !ls -l`).
 - **External Editor**: Press `Ctrl+G` to edit your current input in an external editor.
