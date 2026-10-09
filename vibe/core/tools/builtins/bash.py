@@ -792,7 +792,7 @@ class Bash(
                     proc.communicate(), timeout=timeout
                 )
             except TimeoutError:
-                await kill_async_subprocess(proc)
+                await kill_async_subprocess(proc, grace_seconds=5)
                 raise self._build_timeout_error(args.command, timeout)
 
             stdout = (
