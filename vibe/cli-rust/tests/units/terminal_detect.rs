@@ -1,6 +1,8 @@
 //! Terminal-emulator detection mapping (Python `cli/terminal_detect.py`).
 
-use vibe_rs::terminal_detect::{detect_from, from_env_markers, from_term_program, EnvSource};
+use vibe_rs::terminal_detect::{
+    detect_from, from_env_markers, from_term_program, is_vscode_family, EnvSource,
+};
 
 struct FakeEnv(Vec<(&'static str, &'static str)>);
 
@@ -79,6 +81,16 @@ fn vscode_hosts_resolve_cursor_insiders_and_stable() {
         detect_from(&FakeEnv(vec![("TERM_PROGRAM", "vscode")])),
         "vscode"
     );
+}
+
+#[test]
+fn vscode_family_matches_python() {
+    for terminal in ["vscode", "vscode_insiders", "cursor"] {
+        assert!(is_vscode_family(terminal), "{terminal}");
+    }
+    for terminal in ["jetbrains", "ghostty", "windows_terminal", "unknown"] {
+        assert!(!is_vscode_family(terminal), "{terminal}");
+    }
 }
 
 #[test]

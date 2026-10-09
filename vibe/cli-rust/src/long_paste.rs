@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::app::App;
+use crate::app::{App, ChatInput};
 
 /// A paste longer than this many characters collapses.
 pub const MAX_INLINE_CHARS: usize = 1000;
@@ -24,8 +24,17 @@ pub fn placeholder(text: &str) -> String {
 /// still remembers collapsed again, so a draft or recalled prompt keeps its
 /// placeholders.
 pub fn load_collapsed(app: &mut App, text: String) {
+    load_collapsed_with(app, text, ChatInput::load_full_text);
+}
+
+/// Like `load_collapsed`, for a message: it loads as a prompt.
+pub fn load_collapsed_prompt(app: &mut App, text: String) {
+    load_collapsed_with(app, text, ChatInput::load_prompt_text);
+}
+
+fn load_collapsed_with(app: &mut App, text: String, load: fn(&mut ChatInput, String)) {
     let display = app.chat_input.collapsed_pastes.display(&text);
-    app.chat_input.load_full_text(text);
+    load(&mut app.chat_input, text);
     restore(app, display.as_ref());
     crate::image_placeholders::mark_known(&mut app.chat_input);
 }

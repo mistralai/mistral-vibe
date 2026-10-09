@@ -562,6 +562,46 @@ def read_file(
     )
 
 
+def oversized_read_file(path: str) -> AppServerEvent:
+    """A Unified read whose result the Harness swapped for a large-output receipt."""
+    return _added(
+        _entry(
+            "effect",
+            title="file_system.read_file",
+            detail={
+                "toolName": "file_system.read_file",
+                "display": {
+                    "summary": f"Reading {path}",
+                    "content": None,
+                    "suffix": "",
+                    "verb": "Reading",
+                    "message": path,
+                    "settledVerb": "Read",
+                    "settledMessage": path,
+                    "statusText": "Reading file",
+                },
+                "kind": "file_read",
+                "input": {"filePath": path, "offset": None, "limit": 2000},
+            },
+            state={
+                "status": "completed",
+                "output": None,
+                "outputText": (
+                    "<system>The tool output is large. It was saved to "
+                    "/tmp/read_file.json.</system>\n<truncated-output>\n"
+                    '{"content": "# Title…\n</truncated-output>'
+                ),
+                "display": {
+                    "success": True,
+                    "verb": "Read",
+                    "message": path,
+                    "suffix": "(truncated)",
+                },
+            },
+        )
+    )
+
+
 def subagent(
     task: str, *, tool_name: str = "subagent.spawn", response: str | None = None
 ) -> AppServerEvent:

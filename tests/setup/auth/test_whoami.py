@@ -49,6 +49,30 @@ async def test_fetch_whoami_returns_result_on_success(respx_mock) -> None:
         api_base="https://api.acme",
         vibe_base="https://chat.acme",
     )
+    assert result is not None
+    assert result.primitive_access_scope is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["shared_only", "personal_and_shared"])
+async def test_fetch_whoami_parses_primitive_access_scope(
+    respx_mock, scope: str
+) -> None:
+    respx_mock.get("https://console.test/api/vibe/whoami").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "plan_type": "API",
+                "plan_name": "FREE",
+                "primitive_access_scope": scope,
+            },
+        )
+    )
+
+    result = await fetch_whoami("https://console.test", "secret")
+
+    assert result is not None
+    assert result.primitive_access_scope == scope
 
 
 @pytest.mark.asyncio

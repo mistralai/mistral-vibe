@@ -4,35 +4,23 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::text::{cell_width, pad, pad_line, wrap_chars};
-use super::{Block, Frame, Item, Out, Profile};
+use super::text::{cell_width, pad, pad_line, wrap_chars_folded};
+use super::{Block, Frame, Item, Out, Profile, Sc};
+use crate::selection::Fold;
 use crate::ui::{styled_text, theme};
 
 pub(super) fn render_block(b: &Block, width: u16, frame: Frame, out: &mut Out) {
     match b {
         Block::Heading(1, inline) => {
             let inner = (width as usize).saturating_sub(2 * frame.pad);
-            if frame.center_h1 {
-                for row in wrap_chars(inline, inner) {
-                    let start = frame.pad + inner.saturating_sub(cell_width(&row)) / 2;
-                    out.lines.push_row(vec![pad(start)], &row);
-                }
-            } else {
-                for row in wrap_chars(inline, inner) {
-                    out.lines.push_row(vec![pad(frame.pad)], &row);
-                }
-            }
+            push_wrapped(out, inline, inner, |_, row| match frame.center_h1 {
+                true => vec![pad(frame.pad + inner.saturating_sub(cell_width(row)) / 2)],
+                false => vec![pad(frame.pad)],
+            });
         }
-        Block::Heading(_, inline) => {
-            for row in wrap_chars(inline, (width as usize).saturating_sub(2 * frame.pad)) {
-                out.lines.push_row(vec![pad(frame.pad)], &row);
-            }
-        }
-        Block::Paragraph(inline) => {
+        Block::Heading(_, inline) | Block::Paragraph(inline) => {
             let body = (width as usize).saturating_sub(2 * frame.pad);
-            for row in wrap_chars(inline, body) {
-                out.lines.push_row(vec![pad(frame.pad)], &row);
-            }
+            push_wrapped(out, inline, body, |_, _| vec![pad(frame.pad)]);
         }
         Block::Rule => {
             let inner = (width as usize).saturating_sub(2 * frame.pad);
@@ -60,17 +48,29 @@ pub(super) fn render_block(b: &Block, width: u16, frame: Frame, out: &mut Out) {
                 Profile::Assistant => theme::md_quote_bar(),
                 Profile::Widget => theme::md_widget_quote_bar(),
             };
-            for row in wrap_chars(inline, inner) {
-                out.lines.push_row(
-                    vec![
-                        pad(frame.pad),
-                        Span::styled("▌", Style::default().fg(bar)),
-                        Span::raw(" "),
-                    ],
-                    &row,
-                );
-            }
+            push_wrapped(out, inline, inner, |_, _| {
+                vec![
+                    pad(frame.pad),
+                    Span::styled("▌", Style::default().fg(bar)),
+                    Span::raw(" "),
+                ]
+            });
         }
+    }
+}
+
+/// Push the rows `inline` wraps into after their `lead`, folding continuation rows.
+fn push_wrapped(
+    out: &mut Out,
+    inline: &[Sc],
+    width: usize,
+    lead: impl Fn(usize, &[Sc]) -> Vec<Span<'static>>,
+) {
+    for (index, (row, gap)) in wrap_chars_folded(inline, width).into_iter().enumerate() {
+        let lead = lead(index, &row);
+        let hang = lead.iter().map(Span::width).sum::<usize>() as u16;
+        out.lines.push_row(lead, &row);
+        out.lines.fold_last(Fold::hung(gap, hang));
     }
 }
 
@@ -99,12 +99,13 @@ fn render_code(lines: &[Vec<Span<'static>>], width: u16, frame: Frame, out: &mut
         wash(&mut row, content);
         out.lines.push(pad_line(row, frame.pad));
     }
+    let hang = (frame.pad + indent) as u16;
     for line in lines {
         if line.iter().all(|span| span.content.trim().is_empty()) {
             out.lines.push(Line::default());
             continue;
         }
-        for row in styled_text::wrap_hard(line, wrap) {
+        for (row, gap) in styled_text::wrap_hard_folded(line, wrap) {
             let mut spans = Vec::new();
             if indent > 0 {
                 wash(&mut spans, indent);
@@ -120,7 +121,8 @@ fn render_code(lines: &[Vec<Span<'static>>], width: u16, frame: Frame, out: &mut
             if widget {
                 wash(&mut spans, content.saturating_sub(used));
             }
-            out.lines.push(pad_line(spans, frame.pad));
+            out.lines
+                .push_folded(pad_line(spans, frame.pad), Fold::hung(gap, hang));
         }
     }
     if widget {
@@ -155,14 +157,13 @@ fn render_list(
     for (marker, item) in markers(start, items.len(), depth).iter().zip(items) {
         let marker_len = marker.width();
         let avail = (width as usize).saturating_sub(2 * frame.pad + indent + marker_len);
-        for (i, row) in wrap_chars(&item.inline, avail).iter().enumerate() {
+        push_wrapped(out, &item.inline, avail, |i, _| {
             let marker = match i {
                 0 => Span::styled(marker.clone(), fg),
                 _ => pad(marker_len),
             };
-            out.lines
-                .push_row(vec![pad(frame.pad), pad(indent), marker], row);
-        }
+            vec![pad(frame.pad), pad(indent), marker]
+        });
         let child_indent = indent + marker_len;
         for child in &item.children {
             match child {

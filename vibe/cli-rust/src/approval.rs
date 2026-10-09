@@ -221,6 +221,8 @@ pub fn apply_event(app: &mut App, event: Event) {
     match event {
         Event::Responded { .. } => {
             app.approval.finish_active();
+            // The next pending approval reuses the box: the answered one's selection dies here.
+            crate::selection::clear_region(app, crate::selection::RegionId::BottomApp);
             if app.approval.has_pending() {
                 show_pending(app);
             } else {

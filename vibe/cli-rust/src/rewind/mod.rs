@@ -11,6 +11,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::app::{App, Status, ToastSeverity};
 use crate::collapsed_pastes::Collapsed;
 use crate::commands::submission::new_message_id;
+use crate::input_modes::ClassifiedInput;
 use crate::server::{Client, PublicSessionState};
 use crate::transcript::local;
 use request::{confirm, select};
@@ -113,10 +114,12 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
         KeyCode::Up | KeyCode::Char('k') => navigate(app, false),
         KeyCode::Down | KeyCode::Char('j') => navigate(app, true),
         KeyCode::Enter => choose(app, client, app.rewind.selected),
-        KeyCode::Char('1') => choose(app, client, 0),
-        KeyCode::Char('2') => choose(app, client, 1),
         KeyCode::Char('q') => quit(app),
-        _ => {}
+        _ => {
+            if let Some(option) = crate::list_nav::digit(&key, options(app).len()) {
+                choose(app, client, option);
+            }
+        }
     }
 }
 
@@ -135,11 +138,7 @@ pub fn options(app: &App) -> Vec<&'static str> {
 /// Move the highlight one option up/down, wrapping (Python `action_move_*`).
 fn navigate(app: &mut App, down: bool) {
     let count = options(app).len();
-    if count == 0 {
-        return;
-    }
-    let step = if down { 1 } else { count - 1 };
-    app.rewind.selected = (app.rewind.selected + step) % count;
+    app.rewind.selected = crate::list_nav::wrap(app.rewind.selected, count, down);
 }
 
 /// Act on an option: the action step arms the restore choice and advances, the
@@ -258,13 +257,20 @@ fn apply_done(
             &new_session_id,
         );
     }
-    // The rewound message goes back into the composer, ready to be edited. The
-    // Textual `value` setter parks the caret at the start, so this does too.
-    app.chat_input.load_full_text(message.clone());
+    // The rewound message goes back into the composer, caret at the end, ready to be edited.
+    // A skill invocation reloads in `/` mode as typed; any other message is a prompt.
+    match crate::input_modes::classify(&message, &app.completion.skills) {
+        ClassifiedInput::Skill { .. } => app.chat_input.load_full_text(message.clone()),
+        _ => app.chat_input.load_prompt_text(message.clone()),
+    }
     crate::long_paste::restore(app, display.as_ref());
     crate::inline_images::restore_placeholders(app, &message, &images);
-    app.chat_input.cursor = 0;
+    app.chat_input.cursor = app.chat_input.input.len();
     crate::completion_manager::input_changed(app);
+    // A trailing `@file` or `/skill` mention stays closed until the next edit, like a recall.
+    if crate::completion_manager::active_is_mention(app) {
+        crate::completion_manager::reset_for_recall(app);
+    }
     app.view.scroll = 0;
     app.view.scroll_target = 0;
 }

@@ -26,8 +26,12 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
             crate::vibe_code_project::apply_event(app, client, *event)
         }
         CommandEvent::Teleport(reply) => crate::teleport::apply_reply(app, client, *reply),
+        CommandEvent::Plugins(event) => crate::plugins::apply_event(app, *event),
         CommandEvent::Result(text) => {
             local::add_command_result(&mut app.view.transcript, &id, &text)
+        }
+        CommandEvent::AgentStatistics(text) => {
+            crate::commands::provider_auth::add_agent_statistics(app, &id, &text)
         }
         CommandEvent::Renamed(title) => {
             app.terminal_notifier.set_default_title(&title);
@@ -49,6 +53,7 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
         } => {
             crate::voice_app::apply_saved(app, &runtime, previous_enabled, enabling_audio);
         }
+        CommandEvent::ProxySettings(result) => crate::proxy_setup::apply_read(app, result),
         CommandEvent::PostReady { reads, greeting } => {
             let plan = reads
                 .as_ref()
@@ -144,7 +149,7 @@ pub(super) fn step_scroll(app: &mut App, replaying: bool) {
 pub(super) fn draw_synchronized(terminal: &mut crate::terminal::Tui, app: &mut App) -> Result<()> {
     use crossterm::SynchronizedUpdate;
 
-    std::io::stdout().sync_update(|_| terminal.draw(|renderer| app.draw(renderer)))??;
+    std::io::stdout().sync_update(|_| crate::terminal::draw(terminal, app))??;
     crate::pointer::sync(app);
     crate::terminal_notifier::flush(&mut app.terminal_notifier);
     Ok(())

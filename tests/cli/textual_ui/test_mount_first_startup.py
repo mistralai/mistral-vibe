@@ -14,7 +14,11 @@ from vibe.app_server.events import StatsUpdated
 from vibe.app_server.models import AgentStatsSnapshot, ConfigIssue
 from vibe.app_server.protocol import ConfigReadResponse, StatsUpdatedParams
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
-from vibe.cli.textual_ui.widgets.chat_input import ChatInputBody, ChatInputContainer
+from vibe.cli.textual_ui.widgets.chat_input import (
+    ChatInputBody,
+    ChatInputContainer,
+    ChatTextArea,
+)
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress
 from vibe.cli.textual_ui.widgets.loading import DEFAULT_LOADING_STATUS
 from vibe.cli.textual_ui.widgets.narrator_status import NarratorStatus
@@ -37,14 +41,16 @@ async def test_compose_yields_main_ui_when_no_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cold_mount_applies_configured_theme_not_fallback() -> None:
+async def test_cold_mount_applies_configured_ui_preferences() -> None:
     # Cold mount-first path must apply the theme from the pre-read config so the
     # UI does not flash the fallback theme before the session opens.
     async def _blocking_starter() -> AppServerSession:
         await asyncio.Event().wait()
         raise RuntimeError("unreachable")
 
-    config = build_test_app_config().model_copy(update={"theme": "gruvbox"})
+    config = build_test_app_config().model_copy(
+        update={"theme": "gruvbox", "cursor_blink": False}
+    )
     app = build_test_vibe_app(app_server=_blocking_starter)
     app._mount_first = True
     app._initial_config_response = ConfigReadResponse(config=config)
@@ -52,6 +58,7 @@ async def test_cold_mount_applies_configured_theme_not_fallback() -> None:
         await pilot.pause(0.1)
         assert app._app_server is None
         assert app.theme == "gruvbox"
+        assert app.query_one(ChatTextArea).cursor_blink is False
 
 
 @pytest.mark.asyncio
@@ -164,7 +171,7 @@ async def test_stats_update_keeps_context_progress_visible() -> None:
         context_progress = app.query_one(ContextProgress)
         assert context_progress.tokens.max_tokens == 200_000
         assert context_progress.tokens.current_tokens == 12_500
-        assert str(context_progress.render()) == "12k/200k tokens (6%)"
+        assert str(context_progress.render()) == "12.5k/200k tokens (6%)"
 
 
 @pytest.mark.asyncio

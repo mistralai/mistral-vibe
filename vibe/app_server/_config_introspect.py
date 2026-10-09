@@ -5,10 +5,12 @@ import enum
 from pathlib import Path
 from types import UnionType
 from typing import Any, Union, get_args, get_origin
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic_core import to_jsonable_python
 
 from vibe.app_server.protocol import (
+    ConfigEffectiveReadResponse,
     ConfigFieldKind,
     ConfigFieldWire,
     ConfigLayerValueWire,
@@ -25,6 +27,13 @@ from vibe.core.config.vibe_schema import VibeConfigSchema
 DEFAULT_ORIGIN = "default"
 AUTO_COMPACT_THRESHOLD = "auto_compact_threshold"
 MAX_CONTEXT_LENGTH = "max_context_length"
+_REDACTED = "<redacted>"
+# Config entries whose values are credentials as often as not: header and
+# environment mappings, and the command line of a local MCP server.
+_SECRET_KEYS = frozenset({"headers", "extra_headers", "env", "args"})
+# Only an MCP server's command is redacted: tool configs may have their own.
+_MCP_SERVERS_KEY = "mcp_servers"
+_MCP_COMMAND_KEY = "command"
 
 # Internal fields populated at runtime (not by the user) that should never be
 # rendered in the settings UI.
@@ -252,3 +261,81 @@ def _model_field_path(alias: str, field: str, *, prefix: str = "") -> str:
         f"{prefix}/models/{escape_json_pointer_token(alias)}/"
         f"{escape_json_pointer_token(field)}"
     )
+
+
+def effective_config_response(
+    config: VibeConfigSchema, *, bypass_tool_permissions: bool
+) -> ConfigEffectiveReadResponse:
+    dumped = config.model_dump(mode="json")
+    # Auto-approve is a session option rather than a config layer, so the
+    # session's own decision replaces the configured value.
+    dumped["bypass_tool_permissions"] = bypass_tool_permissions
+    return ConfigEffectiveReadResponse(config=redact_config(dumped))
+
+
+def redact_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Hide the credentials a dumped config may hold, keeping its shape.
+
+    Header, environment and MCP argument values are replaced whole, and an MCP
+    server's ``command`` keeps only its program. Any URL, such as a provider's
+    ``api_base`` or an MCP server's ``url``, keeps its host and path but loses
+    its user info and query string.
+    """
+    return _redact(config)
+
+
+def _redact(value: Any, *, secret: bool = False) -> Any:
+    if isinstance(value, Mapping):
+        if secret:
+            return dict.fromkeys(value, _REDACTED)
+        return {
+            key: _redact_mcp_servers(item)
+            if key == _MCP_SERVERS_KEY
+            else _redact(item, secret=key in _SECRET_KEYS)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact(item, secret=secret) for item in value]
+    if secret and value is not None:
+        return _REDACTED
+    if isinstance(value, str):
+        return _redact_url(value)
+    return value
+
+
+def _redact_mcp_servers(servers: Any) -> Any:
+    redacted = _redact(servers)
+    if not isinstance(redacted, list):
+        return redacted
+    for server in redacted:
+        if isinstance(server, dict) and _MCP_COMMAND_KEY in server:
+            server[_MCP_COMMAND_KEY] = _redact_command(server[_MCP_COMMAND_KEY])
+    return redacted
+
+
+def _redact_command(command: Any) -> Any:
+    # The program says which server runs; what follows it may be a credential.
+    match command:
+        case str():
+            words = command.split(maxsplit=1)
+            return f"{words[0]} {_REDACTED}" if len(words) > 1 else command
+        case [program, *rest]:
+            return [program, *(_REDACTED for _ in rest)]
+        case _:
+            return command
+
+
+def _redact_url(value: str) -> str:
+    if "://" not in value:
+        return value
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return _REDACTED
+    if not parts.scheme or not parts.netloc:
+        return value
+    netloc = parts.netloc
+    if "@" in netloc:
+        netloc = f"{_REDACTED}@{netloc.rpartition('@')[2]}"
+    query = _REDACTED if parts.query else ""
+    return urlunsplit(parts._replace(netloc=netloc, query=query))

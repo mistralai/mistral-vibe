@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Set as AbstractSet
 from typing import Any
 
 from vibe.core.agents.models import BuiltinAgentName
@@ -32,6 +32,7 @@ DROPPED_TOOL_OPTIONS: dict[str, tuple[str, ...]] = {
 
 
 async def migrate_config_layers(layers: Iterable[ConfigLayer[RawConfig]]) -> None:
+    loaded: list[tuple[BaseTomlConfigLayer, dict[str, Any]]] = []
     for layer in layers:
         if not isinstance(layer, BaseTomlConfigLayer):
             continue
@@ -40,8 +41,19 @@ async def migrate_config_layers(layers: Iterable[ConfigLayer[RawConfig]]) -> Non
             data = (await layer.load()).model_dump()
         except (EmptyLayerError, UntrustedLayerError):
             continue
+        loaded.append((layer, data))
 
-        if not migrate_config(data):
+    # A complete entry in any file fills same-alias sparse entries at merge
+    # time; stamping identity here would shadow it in a higher-precedence file.
+    complete_aliases = {
+        key
+        for _, data in loaded
+        for key, model in _model_entries(data)
+        if key and model.get("name") and model.get("provider")
+    }
+
+    for layer, data in loaded:
+        if not migrate_config(data, complete_aliases=complete_aliases):
             continue
 
         fingerprint = layer.fingerprint
@@ -57,19 +69,48 @@ async def migrate_config_layers(layers: Iterable[ConfigLayer[RawConfig]]) -> Non
         )
 
 
-def migrate_config(data: dict[str, Any]) -> bool:
+def migrate_config(
+    data: dict[str, Any], *, complete_aliases: AbstractSet[str] = frozenset()
+) -> bool:
     """Apply every config migration in order, mutating ``data`` in place.
 
     Returns whether anything changed, so the caller can decide to persist.
+    ``complete_aliases`` lists model aliases that some config file defines
+    completely; completion migrations must not stamp those (see
+    ``_migrate_removed_local``).
     """
     changed = False
     changed |= _migrate_bash_allowlist(data)
     changed |= _migrate_bash_read_only(data)
     changed |= _migrate_model_renames(data)
     changed |= _migrate_removed_devstral_small(data)
+    changed |= _migrate_removed_local(data, complete_aliases=complete_aliases)
     changed |= _migrate_renamed_tools(data)
     changed |= _migrate_renamed_agents(data)
     return changed
+
+
+def _model_entries(data: dict[str, Any]) -> list[tuple[str | None, dict[str, Any]]]:
+    """Model entries as ``(alias key, payload)`` pairs.
+
+    Layers normalize ``models`` into an alias map on load; the list shape only
+    appears in malformed files and is keyed by each entry's own ``alias``.
+    """
+    models = data.get("models")
+    if isinstance(models, dict):
+        return [
+            (key, model) for key, model in models.items() if isinstance(model, dict)
+        ]
+    if isinstance(models, list):
+        return [
+            (model.get("alias"), model) for model in models if isinstance(model, dict)
+        ]
+    return []
+
+
+def _resolved_alias(key: str | None, model: dict[str, Any]) -> str | None:
+    """A model entry's merge key: its map key, or its own ``alias``."""
+    return key or model.get("alias")
 
 
 def _migrate_bash_allowlist(data: dict[str, Any]) -> bool:
@@ -114,16 +155,9 @@ def _migrate_bash_read_only(data: dict[str, Any]) -> bool:
 def _migrate_model_renames(data: dict[str, Any]) -> bool:
     """Rename devstral-2 to mistral-medium-3.5 and update its config."""
     changed = False
-    models = data.get("models", [])
-    model_entries: Iterable[dict[str, Any]]
-    if isinstance(models, dict):
-        model_entries = [model for model in models.values() if isinstance(model, dict)]
-    elif isinstance(models, list):
-        model_entries = [model for model in models if isinstance(model, dict)]
-    else:
-        model_entries = []
+    models = data.get("models")
 
-    for model in model_entries:
+    for _, model in _model_entries(data):
         if (
             model.get("name") == "mistral-vibe-cli-latest"
             and model.get("alias") == "devstral-2"
@@ -160,42 +194,72 @@ def _migrate_removed_devstral_small(data: dict[str, Any]) -> bool:
 
     Sparse entries (missing ``name``/``provider``) relied on the default layer
     to fill in identity; without it they fail validation on load. Complete
-    entries are kept.
+    entries are kept. Pins are left to the load-time fallback, which warns
+    and resolves unknown pins.
     """
     alias = "devstral-small"
     name = "devstral-small-latest"
 
-    def is_devstral_small(model: Any, *, key: str | None = None) -> bool:
-        if not isinstance(model, dict):
-            return False
-        resolved = key or model.get("alias")
+    def is_devstral_small(model: dict[str, Any], *, key: str | None = None) -> bool:
+        resolved = _resolved_alias(key, model)
         return resolved == alias or model.get("name") == name
 
     models = data.get("models")
-    if isinstance(models, list):
-        before = len(models)
-        models[:] = [
-            m for m in models if not (is_devstral_small(m) and _is_sparse_model(m))
-        ]
-        dropped = len(models) != before
-        if dropped and not models:
-            del data["models"]
-    elif isinstance(models, dict):
-        before = len(models)
-        for key in list(models):
-            if is_devstral_small(models[key], key=key) and _is_sparse_model(
-                models[key]
-            ):
-                del models[key]
-        dropped = len(models) != before
-        if dropped and not models:
-            del data["models"]
-    else:
-        return False
+    dropped = False
+    for key, model in _model_entries(data):
+        if not is_devstral_small(model, key=key) or not _is_sparse_model(model):
+            continue
+        dropped = True
+        if isinstance(models, dict):
+            del models[key]
+        elif isinstance(models, list):
+            models.remove(model)
 
-    if dropped and data.get("active_model") == alias:
-        data["active_model"] = ""
+    if dropped and not models:
+        del data["models"]
     return dropped
+
+
+def _migrate_removed_local(
+    data: dict[str, Any], *, complete_aliases: AbstractSet[str]
+) -> bool:
+    """Complete sparse ``local`` overrides into standalone user models.
+
+    The built-in is gone from the defaults but the model still runs through
+    llamacpp, so a sparse override (missing ``name``/``provider``) — which
+    would fail validation without the default layer — is completed with the
+    built-in's identity instead of dropping the user's settings. Entries keyed
+    ``local`` are skipped when another file defines that alias completely: the
+    merge fills them from that definition, and stamping a higher-precedence
+    file would shadow it. Entries under other aliases are always completed:
+    the guard covers only the removed built-in's alias, and shadowing between
+    custom aliases is out of scope for this removal.
+
+    Pins are never cleared: layers migrate one file at a time, so this file
+    cannot see whether another layer still defines ``local``. The load-time
+    fallback handles unknown pins.
+    """
+    changed = False
+    for key, model in _model_entries(data):
+        if not _is_local_entry(model, key=key):
+            continue
+        if _resolved_alias(key, model) == "local" and "local" in complete_aliases:
+            continue
+        if not model.get("name"):
+            model["name"] = "devstral"
+            changed = True
+        if not model.get("provider"):
+            model["provider"] = "llamacpp"
+            changed = True
+
+    return changed
+
+
+def _is_local_entry(model: Any, *, key: str | None = None) -> bool:
+    """Match the removed built-in: keyed/aliased ``local``, or named devstral."""
+    if not isinstance(model, dict):
+        return False
+    return _resolved_alias(key, model) == "local" or model.get("name") == "devstral"
 
 
 def _is_sparse_model(model: Any) -> bool:

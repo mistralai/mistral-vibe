@@ -130,6 +130,65 @@ fn one_subagent_completion_notification_reaches_the_model() {
     assert_eq!(spawn_action["call"]["arguments"]["agentName"], "researcher");
 }
 
+#[test]
+fn keeps_notification_pending_after_iteration_limit() {
+    let turn_id = "turn-notification-at-iteration-limit";
+    let mut harness_config = config();
+    harness_config.settings.turn.max_iterations = Some(1);
+    let mut runtime = SynchronousRuntime::new(harness_config);
+    let completion = runtime.start_turn(turn_id, "write the answer");
+    let notification = process_notification(
+        "notification-at-iteration-limit",
+        "process-at-iteration-limit",
+        "background work completed",
+    );
+    runtime.receive_notification(turn_id, &notification, &[&completion]);
+
+    runtime.apply(
+        text_completion(&completion, "the accepted answer"),
+        completed(
+            turn_id,
+            vec![json!({"type": "text", "text": "the accepted answer"})],
+        )
+        .observe(assistant_text_committed(
+            turn_id,
+            &completion,
+            "the accepted answer",
+        ))
+        .observe(turn_completed_at_iteration_limit(
+            turn_id,
+            vec![json!({"type": "text", "text": "the accepted answer"})],
+        )),
+    );
+
+    runtime.restart_from_checkpoint();
+    let next_turn_id = "turn-after-notification-limit";
+    let next_completion = runtime
+        .apply(
+            user_message(next_turn_id, "continue", "queue"),
+            running(next_turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_started(next_turn_id, "continue"))
+                .observe(notification_delivered(
+                    next_turn_id,
+                    observed_notification(&notification),
+                )),
+        )
+        .only_action();
+
+    runtime.assert_last_model_message_update(
+        &next_completion,
+        "replace",
+        &[
+            model_system(),
+            model_user_text("write the answer"),
+            model_assistant_text("the accepted answer"),
+            model_user_text("continue"),
+            model_notifications(&[&notification]),
+        ],
+    );
+}
+
 ///
 /// *Prepare*: A model starts two subagents in parallel and later sends each one a follow-up message.
 /// *Do*: Resolve both tool batches, deliver both completion notifications while the model is pending, and complete after the notifications are injected.

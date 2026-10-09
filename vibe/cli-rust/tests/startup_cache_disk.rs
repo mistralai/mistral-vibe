@@ -68,6 +68,47 @@ fn with_isolated_home(name: &str, f: impl FnOnce(&Path)) {
 }
 
 #[test]
+fn cursor_preference_survives_runtime_updates_and_cached_startup() {
+    with_isolated_home("cursor-blink", |_home| {
+        // Both RuntimeSnapshot producers project ConfigView in app_server/_projection.py.
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../../client-e2e/fixtures/fixture.json"))
+                .unwrap();
+        let mut runtime = fixture["handshake"]["runtime/read"].clone();
+        runtime["runtime"]["config"]["cursorBlink"] = false.into();
+        let mut app = vibe_rs::app::App::default();
+        app.view.cursor_on = false;
+
+        vibe_rs::event_handler::apply_runtime_value(&mut app, &runtime);
+        assert!(app.main_input_cursor_on());
+        assert!(!app.view.cursor_on);
+
+        let mut restarted = vibe_rs::app::App::default();
+        restarted.session.startup_config = StartupConfig::load().unwrap();
+        restarted.view.cursor_on = false;
+        assert!(restarted.main_input_cursor_on());
+
+        runtime["runtime"]["config"]["theme"] = "ansi-light".into();
+        vibe_rs::event_handler::apply_response_runtime(&mut app, &runtime);
+        assert!(app.main_input_cursor_on());
+        assert!(!app.view.cursor_on);
+
+        runtime["runtime"]["config"]["cursorBlink"] = true.into();
+        vibe_rs::event_handler::apply_response_runtime(&mut app, &runtime);
+        assert!(!app.main_input_cursor_on());
+        assert!(StartupConfig::load().unwrap().cursor_blink);
+
+        runtime["runtime"]["config"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cursorBlink");
+        vibe_rs::event_handler::apply_runtime_value(&mut app, &runtime);
+        assert!(!app.main_input_cursor_on());
+        assert!(app.session.startup_config.cursor_blink);
+    });
+}
+
+#[test]
 fn a_fresh_cache_file_is_loaded() {
     with_isolated_home("load-fresh", |_home| {
         let config = fresh_config();

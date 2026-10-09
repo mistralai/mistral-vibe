@@ -1,11 +1,14 @@
 //! The PyPI update gateway (Python `adapters/pypi_update_gateway.py`).
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
 
 use super::pep440::{parse_pep440_version, Pep440Version};
+pub use crate::utils::tls::{
+    apply_tls_trust, apply_tls_trust_for, configure_tls_trust, custom_root_certificates,
+    tls_trust_store, TlsTrustStore,
+};
 
 const DEFAULT_BASE_URL: &str = "https://pypi.org";
 const TIMEOUT_SECONDS: u64 = 5;
@@ -103,56 +106,18 @@ pub trait UpdateGateway {
     }
 }
 
-/// Python `configure_ssl_context`'s module global (ADR 0015): the effective
-/// `enable_system_trust_store`, consulted whenever a gateway HTTP client is
-/// built. Python's process default is likewise the bundled root set.
-static USE_SYSTEM_TRUST_STORE: AtomicBool = AtomicBool::new(false);
-
-/// Python `configure_ssl_context` (ADR 0015): set the effective
-/// `enable_system_trust_store` for the gateway's Vibe-owned HTTPS requests.
-pub fn configure_tls_trust(enable_system_trust_store: bool) {
-    USE_SYSTEM_TRUST_STORE.store(enable_system_trust_store, Ordering::Relaxed);
-}
-
-/// The trust store a gateway client verifies against: the two branches of
-/// Python `build_ssl_context` (ADR 0015).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TlsTrustStore {
-    /// Python's `certifi` bundle: the compiled-in Mozilla root set.
-    BundledWebPki,
-    /// Python's `truststore.SSLContext`: the operating system trust store.
-    System,
-}
-
-/// The effective trust store, consulted when a gateway client is built.
-pub fn tls_trust_store() -> TlsTrustStore {
-    if USE_SYSTEM_TRUST_STORE.load(Ordering::Relaxed) {
-        TlsTrustStore::System
-    } else {
-        TlsTrustStore::BundledWebPki
-    }
-}
-
 /// Python `build_ssl_context` (ADR 0015): the one client builder for every
-/// Vibe-owned HTTPS request. The given trust store's roots — bundled Mozilla
-/// roots, or the OS store with `SSL_CERT_FILE`/`SSL_CERT_DIR` certificates
-/// additive in both modes — with the caller's timeout. Redirects stay off
-/// (Python's httpx default).
+/// Vibe-owned HTTPS request, under the given trust store and the caller's
+/// timeout. Redirects stay off (Python's httpx default).
 pub fn build_http_client_for(
     trust: TlsTrustStore,
     timeout: Duration,
 ) -> Result<reqwest::Client, reqwest::Error> {
-    let custom = custom_root_certificates();
     let builder = reqwest::Client::builder()
         .timeout(timeout)
         // Python's httpx client does not follow redirects.
         .redirect(reqwest::redirect::Policy::none());
-    match trust {
-        TlsTrustStore::System => builder.tls_certs_merge(custom).build(),
-        TlsTrustStore::BundledWebPki => builder
-            .tls_certs_only(bundled_root_certificates().chain(custom))
-            .build(),
-    }
+    apply_tls_trust_for(builder, trust).build()
 }
 
 /// The gateway's HTTP client: the effective trust policy (ADR 0015) with the
@@ -177,61 +142,6 @@ pub fn wizard_http_client(
         TlsTrustStore::BundledWebPki
     };
     build_http_client_for(trust, timeout)
-}
-
-/// The compiled-in Mozilla root set, the analog of Python's certifi bundle.
-fn bundled_root_certificates() -> impl Iterator<Item = reqwest::Certificate> {
-    webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().map(|cert| {
-        reqwest::Certificate::from_der(cert.as_ref()).expect("bundled roots are valid DER")
-    })
-}
-
-/// ADR 0015: certificates from `SSL_CERT_FILE` and `SSL_CERT_DIR`, additive on
-/// top of the policy roots in both trust modes. Unreadable or unparsable
-/// sources are logged and skipped, like Python's `load_verify_locations`
-/// warning path. Like Python, an empty value counts as unset.
-pub fn custom_root_certificates() -> Vec<reqwest::Certificate> {
-    let mut certificates = Vec::new();
-    if let Some(path) = env_path("SSL_CERT_FILE") {
-        load_pem_bundle(&path, &mut certificates);
-    }
-    if let Some(dir) = env_path("SSL_CERT_DIR") {
-        match std::fs::read_dir(&dir) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    // Python's hashed-dir loading skips what it cannot parse;
-                    // so does scanning each file. `metadata` follows symlinks
-                    // (`file_type` would not), so the hashed symlinks a
-                    // c_rehash-style CApath is made of load like the files
-                    // they point at.
-                    if std::fs::metadata(entry.path()).is_ok_and(|meta| meta.is_file()) {
-                        load_pem_bundle(&entry.path(), &mut certificates);
-                    }
-                }
-            }
-            Err(err) => tracing::warn!(%err, ?dir, "Failed to read SSL_CERT_DIR"),
-        }
-    }
-    certificates
-}
-
-fn env_path(name: &str) -> Option<std::path::PathBuf> {
-    match std::env::var_os(name) {
-        Some(value) if !value.is_empty() => Some(std::path::PathBuf::from(value)),
-        _ => None,
-    }
-}
-
-/// Append a file's PEM certificates; unreadable or unparsable files are
-/// logged and skipped.
-fn load_pem_bundle(path: &std::path::Path, out: &mut Vec<reqwest::Certificate>) {
-    match std::fs::read(path) {
-        Ok(bytes) => match reqwest::Certificate::from_pem_bundle(&bytes) {
-            Ok(certificates) => out.extend(certificates),
-            Err(err) => tracing::warn!(%err, ?path, "Failed to parse SSL certificates"),
-        },
-        Err(err) => tracing::warn!(%err, ?path, "Failed to read SSL certificates"),
-    }
 }
 
 /// Python `PyPIUpdateGateway` over the PyPI Simple API.

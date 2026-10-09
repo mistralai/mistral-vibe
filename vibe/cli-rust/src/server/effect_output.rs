@@ -85,6 +85,11 @@ pub fn format_effect_output(kind: Option<&str>, output: Option<&Value>) -> Vec<B
         // Rendered as a diff, so there is no text body.
         Some("file_edit") => Vec::new(),
         Some("file_write") => cleaned_text(output, "content"),
+        // Python `ScratchpadResultWidget`: a note's text, else one file name per row.
+        Some("scratchpad") => match cleaned_text(output, "content") {
+            content if content.is_empty() => scratchpad_files(output),
+            content => content,
+        },
         // Python renders this through `_yield_text`, which trims then sanitizes.
         Some("web_fetch") => trimmed_text(output, "content"),
         Some("file_search") => cleaned_text(output, "matches"),
@@ -105,6 +110,16 @@ pub fn format_effect_output(kind: Option<&str>, output: Option<&Value>) -> Vec<B
         }
     };
     lines.into_iter().map(BodyLine::from).collect()
+}
+
+fn scratchpad_files(output: &Value) -> Vec<String> {
+    let files = output.get("files").and_then(Value::as_array);
+    let names: Vec<&str> = files
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    lines(&clean_output(&names.join("\n")))
 }
 
 /// Python `BashResultWidget`: an output with nothing to show keeps the body

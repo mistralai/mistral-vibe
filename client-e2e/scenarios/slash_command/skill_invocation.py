@@ -41,7 +41,6 @@ handshake = {
 screen_contains = {
     "rust": (
         _PROMPT,
-        "Loaded skills",
         f"Loaded skill: {_NAME}",
         "Review twice.",
         "<skill_content",

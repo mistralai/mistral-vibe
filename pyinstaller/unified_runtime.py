@@ -6,16 +6,23 @@ Vibe executable. ``vibe.spec``, ``vibe-acp.spec``, and ``vibe-app-server.spec``
 collect it through this helper unconditionally, and the build fails when it
 cannot be collected, so a packaging error can never produce a binary that
 silently falls back to the legacy harness.
+
+On Windows the helper also collects ``winpty`` (pywinpty), which the Runtime
+and the managed shell load through ``importlib.import_module`` and PyInstaller
+therefore cannot discover. A Windows build without it fails instead of
+producing a binary that silently falls back to the non-PTY shell backend.
 """
 
 from __future__ import annotations
 
 from importlib import import_module, util
+import sys
 from typing import Any, NoReturn
 
 _RUNTIME_PACKAGE = "mistralai_vibe_local_harness"
 _RUNTIME_NATIVE = f"{_RUNTIME_PACKAGE}._native"
 _RUNTIME_VIBE = f"{_RUNTIME_PACKAGE}.vibe"
+_WINDOWS_PTY_PACKAGE = "winpty"
 
 
 class UnifiedRuntimeRequiredError(SystemExit):
@@ -69,13 +76,36 @@ def require_unified_runtime() -> None:
         )
 
 
-def collect_unified_runtime() -> tuple[list[Any], list[Any], list[Any]]:
-    """Collect the Runtime Python modules and native extension, or fail."""
+def require_windows_pty() -> None:
+    try:
+        import_module(_WINDOWS_PTY_PACKAGE)
+    except Exception as exc:
+        raise UnifiedRuntimeRequiredError(
+            f"Windows builds must bundle pywinpty for the PTY shell backend, but "
+            f"importing {_WINDOWS_PTY_PACKAGE!r} failed: {type(exc).__name__}: "
+            f"{exc}. Install it with 'uv sync --no-dev --group build' and rebuild."
+        ) from exc
+
+
+def collect_unified_runtime(
+    platform: str = sys.platform,
+) -> tuple[list[Any], list[Any], list[Any]]:
+    """Collect the Runtime, its native extension, and winpty on Windows, or fail."""
     require_unified_runtime()
+    if platform == "win32":
+        require_windows_pty()
     # PyInstaller is only importable in a packaging environment
     # (uv sync --group build), so it stays a lazy, dev-env-optional import.
     from PyInstaller.utils.hooks import (  # pyright: ignore[reportMissingModuleSource]
         collect_all,
     )
 
-    return collect_all(_RUNTIME_PACKAGE)
+    runtime = collect_all(_RUNTIME_PACKAGE)
+    if platform != "win32":
+        return runtime
+    windows_pty = collect_all(_WINDOWS_PTY_PACKAGE)
+    return (
+        runtime[0] + windows_pty[0],
+        runtime[1] + windows_pty[1],
+        runtime[2] + windows_pty[2],
+    )

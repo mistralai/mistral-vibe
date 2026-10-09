@@ -53,13 +53,9 @@ class IdentityController:
             return await self._read()
 
     async def _read(self) -> IdentityView | None:
-        runtime_config = self._agent_loop.config
-        if not runtime_config.is_active_model_mistral():
-            return None
-
-        try:
-            provider = runtime_config.get_active_provider()
-        except ValueError:
+        # The Mistral identity holds whatever the active model, like /whoami.
+        provider = self._agent_loop.config.get_mistral_provider()
+        if provider is None:
             return None
 
         api_key = await asyncio.to_thread(resolve_api_key, provider.api_key_env_var)

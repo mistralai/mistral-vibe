@@ -45,9 +45,6 @@ pub fn draw(app: &mut App, wizard: &mut OnboardingState, f: &mut Frame, area: Re
             "Welcome to Mistral Vibe",
             "Choose your sign in method",
             &options::AUTH_OPTS,
-            // Deliberate divergence from Python's "Cancel": Esc goes back
-            // one screen everywhere except the welcome screen.
-            "Back",
             &chat_frame,
             None,
         ),
@@ -60,7 +57,6 @@ pub fn draw(app: &mut App, wizard: &mut OnboardingState, f: &mut Frame, area: Re
             "Launch browser",
             "Where do you sign in?",
             &options::TARGET_OPTS,
-            "Back",
             &chat_frame,
             override_warning.as_deref(),
         ),

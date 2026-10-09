@@ -1,6 +1,6 @@
 [package]
 name = "vibe-rs"
-version = "2.26.0"
+version = "2.26.1"
 edition = "2021"
 license = "Proprietary"
 publish = false
@@ -28,7 +28,7 @@ futures = "0.3"
 ignore = "0.4"
 ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 # Native poll avoids the mio EOF spin; libc is required by Crossterm's wake path.
-crossterm = { version = "0.28", features = ["event-stream", "use-dev-tty", "libc"] }
+crossterm = { version = "0.28", features = ["use-dev-tty", "libc"] }
 pulldown-cmark = { version = "0.10", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -56,7 +56,11 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 # while `enable_system_trust_store` is disabled (Python's certifi bundle).
 webpki-root-certs = "1"
 sentry = { version = "0.49.2", default-features = false, features = ["backtrace", "contexts", "reqwest", "rustls", "tracing"] }
+uuid = { version = "1", features = ["v4"] }
 percent-encoding = "2"
+
+[dev-dependencies]
+ctor = "0.2"
 
 [features]
 # Voice capture pulls in `cpal`, whose Linux backend links ALSA via pkg-config

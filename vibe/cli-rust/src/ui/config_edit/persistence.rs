@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use super::super::theme;
+use super::super::{list_cursor, theme};
 use crate::config::{origin_label, ConfigField};
 use crate::utils::text::ellipsize;
 
@@ -41,7 +41,10 @@ pub(super) fn inspector(f: &mut Frame, area: Rect, field: &ConfigField) {
         };
         let value = field.labeled(value);
         lines.push(Line::from(vec![
-            Span::styled(if active { "▸ " } else { "  " }, style),
+            Span::styled(
+                list_cursor::marker(active),
+                style.fg(list_cursor::current_color()),
+            ),
             Span::styled(format!("{:<label_width$}  ", origin_label(layer)), style),
             Span::styled(
                 ellipsize(&value, budget),

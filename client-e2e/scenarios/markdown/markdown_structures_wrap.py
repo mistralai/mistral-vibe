@@ -5,7 +5,7 @@ from __future__ import annotations
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
 from e2e.app_server.scenario import Timeline
 
-screen_contains = {"rust": ("    list-tail", "  ▌ quote-tail", "   code-tail")}
+screen_contains = {"rust": ("    list-tail", "  ▌ quote-tail", "  code-tail")}
 
 _PROMPT = "wrap every markdown structure"
 _GRAPHEME = "\u2764\ufe0f"

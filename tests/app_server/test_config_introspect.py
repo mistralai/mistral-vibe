@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import json
+from typing import Any
 
 import pytest
 
@@ -12,6 +13,7 @@ from vibe.app_server._config_introspect import (
     build_field_wires,
     classify_annotation,
     collect_layer_values,
+    effective_config_response,
 )
 from vibe.app_server.protocol import ConfigFieldKind, ConfigLayerValueWire
 from vibe.core.config.layers.default import DefaultConfigLayer
@@ -291,3 +293,140 @@ def test_build_field_wires_shows_the_derived_threshold_on_the_global_row(
 
     assert threshold.value == 209_715
     assert threshold.origin == DEFAULT_ORIGIN
+
+
+def test_effective_config_hides_credentials_and_applies_approval_bypass() -> None:
+    """*Prepare*: A config with header and environment secrets.
+    *Do*: Build the effective-config response for a session that bypasses
+    tool approval.
+    *Assert*: Secret values are redacted and the session's bypass wins.
+    """
+    # Prepare
+    config = VibeConfigSchema.model_validate({
+        "providers": [
+            {
+                "name": "custom",
+                "api_base": "https://example.invalid/v1",
+                "extra_headers": {"Authorization": "Bearer secret"},
+            }
+        ],
+        "mcp_servers": [
+            {
+                "name": "local",
+                "transport": "stdio",
+                "command": "server",
+                "env": {"TOKEN": "secret"},
+            }
+        ],
+    })
+
+    # Do
+    dumped: dict[str, Any] = effective_config_response(
+        config, bypass_tool_permissions=True
+    ).config
+
+    # Assert
+    assert "secret" not in str(dumped)
+    provider = next(p for p in dumped["providers"] if p["name"] == "custom")
+    assert provider["extra_headers"] == {"Authorization": "<redacted>"}
+    assert dumped["mcp_servers"][0]["env"] == {"TOKEN": "<redacted>"}
+    assert dumped["bypass_tool_permissions"] is True
+
+
+def test_effective_config_hides_url_credentials_and_mcp_arguments() -> None:
+    """*Prepare*: A config with credentials in a provider URL, an MCP URL and
+    an MCP command line.
+    *Do*: Build the effective-config response.
+    *Assert*: The URLs keep their host and path but lose their user info and
+    query string, and the MCP arguments are redacted.
+    """
+    # Prepare
+    config = VibeConfigSchema.model_validate({
+        "providers": [
+            {
+                "name": "custom",
+                "api_base": "https://user:secret@example.invalid/v1?key=secret",
+            }
+        ],
+        "mcp_servers": [
+            {
+                "name": "remote",
+                "transport": "http",
+                "url": "https://mcp.example.invalid/mcp?token=secret",
+            },
+            {
+                "name": "local",
+                "transport": "stdio",
+                "command": "server",
+                "args": ["--token", "secret"],
+            },
+        ],
+    })
+
+    # Do
+    dumped: dict[str, Any] = effective_config_response(
+        config, bypass_tool_permissions=False
+    ).config
+
+    # Assert
+    assert "secret" not in str(dumped)
+    provider = next(p for p in dumped["providers"] if p["name"] == "custom")
+    assert provider["api_base"] == "https://<redacted>@example.invalid/v1?<redacted>"
+    remote, local = dumped["mcp_servers"]
+    assert remote["url"] == "https://mcp.example.invalid/mcp?<redacted>"
+    assert local["args"] == ["<redacted>", "<redacted>"]
+    assert dumped["vibe_base_url"] == config.vibe_base_url
+
+
+@pytest.mark.parametrize(
+    ("command", "redacted"),
+    [
+        ("npx server --api-key=secret", "npx <redacted>"),
+        (
+            ["npx", "server", "--token", "secret"],
+            ["npx", "<redacted>", "<redacted>", "<redacted>"],
+        ),
+        ("server", "server"),
+        (["server"], ["server"]),
+    ],
+)
+def test_effective_config_keeps_only_the_program_of_an_mcp_command(
+    command: str | list[str], redacted: str | list[str]
+) -> None:
+    """*Prepare*: A local MCP server whose command line may carry a credential.
+    *Do*: Build the effective-config response.
+    *Assert*: The command keeps its program and loses the rest, in the form it
+    was written in.
+    """
+    # Prepare
+    config = VibeConfigSchema.model_validate({
+        "mcp_servers": [{"name": "local", "transport": "stdio", "command": command}]
+    })
+
+    # Do
+    dumped: dict[str, Any] = effective_config_response(
+        config, bypass_tool_permissions=False
+    ).config
+
+    # Assert
+    assert "secret" not in str(dumped)
+    assert dumped["mcp_servers"][0]["command"] == redacted
+
+
+def test_effective_config_keeps_a_command_outside_mcp_servers() -> None:
+    """*Prepare*: A tool config with its own ``command`` entry.
+    *Do*: Build the effective-config response.
+    *Assert*: Only MCP server commands are redacted, so the tool's is kept.
+    """
+    # Prepare
+    config = VibeConfigSchema.model_validate({
+        "tools": {"custom": {"command": "make test --verbose"}}
+    })
+
+    # Do
+    dumped: dict[str, Any] = effective_config_response(
+        config, bypass_tool_permissions=False
+    ).config
+
+    # Assert
+    assert dumped["tools"]["custom"]["command"] == "make test --verbose"

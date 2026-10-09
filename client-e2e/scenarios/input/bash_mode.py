@@ -18,9 +18,9 @@ on_request = {
 }
 
 
-# Expand the folded result to reveal its output, then collapse it again. Expanding
-# adds the output line, so the header rises one row: the collapse click targets it.
-_EXPAND = "\x1b[<0;1;32M\x1b[<0;1;32m"
-_COLLAPSE = "\x1b[<0;1;31M\x1b[<0;1;31m"
+# Expand the folded result to reveal its output, then collapse it again from the same
+# header row, one column over so the second press does not chain into a double click.
+_EXPAND = "\x1b[<0;1;12M\x1b[<0;1;12m"
+_COLLAPSE = "\x1b[<0;2;12M\x1b[<0;2;12m"
 
 timeline: Timeline = ["!", "\x7f", "!   \r", "!printf hello\r", _EXPAND, _COLLAPSE]

@@ -48,7 +48,10 @@ pub(crate) fn wrap_chars(chars: &[Sc], width: usize) -> Vec<Vec<Sc>> {
         let mut chunk_width = 0;
         for (next_end, cell) in widths.graphemes {
             if end > start && chunk_width + cell > width {
-                rows.push(trim_end(word[start..end].to_vec()));
+                let chunk = trim_end(word[start..end].to_vec());
+                if !chunk.is_empty() {
+                    rows.push(chunk);
+                }
                 start = end;
                 chunk_width = 0;
             }
@@ -66,14 +69,22 @@ pub(crate) fn wrap_chars(chars: &[Sc], width: usize) -> Vec<Vec<Sc>> {
     rows
 }
 
+/// [`wrap_chars`], pairing each row with its fold gap.
+pub(crate) fn wrap_chars_folded(chars: &[Sc], width: usize) -> Vec<(Vec<Sc>, Option<u16>)> {
+    let text = |chars: &[Sc]| chars.iter().map(|sc| sc.0).collect::<String>();
+    crate::selection::fold::paired(&text(chars), wrap_chars(chars, width), |row| text(row))
+}
+
 /// Split into words, each keeping the spaces that follow it. A hard break
-/// (a `\n` Sc) is its own word.
+/// (a `\n` Sc) is its own word; a leading indent stays on the first word.
 fn split_words(chars: &[Sc]) -> Vec<&[Sc]> {
     let mut words = Vec::new();
     let mut start = 0;
     for index in 1..chars.len() {
         let (prev, cur) = (chars[index - 1].0, chars[index].0);
-        if cur == '\n' || prev == '\n' || (cur != ' ' && prev == ' ') {
+        let word_end =
+            cur != ' ' && prev == ' ' && chars[start..index].iter().any(|sc| sc.0 != ' ');
+        if cur == '\n' || prev == '\n' || word_end {
             words.push(&chars[start..index]);
             start = index;
         }
@@ -118,6 +129,11 @@ pub(super) fn collapse_ws(text: &str) -> String {
         }
     }
     out
+}
+
+/// True when every span of `line` is whitespace.
+pub(crate) fn is_blank_line(line: &Line<'static>) -> bool {
+    line.spans.iter().all(|span| span.content.trim().is_empty())
 }
 
 pub(crate) fn cell_width(chars: &[Sc]) -> usize {

@@ -8,11 +8,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-use super::panel::{render, Hint, Row, Subtitle, CARD_BORDER};
-use super::welcome::GRADIENT;
+use super::panel::{render, Hint, Row, Subtitle};
 use crate::app::App;
+use crate::hints::{self, action};
 use crate::setup::wizard::{BrowserSignInState, OnboardingState, SignInStep, SignInVariant};
-use crate::ui::theme;
+use crate::ui::{hint_line, theme};
+use unicode_width::UnicodeWidthStr;
 
 /// The step titles and their two detail lines (Python `STEP_DESCRIPTIONS`).
 const STEP_TITLES: [&str; 3] = ["Open browser", "Complete sign-in", "Finished setup"];
@@ -130,7 +131,7 @@ fn draw_step_card(
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(CARD_BORDER)),
+            .border_style(Style::default().fg(theme::fixed::ONBOARDING_CARD_BORDER)),
         Rect::new(area.x, card_y, area.width, 4),
     );
     // The card's border, padding, and title padding leave the text at +4.
@@ -180,7 +181,8 @@ fn draw_active_detail(f: &mut Frame, x: u16, y: u16, width: u16, state: &Browser
                 Span::styled(
                     ch.to_string(),
                     Style::default()
-                        .fg(GRADIENT[offset % GRADIENT.len()])
+                        .fg(theme::fixed::WELCOME_GRADIENT
+                            [offset % theme::fixed::WELCOME_GRADIENT.len()])
                         .add_modifier(Modifier::BOLD),
                 )
             })
@@ -226,35 +228,20 @@ pub(super) fn draw_url_help(f: &mut Frame, x: u16, y: u16) {
 /// `#browser-sign-in-hint`; the Esc wording deliberately diverges: Esc goes
 /// back to the sign-in target, it does not cancel the wizard).
 pub(super) fn draw_hint(f: &mut Frame, area: Rect, variant: SignInVariant) {
-    let text = theme::muted_style();
-    let key = Style::default()
-        .fg(theme::primary())
-        .add_modifier(Modifier::BOLD);
-    let segments: &[(&str, Style)] = match variant {
-        SignInVariant::Success => &[("Finishing setup...", text)],
-        SignInVariant::Error => &[
-            ("Press ", text),
-            ("r", key),
-            (" to retry - Press ", text),
-            ("m", key),
-            (" to enter API key manually - ", text),
-            ("Esc", key),
-            (" to go back", text),
-        ],
-        SignInVariant::Pending => &[
-            ("Press ", text),
-            ("m", key),
-            (" to enter API key manually - ", text),
-            ("Esc", key),
-            (" to go back", text),
-        ],
+    const API_KEY: hints::Hint = ("m", action::API_KEY);
+    let keys: &[hints::Hint] = match variant {
+        SignInVariant::Success => {
+            let text = "Finishing setup...";
+            let x = area.x + area.width.saturating_sub(text.width() as u16) / 2;
+            f.buffer_mut()
+                .set_string(x, area.y, text, theme::muted_style());
+            return;
+        }
+        SignInVariant::Error => &[("r", action::RETRY), API_KEY, hints::BACK],
+        SignInVariant::Pending => &[API_KEY, hints::BACK],
     };
-    let total: u16 = segments
-        .iter()
-        .map(|(segment, _)| segment.chars().count() as u16)
-        .sum();
-    let x = area.x + area.width.saturating_sub(total) / 2;
-    set_segments(f, x, area.y, segments);
+    let x = area.x + area.width.saturating_sub(hints::width(keys)) / 2;
+    hint_line::draw_clipped(f, x, area.y, area.right().saturating_sub(x), keys);
 }
 
 /// Write styled segments left to right on one row, returning the end column.

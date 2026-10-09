@@ -242,12 +242,6 @@ class SessionWorktrees:
         WorktreeLifecycle.release(cwd, session_id)
 
     @staticmethod
-    def reap_if_requested(cwd: Path) -> None:
-        managed = ManagedWorktree.at(cwd)
-        if managed is not None:
-            managed.reap_if_requested()
-
-    @staticmethod
     def cancel_reap(
         cwd: Path, requester_id: str | None = None, request_id: str | None = None
     ) -> None:

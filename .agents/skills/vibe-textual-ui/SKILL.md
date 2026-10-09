@@ -11,6 +11,8 @@ metadata:
 
 Conventions for building and styling Textual TUI widgets in Vibe. Apply when working in `vibe/cli/`, creating or modifying widgets, or writing TCSS.
 
+The Textual TUI is being deprecated in favor of the Rust TUI (`vibe/cli-rust/`). Every user-visible change made here must also ship in the Rust TUI in the same PR; see "Terminal UI changes" in the Vibe project `AGENTS.md` (next to `pyproject.toml`).
+
 ## Widgets
 
 - For selectable lists, use `NavigableOptionList` from `vibe/cli/textual_ui/widgets/navigable_option_list.py` instead of Textual's `OptionList`. It adds `j`/`k` cursor navigation on top of the arrow keys; the bare `OptionList` only handles arrows.

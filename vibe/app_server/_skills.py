@@ -27,11 +27,16 @@ from vibe.core.paths import VIBE_HOME
 from vibe.core.skills.manager import SkillManager
 from vibe.core.skills.models import DISABLE_MODEL_INVOCATION_FIELD, SkillInfo
 from vibe.core.tools.builtins.skill import render_skill_result, sample_skill_files
+from vibe.core.utils import name_matches
 
 if TYPE_CHECKING:
     from mistralai_vibe_local_harness.protocol import (
         RustPluginContextDefinition,
         RustSkillDefinition,
+    )
+    from vibe.app_server._sandbox_skills import (
+        SandboxSessionSkills,
+        SandboxSkillLocation,
     )
     from vibe.core.config import VibeConfigSchema
     from vibe.core.config.harness_files import HarnessFilesManager
@@ -69,7 +74,14 @@ def discover_session_skills(
     plugin_skills: Mapping[str, SkillInfo],
     plugin_contexts: Iterable[RustPluginContextDefinition],
     skill_tool_available: bool,
+    sandbox: SandboxSessionSkills | None = None,
 ) -> tuple[list[ConfigIssue], SkillProjection]:
+    """Project the session's skills.
+
+    With ``sandbox``, the model reads skills in the sandbox: each one is
+    pointed at its copy there, and the project's own skills are those read
+    from the sandbox.
+    """
     # The Python builtins reach a unified session as skills of the shipped
     # `vibe` plugin, so loading them here too would offer each one twice under
     # two names.
@@ -80,9 +92,18 @@ def discover_session_skills(
             manager.config_issues, key=lambda item: (str(item.file), item.message)
         )
     ]
+    root_skills = manager.available_skills
+    if sandbox is not None:
+        issues.extend(sandbox.issues)
+        root_skills = _with_project_skills(
+            root_skills, sandbox.project_skills, config()
+        )
     contexts = tuple(plugin_contexts)
     projection = project_core_skills(
-        manager.available_skills, plugin_skills=plugin_skills, plugin_contexts=contexts
+        root_skills,
+        plugin_skills=plugin_skills,
+        plugin_contexts=contexts,
+        locate=None if sandbox is None else sandbox.locate,
     )
     if skill_tool_available:
         return issues, projection
@@ -96,6 +117,38 @@ def discover_session_skills(
             catalogue=projection.catalogue,
         ),
     )
+
+
+def _with_project_skills(
+    root_skills: Mapping[str, SkillInfo],
+    project_skills: Mapping[str, SkillInfo],
+    config: VibeConfigSchema,
+) -> Mapping[str, SkillInfo]:
+    """Rank a sandbox's project skills as the host ranks its own.
+
+    A skill from ``skill_paths`` wins over the project's, which wins over the
+    user's; the configured filters apply to all of them.
+    """
+    configured = {path.resolve() for path in config.skill_paths if path.is_dir()}
+
+    def is_configured(skill: SkillInfo) -> bool:
+        return skill.skill_path is not None and skill.skill_path.parent.parent in (
+            configured
+        )
+
+    merged = {
+        name: skill for name, skill in root_skills.items() if is_configured(skill)
+    }
+    for name, skill in project_skills.items():
+        if config.enabled_skills:
+            if not name_matches(name, config.enabled_skills):
+                continue
+        elif name_matches(name, config.disabled_skills):
+            continue
+        merged.setdefault(name, skill)
+    for name, skill in root_skills.items():
+        merged.setdefault(name, skill)
+    return merged
 
 
 def _without_skills(
@@ -134,31 +187,49 @@ def project_model_invocable_plugin_contexts(
     return tuple(projected)
 
 
-def _payload(skill: SkillInfo) -> str:
+def _payload(skill: SkillInfo, location: SandboxSkillLocation | None = None) -> str:
     """Render the body the Runtime serves, file sample included."""
+    if location is not None:
+        return render_skill_result(
+            skill, list(location.files), base_dir=location.base_dir
+        ).content
     return render_skill_result(skill, sample_skill_files(skill.skill_dir)).content
 
 
-def project_core_skills(
+def project_core_skills(  # noqa: PLR0912, PLR0915 - host and sandbox halves of one pass
     root_skills: Mapping[str, SkillInfo],
     *,
     plugin_skills: Mapping[str, SkillInfo],
     plugin_contexts: Iterable[RustPluginContextDefinition],
+    locate: Callable[[SkillInfo], SandboxSkillLocation | None] | None = None,
 ) -> SkillProjection:
-    claimed: set[Path] = set()
+    """Project root and plugin skills into Core definitions and payloads.
+
+    With ``locate``, every skill is pointed at its copy in the sandbox, and a
+    skill without one is left out.
+    """
+    claimed: set[str] = set()
     payloads: dict[str, str] = {}
     model_payloads: dict[str, str] = {}
     definitions: list[RustSkillDefinition] = []
     catalogue: list[SkillInfo] = []
 
     contexts = project_model_invocable_plugin_contexts(plugin_contexts, plugin_skills)
+    if locate is not None:
+        from vibe.app_server._sandbox_skills import relocate_plugin_contexts
+
+        contexts = relocate_plugin_contexts(contexts, plugin_skills, locate)
     for definition in (
         definition for context in contexts for definition in context.capabilities.skills
     ):
-        claimed.add(_resolved(Path(definition.path)))
+        claimed.add(
+            definition.path
+            if locate is not None
+            else str(_resolved(Path(definition.path)))
+        )
         skill = plugin_skills.get(definition.name)
         if skill is not None:
-            payload = _payload(skill)
+            payload = _payload(skill, None if locate is None else locate(skill))
             payloads[definition.name] = payload
             model_payloads[definition.name] = payload
             catalogue.append(skill.model_copy(update={"name": definition.name}))
@@ -166,18 +237,33 @@ def project_core_skills(
     for name, skill in plugin_skills.items():
         if skill.model_invocable or name in payloads:
             continue
-        if skill.skill_path is not None:
-            claimed.add(_resolved(skill.skill_path))
-        payloads[name] = _payload(skill)
+        location = None
+        if locate is not None:
+            location = locate(skill)
+            if location is None:
+                logger.warning("Dropped skill %r: it has no copy in the sandbox", name)
+                continue
+            claimed.add(location.path)
+        elif skill.skill_path is not None:
+            claimed.add(str(_resolved(skill.skill_path)))
+        payloads[name] = _payload(skill, location)
         catalogue.append(skill.model_copy(update={"name": name}))
 
     for name, skill in root_skills.items():
-        path = skill.skill_path
-        if path is None:
-            path = _materialize_builtin_skill(skill)
-        if path is None:
-            continue
-        resolved = _resolved(path)
+        location = None
+        if locate is not None:
+            location = locate(skill)
+            if location is None:
+                logger.warning("Dropped skill %r: it has no copy in the sandbox", name)
+                continue
+            path: str = location.path
+            resolved = location.path
+        else:
+            host_path = skill.skill_path or _materialize_builtin_skill(skill)
+            if host_path is None:
+                continue
+            path = str(host_path)
+            resolved = str(_resolved(host_path))
         if resolved in claimed:
             logger.debug(
                 "Skipping root skill %r at %s: the path is already configured by a plugin",
@@ -189,7 +275,7 @@ def project_core_skills(
         if definition is None:
             continue
         claimed.add(resolved)
-        payload = _payload(skill)
+        payload = _payload(skill, location)
         payloads[name] = payload
         if skill.model_invocable:
             definitions.append(definition)
@@ -245,12 +331,12 @@ def _render_builtin_skill(skill: SkillInfo) -> str:
 
 
 def _accept_skill(
-    name: str, *, description: str, path: Path
+    name: str, *, description: str, path: str
 ) -> RustSkillDefinition | None:
     from mistralai_vibe_local_harness.protocol import RustSkillDefinition
 
     try:
-        return RustSkillDefinition(name=name, description=description, path=str(path))
+        return RustSkillDefinition(name=name, description=description, path=path)
     except ValidationError as error:
         logger.warning("Dropped skill %r at %s: %s", name, path, error, exc_info=True)
         return None

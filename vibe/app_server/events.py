@@ -212,7 +212,7 @@ def reconcile_snapshot(
         if prior is None:
             events.append(HistoryEntryAdded(entry))
             continue
-        if prior == entry:
+        if prior is entry or prior == entry:
             continue
         events.append(
             HistoryEntryUpdated(

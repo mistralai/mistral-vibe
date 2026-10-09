@@ -5,32 +5,42 @@ use ratatui::text::Span;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use super::markdown::{wrap_chars, Sc};
+
+/// Word-wrap like assistant prose: only a word wider than the row is cut inside.
 pub(crate) fn wrap_hard(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
-    let width = width.max(1);
-    let chars = styled_chars(spans);
-    let text = chars
+    let chars: Vec<Sc> = spans
         .iter()
-        .map(|(character, _)| character)
-        .collect::<String>();
-    let mut rows = Vec::new();
-    let mut row = Vec::new();
-    let mut used = 0;
-    let mut char_index = 0;
-    for grapheme in text.graphemes(true) {
-        let cell = grapheme.width();
-        if !row.is_empty() && used + cell > width {
-            rows.push(std::mem::take(&mut row));
-            used = 0;
-        }
-        let end = char_index + grapheme.chars().count();
-        for &(character, style) in &chars[char_index..end] {
-            push(&mut row, character, style);
-        }
-        used += cell;
-        char_index = end;
-    }
-    rows.push(row);
-    rows
+        .flat_map(|span| {
+            span.content
+                .chars()
+                .map(move |character| (character, span.style, None))
+        })
+        .collect();
+    wrap_chars(&chars, width)
+        .into_iter()
+        .map(|row| {
+            let mut spans = Vec::new();
+            for (character, style, _) in row {
+                push(&mut spans, character, style);
+            }
+            spans
+        })
+        .collect()
+}
+
+/// [`wrap_hard`], pairing each row with its fold gap.
+pub(crate) fn wrap_hard_folded(
+    spans: &[Span<'static>],
+    width: usize,
+) -> Vec<(Vec<Span<'static>>, Option<u16>)> {
+    let text = |spans: &[Span<'static>]| {
+        spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+    crate::selection::fold::paired(&text(spans), wrap_hard(spans, width), |row| text(row))
 }
 
 pub(crate) fn split_at_width(
@@ -83,3 +93,6 @@ fn push(spans: &mut Vec<Span<'static>>, character: char, style: Style) {
     }
     spans.push(Span::styled(character.to_string(), style));
 }
+
+#[cfg(test)]
+mod tests;

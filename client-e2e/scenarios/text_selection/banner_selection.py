@@ -1,6 +1,6 @@
 """Scenario: mouse drag-select the welcome banner's info block (fresh session).
 
-On an empty session the banner is the only chat content, bottom-anchored: the
+On an empty session the banner is the only chat content, top-anchored: the
 braille cat (frozen/blank at its starting pose under replay) then the info block
 -- `Mistral Vibe v<ver> ...`, the counts line, and `Type /help ...`. Those info
 rows sit in the chat area (chunks[0]), so a drag over them highlights transcript
@@ -22,13 +22,13 @@ from e2e.app_server.scenario import Timeline
 # Force the OSC 52 copy path so the copy notice is deterministic across hosts.
 env = {"SSH_TTY": "/dev/pts/0"}
 
-# The info block occupies 0-based chat rows 28-30 (SGR 29-31): the version line,
+# The info block occupies 0-based chat rows 5-7 (SGR 6-8): the version line,
 # the counts line, and the `Type /help` line. Drag from the start of the version
 # line down to the `Type /help` line for a multi-row banner selection.
-_PRESS = "\x1b[<0;1;29M"
-_DRAG_MID = "\x1b[<32;40;30M"
-_DRAG_END = "\x1b[<32;60;31M"
-_RELEASE = "\x1b[<0;60;31m"
+_PRESS = "\x1b[<0;1;6M"
+_DRAG_MID = "\x1b[<32;40;7M"
+_DRAG_END = "\x1b[<32;60;8M"
+_RELEASE = "\x1b[<0;60;8m"
 
 _SELECT = _PRESS + _DRAG_MID + _DRAG_END + _RELEASE
 

@@ -3,10 +3,11 @@
 
 use std::sync::Arc;
 
-use crossterm::event::{Event, KeyEventKind, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, MouseEventKind};
 use tokio::sync::mpsc;
 
 use crate::app::App;
+use crate::focus::Focus;
 use crate::server::Client;
 use crate::{config, input};
 
@@ -106,22 +107,26 @@ pub(super) fn handle_input_event(
             InputOutcome::Activity { reset_blink }
         }
         Some(Event::Paste(text)) => {
-            if app.trust.open {
-                // Nothing to paste into before the session exists.
-            } else if app.approval.open {
-                // The approval app takes no text input; the paste is dropped.
-            } else if app.question_app.open {
-                crate::question_input::handle_paste(app, text);
-            } else if app.voice_app.open {
-                // Voice settings take no text input; the paste is dropped.
-            } else if app.config_screen.open {
-                config::handle_paste(app, text);
-            } else if app.vibe_code_project.open {
-                crate::vibe_code_project::input::paste(app, &text);
-            } else if app.mcp.open {
-                crate::mcp::search::paste(app, &text);
-            } else {
-                input::handle_paste(app, text);
+            drop_box_selection(app);
+            match app.focus() {
+                // These surfaces take no text input; the paste is dropped.
+                Focus::Trust | Focus::Approval | Focus::VoiceApp => {}
+                Focus::Question => crate::question_input::handle_paste(app, text),
+                Focus::ProxySetup => crate::proxy_setup::paste(app, &text),
+                Focus::Config => config::handle_paste(app, text),
+                Focus::VibeCodeProject => crate::vibe_code_project::input::paste(app, &text),
+                Focus::Mcp => crate::mcp::search::paste(app, &text),
+                Focus::Plugins => crate::plugins::paste(app, &text),
+                Focus::ResumePicker
+                | Focus::McpOAuth
+                | Focus::ConnectorAuth
+                | Focus::Rewind
+                | Focus::ThemePicker
+                | Focus::ModelPicker
+                | Focus::LogLevelPicker
+                | Focus::ThinkingPicker
+                | Focus::SubagentList
+                | Focus::Composer => input::handle_paste(app, text),
             }
             InputOutcome::Activity { reset_blink: false }
         }
@@ -146,55 +151,55 @@ pub(super) fn handle_input_event(
     }
 }
 
+/// Input a bottom app consumes can rewrite its box under a screen-anchored selection.
+fn drop_box_selection(app: &mut App) {
+    if app.view.bottom_app.is_some() {
+        crate::selection::clear_region(app, crate::selection::RegionId::BottomApp);
+    }
+}
+
 fn dispatch_key(
     app: &mut App,
     client: &Arc<Client>,
     config_tx: &mpsc::Sender<config::Loaded>,
     key: crossterm::event::KeyEvent,
 ) -> bool {
-    if app.trust.open {
-        crate::trust_folders::handle_key(app, key)
-    } else if let Some(exit) = input::handle_priority_key(app, client, key) {
-        exit
-    } else if key.code == crossterm::event::KeyCode::Esc
-        && (app.approval.open || app.question_app.open)
-        && app.todo_sidebar.close()
-    {
-        // A docked plan panel closes before Esc rejects the tool or question the turn waits on.
-        false
-    } else if app.approval.open {
-        crate::approval::handle_key(app, client, key);
-        false
-    } else if app.question_app.open {
-        crate::question_input::handle_key(app, client, key);
-        false
-    } else if app.config_screen.open {
-        config::handle_key(app, client, config_tx, key);
-        false
-    } else if app.voice_app.open {
-        crate::voice_app::handle_key(app, client, key);
-        false
-    } else if app.vibe_code_project.open
-        || (app.vibe_code_project.pending && key.code == crossterm::event::KeyCode::Esc)
-    {
-        crate::vibe_code_project::input::handle_key(app, client, key);
-        false
-    } else if app.resume_picker.open {
-        crate::resume_picker::handle_key(app, client, key);
-        false
-    } else if app.mcp.open {
-        input::handle_mcp_key(app, client, key);
-        false
-    } else if app.mcp_oauth.open {
-        input::handle_mcp_oauth_key(app, client, key);
-        false
-    } else if app.connector_auth.open {
-        input::handle_connector_auth_key(app, client, key);
-        false
-    } else if app.rewind.open {
-        crate::rewind::handle_key(app, client, key);
-        false
-    } else {
-        input::handle_key(app, client, config_tx, key)
+    if app.focus() == Focus::Trust {
+        return crate::trust_folders::handle_key(app, key);
     }
+    if let Some(exit) = input::handle_priority_key(app, client, key) {
+        return exit;
+    }
+    drop_box_selection(app);
+    let esc = key.code == KeyCode::Esc;
+    match app.focus() {
+        // Handled above, before the priority keys.
+        Focus::Trust => {}
+        // A docked plan panel closes before Esc rejects the tool or question the turn waits on.
+        Focus::Approval | Focus::Question if esc && app.todo_sidebar.close() => {}
+        Focus::Approval => crate::approval::handle_key(app, client, key),
+        Focus::Question => crate::question_input::handle_key(app, client, key),
+        Focus::Config => config::handle_key(app, client, config_tx, key),
+        Focus::VoiceApp => crate::voice_app::handle_key(app, client, key),
+        Focus::ProxySetup => crate::proxy_setup::handle_key(app, client, key),
+        Focus::VibeCodeProject => crate::vibe_code_project::input::handle_key(app, client, key),
+        Focus::ResumePicker => crate::resume_picker::handle_key(app, client, key),
+        Focus::Mcp => input::handle_mcp_key(app, client, key),
+        Focus::Plugins => crate::plugins::handle_key(app, client, key),
+        Focus::McpOAuth => input::handle_mcp_oauth_key(app, client, key),
+        Focus::ConnectorAuth => input::handle_connector_auth_key(app, client, key),
+        Focus::Rewind => crate::rewind::handle_key(app, client, key),
+        Focus::ThemePicker => input::handle_theme_key(app, client, key),
+        Focus::ModelPicker => input::handle_model_key(app, client, key),
+        Focus::LogLevelPicker => input::handle_log_level_key(app, client, key),
+        Focus::ThinkingPicker => input::handle_thinking_key(app, client, key),
+        // Esc cancels a project request in flight before the composer sees it.
+        Focus::SubagentList | Focus::Composer if esc && app.vibe_code_project.pending => {
+            crate::vibe_code_project::input::handle_key(app, client, key)
+        }
+        Focus::SubagentList | Focus::Composer => {
+            return input::handle_key(app, client, config_tx, key)
+        }
+    }
+    false
 }

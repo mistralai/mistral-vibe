@@ -143,7 +143,8 @@ fn accept_without_suggestions_leaves_input_unchanged() {
 
 #[test]
 fn refresh_resets_highlight_only_when_the_suggestion_list_changes() {
-    let mut app = composer("/", "");
+    let mut app = composer("", "");
+    app.chat_input.mode = InputMode::Slash;
     completion_manager::refresh(&mut app);
     assert!(completion_manager::is_open(&app));
     completion_manager::navigate(&mut app, true);
@@ -158,8 +159,8 @@ fn refresh_resets_highlight_only_when_the_suggestion_list_changes() {
 
     // A different query rebuilds a different list: the highlight restarts at
     // the top suggestion instead of accepting a stale index.
-    app.chat_input.input = "/he".into();
-    app.chat_input.cursor = 3;
+    app.chat_input.input = "he".into();
+    app.chat_input.cursor = 2;
     completion_manager::refresh(&mut app);
     assert!(completion_manager::is_open(&app));
     assert_eq!(app.completion.selected, 0);
@@ -169,12 +170,11 @@ fn refresh_resets_highlight_only_when_the_suggestion_list_changes() {
 #[test]
 fn slash_menu_closes_once_anything_follows_the_command() {
     for (mode, input, open) in [
-        (InputMode::Prompt, "/help", true),
-        (InputMode::Prompt, "/help ", false),
-        (InputMode::Prompt, "/help a", false),
-        (InputMode::Prompt, "/help\n", false),
+        (InputMode::Prompt, "/help", false),
         (InputMode::Slash, "help", true),
         (InputMode::Slash, "help ", false),
+        (InputMode::Slash, "help a", false),
+        (InputMode::Slash, "help\n", false),
     ] {
         let mut app = composer(input, "");
         app.chat_input.mode = mode;
@@ -185,20 +185,20 @@ fn slash_menu_closes_once_anything_follows_the_command() {
 
 #[test]
 fn slash_menu_stays_closed_when_the_caret_returns_to_the_command() {
-    let mut app = composer("/he", "lp arg");
+    let mut app = composer("he", "lp arg");
+    app.chat_input.mode = InputMode::Slash;
     completion_manager::input_changed(&mut app);
     assert!(!completion_manager::is_open(&app));
 
     offer(&mut app, "/help");
     assert!(!completion_manager::accept(&mut app));
-    assert_eq!(app.chat_input.input, "/help arg");
+    assert_eq!(app.chat_input.input, "help arg");
 }
 
 #[test]
 fn tab_leaves_a_space_after_a_slash_command_only() {
     for (mode, before, label, expected) in [
         (InputMode::Slash, "lo", "/loop", "loop "),
-        (InputMode::Prompt, "/lo", "/loop", "/loop "),
         (InputMode::Prompt, "@sr", "@src/", "@src/"),
     ] {
         let mut app = composer(before, "");
@@ -214,18 +214,13 @@ fn tab_leaves_a_space_after_a_slash_command_only() {
 
 #[test]
 fn slash_accept_replaces_the_whole_command_word() {
-    for (mode, before, after, expected) in [
-        (InputMode::Slash, "sta", "tu", "status"),
-        (InputMode::Prompt, "/sta", "tu", "/status"),
-    ] {
-        let mut app = composer(before, after);
-        app.chat_input.mode = mode;
-        app.chat_input.anchor = Some(0);
-        offer(&mut app, "/status");
+    let mut app = composer("sta", "tu");
+    app.chat_input.mode = InputMode::Slash;
+    app.chat_input.anchor = Some(0);
+    offer(&mut app, "/status");
 
-        assert!(completion_manager::accept(&mut app));
-        assert_eq!(app.chat_input.input, expected);
-        assert_eq!(app.chat_input.cursor, expected.len());
-        assert_eq!(app.chat_input.anchor, None);
-    }
+    assert!(completion_manager::accept(&mut app));
+    assert_eq!(app.chat_input.input, "status");
+    assert_eq!(app.chat_input.cursor, "status".len());
+    assert_eq!(app.chat_input.anchor, None);
 }

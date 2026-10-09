@@ -244,7 +244,9 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 workspace = workspace.moved_to(cwd)
             if image_source_roots is not None:
                 workspace = SessionWorkspace(
-                    cwd=workspace.cwd, roots=image_source_roots
+                    cwd=workspace.cwd,
+                    roots=image_source_roots,
+                    path_space=workspace.path_space,
                 )
         self._workspace = workspace
         if adapter_config is not None:
@@ -2885,28 +2887,36 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         self._publish_session_state_update()
 
     def _with_open_callbacks(self, state: PublicSessionState) -> PublicSessionState:
+        blocked = self._blocked_status()
+        session = (
+            state.session.model_copy(update={"status": blocked})
+            if blocked is not None and _held_by_open_callback(state.session.status.type)
+            else state.session
+        )
+        return state.model_copy(
+            update={
+                "active_callbacks": list(self._open_callbacks.values()),
+                "session": session,
+            }
+        )
+
+    def _blocked_status(self) -> BlockedSessionStatus | None:
+        """The status of a session whose latest open callback holds its turn."""
         callbacks = list(self._open_callbacks.values())
         if not callbacks:
-            return state.model_copy(update={"active_callbacks": []})
+            return None
         callback = callbacks[-1]
         active_turn_id = _str_field(callback, "turnId") or self.active_turn_id
-        session = state.session
-        if active_turn_id is not None:
-            detail = _field(callback, "detail", default={})
-            callback_kind = (
-                detail.get("kind") if isinstance(detail, dict) else None
-            ) or "approval"
-            session = session.model_copy(
-                update={
-                    "status": BlockedSessionStatus(
-                        active_turn_id=active_turn_id,
-                        callback_id=_required_str(callback, "callbackId"),
-                        callback_kind=callback_kind,
-                    )
-                }
-            )
-        return state.model_copy(
-            update={"active_callbacks": callbacks, "session": session}
+        if active_turn_id is None:
+            return None
+        detail = _field(callback, "detail", default={})
+        callback_kind = (
+            detail.get("kind") if isinstance(detail, dict) else None
+        ) or "approval"
+        return BlockedSessionStatus(
+            active_turn_id=active_turn_id,
+            callback_id=_required_str(callback, "callbackId"),
+            callback_kind=callback_kind,
         )
 
     def publish_notice(self, message: str, *, level: str = "warning") -> None:
@@ -2939,10 +2949,11 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     def _with_harness_owned_state(self, event: JsonObject) -> JsonObject:
         """Stamp the state this backend owns onto a published state event.
 
-        The turn queue, background processes, and provider-retry indicator are
-        the Harness's, not the projection's, so an event minted by the projector
-        carries none of them. Emitting one without them reads downstream as
-        empty state and silently retires work that is still in flight.
+        The turn queue, background processes, open callbacks, and
+        provider-retry indicator are the Harness's, not the projection's, so an
+        event minted by the projector carries none of them. Emitting one without
+        them reads downstream as empty state and silently retires work that is
+        still in flight.
         """
         if event.get("type") != "session_state_updated":
             return event
@@ -2951,12 +2962,24 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             return event
         state = {
             **raw_state,
+            "activeCallbacks": list(self._open_callbacks.values()),
             "backgroundProcesses": [
                 process.model_dump(mode="json", by_alias=True)
                 for process in self._background_processes_snapshot
             ],
             "turnQueue": self.turn_queue.model_dump(mode="json", by_alias=True),
         }
+        session = raw_state.get("session")
+        blocked = self._blocked_status()
+        if (
+            blocked is not None
+            and isinstance(session, dict)
+            and _held_by_open_callback(_str_field(session.get("status"), "type"))
+        ):
+            state["session"] = {
+                **session,
+                "status": blocked.model_dump(mode="json", by_alias=True),
+            }
         # Absent means "not retrying": the field is omitted when unset so a
         # reader that predates it keeps parsing.
         if self._retrying is None:
@@ -3566,6 +3589,15 @@ def _required_str(params: object, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{field} is required")
     return value
+
+
+def _held_by_open_callback(status_type: str | None) -> bool:
+    """Whether an open callback holds a session that reports this status.
+
+    Only a turn still in flight is held. A terminal status is newer than a
+    callback that is about to close, so it is kept.
+    """
+    return status_type in {"running", "blocked"}
 
 
 def _terminal_turn(event: JsonObject) -> tuple[str, str] | None:

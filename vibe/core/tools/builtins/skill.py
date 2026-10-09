@@ -21,9 +21,9 @@ from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.utils.tool_presentation import ToolEffectKind
 
-_MAX_LISTED_FILES = 10
-_MAX_WALKED_ENTRIES = 200
-_SKIP_DIR_NAMES = frozenset({
+SAMPLED_SKILL_FILES = 10
+MAX_WALKED_SKILL_ENTRIES = 200
+SKIPPED_SKILL_DIR_NAMES = frozenset({
     ".git",
     "node_modules",
     "__pycache__",
@@ -59,20 +59,27 @@ def sample_skill_files(skill_dir: Path | None) -> list[str]:
     files: list[str] = []
     try:
         for root, dirnames, filenames in os.walk(skill_dir, followlinks=False):
-            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_NAMES]
+            dirnames[:] = [d for d in dirnames if d not in SKIPPED_SKILL_DIR_NAMES]
             for name in filenames:
                 if name == "SKILL.md":
                     continue
                 files.append(str(Path(root, name).relative_to(skill_dir)))
-            if len(files) >= _MAX_WALKED_ENTRIES:
+            if len(files) >= MAX_WALKED_SKILL_ENTRIES:
                 break
     except OSError:
         pass
-    return sorted(files)[:_MAX_LISTED_FILES]
+    return sorted(files)[:SAMPLED_SKILL_FILES]
 
 
-def render_skill_result(skill_info: SkillInfo, files: list[str]) -> SkillResult:
-    skill_dir = skill_info.skill_dir
+def render_skill_result(
+    skill_info: SkillInfo, files: list[str], *, base_dir: str | None = None
+) -> SkillResult:
+    """Render a skill's content block.
+
+    ``base_dir`` overrides the skill's own directory, for a skill whose files
+    the model reads somewhere else, such as a copy in a sandbox.
+    """
+    skill_dir = base_dir or skill_info.skill_dir
 
     file_lines = "\n".join(f"<file>{f}</file>" for f in files)
     base_dir_lines: list[str] = []

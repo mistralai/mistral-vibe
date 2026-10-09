@@ -48,7 +48,7 @@ fn selected_owner(
         RegionId::Main => &mut app.view.selection_region,
         RegionId::Toast(_) => &mut app.view.toast_selection_region,
         RegionId::Loading => &mut app.view.loading_selection_region,
-        RegionId::Question => &mut app.view.question_selection_region,
+        RegionId::BottomApp => &mut app.view.bottom_app_selection_region,
     };
     region.area = chat;
     region.end_exclusive = end_exclusive;
@@ -99,7 +99,7 @@ fn frame_regions_select_without_chrome_gaps() {
         2,
         9,
         Granularity::Char,
-        RegionId::Question,
+        RegionId::BottomApp,
         false,
     );
     assert_eq!(question, vec![(0, 2, 9)]);

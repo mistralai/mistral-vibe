@@ -11,7 +11,7 @@ _URI = "vscode:extension/mistralai.mistral-vibe-code"
 expected_actions = {"rust": [Action("open_url", _URI)]}
 
 # `VS Code extension` spans one-based columns 17-33 on the promo row.
-_CLICK = "\x1b[<0;20;31M\x1b[<0;20;31m"
+_CLICK = "\x1b[<0;20;9M\x1b[<0;20;9m"
 
 # The promo mounts after startup; the capture after typing settles it.
 capture_startup = False

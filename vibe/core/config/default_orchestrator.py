@@ -96,6 +96,10 @@ async def build_user_config_orchestrator() -> ConfigOrchestrator[VibeConfigSchem
     """Build a user-config-only orchestrator for configuration management."""
     manager = get_harness_files_manager()
     user_layer = UserConfigLayer(path=manager.user_config_file)
+    # Single-layer view: a project-defined ``local`` is invisible here, so a
+    # sparse user entry may still get stamped. Harmless — a higher complete
+    # entry wins the merge — and the full stack migrates with cross-file
+    # visibility at startup.
     await migrate_config_layers([user_layer])
     return await ConfigOrchestrator.create(
         schema=VibeConfigSchema,

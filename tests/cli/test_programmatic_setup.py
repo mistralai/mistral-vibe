@@ -2,19 +2,25 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import cast
 
 from git import Repo
 import pytest
 
+from mistralai_vibe_local_harness.vibe import SandboxAdapter
 from tests.conftest import OrchestratorLoader, build_test_vibe_config
+from vibe.app_server._runtime import HarnessProcess
 from vibe.app_server.local import LocalHarnessOptions
+from vibe.app_server.run_export import RunOutcome, RunResult
 from vibe.cli import (
     cli as cli_mod,
     entrypoint as entrypoint_mod,
     programmatic as programmatic_mod,
 )
+from vibe.cli.headless_run import HeadlessRun, RunReport, StopRequests
 from vibe.core.config import MissingAPIKeyError, VibeConfigSchema, harness_files
 from vibe.core.config.builder import ConfigMergeError
+from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.layer import ConfigStorageError
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.git.worktree import ManagedWorktree, WorktreeRepository
@@ -30,6 +36,10 @@ def _prepare(name: str, base: Path) -> None:
 def _holders(cwd: Path) -> frozenset[str]:
     managed = ManagedWorktree.at(cwd)
     return frozenset() if managed is None else managed.holders()
+
+
+def _run_cli(args: argparse.Namespace) -> None:
+    cli_mod.run_cli(args, headless=HeadlessRun.for_args(args))
 
 
 def _make_args(**overrides: object) -> argparse.Namespace:
@@ -55,6 +65,11 @@ def _make_args(**overrides: object) -> argparse.Namespace:
         "teleport": False,
         "continue_session": False,
         "resume": None,
+        "prompt_file": None,
+        "output_dir": None,
+        "time_limit": None,
+        "agent_socket": None,
+        "agent_connection": None,
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -90,9 +105,11 @@ def test_programmatic_mode_does_not_run_onboarding_on_missing_api_key(
         sentinel["called"] = True
 
     monkeypatch.setattr(onboarding_mod, "run_onboarding", fail_onboarding)
+    monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
+    monkeypatch.setattr(cli_mod, "load_config_orchestrator", lambda: orchestrator)
 
     with pytest.raises(SystemExit) as exc_info:
-        cli_mod.require_api_key_or_onboard(orchestrator, interactive=False)
+        _run_cli(_make_args())
 
     assert exc_info.value.code == 1
     assert sentinel["called"] is False
@@ -126,7 +143,7 @@ def test_interactive_mode_still_runs_onboarding_on_missing_api_key(
 
     monkeypatch.setattr(onboarding_mod, "run_onboarding", fake_onboarding)
 
-    result = cli_mod.require_api_key_or_onboard(orchestrator, interactive=True)
+    result = cli_mod.require_api_key_or_onboard(orchestrator)
     assert onboarding_called == [True]
     assert result.config.displayed_workdir == "/sentinel/workdir"
 
@@ -239,7 +256,7 @@ def test_check_upgrade_does_not_start_interactive_trust(
         harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
 
-    def fake_run_cli(_args: argparse.Namespace) -> None:
+    def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
         raise SystemExit(0)
 
     monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
@@ -589,7 +606,7 @@ def test_interactive_start_delegates_trust_to_textual(
         harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
 
-    def fake_run_cli(_args: argparse.Namespace) -> None:
+    def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
         raise SystemExit(0)
 
     monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
@@ -614,33 +631,133 @@ def test_session_trust_does_not_write_to_disk(
     assert not trust_file.exists()
 
 
-def test_run_cli_passes_max_tokens_to_run_programmatic(
+def test_run_cli_gives_the_budgets_to_the_run_not_the_session(
     monkeypatch: pytest.MonkeyPatch,
     load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
-    args = _make_args(max_tokens=123)
+    args = _make_args(max_tokens=123, max_price=1.5)
     call: dict[str, object] = {}
     config = build_test_vibe_config()
 
     monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
     monkeypatch.setattr(
-        cli_mod, "load_config_orchestrator_or_exit", lambda: load_orchestrator(config)
+        cli_mod, "load_config_orchestrator", lambda: load_orchestrator(config)
     )
     monkeypatch.setattr(cli_mod, "get_prompt_from_stdin", lambda: None)
 
-    def fake_run_programmatic(**kwargs: object) -> str:
+    def fake_run_programmatic(**kwargs: object) -> RunReport:
         call.update(kwargs)
-        return "done"
+        return RunReport(
+            result=RunResult(outcome=RunOutcome.FINISHED), final_response="done"
+        )
 
     monkeypatch.setattr(programmatic_mod, "run_programmatic", fake_run_programmatic)
 
     with pytest.raises(SystemExit) as exc_info:
-        cli_mod.run_cli(args)
+        _run_cli(args)
 
     assert exc_info.value.code == 0
     options = call["harness_options"]
     assert isinstance(options, LocalHarnessOptions)
-    assert options.session_options.max_session_tokens == 123
+    assert options.session_options.max_session_tokens is None
+    assert options.session_options.max_price is None
+    stop = call["stop"]
+    assert isinstance(stop, StopRequests)
+    assert stop.limits.max_tokens == 123
+    assert stop.limits.max_price == 1.5
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error", "exit_code"),
+    [({"resume": True}, None, 1), ({}, ValueError("malformed runtime reply"), 2)],
+    ids=["resume-without-id", "malformed-runtime-reply"],
+)
+def test_run_cli_tells_usage_errors_from_runtime_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    overrides: dict[str, object],
+    error: Exception | None,
+    exit_code: int,
+) -> None:
+    """*Prepare*: A `vibe -p` run that either passes `--resume` without a
+    session ID or whose runtime fails with a ``ValueError`` (as a reply that
+    fails validation does).
+    *Do*: Run the CLI.
+    *Assert*: The first exits 1 as a usage error; the second exits 2 as an
+    infrastructure failure.
+    """
+    # Prepare
+    args = _make_args(**overrides)
+    monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_config_orchestrator",
+        lambda: load_orchestrator(build_test_vibe_config()),
+    )
+    monkeypatch.setattr(cli_mod, "get_prompt_from_stdin", lambda: None)
+
+    def fake_run_programmatic(**_kwargs: object) -> RunReport:
+        if error is not None:
+            raise error
+        return RunReport(result=RunResult(outcome=RunOutcome.FINISHED))
+
+    monkeypatch.setattr(programmatic_mod, "run_programmatic", fake_run_programmatic)
+
+    # Do
+    with pytest.raises(SystemExit) as exc_info:
+        _run_cli(args)
+
+    # Assert
+    assert exc_info.value.code == exit_code
+
+
+@pytest.mark.parametrize(
+    ("misuse", "message"),
+    [
+        ("project-files", "A sandboxed session cannot load project files"),
+        ("legacy-harness", "A sandbox requires the Unified Harness"),
+    ],
+)
+def test_run_cli_exits_1_when_a_sandboxed_run_is_asked_for_what_it_cannot_do(
+    monkeypatch: pytest.MonkeyPatch,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    capsys: pytest.CaptureFixture[str],
+    misuse: str,
+    message: str,
+) -> None:
+    """*Prepare*: A `vibe -p` run whose harness process is built with a sandbox
+    and the project's own files, or with a sandbox on the legacy harness.
+    *Do*: Run the CLI.
+    *Assert*: It exits 1 as a usage error, naming the mistake.
+    """
+    # Prepare
+    args = _make_args()
+    monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_config_orchestrator",
+        lambda: load_orchestrator(build_test_vibe_config()),
+    )
+    monkeypatch.setattr(cli_mod, "get_prompt_from_stdin", lambda: None)
+    sandbox = cast(SandboxAdapter, object())
+
+    def fake_run_programmatic(**_kwargs: object) -> RunReport:
+        if misuse == "project-files":
+            files = HarnessFilesManager(sources=("user", "project"))
+            HarnessProcess(files, experimental_harness=True, sandbox=sandbox)
+        else:
+            HarnessProcess(legacy_harness=True, sandbox=sandbox)
+        return RunReport(result=RunResult(outcome=RunOutcome.FINISHED))
+
+    monkeypatch.setattr(programmatic_mod, "run_programmatic", fake_run_programmatic)
+
+    # Do
+    with pytest.raises(SystemExit) as exc_info:
+        _run_cli(args)
+
+    # Assert
+    assert exc_info.value.code == 1
+    assert message in capsys.readouterr().err
 
 
 def test_run_cli_auto_approve_is_a_harness_option_without_changing_agent(
@@ -653,19 +770,19 @@ def test_run_cli_auto_approve_is_a_harness_option_without_changing_agent(
     orchestrator = load_orchestrator(config)
 
     monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
-    monkeypatch.setattr(
-        cli_mod, "load_config_orchestrator_or_exit", lambda: orchestrator
-    )
+    monkeypatch.setattr(cli_mod, "load_config_orchestrator", lambda: orchestrator)
     monkeypatch.setattr(cli_mod, "get_prompt_from_stdin", lambda: None)
 
-    def fake_run_programmatic(**kwargs: object) -> str:
+    def fake_run_programmatic(**kwargs: object) -> RunReport:
         call.update(kwargs)
-        return "done"
+        return RunReport(
+            result=RunResult(outcome=RunOutcome.FINISHED), final_response="done"
+        )
 
     monkeypatch.setattr(programmatic_mod, "run_programmatic", fake_run_programmatic)
 
     with pytest.raises(SystemExit) as exc_info:
-        cli_mod.run_cli(args)
+        _run_cli(args)
 
     assert exc_info.value.code == 0
     options = call["harness_options"]
@@ -690,19 +807,19 @@ def test_run_cli_auto_approve_without_an_agent_selects_the_auto_approve_profile(
     orchestrator = load_orchestrator(build_test_vibe_config(default_agent="plan"))
 
     monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
-    monkeypatch.setattr(
-        cli_mod, "load_config_orchestrator_or_exit", lambda: orchestrator
-    )
+    monkeypatch.setattr(cli_mod, "load_config_orchestrator", lambda: orchestrator)
     monkeypatch.setattr(cli_mod, "get_prompt_from_stdin", lambda: None)
 
-    def fake_run_programmatic(**kwargs: object) -> str:
+    def fake_run_programmatic(**kwargs: object) -> RunReport:
         call.update(kwargs)
-        return "done"
+        return RunReport(
+            result=RunResult(outcome=RunOutcome.FINISHED), final_response="done"
+        )
 
     monkeypatch.setattr(programmatic_mod, "run_programmatic", fake_run_programmatic)
 
     with pytest.raises(SystemExit) as exc_info:
-        cli_mod.run_cli(args)
+        _run_cli(args)
 
     assert exc_info.value.code == 0
     options = call["harness_options"]
@@ -723,19 +840,19 @@ def test_run_cli_forwards_experimental_harness_selection(
     orchestrator = load_orchestrator(config)
 
     monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
-    monkeypatch.setattr(
-        cli_mod, "load_config_orchestrator_or_exit", lambda: orchestrator
-    )
+    monkeypatch.setattr(cli_mod, "load_config_orchestrator", lambda: orchestrator)
     monkeypatch.setattr(cli_mod, "get_prompt_from_stdin", lambda: None)
 
-    def fake_run_programmatic(**kwargs: object) -> str:
+    def fake_run_programmatic(**kwargs: object) -> RunReport:
         call.update(kwargs)
-        return "done"
+        return RunReport(
+            result=RunResult(outcome=RunOutcome.FINISHED), final_response="done"
+        )
 
     monkeypatch.setattr(programmatic_mod, "run_programmatic", fake_run_programmatic)
 
     with pytest.raises(SystemExit) as exc_info:
-        cli_mod.run_cli(args)
+        _run_cli(args)
 
     assert exc_info.value.code == 0
     options = call["harness_options"]
@@ -751,14 +868,14 @@ def _patch_run_cli_for_config(
     call: dict[str, object] = {}
     orchestrator = load_orchestrator(config)
     monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
-    monkeypatch.setattr(
-        cli_mod, "load_config_orchestrator_or_exit", lambda: orchestrator
-    )
+    monkeypatch.setattr(cli_mod, "load_config_orchestrator", lambda: orchestrator)
     monkeypatch.setattr(cli_mod, "get_prompt_from_stdin", lambda: None)
 
-    def fake_run_programmatic(**kwargs: object) -> str:
+    def fake_run_programmatic(**kwargs: object) -> RunReport:
         call.update(kwargs)
-        return "done"
+        return RunReport(
+            result=RunResult(outcome=RunOutcome.FINISHED), final_response="done"
+        )
 
     monkeypatch.setattr(programmatic_mod, "run_programmatic", fake_run_programmatic)
     return call
@@ -773,7 +890,7 @@ def test_run_cli_disabled_tools_filter_enabled_tools(
     call = _patch_run_cli_for_config(monkeypatch, config, load_orchestrator)
 
     with pytest.raises(SystemExit):
-        cli_mod.run_cli(args)
+        _run_cli(args)
 
     options = call["harness_options"]
     assert isinstance(options, LocalHarnessOptions)
@@ -790,7 +907,7 @@ def test_run_cli_programmatic_disabled_tools_filter_enabled_tools(
     call = _patch_run_cli_for_config(monkeypatch, config, load_orchestrator)
 
     with pytest.raises(SystemExit):
-        cli_mod.run_cli(args)
+        _run_cli(args)
 
     options = call["harness_options"]
     assert isinstance(options, LocalHarnessOptions)
@@ -812,7 +929,7 @@ def test_run_cli_disabled_tools_concatenated_when_no_enabled_tools(
     call = _patch_run_cli_for_config(monkeypatch, config, load_orchestrator)
 
     with pytest.raises(SystemExit):
-        cli_mod.run_cli(args)
+        _run_cli(args)
 
     options = call["harness_options"]
     assert isinstance(options, LocalHarnessOptions)
@@ -846,7 +963,7 @@ def test_run_cli_runs_update_prompt_before_interactive_start(
     monkeypatch.setattr(cli_mod, "_run_interactive_mode", run_interactive)
 
     with pytest.raises(SystemExit) as exc_info:
-        cli_mod.run_cli(args)
+        _run_cli(args)
 
     assert exc_info.value.code == 0
     assert calls == ["update", "interactive"]
@@ -880,7 +997,7 @@ def test_run_cli_setup_resolves_config_before_onboarding(
     monkeypatch.setattr(onboarding_mod, "run_onboarding", run_onboarding)
 
     with pytest.raises(SystemExit) as exc_info:
-        cli_mod.run_cli(args)
+        _run_cli(args)
 
     assert exc_info.value.code == 0
     assert calls == ["config", "onboarding"]
@@ -920,7 +1037,7 @@ def test_run_cli_check_upgrade_loads_config_without_requiring_api_key(
     monkeypatch.setattr(cli_mod, "_run_check_upgrade", fake_run_check_upgrade)
 
     with pytest.raises(SystemExit) as exc_info:
-        cli_mod.run_cli(args)
+        _run_cli(args)
 
     assert exc_info.value.code == 0
     assert call["theme"] == "dracula"

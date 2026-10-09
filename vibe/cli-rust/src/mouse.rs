@@ -3,7 +3,7 @@
 mod dispatch;
 mod scrollbar;
 
-pub use scrollbar::{drag_scroll, register_scrollbar};
+pub use scrollbar::{drag_scroll, register_scrollbar, scrollbar_tracks};
 
 pub use dispatch::toggle_effect_at;
 
@@ -43,8 +43,10 @@ pub enum MouseTarget {
     LogLevelPicker,
     ResumePicker,
     RemoteProject,
-    Rewind,
+    ProxySetup,
+    BottomApp,
     Mcp,
+    Plugins,
     McpOAuth,
     ConnectorAuth,
     Config,
@@ -202,6 +204,14 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
     let Some(target) = target_at(app, (event.column, event.row)) else {
         return true;
     };
+    // Scrolling a bottom-app box moves its text under a screen-anchored selection.
+    if app
+        .view
+        .bottom_app_selection_region
+        .contains((event.column, event.row))
+    {
+        selection::clear_region(app, selection::RegionId::BottomApp);
+    }
     match target {
         MouseTarget::Transcript => scroll_chat(app, up, MOUSE_SCROLL_STEP),
         MouseTarget::Composer => scroll_input(app, up),
@@ -211,7 +221,9 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         MouseTarget::LogLevelPicker => log_level_picker::navigate(app, !up),
         MouseTarget::ResumePicker => resume_picker::wheel(app, !up),
         MouseTarget::Mcp => mcp::wheel(app, !up),
+        MouseTarget::Plugins => crate::plugins::wheel(app, !up),
         MouseTarget::RemoteProject => crate::vibe_code_project::input::wheel(app, up),
+        MouseTarget::ProxySetup => app.proxy_setup.wheel(up, MOUSE_SCROLL_STEP as usize),
         MouseTarget::Config => config::wheel(app, if up { -2 } else { 2 }),
         MouseTarget::ConfigEditor => crate::config_edit::wheel(app, if up { -1 } else { 1 }),
         MouseTarget::Trust => crate::trust_folders::wheel(app, up),
@@ -233,7 +245,7 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         MouseTarget::Blocked
         | MouseTarget::Loading
         | MouseTarget::Toast
-        | MouseTarget::Rewind
+        | MouseTarget::BottomApp
         | MouseTarget::McpOAuth
         | MouseTarget::ConnectorAuth
         | MouseTarget::BottomBar
@@ -262,6 +274,17 @@ pub(crate) fn cancel_capture(app: &mut App) {
                 | MouseTarget::BottomBar
                 | MouseTarget::Loading
                 | MouseTarget::Question
+                | MouseTarget::Approval
+                | MouseTarget::BottomApp
+                | MouseTarget::ProxySetup
+                | MouseTarget::ThemePicker
+                | MouseTarget::ModelPicker
+                | MouseTarget::LogLevelPicker
+                | MouseTarget::ResumePicker
+                | MouseTarget::Mcp
+                | MouseTarget::Plugins
+                | MouseTarget::McpOAuth
+                | MouseTarget::ConnectorAuth
         ) {
             selection::cancel_drag(app);
         }

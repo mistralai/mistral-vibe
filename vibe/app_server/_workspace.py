@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
@@ -203,10 +204,16 @@ def mentioned_file_content_blocks(
 async def mentioned_file_content_blocks_async(
     message: str, *, base_dir: Path, workspace_roots: Sequence[Path] = ()
 ) -> list[ContentBlock]:
+    if "@" not in message:
+        return []
+    resources = await asyncio.to_thread(
+        _mentioned_file_resources,
+        message,
+        base_dir=base_dir,
+        workspace_roots=workspace_roots,
+    )
     blocks: list[ContentBlock] = []
-    for resource in _mentioned_file_resources(
-        message, base_dir=base_dir, workspace_roots=workspace_roots
-    ):
+    for resource in resources:
         try:
             result = await read_lines_safe_async(
                 resource.path,

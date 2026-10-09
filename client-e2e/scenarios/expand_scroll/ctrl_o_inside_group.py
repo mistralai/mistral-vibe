@@ -11,7 +11,7 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-screen_rows = {"rust": {0: "⏵ Ran commands"}}
+screen_rows = {"rust": {0: "⏵ Ran 20 commands"}}
 
 _WHEEL_UP = "\x1b[<64;60;10M"
 _CTRL_O = "\x0f"

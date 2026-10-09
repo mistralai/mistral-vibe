@@ -24,13 +24,12 @@ _SOURCES = [
     {"title": "Local note", "url": "file:///tmp/zidane.txt"},
 ]
 
-# The settled tool group header lands on SGR row 30, then its web-search entry header.
-_EXPAND = "\x1b[<0;1;30M\x1b[<0;1;30m"
-_EXPAND_ENTRY = "\x1b[<0;8;30M\x1b[<0;8;30m"
-# Hovering the first bullet, under the group and body borders, repaints it as a hovered link.
-_HOVER = "\x1b[<35;20;28M"
+# The lone web search stays ungrouped: its settled header lands on SGR row 15.
+_EXPAND = "\x1b[<0;1;15M\x1b[<0;1;15m"
+# Hovering the first bullet, under the body border, repaints it as a hovered link.
+_HOVER = "\x1b[<35;14;20M"
 # Clicking the same bullet opens its source.
-_CLICK = "\x1b[<0;20;28M\x1b[<0;20;28m"
+_CLICK = "\x1b[<0;14;20M\x1b[<0;14;20m"
 
 expected_actions = {"rust": [Action("open_url", _SOURCES[0]["url"])]}
 
@@ -43,7 +42,6 @@ timeline: Timeline = [
     assistant_msg(_ANSWER),
     turn_completed(),
     _EXPAND,
-    _EXPAND_ENTRY,
     _HOVER,
     _CLICK,
 ]

@@ -188,6 +188,10 @@ class SessionProjector:
         token_usage = state.session.token_usage
         context_usage = state.session.context_usage
         preview = state.session.preview or first_user_message_preview(entries)
+        # The Turn whose latest committed answer was cut off at the output cap.
+        # An answer that ends its Turn is committed in the same transition as
+        # the Turn's completion, so tracking it per transition is enough.
+        truncated_turn_id: str | None = None
         for observation in transition.observations:
             if isinstance(observation, RustTurnStartedObservation):
                 latest_turn = InProgressPublicTurn(
@@ -259,6 +263,11 @@ class SessionProjector:
                     update={"input_entry_id": input_entry_id}
                 )
             elif isinstance(observation, RustAssistantMessageCommittedObservation):
+                truncated_turn_id = (
+                    observation.turn_id
+                    if observation.candidate.finish_reason == "length"
+                    else None
+                )
                 input_entry_id = _active_input_entry_id(
                     latest_turn, observation.turn_id
                 )
@@ -429,6 +438,9 @@ class SessionProjector:
                     ),
                     started_at=started_at,
                     completed_at=observed_at,
+                    stop_reason=_completed_stop_reason(
+                        observation, truncated=truncated_turn_id == observation.turn_id
+                    ),
                 )
             elif isinstance(observation, RustTurnInterruptedObservation):
                 started_at = _started_at(latest_turn, observation.turn_id, observed_at)
@@ -646,12 +658,21 @@ class SessionProjector:
                     "type": "session_state_updated",
                     "eventId": watermark,
                     "sessionId": public.session.id,
-                    "state": public.model_dump(mode="json", by_alias=True),
+                    "state": _published_state(public),
                 },
             ),
             delta=delta,
             journaled_snapshot=self._durable,
         )
+
+
+def _published_state(public: PublicSessionState) -> JsonObject:
+    # Builders replace entries instead of mutating them, so subscribers can share them.
+    state = public.model_dump(
+        mode="json", by_alias=True, exclude={"history": {"entries"}}
+    )
+    state["history"]["entries"] = list(public.history.entries)
+    return state
 
 
 def renamed_session_state(
@@ -1921,6 +1942,16 @@ def _effect_result_message(effect_state: JsonObject) -> str:
         return "tool completed"
     message = display.get("message")
     return message if isinstance(message, str) else "tool completed"
+
+
+def _completed_stop_reason(
+    observation: RustTurnCompletedObservation, *, truncated: bool
+) -> Literal["limit", "length"] | None:
+    if observation.stop_reason == "iteration_limit":
+        return "limit"
+    if truncated:
+        return "length"
+    return None
 
 
 def _started_at(latest_turn: object, turn_id: str, fallback: int) -> int:

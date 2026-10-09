@@ -39,7 +39,7 @@ _URI = "vscode:extension/mistralai.mistral-vibe-code"
 expected_actions = {"rust": [Action("open_url", _URI)]}
 
 # The fixture's `VS Code extension` link spans one-based columns 13-29 on its bullet row.
-_CLICK = "\x1b[<0;16;31M\x1b[<0;16;31m"
+_CLICK = "\x1b[<0;16;14M\x1b[<0;16;14m"
 
 # The banner mounts after startup; the capture after typing settles it.
 capture_startup = False

@@ -216,6 +216,25 @@ class TestKeyringTokenStorage:
         assert reads == [(_KEYRING_SERVICE, "mcp-oauth:linear:tokens")]
 
     @pytest.mark.asyncio
+    async def test_corrupted_entries_read_as_logged_out(
+        self, memory_keyring: _MemoryKeyring, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        for kind in ("tokens", "client_info", "fingerprint"):
+            memory_keyring.store[(_KEYRING_SERVICE, f"mcp-oauth:linear:{kind}")] = (
+                '{"access_token": "truncate'
+            )
+        storage = KeyringTokenStorage(alias="linear")
+
+        with caplog.at_level("WARNING"):
+            assert await storage.get_tokens() is None
+            assert await storage.get_client_info() is None
+            assert await Fingerprint.load("linear") is None
+
+        for kind in ("tokens", "client_info", "fingerprint"):
+            assert f"mcp-oauth:linear:{kind}" in caplog.text
+        assert "truncate" not in caplog.text
+
+    @pytest.mark.asyncio
     async def test_round_trip_client_info(self, memory_keyring: _MemoryKeyring) -> None:
         storage = KeyringTokenStorage(alias="linear")
         assert await storage.get_client_info() is None

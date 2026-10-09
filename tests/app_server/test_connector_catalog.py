@@ -109,6 +109,27 @@ async def test_manage_connectors_url_none_when_identity_incomplete(monkeypatch) 
     assert await connector_catalog._manage_connectors_url(config) is None
 
 
+def test_resolve_provider_gates_document_library_connector(monkeypatch) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    disabled = connector_catalog._resolve_provider(
+        build_test_vibe_config(enable_connectors=True)
+    )
+    assert disabled is not None
+    assert disabled.builtins == ("web_search",)
+
+    enabled = connector_catalog._resolve_provider(
+        build_test_vibe_config(
+            enable_connectors=True, experimental_enable_document_library_connector=True
+        )
+    )
+    assert enabled is not None
+    assert enabled.builtins == ("web_search", "document_library")
+    # The gated builtins must fold into the cache key so the two states never
+    # collide on disk.
+    assert disabled.fingerprint != enabled.fingerprint
+
+
 def _connector(
     *,
     connector_id: str = "connector-1",
@@ -217,8 +238,9 @@ async def test_connector_bootstrap_processing_runs_off_the_event_loop(
         "https://api.example.test/v1/connectors/bootstrap",
         headers={"Authorization": "Bearer secret"},
         params={
+            # Default omits the gated document_library connector.
             "include_auth_actionable_connectors": "true",
-            "builtin_connectors": "web_search",
+            "builtin_connectors": ("web_search",),
             "supports_mcp": "true",
         },
     )
@@ -232,7 +254,9 @@ async def test_connector_catalog_trusts_server_capability_filter(
 ) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
 
-    async def fetch(_base_url: str, _api_key: str) -> object:
+    async def fetch(
+        _base_url: str, _api_key: str, _builtins: tuple[str, ...] = ()
+    ) -> object:
         return {
             "connectors": [
                 _connector(connector_id="mcp", name="MCP"),
@@ -268,7 +292,9 @@ async def test_connector_catalog_resolution_runs_off_the_event_loop(
     resolution_threads: list[int] = []
     resolve_catalog = connector_catalog._resolve_catalog
 
-    async def fetch(_base_url: str, _api_key: str) -> object:
+    async def fetch(
+        _base_url: str, _api_key: str, _builtins: tuple[str, ...] = ()
+    ) -> object:
         return {"connectors": [_connector()]}
 
     def record_resolution(
@@ -462,7 +488,9 @@ async def test_connector_cache_ttl_never_slides(
     now = [1_000]
     fetch_count = 0
 
-    async def fetch(_base_url: str, _api_key: str) -> object:
+    async def fetch(
+        _base_url: str, _api_key: str, _builtins: tuple[str, ...] = ()
+    ) -> object:
         nonlocal fetch_count
         fetch_count += 1
         return {"connectors": [_connector()]}
@@ -508,7 +536,11 @@ def test_connector_cache_reads_safe_legacy_record_without_rewrite(
     """
     # Prepare
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
-    fingerprint = connector_cache_fingerprint("test-key", "https://api.mistral.ai")
+    # Default config keeps the experimental document_library connector off, so
+    # the resolved builtins — and thus the cache key — are web_search only.
+    fingerprint = connector_cache_fingerprint(
+        "test-key", "https://api.mistral.ai", ("web_search",)
+    )
     cache_path = tmp_path / "connectors.json"
     cache_path.write_text(
         json.dumps({
@@ -550,7 +582,9 @@ async def test_connector_cache_round_trip_preserves_diagnostics_and_revision(
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     cache_path = tmp_path / "connectors.json"
 
-    async def fetch(_base_url: str, _api_key: str) -> object:
+    async def fetch(
+        _base_url: str, _api_key: str, _builtins: tuple[str, ...] = ()
+    ) -> object:
         return {
             "connectors": [
                 _connector(
@@ -690,7 +724,9 @@ async def test_successful_bootstrap_writes_redacted_bounded_v2(
     monkeypatch.setenv("MISTRAL_API_KEY", "super-secret-key")
     cache_path = tmp_path / "connectors.json"
 
-    async def fetch(_base_url: str, _api_key: str) -> object:
+    async def fetch(
+        _base_url: str, _api_key: str, _builtins: tuple[str, ...] = ()
+    ) -> object:
         return {
             "connectors": [
                 {
@@ -760,7 +796,9 @@ async def test_failed_forced_refresh_preserves_last_catalog(
     cache_path = tmp_path / "connectors.json"
     should_fail = False
 
-    async def fetch(_base_url: str, _api_key: str) -> object:
+    async def fetch(
+        _base_url: str, _api_key: str, _builtins: tuple[str, ...] = ()
+    ) -> object:
         if should_fail:
             raise RuntimeError("raw private provider response")
         return {"connectors": [_connector()]}
@@ -797,7 +835,11 @@ def test_connector_aliases_are_collision_safe_and_missing_ids_are_ignored(
     """
     # Prepare
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
-    fingerprint = connector_cache_fingerprint("test-key", "https://api.mistral.ai")
+    # Default config keeps the experimental document_library connector off, so
+    # the resolved builtins — and thus the cache key — are web_search only.
+    fingerprint = connector_cache_fingerprint(
+        "test-key", "https://api.mistral.ai", ("web_search",)
+    )
     cache_path = tmp_path / "connectors.json"
     cache_path.write_text(
         json.dumps({
@@ -838,7 +880,9 @@ async def test_connector_aliases_and_revision_are_independent_of_payload_order(
     second = _connector(connector_id="two", name="Docs & Search")
     payloads = iter(({"connectors": [second, first]}, {"connectors": [first, second]}))
 
-    async def fetch(_base_url: str, _api_key: str) -> object:
+    async def fetch(
+        _base_url: str, _api_key: str, _builtins: tuple[str, ...] = ()
+    ) -> object:
         return next(payloads)
 
     service = ConnectorCatalogService(
@@ -866,7 +910,9 @@ async def test_connector_collision_suffix_stays_within_public_name_limit(
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     long_name = "x" * 256
 
-    async def fetch(_base_url: str, _api_key: str) -> object:
+    async def fetch(
+        _base_url: str, _api_key: str, _builtins: tuple[str, ...] = ()
+    ) -> object:
         return {
             "connectors": [
                 _connector(connector_id="one", name=long_name),
@@ -1244,7 +1290,9 @@ async def test_busy_convergence_retains_candidate_across_later_config_change(
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     fetch_count = 0
 
-    async def fetch(_base_url: str, _api_key: str) -> object:
+    async def fetch(
+        _base_url: str, _api_key: str, _builtins: tuple[str, ...] = ()
+    ) -> object:
         nonlocal fetch_count
         fetch_count += 1
         return {"connectors": [_connector()]}
@@ -1324,7 +1372,9 @@ async def test_successful_accept_discards_stale_pending_candidate(
 ) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
 
-    async def fetch(_base_url: str, _api_key: str) -> object:
+    async def fetch(
+        _base_url: str, _api_key: str, _builtins: tuple[str, ...] = ()
+    ) -> object:
         return {"connectors": [_connector()]}
 
     orchestrator = _orchestrator()
@@ -1401,7 +1451,9 @@ async def test_toggle_applies_to_the_accepted_catalog_after_the_cache_expires(
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     now = [1_000]
 
-    async def fetch(_base_url: str, _api_key: str) -> object:
+    async def fetch(
+        _base_url: str, _api_key: str, _builtins: tuple[str, ...] = ()
+    ) -> object:
         return {"connectors": [_connector()]}
 
     orchestrator = _orchestrator()

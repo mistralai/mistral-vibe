@@ -40,13 +40,13 @@ fn boot_pending_welcome_says_the_boot_is_converging() {
     let mut wizard = welcome_state(true);
     let screen = render(&mut wizard);
     assert!(screen.contains("Starting the app server"));
-    assert!(!screen.contains("Press Enter"));
+    assert!(!screen.contains("Enter continue"));
 }
 
 #[test]
 fn booted_welcome_keeps_the_enter_hint() {
     let mut wizard = welcome_state(false);
     let screen = render(&mut wizard);
-    assert!(screen.contains("Press Enter"));
+    assert!(screen.contains("Enter continue"));
     assert!(!screen.contains("Starting the app server"));
 }

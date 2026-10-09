@@ -37,6 +37,7 @@ from vibe.cli.textual_ui.widgets.collapsible import (
     OverflowCollapsibleSection,
     lines_label,
 )
+from vibe.cli.textual_ui.widgets.fired_loop import FiredLoop
 from vibe.cli.textual_ui.widgets.no_markup_static import (
     NoMarkupStatic,
     NonSelectableStatic,
@@ -150,6 +151,7 @@ class UserMessage(Static):
         history_entry_id: str | None = None,
         images: list[ImageAttachment] | None = None,
         severity: UserMessageSeverity | None = None,
+        fired_loop: FiredLoop | None = None,
     ) -> None:
         super().__init__()
         self.add_class("user-message")
@@ -158,9 +160,12 @@ class UserMessage(Static):
         self._images = images or []
         self.severity = severity
         self.history_entry_id = history_entry_id
+        self.fired_loop = fired_loop
         if severity is not None:
             self.add_class("user-message-severity")
             self.add_class(f"user-message-{severity.value}")
+        if fired_loop is not None:
+            self.add_class("user-message-fired-loop")
 
     def get_content(self) -> str:
         return self._content
@@ -185,10 +190,15 @@ class UserMessage(Static):
                         f"{self.PROMPT_CHAR} ", classes="user-message-prompt"
                     )
                 yield NoMarkupStatic(self._content, classes="user-message-content")
-            if self._images:
+            if self._images or self.fired_loop is not None:
                 with Vertical(classes="user-message-attachments"):
                     for image in self._images:
                         yield UserMessageAttachment(image)
+                    if self.fired_loop is not None:
+                        yield NonSelectableStatic(
+                            self.fired_loop.label(),
+                            classes="user-message-fired-loop-line",
+                        )
             if self.SHOW_SEPARATOR and self.severity is None:
                 yield ExpandingSeparator(classes="user-message-separator")
             if self._pending:

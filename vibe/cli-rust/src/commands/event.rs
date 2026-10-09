@@ -12,7 +12,10 @@ use crate::post_ready::AccountReads;
 pub enum CommandEvent {
     RemoteProject(Box<crate::vibe_code_project::Reply>),
     Teleport(Box<crate::teleport::Reply>),
+    Plugins(Box<crate::plugins::Event>),
     Result(String),
+    /// The `/status` text, rendered with its exact counts muted.
+    AgentStatistics(String),
     Renamed(String),
     Error(String),
     Runtime(Value, String),
@@ -21,6 +24,8 @@ pub enum CommandEvent {
         previous_enabled: bool,
         enabling_audio: bool,
     },
+    /// The `/proxy-setup` settings read, or why it failed.
+    ProxySettings(Result<crate::server::proto_proxy::ProxySettingsView, String>),
     /// The post-ready account and identity reads, for the banner.
     PostReady {
         reads: Option<AccountReads>,

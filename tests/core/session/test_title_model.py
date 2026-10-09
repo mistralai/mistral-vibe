@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
 from tests.conftest import build_test_vibe_config
 from vibe.core.config import UtilityFeature
+from vibe.core.prompts import UtilityPrompt
 from vibe.core.session import title_model
 from vibe.core.session.title_model import (
     _clean_title,
@@ -186,3 +188,100 @@ class TestGenerateSessionTitle:
                 config=config,
                 policy=TitlePolicy(total_timeout_seconds=0.05),
             )
+
+    @pytest.mark.asyncio
+    async def test_uses_builtin_session_title_prompt_by_default(
+        self, monkeypatch
+    ) -> None:
+        config = build_test_vibe_config()
+        captured: dict = {}
+
+        async def fake(**kwargs):
+            captured.update(kwargs)
+            return "Fix login bug"
+
+        monkeypatch.setattr(title_model, "run_utility_completion", fake)
+
+        await generate_session_title(
+            [LLMMessage(role=Role.user, content="please fix the login bug")],
+            config=config,
+        )
+
+        assert captured["system_prompt"] == UtilityPrompt.SESSION_TITLE.read()
+
+    @pytest.mark.asyncio
+    async def test_uses_custom_prompt_from_project_dir(
+        self, monkeypatch, mock_prompts_dirs: tuple[Path, Path]
+    ) -> None:
+        project_prompts, _ = mock_prompts_dirs
+        (project_prompts / "terse_titles.md").write_text("Reply with one word.")
+
+        config = build_test_vibe_config(title_prompt_id="terse_titles")
+        captured: dict = {}
+
+        async def fake(**kwargs):
+            captured.update(kwargs)
+            return "Login"
+
+        monkeypatch.setattr(title_model, "run_utility_completion", fake)
+
+        await generate_session_title(
+            [LLMMessage(role=Role.user, content="please fix the login bug")],
+            config=config,
+        )
+
+        assert captured["system_prompt"] == "Reply with one word."
+
+
+class TestTitlePromptResolution:
+    def test_default_falls_back_to_builtin(
+        self, mock_prompts_dirs: tuple[Path, Path]
+    ) -> None:
+        config = build_test_vibe_config()
+
+        assert config.title_prompt == UtilityPrompt.SESSION_TITLE.read()
+
+    def test_custom_prompt_found_in_user_dir_when_missing_from_project(
+        self, mock_prompts_dirs: tuple[Path, Path]
+    ) -> None:
+        _, user_prompts = mock_prompts_dirs
+        (user_prompts / "brief.md").write_text("One word titles only")
+
+        config = build_test_vibe_config(title_prompt_id="brief")
+
+        assert config.title_prompt == "One word titles only"
+
+    def test_custom_prompt_overrides_builtin(
+        self, mock_prompts_dirs: tuple[Path, Path]
+    ) -> None:
+        project_prompts, _ = mock_prompts_dirs
+        (project_prompts / "session_title.md").write_text("My custom title prompt")
+
+        config = build_test_vibe_config()
+
+        assert config.title_prompt == "My custom title prompt"
+
+    def test_invalid_prompt_id_reports_setting_name(
+        self, mock_prompts_dirs: tuple[Path, Path]
+    ) -> None:
+        project_prompts, user_prompts = mock_prompts_dirs
+        (project_prompts / "alpha.md").write_text("a")
+        (user_prompts / "beta.md").write_text("b")
+
+        with pytest.raises(ValueError) as exc_info:
+            build_test_vibe_config(title_prompt_id="unknown")
+
+        error_text = str(exc_info.value)
+        assert "Invalid title_prompt_id value: 'unknown'" in error_text
+        assert 'available prompts ("session_title")' in error_text
+        assert '(available: "alpha", "beta")' in error_text
+
+    @pytest.mark.parametrize(
+        "malicious_id",
+        ["../../../etc/passwd", "..", ".", "subdir/session_title", "back\\slash", ""],
+    )
+    def test_prompt_id_rejects_path_traversal(
+        self, mock_prompts_dirs: tuple[Path, Path], malicious_id: str
+    ) -> None:
+        with pytest.raises(ValueError, match="must be a bare filename"):
+            build_test_vibe_config(title_prompt_id=malicious_id)

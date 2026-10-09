@@ -6,8 +6,10 @@ use unicode_width::UnicodeWidthStr;
 
 use super::super::super::{pulse, theme};
 use super::super::diff;
+use super::bordered::{prefix, BORDER_WIDTH};
 use super::effect_body::{push_edit_diff, push_effect_body, push_todo_body};
 use super::expand_marker;
+use crate::selection::{fold, Fold};
 use crate::server::BodyLine;
 use crate::ui::markdown::LinkedLines;
 use crate::utils::{clean::clean_output, text};
@@ -104,7 +106,7 @@ pub(super) fn push_effect(
         (settled_marker("□"), theme::muted())
     } else if effect.success() {
         (
-            if (grouped && !inert) || effect.kind() == Some("user_question") {
+            if grouped && !inert {
                 expand_marker(expanded).to_string()
             } else {
                 settled_marker("✓")
@@ -150,13 +152,17 @@ pub(super) fn push_effect(
         let indent: usize = spans.iter().map(|span| span.content.width()).sum();
         let style = summary(message_color);
         let mut rows = header_message(message, !in_progress, shown, width, indent).into_iter();
-        spans.push(Span::styled(rows.next().unwrap_or_default(), style));
+        spans.push(Span::styled(rows.next().unwrap_or_default().0, style));
         hanging = rows
-            .map(|row| {
-                Line::from(vec![
-                    Span::raw(" ".repeat(indent)),
-                    Span::styled(row, style),
-                ])
+            .enumerate()
+            .map(|(index, (row, gap))| {
+                // The gutter cells are prefixed once the body below is known.
+                let hang = indent.saturating_sub(BORDER_WIDTH as usize);
+                let line = Line::from(vec![Span::raw(" ".repeat(hang)), Span::styled(row, style)]);
+                // The suffix ends the first row, so the message cannot fold across it.
+                let gap = gap.filter(|_| index > 0 || suffix.is_empty());
+                let hang = hang as u16;
+                (line, Fold::hung(gap, hang).or(Some(Fold::indented(hang))))
             })
             .collect();
     }
@@ -167,7 +173,11 @@ pub(super) fn push_effect(
         spans.push(Span::styled(suffix.to_string(), theme::muted_style()));
     }
     lines.push(Line::from(spans));
-    lines.extend(hanging);
+    // Rows between the header and the body: the wrapped header, then the stream.
+    let mut between = LinkedLines::default();
+    for (line, fold) in hanging {
+        between.push_folded(line, fold);
+    }
     // The stream widget: a running call's latest `/state/outputText` append,
     // one gutter in (Python `tool-stream-message`, cleared on settle). It holds
     // the last patch's own delta, never the accumulated state text.
@@ -175,27 +185,35 @@ pub(super) fn push_effect(
         let stream_delta = clean_output(stream_delta.unwrap_or(""));
         if !stream_delta.is_empty() {
             for line in format!("→ {stream_delta}").lines() {
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(text::expand_tabs(line), theme::muted_style()),
-                ]));
+                between.push(Line::from(Span::styled(
+                    text::expand_tabs(line),
+                    theme::muted_style(),
+                )));
             }
         }
     }
-    if !shown {
-        return;
-    }
-    match cache {
+    let mut result = LinkedLines::default();
+    match cache.filter(|_| shown) {
         Some(cache) => {
             let prepared = cache.prepare_lines(index, rev, width, theme::active_index(), || {
                 let mut result = LinkedLines::default();
                 push_result(&mut result, effect, &body(), width);
                 result
             });
-            lines.append(prepared.linked().clone());
+            result.append(prepared.linked().clone());
         }
-        None => push_result(lines, effect, &body(), width),
+        None if shown => push_result(&mut result, effect, &body(), width),
+        None => {}
     }
+    // A body's border climbs through those rows up to the header's arrow.
+    let gutter = if result.is_empty() {
+        Span::raw(" ".repeat(BORDER_WIDTH as usize))
+    } else {
+        prefix(false, theme::muted_style())
+    };
+    between.prefix(|_| gutter.clone());
+    lines.append(between);
+    lines.append(result);
 }
 
 /// The result body under the header: a pure function of the effect, its body, and width.
@@ -218,23 +236,24 @@ fn push_result(
         push_todo_body(lines, &rows, width);
         return;
     }
-    let content_style = match effect
-        .detail
-        .as_ref()
-        .and_then(|detail| detail.kind.as_deref())
-    {
-        // A read result is a fenced code block like a write result, so
-        // unhighlightable content keeps the plain code colour.
-        Some("file_read" | "file_write") => theme::text(theme::code_plain()),
-        _ => theme::muted_style(),
+    // Python renders read, write, and scratchpad note results as fenced code
+    // blocks: they highlight from the file's extension, and unhighlightable
+    // content keeps the plain code colour.
+    let code_path = effect.code_path();
+    let fenced = code_path.is_some()
+        || matches!(
+            effect
+                .detail
+                .as_ref()
+                .and_then(|detail| detail.kind.as_deref()),
+            Some("file_read" | "file_write")
+        );
+    let content_style = if fenced {
+        theme::text(theme::code_plain())
+    } else {
+        theme::muted_style()
     };
-    // Python renders read and write results as fenced code blocks, so their
-    // bodies highlight from the written or read file's extension.
-    let lang = effect
-        .file_write_path()
-        .or(effect.file_read_path())
-        .map(diff::language)
-        .unwrap_or("");
+    let lang = code_path.map(diff::language).unwrap_or("");
     push_effect_body(
         lines,
         body,
@@ -252,16 +271,22 @@ fn header_message(
     expanded: bool,
     width: u16,
     indent: usize,
-) -> Vec<String> {
+) -> Vec<(String, Option<u16>)> {
     let available = (width as usize).saturating_sub(indent);
     if !settled {
-        return message.lines().map(str::to_owned).collect();
+        return message
+            .lines()
+            .map(|line| (line.to_owned(), None))
+            .collect();
     }
     if !expanded {
-        return vec![text::ellipsize(&text::single_line(message), available)];
+        return vec![(
+            text::ellipsize(&text::single_line(message), available),
+            None,
+        )];
     }
     text::multi_line(message)
         .lines()
-        .flat_map(|line| text::wrap_hard(line, available))
+        .flat_map(|line| fold::wrap_hard(line, available))
         .collect()
 }

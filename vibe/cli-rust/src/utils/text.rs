@@ -21,6 +21,43 @@ pub fn thousands(value: u64) -> String {
     grouped
 }
 
+const COUNT_SUFFIXES: [&str; 5] = ["", "k", "M", "B", "T"];
+const SIGNIFICANT_DIGITS: u32 = 3;
+
+/// Python `format_compact_count`: three significant digits and a `k`/`M`/`B`/`T` suffix.
+pub fn format_compact_count(value: u64) -> String {
+    if value < 1_000 {
+        return value.to_string();
+    }
+    let value = u128::from(value);
+    let step = 10u128.pow(decimal_digits(value) - SIGNIFICANT_DIGITS);
+    let rounded = (value + step / 2) / step * step;
+    let group = ((decimal_digits(rounded) - 1) / 3).min(COUNT_SUFFIXES.len() as u32 - 1);
+    let unit = 1_000u128.pow(group);
+    let fraction = format!("{:03}", rounded % unit * 1_000 / unit);
+    let decimals = fraction.trim_end_matches('0');
+    let whole = rounded / unit;
+    let suffix = COUNT_SUFFIXES[group as usize];
+    if decimals.is_empty() {
+        format!("{whole}{suffix}")
+    } else {
+        format!("{whole}.{decimals}{suffix}")
+    }
+}
+
+/// Python `format_count_markdown`: the compact count, then the exact one as emphasis from one thousand up.
+pub fn format_count_markdown(value: u64) -> String {
+    let compact = format_compact_count(value);
+    if value < 1_000 {
+        return compact;
+    }
+    format!("{compact} _({})_", thousands(value))
+}
+
+fn decimal_digits(value: u128) -> u32 {
+    value.checked_ilog10().map_or(1, |log| log + 1)
+}
+
 /// Flatten every whitespace run to one space so a heredoc keeps the header one row tall.
 pub fn single_line(text: &str) -> String {
     text.split_whitespace()
@@ -153,7 +190,7 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
             if !row.is_empty() {
                 rows.push(std::mem::take(&mut row));
             }
-            let (head, tail) = split_at_width(word, width);
+            let (head, tail, _) = split_at_width(word, width);
             rows.push(head.to_owned());
             word = tail;
         }
@@ -171,17 +208,18 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
 }
 
 /// Cut at the last char boundary fitting in `width` cells, always advancing so a
-/// glyph wider than the whole row cannot loop forever.
-fn split_at_width(word: &str, width: usize) -> (&str, &str) {
+/// glyph wider than the whole row cannot loop forever. Also returns the head's cells.
+pub(crate) fn split_at_width(word: &str, width: usize) -> (&str, &str, usize) {
     let mut used = 0;
     for (index, grapheme) in word.grapheme_indices(true) {
         let cell = grapheme.width();
         if index > 0 && used + cell > width {
-            return word.split_at(index);
+            let (head, tail) = word.split_at(index);
+            return (head, tail, used);
         }
         used += cell;
     }
-    (word, "")
+    (word, "", used)
 }
 
 /// Columns between tab stops, as Rich expands a body's tabs.

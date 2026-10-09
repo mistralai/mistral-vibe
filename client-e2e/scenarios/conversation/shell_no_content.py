@@ -7,8 +7,8 @@ from e2e.app_server.scenario import Timeline
 
 _PROMPT = "run the silent command"
 
-# The settled disclosure header lands on SGR row 32.
-_CLICK = "\x1b[<0;1;32M\x1b[<0;1;32m"
+# The settled disclosure header lands on SGR row 15.
+_CLICK = "\x1b[<0;1;15M\x1b[<0;1;15m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

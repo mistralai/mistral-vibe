@@ -6,11 +6,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Padding, Paragraph};
 
 use super::{UpdateChoice, UpdatePromptState};
+use crate::hints::{self, action, key};
 use crate::ui::banner::petit_chat::PetitChat;
-use crate::ui::theme;
+use crate::ui::{hint_line, list_cursor, theme};
 
 const TITLE: &str = "A new Vibe release is available";
-const HELP: &str = "←→ navigate  Enter select";
+const HELP: &[hints::Hint] = &[(key::LEFT_RIGHT, action::NAVIGATE), hints::SELECT];
 const UPDATING: &str = "Updating mistral-vibe…";
 /// Gap between the two option spans.
 const OPTION_GAP: &str = "    ";
@@ -51,7 +52,7 @@ pub fn draw<B: ratatui::backend::Backend>(
         } else {
             lines.push(options(state));
             lines.push(Line::from("").centered());
-            lines.push(Line::from(Span::styled(HELP, theme::muted_style())).centered());
+            lines.push(hint_line::line(HELP).centered());
         }
         frame.render_widget(Paragraph::new(lines).centered(), inner);
     });
@@ -90,37 +91,23 @@ fn version_line(state: &UpdatePromptState) -> Line<'static> {
     .centered()
 }
 
-/// The two options on one row, the `› ` cursor on the selected one
-/// (Python `_refresh_options`). Both are `$foreground`; the active one is
-/// bold (`.update-option--active`).
+/// The two options on one row, the selected one on the list-cursor bar (Python `_refresh_options`).
 fn options(state: &UpdatePromptState) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, choice) in state.choices().into_iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw(OPTION_GAP));
         }
-        let selected = choice == state.selected;
-        let cursor = if selected { "› " } else { "  " };
-        let text = format!("{cursor}{}", choice.label(state.mode));
-        let style = theme::text(theme::foreground());
-        spans.push(Span::styled(
-            text,
-            if selected {
-                style.add_modifier(Modifier::BOLD)
-            } else {
-                style
-            },
-        ));
+        spans.push(option_span(choice, state));
     }
     Line::from(spans).centered()
 }
 
-/// Exposed for the pure tests: one option's rendered text.
-pub fn option_text(choice: UpdateChoice, state: &UpdatePromptState) -> String {
-    let cursor = if choice == state.selected {
-        "› "
-    } else {
-        "  "
-    };
-    format!("{cursor}{}", choice.label(state.mode))
+/// One option as a padded chip, styled as the cursor bar when selected.
+pub fn option_span(choice: UpdateChoice, state: &UpdatePromptState) -> Span<'static> {
+    let text = format!(" {} ", choice.label(state.mode));
+    match choice == state.selected {
+        true => Span::styled(text, list_cursor::style()),
+        false => Span::styled(text, theme::text(theme::foreground())),
+    }
 }

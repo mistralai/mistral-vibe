@@ -34,6 +34,7 @@ fn core_emits_completion_actions_without_an_llm_context_payload() {
         .filter_map(|action| match action {
             Action::Completion { model_input, .. } => Some(&model_input.messages),
             Action::RuntimeBuiltinTool { .. }
+            | Action::Approval { .. }
             | Action::ProvidedTool { .. }
             | Action::Hook { .. }
             | Action::Filesystem { .. } => None,

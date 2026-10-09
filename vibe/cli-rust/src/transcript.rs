@@ -13,7 +13,7 @@ use crate::server::HistoryEntry;
 use serde_json::Value;
 
 use grouping::is_hidden_hook_notice;
-pub use grouping::{effect_kind, groups_with_tools, outcome, Group, Outcome};
+pub use grouping::{effect_kind, groups_with_tools, Group};
 pub use older::HistoryCursor;
 use patch::appended_text;
 pub use patch::apply_json_patch;
@@ -598,7 +598,7 @@ impl Transcript {
             && !grouping::renders_nothing(&stored.typed, stored.local)
     }
 
-    /// Describe the visible portion of the consecutive effect/reasoning group.
+    /// The visible part of the consecutive effect/reasoning group, or `None` for a single member.
     fn group_at<'a>(&'a self, index: usize, stored: &'a StoredEntry) -> Option<Group<'a>> {
         if !groups_with_tools(&stored.typed) || (stored.local && !stored.historical) {
             return None;
@@ -623,21 +623,22 @@ impl Transcript {
             })
             .map(|(offset, entry)| (start + offset, entry))
             .collect::<Vec<_>>();
+        if visible.len() < 2 {
+            return None;
+        }
         let (first_index, first_entry) = visible.first()?;
         let last_index = visible.last()?.0;
-        let mut kinds = Vec::new();
+        let mut kinds: Vec<(&str, usize)> = Vec::new();
         let mut reasoning = false;
-        let mut group_outcome = Outcome::Success;
         for (_, entry) in &visible {
-            if let Some(kind) = effect_kind(&entry.typed) {
-                if !kinds.contains(&kind) {
-                    kinds.push(kind);
+            if let HistoryEntry::Effect(effect) = &entry.typed {
+                let kind = grouping::label_kind(effect.kind());
+                match kinds.iter_mut().find(|(seen, _)| *seen == kind) {
+                    Some((_, count)) => *count += 1,
+                    None => kinds.push((kind, 1)),
                 }
             }
             reasoning |= matches!(entry.typed, HistoryEntry::Reasoning(_));
-            if let Some(next) = outcome(&entry.typed) {
-                group_outcome = next;
-            }
         }
         Some(Group {
             key: format!("{}{}", grouping::KEY_PREFIX, first_entry.id),
@@ -649,7 +650,6 @@ impl Transcript {
                 || !self.live_tail_open,
             kinds,
             reasoning,
-            outcome: group_outcome,
         })
     }
 
@@ -696,6 +696,11 @@ impl Transcript {
         stored.typed = HistoryEntry::from_value(&stored.raw);
         self.next_rev += 1;
         stored.rev = self.next_rev;
+    }
+
+    /// The group the entry `id` belongs to, if any.
+    pub fn group_of(&self, id: &str) -> Option<Group<'_>> {
+        self.entry(*self.indices.get(id)?)?.group
     }
 
     /// Borrow one entry by its stable position in the append-only transcript.

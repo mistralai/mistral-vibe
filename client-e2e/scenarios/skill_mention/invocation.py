@@ -52,7 +52,7 @@ handshake = {
 screen_contains = {
     "rust": (
         _PROMPT,
-        "Loaded skills",
+        "Loaded 2 skills",
         "Loaded skill: lint",
         "Loaded skill: code-review",
         "Lint first.",

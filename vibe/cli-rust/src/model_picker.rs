@@ -1,43 +1,63 @@
 //! `/model` picker state. Mirrors Python's `ModelPickerApp`: a leading Default
 //! (unpinned) row plus one row per configured model, current row marked, no live
-//! preview; the selection persists on Enter.
+//! preview. A pick chains straight into `/thinking`, which writes both at once.
+
+use std::sync::Arc;
 
 use serde_json::Value;
 
 use crate::app::{App, ModelOption};
-use crate::commands::event::RELOADED_MESSAGE;
-use crate::commands::submission::new_message_id;
+use crate::config_write::Scope;
 use crate::event_handler;
-use crate::transcript::local;
+use crate::server::Client;
+use crate::thinking_picker::{self, ModelPick, THINKING_LEVELS};
 
 /// Alias persisted for the Default (unpinned) row (Python `UNPINNED_ACTIVE_MODEL`).
 pub const UNPINNED_ACTIVE_MODEL: &str = "";
 
-/// A committed selection's server answer, applied on the main thread.
+/// A `/config` model write's server answer, applied on the main thread.
 pub enum Event {
-    /// Runtime returned by `config/write` when the follow-up reload failed.
+    /// Runtime returned by `config/write`.
     Written(Value),
-    /// Runtime returned by the follow-up `config/reload` (Python `_reload_config`).
-    Reloaded(Value),
     /// The write failed; nothing to apply.
     Failed,
 }
 
 /// Apply the server's answer and release the commit that was in flight.
 pub fn apply_event(app: &mut App, event: Event) {
-    match event {
-        Event::Written(runtime) => event_handler::apply_runtime_value(app, &runtime),
-        Event::Reloaded(runtime) => {
-            event_handler::apply_runtime_value(app, &runtime);
-            local::add_status(
-                &mut app.view.transcript,
-                &new_message_id(),
-                RELOADED_MESSAGE,
-            );
-        }
-        Event::Failed => {}
+    if let Event::Written(runtime) = event {
+        event_handler::apply_runtime_value(app, &runtime);
     }
     app.commit_finished();
+}
+
+/// Hand the highlighted model to the thinking picker, opened at once on its
+/// levels; nothing is written until that picker commits or is dismissed. A
+/// model that cannot be resolved has no levels to offer and is written alone.
+pub fn select(app: &mut App, client: &Arc<Client>, scope: Scope) {
+    let alias = selected_alias(app);
+    app.model_picker.open = false;
+    let target = match alias.as_str() {
+        UNPINNED_ACTIVE_MODEL => app.model_picker.default_alias.clone(),
+        _ => alias.clone(),
+    };
+    let option = app.model_picker.models.iter().find(|m| m.alias == target);
+    let Some((thinking, levels)) = option.map(|m| (m.thinking.clone(), m.thinking_levels.clone()))
+    else {
+        let pick = ModelPick {
+            alias,
+            target: String::new(),
+            scope,
+        };
+        thinking_picker::commit_model(app, client, &pick);
+        return;
+    };
+    let pick = ModelPick {
+        alias,
+        target,
+        scope,
+    };
+    thinking_picker::open_for_model(app, pick, thinking, levels);
 }
 
 /// Open the picker highlighted on the current choice (Python `on_mount`).
@@ -71,15 +91,11 @@ pub fn option_count(app: &App) -> usize {
     app.model_picker.models.len() + 1
 }
 
-/// Move the highlight up/down by one, clamped (Textual `OptionList` no wrap).
+/// Move the highlight up/down by one, wrapping at the ends.
 pub fn navigate(app: &mut App, down: bool) {
     app.model_picker.free_scroll = false;
-    let last = option_count(app) - 1;
-    if down {
-        app.model_picker.selected = (app.model_picker.selected + 1).min(last);
-    } else {
-        app.model_picker.selected = app.model_picker.selected.saturating_sub(1);
-    }
+    let count = option_count(app);
+    app.model_picker.selected = crate::list_nav::wrap(app.model_picker.selected, count, down);
 }
 
 /// Whether row `i` is the current choice: Default when unpinned, else the pinned model.
@@ -129,6 +145,11 @@ pub fn apply_runtime(app: &mut App, response: &Value) {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     app.model_picker.default_display_name = default_display_name(config);
+    app.model_picker.default_alias = config
+        .get("defaultModelAlias")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
 }
 
 /// Display name of the default model, looked up by `defaultModelAlias` (Python
@@ -156,8 +177,28 @@ fn read_model(value: &Value) -> Option<ModelOption> {
         .and_then(Value::as_str)
         .unwrap_or(&alias)
         .to_owned();
+    let thinking = value
+        .get("thinking")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    // Older servers omit the per-model set; fall back to the canonical five (ADR 0014).
+    let thinking_levels = value
+        .get("thinkingLevels")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .filter(|levels: &Vec<String>| !levels.is_empty())
+        .unwrap_or_else(|| THINKING_LEVELS.iter().map(|it| it.to_string()).collect());
     Some(ModelOption {
         alias,
         display_name,
+        thinking,
+        thinking_levels,
     })
 }

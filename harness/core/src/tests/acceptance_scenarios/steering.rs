@@ -278,6 +278,56 @@ fn multiple_steering_messages_keep_order_before_notifications() {
     );
 }
 
+#[test]
+fn stops_at_iteration_limit_before_delivering_pending_steering() {
+    let turn_id = "turn-steer-at-iteration-limit";
+    let mut harness_config = config();
+    harness_config.settings.turn.max_iterations = Some(1);
+    let mut runtime = SynchronousRuntime::new(harness_config);
+    let completion = runtime.start_turn(turn_id, "write the answer");
+    runtime.receive_steering(turn_id, "add one more detail", &[&completion]);
+
+    runtime.apply(
+        text_completion(&completion, "the accepted answer"),
+        completed(
+            turn_id,
+            vec![json!({"type": "text", "text": "the accepted answer"})],
+        )
+        .observe(assistant_text_committed(
+            turn_id,
+            &completion,
+            "the accepted answer",
+        ))
+        .observe(turn_completed_at_iteration_limit(
+            turn_id,
+            vec![json!({"type": "text", "text": "the accepted answer"})],
+        )),
+    );
+
+    runtime.restart_from_checkpoint();
+    let next_turn_id = "turn-after-steer-limit";
+    let next_completion = runtime
+        .apply(
+            user_message(next_turn_id, "continue", "queue"),
+            running(next_turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_started(next_turn_id, "continue")),
+        )
+        .only_action();
+
+    runtime.assert_last_model_message_update(
+        &next_completion,
+        "replace",
+        &[
+            model_system(),
+            model_user_text("write the answer"),
+            model_assistant_text("the accepted answer"),
+            model_user_text("add one more detail"),
+            model_user_text("continue"),
+        ],
+    );
+}
+
 ///
 /// *Prepare*: A turn has one model completion in flight and one accepted steering message.
 /// *Do*: Interrupt the turn before any model call carries the steering, then start the next turn.

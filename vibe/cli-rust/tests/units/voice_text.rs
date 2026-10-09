@@ -44,8 +44,9 @@ fn dictated_text_leaves_the_recalled_history_entry() {
 #[test]
 fn dictated_text_refreshes_the_completion_popup() {
     let mut app = App::default();
+    app.chat_input.mode = vibe_rs::input_modes::InputMode::Slash;
 
-    app.apply_voice_event(VoiceEvent::TextDelta("/he".to_owned()));
+    app.apply_voice_event(VoiceEvent::TextDelta("he".to_owned()));
 
     assert!(vibe_rs::completion_manager::is_open(&app));
 }

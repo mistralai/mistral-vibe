@@ -22,6 +22,22 @@ pub(crate) fn reduce(
     validate_correlation(state, &command)?;
 
     match command {
+        HarnessCommand::ApprovalCompleted { action_id, outcome } => dispatch(
+            state,
+            TurnEvent::Approval {
+                action_id,
+                resolution: Ok(outcome),
+            },
+            determinism,
+        ),
+        HarnessCommand::ApprovalFailed { action_id, reason } => dispatch(
+            state,
+            TurnEvent::Approval {
+                action_id,
+                resolution: Err(reason),
+            },
+            determinism,
+        ),
         HarnessCommand::UserMessage {
             turn_id,
             content,
@@ -176,6 +192,7 @@ pub(crate) fn normalize_command(state: &HarnessState, command: &mut HarnessComma
                 effect_id, call, ..
             } if effect_id == *action_id => Some(call.name),
             Action::Completion { .. }
+            | Action::Approval { .. }
             | Action::RuntimeBuiltinTool { .. }
             | Action::ProvidedTool { .. }
             | Action::Hook { .. }

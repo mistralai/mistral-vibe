@@ -7,11 +7,13 @@ use crate::server::Client;
 use serde_json::Value;
 
 use super::event::{dispatch, reload_result, CommandEvent};
+use super::provider_auth::literal;
 use super::submission::{new_message_id, NOTICE_TIMEOUT_SECS};
 use crate::app::App;
 use crate::post_ready::{self, AccountReads};
 use crate::transcript::local;
 use crate::ui;
+use crate::utils::text::format_count_markdown;
 
 pub(super) const DATA_RETENTION_MESSAGE: &str = "## Your Data Helps Improve Mistral AI\n\nAt Mistral AI, we're committed to delivering the best possible experience. When you use Mistral models on our API, your interactions may be collected to improve our models, ensuring they stay cutting-edge, accurate, and helpful.\n\nManage your data settings [here](https://chat.mistral.ai/work?profile_dialog=privacy)";
 
@@ -69,22 +71,28 @@ pub(super) fn copy_last_agent_message(app: &mut App) {
 pub(super) fn status_text(app: &App) -> String {
     let stats = &app.session.stats;
     let session_cached = if stats.session_cached_tokens > 0 {
-        format!(" _(including {} cached)_", stats.session_cached_tokens)
+        format!(
+            ", including {} cached",
+            format_count_markdown(stats.session_cached_tokens)
+        )
     } else {
         String::new()
     };
     let last_turn_cached = if stats.last_turn_cached_tokens > 0 {
-        format!(" _(including {} cached)_", stats.last_turn_cached_tokens)
+        format!(
+            ", including {} cached",
+            format_count_markdown(stats.last_turn_cached_tokens)
+        )
     } else {
         String::new()
     };
     format!(
         "## Agent Statistics\n\n- **Steps**: {}\n- **Session Prompt Tokens**: {}{session_cached}\n- **Session Completion Tokens**: {}\n- **Session Total LLM Tokens**: {}\n- **Last Turn Tokens**: {}{last_turn_cached}\n- **Cost**: ${:.4}",
-        stats.steps,
-        stats.session_prompt_tokens,
-        stats.session_completion_tokens,
-        stats.session_prompt_tokens + stats.session_completion_tokens,
-        stats.last_turn_total_tokens,
+        format_count_markdown(stats.steps),
+        format_count_markdown(stats.session_prompt_tokens),
+        format_count_markdown(stats.session_completion_tokens),
+        format_count_markdown(stats.session_prompt_tokens + stats.session_completion_tokens),
+        format_count_markdown(stats.last_turn_total_tokens),
         stats.session_cost,
     )
 }
@@ -215,12 +223,11 @@ fn identity_name(identity: &Value, email: Option<&str>) -> Option<String> {
     }
 }
 
-/// The `/whoami` body, or Python's fallback when the active model has no identity.
+/// The `/whoami` body, or Python's fallback when no Mistral identity is available.
 pub fn whoami_text(reads: &AccountReads) -> String {
     let identity = &reads.identity;
     if identity.is_null() {
-        return "## Who am I\n\nNo identity information is available for the active model."
-            .to_owned();
+        return "## Who am I\n\nNo Mistral account information is available.".to_owned();
     }
     let mut lines = vec!["## Who am I".to_owned(), String::new()];
     let email = identity
@@ -244,6 +251,19 @@ pub fn whoami_text(reads: &AccountReads) -> String {
     }
     if let Some(plan) = post_ready::plan_title(&reads.account) {
         lines.push(format!("- **Plan**: {plan}"));
+    }
+    for (label, key) in [
+        ("API key", "preview"),
+        ("Key scope", "scope"),
+        ("Access scope", "accessScope"),
+    ] {
+        if let Some(value) = reads
+            .account
+            .pointer(&format!("/apiKey/{key}"))
+            .and_then(Value::as_str)
+        {
+            lines.push(format!("- **{label}**: {}", literal(value)));
+        }
     }
     lines.join("\n")
 }

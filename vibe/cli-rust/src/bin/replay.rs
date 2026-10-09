@@ -391,6 +391,7 @@ fn load_fixture() -> Fixture {
 }
 
 fn main() {
+    vibe_rs::clipboard::set_sink(Arc::new(vibe_rs::clipboard::SystemClipboard));
     let Fixture {
         mut handshake,
         batches,

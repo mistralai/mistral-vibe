@@ -33,6 +33,8 @@ from mistralai_vibe_local_harness.vibe._processes._manager import (
     ProcessStartRequest,
 )
 from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
+from mistralai_vibe_local_harness.vibe._sandbox import sandbox_path
+from mistralai_vibe_local_harness.vibe._sandbox_helper import PROCESS_ENV_DEFAULTS
 
 type ProcessToolName = Literal[
     "process.start", "process.output", "process.write", "process.list", "process.stop"
@@ -63,15 +65,6 @@ _CONTROL_BYTES: dict[ProcessControlKey, bytes] = {
     "down": b"\x1b[B",
     "left": b"\x1b[D",
     "right": b"\x1b[C",
-}
-_POSIX_ENV_DEFAULTS = {
-    "TERM": "xterm-256color",
-    "COLUMNS": "120",
-    "LINES": "40",
-    "GIT_PAGER": "cat",
-    "PAGER": "cat",
-    "LESS": "-FX",
-    "DEBIAN_FRONTEND": "noninteractive",
 }
 _POWERSHELL_ENV_DEFAULTS = {"GIT_PAGER": "more", "PAGER": "more"}
 _MAX_OUTPUT_WAIT_MS = 30_000
@@ -161,10 +154,18 @@ def validate_process_config(config: LocalRuntimeAdapterConfig) -> None:
     issues = _environment_issues(config.env, windows=_is_windows(config))
     if issues:
         raise ValueError("; ".join(issue.message for issue in issues))
-    if config.process_authority == "host_shell":
-        command_environment = _process_command_environment(config)
-        if (os.name == "nt") != (command_environment != "unix"):
-            raise ValueError("command environment does not match the operating system")
+    match config.process_authority:
+        case "host_shell":
+            command_environment = _process_command_environment(config)
+            if (os.name == "nt") != (command_environment != "unix"):
+                raise ValueError(
+                    "command environment does not match the operating system"
+                )
+        case "sandbox":
+            if config.command_environment != "unix":
+                raise ValueError("sandbox processes run in a unix command environment")
+        case "disabled":
+            return
 
 
 def resolve_process_start(
@@ -288,8 +289,20 @@ def _validate_start(
                 "command", "empty_command", "Command must not be empty"
             )
         )
+    raw_cwd = arguments.get("cwd", "")
+    if config.process_authority == "sandbox":
+        # The sandbox checks the directory and supplies the environment the
+        # explicit variables are merged into.
+        _raise_argument_issues("process.start", issues)
+        return ValidatedProcessStart(
+            process_id=process_id(session_id, action.action_id, action.call_id),
+            command=command,
+            cwd=_sandbox_working_directory(raw_cwd, config.workspace.cwd),
+            explicit_env=explicit_env,
+            process_env=explicit_env,
+        )
     cwd, cwd_issue = _resolve_working_directory(
-        arguments.get("cwd", ""), config.workspace.cwd, windows=_is_windows(config)
+        raw_cwd, config.workspace.cwd, windows=_is_windows(config)
     )
     if cwd_issue is not None:
         issues.append(cwd_issue)
@@ -463,6 +476,12 @@ def _resolve_working_directory(
     return resolved, None
 
 
+def _sandbox_working_directory(value: JsonValue, session_cwd: Path) -> Path:
+    if not isinstance(value, str):
+        raise ValueError("process.start cwd must be a string")
+    return sandbox_path(value.strip() or session_cwd, cwd=session_cwd)
+
+
 def _merge_process_environment(
     base: dict[str, str],
     explicit: dict[str, str],
@@ -474,7 +493,7 @@ def _merge_process_environment(
     defaults = (
         _POWERSHELL_ENV_DEFAULTS
         if command_environment == "powershell"
-        else _POSIX_ENV_DEFAULTS
+        else PROCESS_ENV_DEFAULTS
     )
     for name, value in defaults.items():
         _setdefault_environment(merged, name, value, windows=windows)

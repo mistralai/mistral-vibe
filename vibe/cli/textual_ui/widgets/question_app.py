@@ -40,6 +40,7 @@ class QuestionApp(VimNavigationMixin, Container):
         Binding("up", "move_up", "Up", show=False),
         Binding("down", "move_down", "Down", show=False),
         Binding("enter", "select", "Select", show=False),
+        Binding("space", "toggle_focused", "Toggle", show=False),
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 
@@ -309,7 +310,7 @@ class QuestionApp(VimNavigationMixin, Container):
             return
         if self._current_question.multi_select:
             help_text = (
-                f"{shortcut('↑↓/jk')} navigate  {shortcut('Enter')} toggle  "
+                f"{shortcut('↑↓/jk')} navigate  {shortcut('Space/Enter')} toggle  "
                 f"{shortcut('Esc')} cancel"
             )
         else:
@@ -377,6 +378,14 @@ class QuestionApp(VimNavigationMixin, Container):
             self._handle_multi_select_action()
         else:
             self._handle_single_select_action()
+
+    def action_toggle_focused(self) -> None:
+        """Handle Space key: toggle the focused checkbox (multi-select only)."""
+        if self.is_within_grace_period():
+            return
+        if not self._current_question.multi_select or self._is_submit_selected:
+            return
+        self._toggle_selection(self.selected_option)
 
     def _handle_multi_select_action(self) -> None:
         """Handle Enter key in multi-select mode: toggle option or submit."""

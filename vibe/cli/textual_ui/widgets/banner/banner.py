@@ -11,7 +11,7 @@ from textual.widgets import Static
 from vibe import __version__
 from vibe.app_server.config import ConfigView
 from vibe.app_server.models import MCPSourceKind, MCPSourceStatus, MCPState
-from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
+from vibe.cli.textual_ui.widgets.banner.petit_chat import CatVariant, PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.spinner_text import SpinnerText
 
@@ -23,6 +23,7 @@ def _pluralize(count: int, singular: str) -> str:
 @dataclass
 class BannerState:
     active_model: str = ""
+    model_display_name: str = ""
     model_pending: bool = False
     models_count: int = 0
     mcp_servers_enabled: int = 0
@@ -94,6 +95,9 @@ class Banner(Static):
     def watch_state(self) -> None:
         if not self.is_attached:
             return
+        # Sync the cat variant from the active model name.
+        chat = self.query_one(PetitChat)
+        chat.set_variant(CatVariant.from_model(self.state.model_display_name))
         widgets = {widget.id: widget for widget in self.query(NoMarkupStatic)}
         model = widgets.get("banner-model")
         counts = widgets.get("banner-meta-counts")
@@ -172,6 +176,7 @@ class Banner(Static):
         suffix = " · unified harness" if experimental_harness else ""
         return BannerState(
             active_model=f"{active_model.display_name}[{active_model.thinking}]{suffix}",
+            model_display_name=active_model.display_name,
             model_pending=model_pending,
             models_count=len(config.models),
             mcp_servers_enabled=mcp_enabled,

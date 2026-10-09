@@ -6,7 +6,6 @@ import re
 
 from vibe.core.config import UtilityFeature, VibeConfigSchema
 from vibe.core.llm.utility_completion import run_utility_completion
-from vibe.core.prompts import UtilityPrompt
 from vibe.core.session.title_policy import DEFAULT_TITLE_POLICY, TitlePolicy
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import LaunchContext
@@ -50,7 +49,7 @@ async def generate_session_title(
         content = await run_utility_completion(
             config=config,
             feature=UtilityFeature.TITLE,
-            system_prompt=UtilityPrompt.SESSION_TITLE.read(),
+            system_prompt=config.title_prompt,
             user_content=_user_prompt(transcript, previous_title),
             max_tokens=policy.max_tokens,
             request_timeout_seconds=policy.request_timeout_seconds,

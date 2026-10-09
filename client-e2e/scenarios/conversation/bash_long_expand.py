@@ -17,8 +17,8 @@ _COMMAND = (
     "| xargs wc -l | sort -rn | head -20 | tee /tmp/python-line-counts.txt"
 )
 
-# The settled bash disclosure header lands on SGR row 30.
-_CLICK = "\x1b[<0;1;30M\x1b[<0;1;30m"
+# The settled bash disclosure header lands on SGR row 15.
+_CLICK = "\x1b[<0;1;15M\x1b[<0;1;15m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

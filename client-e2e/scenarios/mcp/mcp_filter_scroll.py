@@ -10,7 +10,7 @@ handshake = mcp_handshake([
 ])
 request_methods = {"telemetry/record"}
 
-timeline: Timeline = ["/mcp\r", "\x1b[B" * 24, "/entry-24", "\x15", "\x1b[B\r"]
+timeline: Timeline = ["/mcp\r", "\x1b[B" * 24, "/entry-24", "\x15", "\r"]
 
 screen_contains = {"rust": ("MCP Server: entry-00", "read_file")}
 screen_excludes = {"rust": ("entry-24", "No matching MCP servers or connectors")}

@@ -5,8 +5,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 
-use super::theme;
-use super::theme::blend;
+use super::{list_cursor, theme};
 use crate::app::App;
 use crate::mouse;
 use crate::server::PublicChildSession;
@@ -128,16 +127,12 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         };
         app.subagents.list.row_areas.push((row_area, index));
         let marked = marker.as_deref() == rows.row_id(index).as_deref();
-        let (line, highlighted) = if index == 0 {
-            (main_row(&rows, marked), rows.highlighted == 0)
-        } else {
-            let session = &rows.children[index - 1];
-            (child_row(&rows, session, marked), rows.highlighted == index)
+        let line = match index {
+            0 => main_row(&rows, marked),
+            _ => child_row(&rows, &rows.children[index - 1], marked),
         };
-        if highlighted {
-            // The OptionList highlight background spans the whole row.
-            f.buffer_mut()
-                .set_style(row_area, Style::default().bg(theme::surface()));
+        if marked {
+            f.buffer_mut().set_style(row_area, list_cursor::style());
         }
         let padded = Rect {
             x: area.x + 1,
@@ -149,24 +144,28 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     }
 }
 
-/// Python `_main_row`: bold `Main conversation`, selected while in main chat.
+/// Python `_main_row`: bold `Main conversation`, current while in main chat.
 fn main_row(rows: &Rows, marked: bool) -> Line<'static> {
-    let style = row_style(rows, rows.selected.is_none(), rows.highlighted == 0, None);
+    let style = row_style(marked);
     Line::from(vec![
-        Span::styled(if marked { "> " } else { "  " }, style),
+        current_marker(rows.selected.is_none(), marked),
         Span::styled("Main conversation", style.add_modifier(Modifier::BOLD)),
     ])
 }
 
+/// The green `›` on the session being viewed (the list's current value).
+fn current_marker(current: bool, marked: bool) -> Span<'static> {
+    let style = match marked {
+        true => list_cursor::style(),
+        false => Style::default().fg(list_cursor::current_color()),
+    };
+    Span::styled(list_cursor::marker(current), style)
+}
+
 /// Python `_child_row`: `AgentType (name) [status] · N tokens`.
 fn child_row(rows: &Rows, session: &PublicChildSession, marked: bool) -> Line<'static> {
-    let selected = rows.selected.as_deref() == Some(session.id.as_str());
-    let highlighted = rows
-        .children
-        .iter()
-        .position(|row| row.id == session.id)
-        .is_some_and(|position| rows.highlighted == position + 1);
-    let style = row_style(rows, selected, highlighted, Some(session.id.as_str()));
+    let current = rows.selected.as_deref() == Some(session.id.as_str());
+    let style = row_style(marked);
     let status_style = match status_tone(session.status) {
         StatusTone::Success => Style::default().fg(theme::success()),
         StatusTone::Warning => Style::default().fg(theme::warning()),
@@ -174,7 +173,7 @@ fn child_row(rows: &Rows, session: &PublicChildSession, marked: bool) -> Line<'s
         StatusTone::Muted => Style::default().fg(theme::muted()),
     };
     Line::from(vec![
-        Span::styled(if marked { "> " } else { "  " }, style),
+        current_marker(current, marked),
         Span::styled(
             display_name(&session.agent_type),
             style.add_modifier(Modifier::BOLD),
@@ -184,32 +183,17 @@ fn child_row(rows: &Rows, session: &PublicChildSession, marked: bool) -> Line<'s
         Span::styled(
             format!(
                 " · {} tokens",
-                crate::ui::bottom_bar::format_token_count(session.context_tokens())
+                crate::utils::text::format_compact_count(session.context_tokens())
             ),
             theme::muted_style(),
         ),
     ])
 }
 
-/// Python `_row` plus the OptionList hover/highlight TCSS rules: the highlighted
-/// row is `$primary` on `$surface`; the selected row is `$primary`; the hovered
-/// row is `$primary-darken-1`.
-fn row_style(rows: &Rows, selected: bool, highlighted: bool, hovered: Option<&str>) -> Style {
-    let style = Style::default().fg(theme::foreground());
-    let hovered = hovered.is_some_and(|id| rows.mouse.as_deref() == Some(id));
-    if highlighted {
-        return style.fg(theme::primary()).bg(theme::surface());
+/// A row's text: the list-cursor bar under keyboard focus or the mouse, plain otherwise.
+fn row_style(marked: bool) -> Style {
+    match marked {
+        true => list_cursor::style(),
+        false => Style::default().fg(theme::foreground()),
     }
-    if selected {
-        return style.fg(theme::primary());
-    }
-    if hovered {
-        // Textual's `$primary-darken-1`: 10% toward black.
-        return style.fg(blend(
-            theme::primary(),
-            ratatui::style::Color::Rgb(0, 0, 0),
-            0.1,
-        ));
-    }
-    style
 }

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +47,7 @@ from vibe.app_server.protocol import (
     SessionHistoryClearParams,
     SessionHistoryListParams,
     SessionHistoryListResponse,
+    SessionLeaseHolder,
     SessionListParams,
     SessionListResponse,
     SessionMarkAsSeenParams,
@@ -565,6 +566,13 @@ class SessionBackendHostPin(Protocol):
     """Optional selected-backend ownership of durable session pinning."""
 
     async def pin(self, params: SessionPinParams) -> SessionPinResponse: ...
+
+
+@runtime_checkable
+class SessionBackendHostLeaseWatch(Protocol):
+    def watch_leases(
+        self,
+    ) -> AsyncGenerator[dict[str, SessionLeaseHolder | None], None]: ...
 
 
 @runtime_checkable

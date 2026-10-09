@@ -52,6 +52,7 @@ class WhoAmIResult(BaseModel):
     customer_id: str | None = None
     api_base: str | None = None
     vibe_base: str | None = None
+    primitive_access_scope: str | None = None
 
     @field_validator("plan_type", mode="before")
     @classmethod

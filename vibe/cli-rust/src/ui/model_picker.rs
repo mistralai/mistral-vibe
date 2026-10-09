@@ -7,27 +7,16 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
 
-use super::theme_picker::marker_green;
-use super::{bottom_bar, loading, scrollbar, theme, transcript};
+use super::{hint_line, list_cursor, list_scroll, scrollbar, theme};
 use crate::app::App;
 use crate::model_picker::{is_current, option_count};
 
 /// Draw the whole screen with the picker replacing the input box, matching the
 /// Textual layout where `#chat` shrinks to make room for the bottom-app.
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    f.buffer_mut()
-        .set_style(area, Style::default().bg(theme::background()));
-
-    let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
-    let picker_height = box_height(app, area.height);
-    let chunks = super::bottom_app_chunks(app, area, loading_height, picker_height);
-
-    transcript::draw(app, f, chunks[0]);
-    loading::draw(app, f, chunks[1]);
-    crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Blocked);
-    draw_box(app, f, chunks[2]);
-    super::todo::draw_row(app, f, chunks[4]);
-    bottom_bar::draw(app, f, chunks[3]);
+    let height = box_height(app, area.height);
+    let kind = super::bottom_app::Kind::Model;
+    super::bottom_app::draw(app, f, area, height, kind, draw_box);
 }
 
 /// Visible option rows: `min(count, 50vh)` (Textual `max-height: 50vh`).
@@ -100,7 +89,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
         );
     }
 
-    draw_help(f, bx + 2, by + h - 2);
+    hint_line::draw(f, bx + 2, by + h - 2, hint_line::PICK_HINTS);
 }
 
 /// One option row: the `›`/blank marker, the label, and (row 0) the dim hint.
@@ -109,35 +98,18 @@ fn draw_option(app: &App, f: &mut Frame, bx: u16, y: u16, w: u16, i: usize, has_
     let current = is_current(app, i);
     if is_hl {
         let gutter = if has_scrollbar { 7 } else { 6 };
-        let bar = Rect::new(bx + 3, y, w.saturating_sub(gutter), 1);
-        f.buffer_mut()
-            .set_style(bar, Style::default().bg(theme::block_cursor_bg()));
+        list_cursor::paint(f, Rect::new(bx + 3, y, w.saturating_sub(gutter), 1));
     }
-    let row_bg = if is_hl {
-        theme::block_cursor_bg()
-    } else {
-        theme::background()
-    };
-    let text_fg = if is_hl {
-        theme::block_cursor_fg()
-    } else {
-        theme::foreground()
-    };
-
     // A highlighted row is bold across the whole option (Textual block cursor);
     // a current-but-unhighlighted row bolds only its label (Python "bold" style).
-    let marker = if current { "› " } else { "  " };
-    let marker_fg = if current { marker_green() } else { text_fg };
-    let mut marker_style = Style::default().fg(marker_fg).bg(row_bg);
-    if is_hl {
-        marker_style = marker_style.add_modifier(Modifier::BOLD);
-    }
-    f.buffer_mut().set_string(bx + 3, y, marker, marker_style);
-
-    let mut name_style = Style::default().fg(text_fg).bg(row_bg);
-    if is_hl || current {
-        name_style = name_style.add_modifier(Modifier::BOLD);
-    }
+    let (base, dim) = list_cursor::styles(is_hl);
+    let marker_style = list_cursor::marker_style(base, current);
+    f.buffer_mut()
+        .set_string(bx + 3, y, list_cursor::marker(current), marker_style);
+    let name_style = match current {
+        true => base.add_modifier(Modifier::BOLD),
+        false => base,
+    };
     let label = if i == 0 {
         "Default"
     } else {
@@ -147,48 +119,24 @@ fn draw_option(app: &App, f: &mut Frame, bx: u16, y: u16, w: u16, i: usize, has_
 
     if i == 0 {
         let hint = format!("  (currently {})", app.model_picker.default_display_name);
-        let hint_fg = if is_hl { text_fg } else { theme::muted() };
-        let mut hint_style = theme::dim(hint_fg).bg(row_bg);
-        if is_hl {
-            hint_style = hint_style.add_modifier(Modifier::BOLD);
-        }
+        let hint_style = dim;
         let hint_x = bx + 5 + label.chars().count() as u16;
         f.buffer_mut().set_string(hint_x, y, hint, hint_style);
     }
 }
 
-/// Keep the highlighted option visible (Textual `scroll_to_highlight`).
+/// Keep the highlighted option visible, the wheel's free scroll aside.
 fn reconcile_scroll(app: &mut App, total: usize, visible: usize) -> usize {
-    let sel = app.model_picker.selected.min(total.saturating_sub(1));
-    let mut off = app.model_picker.scroll;
-    if app.model_picker.free_scroll {
-        off = off.min(total.saturating_sub(visible));
-    } else if sel < off {
-        off = sel;
-    } else if sel >= off + visible {
-        off = sel + 1 - visible;
-    }
-    off = off.min(total.saturating_sub(visible));
-    app.model_picker.scroll = off;
-    off
-}
-
-/// The hint line: `↑↓/jk` `Enter` `Esc` keys in bold $primary, labels in $text-muted.
-pub(crate) fn draw_help(f: &mut Frame, x: u16, y: u16) {
-    let key = Style::default()
-        .fg(theme::primary())
-        .bg(theme::background())
-        .add_modifier(Modifier::BOLD);
-    let label = theme::muted_style().bg(theme::background());
-    let mut cx = x;
-    for (k, l) in [
-        ("↑↓/jk", " Navigate  "),
-        ("Enter", " Select  "),
-        ("Esc", " Cancel"),
-    ] {
-        f.buffer_mut().set_string(cx, y, k, key);
-        cx += k.chars().count() as u16;
-        f.buffer_mut().set_string(cx, y, l, label);
-        cx += l.chars().count() as u16;
-    }
+    let state = &mut app.model_picker;
+    let offset = match state.free_scroll {
+        true => state.scroll.min(total.saturating_sub(visible)),
+        false => {
+            let selected = state.selected.min(total.saturating_sub(1));
+            list_scroll::follow(state.scroll, visible, total, selected..selected + 1, |_| {
+                true
+            })
+        }
+    };
+    state.scroll = offset;
+    offset
 }

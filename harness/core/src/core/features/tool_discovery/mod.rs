@@ -32,7 +32,7 @@ const SEARCH_TOOL_FUNCTIONS_DESCRIPTION: &str = r#"Discover callable tool functi
 
 Use mode="best_match" first with a capability query; it returns up to 20 ranked exact function names, without declarations.
 If a returned name fits, call mode="details" with that exact name before using it.
-Use mode="all_connector_capabilities" only when best_match returned moreCandidatesAvailable: true and no candidate fits, or when explicitly listing a connector inventory.
+Use mode="all_connector_capabilities" with connectors set to exact connector names only when best_match returned moreCandidatesAvailable: true and no candidate fits, or when explicitly listing a connector inventory.
 
 For query, use short tool-capability keywords, not the full user request.
 If the user shares a URL from an online service, first check whether there is a connector for that service. Include the service name or domain plus the needed operation in the best_match query, for example "google docs open url", before falling back to generic web URL tools.
@@ -81,7 +81,7 @@ pub(crate) struct SearchRequest {
     #[schemars(
         length(max = 10),
         inner(length(min = 1)),
-        description = "Exact connector names for best_match/all_connector_capabilities; unused in details."
+        description = "Exact connector names; required in all_connector_capabilities mode, optional filter in best_match, unused in details."
     )]
     pub(crate) connectors: Vec<String>,
 }

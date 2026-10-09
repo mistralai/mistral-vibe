@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use super::{dispatch, is_side_channel, parse};
 use crate::app::{App, QueuedPrompt, Status, ToastSeverity};
-use crate::input_modes::{classify, ClassifiedInput};
+use crate::input_modes::{classify, classify_submitted, submitted_value, ClassifiedInput};
 use crate::startup::banners;
 use crate::telemetry::TelemetrySender;
 use crate::transcript::local;
@@ -94,7 +94,8 @@ pub fn submit(
     client: &Arc<Client>,
     config_tx: &mpsc::Sender<config::Loaded>,
 ) -> bool {
-    let value = app.chat_input.submitted_text().trim().to_owned();
+    let mode = app.chat_input.mode;
+    let value = submitted_value(mode, &app.chat_input.submitted_text());
     if matches!(app.session.status, Status::Failed) {
         return false;
     }
@@ -125,7 +126,7 @@ pub fn submit(
         }
         return false;
     }
-    let classified = classify(&value, &app.completion.skills);
+    let classified = classify_submitted(mode, &value, &app.completion.skills);
     if !matches!(&classified, ClassifiedInput::SlashCommand { .. }) {
         if reject_while_shell_runs(app, &value) {
             return false;

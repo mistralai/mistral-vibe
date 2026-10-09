@@ -67,7 +67,7 @@ fn push_code(rows: &mut Builder, content: &str, language: &str, width: u16) {
         return;
     }
     for spans in markdown::code_lines(content, language) {
-        push_styled_wrapped(rows, spans, width, None);
+        push_styled_wrapped(rows, &spans, width);
         if rows.done() {
             return;
         }
@@ -85,12 +85,7 @@ fn push_large_code(rows: &mut Builder, content: &str, language: &str, width: u16
                 Line::from(spans)
             });
         } else {
-            push_styled_wrapped(
-                rows,
-                vec![Span::styled(line.to_owned(), style)],
-                width,
-                None,
-            );
+            push_wrapped(rows, line, width, style);
         }
         if rows.done() {
             return;

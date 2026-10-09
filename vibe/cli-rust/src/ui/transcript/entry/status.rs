@@ -22,7 +22,7 @@ pub(super) fn push_compact_status(
     } else {
         ("✓".to_string(), theme::status_ready())
     };
-    lines.push(Line::from(""));
+    lines.push_gap();
     lines.push(Line::from(vec![
         Span::styled(format!("{glyph} "), theme::text(color)),
         Span::styled(text.to_string(), theme::text(theme::foreground())),
@@ -32,7 +32,7 @@ pub(super) fn push_compact_status(
 /// A settled status message: the `✓` indicator then its text, whose extra lines
 /// align under the first one (Python's `StatusMessage` horizontal layout).
 pub(super) fn push_checkpoint(lines: &mut LinkedLines, message: &str) {
-    lines.push(Line::from(""));
+    lines.push_gap();
     for (index, text) in message.lines().enumerate() {
         let marker = if index == 0 { "✓ " } else { "  " };
         lines.push(Line::from(vec![
@@ -59,7 +59,7 @@ pub(super) fn push_teleport_status(
     };
     let body = theme::text(theme::foreground());
     let mut spans = vec![Span::styled(format!("{glyph} "), theme::text(color))];
-    lines.push(Line::from(""));
+    lines.push_gap();
     if !complete {
         spans.push(Span::styled(text.to_string(), body));
         lines.push(Line::from(spans));

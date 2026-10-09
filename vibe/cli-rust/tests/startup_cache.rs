@@ -90,6 +90,15 @@ fn round_trips_through_the_cache_file_format() {
 }
 
 #[test]
+fn an_older_cache_without_cursor_blink_keeps_blinking_enabled() {
+    let mut cache = serde_json::to_value(config_with(CLIENT_VERSION, 1000)).unwrap();
+    cache.as_object_mut().unwrap().remove("cursorBlink");
+    let config: StartupConfig = serde_json::from_value(cache).unwrap();
+    assert!(config.cursor_blink);
+    assert!(config.is_fresh(CLIENT_VERSION, 1000));
+}
+
+#[test]
 fn a_same_release_cache_within_the_ttl_is_fresh() {
     let config = config_with(CLIENT_VERSION, 1000);
     assert!(config.is_fresh(CLIENT_VERSION, 1000));

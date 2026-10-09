@@ -30,6 +30,8 @@ class ChatCompletionsRequestPayload(TypedDict, total=False):
 
 type StreamChunk = dict[str, object]
 type ChunkFactory = Callable[[int, ChatCompletionsRequestPayload], list[StreamChunk]]
+# The HTTP status for a request; anything but 200 is sent as a JSON error body.
+type StatusFactory = Callable[[int, ChatCompletionsRequestPayload], int]
 
 
 class StreamingMockServer:
@@ -189,11 +191,13 @@ class StreamingMockServer:
         self,
         *,
         chunk_factory: ChunkFactory | None = None,
+        status_factory: StatusFactory | None = None,
         ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         self.requests: list[ChatCompletionsRequestPayload] = []
         self._lock = threading.Lock()
         self._chunk_factory = chunk_factory
+        self._status_factory = status_factory
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._build_handler())
         self._scheme = "https" if ssl_context is not None else "http"
         if ssl_context is not None:
@@ -224,6 +228,25 @@ class StreamingMockServer:
                 with parent._lock:
                     parent.requests.append(payload)
                     request_index = len(parent.requests) - 1
+
+                status = (
+                    parent._status_factory(request_index, payload)
+                    if parent._status_factory is not None
+                    else 200
+                )
+                if status != 200:
+                    error_body = json.dumps({
+                        "object": "error",
+                        "message": f"mock status {status}",
+                        "type": "mock_error",
+                    }).encode()
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(error_body)))
+                    self.end_headers()
+                    self.wfile.write(error_body)
+                    self.wfile.flush()
+                    return
 
                 chunks = (
                     parent._chunk_factory(request_index, payload)

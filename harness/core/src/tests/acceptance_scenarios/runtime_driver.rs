@@ -536,6 +536,7 @@ impl SynchronousRuntime {
             | "completion_succeeded"
             | "completion_failed" => Some("llm_call"),
             "hook_completed" | "hook_failed" => Some("hook_call"),
+            "approval_completed" | "approval_failed" => Some("approval"),
             "tool_succeeded" | "tool_failed" => Some("tool"),
             "filesystem_succeeded" | "filesystem_failed" => Some("filesystem"),
             "fail_turn" => Some("pending"),
@@ -924,6 +925,12 @@ fn assert_canonical_action_id(action_id: &str) {
 /// Converts a Runtime Action to the pending-Action inspection form.
 fn pending_action_inspection(action: &Value) -> Value {
     match action["type"].as_str() {
+        Some("approval") => json!({
+            "type": "approval",
+            "action_id": action["action_id"],
+            "call_id": action["call_id"],
+            "grant_key": action["grant_key"],
+        }),
         Some("llm_call") => json!({
             "type": "completion",
             "purpose": action["purpose"],

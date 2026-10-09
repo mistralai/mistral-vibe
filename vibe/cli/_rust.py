@@ -22,6 +22,8 @@ _PYTHON_ONLY_FLAGS: Final = frozenset({
     "--setup",
     "--legacy-harness",
     "--experimental-harness",
+    # Experimental and hidden; vibe-rs has no agent socket.
+    "--agent-socket",
 })
 
 if sys.platform == "win32":

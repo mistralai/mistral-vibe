@@ -241,20 +241,16 @@ impl EffectEntry {
         self.detail.as_ref()?.input.as_ref()
     }
 
-    /// The written path, whose extension picks the body's highlight language.
-    pub fn file_write_path(&self) -> Option<&str> {
-        if self.kind() != Some("file_write") {
-            return None;
-        }
-        self.output()?.get("filePath")?.as_str()
-    }
-
-    /// The read path, whose extension picks the body's highlight language.
-    pub fn file_read_path(&self) -> Option<&str> {
-        if self.kind() != Some("file_read") {
-            return None;
-        }
-        self.output()?.get("filePath")?.as_str()
+    /// The read, written, or scratchpad note path whose content is the body;
+    /// its extension picks the body's highlight language.
+    pub fn code_path(&self) -> Option<&str> {
+        let output = self.output()?;
+        let key = match self.kind()? {
+            "file_read" | "file_write" => "filePath",
+            "scratchpad" if output.get("content")?.is_string() => "path",
+            _ => return None,
+        };
+        output.get(key)?.as_str()
     }
 
     fn output(&self) -> Option<&Value> {

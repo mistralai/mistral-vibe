@@ -81,6 +81,8 @@ enum CheckpointMessageSource {
 pub(super) struct CheckpointStoredMessage {
     message: CheckpointMessage,
     source: CheckpointMessageSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_key: Option<String>,
 }
 
 impl CheckpointStoredMessage {
@@ -99,6 +101,7 @@ impl CheckpointStoredMessage {
         Ok(Self {
             message: CheckpointMessage::capture(&message.message),
             source,
+            context_key: message.context_key.clone(),
         })
     }
 
@@ -107,12 +110,16 @@ impl CheckpointStoredMessage {
         message
             .validate()
             .map_err(|error| error.detail().to_string())?;
+        if let Some(key) = &self.context_key {
+            validate_context_key(key, self.source, &message)?;
+        }
         Ok(StoredMessage {
             message,
             source: match self.source {
                 CheckpointMessageSource::History => StoredMessageSource::History,
                 CheckpointMessageSource::Injection => StoredMessageSource::Injection,
             },
+            context_key: self.context_key,
         })
     }
 
@@ -129,6 +136,20 @@ impl CheckpointStoredMessage {
         validate_visible_user(&message, label)?;
         Ok(message)
     }
+}
+
+fn validate_context_key(
+    key: &str,
+    source: CheckpointMessageSource,
+    message: &Message,
+) -> Result<(), String> {
+    if key.is_empty() {
+        return Err("checkpoint context key must not be empty".to_string());
+    }
+    if source != CheckpointMessageSource::Injection || !matches!(message, Message::User { .. }) {
+        return Err("checkpoint context key requires an injected user message".to_string());
+    }
+    Ok(())
 }
 
 fn validate_visible_user(message: &StoredMessage, label: &str) -> Result<(), String> {

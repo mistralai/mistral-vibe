@@ -33,7 +33,7 @@ _QUESTIONS = [
     }
 ]
 
-_DRAG = "\x1b[<0;3;28M\x1b[<32;119;28M\x1b[<0;119;28m"
+_DRAG = "\x1b[<0;3;15M\x1b[<32;119;15M\x1b[<0;119;15m"
 
 timeline: Timeline = [
     "pick a color\r",

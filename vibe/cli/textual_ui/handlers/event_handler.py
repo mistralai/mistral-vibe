@@ -43,6 +43,7 @@ from vibe.app_server.models import (
 )
 from vibe.cli.textual_ui.todo_tracker import TodoTracker
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
+from vibe.cli.textual_ui.widgets.fired_loop import FiredLoop
 from vibe.cli.textual_ui.widgets.loading import (
     DEFAULT_LOADING_STATUS,
     THINKING_LOADING_STATUS,
@@ -55,7 +56,7 @@ from vibe.cli.textual_ui.widgets.messages import (
     PlanFileMessage,
     ReasoningMessage,
     SlashCommandMessage,
-    UserCommandMessage,
+    UserMessage,
 )
 from vibe.cli.textual_ui.widgets.model_change import (
     ModelChangeMessage,
@@ -115,6 +116,8 @@ class EventHandler:
         self._tool_call_anchors: dict[str, Widget] = {}
         self._pending_error_results: list[ToolResultMessage] = []
         self._retry_presentation: _RetryPresentation | None = None
+        self._last_user_entry: PublicMessageEntry | None = None
+        self._fired_prompt_id: str | None = None
 
     def offer_retry(self, error: ErrorMessage | None = None) -> None:
         presentation = self._retry_presentation
@@ -178,8 +181,12 @@ class EventHandler:
                 if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
                     await self.finalize_streaming()
             case PublicMessageEntry(role="user"):
+                self._last_user_entry = entry
                 self.cancel_retry_presentation()
                 await self.finalize_streaming()
+                fired_loop = FiredLoop.from_display(entry.user_display_content)
+                if fired_loop is not None:
+                    await self._mount_fired_loop_prompt(entry, fired_loop)
             case PublicMessageEntry(role="system"):
                 await self._resolve_retry_presentation(continue_assistant=False)
             case PublicReasoningEntry():
@@ -408,10 +415,40 @@ class EventHandler:
                 await self.finalize_streaming()
             case ScheduledLoopFiredNoticeDetail():
                 await self.finalize_streaming()
-                await self.mount_callback(UserCommandMessage(entry.message))
+                await self._handle_fired_loop_notice(entry)
             case SessionTitleUpdatedNoticeDetail(title=title):
                 if self.on_session_title_changed is not None:
                     self.on_session_title_changed(title)
+
+    async def _handle_fired_loop_notice(self, notice: PublicNoticeEntry) -> None:
+        # A prompt without the display marker (an older server) is only known
+        # to be fired once the notice that follows it in the same turn arrives.
+        prompt = self._last_user_entry
+        fired_loop = FiredLoop.from_notice(notice)
+        if (
+            prompt is None
+            or notice.turn_id is None
+            or prompt.turn_id != notice.turn_id
+            or prompt.id == self._fired_prompt_id
+            or fired_loop is None
+        ):
+            return
+        await self._mount_fired_loop_prompt(prompt, fired_loop)
+
+    async def _mount_fired_loop_prompt(
+        self, prompt: PublicMessageEntry, fired_loop: FiredLoop
+    ) -> None:
+        # A fired loop starts its turn server-side, so no local widget echoes
+        # the prompt.
+        self._fired_prompt_id = prompt.id
+        await self.mount_callback(
+            UserMessage(
+                prompt.text,
+                history_entry_id=prompt.id,
+                images=prompt.images or None,
+                fired_loop=fired_loop,
+            )
+        )
 
     async def _handle_hook_notice(
         self, detail: HookNoticeDetail, loading_widget: LoadingWidget | None

@@ -9,6 +9,6 @@ env = {"SSH_TTY": "/dev/pts/0"}
 clipboard_contains = ("Trust full repo", "Trust folder", "Don't trust")
 
 timeline: Timeline = [
-    "\x1b[<0;38;26M\x1b[<32;88;26M\x1b[<0;88;26m",
-    "\x1b[<0;88;26M\x1b[<32;38;26M\x1b[<0;38;26m",
+    "\x1b[<0;36;26M\x1b[<32;88;26M\x1b[<0;88;26m",
+    "\x1b[<0;88;26M\x1b[<32;36;26M\x1b[<0;36;26m",
 ]

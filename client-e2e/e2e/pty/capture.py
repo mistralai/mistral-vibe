@@ -94,6 +94,7 @@ def capture(
     spec: CaptureSpec,
     *,
     releases: tuple[int, ...] = (),
+    releases_after: tuple[int, ...] = (),
     capture_startup: bool = True,
     capture_steps: Set[int] | None = None,
     step_fd: int | None = None,
@@ -125,6 +126,11 @@ def capture(
                 rows, columns = resize
                 _set_window_size(fd, rows, columns)
                 terminal.resize(rows, columns)
+                buffered = _settle(fd, terminal, clipboard, buffered, spec)
+            for _ in range(releases_after[index] if index < len(releases_after) else 0):
+                if step_fd is None:
+                    raise RuntimeError("replay release has no step FIFO")
+                os.write(step_fd, b"\0")
                 buffered = _settle(fd, terminal, clipboard, buffered, spec)
             if capture_steps is None or index in capture_steps:
                 snapshots.append(terminal.snapshot(f"step{index}", clipboard.text))

@@ -13,7 +13,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         rows: rows(app),
         selected: app.mcp_oauth.selected,
         detail: vec![(mcp_oauth::detail(app), false)],
-        help: vec![(mcp_oauth::help_text(app), false)],
+        help: mcp_oauth::help_text(app),
     };
     app.mcp_oauth.list_area =
         auth_app::draw(app, f, area, &view, crate::mouse::MouseTarget::McpOAuth);

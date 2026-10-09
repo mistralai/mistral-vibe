@@ -14,7 +14,8 @@ from e2e.app_server.scenario import Timeline
 _QUESTION = "Which part of the repo should I focus on?"
 
 screen_contains = {
-    "rust": (f'Answered "{_QUESTION}" → vibe/core',),
+    # Answers never fold, so the row shows the settled check mark, not a disclosure triangle.
+    "rust": (f'✓ Answered "{_QUESTION}" → vibe/core',),
     "python": (f'Answered "{_QUESTION}" → vibe/core',),
 }
 screen_excludes = {"rust": ("Asked questions",), "python": ("Asked questions",)}

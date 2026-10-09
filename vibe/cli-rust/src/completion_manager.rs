@@ -16,7 +16,7 @@ pub struct CompletionEntry {
 }
 
 enum ActiveCompletion {
-    Slash { start: usize },
+    Slash,
     File { start: usize, end: usize },
     Skill { start: usize, end: usize },
 }
@@ -45,7 +45,7 @@ pub fn refresh(app: &mut App) {
         return;
     }
     let entries = match active(app) {
-        Some(ActiveCompletion::Slash { start }) => slash_entries(app, start),
+        Some(ActiveCompletion::Slash) => slash_entries(app),
         Some(ActiveCompletion::File { start, end }) => file_entries(app, start, end),
         Some(ActiveCompletion::Skill { start, end }) => skill_entries(app, start, end),
         None => Vec::new(),
@@ -110,11 +110,11 @@ pub fn accept(app: &mut App) -> bool {
     let mut replacement = entry.label.clone();
     app.chat_input.sync_mentions();
     match active(app) {
-        Some(ActiveCompletion::Slash { start }) => {
-            app.chat_input.input.replace_range(
-                start..,
-                replacement.strip_prefix('/').unwrap_or(&replacement),
-            );
+        Some(ActiveCompletion::Slash) => {
+            app.chat_input.input = replacement
+                .strip_prefix('/')
+                .unwrap_or(&replacement)
+                .to_owned();
             app.chat_input.cursor = app.chat_input.input.len();
         }
         Some(ActiveCompletion::File { start, end } | ActiveCompletion::Skill { start, end }) => {
@@ -139,7 +139,7 @@ pub fn accept(app: &mut App) -> bool {
 
 /// Tab accepts like `accept`, then leaves a space after a slash command so its arguments (and hint) follow.
 pub fn tab(app: &mut App) {
-    let slash = matches!(active(app), Some(ActiveCompletion::Slash { .. }));
+    let slash = matches!(active(app), Some(ActiveCompletion::Slash));
     if accept(app) && slash {
         app.chat_input.input.push(' ');
         app.chat_input.cursor = app.chat_input.input.len();
@@ -177,14 +177,9 @@ fn active(app: &App) -> Option<ActiveCompletion> {
     if let Some(start) = skill_mention_start(app) {
         return Some(ActiveCompletion::Skill { start, end: caret });
     }
-    let slash_start = match app.chat_input.mode {
-        InputMode::Slash => Some(0),
-        InputMode::Prompt if input.starts_with('/') => Some(1),
-        _ => None,
-    };
-    if let Some(start) = slash_start {
+    if app.chat_input.mode == InputMode::Slash {
         // Anything typed past the command word, even a space, closes the menu.
-        return (!input.contains(char::is_whitespace)).then_some(ActiveCompletion::Slash { start });
+        return (!input.contains(char::is_whitespace)).then_some(ActiveCompletion::Slash);
     }
     let start = input[..caret].rfind('@')?;
     let query = &input[start + 1..caret];
@@ -224,11 +219,11 @@ fn boost(label: &str) -> i64 {
 
 /// Matching commands, best score first; ties keep the alphabetical entry order
 /// (Python `CommandCompleter._fuzzy_filter`, a stable sort on the score).
-fn slash_entries(app: &App, start: usize) -> Vec<CompletionEntry> {
+fn slash_entries(app: &App) -> Vec<CompletionEntry> {
     // Python completes on the word up to the caret, not the whole word.
     let input = &app.chat_input.input;
-    let end = crate::chat_input::clamp_offset(input, app.chat_input.cursor).max(start);
-    let query = input[start..end].to_lowercase();
+    let end = crate::chat_input::clamp_offset(input, app.chat_input.cursor);
+    let query = input[..end].to_lowercase();
     let mut scored: Vec<(i64, CompletionEntry)> = commands::entries(&app.completion.skills)
         .into_iter()
         .filter_map(|(label, description)| {

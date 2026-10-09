@@ -22,12 +22,7 @@ pub struct SessionExitSummary {
     pub usage: TokenUsage,
 }
 
-/// The `[bold dark_orange]` span on a 256-color-or-better terminal.
-const ORANGE_256: &str = "\x1b[1;38;5;208m";
-/// The same span downgraded by rich on a 16-color terminal: dark_orange becomes bright red.
-const ORANGE_16: &str = "\x1b[1;91m";
-/// `[red]`, which rich emits unchanged at every color depth.
-const RED: &str = "\x1b[31m";
+use crate::ui::theme::fixed::sgr::{ORANGE_16, ORANGE_256, RED};
 const RESET: &str = "\x1b[0m";
 
 /// Token usage the app currently projects (Python `_current_usage`).

@@ -17,10 +17,11 @@ HARNESS_SRC ?=
 HARNESS_EDITABLE = $(if $(HARNESS_SRC),$(if $(wildcard $(HARNESS_SRC)/pyproject.toml),--with-editable $(HARNESS_SRC) ,),)
 start run release profile-stress: export VIBE_APP_SERVER_CMD = uv run --quiet $(HARNESS_EDITABLE)vibe-app-server --experimental-harness
 
-# Set QUIET=1 to suppress per-test output (only failures, slowest, and summary).
+# Set QUIET=1 for quiet test output: nextest prints only failures and the
+# summary, and the golden pytest run gets -q.
 QUIET ?=
 QUIET_FLAGS = $(if $(QUIET),-q,)
-CARGO_QUIET = $(if $(QUIET),-- --quiet,)
+NEXTEST_QUIET = $(if $(QUIET),--status-level none --final-status-level fail,)
 
 .PHONY: start run build build_test release fmt fmt_check lint lint_test check clean sweep test test_rust test_golden store_golden profile-stress view-stress
 
@@ -72,13 +73,16 @@ clean:
 sweep:          ## Delete incremental sessions older than 7 days
 	[ ! -d vibe/cli-rust/target/debug/incremental ] || find vibe/cli-rust/target/debug/incremental -maxdepth 1 -mindepth 1 -type d -mtime +7 -exec rm -rf {} +
 
-test_rust:      ## Rust tests, fast gate before client-e2e
-	cargo test $(M) $(TEST_CARGO_FLAGS) $(CARGO_QUIET)
+test_rust:      ## Rust tests via cargo-nextest, fast gate before client-e2e
+	@cargo nextest --version >/dev/null 2>&1 || { echo "cargo-nextest missing: cargo install cargo-nextest --locked --version 0.9.146"; exit 1; }
+	cargo nextest run $(M) $(TEST_CARGO_FLAGS) $(NEXTEST_QUIET)
 
 test: build_test test_rust  ## Rust tests, then golden snapshots
+	rm -rf client-e2e/goldens/_live
 	$(GOLDEN_CMD)
 
 test_golden: build_test ## Rust golden snapshot tests (Rust-only, no Python CLI needed)
+	rm -rf client-e2e/goldens/_live
 	$(GOLDEN_CMD)
 
 store_golden: build_test ## Regenerate Rust golden snapshots (all scenarios)

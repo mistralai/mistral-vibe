@@ -4,6 +4,8 @@ use crate::core::error::CoreError;
 use serde_json::Value;
 use serde_json::json;
 
+use crate::core::action_id;
+use crate::core::features::permissions::{GrantKey, PermissionResolution};
 use crate::core::features::programmatic_tool_calling::code_mode::{
     self, CodeResult, EvaluationOutcome, EvaluationRequest,
 };
@@ -12,9 +14,10 @@ use crate::core::features::programmatic_tool_calling::model::ToolKind;
 use crate::core::features::programmatic_tool_calling::model::ToolState;
 use crate::core::features::programmatic_tool_calling::state::{
     PendingProgramHook, PendingProgramOperation, ProgramContinuation, ProgramExecution,
+    resolve_tool_state,
 };
 use crate::core::features::programmatic_tool_calling::{
-    CompletedProgramResult, ProgramContext, ProgramOutcome, TypeScriptTool,
+    CompletedProgramResult, ProgramContext, ProgramOutcome, ProgrammaticName, TypeScriptTool,
 };
 use crate::core::hooks::{
     HookCall, HookPoint, HookResult, PreToolCallOutput, hook_action_id, hook_failure_tool_result,
@@ -23,7 +26,7 @@ use crate::core::hooks::{
 use crate::core::step_protocol::Action;
 use crate::core::step_protocol::DeterminismContext;
 use crate::core::tools::external::{ExternalToolCall, ToolOrigin, effect_id_for_operation};
-use crate::core::tools::result::model_visible_content_block;
+use crate::core::tools::result::{model_visible_content_block, permission_denied_result};
 use crate::core::wire::content::ContentBlock;
 use crate::core::wire::content::text_content;
 use crate::core::wire::tool::{ProtocolError, StructuredContent, ToolCall, ToolResult};
@@ -56,6 +59,7 @@ pub(super) fn start_program_execution(
 }
 
 enum ProgramResume<'a> {
+    Approval { action_id: &'a str },
     Tool { action_id: &'a str },
     Hook { action_id: &'a str },
 }
@@ -76,18 +80,19 @@ struct ClassifiedProgramInput {
 }
 
 impl ClassifiedProgramInput {
-    fn resume_after_hook(action_id: &str, call: &ExternalToolCall, result: ToolResult) -> Self {
+    fn resume_after_hook(action_id: String, call: &ExternalToolCall, result: ToolResult) -> Self {
         Self {
             accepted_result: Some(accepted_program_result(call, result.clone())),
-            transition: ProgramInputTransition::ResumeHook {
-                action_id: action_id.to_owned(),
-                result,
-            },
+            transition: ProgramInputTransition::ResumeHook { action_id, result },
         }
     }
 }
 
 enum ProgramInputTransition {
+    ResumeApproval {
+        action_id: String,
+        result: ToolResult,
+    },
     ResumeTool {
         action_id: String,
         result: ToolResult,
@@ -97,6 +102,12 @@ enum ProgramInputTransition {
         call: ExternalToolCall,
         hook_binding_ids: Vec<String>,
         result: ToolResult,
+    },
+    AwaitApprovalAfterPreHook {
+        action_id: String,
+        effective_call: ExternalToolCall,
+        grant_key: GrantKey,
+        programmatic_name: ProgrammaticName,
     },
     ContinueAfterPreHook {
         action_id: String,
@@ -110,6 +121,10 @@ enum ProgramInputTransition {
 
 pub(crate) enum ProgramInput {
     ToolResult {
+        action_id: String,
+        result: ToolResult,
+    },
+    ApprovalResult {
         action_id: String,
         result: ToolResult,
     },
@@ -183,7 +198,9 @@ fn evaluate_program_round(
     })
     .map_err(CoreError::invariant)?
     {
-        EvaluationOutcome::PartialEvaluation { partial_evaluation } => {
+        EvaluationOutcome::PartialEvaluation {
+            mut partial_evaluation,
+        } => {
             let mut pending_operations = Vec::new();
             let mut permission_denials = Vec::new();
             for (operation_id, function) in
@@ -219,30 +236,50 @@ fn evaluate_program_round(
                         hook_binding_ids,
                     )
                 } else {
-                    if let Some(result) = context.permission_denial(&operation_call) {
-                        permission_denials.push(accepted_program_result(&operation_call, result));
+                    match context.permission_resolution(&operation_call) {
+                        PermissionResolution::Allow => {
+                            PendingProgramOperation::pending(operation_call)
+                        }
+                        PermissionResolution::Deny => {
+                            permission_denials.push(accepted_program_result(
+                                &operation_call,
+                                permission_denied_result(),
+                            ));
+                            continue;
+                        }
+                        PermissionResolution::Ask(grant_key) => {
+                            let programmatic_name =
+                                context.resolve_programmatic_name(&operation_call)?;
+                            PendingProgramOperation::awaiting_approval(
+                                operation_call,
+                                grant_key,
+                                programmatic_name,
+                            )
+                        }
                     }
-                    PendingProgramOperation::pending(operation_call)
                 };
                 pending_operations.push(operation);
             }
-            if pending_operations.is_empty() {
+            if pending_operations.is_empty() && permission_denials.is_empty() {
                 return Err(CoreError::invalid_command(
                     "TypeScript partial evaluation contains no pending effects",
                 ));
             }
-            let mut execution =
-                ProgramExecution::new(partial_evaluation, pending_operations, round);
 
-            for denial in permission_denials {
-                let continuation =
-                    execution.resolve_pending_tool(&denial.action_id, denial.result.clone())?;
-                accepted_results.push(denial);
-                if let Some(continuation) = continuation {
-                    return Ok(ControlFlow::Continue(continuation));
-                }
+            for denial in &permission_denials {
+                resolve_tool_state(
+                    &mut partial_evaluation,
+                    &denial.operation_id,
+                    denial.result.clone(),
+                )?;
+            }
+            accepted_results.extend(permission_denials);
+            if pending_operations.is_empty() {
+                let continuation = ProgramContinuation::after_round(partial_evaluation, round)?;
+                return Ok(ControlFlow::Continue(continuation));
             }
 
+            let execution = ProgramExecution::new(partial_evaluation, pending_operations, round);
             let pending_actions = execution.pending_actions(context.turn_id());
             Ok(ControlFlow::Break((
                 ProgramOutcome::Pending(execution),
@@ -375,12 +412,7 @@ fn retained_program_content(
         descriptors
             .iter()
             .find(|descriptor| descriptor.name == runtime_name)
-            .map(|descriptor| {
-                format!(
-                    "tools.{}.{}",
-                    descriptor.programmatic_name.namespace, descriptor.programmatic_name.name
-                )
-            })
+            .map(|descriptor| descriptor.programmatic_name.display_name())
             .unwrap_or_else(|| format!("tools.{runtime_name}"))
     })
 }
@@ -450,22 +482,20 @@ impl ProgramExecution {
     fn classify_input(
         &self,
         context: ProgramContext<'_>,
-        input: &ProgramInput,
+        input: ProgramInput,
     ) -> Result<ClassifiedProgramInput, CoreError> {
         match input {
             ProgramInput::ToolResult { action_id, result } => {
                 let disposition = self
-                    .tool_result_disposition(context, action_id)
+                    .tool_result_disposition(context, &action_id)
                     .ok_or_else(|| {
                         CoreError::invariant("pending program tool operation was not found")
                     })?;
+                let result = within_nested_result_limit(result);
                 Ok(match disposition {
                     ProgramToolResultDisposition::Commit { call } => ClassifiedProgramInput {
                         accepted_result: Some(accepted_program_result(&call, result.clone())),
-                        transition: ProgramInputTransition::ResumeTool {
-                            action_id: action_id.clone(),
-                            result: result.clone(),
-                        },
+                        transition: ProgramInputTransition::ResumeTool { action_id, result },
                     },
                     ProgramToolResultDisposition::AwaitPostHook {
                         call,
@@ -473,16 +503,26 @@ impl ProgramExecution {
                     } => ClassifiedProgramInput {
                         accepted_result: None,
                         transition: ProgramInputTransition::AwaitPostHook {
-                            action_id: action_id.clone(),
+                            action_id,
                             call,
                             hook_binding_ids,
-                            result: result.clone(),
+                            result,
                         },
                     },
                 })
             }
+            ProgramInput::ApprovalResult { action_id, result } => {
+                let call = self.pending_approval(&action_id).ok_or_else(|| {
+                    CoreError::invariant("pending program approval was not found")
+                })?;
+
+                Ok(ClassifiedProgramInput {
+                    accepted_result: Some(accepted_program_result(call, result.clone())),
+                    transition: ProgramInputTransition::ResumeApproval { action_id, result },
+                })
+            }
             ProgramInput::HookCompleted { action_id, result } => {
-                match (self.pending_hook(action_id), result) {
+                match (self.pending_hook(&action_id), result) {
                     (
                         Some(PendingProgramHook::Pre(original)),
                         HookResult::PreToolCall(PreToolCallOutput::Continue {
@@ -490,17 +530,29 @@ impl ProgramExecution {
                         }),
                     ) => {
                         let effective_call =
-                            context.effective_call(original, effective_arguments.clone())?;
-                        Ok(match context.permission_denial(&effective_call) {
-                            Some(denial) => ClassifiedProgramInput::resume_after_hook(
-                                action_id,
-                                &effective_call,
-                                denial,
-                            ),
-                            None => ClassifiedProgramInput {
+                            context.effective_call(original, effective_arguments)?;
+                        Ok(match context.permission_resolution(&effective_call) {
+                            PermissionResolution::Deny => {
+                                ClassifiedProgramInput::resume_after_hook(
+                                    action_id,
+                                    &effective_call,
+                                    permission_denied_result(),
+                                )
+                            }
+                            PermissionResolution::Ask(grant_key) => ClassifiedProgramInput {
+                                accepted_result: None,
+                                transition: ProgramInputTransition::AwaitApprovalAfterPreHook {
+                                    action_id,
+                                    programmatic_name: context
+                                        .resolve_programmatic_name(&effective_call)?,
+                                    effective_call,
+                                    grant_key,
+                                },
+                            },
+                            PermissionResolution::Allow => ClassifiedProgramInput {
                                 accepted_result: None,
                                 transition: ProgramInputTransition::ContinueAfterPreHook {
-                                    action_id: action_id.clone(),
+                                    action_id,
                                     effective_call,
                                 },
                             },
@@ -510,7 +562,7 @@ impl ProgramExecution {
                         Some(PendingProgramHook::Pre(call)),
                         HookResult::PreToolCall(PreToolCallOutput::Skip { reason }),
                     ) => {
-                        let result = skipped_tool_result(reason.clone())?;
+                        let result = skipped_tool_result(reason)?;
                         Ok(ClassifiedProgramInput::resume_after_hook(
                             action_id, call, result,
                         ))
@@ -521,7 +573,7 @@ impl ProgramExecution {
                     ) => Ok(ClassifiedProgramInput::resume_after_hook(
                         action_id,
                         call,
-                        tool_result.clone(),
+                        within_nested_result_limit(tool_result),
                     )),
                     (Some(PendingProgramHook::Pre(_)), _) => Err(CoreError::invalid_command(
                         "pre-tool hook requires a pre_tool_call result",
@@ -534,10 +586,10 @@ impl ProgramExecution {
             }
             ProgramInput::HookFailed { action_id, error } => {
                 let pending = self
-                    .pending_hook(action_id)
+                    .pending_hook(&action_id)
                     .ok_or_else(|| CoreError::invariant("pending program hook was not found"))?;
                 let call = pending.call();
-                let result = hook_failure_tool_result(error.clone());
+                let result = hook_failure_tool_result(error);
                 Ok(ClassifiedProgramInput::resume_after_hook(
                     action_id, call, result,
                 ))
@@ -568,9 +620,19 @@ impl ProgramExecution {
         let ClassifiedProgramInput {
             accepted_result,
             transition,
-        } = self.classify_input(context, &input)?;
+        } = self.classify_input(context, input)?;
         let mut accepted_results = Vec::from_iter(accepted_result);
         let advance = match transition {
+            ProgramInputTransition::ResumeApproval { action_id, result } => self.resume(
+                context,
+                parent_call,
+                ProgramResume::Approval {
+                    action_id: &action_id,
+                },
+                result,
+                determinism,
+                &mut accepted_results,
+            ),
             ProgramInputTransition::ResumeTool { action_id, result } => self.resume(
                 context,
                 parent_call,
@@ -600,6 +662,32 @@ impl ProgramExecution {
                 self.await_post_hook(&action_id, hook_action_id, hook_binding_ids, result)?;
                 Ok(ProgramAdvance::Pending {
                     actions: vec![action],
+                })
+            }
+            ProgramInputTransition::AwaitApprovalAfterPreHook {
+                action_id,
+                effective_call,
+                grant_key,
+                programmatic_name,
+            } => {
+                let approval_action_id = action_id::approval(&effective_call.action_id);
+                let approval = Action::approval(
+                    approval_action_id.clone(),
+                    context.turn_id(),
+                    &grant_key,
+                    &effective_call,
+                    programmatic_name.display_name(),
+                );
+                self.await_approval_after_pre_hook(
+                    &action_id,
+                    effective_call,
+                    approval_action_id,
+                    grant_key,
+                    programmatic_name,
+                )?;
+
+                Ok(ProgramAdvance::Pending {
+                    actions: vec![approval],
                 })
             }
             ProgramInputTransition::ContinueAfterPreHook {
@@ -676,6 +764,63 @@ fn accepted_program_result(call: &ExternalToolCall, result: ToolResult) -> Accep
     }
 }
 
+/// Largest serialized nested result a program receives; see
+/// `within_nested_result_limit`.
+const NESTED_RESULT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Quick fix for a trap that left sessions unable to resume: a large nested
+/// result was copied into the post-tool hook input and output, the checkpoint,
+/// and the Runtime's journal before the program could use it, which could push
+/// a stored document past the Runtime's 64 MiB size limit. Such a result now
+/// becomes a small failure the program can catch, on arrival and after the
+/// post-tool hook.
+///
+/// The limit is half the 16 MiB replay limit because the Runtime records one
+/// result several times between two journal compactions; 8 MiB keeps that
+/// within its size limit, and V8 already runs out of memory replaying values
+/// of that size.
+///
+/// This deliberately bounds one result only. It does not count results the
+/// program already holds, and it does not cover direct calls or results the
+/// Runtime journals before Core sees them. Passing large results by reference
+/// is the intended complete solution.
+fn within_nested_result_limit(result: ToolResult) -> ToolResult {
+    if serialized_len(&result) <= NESTED_RESULT_LIMIT_BYTES {
+        return result;
+    }
+    let limit_mib = NESTED_RESULT_LIMIT_BYTES / (1024 * 1024);
+    let message = format!(
+        "The tool ran, but its result is too large to return to run_typescript: it exceeds the {limit_mib} MiB limit. Request a smaller result by filtering, paginating, or narrowing the query, or split the work across multiple run_typescript calls."
+    );
+    ToolResult::Failure {
+        content: text_content(message.clone()),
+        structured_content: StructuredContent::default(),
+        meta: None,
+        error: ProtocolError {
+            code: "tool_result_too_large".to_string(),
+            message,
+            retryable: false,
+            details: json!({ "limit_bytes": NESTED_RESULT_LIMIT_BYTES }),
+        },
+    }
+}
+
+fn serialized_len(result: &ToolResult) -> usize {
+    struct ByteCounter(usize);
+    impl std::io::Write for ByteCounter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, result).expect("validated tool results serialize");
+    counter.0
+}
+
 fn resume_program_execution(
     context: ProgramContext<'_>,
     parent_call: &ToolCall,
@@ -686,6 +831,9 @@ fn resume_program_execution(
     accepted_results: &mut Vec<AcceptedProgramResult>,
 ) -> Result<Option<(ProgramOutcome, Vec<Action>)>, CoreError> {
     let continuation = match resume {
+        ProgramResume::Approval { action_id } => {
+            program.resolve_pending_approval(action_id, result)?
+        }
         ProgramResume::Tool { action_id } => program.resolve_pending_tool(action_id, result)?,
         ProgramResume::Hook { action_id } => program.resolve_pending_hook(action_id, result)?,
     };

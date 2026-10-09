@@ -4,6 +4,7 @@ use ratatui::style::Modifier;
 
 use super::theme;
 use super::trust_folders_text::{block, Row};
+use crate::hints::{self, action, key};
 use crate::trust_folders::TrustFolders;
 
 /// The dialog's rows plus what the overflowing scroll region needs.
@@ -23,8 +24,9 @@ pub(super) struct Layout {
 /// `#trust-dialog-content { min-height: 3; max-height: 10 }`.
 const CONTENT_MIN: usize = 3;
 pub(super) const CONTENT_MAX: usize = 10;
-/// `.trust-option { margin: 0 3 }`, collapsed between two adjacent options.
-const OPTION_MARGIN: usize = 3;
+/// Columns between two option chips, narrow enough for the numbered labels to
+/// fit the 58-column content width.
+const OPTION_GAP: usize = 2;
 
 const WARNING: &str = "Malicious configs can modify AI behavior, exfiltrate data, run destructive \
                        commands, or silently alter your code.";
@@ -165,31 +167,25 @@ fn repo_line(trust: &TrustFolders, content_width: usize) -> Vec<Row> {
 }
 
 fn options_row(trust: &TrustFolders) -> Row {
-    let margin = " ".repeat(OPTION_MARGIN);
     let plain = theme::text(theme::foreground());
-    let mut row = vec![(margin.clone(), plain)];
+    let mut row = Vec::new();
     for (index, (_, label)) in trust.options.iter().enumerate() {
-        let selected = index == trust.selected;
-        let cursor = if selected { "\u{203a} " } else { "  " };
-        let style = match selected {
-            true => plain.add_modifier(Modifier::BOLD),
+        if index > 0 {
+            row.push((" ".repeat(OPTION_GAP), plain));
+        }
+        let style = match index == trust.selected {
+            true => super::list_cursor::style(),
             false => plain,
         };
-        row.push((format!("{cursor}{label}"), style));
-        row.push((margin.clone(), plain));
+        row.push((format!(" {}. {label} ", index + 1), style));
     }
     Row::widgets(row)
 }
 
 fn help_row() -> Row {
-    let key = theme::text(theme::primary()).add_modifier(Modifier::BOLD);
-    let muted = theme::muted_style();
-    Row::text(vec![
-        ("\u{2191}\u{2193}".to_owned(), key),
-        (" scroll  ".to_owned(), muted),
-        ("\u{2190}\u{2192}".to_owned(), key),
-        (" navigate  ".to_owned(), muted),
-        ("Enter".to_owned(), key),
-        (" select".to_owned(), muted),
-    ])
+    Row::text(super::hint_line::styled(&[
+        (key::NAV, action::SCROLL),
+        (key::LEFT_RIGHT, action::NAVIGATE),
+        hints::SELECT,
+    ]))
 }

@@ -77,7 +77,7 @@ pub fn open(app: &mut App, client: &Arc<Client>, connector_name: String) {
     fetch_auth_url(app, client);
 }
 
-/// Esc/Backspace, and the refresh that discovered tools (Python `ConnectorAuthClosed`).
+/// Esc, and the refresh that discovered tools (Python `ConnectorAuthClosed`).
 pub fn close(app: &mut App, client: &Arc<Client>, refreshed: bool) {
     let connector_name = if refreshed {
         app.connector_auth.connector_name.clone()
@@ -188,17 +188,10 @@ fn on_connector_refreshed(app: &mut App, client: &Arc<Client>, tool_count: u64) 
     );
 }
 
-/// Move the highlight, clamped like Textual's `OptionList`.
+/// Move the highlight, wrapping at the ends.
 pub fn navigate(app: &mut App, down: bool) {
-    let last = rows(app).iter().filter(|row| row.selectable()).count();
-    if last == 0 {
-        return;
-    }
-    app.connector_auth.selected = if down {
-        (app.connector_auth.selected + 1).min(last - 1)
-    } else {
-        app.connector_auth.selected.saturating_sub(1)
-    };
+    let count = rows(app).iter().filter(|row| row.selectable()).count();
+    app.connector_auth.selected = crate::list_nav::wrap(app.connector_auth.selected, count, down);
 }
 
 /// Enter on the highlighted option (Python `on_option_list_option_selected`).

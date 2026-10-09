@@ -6,8 +6,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
 
-use super::{bottom_bar, loading, theme, transcript};
+use super::{list_cursor, theme};
 use crate::app::App;
+use crate::hints::{self, action, key, Hint};
 use crate::rewind::{options, Step};
 
 /// Preview characters kept in the title (Python `_title_text`).
@@ -19,20 +20,12 @@ type Row = Vec<(String, Style)>;
 
 /// Draw the whole screen with the panel replacing the input box.
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    f.buffer_mut()
-        .set_style(area, Style::default().bg(theme::background()));
-
-    let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
     let rows = rows(app);
     let box_height = (rows.len() as u16 + 2).min(area.height);
-    let chunks = super::bottom_app_chunks(app, area, loading_height, box_height);
-
-    transcript::draw(app, f, chunks[0]);
-    loading::draw(app, f, chunks[1]);
-    crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Rewind);
-    draw_box(f, chunks[2], &rows);
-    super::todo::draw_row(app, f, chunks[4]);
-    bottom_bar::draw(app, f, chunks[3]);
+    let kind = super::bottom_app::Kind::Rewind;
+    super::bottom_app::draw(app, f, area, box_height, kind, |_, f, area| {
+        draw_box(f, area, &rows)
+    });
 }
 
 fn draw_box(f: &mut Frame, area: Rect, rows: &[Row]) {
@@ -53,10 +46,15 @@ fn draw_box(f: &mut Frame, area: Rect, rows: &[Row]) {
     let x = area.x + 2;
     let visible = area.height.saturating_sub(2) as usize;
     for (index, row) in rows.iter().take(visible).enumerate() {
+        let y = area.y + 1 + index as u16;
+        if list_cursor::is_bar(row) {
+            let bar = Rect::new(x, y, area.width.saturating_sub(4), 1);
+            f.buffer_mut().set_style(bar, list_cursor::style());
+        }
         let mut cursor = x;
         for (text, style) in row {
-            f.buffer_mut()
-                .set_string(cursor, area.y + 1 + index as u16, text, style.bg(bg));
+            let style = style.bg.map_or(style.bg(bg), |_| *style);
+            f.buffer_mut().set_string(cursor, y, text, style);
             cursor += text.chars().count() as u16;
         }
     }
@@ -86,45 +84,32 @@ fn rows(app: &App) -> Vec<Row> {
         .collect();
     rows.push(Vec::new());
     for (index, label) in options(app).iter().enumerate() {
-        let focused = index == app.rewind.selected;
-        let style = if focused {
-            Style::default()
-                .fg(theme::primary())
-                .add_modifier(Modifier::BOLD)
+        let style = if index == app.rewind.selected {
+            list_cursor::style()
         } else {
             Style::default().fg(theme::foreground())
         };
-        let cursor = if focused { "› " } else { "  " };
-        rows.push(vec![(format!("{cursor}{}. {label}", index + 1), style)]);
+        rows.push(vec![(format!("  {}. {label}", index + 1), style)]);
     }
     rows.push(Vec::new());
     rows.push(help(app));
     rows
 }
 
-/// The hint line: keys in bold $primary, labels in $text-muted.
+/// The hint line for the current step.
 fn help(app: &App) -> Row {
-    let key = Style::default()
-        .fg(theme::primary())
-        .add_modifier(Modifier::BOLD);
-    let label = theme::dim(theme::text_muted());
-    let hints: &[(&str, &str)] = match app.rewind.step {
-        Step::Persistence => &[
-            ("↑↓/jk", " pick option  "),
-            ("Enter", " confirm  "),
-            ("Esc", " back  "),
-            ("q", " quit"),
-        ],
+    const PICK: Hint = (key::NAV, action::PICK_OPTION);
+    const CONFIRM: Hint = (key::ENTER, action::CONFIRM);
+    const QUIT: Hint = ("q", action::QUIT);
+    let list: &[Hint] = match app.rewind.step {
+        Step::Persistence => &[PICK, CONFIRM, hints::BACK, QUIT],
         Step::Action => &[
-            ("←/Esc", " previous  "),
-            ("→", " next  "),
-            ("↑↓/jk", " pick option  "),
-            ("Enter", " confirm  "),
-            ("q", " quit"),
+            (key::LEFT_ESC, action::PREVIOUS),
+            (key::RIGHT, action::NEXT),
+            PICK,
+            CONFIRM,
+            QUIT,
         ],
     };
-    hints
-        .iter()
-        .flat_map(|(k, text)| [((*k).to_owned(), key), ((*text).to_owned(), label)])
-        .collect()
+    super::hint_line::styled(list)
 }

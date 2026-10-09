@@ -4,12 +4,14 @@ pub mod bottom_bar;
 pub mod cells;
 mod composer;
 mod flow;
+pub mod fold;
 mod gesture;
 pub mod region;
 mod table;
 
 pub use bottom_bar::BottomBarSelection;
-pub use composer::{in_input, offset_at};
+pub use composer::{blur_composer, in_input, offset_at};
+pub use fold::{Fold, Folds};
 pub use gesture::{ClickChain, Granularity};
 pub use region::{Region, RegionId, RowSpan, ScrollTarget};
 pub use table::{TableCellHit, TableCellKey, TableCellSelection, TableCellSpan};
@@ -198,11 +200,7 @@ pub fn is_collapsed(selection: &Selection, granularity: Granularity) -> bool {
 
 /// A scroll drops the composer selection; a transcript one rides the document.
 pub fn scrolled(app: &mut App) {
-    app.chat_input.anchor = None;
-    app.selection.composer_anchor = None;
-    if app.selection.drag == Some(Surface::Composer) {
-        app.selection.drag = None;
-    }
+    blur_composer(app);
 }
 
 pub fn is_auto_scrolling(app: &App) -> bool {

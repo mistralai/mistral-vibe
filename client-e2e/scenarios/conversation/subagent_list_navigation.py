@@ -15,8 +15,8 @@ _TASK = "find the grouping code"
 screen_contains = {
     "rust": (
         "Main conversation",
-        "Explore (Explore 1) [running] · 2k tokens",
-        "> Main conversation",
+        "Explore (Explore 1) [running] · 2.5k tokens",
+        "› Main conversation",
     )
 }
 

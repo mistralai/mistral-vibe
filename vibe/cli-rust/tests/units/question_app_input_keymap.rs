@@ -226,13 +226,15 @@ fn number_keys_do_not_jump_rows_while_the_row_is_focused() {
 }
 
 #[test]
-fn ctrl_j_and_shift_enter_do_not_insert_newlines() {
+fn ctrl_j_and_shift_enter_insert_newlines_without_submitting() {
     let mut harness = Harness::new(focused_other(question("Choose", false)));
+    harness.app.question_app.open = true;
 
     harness.press_ctrl('j');
     harness.press(KeyCode::Enter, KeyModifiers::SHIFT);
 
-    assert_eq!(harness.other(), "");
+    assert_eq!(harness.other(), "\n\n");
+    assert!(harness.app.question_app.open);
 }
 
 #[test]

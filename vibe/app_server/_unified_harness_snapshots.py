@@ -17,7 +17,9 @@ Known gaps versus the legacy engine-side recorder, accepted for this backend:
   tracked from that turn on. The same holds for a ``write_file`` overwrite the
   runtime could not diff (a binary or large file carries no replaced text);
 - snapshots live in memory, so turns from before this process restore
-  nothing, and subagent writes are not recorded.
+  nothing, and subagent writes are not recorded;
+- a session whose tools run in a sandbox records nothing: its files are not
+  on this disk (:class:`UnavailableRewindFileSnapshots`).
 """
 
 from __future__ import annotations
@@ -260,6 +262,38 @@ class RewindFileSnapshots:
         cwd = self._cwd() or str(Path.cwd())
         absolute = Path(path) if Path(path).is_absolute() else Path(cwd) / path
         return str(absolute.resolve())
+
+
+class UnavailableRewindFileSnapshots:
+    """Rewind file snapshots for a session whose files are not on this disk.
+
+    Records nothing, so a rewind restores no file: reading each written path
+    back would cost a sandbox call per write, and the host disk holds
+    different files, or none, at those paths.
+    """
+
+    def observe(self, state: PublicSessionState) -> None:
+        """Ignore the state: nothing is recorded."""
+
+    def restorable_paths(self, anchor: str) -> list[str]:
+        """No path: nothing was recorded."""
+        return []
+
+    def restore(self, anchor: str) -> tuple[list[str], list[str]]:
+        """Restore nothing and report no error."""
+        return [], []
+
+    def drop_from(self, anchor: str) -> None:
+        """Nothing to forget."""
+
+    def forked(
+        self, anchor: str, renamed: dict[str, str]
+    ) -> UnavailableRewindFileSnapshots:
+        """A fork's files are no more on this disk than its source's."""
+        return self
+
+
+type SessionRewindFileSnapshots = RewindFileSnapshots | UnavailableRewindFileSnapshots
 
 
 def _active_turn(state: PublicSessionState) -> str | None:

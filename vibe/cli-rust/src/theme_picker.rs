@@ -35,16 +35,12 @@ pub fn open(app: &mut App) {
     app.theme_picker.open = true;
 }
 
-/// Move the highlight up/down by one, clamped (Textual's `OptionList` does not
-/// wrap), then arm the debounced preview of the newly highlighted theme.
+/// Move the highlight up/down by one, wrapping at the ends, then arm the
+/// debounced preview of the newly highlighted theme.
 pub fn navigate(app: &mut App, down: bool) {
     app.theme_picker.free_scroll = false;
-    let last = options().len() - 1;
-    if down {
-        app.theme_picker.selected = (app.theme_picker.selected + 1).min(last);
-    } else {
-        app.theme_picker.selected = app.theme_picker.selected.saturating_sub(1);
-    }
+    let picker = &mut app.theme_picker;
+    picker.selected = crate::list_nav::wrap(picker.selected, options().len(), down);
     app.theme_picker.preview_at = Some(Instant::now() + PREVIEW_DEBOUNCE);
 }
 

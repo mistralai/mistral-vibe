@@ -30,6 +30,7 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel
 
 from mistralai_vibe_local_harness.protocol import RustRuntimeBuiltinToolName
+from mistralai_vibe_local_harness.vibe import PathSpace, sandbox_path
 from mistralai_vibe_local_harness.vibe._permissions import PermissionOutcome
 from vibe.app_server._cron import CRON_TOOL_NAME
 from vibe.core.config import VibeConfigSchema
@@ -240,11 +241,16 @@ class UnifiedPermissionResolver:
         store: PermissionStore,
         config: ConfigOrchestrator[VibeConfigSchema],
         provided_names: ProvidedToolNames | None = None,
+        *,
+        path_space: PathSpace = "host",
     ) -> None:
         self._tools = tools
         self._store = store
         self._config = config
         self._provided_names = provided_names or ProvidedToolNames()
+        # The session workspace's: sandbox paths name files the host's file
+        # system cannot resolve, so they are normalized instead.
+        self._path_space: PathSpace = path_space
 
     @property
     def store(self) -> PermissionStore:
@@ -297,7 +303,7 @@ class UnifiedPermissionResolver:
         resolved = {
             name: self._tool_and_args(name, builtin, arguments) for name in names
         }
-        authorized_path = self._resolve_path_for(resolved)
+        authorized_path = self._resolve_path_for(resolved, path_space=self._path_space)
 
         uncovered: list[RequiredPermission] = []
         scopeable = False
@@ -469,6 +475,8 @@ class UnifiedPermissionResolver:
     @staticmethod
     def _resolve_path_for(
         resolved: Mapping[str, tuple[BaseTool, BaseModel] | None],
+        *,
+        path_space: PathSpace,
     ) -> Path | None:
         """Resolve this call's path, so the file tool acts on the same one.
 
@@ -483,6 +491,8 @@ class UnifiedPermissionResolver:
             if raw is None:
                 continue
             try:
+                if path_space == "sandbox":
+                    return sandbox_path(str(raw), cwd=tool.cwd)
                 path = Path(str(raw)).expanduser()
                 if not path.is_absolute():
                     path = tool.cwd / path

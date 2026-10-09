@@ -12,9 +12,8 @@ from e2e.app_server.events import (
 from e2e.app_server.scenario import Timeline
 
 _PROMPT = "run a failing command"
-# The group header, then the shell result row it reveals: shell output folds twice.
-_EXPAND_GROUP = "\x1b[<0;1;30M\x1b[<0;1;30m"
-_EXPAND_RESULT = "\x1b[<0;8;30M\x1b[<0;8;30m"
+# The lone shell call stays ungrouped, so its own header row unfolds the output.
+_EXPAND_RESULT = "\x1b[<0;1;15M\x1b[<0;1;15m"
 _ERROR = "Command exited with status 1"
 
 screen_contains = {"python": (f"Error: {_ERROR}",), "rust": (f"Error: {_ERROR}",)}
@@ -26,6 +25,5 @@ timeline: Timeline = [
     bash_failed("false", _ERROR),
     assistant_msg("The command failed."),
     turn_completed(),
-    _EXPAND_GROUP,
     _EXPAND_RESULT,
 ]

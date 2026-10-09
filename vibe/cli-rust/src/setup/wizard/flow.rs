@@ -174,6 +174,7 @@ pub async fn run_wizard(
                     && !state.marker_held
                     && !state.idle_marker_emitted
                     && client.is_some()
+                    && !wizard.browser_sign_in.is_starting()
                 {
                     emit_idle_marker();
                     state.idle_marker_emitted = true;

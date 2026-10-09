@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::features::programmatic_tool_calling::ProgramFunctionRecord;
+use crate::core::features::programmatic_tool_calling::{ProgramFunctionRecord, ProgrammaticName};
 use crate::core::tools::external::{ExternalTool, RuntimeBuiltinToolName};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
@@ -162,6 +162,29 @@ impl CheckpointProgramFunction {
         ProgramFunctionRecord {
             name: self.name,
             arguments: self.arguments,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(in crate::core::checkpoint::v1) struct CheckpointProgrammaticName {
+    namespace: String,
+    name: String,
+}
+
+impl CheckpointProgrammaticName {
+    pub(in crate::core::checkpoint::v1) fn capture(name: &ProgrammaticName) -> Self {
+        Self {
+            namespace: name.namespace.clone(),
+            name: name.name.clone(),
+        }
+    }
+
+    pub(in crate::core::checkpoint::v1) fn restore(self) -> ProgrammaticName {
+        ProgrammaticName {
+            namespace: self.namespace,
+            name: self.name,
         }
     }
 }

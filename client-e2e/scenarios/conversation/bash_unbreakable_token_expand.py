@@ -24,7 +24,7 @@ _STDOUT = (
     "print(BIN)"
 )
 
-_CLICK = "\x1b[<0;1;30M\x1b[<0;1;30m"
+_CLICK = "\x1b[<0;1;15M\x1b[<0;1;15m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

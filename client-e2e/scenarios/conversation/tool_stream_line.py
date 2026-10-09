@@ -20,9 +20,8 @@ _EFFECT_ID = "streaming-bash"
 env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 # A release step must not consume a marker of its own, so settle key by key.
 settle_per_key = True
-# Open the busy group before capturing the streamed output and its removal.
-_EXPAND_GROUP = "\x1b[<0;1;32M\x1b[<0;1;32m"
-capture_steps = {2, 3, 4}
+# The lone running call stays ungrouped, so its stream line shows unfolded.
+capture_steps = {1, 2, 3}
 
 timeline: Timeline = [
     f"{_PROMPT}\r",
@@ -42,7 +41,6 @@ timeline: Timeline = [
     # then the call and its two streamed chunks) pin the live `→` line on the
     # LATEST chunk, never the accumulated output.
     {"release": 6},
-    _EXPAND_GROUP,
     # A controls-only chunk has no visible stream row.
     {"release": 1},
     # The remaining three settle the effect.

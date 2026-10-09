@@ -1,23 +1,23 @@
 //! Remote-project bottom panels using the shared transcript, theme, and scrollbar.
 
-mod paint;
+pub(super) mod paint;
 
 use ratatui::{
-    layout::{Constraint, Layout, Rect},
+    layout::Rect,
     style::{Modifier, Style},
     widgets::{Block, Borders},
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::{bottom_bar, loading, scrollbar, selection, theme, transcript};
+use super::{list_scroll, scrollbar, theme};
 use crate::app::App;
+use crate::hints::{self, action, key};
 use crate::mouse::{register_region, MouseTarget};
-use crate::selection::Region;
+use crate::search_field;
 use crate::vibe_code_project::items::repo_url_label;
 
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    f.buffer_mut().set_style(area, theme::screen_style());
     let creating = app.vibe_code_project.create.is_some();
     let rows = app
         .vibe_code_project
@@ -25,34 +25,21 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         .len()
         .min(area.height as usize / 2);
     let height = if creating { 10 } else { rows as u16 + 10 };
-    let chunks = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(2),
-        Constraint::Length(height),
-        Constraint::Length(1),
-    ])
-    .split(area);
-    transcript::draw(app, f, chunks[0]);
-    loading::draw(app, f, chunks[1]);
-    bottom_bar::draw(app, f, chunks[3]);
-    let area = chunks[2];
-    register_region(app, area, MouseTarget::RemoteProject);
     app.view.input_area = Rect::default();
-    app.view.selection_region = Region::default();
-    app.view.selection_chrome.clear();
+    super::bottom_app::draw(
+        app,
+        f,
+        area,
+        height,
+        super::bottom_app::Kind::RemoteProject,
+        |app, f, area| draw_box(app, f, area, creating),
+    );
+}
+
+fn draw_box(app: &mut App, f: &mut Frame, area: Rect, creating: bool) {
     if area.width < 8 || area.height < 10 {
         return;
     }
-    app.view.selection_region = Region {
-        area: Rect::new(
-            area.x + 1,
-            area.y + 1,
-            area.width.saturating_sub(2),
-            area.height.saturating_sub(2),
-        ),
-        top: (area.y + 1) as i32,
-        ..Region::default()
-    };
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
@@ -83,7 +70,6 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     } else {
         draw_picker(app, f, area);
     }
-    selection::overlay(app, f);
 }
 
 fn draw_create(app: &mut App, f: &mut Frame, area: Rect) {
@@ -126,12 +112,12 @@ fn draw_create(app: &mut App, f: &mut Frame, area: Rect) {
         create.branch_focused,
         app.view.cursor_on,
     );
-    paint::help(
+    super::hint_line::draw_clipped(
         f,
         x,
         area.y + 8,
         width,
-        &[("Enter", " Create  "), ("Esc", " Back")],
+        &[(key::ENTER, action::CREATE), hints::BACK],
     );
     register_region(
         app,
@@ -175,16 +161,17 @@ fn draw_picker(app: &mut App, f: &mut Frame, area: Rect) {
         app.view.cursor_on,
     );
     let visible = area.height.saturating_sub(10) as usize;
-    if !state.free_scroll {
-        if state.selected < state.scroll {
-            state.scroll = state.selected;
-        }
-        if state.selected >= state.scroll + visible {
-            state.scroll = (state.selected + 1).saturating_sub(visible);
-        }
-    }
-    state.scroll = state.scroll.min(state.items.len().saturating_sub(visible));
     let total = state.items.len();
+    state.scroll = match state.free_scroll {
+        true => state.scroll.min(total.saturating_sub(visible)),
+        false => {
+            let items = &state.items;
+            let highlight = state.selected..state.selected + 1;
+            list_scroll::follow(state.scroll, visible, total, highlight, |line| {
+                items[line].selectable()
+            })
+        }
+    };
     let offset = state.scroll;
     let overflow = total > visible;
     state.list_area = Rect::new(x, area.y + 7, width, visible as u16);
@@ -210,18 +197,13 @@ fn draw_picker(app: &mut App, f: &mut Frame, area: Rect) {
             name_width,
         );
     }
-    paint::help(
-        f,
-        x,
-        area.bottom() - 2,
-        width,
-        &[
-            ("↑↓/jk", " Navigate  "),
-            ("Enter", " Select  "),
-            ("/", " Search  "),
-            ("Esc", " Cancel"),
-        ],
+    let state = &app.vibe_code_project;
+    let hints = search_field::hints(
+        state.search_focused,
+        !state.query.text.is_empty(),
+        &[hints::NAVIGATE, hints::SELECT, hints::SEARCH, hints::CANCEL],
     );
+    super::hint_line::draw_clipped(f, x, area.bottom() - 2, width, &hints);
     register_region(
         app,
         app.vibe_code_project.search_area,

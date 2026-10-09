@@ -11,7 +11,7 @@ use crate::server::signal::ShutdownSignal;
 use crate::server::{method, Client, WorktreeRemoveParams, WorktreeRemoveResponse};
 use crate::worktree::WorktreeInfo;
 
-pub const YELLOW: &str = "\x1b[33m";
+pub use crate::ui::theme::fixed::sgr::YELLOW;
 pub const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 

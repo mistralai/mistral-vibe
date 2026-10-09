@@ -45,7 +45,7 @@ def test_subagent_list_renders_identity_status_and_context_usage() -> None:
     assert widget.option_count == 2
     assert str(widget.get_option_at_index(0).prompt) == "  Main conversation"
     assert str(widget.get_option_at_index(1).prompt) == (
-        "  Explore (Test Audit) [running] · 12k tokens"
+        "  Explore (Test Audit) [running] · 12.5k tokens"
     )
 
 

@@ -208,7 +208,7 @@ fn open(app: &mut App, state: MCPState, initial_source: &str, reopened: bool) {
     // After an auth flow that left it unauthenticated, show the list rather than loop back.
     let viewing = viewing.filter(|source| !(reopened && rows::awaits_auth(source)));
     add_result(app, "MCP and connectors opened...");
-    app.mcp.search = search::Search::default();
+    app.mcp.search = crate::search_field::Search::default();
     app.mcp.viewing_name = viewing.map(|source| source.name.clone());
     app.mcp.viewing_kind = viewing.map(|source| source.kind);
     app.mcp.selected = 0;

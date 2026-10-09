@@ -10,7 +10,6 @@ import logging
 from pathlib import Path
 import queue
 import secrets
-import subprocess
 import threading
 import time
 from typing import Literal, cast
@@ -20,6 +19,8 @@ from mistralai_vibe_local_harness.vibe._processes._backend import (
     PtyBackend,
     TerminalBackend,
     TerminalBackendError,
+    TerminalStartError,
+    WorkingDirectoryError,
 )
 from mistralai_vibe_local_harness.vibe._processes._output import (
     OutputPage,
@@ -49,7 +50,8 @@ class ProcessStartRequest:
     command: str
     cwd: Path
     env: dict[str, str]
-    shell: str
+    shell: str | None
+    """None when the backend resolves the shell where the process runs."""
     created_at: str
 
 
@@ -335,6 +337,7 @@ class SessionProcessManager:
         await asyncio.to_thread(self._runner.join, 1)
         if self._termination_runner is not None:
             await asyncio.to_thread(self._termination_runner.join, 1)
+        await asyncio.to_thread(self._backend.close)
         if error is not None:
             raise error
 
@@ -469,11 +472,7 @@ class SessionProcessManager:
                 output.mark_unavailable()
             except Exception:
                 pass
-            raise ProcessManagerError(
-                "process_start_failed",
-                "Background process could not be started",
-                {"processId": request.process_id, "stage": "spawn"},
-            ) from error
+            raise _start_error(request.process_id, error) from error
         started_at = _timestamp_at_least(request.created_at)
         entry = _ProcessEntry(
             request=request,
@@ -555,7 +554,9 @@ class SessionProcessManager:
 
     def _stop(self, process_id: str) -> ProcessStopResult:
         entry = self._get_entry(process_id)
-        if _root_exit_code(entry.terminal) is not None:
+        if _root_exit_code(entry.terminal) is not None and not _group_is_alive(
+            entry.terminal
+        ):
             snapshot = self._finish(entry, "completed")
             return ProcessStopResult(process_id, snapshot.status, snapshot.exit_code)
         with entry.condition:
@@ -572,22 +573,15 @@ class SessionProcessManager:
                     process_id, snapshot.status, snapshot.exit_code
                 )
             entry.stopping = True
-        try:
-            self._backend.request_termination(entry.terminal)
-            try:
-                entry.terminal.wait(timeout=_TERMINATION_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired:
-                self._backend.force_termination(entry.terminal)
-                entry.terminal.wait(timeout=_TERMINATION_TIMEOUT_SECONDS)
-        except (OSError, subprocess.TimeoutExpired, TerminalBackendError):
-            if not _root_is_terminal(entry.terminal):
-                with entry.condition:
-                    entry.stopping = False
-                raise ProcessManagerError(
-                    "process_stop_failed",
-                    "Background process did not reach a terminal PTY-root state",
-                    {"processId": process_id, "status": "running", "exitCode": None},
-                ) from None
+        [contained] = self._stop_terminals([entry])
+        if not contained and not _root_is_terminal(entry.terminal):
+            with entry.condition:
+                entry.stopping = False
+            raise ProcessManagerError(
+                "process_stop_failed",
+                "Background process did not reach a terminal PTY-root state",
+                {"processId": process_id, "status": "running", "exitCode": None},
+            )
         if self._terminations is not None and _root_is_terminal(entry.terminal):
             self._fail_active_write(process_id)
         if entry.reader is not None:
@@ -598,7 +592,10 @@ class SessionProcessManager:
             snapshot = entry.terminal_snapshot
         if snapshot is None:
             snapshot = self._finish(
-                entry, "stopped" if _root_is_terminal(entry.terminal) else "orphaned"
+                entry,
+                "stopped"
+                if contained and _root_is_terminal(entry.terminal)
+                else "orphaned",
             )
         return ProcessStopResult(process_id, snapshot.status, snapshot.exit_code)
 
@@ -629,25 +626,16 @@ class SessionProcessManager:
                 if not entry.finishing:
                     entry.stopping = True
             live.append(entry)
-            try:
-                self._backend.request_termination(entry.terminal)
-            except Exception:
-                logger.warning("background_process.operation_failed")
 
-        shutdown_entries = list(live)
-        live = _wait_for_live_roots(live, _TERMINATION_TIMEOUT_SECONDS)
-        for entry in live:
-            try:
-                self._backend.force_termination(entry.terminal)
-            except Exception:
-                logger.warning("background_process.operation_failed")
+        contained = self._stop_terminals(live)
         uncontrolled = {
             id(entry)
-            for entry in _wait_for_live_roots(live, _TERMINATION_TIMEOUT_SECONDS)
+            for entry, stopped in zip(live, contained, strict=True)
+            if not stopped
         }
 
         drain_deadline = time.monotonic() + _READER_DRAIN_TIMEOUT_SECONDS
-        for entry in shutdown_entries:
+        for entry in live:
             reader = entry.reader
             if reader is not None:
                 reader.join(timeout=max(0, drain_deadline - time.monotonic()))
@@ -676,8 +664,15 @@ class SessionProcessManager:
                         entry.output.append(chunk)
                         continue
                     if entry.terminal.poll() is not None:
-                        break
+                        if not entry.terminal.group_is_alive():
+                            break
+                        # Every terminal end is closed, but descendants the
+                        # root left behind still run: the process does too.
+                        time.sleep(0.1)
+                        continue
                 if entry.terminal.poll() is None:
+                    continue
+                if entry.terminal.group_is_alive():
                     continue
                 if drain_deadline is None:
                     drain_deadline = time.monotonic() + _READER_DRAIN_TIMEOUT_SECONDS
@@ -696,11 +691,9 @@ class SessionProcessManager:
                 or entry.terminal_snapshot is not None
             ):
                 return
-        if status == "failed" and not _root_is_terminal(entry.terminal):
-            try:
-                self._backend.force_termination(entry.terminal)
-                entry.terminal.wait(timeout=_TERMINATION_TIMEOUT_SECONDS)
-            except Exception:
+        if status == "failed" and _group_is_alive(entry.terminal):
+            [contained] = self._stop_terminals([entry])
+            if not contained:
                 self._finish(entry, "orphaned", reader_generation=generation)
                 return
         self._finish(entry, status, reader_generation=generation)
@@ -711,18 +704,24 @@ class SessionProcessManager:
         with entry.condition:
             if entry.terminal_snapshot is not None:
                 return entry.terminal_snapshot
-        if _root_is_terminal(entry.terminal):
+        if _root_is_terminal(entry.terminal) and not _group_is_alive(entry.terminal):
             return self._finish(entry, "completed")
-        try:
-            self._backend.request_termination(entry.terminal)
-            entry.terminal.wait(timeout=_TERMINATION_TIMEOUT_SECONDS)
-        except Exception:
-            try:
-                self._backend.force_termination(entry.terminal)
-                entry.terminal.wait(timeout=_TERMINATION_TIMEOUT_SECONDS)
-            except Exception:
-                return self._finish(entry, "orphaned")
+        [contained] = self._stop_terminals([entry])
+        if not contained:
+            return self._finish(entry, "orphaned")
         return self._finish(entry, cause)
+
+    def _stop_terminals(self, entries: list[_ProcessEntry]) -> list[bool]:
+        """Stop the entries' processes; whether nothing of each was left."""
+        if not entries:
+            return []
+        try:
+            return self._backend.stop_terminals(
+                [entry.terminal for entry in entries], _TERMINATION_TIMEOUT_SECONDS
+            )
+        except Exception:
+            logger.warning("background_process.operation_failed")
+            return [False] * len(entries)
 
     def _finish(
         self,
@@ -851,16 +850,11 @@ def _timestamp_at_least(minimum: str) -> str:
     return max(now, minimum)
 
 
-def _wait_for_live_roots(
-    entries: list[_ProcessEntry], timeout_seconds: float
-) -> list[_ProcessEntry]:
-    deadline = time.monotonic() + timeout_seconds
-    live = entries
-    while live and time.monotonic() < deadline:
-        live = [entry for entry in live if not _root_is_terminal(entry.terminal)]
-        if live:
-            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
-    return [entry for entry in live if not _root_is_terminal(entry.terminal)]
+def _group_is_alive(terminal: ManagedTerminal) -> bool:
+    try:
+        return terminal.group_is_alive()
+    except Exception:
+        return not _root_is_terminal(terminal)
 
 
 def _root_is_terminal(terminal: ManagedTerminal) -> bool:
@@ -872,6 +866,46 @@ def _root_exit_code(terminal: ManagedTerminal) -> int | None:
         return terminal.poll()
     except Exception:
         return None
+
+
+def _start_error(
+    process_id: str, error: OSError | TerminalBackendError
+) -> ProcessManagerError:
+    match error:
+        case WorkingDirectoryError():
+            # The same answer a start gets when its directory is checked first.
+            return ProcessManagerError(
+                "invalid_arguments",
+                "Invalid arguments for process.start",
+                {
+                    "tool": "process.start",
+                    "errors": [
+                        {
+                            "location": "cwd",
+                            "type": "invalid_working_directory",
+                            "message": "Working directory must exist and be a directory",
+                        }
+                    ],
+                },
+            )
+        case TerminalStartError(stage="unsupported_platform"):
+            return ProcessManagerError(
+                "process_start_failed",
+                str(error),
+                {"processId": process_id, "stage": error.stage},
+            )
+        case TerminalStartError():
+            return ProcessManagerError(
+                "process_start_failed",
+                "Background process could not be started",
+                {"processId": process_id, "stage": error.stage},
+            )
+        case _:
+            return ProcessManagerError(
+                "process_start_failed",
+                "Background process could not be started",
+                {"processId": process_id, "stage": "spawn"},
+            )
 
 
 def _shutdown_error(operation: OperationName, process_id: str) -> ProcessManagerError:

@@ -224,7 +224,14 @@ def test_rollout_uses_most_recent_entry(
 
 
 @pytest.mark.parametrize(
-    "args", [["--setup"], ["--legacy-harness"], ["--experimental-harness", "prompt"]]
+    "args",
+    [
+        ["--setup"],
+        ["--legacy-harness"],
+        ["--experimental-harness", "prompt"],
+        ["-p", "prompt", "--agent-socket", "/tmp/agent.sock"],
+        ["-p", "prompt", "--agent-socket=/tmp/agent.sock"],
+    ],
 )
 def test_rollout_keeps_python_for_flags_rust_rejects(
     monkeypatch: pytest.MonkeyPatch, rollout_env: list[str], args: list[str]

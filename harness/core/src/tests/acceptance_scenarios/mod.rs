@@ -117,6 +117,14 @@ fn hook_completed(action: &Value, hook: &str, output: Value) -> Value {
     })
 }
 
+fn pre_llm_continue_with_context(context: &[(&str, &str)]) -> Value {
+    let context_messages = context
+        .iter()
+        .map(|(key, text)| json!({"key": key, "content": [{"type": "text", "text": text}]}))
+        .collect::<Vec<_>>();
+    json!({"type": "continue", "context_messages": context_messages})
+}
+
 fn turn_started(turn_id: &str, text: &str) -> Value {
     json!({
         "type": "turn_started",
@@ -255,6 +263,15 @@ fn turn_completed(turn_id: &str, text: &str) -> Value {
         "type": "turn_completed",
         "turn_id": turn_id,
         "output": [{"type": "text", "text": text}],
+    })
+}
+
+fn turn_completed_at_iteration_limit(turn_id: &str, output: Vec<Value>) -> Value {
+    json!({
+        "type": "turn_completed",
+        "turn_id": turn_id,
+        "output": output,
+        "stop_reason": "iteration_limit",
     })
 }
 

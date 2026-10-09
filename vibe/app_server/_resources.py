@@ -18,6 +18,7 @@ from vibe.app_server._config_introspect import (
     POPULAR_SETTINGS,
     build_field_wires,
     collect_layer_values,
+    effective_config_response,
 )
 from vibe.app_server._config_write import (
     config_write_ops_to_patches,
@@ -62,6 +63,7 @@ from vibe.app_server.protocol import (
     AgentInstallParams,
     AgentsListParams,
     AgentsListResponse,
+    ConfigEffectiveReadParams,
     ConfigFieldsReadParams,
     ConfigFieldsReadResponse,
     ConfigMutationResponse,
@@ -353,6 +355,14 @@ class ResourceRequestHandler:
                 write_response = await self._config_write(write_params)
                 response = write_response
                 runtime_updated = write_response.applied
+            case "config/effective/read":
+                effective_params = validate_wire(ConfigEffectiveReadParams, raw_params)
+                self._require_session(effective_params.session_id)
+                response = effective_config_response(
+                    self._agent_loop.config_orchestrator.config,
+                    bypass_tool_permissions=self._agent_loop.bypass_tool_permissions,
+                )
+                runtime_updated = False
             case "config/fields/read":
                 response = await self._config_fields_read(
                     validate_wire(ConfigFieldsReadParams, raw_params)

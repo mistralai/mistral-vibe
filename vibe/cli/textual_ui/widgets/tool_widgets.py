@@ -26,6 +26,7 @@ from vibe.app_server.models import (
     FileSearchEffectOutput as FileSearchOutput,
     FileWriteEffectInput as FileWriteInput,
     FileWriteEffectOutput as FileWriteOutput,
+    ScratchpadEffectOutput as ScratchpadOutput,
     ShellEffectInput as ShellInput,
     ShellEffectOutput as ShellOutput,
     TodoEffectInput as TodoInput,
@@ -381,6 +382,23 @@ class WriteFileResultWidget(ToolResultWidget[FileWriteOutput]):
         yield from self._footer()
 
 
+class ScratchpadResultWidget(ToolResultWidget[ScratchpadOutput]):
+    """A note read or written renders like a file's content; a list, one name per row."""
+
+    def compose(self) -> ComposeResult:
+        yield from self._yield_advisories()
+        if not self.result:
+            yield from self._footer()
+            return
+        if self.result.content:
+            yield from self._yield_markdown(
+                self.result.content, ext=language_for_path(self.result.path or "")
+            )
+        elif self.result.files:
+            yield from self._yield_text("\n".join(self.result.files))
+        yield from self._footer()
+
+
 type FileEditInput = SingleFileEditInput | FileEditBatchInput
 
 
@@ -725,6 +743,9 @@ EFFECT_WIDGETS: dict[ToolEffectKind, EffectWidgets] = {
     ),
     ToolEffectKind.PROCESS: EffectWidgets(
         output_model=ProcessToolOutput, result=ProcessResultWidget
+    ),
+    ToolEffectKind.SCRATCHPAD: EffectWidgets(
+        output_model=ScratchpadOutput, result=ScratchpadResultWidget
     ),
 }
 

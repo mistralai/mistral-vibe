@@ -3,7 +3,7 @@
 use ratatui::text::Line;
 use serde_json::Value;
 
-use super::window::{push_prefixed_wrapped, push_styled_wrapped, Builder};
+use super::window::{push_prefixed_wrapped, Builder};
 use super::{push_description, push_fields, MAX_EAGER_DETAIL_BYTES};
 use crate::server::{FileEditEffectOccurrence, FileEditEffectOutput};
 use crate::ui::{theme, transcript::diff};
@@ -40,9 +40,11 @@ fn push_diff(rows: &mut Builder, output: &FileEditEffectOutput, width: u16) {
     let occurrences = diff::occurrences(output);
     let language = diff::language(&output.file);
     for row in diff::render_edit_diff(&occurrences, language) {
-        push_styled_wrapped(rows, row.spans, width, row.band);
-        if rows.done() {
-            return;
+        for (spans, _) in diff::wrap_row(&row, width) {
+            rows.push(Line::from(diff::banded(&spans, row.band, width)));
+            if rows.done() {
+                return;
+            }
         }
     }
 }

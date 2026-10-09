@@ -2,6 +2,7 @@
 
 use super::{OptionId, Row};
 use crate::app::App;
+use crate::hints::{self, action};
 
 /// Indent of the three action options (Python `_OPTION_PADDING`).
 const OPTION_PADDING: &str = "  ";
@@ -61,7 +62,16 @@ pub fn help_text(app: &App) -> Vec<(String, bool)> {
     if let Some(status) = &app.connector_auth.status_message {
         spans.push((format!("{status}  "), false));
     }
-    spans.push(("Backspace".to_owned(), true));
-    spans.push((" Back".to_owned(), false));
+    let list = [
+        hints::NAVIGATE,
+        hints::SELECT,
+        ("r", action::REFRESH),
+        hints::BACK,
+    ];
+    spans.extend(
+        hints::runs(&list)
+            .into_iter()
+            .map(|(text, is_key)| (text.to_owned(), is_key)),
+    );
     spans
 }

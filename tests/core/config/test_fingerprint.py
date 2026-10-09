@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import os
 from pathlib import Path
 from typing import IO, Any
 
@@ -162,8 +163,13 @@ class TestCreateFileFingerprint:
         path.write_text("key = 1")
         with path.open("rb") as file:
             first_fingerprint = create_file_fingerprint(file)
+        first_mtime_ns = path.stat().st_mtime_ns
 
         path.write_text("key = 2")
+        # Same-size rewrites can land in one filesystem timestamp tick, so the
+        # new version gets a distinct mtime instead of depending on the clock.
+        later_ns = first_mtime_ns + 1_000_000_000
+        os.utime(path, ns=(later_ns, later_ns))
 
         with path.open("rb") as file:
             assert create_file_fingerprint(file) != first_fingerprint

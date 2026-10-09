@@ -6,4 +6,4 @@ from e2e.app_server.scenario import Timeline
 
 expected_clipboard = "  b\n"
 
-timeline: Timeline = ["a\n  b\n  c", "\x1b[A\x05\x18"]
+timeline: Timeline = ["a\n  b\n  c", "\x1b[A\x18"]

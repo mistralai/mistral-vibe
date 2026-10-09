@@ -52,7 +52,7 @@ fn loop_remains_a_discoverable_builtin_not_a_side_channel() {
 
 #[test]
 fn loop_argument_hint_matches_the_loop_description() {
-    let hint = argument_hint(None, "/loop ").unwrap();
+    let hint = argument_hint(Some('/'), "loop ").unwrap();
     let (_, description) = entries(&[])
         .into_iter()
         .find(|(name, _)| name == "/loop")

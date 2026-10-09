@@ -62,6 +62,16 @@ pub fn register_scrollbar(
     }
 }
 
+/// The tracks of the scrollbars painted so far this frame that overlap `within`.
+pub fn scrollbar_tracks(app: &App, within: Rect) -> Vec<Rect> {
+    app.view
+        .mouse_regions
+        .iter()
+        .filter_map(|region| region.scrollbar.and_then(|state| state.area()))
+        .filter(|track| track.intersects(within))
+        .collect()
+}
+
 pub(super) fn contains_track(app: &App, at: (u16, u16)) -> bool {
     app.view
         .mouse_regions
@@ -247,6 +257,10 @@ fn apply_position(app: &mut App, target: MouseTarget, position: usize, max: usiz
             app.mcp.scroll = position;
             app.mcp.free_scroll = true;
         }
+        MouseTarget::Plugins => {
+            app.plugins.scroll = position;
+            app.plugins.free_scroll = true;
+        }
         MouseTarget::Config => {
             app.config_screen.scroll = position;
             app.config_screen.free_scroll = true;
@@ -262,6 +276,10 @@ fn apply_position(app: &mut App, target: MouseTarget, position: usize, max: usiz
             .viewport
             .detach_at(u16::try_from(position).unwrap_or(u16::MAX)),
         MouseTarget::Trust => app.trust.scroll = position,
+        MouseTarget::ProxySetup => {
+            app.proxy_setup.scroll = position;
+            app.proxy_setup.free_scroll = true;
+        }
         // The wizard's theme preview reads the live drag position itself
         // (`drag_scroll`): its scroll state is not app-owned.
         MouseTarget::Blocked
@@ -269,7 +287,7 @@ fn apply_position(app: &mut App, target: MouseTarget, position: usize, max: usiz
         | MouseTarget::Composer
         | MouseTarget::Loading
         | MouseTarget::LogLevelPicker
-        | MouseTarget::Rewind
+        | MouseTarget::BottomApp
         | MouseTarget::McpOAuth
         | MouseTarget::ConnectorAuth
         | MouseTarget::BottomBar

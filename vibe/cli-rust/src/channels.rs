@@ -88,7 +88,7 @@ pub fn connect(app: &mut App) -> UiChannels {
     app.approval.tx = Some(approval_tx);
     let (feedback_tx, feedback) = mpsc::channel::<feedback::Event>(FEEDBACK_CHANNEL_CAP);
     app.feedback.tx = Some(feedback_tx);
-    // Narrator summarize answers, applied on the main thread.
+    // Narrator summary answers and clip playback progress, applied on the main thread.
     let (narrator_tx, narrator) = mpsc::channel::<turn_summary::Event>(NARRATOR_CHANNEL_CAP);
     app.narrator.tx = Some(narrator_tx);
     let (paste_image_tx, paste_image) =

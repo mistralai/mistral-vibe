@@ -35,7 +35,7 @@
      "result": {
       "answers": [
        {
-        "answer": "SQLite Enterprise",
+        "answer": "SQLite Enterprise\nwith WAL",
         "isOther": true,
         "question": "Which database should we use for this project?"
        }

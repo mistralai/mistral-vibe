@@ -24,7 +24,7 @@ on_request = {
     ]
 }
 client_args = ("--worktree", "feature")
-screen_contains = {"rust": ("Created worktrees",)}
+screen_contains = {"rust": ("Created feature on feature",)}
 request_methods = {"session/start"}
 timeline: Timeline = [
     "hi\r",

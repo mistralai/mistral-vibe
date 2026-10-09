@@ -4,6 +4,8 @@ use serde_json::Value;
 
 use crate::core::error::CoreError;
 use crate::core::features::compaction::CompactionTrigger;
+use crate::core::features::permissions::GrantKey;
+use crate::core::features::permissions::PublicArguments;
 use crate::core::hooks::HookCall;
 use crate::core::tools::external::{
     ExternalTool, ExternalToolCall, ProvidedToolCall, RuntimeBuiltinToolCall,
@@ -89,6 +91,16 @@ pub(crate) enum FilesystemOperation {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Action {
+    Approval {
+        #[serde(rename = "action_id")]
+        effect_id: String,
+        turn_id: String,
+        call_id: String,
+        grant_key: String,
+        tool_id: String,
+        display_name: String,
+        input: Value,
+    },
     #[serde(rename = "llm_call")]
     Completion {
         #[serde(rename = "action_id")]
@@ -138,11 +150,30 @@ pub(crate) enum Action {
 impl Action {
     pub(crate) fn action_id(&self) -> &str {
         match self {
-            Self::Completion { effect_id, .. }
+            Self::Approval { effect_id, .. }
+            | Self::Completion { effect_id, .. }
             | Self::RuntimeBuiltinTool { effect_id, .. }
             | Self::ProvidedTool { effect_id, .. }
             | Self::Hook { effect_id, .. }
             | Self::Filesystem { effect_id, .. } => effect_id,
+        }
+    }
+
+    pub(crate) fn approval(
+        effect_id: String,
+        turn_id: &str,
+        grant_key: &GrantKey,
+        call: &ExternalToolCall,
+        display_name: String,
+    ) -> Self {
+        Self::Approval {
+            effect_id,
+            turn_id: turn_id.to_string(),
+            call_id: call.call_id.clone(),
+            grant_key: grant_key.as_str().to_string(),
+            tool_id: call.hook_tool_key().qualified_name,
+            display_name,
+            input: PublicArguments::from_call(call).to_value(),
         }
     }
 

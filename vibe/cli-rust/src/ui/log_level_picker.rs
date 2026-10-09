@@ -6,9 +6,10 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
 
-use super::theme_picker::marker_green;
-use super::{bottom_bar, loading, theme, transcript};
+use super::hint_line;
+use super::{list_cursor, theme};
 use crate::app::App;
+use crate::hints::{self, action, key, Hint};
 use crate::log_level_picker::{draft_chain, options, BADGE_CONFIG, BADGE_SESSION};
 use crate::observability::level::LogLevelChain;
 
@@ -18,17 +19,8 @@ fn box_height() -> u16 {
 }
 
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    f.buffer_mut()
-        .set_style(area, Style::default().bg(theme::background()));
-    let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
-    let chunks = super::bottom_app_chunks(app, area, loading_height, box_height());
-
-    transcript::draw(app, f, chunks[0]);
-    loading::draw(app, f, chunks[1]);
-    crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Blocked);
-    draw_box(app, f, chunks[2]);
-    super::todo::draw_row(app, f, chunks[4]);
-    bottom_bar::draw(app, f, chunks[3]);
+    let kind = super::bottom_app::Kind::LogLevel;
+    super::bottom_app::draw(app, f, area, box_height(), kind, draw_box);
 }
 
 fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
@@ -79,7 +71,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
     for (row, level) in options().iter().enumerate() {
         draw_row(app, f, area, by + 4 + row as u16, level, &chain);
     }
-    draw_help(f, bx + 2, by + area.height - 2);
+    hint_line::draw(f, bx + 2, by + area.height - 2, HINTS);
 }
 
 fn subtitle(chain: &LogLevelChain) -> String {
@@ -95,31 +87,14 @@ fn subtitle(chain: &LogLevelChain) -> String {
 fn draw_row(app: &App, f: &mut Frame, area: Rect, y: u16, level: &str, chain: &LogLevelChain) {
     let x = area.x + 3;
     let highlighted = crate::log_level_picker::selected_level(app) == level;
-    let (row_bg, text_fg) = if highlighted {
-        (theme::block_cursor_bg(), theme::block_cursor_fg())
-    } else {
-        (theme::background(), theme::foreground())
-    };
     if highlighted {
-        let bar = Rect::new(x, y, area.width.saturating_sub(6), 1);
-        f.buffer_mut().set_style(bar, Style::default().bg(row_bg));
+        list_cursor::paint(f, Rect::new(x, y, area.width.saturating_sub(6), 1));
     }
-
-    let mut base = Style::default().fg(text_fg).bg(row_bg);
-    if highlighted {
-        base = base.add_modifier(Modifier::BOLD);
-    }
-    let marker = if chain.effective == level {
-        "› "
-    } else {
-        "  "
-    };
-    let marker_style = if chain.effective == level {
-        base.fg(marker_green())
-    } else {
-        base
-    };
-    f.buffer_mut().set_string(x, y, marker, marker_style);
+    let (base, _) = list_cursor::styles(highlighted);
+    let current = chain.effective == level;
+    let marker_style = list_cursor::marker_style(base, current);
+    f.buffer_mut()
+        .set_string(x, y, list_cursor::marker(current), marker_style);
     f.buffer_mut()
         .set_string(x + 2, y, format!("{level:<10}"), base);
 
@@ -155,7 +130,7 @@ fn draw_row(app: &App, f: &mut Frame, area: Rect, y: u16, level: &str, chain: &L
 /// one Enter would toggle (Python `_append_badge`).
 fn badge_style(base: Style, set: bool, focused: bool) -> Style {
     if set {
-        return base.fg(marker_green());
+        return base.fg(list_cursor::current_color());
     }
     if focused {
         base
@@ -164,22 +139,9 @@ fn badge_style(base: Style, set: bool, focused: bool) -> Style {
     }
 }
 
-fn draw_help(f: &mut Frame, x: u16, y: u16) {
-    let key = Style::default()
-        .fg(theme::primary())
-        .bg(theme::background())
-        .add_modifier(Modifier::BOLD);
-    let label = theme::muted_style().bg(theme::background());
-    let mut cx = x;
-    for (k, l) in [
-        ("↑↓/jk", " Navigate  "),
-        ("←/→", " Switch badge  "),
-        ("Enter", " Toggle  "),
-        ("Esc", " Close"),
-    ] {
-        f.buffer_mut().set_string(cx, y, k, key);
-        cx += k.chars().count() as u16;
-        f.buffer_mut().set_string(cx, y, l, label);
-        cx += l.chars().count() as u16;
-    }
-}
+const HINTS: &[Hint] = &[
+    hints::NAVIGATE,
+    (key::LEFT_RIGHT, action::SWITCH_BADGE),
+    (key::ENTER, action::TOGGLE),
+    hints::CLOSE,
+];

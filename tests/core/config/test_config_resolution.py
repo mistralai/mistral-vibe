@@ -413,16 +413,16 @@ class TestModelThinkingFieldUpdate:
             tomli_w.dump(data, f)
 
         orch = await make_orchestrator()
-        await orch.set_field("/models/mistral-medium-3.5/thinking", "low")
+        await orch.set_field("/models/mistral-medium-3.5/thinking", "off")
 
         with config_file.open("rb") as f:
             result = tomllib.load(f)
-        assert result["models"] == [{"alias": "mistral-medium-3.5", "thinking": "low"}]
+        assert result["models"] == [{"alias": "mistral-medium-3.5", "thinking": "off"}]
 
         await orch.reload()
 
         model = orch.config.models["mistral-medium-3.5"]
-        assert model.thinking == "low"
+        assert model.thinking == "off"
         assert model.supports_images is True
 
 
@@ -2146,6 +2146,47 @@ class TestThinkingLevels:
 
         assert cfg.get_active_model().thinking == "high"
 
+    def test_stored_low_resets_to_off_when_the_set_still_offers_it(
+        self, make_config: Callable[..., VibeConfigSchema]
+    ) -> None:
+        # "low" was the historical no-reasoning pick; a curated set that
+        # dropped it carries that intent in "off" instead of re-enabling
+        # reasoning through the default.
+        model = ModelConfig(
+            name="m",
+            provider="p",
+            alias="m",
+            thinking="low",
+            thinking_levels=["off", "high"],
+        )
+        cfg = make_config(models=[model], active_model="m")
+
+        assert cfg.get_active_model().thinking == "off"
+
+    def test_stored_low_resets_to_default_when_off_is_not_offered(
+        self, make_config: Callable[..., VibeConfigSchema]
+    ) -> None:
+        # "medium" proves the fallback routes through default_thinking (the
+        # set's last entry) rather than a hardcoded "high".
+        model = ModelConfig(
+            name="m",
+            provider="p",
+            alias="m",
+            thinking="low",
+            thinking_levels=["medium"],
+        )
+        cfg = make_config(models=[model], active_model="m")
+
+        assert cfg.get_active_model().thinking == "medium"
+
+    def test_stored_low_stays_on_the_uncurated_set(
+        self, make_config: Callable[..., VibeConfigSchema]
+    ) -> None:
+        model = ModelConfig(name="m", provider="p", alias="m", thinking="low")
+        cfg = make_config(models=[model], active_model="m")
+
+        assert cfg.get_active_model().thinking == "low"
+
     def test_reset_targets_the_last_entry_when_high_is_absent(
         self, make_config: Callable[..., VibeConfigSchema]
     ) -> None:
@@ -2213,6 +2254,27 @@ class TestThinkingLevels:
         )
         cfg = make_config(models=[widened], active_model="m")
         assert cfg.get_active_model().thinking == "medium"
+
+    def test_widened_set_revives_a_stored_low(self) -> None:
+        # The low -> off reset is a re-derivation like any other: the stored
+        # low stays in the file and runs again once the set offers it.
+        narrowed = ModelConfig(
+            name="m",
+            provider="p",
+            alias="m",
+            thinking="low",
+            thinking_levels=["off", "high"],
+        )
+        assert narrowed.thinking == "off"
+
+        widened = ModelConfig(
+            name="m",
+            provider="p",
+            alias="m",
+            thinking="low",
+            thinking_levels=["off", "low", "high"],
+        )
+        assert widened.thinking == "low"
 
     def test_unknown_level_is_a_config_error(self) -> None:
         # The same strictness as `thinking`: values outside the five canonical

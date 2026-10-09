@@ -25,7 +25,7 @@ fn logged_in() -> App {
 fn login_shows_connecting_until_the_browser_reopens() {
     let mut app = logged_in();
     assert!(app.mcp_oauth.open && app.mcp_oauth.logging_in);
-    assert!(mcp_oauth::help_text(&app).starts_with("Connecting..."));
+    assert!(mcp_oauth::help_text(&app)[0].0.starts_with("Connecting..."));
     let weather =
         json!({"name": "weather", "kind": "server", "transport": "http", "status": "connected"});
     let event = mcp::Event::Opened {

@@ -12,7 +12,7 @@ handshake = {
 }
 _PROMPT = "give me Paul Vezia's profile"
 _ANSWER = "• Paul Vezia — Senior AI Engineer at Publicis. [LinkedIn profile](https://www.linkedin.com)"
-_HOVER = "\x1b[<35;50;32M"
+_HOVER = "\x1b[<35;50;15M"
 timeline: Timeline = [
     f"{_PROMPT}\r",
     turn_started(),

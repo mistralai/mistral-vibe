@@ -52,6 +52,39 @@ def fake_import_module(name: str) -> types.ModuleType:
     return module
 
 
+def install_fake_collect_all(
+    monkeypatch: pytest.MonkeyPatch,
+    collected_by_package: dict[str, tuple[list[object], list[object], list[object]]],
+) -> list[str]:
+    collected_packages: list[str] = []
+
+    def fake_collect_all(package_name: str, **_kwargs: object):
+        collected_packages.append(package_name)
+        return collected_by_package[package_name]
+
+    fake_hooks = types.ModuleType("PyInstaller.utils.hooks")
+    fake_hooks.collect_all = fake_collect_all  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setitem(sys.modules, "PyInstaller", types.ModuleType("PyInstaller"))
+    monkeypatch.setitem(
+        sys.modules, "PyInstaller.utils", types.ModuleType("PyInstaller.utils")
+    )
+    monkeypatch.setitem(sys.modules, "PyInstaller.utils.hooks", fake_hooks)
+    return collected_packages
+
+
+def install_findable_runtime(
+    monkeypatch: pytest.MonkeyPatch, helper: types.ModuleType
+) -> None:
+    monkeypatch.setattr(
+        helper,
+        "util",
+        FakeFinder(
+            "mistralai_vibe_local_harness", "mistralai_vibe_local_harness._native"
+        ),
+    )
+    monkeypatch.setattr(helper, "import_module", fake_import_module)
+
+
 def test_helper_exists_at_the_spec_location() -> None:
     assert HELPER_PATH.is_file()
 
@@ -120,34 +153,58 @@ def test_collect_unified_runtime_collects_the_runtime_package(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     helper = load_helper()
-    monkeypatch.setattr(
-        helper,
-        "util",
-        FakeFinder(
-            "mistralai_vibe_local_harness", "mistralai_vibe_local_harness._native"
-        ),
+    install_findable_runtime(monkeypatch, helper)
+    sentinel = ([object()], [object()], [object()])
+    collected_packages = install_fake_collect_all(
+        monkeypatch, {"mistralai_vibe_local_harness": sentinel}
     )
-    monkeypatch.setattr(helper, "import_module", fake_import_module)
 
-    collected_packages = []
-    sentinel = (object(), object(), object())
-
-    def fake_collect_all(package_name: str, **_kwargs: object):
-        collected_packages.append(package_name)
-        return sentinel
-
-    fake_hooks = types.ModuleType("PyInstaller.utils.hooks")
-    fake_hooks.collect_all = fake_collect_all  # pyright: ignore[reportAttributeAccessIssue]
-    monkeypatch.setitem(sys.modules, "PyInstaller", types.ModuleType("PyInstaller"))
-    monkeypatch.setitem(
-        sys.modules, "PyInstaller.utils", types.ModuleType("PyInstaller.utils")
-    )
-    monkeypatch.setitem(sys.modules, "PyInstaller.utils.hooks", fake_hooks)
-
-    result = helper.collect_unified_runtime()
+    result = helper.collect_unified_runtime(platform="linux")
 
     assert collected_packages == ["mistralai_vibe_local_harness"]
     assert result is sentinel
+
+
+def test_collect_unified_runtime_also_collects_winpty_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = load_helper()
+    install_findable_runtime(monkeypatch, helper)
+    collected_packages = install_fake_collect_all(
+        monkeypatch,
+        {
+            "mistralai_vibe_local_harness": (["rt-data"], ["rt-bin"], ["rt-mod"]),
+            "winpty": (["pty-data"], ["pty-bin"], ["pty-mod"]),
+        },
+    )
+
+    result = helper.collect_unified_runtime(platform="win32")
+
+    assert collected_packages == ["mistralai_vibe_local_harness", "winpty"]
+    assert result == (
+        ["rt-data", "pty-data"],
+        ["rt-bin", "pty-bin"],
+        ["rt-mod", "pty-mod"],
+    )
+
+
+def test_missing_winpty_fails_the_windows_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = load_helper()
+    install_findable_runtime(monkeypatch, helper)
+
+    def import_without_winpty(name: str) -> types.ModuleType:
+        if name == "winpty":
+            raise ModuleNotFoundError("No module named 'winpty'")
+        return fake_import_module(name)
+
+    monkeypatch.setattr(helper, "import_module", import_without_winpty)
+    collected_packages = install_fake_collect_all(monkeypatch, {})
+
+    with pytest.raises(helper.UnifiedRuntimeRequiredError, match="pywinpty"):
+        helper.collect_unified_runtime(platform="win32")
+    assert collected_packages == []
 
 
 def test_missing_runtime_package_fails_the_build_message_mentions_reinstall(

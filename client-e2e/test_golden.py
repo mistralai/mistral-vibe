@@ -6,8 +6,8 @@ generated golden is uncommitted until reviewed.
 
 On failure, live SVGs are saved under ``goldens/_live/<scenario>/`` next to
 the committed goldens so a simple ``diff`` reveals the platform-specific
-difference. CI artifact globs already cover ``goldens/**/*.svg`` so the live
-SVGs are uploaded automatically — no separate store step needed.
+difference. CI artifact globs already cover ``goldens/_live/**/*.svg`` so the
+live SVGs are uploaded automatically — no separate store step needed.
 """
 
 from __future__ import annotations
@@ -64,6 +64,8 @@ def _assert_scenario_expectations(captured: Capture, scenario: Scenario) -> None
         assert text not in screen, f"rust screen contains {text!r}"
     for row, text in scenario.screen_rows.get("rust", {}).items():
         assert snapshot.rows[row] == text, f"rust screen row {row} differs"
+    if (cursor := scenario.screen_cursor.get("rust")) is not None:
+        assert snapshot.cursor == cursor, f"rust cursor {snapshot.cursor} != {cursor}"
 
     clipboard_expected = (
         scenario.expected_clipboard is not None
@@ -125,6 +127,14 @@ def test_scenario_expectations_reject_wrong_clipboard() -> None:
         _assert_scenario_expectations(captured, scenario)
 
 
+def test_scenario_expectations_reject_wrong_cursor() -> None:
+    scenario = Scenario(name="test", steps=[], screen_cursor={"rust": (0, 0)})
+    captured = Capture([Snapshot("final", (), cursor=(0, 1))], [], [])
+
+    with pytest.raises(AssertionError):
+        _assert_scenario_expectations(captured, scenario)
+
+
 def test_svg_groups_text_without_merging_styles() -> None:
     terminal = Terminal(40, 24)
     terminal.feed(b"plain  text \x1b[1;38;2;255;0;0;48;2;0;0;255mbold red\x1b[0m end")
@@ -169,6 +179,8 @@ def test_svg_groups_text_without_merging_styles() -> None:
         ("\u2500\u2500\u2588\u2588", [("\u2500\u2500\u2588\u2588", "0")]),
         ("ab界X", [("ab", "0"), ("界", "24.4"), ("X", "61")]),
         ("abx\u0301Y", [("ab", "0"), ("x\u0301", "24.4"), ("Y", "36.6")]),
+        ("❤\ufe0fX", [("❤\ufe0f", "0"), ("X", "24.4")]),
+        ("1\ufe0f\u20e3X", [("1\ufe0f\u20e3", "0"), ("X", "24.4")]),
         ("\x1b[4ma b\x1b[0m", [("a", "0"), ("b", "24.4")]),
         ("\x1b[9ma b\x1b[0m", [("a", "0"), ("b", "24.4")]),
     ],

@@ -16,6 +16,8 @@ use crate::startup::StartupEvent;
 use crate::voice::VoiceEvent;
 
 mod deadlines;
+mod external_editor;
+mod handoff;
 mod helpers;
 pub(crate) mod keys;
 pub mod notifications;
@@ -46,7 +48,7 @@ pub const QUEUE_CHANNEL_CAP: usize = 32;
 pub const APPROVAL_CHANNEL_CAP: usize = 4;
 /// Bounded feedback-result channel; at most one eligibility or record request is active.
 pub const FEEDBACK_CHANNEL_CAP: usize = 2;
-/// Bounded narrator channel; at most one summary request is active.
+/// Bounded narrator channel; one summary and one clip are live, and senders await rather than drop.
 pub const NARRATOR_CHANNEL_CAP: usize = 2;
 /// How the steady loop ended: a plain quit, or the handshake's missing-key
 /// verdict — the wizard is a pre-session surface (Python `run_onboarding`
@@ -96,6 +98,8 @@ pub struct EventLoop {
     pub config_tx: mpsc::Sender<config::Loaded>,
     pub sources: EventSources,
     pub input: mpsc::Receiver<crossterm::event::Event>,
+    /// Pauses `input` while the external editor owns the terminal.
+    pub input_reader: crate::terminal_events::Reader,
     pub crash_rx: watch::Receiver<bool>,
     pub shutdown: crate::server::signal::ShutdownSignal,
     /// Startup-event sender; the post-wizard handshake re-spawn reuses it.
@@ -157,7 +161,7 @@ impl EventLoop {
                 return Ok(Some(LoopExit::Quit));
             }
         }
-        self.terminal.draw(|frame| self.app.draw(frame))?;
+        crate::terminal::draw(&mut self.terminal, &mut self.app)?;
         timings.record("first_draw");
         crate::startup::mark_first_draw();
         crate::event_handler::flush_startup_telemetry(&mut self.app);
@@ -178,6 +182,9 @@ impl EventLoop {
             }
             Err(error) => Err(error),
         };
+        // Python `shutdown_cleanup`: stop narration so the clip ends with the TUI
+        // and `read_aloud.ended` is queued before the session/stop telemetry flush.
+        crate::turn_summary::cancel(&mut self.app);
         // Closing input cancels the stream without joining an OS reader thread.
         self.input.close();
         drop(self.terminal_guard);

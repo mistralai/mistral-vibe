@@ -72,6 +72,22 @@ def get_mistral_provider_and_api_key(
     return provider, api_key
 
 
+def mistral_credential_cache_key(config: VibeConfigSchema) -> str | None:
+    """Stable, anonymous per-user cache key derived from the Mistral API key.
+
+    The single resolution for on-disk caches keyed by user (experiment eval,
+    model catalog): None means no Mistral credential, so the caller has no
+    entry to read or write.
+    """
+    from vibe.core.experiments.manager import hash_api_key
+
+    provider_and_key = get_mistral_provider_and_api_key(config)
+    if provider_and_key is None:
+        return None
+    _provider, api_key = provider_and_key
+    return hash_api_key(api_key)
+
+
 def _extract_file_extension(path: object) -> str | None:
     if not isinstance(path, (str, Path)):
         return None

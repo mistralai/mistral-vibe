@@ -55,7 +55,7 @@ fn app_with_hide_other_question() -> App {
 fn a_hide_other_drag_from_a_non_option_row_selects() {
     let mut app = app_with_hide_other_question();
     app.question_app.option_rows = vec![(7, 0), (8, 1)];
-    app.view.question_selection_region = question_region(2, 6, 60, 10);
+    app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
         &mut app,
@@ -81,7 +81,7 @@ fn a_hide_other_drag_from_a_non_option_row_selects() {
 fn a_hide_other_release_on_a_non_option_row_never_clicks() {
     let mut app = app_with_hide_other_question();
     app.question_app.option_rows = vec![(7, 0), (8, 1)];
-    app.view.question_selection_region = question_region(2, 6, 60, 10);
+    app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
         &mut app,

@@ -130,7 +130,7 @@ fn clicking_a_wrapped_row_keeps_the_viewport_detached() {
     app.question_app.other_texts.insert(0, "custom".into());
     app.question_app.viewport.detach_at(8);
     app.question_app.option_rows = vec![(7, 1)];
-    app.view.question_selection_region = question_region(2, 6, 60, 10);
+    app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
         &mut app,
@@ -147,7 +147,7 @@ fn clicking_a_wrapped_row_keeps_the_viewport_detached() {
 fn a_drag_from_an_option_row_selects_instead_of_clicking() {
     let mut app = app_with_question();
     app.question_app.option_rows = vec![(7, 1)];
-    app.view.question_selection_region = question_region(2, 6, 60, 10);
+    app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
         &mut app,
@@ -173,7 +173,7 @@ fn a_drag_from_an_option_row_selects_instead_of_clicking() {
 fn a_press_on_the_border_never_selects_or_clicks() {
     let mut app = app_with_question();
     app.question_app.option_rows = vec![(7, 1)];
-    app.view.question_selection_region = question_region(2, 6, 60, 10);
+    app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
         &mut app,
@@ -196,7 +196,7 @@ fn a_press_on_the_border_never_selects_or_clicks() {
 fn a_multi_select_click_ticks_the_clicked_row_on_release() {
     let mut app = app_with_multi_select_question();
     app.question_app.option_rows = vec![(7, 0), (8, 1)];
-    app.view.question_selection_region = question_region(2, 6, 60, 10);
+    app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
         &mut app,
@@ -212,7 +212,7 @@ fn a_multi_select_click_ticks_the_clicked_row_on_release() {
 fn every_click_of_a_double_click_acts_like_python_on_click() {
     let mut app = app_with_multi_select_question();
     app.question_app.option_rows = vec![(7, 0), (8, 1)];
-    app.view.question_selection_region = question_region(2, 6, 60, 10);
+    app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     for _ in 0..2 {
         handle_mouse(
@@ -229,7 +229,7 @@ fn every_click_of_a_double_click_acts_like_python_on_click() {
 fn a_jittered_round_trip_still_clicks() {
     let mut app = app_with_question();
     app.question_app.option_rows = vec![(7, 0), (8, 1)];
-    app.view.question_selection_region = question_region(2, 6, 60, 10);
+    app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
         &mut app,
@@ -253,7 +253,7 @@ fn the_free_text_row_owns_its_mouse_like_python_input() {
     let mut app = app_with_question();
     app.question_app.other_texts.insert(0, "draft".into());
     app.question_app.option_rows = vec![(7, 0), (8, 1), (9, 2)];
-    app.view.question_selection_region = question_region(2, 6, 60, 10);
+    app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
         &mut app,

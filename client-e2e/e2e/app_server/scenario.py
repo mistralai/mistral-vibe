@@ -63,6 +63,8 @@ class Step:
     text: str
     events: list[AppServerEvent] = field(default_factory=list)
     release: int = 0
+    # Events gated on settles after this step's input, one event per settle.
+    release_after: int = 0
     resize: tuple[int, int] | None = None
 
 
@@ -87,6 +89,8 @@ class Scenario:
     screen_contains: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     screen_excludes: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     screen_rows: Mapping[str, Mapping[int, str]] = field(default_factory=dict)
+    screen_cursor: Mapping[str, tuple[int, int]] = field(default_factory=dict)
+    """Expected final terminal cursor ``(row, column)`` per client."""
     skip_reason: str | None = None
     capture_startup: bool = True
     capture_steps: set[int] | None = None
@@ -186,6 +190,7 @@ def _build_scenario(module: ModuleType, name: str, origin: str) -> Scenario:
         screen_contains=getattr(module, "screen_contains", {}),
         screen_excludes=getattr(module, "screen_excludes", {}),
         screen_rows=getattr(module, "screen_rows", {}),
+        screen_cursor=getattr(module, "screen_cursor", {}),
         skip_reason=getattr(module, "skip", None),
         capture_startup=getattr(module, "capture_startup", True),
         capture_steps=getattr(module, "capture_steps", None),
@@ -212,6 +217,14 @@ def _split_timeline(timeline: Timeline) -> list[Step]:
             if not isinstance(release, int) or release < 1:
                 raise ValueError("a replay release must be a positive integer")
             steps.append(Step("", release=release))
+            continue
+        if "release_after" in item:
+            release_after = item["release_after"]
+            if not isinstance(release_after, int) or release_after < 1:
+                raise ValueError("a replay release must be a positive integer")
+            if not steps:
+                raise ValueError("timeline starts with a release before any input")
+            steps[-1].release_after = release_after
             continue
         if "resize" in item:
             size = item["resize"]

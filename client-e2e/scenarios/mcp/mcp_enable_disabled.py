@@ -33,4 +33,4 @@ _TOGGLED = [
 
 handshake = mcp_handshake(_SOURCES, toggled=_TOGGLED)
 
-timeline: Timeline = ["/mcp github_app\r", "e", "\x7f"]
+timeline: Timeline = ["/mcp github_app\r", "e", "\x1b"]

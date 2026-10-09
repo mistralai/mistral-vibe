@@ -34,11 +34,26 @@ fn queued_app() -> App {
     app
 }
 
+/// Paste a prompt draft; a mode character pasted before its text stays literal.
+fn paste_draft(app: &mut App, text: &str) {
+    let body = text.trim_start_matches(['/', '!']);
+    input::handle_paste(app, body.into());
+    app.chat_input.cursor = 0;
+    if body.len() < text.len() {
+        input::handle_paste(app, text[..1].into());
+    }
+    app.chat_input.cursor = app.chat_input.input.len();
+}
+
+fn undo_all(app: &mut App) {
+    while app.chat_input.restore_edit(false) {}
+}
+
 #[test]
 fn browsing_queue_preserves_draft_undo_and_redo() {
     for text in ["draft", "/literal", "!literal"] {
         let mut app = queued_app();
-        input::handle_paste(&mut app, text.into());
+        paste_draft(&mut app, text);
         input::handle_paste(&mut app, " suffix".into());
         assert!(app.chat_input.restore_edit(false));
         assert!(message_queue::enter(&mut app));
@@ -49,8 +64,7 @@ fn browsing_queue_preserves_draft_undo_and_redo() {
         assert_eq!(app.chat_input.input, text);
         assert!(app.chat_input.restore_edit(true));
         assert_eq!(app.chat_input.input, format!("{text} suffix"));
-        assert!(app.chat_input.restore_edit(false));
-        assert!(app.chat_input.restore_edit(false));
+        undo_all(&mut app);
         assert!(app.chat_input.input.is_empty());
     }
 }
@@ -78,12 +92,24 @@ fn loading_a_queued_prompt_starts_a_separate_history() {
     assert_eq!(app.chat_input.input, "queued prompt");
 }
 
+#[test]
+fn editing_a_queued_slash_message_keeps_it_a_prompt() {
+    let mut app = queued_app();
+    app.queue.items[0].text = "/config".into();
+    assert!(message_queue::enter(&mut app));
+
+    message_queue::edit_selected(&mut app);
+
+    assert_eq!(app.chat_input.mode, InputMode::Prompt);
+    assert_eq!(app.chat_input.input, "/config");
+}
+
 #[tokio::test]
 async fn pending_commands_preserve_draft_history_and_literal_prefixes() {
     for text in ["draft", "/literal", "!literal"] {
         let mut app = App::default();
         app.session.status = Status::Ready;
-        input::handle_paste(&mut app, text.into());
+        paste_draft(&mut app, text);
         input::handle_paste(&mut app, " suffix".into());
         assert!(app.chat_input.restore_edit(false));
         app.pending_commands.push("/help".into());
@@ -99,8 +125,7 @@ async fn pending_commands_preserve_draft_history_and_literal_prefixes() {
         assert_eq!(app.chat_input.input, text);
         assert!(app.chat_input.restore_edit(true));
         assert_eq!(app.chat_input.input, format!("{text} suffix"));
-        assert!(app.chat_input.restore_edit(false));
-        assert!(app.chat_input.restore_edit(false));
+        undo_all(&mut app);
         assert!(app.chat_input.input.is_empty());
     }
 }

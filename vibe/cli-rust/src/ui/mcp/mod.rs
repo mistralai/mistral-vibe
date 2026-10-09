@@ -1,14 +1,13 @@
 //! `/mcp` browser bottom-app: title, source/tool option list, shortcut hint.
 
-mod layout;
-mod search;
+pub(crate) mod layout;
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
 
-use super::{bottom_bar, loading, scrollbar, theme, transcript};
+use super::{hint_line, list_scroll, scrollbar, search_field, theme};
 use crate::app::App;
 use crate::mcp::{help_text, rows};
 use layout::VisualLine;
@@ -20,35 +19,19 @@ const SCROLLBAR_GUTTER: u16 = 7;
 
 /// Draw the whole screen with the browser replacing the input box.
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    f.buffer_mut()
-        .set_style(area, Style::default().bg(theme::background()));
-
-    let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
     let lines = visual_lines(app, area);
-    let chunks = super::bottom_app_chunks(
-        app,
-        area,
-        loading_height,
-        box_height(app, lines.len(), area.height),
-    );
-
-    transcript::draw(app, f, chunks[0]);
-    loading::draw(app, f, chunks[1]);
-    crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Blocked);
-    draw_box(app, f, chunks[2], &lines);
-    super::todo::draw_row(app, f, chunks[4]);
-    bottom_bar::draw(app, f, chunks[3]);
+    let height = box_height(app, lines.len(), area.height);
+    let kind = super::bottom_app::Kind::Mcp;
+    super::bottom_app::draw(app, f, area, height, kind, |app, f, area| {
+        draw_box(app, f, area, &lines)
+    });
 }
 
 /// Lay the rows out, reserving the scrollbar gutter once they overflow.
 fn visual_lines(app: &App, area: Rect) -> Vec<VisualLine> {
     let rows = rows::rows(&app.mcp);
     let width = area.width.saturating_sub(GUTTER) as usize;
-    let selected = if app.mcp.search.focused {
-        usize::MAX
-    } else {
-        app.mcp.selected
-    };
+    let selected = app.mcp.selected;
     let lines = layout::lines(&rows, selected, width);
     if lines.len() <= visible_lines(lines.len(), area.height) {
         return lines;
@@ -104,7 +87,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, lines: &[VisualLine]) {
 
     let header = header_height(app);
     if header > 1 {
-        search::draw(app, f, area);
+        draw_search(app, f, area);
     }
     let visible = area.height.saturating_sub(header + 3) as usize;
     let top = area.y + 1 + header;
@@ -137,15 +120,14 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, lines: &[VisualLine]) {
         );
     }
 
-    draw_help(app, f, area.x + 2, area.y + area.height - 2);
+    hint_line::draw(f, area.x + 2, area.y + area.height - 2, &help_text(app));
 }
 
 fn draw_line(f: &mut Frame, area: Rect, y: u16, line: &VisualLine, overflows: bool) {
     if line.highlighted {
         let gutter = if overflows { SCROLLBAR_GUTTER } else { GUTTER };
         let bar = Rect::new(area.x + 3, y, area.width.saturating_sub(gutter), 1);
-        f.buffer_mut()
-            .set_style(bar, Style::default().bg(theme::block_cursor_bg()));
+        super::list_cursor::paint(f, bar);
     }
     let mut x = area.x + 3;
     for span in &line.spans {
@@ -154,45 +136,40 @@ fn draw_line(f: &mut Frame, area: Rect, y: u16, line: &VisualLine, overflows: bo
     }
 }
 
-/// Keep every line of the highlighted option visible (Textual `scroll_to_highlight`).
+/// Keep the highlighted option visible, the wheel's free scroll aside.
 fn reconcile_scroll(app: &mut App, lines: &[VisualLine], visible: usize) -> usize {
-    if visible == 0 {
-        return 0;
-    }
-    let mut offset = app.mcp.scroll;
-    if app.mcp.free_scroll {
-        offset = offset.min(lines.len().saturating_sub(visible));
-        app.mcp.scroll = offset;
-        return offset;
-    }
-    if let Some(first) = lines.iter().position(|line| line.highlighted) {
-        let last = lines
-            .iter()
-            .rposition(|line| line.highlighted)
-            .unwrap_or(first);
-        if first < offset {
-            offset = first;
-        } else if last >= offset + visible {
-            offset = (last + 1 - visible).min(first);
+    let max = lines.len().saturating_sub(visible);
+    let offset = match app.mcp.free_scroll {
+        true => app.mcp.scroll.min(max),
+        false => {
+            let first = lines.iter().position(|line| line.highlighted);
+            let last = lines.iter().rposition(|line| line.highlighted);
+            let highlight = first
+                .zip(last)
+                .map_or(0..0, |(first, last)| first..last + 1);
+            list_scroll::follow(app.mcp.scroll, visible, lines.len(), highlight, |line| {
+                lines[line].selectable
+            })
         }
-    }
-    offset = offset.min(lines.len().saturating_sub(visible));
+    };
     app.mcp.scroll = offset;
     offset
 }
 
-/// The hint line: keys in bold $primary, labels in $text-muted.
-fn draw_help(app: &App, f: &mut Frame, x: u16, y: u16) {
-    let key = Style::default()
-        .fg(theme::primary())
-        .bg(theme::background())
-        .add_modifier(Modifier::BOLD);
-    let label = theme::muted_style().bg(theme::background());
-    let mut cursor = x;
-    for (shortcut, text) in help_text(app) {
-        f.buffer_mut().set_string(cursor, y, shortcut, key);
-        cursor += shortcut.chars().count() as u16;
-        f.buffer_mut().set_string(cursor, y, text, label);
-        cursor += text.chars().count() as u16;
-    }
+/// The search row under the title; the field owns its mouse like Python's `Input`.
+fn draw_search(app: &mut App, f: &mut Frame, area: Rect) {
+    let row = Rect::new(area.x + 3, area.y + 2, area.width.saturating_sub(6), 1);
+    let input = search_field::draw_row(
+        f,
+        row,
+        &app.mcp.search,
+        "Search servers and connectors",
+        app.view.cursor_on,
+        theme::background(),
+    );
+    app.mcp.search.area = input;
+    crate::mouse::register_region(app, input, crate::mouse::MouseTarget::Mcp);
+    // A box drag never selects the field.
+    let field = (input.y, input.x, input.right().saturating_sub(1));
+    app.view.bottom_app_selection_chrome.push(field);
 }

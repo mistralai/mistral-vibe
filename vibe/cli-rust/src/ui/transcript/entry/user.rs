@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 
 use super::super::super::markdown::{self, LinkKind, LinkedLines, Sc};
 use super::super::super::theme;
+use crate::selection::Fold;
 use crate::server::{ImageAttachment, ImageSource, MessageContent, MessageEntry};
 use crate::transcript::{FiredLoop, TranscriptEntry};
 use crate::utils::{datetime, text};
@@ -24,13 +25,13 @@ const GENERIC_IMAGE_ALIAS: &str = "image";
 /// same expanding separator a user message paints.
 pub(super) fn push_queue_header(lines: &mut LinkedLines, width: u16, paused: bool) {
     let label = theme::text(theme::ORANGE).add_modifier(Modifier::BOLD | Modifier::ITALIC);
-    lines.push(Line::from(""));
+    lines.push_gap();
     lines.push(match paused {
         false => Line::from(Span::styled(QUEUE_HEADER_LABEL, label)),
         // The shortcut only recolors the label it sits in (Python `SHORTCUT_STYLE`).
         true => Line::from(vec![
             Span::styled(QUEUE_PAUSED_PREFIX, label),
-            Span::styled("Enter", label.fg(theme::primary())),
+            Span::styled(crate::hints::key::ENTER, label.fg(theme::primary())),
             Span::styled(QUEUE_PAUSED_SUFFIX, label),
         ]),
     });
@@ -102,8 +103,8 @@ pub(super) fn push_user(
         false => theme::text(theme::foreground()).add_modifier(emphasis),
     };
     if !pending && !follows_user {
-        lines.push(Line::from(""));
-        lines.push(Line::from(""));
+        lines.push_gap();
+        lines.push_gap();
     }
     // A settled message's content widget spans the row (`width: 1fr`), so its
     // rewind highlight reverses the padding too; a queued one is `width: auto`.
@@ -133,7 +134,7 @@ pub(super) fn push_user(
             body.push_str(segment);
         }
         // Continuation rows hang under the text, like Python's prompt/content `Horizontal`.
-        for (row_index, mut row) in markdown::wrap_chars(&chars, content_width)
+        for (row_index, (mut row, gap)) in markdown::wrap_chars_folded(&chars, content_width)
             .into_iter()
             .enumerate()
         {
@@ -146,6 +147,7 @@ pub(super) fn push_user(
                 row.extend(std::iter::repeat_n((' ', content, None), pad));
             }
             lines.push_row(vec![Span::styled(marker, prompt)], &row);
+            lines.fold_last(Fold::hung(gap, 2));
         }
     }
     let images: Vec<&ImageAttachment> = message
@@ -186,8 +188,9 @@ pub(super) fn push_user(
             .map(|c| (c, theme::muted_style(), None))
             .chain(label.chars().map(|c| (c, label_style, link)))
             .collect();
-        for row in markdown::wrap_chars(&chars, width as usize) {
+        for (row, gap) in markdown::wrap_chars_folded(&chars, width as usize) {
             lines.push_row(Vec::new(), &row);
+            lines.fold_last(Fold::hung(gap, 0));
         }
     }
     if let Some(fired) = fired_loop {

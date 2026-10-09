@@ -5,21 +5,14 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
 
-use super::{bottom_bar, loading, scrollbar, theme, transcript};
+use super::{list_scroll, scrollbar, theme};
 use crate::app::App;
+use crate::hints::{self, action};
 
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    f.buffer_mut()
-        .set_style(area, Style::default().bg(theme::background()));
-    let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
     let height = (app.resume_picker.sessions.len().max(1) as u16 + 6).min(max_height(area));
-    let chunks = super::bottom_app_chunks(app, area, loading_height, height);
-    transcript::draw(app, f, chunks[0]);
-    loading::draw(app, f, chunks[1]);
-    crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Blocked);
-    draw_box(app, f, chunks[2]);
-    super::todo::draw_row(app, f, chunks[4]);
-    bottom_bar::draw(app, f, chunks[3]);
+    let kind = super::bottom_app::Kind::Resume;
+    super::bottom_app::draw(app, f, area, height, kind, draw_box);
 }
 
 /// The whole picker takes at most 40% of the screen, keeping one session row.
@@ -81,11 +74,6 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
     {
         let y = area.y + 3 + row as u16;
         let selected = app.resume_picker.scroll + row == app.resume_picker.selected;
-        let row_bg = if selected {
-            theme::block_cursor_bg()
-        } else {
-            bg
-        };
         let text = if session.title.is_empty() {
             &session.preview
         } else {
@@ -106,28 +94,11 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
         };
         if selected {
             let gutter = if has_scrollbar { 7 } else { 6 };
-            f.buffer_mut().set_style(
-                Rect::new(area.x + 3, y, area.width.saturating_sub(gutter), 1),
-                Style::default().bg(row_bg),
-            );
+            let bar = Rect::new(area.x + 3, y, area.width.saturating_sub(gutter), 1);
+            super::list_cursor::paint(f, bar);
         }
-        let style = Style::default()
-            .fg(if selected {
-                theme::block_cursor_fg()
-            } else {
-                theme::foreground()
-            })
-            .bg(row_bg);
-        let muted = if selected {
-            style.add_modifier(Modifier::DIM | Modifier::BOLD)
-        } else {
-            style.add_modifier(Modifier::DIM)
-        };
-        let text_style = if selected {
-            style.add_modifier(Modifier::BOLD)
-        } else {
-            style
-        };
+        let (text_style, _) = super::list_cursor::styles_on(selected, bg);
+        let muted = text_style.add_modifier(Modifier::DIM);
         f.buffer_mut().set_string(area.x + 3, y, time, muted);
         f.buffer_mut().set_string(area.x + 15, y, id, muted);
         let message = delete_message.unwrap_or(text);
@@ -157,27 +128,14 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
             app.resume_picker.scroll as u16,
         );
     }
-    let key = Style::default()
-        .fg(theme::primary())
-        .bg(bg)
-        .add_modifier(Modifier::BOLD);
-    let label = theme::muted_style().bg(bg);
-    f.buffer_mut()
-        .set_string(area.x + 2, area.y + area.height - 2, "↑↓/jk", key);
-    f.buffer_mut()
-        .set_string(area.x + 7, area.y + area.height - 2, " Navigate  ", label);
-    f.buffer_mut()
-        .set_string(area.x + 18, area.y + area.height - 2, "Enter", key);
-    f.buffer_mut()
-        .set_string(area.x + 23, area.y + area.height - 2, " Select  ", label);
-    f.buffer_mut()
-        .set_string(area.x + 32, area.y + area.height - 2, "d", key);
-    f.buffer_mut()
-        .set_string(area.x + 33, area.y + area.height - 2, " Delete ", label);
-    f.buffer_mut()
-        .set_string(area.x + 42, area.y + area.height - 2, "Esc", key);
-    f.buffer_mut()
-        .set_string(area.x + 45, area.y + area.height - 2, " Cancel", label);
+    let help = [
+        hints::NAVIGATE,
+        hints::SELECT,
+        ("d", action::DELETE),
+        hints::CANCEL,
+    ];
+    let width = area.width.saturating_sub(4);
+    super::hint_line::draw_clipped(f, area.x + 2, area.y + area.height - 2, width, &help);
 }
 
 fn relative_time(timestamp: u64) -> String {
@@ -196,21 +154,20 @@ fn relative_time(timestamp: u64) -> String {
     }
 }
 
+/// Keep the highlighted session visible, the wheel's free scroll aside.
 fn reconcile_scroll(app: &mut App, visible: usize) {
     if visible == 0 {
         return;
     }
-    let max_scroll = app.resume_picker.sessions.len().saturating_sub(visible);
-    if app.resume_picker.free_scroll {
-        app.resume_picker.scroll = app.resume_picker.scroll.min(max_scroll);
-        return;
-    }
-    let selected = app.resume_picker.selected;
-    if selected < app.resume_picker.scroll {
-        app.resume_picker.scroll = selected;
-    }
-    if selected >= app.resume_picker.scroll + visible {
-        app.resume_picker.scroll = selected + 1 - visible;
-    }
-    app.resume_picker.scroll = app.resume_picker.scroll.min(max_scroll);
+    let state = &mut app.resume_picker;
+    let total = state.sessions.len();
+    state.scroll = match state.free_scroll {
+        true => state.scroll.min(total.saturating_sub(visible)),
+        false => {
+            let selected = state.selected;
+            list_scroll::follow(state.scroll, visible, total, selected..selected + 1, |_| {
+                true
+            })
+        }
+    };
 }

@@ -28,6 +28,27 @@ def _mouse_move(ta: ChatTextArea, x: int, y: int = 0) -> events.MouseMove:
     )
 
 
+def _mouse_event[E: events.MouseEvent](
+    event_type: type[E], ta: ChatTextArea, x: int, *, at: float
+) -> E:
+    origin = ta.region.offset
+    event = event_type(
+        widget=ta,
+        x=x,
+        y=0,
+        delta_x=0,
+        delta_y=0,
+        button=1,
+        shift=False,
+        meta=False,
+        ctrl=False,
+        screen_x=origin.x + x,
+        screen_y=origin.y,
+    )
+    event.time = at
+    return event
+
+
 def test_word_boundary_around_middle_of_word() -> None:
     ta = _make_text_area("hello world foo")
     assert ta._word_boundary_around((0, 2)) == ((0, 0), (0, 5))
@@ -266,21 +287,17 @@ async def test_pause_after_double_click_resets_to_char() -> None:
         ta.focus()
         ta.load_text("hello world foo")
         await pilot.pause(0.2)
+        threshold = app.CLICK_CHAIN_TIME_THRESHOLD
 
-        await pilot.mouse_down(ta, offset=(2, 0))
-        await pilot.pause(0.05)
-        await pilot.mouse_up(ta, offset=(2, 0))
-        await pilot.pause(0.05)
-        await pilot.mouse_down(ta, offset=(2, 0))
-        await pilot.pause(0.05)
+        await ta._on_mouse_down(_mouse_event(events.MouseDown, ta, 2, at=0.0))
+        await ta._on_mouse_up(_mouse_event(events.MouseUp, ta, 2, at=0.0))
+        await ta._on_mouse_down(_mouse_event(events.MouseDown, ta, 2, at=0.0))
         assert ta._click_chain == 2
-        await pilot.mouse_up(ta, offset=(2, 0))
-        await pilot.pause(0.05)
+        await ta._on_mouse_up(_mouse_event(events.MouseUp, ta, 2, at=0.0))
 
-        ta._last_down_time = (ta._last_down_time or 0.0) - 1.0
-
-        await pilot.mouse_down(ta, offset=(2, 0))
-        await pilot.pause(0.05)
+        await ta._on_mouse_down(
+            _mouse_event(events.MouseDown, ta, 2, at=threshold + 1.0)
+        )
         assert ta._click_chain == 1
         assert ta.selection == Selection.cursor((0, 2))
 

@@ -39,8 +39,7 @@ fn has_body_counts_output_fallback_text_and_warnings() {
     let read = entry(json!({"status": "completed",
         "output": {"filePath": "app.py", "content": "x"}}));
     assert!(read.has_body());
-    assert_eq!(read.file_read_path(), Some("app.py"));
-    assert_eq!(read.file_write_path(), None);
+    assert_eq!(read.code_path(), Some("app.py"));
 
     let warnings = entry(json!({"status": "completed",
         "output": {"filePath": "app.py", "content": "x"},

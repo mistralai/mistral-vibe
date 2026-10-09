@@ -15,6 +15,7 @@ from vibe.core.config.layer import (
     LayerNotLoadedError,
 )
 from vibe.core.config.layers import _base
+from vibe.core.config.layers.project import ProjectConfigLayer
 from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.patch import (
     AddOperationPatch,
@@ -23,6 +24,7 @@ from vibe.core.config.patch import (
     ReplaceOperationPatch,
 )
 from vibe.core.config.types import MISSING_BACKING_STORE_DATA_FINGERPRINT
+from vibe.core.trusted_folders import trusted_folders_manager
 
 
 def random_config_file_name() -> str:
@@ -463,7 +465,9 @@ async def test_migrate_config_layers_drops_sparse_leftover_devstral_small(
 
     with path.open("rb") as file:
         persisted = tomllib.load(file)
-    assert persisted.get("active_model", "") == ""
+    # The pin is left to the load-time fallback: another layer may still
+    # define the model.
+    assert persisted["active_model"] == "devstral-small"
     assert "models" not in persisted
 
 
@@ -488,6 +492,223 @@ async def test_migrate_config_layers_keeps_complete_devstral_small(
         persisted = tomllib.load(file)
     assert persisted["active_model"] == "devstral-small"
     assert persisted["models"][0]["alias"] == "devstral-small"
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_completes_sparse_leftover_local(
+    tmp_working_directory: Path,
+) -> None:
+    # /thinking on the built-in wrote a sparse entry; the built-in is gone but
+    # the model still runs through llamacpp, so the entry gains the identity it
+    # needs to stand alone and the pin keeps resolving.
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text('active_model = "local"\n\n[models.local]\nthinking = "low"\n')
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["active_model"] == "local"
+    assert persisted["models"] == [
+        {
+            "thinking": "low",
+            "alias": "local",
+            "name": "devstral",
+            "provider": "llamacpp",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_keeps_pin_to_removed_local_without_override(
+    tmp_working_directory: Path,
+) -> None:
+    # A per-file migration cannot know the pin is stale; the load-time
+    # fallback handles unknown pins.
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text('active_model = "local"\n')
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["active_model"] == "local"
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_keeps_pin_when_entry_is_in_project_config(
+    tmp_working_directory: Path,
+) -> None:
+    # Pin in the user config, model entry in the project config: each file
+    # migrates without seeing the other, so the pin must survive.
+    user_path = tmp_working_directory / random_config_file_name()
+    user_path.write_text('active_model = "local"\n')
+    project_path = tmp_working_directory / ".vibe" / "config.toml"
+    project_path.parent.mkdir(parents=True, exist_ok=True)
+    project_path.write_text('[models.local]\nthinking = "low"\n')
+    trusted_folders_manager.add_trusted(project_path.parent)
+
+    await migrate_config_layers([
+        UserConfigLayer(path=user_path),
+        ProjectConfigLayer(path=tmp_working_directory),
+    ])
+
+    with user_path.open("rb") as file:
+        assert tomllib.load(file)["active_model"] == "local"
+    with project_path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["models"] == [
+        {
+            "alias": "local",
+            "thinking": "low",
+            "name": "devstral",
+            "provider": "llamacpp",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_does_not_stamp_local_over_custom_definition(
+    tmp_working_directory: Path,
+) -> None:
+    # The user config completely defines a custom ``local``; the project config
+    # holds a sparse leftover. The merge fills the sparse entry with the user's
+    # identity, so stamping the higher-precedence project file would shadow it.
+    user_path = tmp_working_directory / random_config_file_name()
+    user_path.write_text(
+        '[[models]]\nname = "my-gguf"\nprovider = "my-llamacpp"\nalias = "local"\n'
+    )
+    project_path = tmp_working_directory / ".vibe" / "config.toml"
+    project_path.parent.mkdir(parents=True, exist_ok=True)
+    project_path.write_text('[models.local]\nthinking = "low"\n')
+    trusted_folders_manager.add_trusted(project_path.parent)
+
+    await migrate_config_layers([
+        UserConfigLayer(path=user_path),
+        ProjectConfigLayer(path=tmp_working_directory),
+    ])
+
+    with user_path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["models"] == [
+        {"name": "my-gguf", "provider": "my-llamacpp", "alias": "local"}
+    ]
+    with project_path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["models"] == {"local": {"thinking": "low"}}
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_completes_local_despite_devstral_named_model(
+    tmp_working_directory: Path,
+) -> None:
+    # The merge fills sparse entries per alias, so a complete ``devstral``-named
+    # model under another alias must not suppress completing ``local``.
+    user_path = tmp_working_directory / random_config_file_name()
+    user_path.write_text(
+        '[[models]]\nname = "devstral"\nprovider = "llamacpp"\nalias = "my-devstral"\n'
+    )
+    project_path = tmp_working_directory / ".vibe" / "config.toml"
+    project_path.parent.mkdir(parents=True, exist_ok=True)
+    project_path.write_text('[models.local]\nthinking = "low"\n')
+    trusted_folders_manager.add_trusted(project_path.parent)
+
+    await migrate_config_layers([
+        UserConfigLayer(path=user_path),
+        ProjectConfigLayer(path=tmp_working_directory),
+    ])
+
+    with project_path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["models"] == [
+        {
+            "alias": "local",
+            "thinking": "low",
+            "name": "devstral",
+            "provider": "llamacpp",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_completes_devstral_named_entry_under_other_alias(
+    tmp_working_directory: Path,
+) -> None:
+    # A complete ``local`` elsewhere suppresses stamping only for ``local``-
+    # keyed entries; an entry identified by name under another alias is always
+    # completed, since the merge never fills it.
+    user_path = tmp_working_directory / random_config_file_name()
+    user_path.write_text(
+        '[[models]]\nname = "my-gguf"\nprovider = "my-llamacpp"\nalias = "local"\n'
+    )
+    project_path = tmp_working_directory / ".vibe" / "config.toml"
+    project_path.parent.mkdir(parents=True, exist_ok=True)
+    project_path.write_text('[models.my-devstral]\nname = "devstral"\n')
+    trusted_folders_manager.add_trusted(project_path.parent)
+
+    await migrate_config_layers([
+        UserConfigLayer(path=user_path),
+        ProjectConfigLayer(path=tmp_working_directory),
+    ])
+
+    with project_path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["models"] == [
+        {"alias": "my-devstral", "name": "devstral", "provider": "llamacpp"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_completes_local_when_no_file_defines_it(
+    tmp_working_directory: Path,
+) -> None:
+    # No file defines ``local`` completely, so each sparse entry is completed
+    # to stand alone.
+    first_path = tmp_working_directory / random_config_file_name()
+    first_path.write_text('[models.local]\nthinking = "low"\n')
+    second_path = tmp_working_directory / random_config_file_name()
+    second_path.write_text('[models.local]\nthinking = "high"\n')
+
+    await migrate_config_layers([
+        UserConfigLayer(path=first_path),
+        UserConfigLayer(path=second_path),
+    ])
+
+    for path in (first_path, second_path):
+        with path.open("rb") as file:
+            persisted = tomllib.load(file)
+        assert persisted["models"] == [
+            {
+                "alias": "local",
+                "thinking": "low" if path is first_path else "high",
+                "name": "devstral",
+                "provider": "llamacpp",
+            }
+        ]
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_keeps_complete_local(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text(
+        'active_model = "local"\n\n'
+        "[[models]]\n"
+        'name = "devstral"\n'
+        'provider = "llamacpp"\n'
+        'alias = "local"\n'
+    )
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["active_model"] == "local"
+    assert persisted["models"][0]["alias"] == "local"
 
 
 @pytest.mark.asyncio

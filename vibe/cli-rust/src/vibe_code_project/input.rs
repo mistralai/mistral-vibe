@@ -10,6 +10,7 @@ use super::{
 };
 use crate::app::App;
 use crate::chat_input::Action;
+use crate::focus::Focus;
 use crate::selection::{self, Release};
 use crate::server::Client;
 
@@ -40,21 +41,20 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
         }
     }
     if key.code == KeyCode::Esc {
-        if app.vibe_code_project.create.is_some() {
-            app.vibe_code_project.show_picker();
-        } else {
-            request::start(app, client, Operation::Cancel);
-        }
+        escape(app, client);
         return;
     }
     if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
         let state = &mut app.vibe_code_project;
         if let Some(create) = &mut state.create {
             create.branch_focused = !create.branch_focused;
-        } else {
-            state.search_focused = !state.search_focused;
         }
-        if let Some(field) = focused_field(state) {
+        if let Some(field) = state
+            .create
+            .is_some()
+            .then(|| focused_field(state))
+            .flatten()
+        {
             field.edit(Action::SelectAll);
         }
         return;
@@ -91,10 +91,9 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
             }
             KeyCode::Char('/') if plain && !state.search_focused => {
                 state.search_focused = true;
-                state.query.edit(Action::SelectAll);
                 return;
             }
-            KeyCode::PageUp | KeyCode::PageDown if !state.search_focused => {
+            KeyCode::PageUp | KeyCode::PageDown => {
                 state.page(key.code == KeyCode::PageDown);
                 return;
             }
@@ -121,6 +120,21 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     }
 }
 
+/// Esc backs out one level: create form, search field, search filter, then the picker.
+fn escape(app: &mut App, client: &Arc<Client>) {
+    let state = &mut app.vibe_code_project;
+    if state.create.is_some() {
+        state.show_picker();
+    } else if state.search_focused {
+        state.search_focused = false;
+    } else if !state.query.text.is_empty() {
+        state.query = Field::default();
+        state.refresh(None);
+    } else {
+        request::start(app, client, Operation::Cancel);
+    }
+}
+
 pub fn paste(app: &mut App, text: &str) {
     let state = &mut app.vibe_code_project;
     if state.pending {
@@ -137,10 +151,10 @@ pub fn paste(app: &mut App, text: &str) {
 }
 
 pub fn copy_selection(app: &mut App, cut: bool) -> bool {
-    let state = &mut app.vibe_code_project;
-    if !state.open || state.pending {
+    if app.focus() != Focus::VibeCodeProject || app.vibe_code_project.pending {
         return false;
     }
+    let state = &mut app.vibe_code_project;
     let Some(field) = focused_field(state) else {
         return false;
     };
@@ -184,7 +198,7 @@ pub fn mouse(app: &mut App, client: &Arc<Client>, event: MouseEvent) {
     let at = (event.column, event.row);
     let release = match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            selection::press_including_padding(app, at);
+            selection::press_owned(app, at, selection::RegionId::BottomApp);
             None
         }
         MouseEventKind::Drag(MouseButton::Left) => {

@@ -43,9 +43,9 @@ impl HistoryManager {
         }
     }
 
-    /// Record a submitted prompt, skipping blanks and immediate repeats.
+    /// Record a submitted prompt, skipping blanks and immediate repeats; leading whitespace keeps a mode character literal.
     pub fn add(&mut self, text: &str) {
-        let text = text.trim();
+        let text = text.trim_end();
         if text.is_empty() || self.entries.last().map(String::as_str) == Some(text) {
             return;
         }

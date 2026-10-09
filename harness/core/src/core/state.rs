@@ -282,6 +282,7 @@ impl HarnessState {
                     ..
                 } if effect_id == action_id => Some(operation_id),
                 Action::Completion { .. }
+                | Action::Approval { .. }
                 | Action::Hook { .. }
                 | Action::RuntimeBuiltinTool { .. }
                 | Action::ProvidedTool { .. }
@@ -325,6 +326,16 @@ impl HarnessState {
             .pending_actions()
             .into_iter()
             .map(|action| match action {
+                Action::Approval {
+                    effect_id,
+                    call_id,
+                    grant_key,
+                    ..
+                } => PendingActionInspection::Approval {
+                    action_id: effect_id,
+                    call_id,
+                    grant_key,
+                },
                 Action::Completion {
                     effect_id, kind, ..
                 } => PendingActionInspection::Completion {

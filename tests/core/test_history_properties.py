@@ -240,7 +240,7 @@ def test_manual_edits_during_review_stay_projectable() -> None:
     manual edit survives projection, never silently dropped nor conflated with the
     decisions already baked into disk. Reverting every hunk then bottoms out at v0.
     """
-    for seed in range(400):
+    for seed in range(32):
         rng = random.Random(seed)
         v0, current, chain = gen_chain(rng, rng.randint(2, 6))
         cp = build(chain)

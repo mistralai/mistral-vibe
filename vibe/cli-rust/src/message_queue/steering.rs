@@ -22,13 +22,23 @@ pub fn defer_prompt(app: &mut App, text: String) -> bool {
     true
 }
 
+/// Whether an empty Enter would steer the accepted queue into the running turn.
+pub fn can_steer(app: &App) -> bool {
+    !app.queue.paused
+        && app.queue.selected.is_none()
+        && app.queue.steering.is_none()
+        && matches!(app.session.status, Status::Generating { .. })
+        && app.session.active_turn_id.is_some()
+        && app
+            .queue
+            .items
+            .first()
+            .is_some_and(|item| item.queue_item_id.is_some())
+}
+
 /// Send the merged queued block into the active turn without rebuilding it.
 pub fn steer_pending(app: &mut App, client: &Arc<Client>) -> bool {
-    if app.queue.paused
-        || app.queue.selected.is_some()
-        || app.queue.steering.is_some()
-        || !matches!(app.session.status, Status::Generating { .. })
-    {
+    if !can_steer(app) {
         return false;
     }
     let (Some(session_id), Some(expected_turn_id), Some(item)) = (

@@ -1,13 +1,14 @@
 //! Chat input: the editable prompt with a `>` marker and top/bottom borders.
 
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 use super::composer_layout::{ComposerLayout, Row};
-use super::tab_cells::cells;
+use super::tab_cells::{cells, cells_width};
 use super::theme;
 use crate::agents;
 use crate::app::{App, Status};
@@ -25,7 +26,8 @@ fn safety_colors(safety: AgentSafety) -> (Color, Color) {
     }
 }
 
-pub fn draw(app: &App, f: &mut Frame, area: Rect) {
+/// Draw the chat input, returning the caret's screen cell while it is in view and takes keys.
+pub fn draw(app: &App, f: &mut Frame, area: Rect) -> Option<Position> {
     // The chat input is usable as soon as the cached startup config is shown; it
     // buffers input locally while the app server is still loading (`Starting`),
     // so the caret and normal text show throughout. Only a failed start stays inert.
@@ -69,8 +71,8 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
     } else {
         theme::muted_style()
     };
-    let caret = (editable && !selecting && app.view.cursor_on && !app.subagents.list.focused)
-        .then_some(body_off);
+    let owns_keys = editable && !selecting && !app.subagents.list.focused;
+    let caret = (owns_keys && app.main_input_cursor_on()).then_some(body_off);
     let sel =
         crate::chat_input::selection_range(&app.chat_input.input, cursor, app.chat_input.anchor);
     let hint = crate::commands::argument_hint(app.chat_input.mode.prefix(), body);
@@ -121,24 +123,38 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
         .min(max_scroll);
     let cursor_line_bg = theme::input_cursor_line_bg();
     let cursor_row = layout.caret_row();
-    if caret.is_some()
-        && cursor_line_bg != theme::background()
-        && cursor_row >= scroll as usize
-        && cursor_row < scroll as usize + content_h
-    {
-        let y = area.y + 1 + (cursor_row - scroll as usize) as u16;
+    let caret_y = (cursor_row >= scroll as usize && cursor_row < scroll as usize + content_h)
+        .then(|| area.y + 1 + (cursor_row - scroll as usize) as u16)
+        .filter(|_| owns_keys);
+    if let Some(y) = caret_y.filter(|_| caret.is_some() && cursor_line_bg != theme::background()) {
         let row = Rect::new(area.x + 2, y, area.width.saturating_sub(2), 1);
         f.buffer_mut().set_style(
             row,
             Style::default().fg(theme::foreground()).bg(cursor_line_bg),
         );
     }
+    let caret_cell = caret_y.and_then(|y| caret_position(&layout, cursor_row, &marker, area.x, y));
     let para = Paragraph::new(lines).scroll((scroll, 0)).block(block);
     f.render_widget(para, area);
     if scroll > 0 && area.height > 2 {
         f.buffer_mut()
             .set_string(area.x, area.y + 1, marker, prompt_style);
     }
+    caret_cell
+}
+
+/// Screen cell of the caret on visual row `index`, drawn at screen row `y`, whatever the blink phase.
+fn caret_position(
+    layout: &ComposerLayout,
+    index: usize,
+    marker: &str,
+    x: u16,
+    y: u16,
+) -> Option<Position> {
+    let row = layout.rows().nth(index)?;
+    let gutter = if row.index == 0 { marker.width() } else { 2 };
+    let column = gutter + cells_width(&row.text[..layout.caret_in(row)?], row.column);
+    Some(Position::new(x.saturating_add(column as u16), y))
 }
 
 fn composer_layout(app: &App, width: u16) -> ComposerLayout<'_> {

@@ -55,6 +55,8 @@ const COMMANDS: &[Command] = &[
     cmd(&["/rename"], "Rename the current session", true).args("<title>"),
     cmd(&["/mcp", "/connectors"], "Display available MCP servers and connectors. Pass a name to list tools; subcommands: add <url> [--transport http|streamable-http], status, login <alias>, logout <alias>", false)
         .args("[name] | add <url> | status | login <alias> | logout <alias>"),
+    cmd(&["/plugins"], "Display the plugins this session is running", false),
+    cmd(&["/reload-plugins"], "Re-pin this session's plugins and report what changed", false),
     cmd(&["/voice"], "Configure voice settings", false),
     cmd(&["/leanstall"], "Install the Lean 4 agent (leanstral)", false),
     cmd(&["/unleanstall"], "Uninstall the Lean 4 agent", false),
@@ -88,14 +90,9 @@ pub fn has_command(label: &str) -> bool {
     available().any(|command| command.aliases[0] == label)
 }
 
-/// Arguments hint shown after `/command ` until the first argument character is typed; `prefix` is the input-mode prefix.
+/// Arguments hint shown in slash mode after `command ` until the first argument character is typed; `prefix` is the input-mode prefix.
 pub fn argument_hint(prefix: Option<char>, body: &str) -> Option<&'static str> {
-    let body = body.strip_suffix(' ')?;
-    let word = match prefix {
-        Some('/') => body,
-        None => body.strip_prefix('/')?,
-        Some(_) => return None,
-    };
+    let word = body.strip_suffix(' ').filter(|_| prefix == Some('/'))?;
     available()
         .find(|command| {
             command.aliases.iter().any(|alias| {

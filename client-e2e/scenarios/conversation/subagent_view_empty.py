@@ -25,6 +25,10 @@ handshake = {
 
 request_methods = frozenset({"session/read"})
 
+# The viewed child stays Running after the parent turn: freeze the loading
+# gradient so the idle capture cannot catch it mid-wipe on a slow host.
+env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
+
 screen_contains = {
     "rust": (
         # The banner stays mounted while a child view is open.

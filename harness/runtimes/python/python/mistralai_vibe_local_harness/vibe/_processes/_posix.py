@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import errno
 import json
 import os
 from pathlib import Path
 import pty
 import select
-import shutil
-import signal
 import struct
 import subprocess
 import sys
@@ -21,6 +20,12 @@ from mistralai_vibe_local_harness.vibe._processes._backend import (
     ProcessCommandEnvironment,
     PtyBackend,
     TerminalBackendError,
+)
+from mistralai_vibe_local_harness.vibe._sandbox_helper import (
+    ProcessTree,
+    ShellNotFoundError,
+    resolve_posix_shell,
+    stop_process_trees,
 )
 
 _HELPER_FAILURE_STAGES = {
@@ -38,6 +43,7 @@ _ERROR_FRAME_HEADER = 5
 class PosixTerminal:
     def __init__(self, process: subprocess.Popen[bytes], master_fd: int) -> None:
         self._process = process
+        self.tree = ProcessTree(process)
         self._master_fd = master_fd
         self._closed = False
 
@@ -58,6 +64,17 @@ class PosixTerminal:
 
     def wait(self, timeout: float | None = None) -> int:
         return self._process.wait(timeout=timeout)
+
+    def group_is_alive(self) -> bool:
+        return self.tree.group_is_alive()
+
+    def wait_for_group_exit(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while self.group_is_alive():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
+        return True
 
     def wait_readable(self, timeout_seconds: float) -> bool:
         if self._closed:
@@ -107,33 +124,27 @@ class PosixTerminal:
 
 
 class PosixTerminalBackend:
+    """Runs background processes in pseudo-terminals on this POSIX host.
+
+    A stop reaches the process's group and the descendants that left it while
+    they still descend from it. One reparented away before the stop (its
+    parent exited) is out of reach: this process does not adopt orphans, as
+    that would change how the whole process reaps its children.
+    """
+
     command_environment: ProcessCommandEnvironment = "unix"
 
     def resolve_shell(self, configured: str | None, env: dict[str, str]) -> str:
-        if configured is not None:
-            resolved = _resolve_executable(configured, env)
-            if resolved is None:
-                raise TerminalBackendError("configured shell is not executable")
-            return resolved
-        search_path = env.get("PATH", "")
-        for candidate in ("zsh", "bash", "sh"):
-            if resolved := shutil.which(candidate, path=search_path):
-                return resolved
-        for candidate in (
-            "/bin/zsh",
-            "/usr/bin/zsh",
-            "/bin/bash",
-            "/usr/bin/bash",
-            "/bin/sh",
-            "/usr/bin/sh",
-        ):
-            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                return candidate
-        raise TerminalBackendError("no POSIX shell found")
+        try:
+            return resolve_posix_shell(configured, env)
+        except ShellNotFoundError as error:
+            raise TerminalBackendError(str(error)) from error
 
     def start_terminal(
-        self, *, shell: str, command: str, cwd: Path, env: dict[str, str]
+        self, *, shell: str | None, command: str, cwd: Path, env: dict[str, str]
     ) -> PosixTerminal:
+        if shell is None:
+            raise TerminalBackendError("no shell was resolved")
         master_fd, slave_fd = pty.openpty()
         request_read, request_write = os.pipe()
         status_read, status_write = os.pipe()
@@ -191,11 +202,16 @@ class PosixTerminalBackend:
                 if descriptor >= 0:
                     os.close(descriptor)
 
-    def request_termination(self, terminal: ManagedTerminal) -> None:
-        _signal_process_group(_require_posix_terminal(terminal), signal.SIGTERM)
+    def stop_terminals(
+        self, terminals: Sequence[ManagedTerminal], grace_seconds: float
+    ) -> list[bool]:
+        return stop_process_trees(
+            [_require_posix_terminal(terminal).tree for terminal in terminals],
+            grace_seconds,
+        )
 
-    def force_termination(self, terminal: ManagedTerminal) -> None:
-        _signal_process_group(_require_posix_terminal(terminal), signal.SIGKILL)
+    def close(self) -> None:
+        return
 
 
 def _helper_argv(request_fd: int, status_fd: int, slave_fd: int) -> list[str]:
@@ -210,35 +226,10 @@ def _helper_argv(request_fd: int, status_fd: int, slave_fd: int) -> list[str]:
     ]
 
 
-def _resolve_executable(candidate: str, env: dict[str, str]) -> str | None:
-    expanded = Path(candidate).expanduser()
-    if os.sep in candidate or (os.altsep is not None and os.altsep in candidate):
-        return (
-            str(expanded)
-            if expanded.is_file() and os.access(expanded, os.X_OK)
-            else None
-        )
-    return shutil.which(candidate, path=env.get("PATH", ""))
-
-
 def _require_posix_terminal(terminal: ManagedTerminal) -> PosixTerminal:
     if not isinstance(terminal, PosixTerminal):
         raise TerminalBackendError("POSIX backend received a foreign terminal")
     return terminal
-
-
-def _signal_process_group(terminal: PosixTerminal, signal_number: int) -> None:
-    if terminal.poll() is not None:
-        return
-    try:
-        os.killpg(os.getpgid(terminal.pid), signal_number)
-    except ProcessLookupError:
-        return
-    except OSError:
-        try:
-            os.kill(terminal.pid, signal_number)
-        except OSError:
-            return
 
 
 def _write_all(descriptor: int, data: bytes) -> None:

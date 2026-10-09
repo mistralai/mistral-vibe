@@ -97,6 +97,7 @@ def project_config_view(
         theme=config.theme,
         log_level=config.log_level,
         disable_welcome_banner_animation=config.disable_welcome_banner_animation,
+        cursor_blink=config.cursor_blink,
         show_greeting=config.show_greeting,
         autocopy_to_clipboard=config.autocopy_to_clipboard,
         file_watcher_for_autocomplete=config.file_watcher_for_autocomplete,

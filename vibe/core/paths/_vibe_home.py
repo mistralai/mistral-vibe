@@ -23,6 +23,9 @@ CONNECTOR_BOOTSTRAP_CACHE_FILE = GlobalPath(
     lambda: VIBE_HOME.path / "connector_bootstrap_cache.json"
 )
 EXPERIMENT_EVAL_CACHE_FILE = GlobalPath(lambda: VIBE_HOME.path / EVAL_CACHE_FILE_NAME)
+MODEL_CATALOG_CACHE_FILE = GlobalPath(
+    lambda: VIBE_HOME.path / "model_catalog_cache.json"
+)
 WHOAMI_CACHE_FILE = GlobalPath(lambda: VIBE_HOME.path / "whoami_cache.json")
 UTILITY_MODEL_CACHE_FILE = GlobalPath(
     lambda: VIBE_HOME.path / "utility_model_cache.json"

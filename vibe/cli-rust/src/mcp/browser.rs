@@ -11,13 +11,13 @@ use crate::app::App;
 /// Esc: close the browser and mount the closed message (Python `MCPClosed`).
 pub fn close(app: &mut App) {
     app.mcp.open = false;
-    app.mcp.search = super::search::Search::default();
+    app.mcp.search = crate::search_field::Search::default();
     app.mcp.viewing_name = None;
     app.mcp.viewing_kind = None;
     add_result(app, "MCP and connectors closed.");
 }
 
-/// Backspace: leave the tool list for the source list, highlighting its first
+/// Esc in the tool list: back to the source list, highlighting its first
 /// row as Python's `_show_list_view` does.
 pub fn back(app: &mut App) {
     if app.mcp.viewing_name.is_none() {
@@ -83,21 +83,14 @@ pub(super) fn hand_off_auth(app: &mut App, client: &Arc<Client>) {
     }
 }
 
-/// Move the highlight to the next selectable row, clamped (Textual `OptionList`).
+/// Move the highlight to the next selectable row, wrapping at the ends.
 pub fn navigate(app: &mut App, down: bool) {
     app.mcp.free_scroll = false;
     let rows = rows::rows(&app.mcp);
-    let next = if down {
-        (app.mcp.selected + 1..rows.len()).find(|index| rows[*index].selectable())
-    } else {
-        (0..app.mcp.selected)
-            .rev()
-            .find(|index| rows[*index].selectable())
-    };
+    let selectable = |index: usize| rows[index].selectable();
+    let next = crate::list_nav::wrap_selectable(app.mcp.selected, rows.len(), down, selectable);
     if let Some(index) = next {
         app.mcp.selected = index;
-    } else {
-        super::search::focus(app);
     }
 }
 

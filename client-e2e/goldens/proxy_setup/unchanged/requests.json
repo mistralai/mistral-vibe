@@ -1,0 +1,15 @@
+[
+ {
+  "method": "config/proxy/read",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "config/proxy/write",
+  "params": {
+   "changes": {},
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

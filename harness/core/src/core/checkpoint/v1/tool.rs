@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::action_id;
 use crate::core::features::large_output::{CharacterLimits, PendingWrite};
+use crate::core::features::permissions::GrantKey;
 use crate::core::hooks::HookPoint;
 use crate::core::hooks::hook_action_id;
 use crate::core::tools::execution::{
@@ -67,6 +68,10 @@ impl CheckpointToolBatch {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum CheckpointToolExecutionState {
+    DirectAwaitingApproval {
+        grant_key: String,
+        call: CheckpointExternalTool,
+    },
     DirectAwaitingPreHook {
         hook_binding_ids: Vec<String>,
         call: CheckpointExternalTool,
@@ -95,6 +100,24 @@ impl CheckpointToolExecutionState {
     fn capture(state: &ToolExecutionState, model_call: &ToolCall) -> Result<Self, String> {
         let model_call_id = &model_call.id;
         match state {
+            ToolExecutionState::DirectAwaitingApproval {
+                approval_action_id,
+                grant_key,
+                call,
+            } => {
+                let expected_action_id = action_id::approval(&call.action_id);
+
+                if approval_action_id != &expected_action_id {
+                    return Err(format!(
+                        "checkpoint approval action ID {approval_action_id:?} does not match derived action ID {expected_action_id:?}"
+                    ));
+                }
+
+                Ok(Self::DirectAwaitingApproval {
+                    grant_key: grant_key.as_str().to_owned(),
+                    call: capture_external_tool_call(call, model_call_id, ToolOrigin::TopLevel)?,
+                })
+            }
             ToolExecutionState::DirectAwaitingPreHook {
                 hook_action_id,
                 hook_binding_ids,
@@ -164,6 +187,21 @@ impl CheckpointToolExecutionState {
     fn restore(self, model_call: &ToolCall) -> Result<ToolExecutionState, String> {
         let model_call_id = &model_call.id;
         match self {
+            Self::DirectAwaitingApproval { grant_key, call } => {
+                let call = restore_external_tool_call(
+                    call,
+                    model_call_id,
+                    ToolOrigin::TopLevel,
+                    model_call.name.clone(),
+                );
+                let approval_action_id = action_id::approval(&call.action_id);
+
+                Ok(ToolExecutionState::DirectAwaitingApproval {
+                    approval_action_id,
+                    grant_key: GrantKey::try_from(grant_key)?,
+                    call,
+                })
+            }
             Self::DirectAwaitingPreHook {
                 hook_binding_ids,
                 call,
@@ -453,15 +491,10 @@ fn validate_tool_execution(execution: &ToolExecution) -> Result<(), String> {
         );
     }
     match &execution.state {
-        ToolExecutionState::DirectAwaitingPreHook { call, .. } => {
-            validate_direct_tool_call(model_call, call)?;
-            return Ok(());
-        }
-        ToolExecutionState::DirectPending { call } => {
-            validate_direct_tool_call(model_call, call)?;
-            return Ok(());
-        }
-        ToolExecutionState::DirectAwaitingPostHook { call, .. } => {
+        ToolExecutionState::DirectAwaitingApproval { call, .. }
+        | ToolExecutionState::DirectAwaitingPreHook { call, .. }
+        | ToolExecutionState::DirectPending { call }
+        | ToolExecutionState::DirectAwaitingPostHook { call, .. } => {
             validate_direct_tool_call(model_call, call)?;
             return Ok(());
         }

@@ -117,6 +117,8 @@ _GENERATION_PATTERN = re.compile(r"^[0-9]{16}$")
 _MAX_GENERATION = 9_999_999_999_999_999
 _RUNTIME_STATE_VERSION = 3
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_SHA256_HEX_LENGTH = 64
+_JOURNAL_RECORD_DIGEST_FIELD = b',"record_sha256":"'
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _TIMESTAMP_PATTERN = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$"
@@ -1822,6 +1824,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
         self._chunk_plans: dict[str, _ChunkPlan] = {}
         self._chunk_cache = _ChunkCache()
         self.last_publication = ChunkPublicationStats()
+        self.last_load_bytes = 0
 
     @property
     def exists(self) -> bool:
@@ -2024,8 +2027,9 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
                 ):
                     return cached.session
                 self._cache = None
-                session, key = self._load_current()
+                session, key, loaded_bytes = self._load_current()
                 self._cache = _CachedGeneration(key=key, session=session)
+                self.last_load_bytes = loaded_bytes
                 return session
         except HarnessInvalidSessionStoreError:
             raise
@@ -2034,7 +2038,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
                 self.session_id, f"Invalid Unified session store: {exc}"
             ) from exc
 
-    def _load_current(self) -> tuple[StoredSession, _GenerationCacheKey]:
+    def _load_current(self) -> tuple[StoredSession, _GenerationCacheKey, int]:
         pointer = self._current_bytes()
         try:
             return self._load()
@@ -2054,6 +2058,19 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
     def _invalidate_cache(self) -> None:
         with self._cache_lock:
             self._cache = None
+
+    def adopt_cached_generation(self, source: UnifiedSessionStore) -> None:
+        if source is self or source.session_root != self.session_root:
+            return
+        with source._cache_lock:
+            cached = source._cache
+        if cached is None:
+            return
+        with self._cache_lock:
+            if self._cache is not None:
+                return
+            if self._read_cache_key(cached.key.journal_path) == cached.key:
+                self._cache = cached
 
     def _prime_cache(
         self,
@@ -2126,7 +2143,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
         _reject_symlink(self.session_root / "generations")
         _reject_symlink_components(self.session_root, journal_path)
 
-    def _load(self) -> tuple[StoredSession, _GenerationCacheKey]:  # noqa: PLR0914 - one cohesive generation load
+    def _load(self) -> tuple[StoredSession, _GenerationCacheKey, int]:  # noqa: PLR0914, PLR0915 - one cohesive generation load
         _reject_symlink_components(self.root, self.session_root)
         current_path = self.session_root / "CURRENT"
         current_value, current_canonical = _read_document_bytes(current_path)
@@ -2151,45 +2168,41 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             raise ValueError("CURRENT and manifest disagree")
 
         chunk_root = self.session_root / _CHUNKS_DIRNAME
-        checkpoint = cast(
-            dict[str, JsonValue],
-            _read_referenced_document(generation_dir, manifest.checkpoint),
+        checkpoint_value, loaded_bytes = _read_referenced_document(
+            generation_dir, manifest.checkpoint
         )
+        checkpoint = cast(dict[str, JsonValue], checkpoint_value)
         if (
             checkpoint.get("checkpoint_version")
             != manifest.checkpoint.checkpoint_version
         ):
             raise ValueError("Core checkpoint version mismatch")
         if manifest.checkpoint.chunks is not None:
-            _attach_transcript(
-                checkpoint,
-                _CHECKPOINT_MESSAGES_PATH,
-                _read_chunked_transcript(
-                    chunk_root, manifest.checkpoint.chunks, self._chunk_cache
-                ),
+            messages, chunk_bytes = _read_chunked_transcript(
+                chunk_root, manifest.checkpoint.chunks, self._chunk_cache
             )
-        runtime_state_value = _read_referenced_document(
+            _attach_transcript(checkpoint, _CHECKPOINT_MESSAGES_PATH, messages)
+            loaded_bytes += chunk_bytes
+        runtime_state_value, document_bytes = _read_referenced_document(
             generation_dir, manifest.runtime_state
         )
+        loaded_bytes += document_bytes
         if manifest.runtime_state.chunks is not None:
-            _attach_pooled_value(
-                runtime_state_value,
-                _CAPABILITY_CATALOG_KEY,
-                _read_chunked_transcript(
-                    chunk_root, manifest.runtime_state.chunks, self._chunk_cache
-                ),
+            catalog, chunk_bytes = _read_chunked_transcript(
+                chunk_root, manifest.runtime_state.chunks, self._chunk_cache
             )
-        projection_value = _read_referenced_document(
+            _attach_pooled_value(runtime_state_value, _CAPABILITY_CATALOG_KEY, catalog)
+            loaded_bytes += chunk_bytes
+        projection_value, document_bytes = _read_referenced_document(
             generation_dir, manifest.projection_state
         )
+        loaded_bytes += document_bytes
         if manifest.projection_state.chunks is not None:
-            _attach_transcript(
-                projection_value,
-                _PROJECTION_HISTORY_PATH,
-                _read_chunked_transcript(
-                    chunk_root, manifest.projection_state.chunks, self._chunk_cache
-                ),
+            history, chunk_bytes = _read_chunked_transcript(
+                chunk_root, manifest.projection_state.chunks, self._chunk_cache
             )
+            _attach_transcript(projection_value, _PROJECTION_HISTORY_PATH, history)
+            loaded_bytes += chunk_bytes
         projection_state = ProjectionStateV1.model_validate(projection_value)
         runtime_state = _load_runtime_state(runtime_state_value, projection_state)
         # No read of interop-export.json: a generation written before minor 3 still
@@ -2233,7 +2246,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             journal_size=journal_stat.st_size,
             journal_mtime_ns=journal_stat.st_mtime_ns,
         )
-        return session, key
+        return session, key, loaded_bytes + journal_stat.st_size
 
     def repair_diverged_generation(
         self, config: RustHarnessConfig, sequence: int
@@ -3967,18 +3980,13 @@ def _read_journal(path: Path, first_sequence: int) -> tuple[JournalRecordV1, ...
             raise ValueError("recovery journal has an unterminated interior record")
         raw = line[:-1]
         try:
-            value = json.loads(raw)
-            record = _JOURNAL_RECORD_ADAPTER.validate_python(value)
+            record = _JOURNAL_RECORD_ADAPTER.validate_json(raw)
         except Exception as exc:
             raise ValueError(
                 f"invalid recovery journal record {expected_sequence}"
             ) from exc
-        canonical_without_digest = dict(value)
-        stored_digest = canonical_without_digest.pop("record_sha256", None)
-        if stored_digest != sha256_json(canonical_without_digest):
+        if record.record_sha256 != _journal_record_digest(raw):
             raise ValueError("recovery journal record digest mismatch")
-        if raw != canonical_json(value):
-            raise ValueError("recovery journal record is not canonical JSON")
         if record.sequence != expected_sequence:
             raise ValueError("recovery journal sequence gap")
         if record.previous_record_sha256 != previous_digest:
@@ -3987,6 +3995,20 @@ def _read_journal(path: Path, first_sequence: int) -> tuple[JournalRecordV1, ...
         expected_sequence += 1
         previous_digest = record.record_sha256
     return tuple(records)
+
+
+def _journal_record_digest(raw: bytes) -> str | None:
+    start = raw.rfind(_JOURNAL_RECORD_DIGEST_FIELD)
+    if start < 0:
+        return None
+    digest_start = start + len(_JOURNAL_RECORD_DIGEST_FIELD)
+    digest_end = digest_start + _SHA256_HEX_LENGTH
+    if raw[digest_end : digest_end + 1] != b'"':
+        return None
+    stored = raw[digest_start:digest_end].decode("ascii", errors="replace")
+    if _sha256(raw[:start] + raw[digest_end + 1 :]) != stored:
+        return None
+    return stored
 
 
 def _journal_record_bytes(payload: bytes, header: dict[str, JsonValue]) -> bytes:
@@ -4218,16 +4240,19 @@ def _write_pooled_chunk(path: Path, body: bytes) -> None:
 
 def _read_chunked_transcript(
     chunk_root: Path, digests: tuple[str, ...], cache: _ChunkCache
-) -> list[JsonValue]:
+) -> tuple[list[JsonValue], int]:
     items: list[JsonValue] = []
+    size = 0
     for digest in digests:
+        body = cache.read(chunk_root, digest)
+        size += len(body)
         # Parsed per read rather than cached: the items land in a document the
         # caller owns, and sharing them would let one load mutate another's.
-        chunk = json.loads(cache.read(chunk_root, digest))
+        chunk = json.loads(body)
         if not isinstance(chunk, list):
             raise ValueError(f"stored chunk is not a transcript run: {digest}")
         items.extend(cast(list[JsonValue], chunk))
-    return items
+    return items, size
 
 
 def _collect_chunks(session_root: Path, generation_root: Path) -> None:
@@ -4328,7 +4353,7 @@ def _verify_published_documents(
 
 def _read_referenced_document(
     generation_dir: Path, descriptor: StoredFileV1
-) -> JsonValue:
+) -> tuple[JsonValue, int]:
     path = generation_dir / descriptor.path
     body = _read_document_body(path)
     # Digesting the bytes as they sit on disk pins them to exactly what
@@ -4338,7 +4363,7 @@ def _read_referenced_document(
     # conversation, so re-deriving them dominates the cost of a load.
     if _sha256(body) != descriptor.sha256:
         raise ValueError(f"stored record digest mismatch: {descriptor.path}")
-    return cast(JsonValue, json.loads(body))
+    return cast(JsonValue, json.loads(body)), len(body)
 
 
 def _read_document_bytes(path: Path) -> tuple[JsonValue, bytes]:

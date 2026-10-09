@@ -20,7 +20,7 @@ use crate::utils::is_replaying;
 
 pub use ansi::color_span;
 pub use view::draw;
-pub use view::option_text;
+pub use view::option_span;
 
 /// Python `UpdatePromptMode`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

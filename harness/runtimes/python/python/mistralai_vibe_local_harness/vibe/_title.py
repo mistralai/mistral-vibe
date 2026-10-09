@@ -19,8 +19,7 @@ from mistralai_vibe_local_harness.protocol import (
 )
 from mistralai_vibe_local_harness.session_protocol import JsonObject
 from mistralai_vibe_local_harness.vibe._completion import (
-    _REJECTION_REASONS,
-    _provider_status,
+    credential_rejection,
     report_request_sent,
 )
 from mistralai_vibe_local_harness.vibe._credentials import (
@@ -31,6 +30,9 @@ from mistralai_vibe_local_harness.vibe._credentials import (
 from mistralai_vibe_local_harness.vibe._runtime_config import (
     LocalModelRoute,
     LocalRuntimeAdapterConfig,
+)
+from mistralai_vibe_local_harness.vibe.adapters._provider_failure import (
+    read_provider_failure,
 )
 from mistralai_vibe_local_harness.vibe.adapters.generic import (
     execute_generic_completion,
@@ -236,7 +238,7 @@ async def execute_title_completion(
         else:
             raise ValueError(f"Unsupported completion backend: {title_config.backend}")
     except Exception as exc:
-        rejection = _REJECTION_REASONS.get(_provider_status(exc) or 0)
+        rejection = credential_rejection(read_provider_failure(exc))
         if rejection is not None and config.title_provider is not None:
             with suppress(Exception):
                 await title_config.credentials.reject(

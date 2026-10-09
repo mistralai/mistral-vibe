@@ -38,7 +38,14 @@ class ExchangePayload(TypedDict, total=False):
     api_key: str
 
 
+HTTP_FORBIDDEN = 403
 HTTP_GONE = 410
+API_KEYS_CREATE_UNAUTHORIZED_ERROR_CODE = 9_004
+WORKSPACE_NOT_ELIGIBLE_MESSAGE = (
+    "Your current workspace can't be used for Mistral Vibe. "
+    "Sign in again and select another workspace in the browser, "
+    "or contact your administrator."
+)
 
 
 class HttpBrowserSignInGateway(BrowserSignInGateway):
@@ -211,6 +218,8 @@ class HttpBrowserSignInGateway(BrowserSignInGateway):
                 self._api_base_url,
                 _build_safe_response_error_detail(response),
             )
+            if _is_workspace_api_key_creation_denied(response):
+                raise BrowserSignInError(WORKSPACE_NOT_ELIGIBLE_MESSAGE, code=code)
             raise BrowserSignInError(message, code=code)
 
         raw_payload = _response_json_or_raise(response, message=message, code=code)
@@ -317,6 +326,21 @@ def _response_json_or_raise(
         raise BrowserSignInError(message, code=code)
 
     return dict(payload)
+
+
+def _is_workspace_api_key_creation_denied(response: httpx.Response) -> bool:
+    if response.status_code != HTTP_FORBIDDEN:
+        return False
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+
+    return (
+        isinstance(payload, Mapping)
+        and payload.get("error_code") == API_KEYS_CREATE_UNAUTHORIZED_ERROR_CODE
+    )
 
 
 def _build_safe_response_error_detail(response: httpx.Response) -> str:

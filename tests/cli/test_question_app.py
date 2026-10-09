@@ -629,6 +629,66 @@ class TestMultiSelectFreeChoice:
             assert other_idx not in qapp.multi_selections.get(0, set())
 
 
+class TestSpaceToggle:
+    @pytest.mark.asyncio
+    async def test_space_toggles_focused_option(self, multi_select_args):
+        app = _HostApp(multi_select_args)
+        async with app.run_test() as pilot:
+            qapp = app.query_one(QuestionApp)
+
+            await pilot.press("space")
+            assert qapp.multi_selections[0] == {0}
+
+            await pilot.press("down", "space")
+            assert qapp.multi_selections[0] == {0, 1}
+
+            await pilot.press("space")
+            assert qapp.multi_selections[0] == {0}
+            assert qapp.answers == {}
+
+    @pytest.mark.asyncio
+    async def test_space_on_submit_does_not_submit(self, multi_select_args):
+        app = _HostApp(multi_select_args)
+        async with app.run_test() as pilot:
+            qapp = app.query_one(QuestionApp)
+
+            await pilot.press("space")
+            await pilot.press("up")
+            assert qapp._is_submit_selected
+
+            await pilot.press("space")
+
+            assert qapp._is_submit_selected
+            assert qapp.multi_selections[0] == {0}
+            assert qapp.answers == {}
+
+    @pytest.mark.asyncio
+    async def test_space_types_in_free_choice(self, multi_select_args):
+        app = _HostApp(multi_select_args)
+        async with app.run_test() as pilot:
+            qapp = app.query_one(QuestionApp)
+
+            await pilot.press("down", "down", "down")
+            assert qapp._is_other_selected
+
+            await pilot.press("a", "space", "b")
+
+            assert qapp.other_texts.get(0) == "a b"
+            assert qapp.multi_selections[0] == {qapp._other_option_idx}
+
+    @pytest.mark.asyncio
+    async def test_space_ignored_in_single_select(self, single_question_args):
+        app = _HostApp(single_question_args)
+        async with app.run_test() as pilot:
+            qapp = app.query_one(QuestionApp)
+
+            await pilot.press("space")
+
+            assert qapp.selected_option == 0
+            assert qapp.answers == {}
+            assert qapp.multi_selections == {}
+
+
 class TestNumberKeyShortcuts:
     def test_number_key_selects_predefined_option(self, single_question_args):
         from unittest.mock import patch

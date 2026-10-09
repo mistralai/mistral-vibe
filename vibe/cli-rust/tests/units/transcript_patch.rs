@@ -2,13 +2,7 @@
 
 use serde_json::{json, Value};
 use vibe_rs::server::HistoryEntry;
-use vibe_rs::transcript::{
-    apply_json_patch, effect_kind, groups_with_tools, outcome, Group, Outcome, Transcript,
-};
-
-fn effect(kind: &str, state: Value) -> HistoryEntry {
-    HistoryEntry::from_value(&json!({"type": "effect", "detail": {"kind": kind}, "state": state}))
-}
+use vibe_rs::transcript::{apply_json_patch, effect_kind, groups_with_tools, Group, Transcript};
 
 #[test]
 fn add_and_replace_reach_nested_paths_and_create_missing_parents() {
@@ -161,7 +155,7 @@ fn consecutive_effects_share_one_group_keyed_by_the_first_entry() {
     assert_eq!(second.key, "tool-group:e1");
     assert!(first.first && !first.last);
     assert!(!second.first && second.last);
-    assert_eq!(first.kinds, vec!["file_edit", "file_search"]);
+    assert_eq!(first.kinds, vec![("file_edit", 1), ("file_search", 1)]);
     assert!(transcript.is_expandable("tool-group:e1"));
 }
 
@@ -170,14 +164,18 @@ fn a_message_between_effects_starts_a_new_group() {
     let mut transcript = Transcript::default();
     transcript.add(&json!({"entry": {"id": "e1", "type": "effect",
                                      "detail": {"kind": "file_edit"}}}));
+    transcript.add(&json!({"entry": {"id": "e1b", "type": "effect",
+                                     "detail": {"kind": "file_edit"}}}));
+    assert!(transcript.entry(1).unwrap().group.expect("groups").last);
     transcript.add(
         &json!({"entry": {"id": "m1", "type": "message", "role": "user",
                                      "content": [{"type": "text", "text": "hi"}]}}),
     );
-    transcript.add(&json!({"entry": {"id": "e2", "type": "effect",
-                                     "detail": {"kind": "file_search"}}}));
-    assert!(transcript.entry(0).unwrap().group.expect("groups").last);
-    let second_group = transcript.entry(2).unwrap().group.expect("groups");
+    for id in ["e2", "e3"] {
+        transcript.add(&json!({"entry": {"id": id, "type": "effect",
+                                         "detail": {"kind": "file_search"}}}));
+    }
+    let second_group = transcript.entry(3).unwrap().group.expect("groups");
     assert_eq!(second_group.key, "tool-group:e2");
 }
 
@@ -192,12 +190,14 @@ fn shell_effects_stay_standalone() {
 #[test]
 fn skill_effects_group_and_expand_like_python() {
     let mut transcript = Transcript::default();
-    transcript.add(&json!({"entry": {
-        "id": "skill-1",
-        "type": "effect",
-        "detail": {"kind": "skill", "toolName": "skill"},
-        "state": {"status": "completed", "outputText": "private body"},
-    }}));
+    for id in ["skill-1", "skill-2"] {
+        transcript.add(&json!({"entry": {
+            "id": id,
+            "type": "effect",
+            "detail": {"kind": "skill", "toolName": "skill"},
+            "state": {"status": "completed", "outputText": "private body"},
+        }}));
+    }
 
     assert!(transcript.entry(0).unwrap().group.is_some());
     assert!(transcript.is_expandable("skill-1"));
@@ -283,70 +283,43 @@ fn effect_kind_reads_only_effect_details() {
     assert_eq!(effect_kind(&message), None);
 }
 
-#[test]
-fn outcome_maps_settled_effect_statuses() {
-    let failed = effect("shell", json!({"status": "failed"}));
-    let cancelled = effect("shell", json!({"status": "cancelled"}));
-    let skipped = effect("shell", json!({"status": "skipped"}));
-    let unhappy = effect(
-        "shell",
-        json!({"status": "completed",
-                                         "display": {"success": false}}),
-    );
-    let happy = effect(
-        "shell",
-        json!({"status": "completed",
-                                       "display": {"success": true}}),
-    );
-    let running = effect("shell", json!({}));
-    let message = HistoryEntry::from_value(&json!({"type": "message"}));
-    assert!(matches!(outcome(&failed), Some(Outcome::Error)));
-    assert!(matches!(outcome(&cancelled), Some(Outcome::Muted)));
-    assert!(matches!(outcome(&skipped), Some(Outcome::Muted)));
-    assert!(matches!(outcome(&unhappy), Some(Outcome::Error)));
-    assert!(matches!(outcome(&happy), Some(Outcome::Success)));
-    assert!(outcome(&running).is_none());
-    assert!(outcome(&message).is_none());
+fn group_of(kinds: Vec<(&'static str, usize)>, reasoning: bool) -> Group<'static> {
+    Group {
+        key: "tool-group:e1".into(),
+        first: true,
+        last: true,
+        finalized: true,
+        kinds,
+        reasoning,
+    }
 }
 
 #[test]
-fn group_labels_compose_kinds_then_reasoning_and_capitalize() {
-    let group = Group {
-        key: "tool-group:e1".into(),
-        first: true,
-        last: true,
-        finalized: true,
-        kinds: vec!["file_edit", "web_search"],
-        reasoning: false,
-        outcome: Outcome::Success,
-    };
-    assert_eq!(group.label(false), "Edited files, searched the web");
-    assert_eq!(group.label(true), "Editing files, searching the web");
+fn group_labels_count_each_kind_then_add_reasoning_and_capitalize() {
+    let group = group_of(vec![("file_edit", 3), ("web_search", 1)], false);
+    assert_eq!(group.label(false), "Edited 3 files, ran 1 web search");
+    assert_eq!(group.label(true), "Editing 3 files, running 1 web search");
 
-    let thinking = Group {
-        key: "tool-group:e1".into(),
-        first: true,
-        last: true,
-        finalized: true,
-        kinds: vec!["subagent"],
-        reasoning: true,
-        outcome: Outcome::Success,
-    };
-    assert_eq!(thinking.label(false), "Ran subagents, thought");
-    assert_eq!(thinking.label(true), "Running subagents, thinking");
+    let thinking = group_of(vec![("subagent", 2)], true);
+    assert_eq!(thinking.label(false), "Ran 2 subagents, thought");
+    assert_eq!(thinking.label(true), "Running 2 subagents, thinking");
+}
+
+#[test]
+fn group_labels_pluralize_by_count() {
+    let group = group_of(
+        vec![("file_read", 10), ("skill", 1), ("shell", 3), ("todo", 2)],
+        false,
+    );
+    assert_eq!(
+        group.label(false),
+        "Read 10 files, loaded 1 skill, ran 3 commands, updated todos 2 times"
+    );
 }
 
 #[test]
 fn unknown_kinds_fall_back_to_generic_tool_labels() {
-    let group = Group {
-        key: "tool-group:e1".into(),
-        first: true,
-        last: true,
-        finalized: true,
-        kinds: vec!["custom_tool"],
-        reasoning: false,
-        outcome: Outcome::Success,
-    };
-    assert_eq!(group.label(false), "Called tools");
-    assert_eq!(group.label(true), "Calling tools");
+    let group = group_of(vec![("custom_tool", 2)], false);
+    assert_eq!(group.label(false), "Called 2 tools");
+    assert_eq!(group.label(true), "Calling 2 tools");
 }

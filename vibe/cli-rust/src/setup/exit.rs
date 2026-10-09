@@ -9,6 +9,7 @@ use anyhow::Result;
 
 use crate::server::{child::ChildHandle, Client};
 use crate::startup::StartupRecorder;
+use crate::ui::theme::fixed::sgr;
 use crate::utils::history_persist::Persister;
 
 pub const SETUP_CANCELLED: &str = "Setup cancelled. See you next time!";
@@ -20,7 +21,7 @@ pub const SETUP_COMPLETE: &str =
 /// color off-TTY and under NO_COLOR exactly like rich does.
 pub fn setup_complete_message() -> String {
     let green =
-        crate::session_exit::color_span(std::io::stdout().is_terminal(), "\x1b[32m", "\x1b[32m")
+        crate::session_exit::color_span(std::io::stdout().is_terminal(), sgr::GREEN, sgr::GREEN)
             .filter(|_| !crate::session_exit::no_color());
     match green {
         Some(code) => format!(
@@ -61,7 +62,7 @@ pub fn provider_config_warning(error: &str) -> String {
 pub fn print_env_var_error(env_key: &str) {
     let enabled = std::io::stdout().is_terminal() && !crate::session_exit::no_color();
     let (yellow, dim) = if enabled {
-        ("\x1b[33m", "\x1b[2m")
+        (sgr::YELLOW, "\x1b[2m")
     } else {
         ("", "")
     };
@@ -128,7 +129,7 @@ pub fn print_setup_exit(message: String) {
 /// colors at every depth, and drops them under NO_COLOR or off-TTY.
 pub fn print_setup_cancelled() {
     let yellow =
-        crate::session_exit::color_span(std::io::stdout().is_terminal(), "\x1b[33m", "\x1b[33m")
+        crate::session_exit::color_span(std::io::stdout().is_terminal(), sgr::YELLOW, sgr::YELLOW)
             .filter(|_| !crate::session_exit::no_color());
     let message = match yellow {
         Some(code) => format!("\n{code}{SETUP_CANCELLED}\x1b[0m"),

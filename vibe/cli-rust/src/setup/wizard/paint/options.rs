@@ -7,9 +7,13 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders};
 use ratatui::Frame;
 
-use super::panel::{render, Hint, Row, Subtitle, CARD_BORDER};
+use super::panel::{render, Hint, Row, Subtitle};
 use crate::app::App;
+use crate::hints;
 use crate::ui::theme;
+
+/// Deliberate divergence from Python's "Cancel": Esc goes back one screen everywhere except the welcome screen.
+const OPTION_HINTS: &[hints::Hint] = &[hints::NAVIGATE, hints::SELECT, hints::BACK];
 
 pub(super) struct Opt {
     pub title: &'static str,
@@ -56,7 +60,6 @@ pub(super) fn draw(
     title: &str,
     subtitle: &'static str,
     opts: &'static [Opt],
-    escape_action: &str,
     chat_frame: &str,
     warning: Option<&str>,
 ) {
@@ -70,9 +73,7 @@ pub(super) fn draw(
         }
         None => rows.push(Row::Blank(2)),
     }
-    rows.push(Row::Hint(Hint::Options {
-        escape_action: escape_action.to_string(),
-    }));
+    rows.push(Row::Hint(Hint::Keys(OPTION_HINTS)));
     render(
         app,
         wizard,
@@ -142,7 +143,7 @@ pub(super) fn draw_option_cards(
         let card_area = Rect::new(area.x, card_y, area.width, 4);
         let mut block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(CARD_BORDER));
+            .border_style(Style::default().fg(theme::fixed::ONBOARDING_CARD_BORDER));
         if !option.badge.is_empty() {
             block = block
                 .title(format!(" {} ─", option.badge))
@@ -162,7 +163,7 @@ pub(super) fn draw_option_cards(
                 card_area.y,
                 "─",
                 Style::default()
-                    .fg(CARD_BORDER)
+                    .fg(theme::fixed::ONBOARDING_CARD_BORDER)
                     .remove_modifier(Modifier::BOLD),
             );
         }
@@ -188,19 +189,4 @@ pub(super) fn draw_option_cards(
             theme::muted_style(),
         );
     }
-}
-
-pub(super) fn draw_hints(f: &mut Frame, x: u16, y: u16, escape_action: &str) {
-    let text = Style::default().fg(theme::foreground());
-    let key = Style::default()
-        .fg(theme::primary())
-        .add_modifier(Modifier::BOLD);
-    f.buffer_mut().set_string(x, y, "Use ", text);
-    f.buffer_mut().set_string(x + 4, y, "↑↓", key);
-    f.buffer_mut().set_string(x + 6, y, " to navigate - ", text);
-    f.buffer_mut().set_string(x + 21, y, "Enter", key);
-    f.buffer_mut().set_string(x + 26, y, " Select - ", text);
-    f.buffer_mut().set_string(x + 36, y, "Esc", key);
-    f.buffer_mut()
-        .set_string(x + 39, y, format!(" {escape_action}"), text);
 }

@@ -14,10 +14,12 @@ from vibe.app_server.models import (
     PublicEntryGenerationStatus,
     PublicHistoryEntry,
     PublicMessageEntry,
+    PublicNoticeEntry,
     PublicReasoningEntry,
     SkippedEffectState,
 )
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
+from vibe.cli.textual_ui.widgets.fired_loop import FiredLoop
 from vibe.cli.textual_ui.widgets.messages import (
     AssistantMessage,
     ReasoningMessage,
@@ -65,6 +67,8 @@ def build_history_widgets(
     widgets: list[Widget] = []
     current_group: ToolGroup | None = None
     pending_error_results: list[ToolResultMessage] = []
+
+    fired_loops = _fired_loops(batch)
 
     def _resolve_pending_errors(*, escalate: bool) -> None:
         if escalate:
@@ -121,6 +125,7 @@ def build_history_widgets(
                 tools_collapsed,
                 show_thinking=show_thinking,
                 todo_deltas=todo_deltas,
+                fired_loop=fired_loops.get(entry.id),
             )
             widgets.extend(entry_widgets)
             for widget in entry_widgets:
@@ -133,6 +138,32 @@ def build_history_widgets(
         widgets.append(current_group)
 
     return widgets
+
+
+def _fired_loops(batch: Sequence[PublicHistoryEntry]) -> dict[str, FiredLoop]:
+    # The display marker survives forks and wins, as it does live; the notice
+    # only annotates an unmarked prompt of its own turn within this batch.
+    fired: dict[str, FiredLoop] = {}
+    last_prompt: PublicMessageEntry | None = None
+    for entry in batch:
+        match entry:
+            case PublicMessageEntry(role="user"):
+                last_prompt = entry
+                if (
+                    marker := FiredLoop.from_display(entry.user_display_content)
+                ) is not None:
+                    fired[entry.id] = marker
+            case PublicNoticeEntry() if (
+                last_prompt is not None
+                and entry.turn_id is not None
+                and last_prompt.turn_id == entry.turn_id
+                and last_prompt.id not in fired
+                and (notice := FiredLoop.from_notice(entry)) is not None
+            ):
+                fired[last_prompt.id] = notice
+            case _:
+                pass
+    return fired
 
 
 def _handle_terminal_effect(
@@ -177,12 +208,16 @@ def _entry_widgets(  # noqa: PLR0911
     *,
     show_thinking: bool = True,
     todo_deltas: Mapping[str, str] | None = None,
+    fired_loop: FiredLoop | None = None,
 ) -> list[Widget]:
     match entry:
         case PublicMessageEntry(role="user"):
             return [
                 UserMessage(
-                    entry.text, history_entry_id=entry.id, images=entry.images or None
+                    entry.text,
+                    history_entry_id=entry.id,
+                    images=entry.images or None,
+                    fired_loop=fired_loop,
                 )
             ]
         case PublicMessageEntry(role="assistant"):

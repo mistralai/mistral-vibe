@@ -25,6 +25,6 @@ timeline: Timeline = [
     edit_file("notes.txt", [(1, _OLD, _NEW)], occurrences_only=True),
     assistant_msg("Done."),
     turn_completed(),
-    # Ctrl+O unfolds the group and the edit result.
+    # Ctrl+O unfolds the lone edit result.
     "\x0f",
 ]

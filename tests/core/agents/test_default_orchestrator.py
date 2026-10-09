@@ -152,7 +152,7 @@ alias = "custom"
     orchestrator = await build_default_orchestrator()
 
     assert orchestrator.config.active_model == "custom"
-    assert set(orchestrator.config.models) >= {"custom", "mistral-medium-3.5", "local"}
+    assert set(orchestrator.config.models) >= {"custom", "mistral-medium-3.5"}
 
 
 @pytest.mark.asyncio
@@ -219,7 +219,8 @@ async def test_build_default_orchestrator_drops_sparse_leftover_devstral_small(
 
     with config_path.open("rb") as file:
         persisted = tomllib.load(file)
-    assert persisted.get("active_model", "") == ""
+    # The pin stays on disk; the fallback already reset the in-memory value.
+    assert persisted["active_model"] == "devstral-small"
     assert "devstral-small" not in {
         model.get("alias")
         for model in persisted.get("models", [])
@@ -565,6 +566,36 @@ provider = "mistral"
         persisted = tomllib.load(file)
     assert persisted["active_model"] == "mistral-medium-3.5"
     assert persisted["models"][0]["alias"] == "mistral-medium-3.5"
+
+
+@pytest.mark.asyncio
+async def test_build_default_orchestrator_merges_sparse_local_over_complete_definition(
+    config_dir: Path, tmp_working_directory: Path
+) -> None:
+    # End-to-end premise of the completion guard: the user file completely
+    # defines ``local``, the project file holds a sparse leftover, and the
+    # merged model keeps the user's identity plus the project's setting.
+    user_config = config_dir / "config.toml"
+    user_config.write_text(
+        'active_model = "local"\n\n'
+        "[[models]]\n"
+        'name = "my-gguf"\n'
+        'provider = "my-llamacpp"\n'
+        'alias = "local"\n',
+        encoding="utf-8",
+    )
+    project_config = tmp_working_directory / ".vibe" / "config.toml"
+    project_config.parent.mkdir(parents=True, exist_ok=True)
+    project_config.write_text('[models.local]\nthinking = "low"\n', encoding="utf-8")
+    trusted_folders_manager.add_trusted(project_config.parent)
+
+    orchestrator = await build_default_orchestrator()
+
+    model = orchestrator.config.get_active_model()
+    assert model.alias == "local"
+    assert model.name == "my-gguf"
+    assert model.provider == "my-llamacpp"
+    assert model.thinking == "low"
 
 
 @pytest.mark.asyncio

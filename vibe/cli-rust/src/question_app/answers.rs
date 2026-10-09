@@ -37,6 +37,17 @@ pub fn select(app: &mut App, client: &Arc<Client>) {
     toggle_selection(app, app.question_app.selected_option);
 }
 
+/// Space on a multi-select option (Python `action_toggle_focused`).
+pub fn toggle_focused(app: &mut App) {
+    if is_within_grace_period(app) {
+        return;
+    }
+    if !current_question(app).multi_select || is_submit_selected(app) {
+        return;
+    }
+    toggle_selection(app, app.question_app.selected_option);
+}
+
 /// Enter on the focused free-text row (Python `on_input_submitted`).
 pub fn submit_other(app: &mut App, client: &Arc<Client>) {
     if current_question(app).multi_select {
@@ -196,8 +207,9 @@ pub fn dismiss(app: &mut App, source: &QuestionSource) {
 fn close(app: &mut App) {
     app.question_app.open = false;
     app.question_app.mouse_press_row = None;
-    app.view.question_selection_chrome.clear();
-    crate::selection::clear_region(app, crate::selection::RegionId::Question);
+    app.view.bottom_app_selection_chrome.clear();
+    app.view.bottom_app_selection_folds = crate::selection::Folds::default();
+    crate::selection::clear_region(app, crate::selection::RegionId::BottomApp);
     crate::selection::clear_region(app, crate::selection::RegionId::Loading);
     crate::terminal_notifier::restore_running(app);
     app.view.loading.end_action_required();

@@ -19,6 +19,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustContentBlock,
     RustEvent,
     RustExternalToolCall,
+    RustFailTurnEvent,
     RustFilesystemAction,
     RustFilesystemFailedEvent,
     RustFilesystemSucceededEvent,
@@ -78,6 +79,14 @@ from mistralai_vibe_local_harness.vibe._runtime_config import (
     ProviderRetry,
     ToolApprovalMode,
 )
+from mistralai_vibe_local_harness.vibe._sandbox import (
+    SANDBOX_UNAVAILABLE_CODE,
+    SandboxUnavailableError,
+)
+from mistralai_vibe_local_harness.vibe._saved_outputs import (
+    SavedOutputs,
+    build_saved_outputs,
+)
 from mistralai_vibe_local_harness.vibe._self_tools import execute_self_tool
 from mistralai_vibe_local_harness.vibe._shell_tools import execute_shell_tool
 from mistralai_vibe_local_harness.vibe._skill_tools import execute_skill_tool
@@ -90,6 +99,7 @@ from mistralai_vibe_local_harness.vibe._smart_approve import (
     RiskClassificationResult,
     build_classification_request,
     classify_tool_call,
+    project_checkouts,
 )
 
 logger = logging.getLogger(__name__)
@@ -405,6 +415,7 @@ class _LocalActionState:
             if filesystem_root is not None
             else None
         )
+        self._saved_outputs = self._build_saved_outputs(config)
         # The path each file call was cleared for by the permission resolver
         # (main's out-of-workspace grant handoff), keyed by action id: actions
         # gate and run as concurrent tasks, so one shared slot would let one
@@ -448,9 +459,46 @@ class _LocalActionState:
             Callable[[str, ProviderRetry | None], Awaitable[None]] | None
         ) = None
         self._delta_sink: CompletionDeltaSink | None = None
+        self._project_roots_for: tuple[Path, ...] | None = None
+        self._project_roots: list[str] = []
+        self._refresh_project_roots()
 
     def configure(self, config: LocalRuntimeAdapterConfig) -> None:
+        if config.sandbox is not self._config.sandbox:
+            self._saved_outputs = self._build_saved_outputs(config)
         self._config = config
+        self._refresh_project_roots()
+
+    def _refresh_project_roots(self) -> None:
+        """Decide which writable roots are checkouts, once per set of roots.
+
+        Smart approve shows a checkout to the classifier by name instead of by
+        location. Deciding it here rather than on every call means the agent
+        cannot turn a writable directory into a checkout by creating ``.git`` in
+        it. The roots change when a session moves to a new workspace, so the
+        decision is taken again then, and only then.
+        """
+        roots = self._writable_roots()
+        if roots == self._project_roots_for:
+            return
+        self._project_roots_for = roots
+        self._project_roots = project_checkouts([str(root) for root in roots])
+
+    def _build_saved_outputs(self, config: LocalRuntimeAdapterConfig) -> SavedOutputs:
+        return build_saved_outputs(
+            config.sandbox,
+            records=lambda: self._tool_results_root,
+            session_id=self._session_id,
+        )
+
+    @property
+    def _workspace_root(self) -> Path:
+        return self._filesystem_root or self._config.workspace.cwd
+
+    @property
+    def _tool_results_root(self) -> Path:
+        """Where the Session records the outputs the Harness Core saves."""
+        return (self._workspace_root / "tool-results").resolve()
 
     def bind_approval_requester(self, request_approval: ApprovalRequester) -> None:
         self._request_approval = request_approval
@@ -533,7 +581,25 @@ class _LocalActionState:
             approval = approval.get(call.tool_name)
         return approval or self._config.provided_tool_mode
 
-    async def execute(self, action: RustAction) -> RustEvent:  # noqa: PLR0911 - one return per action kind
+    async def execute(self, action: RustAction) -> RustEvent:
+        try:
+            return await self._execute(action)
+        except SandboxUnavailableError as error:
+            # Reported to the model, a lost sandbox would only be retried.
+            if isinstance(action, RustLLMCallAction):
+                raise
+            return RustFailTurnEvent(
+                action_id=action.action_id,
+                expected_turn_id=action.turn_id,
+                error=RustProtocolError(
+                    code=SANDBOX_UNAVAILABLE_CODE,
+                    message=str(error),
+                    retryable=False,
+                    details=None,
+                ),
+            )
+
+    async def _execute(self, action: RustAction) -> RustEvent:  # noqa: PLR0911 - one return per action kind
         if isinstance(action, RustLLMCallAction):
             self._apply_model_input(action)
             return await execute_completion(
@@ -568,10 +634,7 @@ class _LocalActionState:
                 "file_system.search_replace",
             }:
                 additional_read_roots = (
-                    (
-                        self._filesystem_root / "attachments",
-                        self._filesystem_root / "tool-results",
-                    )
+                    (self._filesystem_root / "attachments",)
                     if self._filesystem_root is not None
                     else ()
                 )
@@ -580,6 +643,7 @@ class _LocalActionState:
                         action,
                         self._config,
                         additional_read_roots=additional_read_roots,
+                        workspace_read_roots=self._saved_outputs.read_roots,
                         authorized_path=self._resolved_authorized_paths.pop(
                             action.action_id, None
                         ),
@@ -613,24 +677,29 @@ class _LocalActionState:
             relative_path = Path(action.operation.workspace_path)
             if relative_path.is_absolute():
                 raise ValueError("filesystem write path must be relative")
-            workspace = self._filesystem_root or self._config.workspace.cwd
+            workspace = self._workspace_root
             destination = (workspace / relative_path).resolve()
             if not destination.is_relative_to(workspace):
                 raise ValueError("filesystem write path resolves outside the workspace")
             # Filesystem actions can be restored from durable state. Keep a
             # malformed action away from checkpoints and other session metadata.
-            tool_results_root = (workspace / "tool-results").resolve()
-            if not destination.is_relative_to(tool_results_root):
+            if not destination.is_relative_to(self._tool_results_root):
                 raise ValueError(
                     "filesystem write path must resolve under tool-results"
                 )
+            # The record stays with the Session, and an export copies it.
             await asyncio.to_thread(
                 _replace_text_file, destination, action.operation.content
             )
+            model_path = await self._saved_outputs.publish(
+                destination, action.operation.content
+            )
             return RustFilesystemSucceededEvent(
                 action_id=action.action_id,
-                result=RustFilesystemWriteResult(model_path=str(destination)),
+                result=RustFilesystemWriteResult(model_path=model_path),
             )
+        except SandboxUnavailableError:
+            raise
         except Exception as error:
             return RustFilesystemFailedEvent(
                 action_id=action.action_id,
@@ -762,6 +831,8 @@ class _LocalActionState:
                     context,
                 )
                 tool_result = result.output.tool_result
+        except SandboxUnavailableError:
+            raise
         except Exception as error:
             return _hook_pipeline_failed(action, error)
         else:
@@ -911,8 +982,14 @@ class _LocalActionState:
         disagree. This string is the trusted evidence that makes a workspace delete
         auto-approvable, so it has to name the directory the write will actually land in.
         """
-        roots = self._config.workspace.roots
-        return tuple(root.expanduser().resolve() for root in roots)
+        workspace = self._config.workspace
+        match workspace.path_space:
+            case "host":
+                return tuple(root.expanduser().resolve() for root in workspace.roots)
+            case "sandbox":
+                # Already canonical, and resolving them against this host's file
+                # system would follow the host's links instead.
+                return workspace.roots
 
     def _with_approval_note(self, event: RustEvent, action_id: str) -> RustEvent:
         """Ride a recorded approval note out on the tool's result ``_meta``.
@@ -1092,6 +1169,7 @@ class _LocalActionState:
             action.call,
             tuple(self._messages),
             writable_roots=[str(root) for root in self._writable_roots()],
+            project_roots=self._project_roots,
         )
         # Exact: it scopes what a human's session grant covers.
         key = (request.tool_name, request.args_hash())

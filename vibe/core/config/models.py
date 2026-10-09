@@ -474,6 +474,13 @@ class ModelConfig(BaseModel):
     alias: str
     display_name: str | None = None
     temperature: float = 0.2
+    # Request settings read by the Unified Harness runtime only; the legacy
+    # agent loop does not send them.
+    # Nucleus sampling; None leaves it to the provider's default.
+    top_p: float | None = Field(default=None, gt=0, le=1)
+    # Cap on output tokens per model request; None leaves it to the provider.
+    # A session's own ``max_tokens`` limit, when set, takes precedence.
+    max_output_tokens: int | None = Field(default=None, ge=1)
     input_price: float = 0.0  # Price per million input tokens
     output_price: float = 0.0  # Price per million output tokens
     cached_input_price: float | None = (
@@ -513,13 +520,29 @@ class ModelConfig(BaseModel):
             return "high"
         return self.thinking_levels[-1]
 
+    @property
+    def thinking_levels_curated(self) -> bool:
+        """Whether the offered set was narrowed from the CLI's default five.
+
+        The uncurated default makes no claim about the model, so consumers
+        (e.g. the Mistral backend's reasoning-effort mapping) treat it
+        differently from a set someone deliberately wrote.
+        """
+        return set(self.thinking_levels) != set(THINKING_LEVELS)
+
     @model_validator(mode="after")
     def _reset_thinking_outside_levels(self) -> ModelConfig:
         # Curation can narrow a set under a level the user already stored.
         # Re-derived on every load, like the active-model fallback: the stored
         # value stays in the user's file and applies again if the set widens.
         if self.thinking not in self.thinking_levels:
-            self.thinking = self.default_thinking
+            # "low" was the historical no-reasoning pick; a curated set that
+            # dropped it carries that intent in "off" instead of re-enabling
+            # reasoning through default_thinking.
+            if self.thinking == "low" and "off" in self.thinking_levels:
+                self.thinking = "off"
+            else:
+                self.thinking = self.default_thinking
         return self
 
 

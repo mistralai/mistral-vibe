@@ -18,6 +18,7 @@ from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.screens.config import ConfigScreen, ConfigWriteResult
 from vibe.cli.textual_ui.screens.config._common import ConfigOptionList
 from vibe.cli.textual_ui.screens.config.edit import _TargetedEditScreen
+from vibe.cli.textual_ui.widgets.chat_input import ChatTextArea
 from vibe.cli.textual_ui.widgets.theme_picker import sorted_theme_names
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.config import ModelConfig, VibeConfigSchema, build_default_orchestrator
@@ -220,6 +221,22 @@ async def test_config_screen_toggles_bool_and_persists() -> None:
 
 
 @pytest.mark.asyncio
+async def test_config_screen_disables_cursor_blink() -> None:
+    app, agent_loop = _app(build_test_vibe_config())
+    async with app.run_test() as pilot:
+        text_area = app.query_one(ChatTextArea)
+        screen = await _open_config(app, pilot)
+        await _filter_to(pilot, screen, "cursor", "cursor_blink")
+        await _open_editor(app, pilot)
+        await pilot.press("down", "enter")
+
+        assert await wait_until(
+            pilot, lambda: agent_loop.config_orchestrator.config.cursor_blink is False
+        )
+        assert text_area.cursor_blink is False
+
+
+@pytest.mark.asyncio
 async def test_config_screen_hides_subagent_status_list() -> None:
     app, agent_loop = _app(build_test_vibe_config(show_subagent_status_list=True))
     async with app.run_test() as pilot:
@@ -314,7 +331,17 @@ async def test_config_screen_enum_edit_via_choice_screen() -> None:
 
 @pytest.mark.asyncio
 async def test_config_screen_active_model_uses_choice_picker() -> None:
-    app, agent_loop = _app()
+    # The choice picker needs a second row to pick; the built-in list ships
+    # one model, so the test adds its own alongside the default.
+    from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
+
+    config = build_test_vibe_config(
+        models=[
+            DEFAULT_ACTIVE_MODEL_CONFIG,
+            ModelConfig(name="model-b", provider="mistral", alias="beta"),
+        ]
+    )
+    app, agent_loop = _app(config)
     async with app.run_test() as pilot:
         screen = await _open_config(app, pilot)
         orchestrator = agent_loop.config_orchestrator

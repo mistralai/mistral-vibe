@@ -11,9 +11,8 @@ _CONTENT = (
     "   2→    \x1b]8;;https://example.com\x1b\\return f'hello {name}'\x1b]8;;\x1b\\\x00\x08\x7f"
 )
 
-# Open the group, then its read result.
-_EXPAND_GROUP = "\x1b[<0;1;32M\x1b[<0;1;32m"
-_EXPAND_RESULT = "\x1b[<0;8;32M\x1b[<0;8;32m"
+# The lone read stays ungrouped, so its own header row unfolds the result.
+_EXPAND_RESULT = "\x1b[<0;1;15M\x1b[<0;1;15m"
 
 screen_contains = {"rust": ("def greet(name):", "return f'hello {name}'")}
 screen_excludes = {"rust": ("[31m", "https://example.com", "old")}
@@ -24,6 +23,5 @@ timeline: Timeline = [
     user_msg(_PROMPT),
     read_file("app.py", _CONTENT, num_lines=2),
     turn_completed(),
-    _EXPAND_GROUP,
     _EXPAND_RESULT,
 ]

@@ -42,7 +42,7 @@ expected_actions = {
     "python": [Action("open_url", f"file://{_PATH}")],
     "rust": [Action("open_url", f"file://{_PATH}")],
 }
-_CLICK_ATTACHMENT = "\x1b[<0;21;31M\x1b[<0;21;31m"
+_CLICK_ATTACHMENT = "\x1b[<0;21;13M\x1b[<0;21;13m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

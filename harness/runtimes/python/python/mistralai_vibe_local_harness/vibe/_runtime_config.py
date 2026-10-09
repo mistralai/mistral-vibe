@@ -15,6 +15,11 @@ from mistralai_vibe_local_harness.vibe._credentials import (
     StaticProviderCredentials,
 )
 from mistralai_vibe_local_harness.vibe._permissions import PermissionResolver
+from mistralai_vibe_local_harness.vibe._sandbox import (
+    HelperCrashCount,
+    SandboxAdapter,
+    sandbox_path,
+)
 
 type ThinkingLevel = Literal["off", "low", "medium", "high", "max"]
 
@@ -103,7 +108,10 @@ class RequestSentTelemetry:
 
     Only transport-neutral primitives cross to the Host. The Host maps
     ``purpose`` and ``iteration`` onto its call-type taxonomy and forwards the
-    remaining request metrics once per provider call.
+    remaining request metrics once per provider call. ``turn_id`` is the turn
+    an agent or compaction call serves, which tells a Session's own calls
+    from its subagents' when they share one sink; utility completions have
+    none.
     """
 
     model: str
@@ -112,6 +120,7 @@ class RequestSentTelemetry:
     nb_context_chars: int
     nb_context_messages: int
     nb_prompt_chars: int
+    turn_id: str | None = None
 
 
 # Host sink for per-completion request telemetry, called once per LLM call.
@@ -124,6 +133,11 @@ class LocalModelRoute:
     temperature: float = 1.0
     thinking: ThinkingLevel = "off"
     supports_images: bool = True
+    # Nucleus sampling; None leaves it to the provider's default.
+    top_p: float | None = None
+    # This model's cap on output tokens per request, used when the adapter
+    # config sets no ``max_tokens`` of its own.
+    max_output_tokens: int | None = None
 
 
 _DEFAULT_LOCAL_MODEL_ROUTE = LocalModelRoute()
@@ -155,19 +169,29 @@ class LocalProviderRoute:
 type CommandEnvironment = Literal[
     "disabled", "unix", "git_bash", "powershell", "in_memory_bash"
 ]
-type ProcessAuthority = Literal["disabled", "host_shell"]
+type ProcessAuthority = Literal["disabled", "host_shell", "sandbox"]
+"""Where background processes run: nowhere, in the host shell, or in the
+Session's Sandbox Environment."""
+type PathSpace = Literal["host", "sandbox"]
+"""Whose file system a Session's workspace paths name."""
 
 
 @dataclass(frozen=True, slots=True)
 class SessionWorkspace:
-    """The canonical local workspace owned by one Harness Session."""
+    """The canonical local workspace owned by one Harness Session.
+
+    ``path_space`` says whose file system the paths name. Host paths are
+    resolved; sandbox paths are normalized with :func:`sandbox_path` instead,
+    as this host's file system may not hold them or may link them elsewhere.
+    """
 
     cwd: Path = field(default_factory=Path.cwd)
     roots: tuple[Path, ...] = ()
+    path_space: PathSpace = "host"
 
     def __post_init__(self) -> None:
-        cwd = self.cwd.expanduser().resolve()
-        roots = tuple(dict.fromkeys(root.expanduser().resolve() for root in self.roots))
+        cwd = self._canonical(self.cwd)
+        roots = tuple(dict.fromkeys(self._canonical(root) for root in self.roots))
         if not roots:
             roots = (cwd,)
         object.__setattr__(self, "cwd", cwd)
@@ -175,11 +199,20 @@ class SessionWorkspace:
 
     def moved_to(self, cwd: str | Path) -> SessionWorkspace:
         """Move the working directory without widening explicit access roots."""
-        destination = Path(cwd).expanduser().resolve()
+        destination = self._canonical(Path(cwd))
         if destination == self.cwd:
             return self
         roots = tuple(destination if root == self.cwd else root for root in self.roots)
-        return SessionWorkspace(cwd=destination, roots=roots)
+        return SessionWorkspace(
+            cwd=destination, roots=roots, path_space=self.path_space
+        )
+
+    def _canonical(self, path: Path) -> Path:
+        match self.path_space:
+            case "host":
+                return path.expanduser().resolve()
+            case "sandbox":
+                return sandbox_path(path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +227,10 @@ class LocalRuntimeAdapterPorts:
     permission_resolver: PermissionResolver | None
     correlation_id_sink: CorrelationIdSink | None
     request_sent_sink: RequestSentSink | None
+    sandbox: SandboxAdapter | None = None
+    helper_crashes: HelperCrashCount = field(
+        default_factory=HelperCrashCount, compare=False
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,8 +289,17 @@ class LocalRuntimeAdapterConfig:
     project_id: str = ""
     region: str = ""
     timeout_s: float = 60.0
+    # Silence allowed between output items once a response has started
+    # streaming. ``timeout_s`` must also cover the wait for the first token, so
+    # it is too long to notice a provider that stalls mid-response. ``None``
+    # applies no limit: some providers, Mistral included, send a tool call in one
+    # piece once it is fully generated, so a long tool call is a long silence
+    # that no fixed limit can tell apart from a stall.
+    stream_idle_timeout_s: float | None = None
     retry_max_elapsed_time_s: float = 300.0
     workspace: SessionWorkspace = field(default_factory=SessionWorkspace)
+    # The environment of commands run on the host. Commands in a Sandbox
+    # Environment run with the sandbox's own environment and never see it.
     env: dict[str, str] = field(default_factory=dict)
     command_environment: CommandEnvironment = "unix"
     shell: str | None = None
@@ -277,8 +323,32 @@ class LocalRuntimeAdapterConfig:
     correlation_id_sink: CorrelationIdSink | None = None
     request_sent_sink: RequestSentSink | None = None
     skills: Mapping[str, str] = field(default_factory=dict)
+    # Where workspace file and shell tools run. None runs them on this host;
+    # an adapter runs them in its Sandbox Environment, whose paths ``workspace``
+    # then names. Session storage, attachments, provided tools, MCP servers
+    # and hooks stay on the host either way. A saved tool output is recorded
+    # in Session storage and copied to where the tools run.
+    sandbox: SandboxAdapter | None = None
+    # The tool helper's crashes in a row in ``sandbox``, shared by every
+    # Session whose tools run there (see ``HelperCrashCount``).
+    helper_crashes: HelperCrashCount = field(
+        default_factory=HelperCrashCount, compare=False
+    )
 
     def __post_init__(self) -> None:
+        # ``sandbox`` decides where tools run; the workspace and the process
+        # tools have to agree with it.
+        if self.workspace.path_space != self.path_space:
+            raise ValueError(
+                f"a {self.path_space} session cannot use a workspace of "
+                f"{self.workspace.path_space} paths"
+            )
+        if self.sandbox is not None and self.process_authority == "host_shell":
+            raise ValueError(
+                "a sandboxed session cannot run processes in the host shell"
+            )
+        if self.sandbox is None and self.process_authority == "sandbox":
+            raise ValueError("sandbox processes need a sandboxed session")
         direct_route = LocalModelRoute(
             model=self.model, temperature=self.temperature, thinking=self.thinking
         )
@@ -297,6 +367,11 @@ class LocalRuntimeAdapterConfig:
         object.__setattr__(self, "temperature", active_model.temperature)
         object.__setattr__(self, "thinking", active_model.thinking)
 
+    @property
+    def path_space(self) -> PathSpace:
+        """Whose file system the workspace paths name."""
+        return "host" if self.sandbox is None else "sandbox"
+
     @classmethod
     def at(
         cls,
@@ -305,7 +380,11 @@ class LocalRuntimeAdapterConfig:
         roots: tuple[str | Path, ...] = (),
         **config: object,
     ) -> LocalRuntimeAdapterConfig:
-        """Build a config rooted at ``cwd`` without duplicating workspace fields."""
+        """Build a config rooted at ``cwd`` without duplicating workspace fields.
+
+        With a ``sandbox``, ``cwd`` and the roots are paths in its Sandbox
+        Environment.
+        """
         if additional_roots and roots:
             raise ValueError(
                 "pass workspace roots positionally or by keyword, not both"
@@ -314,7 +393,9 @@ class LocalRuntimeAdapterConfig:
         return replace(
             cls(),
             workspace=SessionWorkspace(
-                cwd=Path(cwd), roots=tuple(Path(root) for root in configured_roots)
+                cwd=Path(cwd),
+                roots=tuple(Path(root) for root in configured_roots),
+                path_space="host" if config.get("sandbox") is None else "sandbox",
             ),
             **config,
         )
@@ -330,6 +411,16 @@ class LocalRuntimeAdapterConfig:
             }
             headers["x-affinity"] = affinity_id
         return headers
+
+    def output_token_cap(self, route: LocalModelRoute) -> int | None:
+        """The output-token cap for one request on ``route``.
+
+        ``max_tokens`` wins when set, so a caller that pins a short completion
+        (a title, say) keeps its cap whatever the model allows.
+        """
+        if self.max_tokens is not None:
+            return self.max_tokens
+        return route.max_output_tokens
 
     def with_workspace(self, workspace: SessionWorkspace) -> LocalRuntimeAdapterConfig:
         """Return this config projected onto the Session's canonical workspace."""
@@ -348,6 +439,8 @@ class LocalRuntimeAdapterConfig:
             permission_resolver=self.permission_resolver,
             correlation_id_sink=self.correlation_id_sink,
             request_sent_sink=self.request_sent_sink,
+            sandbox=self.sandbox,
+            helper_crashes=self.helper_crashes,
         )
 
     def forked_with(
@@ -366,6 +459,8 @@ class LocalRuntimeAdapterConfig:
             permission_resolver=ports.permission_resolver,
             correlation_id_sink=ports.correlation_id_sink,
             request_sent_sink=ports.request_sent_sink,
+            sandbox=ports.sandbox,
+            helper_crashes=ports.helper_crashes,
         )
 
 
@@ -389,6 +484,7 @@ _LOCAL_RUNTIME_ADAPTER_BEHAVIOR_FIELDS = frozenset({
     "project_id",
     "region",
     "timeout_s",
+    "stream_idle_timeout_s",
     "retry_max_elapsed_time_s",
     "env",
     "command_environment",

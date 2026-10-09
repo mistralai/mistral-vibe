@@ -8,9 +8,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use super::{config_edit, config_options, scrollbar, theme};
+use super::{config_edit, config_options, list_cursor, list_scroll, scrollbar, theme};
 use crate::app::App;
 use crate::config::{self, ConfigField};
+use crate::hints::{self, action, key, Hint};
+use crate::search_field;
 
 pub(super) const NAME_W: usize = 38;
 pub(super) const VALUE_W: usize = 32;
@@ -20,12 +22,12 @@ const ROW_W: usize = CURSOR_W + NAME_W + GAP + VALUE_W;
 const OPT_W: u16 = 76;
 pub(super) const POPULAR: &str = "Popular settings";
 pub(super) const ADVANCED: &str = "Advanced settings";
-const HELP: &[(&str, &str)] = &[
-    ("type", "Filter"),
-    ("↑↓", "Navigate"),
-    ("Enter", "Edit"),
-    ("Ctrl+R", "Reset"),
-    ("Esc", "Close"),
+const HELP: &[Hint] = &[
+    hints::NAVIGATE,
+    (key::ENTER, action::EDIT),
+    hints::SEARCH,
+    (key::CTRL_R, action::RESET),
+    hints::CLOSE,
 ];
 
 /// One content line of the option list.
@@ -46,6 +48,8 @@ pub(super) enum Opt {
 /// margins, like Textual's centered `ModalScreen`.
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     app.config_screen.area = area;
+    // The modal hides the chat caret and takes the keys.
+    app.view.cursor_position = None;
     let w = ((area.width as u32 * 96 / 100) as u16).min(92);
     let h = (area.height as u32 * 96 / 100) as u16;
     if w < 20 || h < 8 {
@@ -53,7 +57,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
             app,
             f,
             area,
-            "Enlarge terminal to browse settings. Esc Close",
+            "Enlarge terminal to browse settings. Esc close",
         );
         return;
     }
@@ -82,26 +86,11 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let cx = bx + 3; // border + padding-left 2
     let cy = by + 2; // border + padding-top 1
 
-    // Search line: $primary label, dim-primary placeholder.
-    f.buffer_mut()
-        .set_string(cx, cy, "Filter: ", primary.add_modifier(Modifier::BOLD));
-    f.buffer_mut().set_string(
-        cx + 8,
-        cy,
-        if app.config_screen.query.is_empty() {
-            "type to filter"
-        } else {
-            &app.config_screen.query
-        },
-        if app.config_screen.query.is_empty() {
-            primary.add_modifier(Modifier::DIM)
-        } else {
-            primary
-        },
-    );
-
+    draw_search(app, f, Rect::new(cx, cy, w - 6, 1));
     draw_options(app, f, bx, cy + 2, w, by + h - 2);
-    draw_help(f, Rect::new(cx, by + h - 2, w - 6, 1));
+    let search = &app.config_screen.search;
+    let help = search_field::hints(search.focused, !search.query.is_empty(), HELP);
+    super::hint_line::draw_clipped(f, cx, by + h - 2, w - 6, &help);
     config_edit::draw(app, f, area);
 }
 
@@ -119,7 +108,7 @@ fn draw_options(app: &mut App, f: &mut Frame, bx: u16, top: u16, w: u16, help_y:
     let lines = config_options::build_lines(
         &fields,
         app.config_screen.selected,
-        app.config_screen.query.trim().is_empty() || fields.len() > 5,
+        app.config_screen.search.query.trim().is_empty() || fields.len() > 5,
     );
     let total = lines.len() as u16;
     let offset = reconcile_scroll(app, &lines, visible);
@@ -145,26 +134,25 @@ fn draw_options(app: &mut App, f: &mut Frame, bx: u16, top: u16, w: u16, help_y:
                 name,
                 value,
             } => {
-                let cursor = if *selected { "▸ " } else { "  " };
+                let (name_style, value_style) = if *selected {
+                    let bar = Rect::new(opt_x, y, opt_width.saturating_sub(1), 1);
+                    f.buffer_mut().set_style(bar, list_cursor::style());
+                    (list_cursor::style(), list_cursor::style())
+                } else {
+                    let name = Style::default().fg(theme::foreground()).bg(bg);
+                    let value = Style::default().fg(theme::muted()).bg(bg);
+                    (
+                        name.add_modifier(Modifier::BOLD),
+                        value.remove_modifier(Modifier::DIM),
+                    )
+                };
                 let buf = f.buffer_mut();
-                buf.set_string(
-                    opt_x,
-                    y,
-                    cursor,
-                    Style::default()
-                        .fg(theme::primary())
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD),
-                );
                 buf.set_stringn(
                     opt_x + CURSOR_W as u16,
                     y,
                     name,
                     NAME_W.min(opt_width.saturating_sub(CURSOR_W as u16) as usize),
-                    Style::default()
-                        .fg(theme::foreground())
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD),
+                    name_style,
                 );
                 buf.set_stringn(
                     opt_x + (CURSOR_W + NAME_W + GAP) as u16,
@@ -172,14 +160,7 @@ fn draw_options(app: &mut App, f: &mut Frame, bx: u16, top: u16, w: u16, help_y:
                     value,
                     VALUE_W
                         .min(opt_width.saturating_sub((CURSOR_W + NAME_W + GAP) as u16) as usize),
-                    (if *selected {
-                        Style::default().add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    })
-                    .fg(theme::muted())
-                    .bg(bg)
-                    .remove_modifier(Modifier::DIM),
+                    value_style,
                 );
             }
         }
@@ -200,26 +181,30 @@ fn draw_options(app: &mut App, f: &mut Frame, bx: u16, top: u16, w: u16, help_y:
     }
 }
 
-/// Keep the highlighted field visible by scrolling the minimum amount, mirroring
-/// Textual's `scroll_to_highlight`. Returns the new top line offset.
+/// Keep the highlighted field visible, the wheel's free scroll aside. Returns
+/// the new top line offset.
 fn reconcile_scroll(app: &mut App, lines: &[Opt], visible: u16) -> usize {
     let visible = visible as usize;
-    let total = lines.len();
-    let sel_line = lines
-        .iter()
-        .position(|l| matches!(l, Opt::Row { selected: true, .. }))
-        .unwrap_or(0);
-    let mut off = app.config_screen.scroll;
-    if !app.config_screen.free_scroll {
-        if sel_line < off {
-            off = sel_line;
-        } else if sel_line >= off + visible {
-            off = sel_line + 1 - visible;
+    let max = lines.len().saturating_sub(visible);
+    let offset = match app.config_screen.free_scroll {
+        true => app.config_screen.scroll.min(max),
+        false => {
+            let selected = lines
+                .iter()
+                .position(|l| matches!(l, Opt::Row { selected: true, .. }));
+            let highlight = selected.map_or(0..0, |line| line..line + 1);
+            let is_option = |line: usize| matches!(lines[line], Opt::Row { .. });
+            list_scroll::follow(
+                app.config_screen.scroll,
+                visible,
+                lines.len(),
+                highlight,
+                is_option,
+            )
         }
-    }
-    off = off.min(total.saturating_sub(visible));
-    app.config_screen.scroll = off;
-    off
+    };
+    app.config_screen.scroll = offset;
+    offset
 }
 
 /// A centered section rule with the dim dashes and a brighter bold label.
@@ -244,25 +229,16 @@ fn draw_section(f: &mut Frame, area: Rect, label: &str, bg: Color) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-fn draw_help(f: &mut Frame, area: Rect) {
-    let mut spans = Vec::new();
-    for (index, (key, label)) in HELP.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::raw("  "));
-        }
-        spans.push(Span::styled(
-            *key,
-            Style::default()
-                .fg(theme::primary())
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            format!(" {label}"),
-            theme::dim(theme::muted()),
-        ));
-    }
-    f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::surface())),
+/// The search row: a dim `/` and the shared search field.
+fn draw_search(app: &mut App, f: &mut Frame, area: Rect) {
+    let input = super::search_field::draw_row(
+        f,
         area,
+        &app.config_screen.search,
+        "Search settings",
+        app.view.cursor_on,
+        theme::surface(),
     );
+    app.config_screen.search.area = input;
+    crate::mouse::register_region(app, input, crate::mouse::MouseTarget::Config);
 }

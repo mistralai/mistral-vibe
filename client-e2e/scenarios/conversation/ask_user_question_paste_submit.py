@@ -18,10 +18,7 @@ handshake = {"callback/result": {"accepted": True}}
 capture_startup = False
 capture_steps = {1, 2, 3, 4, 5, 6, 7}
 request_methods = {"callback/result"}
-screen_excludes = {
-    "rust": ("Ignored second line", "Junk answer"),
-    "python": ("Ignored second line", "Junk answer"),
-}
+screen_excludes = {"rust": ("Junk answer",), "python": ("Junk answer",)}
 
 _QUESTION = "Which database should we use for this project?"
 _QUESTIONS = [
@@ -38,7 +35,11 @@ _QUESTIONS = [
 on_request = {
     "callback/result": [
         ask_user_question_answered([
-            {"question": _QUESTION, "answer": "SQLite Enterprise", "isOther": True}
+            {
+                "question": _QUESTION,
+                "answer": "SQLite Enterprise\nwith WAL",
+                "isOther": True,
+            }
         ]),
         turn_completed(),
     ]
@@ -54,12 +55,12 @@ timeline: Timeline = [
     ask_user_question(_QUESTIONS),
     {"release": 5},
     # The cursor still sits on the first option row: the paste must be dropped.
-    paste("Junk answer\nIgnored second line"),
+    paste("Junk answer\nJunk second line"),
     # Three downs park the cursor on the free-text row, which then takes keys.
     _DOWN,
     _DOWN,
     _DOWN,
-    paste("SQLite Enterprise\nIgnored second line"),
+    paste("SQLite Enterprise\nwith WAL"),
     "\r",
 ]
 

@@ -488,7 +488,8 @@ class InMemoryHarnessRuntime:
                     action_id=action.action_id,
                     error=RustProtocolError(
                         code="model_stream_failed",
-                        message=str(error),
+                        # Transport timeouts render as an empty string.
+                        message=str(error) or type(error).__name__,
                         retryable=False,
                         details=None,
                     ),

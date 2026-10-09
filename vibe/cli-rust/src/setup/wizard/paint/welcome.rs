@@ -2,32 +2,19 @@
 //! with a gradient highlight, in a rounded box. No petit chat, per Python.
 
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Text;
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
+use crate::hints;
 use crate::setup::wizard::OnboardingState;
 use crate::setup::wizard::WELCOME_TEXT;
-use crate::ui::theme;
+use crate::ui::{hint_line, theme};
 const HIGHLIGHT_START: usize = 11;
 const HIGHLIGHT_END: usize = 23;
-/// Python `GRADIENT_COLORS`; the browser sign-in screen paints its waiting
-/// detail with the same ramp.
-pub(super) const GRADIENT: [Color; 10] = [
-    Color::Rgb(0xff, 0x6b, 0x00),
-    Color::Rgb(0xff, 0x7b, 0x00),
-    Color::Rgb(0xff, 0x8c, 0x00),
-    Color::Rgb(0xff, 0x9d, 0x00),
-    Color::Rgb(0xff, 0xae, 0x00),
-    Color::Rgb(0xff, 0xbf, 0x00),
-    Color::Rgb(0xff, 0xae, 0x00),
-    Color::Rgb(0xff, 0x9d, 0x00),
-    Color::Rgb(0xff, 0x8c, 0x00),
-    Color::Rgb(0xff, 0x7b, 0x00),
-];
 
-/// Python `WelcomeScreen`: round border, padding 1 3, centered text, "Press Enter" hint.
+/// Python `WelcomeScreen`: round border, padding 1 3, centered text, `Enter continue` hint.
 pub(super) fn draw(wizard: &mut OnboardingState, f: &mut Frame, area: Rect) {
     let text = &WELCOME_TEXT[..wizard.welcome_char_index.min(WELCOME_TEXT.len())];
     // The box is text plus border and padding; narrow terminals clip it.
@@ -74,29 +61,9 @@ pub(super) fn draw(wizard: &mut OnboardingState, f: &mut Frame, area: Rect) {
             .set_string(hx, box_y + 7, msg, Style::default().fg(theme::muted()));
         return;
     }
-    let pre = "Press ";
-    let key = "Enter";
-    let post = " \u{21b5}";
-    let total = (pre.len() + key.len() + post.chars().count()) as u16;
-    let mut hx = box_x + (box_w.saturating_sub(total)) / 2;
-    f.buffer_mut()
-        .set_string(hx, box_y + 7, pre, Style::default().fg(theme::foreground()));
-    hx += pre.len() as u16;
-    f.buffer_mut().set_string(
-        hx,
-        box_y + 7,
-        key,
-        Style::default()
-            .fg(theme::primary())
-            .add_modifier(Modifier::BOLD),
-    );
-    hx += key.len() as u16;
-    f.buffer_mut().set_string(
-        hx,
-        box_y + 7,
-        post,
-        Style::default().fg(theme::foreground()),
-    );
+    let keys = [(hints::key::ENTER, hints::action::CONTINUE)];
+    let hx = box_x + box_w.saturating_sub(hints::width(&keys)) / 2;
+    hint_line::draw_clipped(f, hx, box_y + 7, box_x + box_w - hx, &keys);
 }
 
 fn render_welcome_text<'a>(text: &'a str, char_index: usize) -> Text<'a> {
@@ -124,7 +91,7 @@ fn render_welcome_text<'a>(text: &'a str, char_index: usize) -> Text<'a> {
         spans.push(Span::styled(
             ch.to_string(),
             Style::default()
-                .fg(GRADIENT[i % GRADIENT.len()])
+                .fg(theme::fixed::WELCOME_GRADIENT[i % theme::fixed::WELCOME_GRADIENT.len()])
                 .add_modifier(Modifier::BOLD),
         ));
     }

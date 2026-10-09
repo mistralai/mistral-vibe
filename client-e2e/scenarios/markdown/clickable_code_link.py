@@ -15,7 +15,7 @@ expected_actions = {
 }
 
 # `select!` spans one-based columns 22-28 on the answer row.
-_ROW, _COL = 32, 24
+_ROW, _COL = 15, 24
 _CLICK = f"\x1b[<0;{_COL};{_ROW}M\x1b[<0;{_COL};{_ROW}m"
 
 timeline: Timeline = [

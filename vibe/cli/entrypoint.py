@@ -19,7 +19,7 @@ from vibe.cli.process_start import PROCESS_START_MONOTONIC as PROCESS_START_MONO
 import argparse
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 from vibe import __version__
 from vibe._experimental_harness import (
@@ -32,11 +32,30 @@ from vibe._experimental_harness import (
 # (pydantic, textual, rich) at import time.
 
 if TYPE_CHECKING:
+    from vibe.cli.headless_run import HeadlessRun
     from vibe.core.git.worktree import PreparedWorktree, WorktreeCleanupState
 
 
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        # 1 like every other usage error: 2 means infrastructure failure in
+        # programmatic mode.
+        self.print_usage(sys.stderr)
+        self.exit(1, f"{self.prog}: error: {message}\n")
+
+
+def _positive_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {value!r}") from None
+    if not seconds > 0 or seconds == float("inf"):
+        raise argparse.ArgumentTypeError(f"must be a positive number: {value!r}")
+    return seconds
+
+
 def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
+    parser = _ArgumentParser(
         description="Run the Mistral Vibe interactive CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -49,7 +68,9 @@ def parse_arguments() -> argparse.Namespace:
             "                  Also set via log_level in config.toml or /log-level at runtime.\n"
             "                  Logs are written to $VIBE_HOME/logs/vibe.log.\n"
             "  LOG_MAX_BYTES   Max size of vibe.log before rotation (default: 10485760).\n"
-            "  VIBE_*          Override any config field (e.g. VIBE_ACTIVE_MODEL=local)."
+            "  VIBE_*          Override any config field (e.g. VIBE_ACTIVE_MODEL=local).\n\n"
+            "Programmatic mode exits 0 finished, 1 usage or config error,\n"
+            "2 infrastructure failure, 3 stopped by a limit."
         ),
     )
     parser.add_argument(
@@ -92,6 +113,36 @@ def parse_arguments() -> argparse.Namespace:
         help="Maximum total prompt + completion tokens across the session "
         "(only applies in programmatic mode with -p). "
         "Session will be interrupted if usage exceeds this limit.",
+    )
+    parser.add_argument(
+        "--time-limit",
+        type=_positive_seconds,
+        metavar="SECONDS",
+        help="Programmatic mode only: interrupt the run once SECONDS have passed "
+        "since start, write the export and exit 3. SIGTERM stops the run the same "
+        "way.",
+    )
+    parser.add_argument(
+        "--prompt-file",
+        type=Path,
+        metavar="PATH",
+        help="Run in programmatic mode with the prompt read from PATH, "
+        "instead of -p TEXT or stdin.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        metavar="DIR",
+        help="Programmatic mode only: on every exit, write export.json (Vibe "
+        "version, effective config, token usage, cost, stop reason, outcome) "
+        "and a copy of the session journal (session/) to DIR.",
+    )
+    # Experimental, hence hidden: programmatic mode only, connect to an agent
+    # server on the Unix socket PATH that runs the session's file and shell
+    # tools in its sandbox and/or serves tools of its own. It and its protocol
+    # (vibe.cli.agent_socket) may change or go away without notice.
+    parser.add_argument(
+        "--agent-socket", type=Path, metavar="PATH", help=argparse.SUPPRESS
     )
     parser.add_argument(
         "--enabled-tools",
@@ -210,6 +261,16 @@ def parse_arguments() -> argparse.Namespace:
     if cli_args[:1] == ["update"]:
         cli_args[0] = "--check-upgrade"
     args = parser.parse_args(cli_args)
+    # Resolved before --workdir changes directory, so relative paths name what
+    # the caller meant.
+    for name in ("prompt_file", "output_dir"):
+        if (path := getattr(args, name)) is not None:
+            setattr(args, name, path.expanduser().resolve())
+    # Not resolved: resolving can lengthen it past the Unix socket path limit.
+    if args.agent_socket is not None:
+        args.agent_socket = args.agent_socket.expanduser()
+    # The connected agent socket, once main has shaken hands with it.
+    args.agent_connection = None
     # --smart-approve selects the smart-approve mode unless an explicit --agent wins.
     # Smart approve is a Unified Harness classify gate with no legacy equivalent, so
     # the flag also turns on the experimental harness -- otherwise a legacy session
@@ -221,7 +282,9 @@ def parse_arguments() -> argparse.Namespace:
     return args
 
 
-def _enter_worktree(args: argparse.Namespace) -> PreparedWorktree:
+def _enter_worktree(
+    args: argparse.Namespace, headless: HeadlessRun | None
+) -> PreparedWorktree:
     """Prepare the requested worktree, hold it, and chdir into it."""
     from rich import print as rprint
 
@@ -240,8 +303,7 @@ def _enter_worktree(args: argparse.Namespace) -> PreparedWorktree:
             else:
                 session = repository.prepare(args.worktree)
     except GitError as e:
-        rprint(f"[red]Error: {e}[/]")
-        sys.exit(1)
+        _usage_error(headless, str(e))
     rprint(f"[dim]Using worktree: {session.path}[/]", file=sys.stderr)
     if managed := ManagedWorktree.at(session.root):
         managed.hold(_cli_worktree_holder(), session.pending_hold)
@@ -418,9 +480,8 @@ def main() -> None:
         return
 
     args = parse_arguments()
+    headless = _headless_run(args)
     worktree_session: PreparedWorktree | None = None
-
-    from rich import print as rprint
 
     from vibe.core.config.harness_files import init_harness_files_manager
     from vibe.core.paths import LOG_FILE
@@ -428,56 +489,130 @@ def main() -> None:
 
     init_file_logging(LOG_FILE.path)
 
+    if args.agent_socket is not None:
+        _check_agent_socket_usage(args, headless)
+
     if args.workdir:
         workdir = args.workdir.expanduser().resolve()
         if not workdir.is_dir():
-            rprint(
-                f"[red]Error: --workdir does not exist or is not a directory: {workdir}[/]"
+            _usage_error(
+                headless, f"--workdir does not exist or is not a directory: {workdir}"
             )
-            sys.exit(1)
         os.chdir(workdir)
 
     # Must run before `cwd` is read and before run_cli so that session lookups
     # (-c / --resume picker) scope to the worktree directory.
     if args.worktree and not (args.setup or args.check_upgrade):
-        worktree_session = _enter_worktree(args)
+        worktree_session = _enter_worktree(args, headless)
 
     try:
         Path.cwd()
     except FileNotFoundError:
-        rprint(
-            "[red]Error: Current working directory no longer exists.[/]\n"
-            "[yellow]The directory you started vibe from has been deleted. "
+        _usage_error(
+            headless,
+            "Current working directory no longer exists.",
+            hint="The directory you started vibe from has been deleted. "
             "Please change to an existing directory and try again, "
-            "or use --workdir to specify a working directory.[/]"
+            "or use --workdir to specify a working directory.",
         )
-        sys.exit(1)
 
     additional_dirs: list[Path] = []
     for d in args.add_dir:
         resolved = Path(d).expanduser().resolve()
         if not resolved.is_dir():
-            rprint(
-                f"[red]Error: --add-dir path does not exist "
-                f"or is not a directory: {d}[/]"
+            _usage_error(
+                headless, f"--add-dir path does not exist or is not a directory: {d}"
             )
-            sys.exit(1)
         additional_dirs.append(resolved)
 
     args.add_dir = [str(path) for path in additional_dirs]
-    init_harness_files_manager("user", "project")
+    if args.agent_socket is None:
+        init_harness_files_manager("user", "project")
+    else:
+        from vibe.cli.cli import connect_agent_socket_for_run
 
-    _run_cli_with_worktree_cleanup(args, worktree_session)
+        # _check_agent_socket_usage refused a run that is not headless.
+        assert headless is not None
+        args.agent_connection = connect_agent_socket_for_run(
+            args.agent_socket, headless
+        )
+        if args.agent_connection.sandbox is None:
+            init_harness_files_manager("user", "project")
+        else:
+            # The project lives in the sandbox: its files on the host's disk at
+            # the same path are not the project's.
+            init_harness_files_manager("user")
+
+    _run_cli_with_worktree_cleanup(args, headless, worktree_session)
+
+
+# Options that pick a host directory, or whichever session was last, for the
+# run. `--resume SESSION_ID` names its session, so it is allowed.
+_AGENT_SOCKET_CONFLICTS = (
+    ("workdir", "--workdir"),
+    ("worktree", "--worktree"),
+    ("add_dir", "--add-dir"),
+    ("continue_session", "--continue"),
+    ("teleport", "--teleport"),
+)
+
+
+def _check_agent_socket_usage(
+    args: argparse.Namespace, headless: HeadlessRun | None
+) -> None:
+    from vibe.utils.platform import is_windows
+
+    if headless is None:
+        _usage_error(
+            None, "--agent-socket needs programmatic mode: pass -p or --prompt-file"
+        )
+    if is_windows():
+        _usage_error(
+            headless,
+            "--agent-socket needs Unix domain sockets; not supported on Windows",
+        )
+    conflicts = [flag for name, flag in _AGENT_SOCKET_CONFLICTS if getattr(args, name)]
+    if conflicts:
+        _usage_error(
+            headless, f"--agent-socket cannot be combined with {', '.join(conflicts)}"
+        )
+
+
+def _headless_run(args: argparse.Namespace) -> HeadlessRun | None:
+    from vibe.cli.headless_run import HeadlessRun
+
+    return HeadlessRun.for_args(args)
+
+
+def _usage_error(
+    headless: HeadlessRun | None, message: str, *, hint: str | None = None
+) -> NoReturn:
+    """End the process on a usage error found before the run starts: with an
+    export and exit 1 in headless mode, as before otherwise.
+    """
+    if headless is not None:
+        from vibe.app_server.run_export import RunOutcome
+
+        headless.fail(RunOutcome.USAGE_ERROR, f"{message} {hint}" if hint else message)
+    from rich import print as rprint
+    from rich.markup import escape
+
+    rprint(f"[red]Error: {escape(message)}[/]")
+    if hint:
+        rprint(f"[yellow]{escape(hint)}[/]")
+    sys.exit(1)
 
 
 def _run_cli_with_worktree_cleanup(
-    args: argparse.Namespace, worktree_session: PreparedWorktree | None
+    args: argparse.Namespace,
+    headless: HeadlessRun | None,
+    worktree_session: PreparedWorktree | None,
 ) -> None:
     from vibe.cli.cli import run_cli
 
     session_started = False
     try:
-        run_cli(args)
+        run_cli(args, headless=headless)
         session_started = True
     except SystemExit as e:
         session_started = e.code in {0, None}
@@ -489,7 +624,7 @@ def _run_cli_with_worktree_cleanup(
         if (
             worktree_session is not None
             and worktree_session.created
-            and args.prompt is None
+            and headless is None
             and session_started
         ):
             _cleanup_worktree_on_exit(worktree_session)

@@ -5,6 +5,105 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.26.1] - 2026-10-09
+
+### Added
+
+- The app-server reports which process holds a stored session, and pushes a change when that process lets go of it, so a client can show a session open elsewhere as read-only
+- Rust CLI: Configure proxy and SSL certificate settings with `/proxy-setup`.
+- Rust CLI: The narrator reads each turn's summary aloud and shows a `speaking` status row that Esc or Ctrl+C stops.
+- Rust CLI: `/plugins` browses the session's plugins, and `/reload-plugins` re-pins them and reports what changed.
+- Rust CLI: Free-text answers to agent questions accept multiple lines, multi-line pastes, and click-to-place caret.
+- Rust CLI: In the `/model` and `/thinking` pickers, `s` applies the selection for the current session only, while Enter still saves it to your config.
+- Rust CLI: Picking a model immediately opens the thinking level picker for that model, and both are applied together (Esc cancels both); after a session-only model pick, the thinking level is session-only too.
+- `nix run .#rustCli` to launch the Rust terminal instead of the Python one
+- Rust CLI: `/whoami` shows the start of your API key, its scope, and its access scope.
+- Space toggles the focused checkbox in multi-select questions.
+- `enable_background_processes = false` stops the agent from starting background processes
+- `enable_subagents = false` takes subagents away from the agent on the default runtime.
+- Disable main input cursor blinking with `cursor_blink = false` or `/config`, keeping a steady caret in both Python and Rust terminals.
+- Document Library connector: search, list, open, and fetch documents from your Mistral document libraries directly in Vibe.
+- `export.json` records `steps`, the number of model calls the agent made
+- `export.json` lists the session's config issues, such as a skill it could not load, under `warnings`
+- `vibe -p` reads the prompt from `--prompt-file` or stdin, and `--output-dir` writes an `export.json` and the session journal on every exit.
+- `vibe -p --time-limit SECONDS` stops the run at a deadline; SIGTERM and Ctrl-C stop it the same way, and the session can be resumed.
+- Per-model `top_p` and `max_output_tokens` config settings.
+- Experimental `experimental_enable_model_catalog` config flag (default off) — groundwork for the upcoming model catalog, no visible effect yet.
+- New `api_stream_idle_timeout` setting (off by default) fails a model response that goes silent for that many seconds.
+- `vibe -p --agent-socket` sessions run background processes in their POSIX sandbox, as `enable_background_processes` says, instead of always turning them off
+- New `title_prompt_id` config setting to override the prompt used to generate session titles: built-in `session_title` or a custom `.md` file from `~/.vibe/prompts/` or `.vibe/prompts/`.
+
+### Changed
+
+- New sessions start their first turn faster, and long sessions open, load older messages and resume sooner.
+- `/status` shows token counts in a compact form (e.g. `1.23M`) followed by the exact value, dimmed, with thousands separators.
+- The context usage indicator and subagent token counts round to three significant digits (e.g. `12.5k` instead of `12k`).
+- Rust CLI: Queue selection removes the highlighted prompt with Backspace or Ctrl+C instead of Backspace or Delete.
+- Rust CLI: Tool group headers count each kind of call (e.g. "Read 10 files, ran 3 commands"), a single visible entry is no longer folded into a group, and result borders line up under their toggle arrows, wrapped headers included.
+- The off thinking level now actually disables reasoning on models whose offered levels include it, instead of silently leaving the server's default in charge.
+- The default model's thinking levels are now off and high; a stored low pick resets to off and a stored medium pick resets to high.
+- The default model declares a 256k context window; auto-compaction now derives from it.
+- A stale pin to the removed local model now warns and falls back to the hosted default.
+- Rust CLI: In text inputs, Cmd+Left/Right, Home/End and Ctrl+A/E at a line edge move on to the previous line start or the next line end.
+- Rust CLI: Shortcut hints use the same wording everywhere, and j/k navigate every list.
+- Rust CLI: `/config`, `/mcp`, `/plugins` and the project picker search with `/`; Esc leaves the search, then clears it, then closes. `/plugins` now shows its search field under the title, like `/mcp` and `/config`.
+- Rust CLI: Every list marks the focused row with the same highlight bar, and a green `›` marks the current value.
+- Rust CLI: Lists wrap at both ends and scroll back to their very top, Esc always goes back one level, and numbered options take their digit.
+- Your Mistral identity and plan now show in `/whoami` and the banner even when the active model isn't a Mistral model.
+- Rust CLI: Typing `/`, `!` or `&` over a fully selected input switches to that mode, and so does pasting a `/command` or `!command` into an empty input.
+- Rust CLI: the startup banner hint now reads "You are using the new Vibe TUI. To switch back to the classic TUI, set the `VIBE_CLI` environment variable to `python`."
+- Stopping a background process now also stops what it started in the background, and returns only once all of it has exited
+- A background process now keeps running until everything it started in the background has exited, not just its shell
+- The Document Library connector is now gated behind the `experimental_enable_document_library_connector` config flag (off by default) while its tools stabilize.
+- `vibe -p` exits 1 on usage or config errors, 2 on infrastructure failures and 3 when a limit or a model refusal stopped the agent
+- `vibe -p --max-turns` now exits 3, not 1, when the agent reaches the turn limit; so do `--max-tokens` and `--max-price`, including when the budget ran out as the agent finished
+- Model requests retry HTTP 520.
+- Rust CLI: The welcome banner starts at the top left, with the conversation and what's new flowing below it while queued messages stay at the bottom.
+
+### Fixed
+
+- Browser sign-in now explains when your workspace can't be used and asks you to select another one, instead of showing a generic error.
+- Rust CLI: `Ctrl+G` opens the current input in `$VISUAL` / `$EDITOR` and loads the saved text back.
+- Rust CLI: A chat input selection no longer reappears after an approval, a question, or the subagent list takes focus.
+- Rust CLI: Text stays selectable and copyable while an approval, question, picker, or other bottom panel is open, including the transcript, the loading row, and the panel itself.
+- `/reload-plugins` now offers the skills of a plugin installed during the session, without a restart.
+- Rust CLI: Copying a selection no longer adds line breaks or indentation where long text wraps on screen.
+- Rust CLI: Copying wide characters such as CJK text no longer inserts a space after each one.
+- Rust CLI: Selecting or copying a wrapped or multi-line transcript row no longer picks up its hang indent.
+- Rust CLI: Long lines in an expanded thought now wrap inside its border and indent.
+- Rust CLI: Queue selection and edit controls replace the loading hints for as long as the mode lasts, instead of a notice that timed out or lingered.
+- Rust CLI: The loading hints no longer offer steering or queued-message cancellation when Enter or Ctrl+C would do something else.
+- Rust CLI: Long free-text answers to agent questions wrap instead of overflowing the question box.
+- Rust CLI: Answered questions show a check mark instead of an expand arrow that did nothing.
+- A corrupted MCP OAuth token in the keychain no longer crashes Vibe; the server just asks you to log in again
+- Tool calls with a very large result (e.g. reading a big file) keep their tool-specific header, marked as truncated, instead of showing as a generic tool call.
+- File paths in read, write, edit, and search headers are shown relative to the working directory or workspace root that contains them.
+- Rust CLI: Rewinding to a skill invocation reloads it in `/` mode with the caret at the end and that skill highlighted in the completion menu.
+- CI: fix Nix build step
+- Prompts sent by a scheduled loop now appear in the conversation, marked with the loop that fired them.
+- Scratchpad notes now display like file contents instead of a raw tool result dump.
+- Rust CLI: Copying a transcript selection keeps the blank lines and wrapped characters it shows, and drops the spacing between messages.
+- Rewinding to an earlier message no longer fails after the session was titled or renamed.
+- Rust CLI: `/clear` resets the context window display right away instead of keeping the previous conversation's usage until the next turn.
+- Rust CLI: Dead-key and IME previews show at the input caret instead of in the loader.
+- Rust CLI: Code blocks and edit diffs wrap long lines between words instead of splitting words, and continuation rows no longer start with a space.
+- Rust CLI: On terminal (ANSI) themes, code blocks are separated from the text around them by a blank row.
+- Rust CLI: Text with `/`, `!` or `&` added before an existing message, or after leading spaces, is sent as a message instead of running a command, and stays one when rewound or edited in the queue.
+- Rust CLI: Backspace at the start of a `/`, `!` or `&` input leaves the mode and keeps the text.
+- `vibe -p` no longer offers the `cron` tool, whose calls always failed in a headless session.
+- A model request that times out now shows a readable error instead of a blank one, and is recorded in the log.
+- A question or approval the agent asks while a steered message is waiting is no longer hidden, so the session no longer stalls on "Preparing a question".
+- Rust CLI: A long working directory is shortened with an ellipsis so the token counter stays visible in the bottom bar.
+- Closing a session no longer waits for its archived worktree to be deleted.
+- Smart approve asks less often for routine work, such as edits in a worktree, CI file changes and local commits.
+- Tool results with accents or non-Latin text now reach the model as written instead of as escape sequences.
+- Fix turns crashing with "Completed public history entry is frozen" when a backend keeps streaming reasoning or text after a tool call
+
+### Removed
+
+- The bundled Devstral (local) model
+- New `--experimental-harness` turns no longer re-state scratchpad notes into prompts, so they no longer add `<vibe-scratchpad>` blocks to the transcript.
+
 ## [2.26.0] - 2026-10-05
 
 ### Added

@@ -49,7 +49,7 @@ async def test_whoami_command_reports_missing_identity() -> None:
         messages = [message._content for message in app.query(UserCommandMessage)]
 
     assert handled is True
-    assert any("No identity information" in content for content in messages)
+    assert any("No Mistral account information" in content for content in messages)
     assert not list(app.query(LoadingWidget))
 
 

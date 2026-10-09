@@ -8,9 +8,11 @@ use tokio::sync::mpsc;
 
 use crate::app::{App, Status};
 use crate::commands::{stress, submission};
+use crate::config_write::Scope;
+use crate::focus::Focus;
 use crate::mouse::{scroll_chat, KEY_SCROLL_STEP};
 use crate::quit_manager::QuitConfirmKey;
-use crate::server::{method, Client};
+use crate::server::Client;
 use crate::utils::input_edit;
 use crate::{
     agents, chat_input, clipboard, completion_manager, config, config_write, connector_auth,
@@ -100,7 +102,7 @@ fn is_todo_key(key: &KeyEvent) -> bool {
 /// Handle application-level bindings before a modal consumes local keys.
 pub fn handle_priority_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) -> Option<bool> {
     if key.code == KeyCode::BackTab {
-        if app.vibe_code_project.open {
+        if app.focus() == Focus::VibeCodeProject {
             return None;
         }
         agents::cycle(app, client);
@@ -115,12 +117,20 @@ pub fn handle_priority_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) -
     {
         return Some(false);
     }
+    if is_ctrl_c(&key) && crate::proxy_setup::copy_selection(app, false) {
+        return Some(false);
+    }
     if is_ctrl_c(&key) {
         if app.recording_active() {
             app.cancel_recording();
             return Some(false);
         }
         if stress::stop(app) {
+            return Some(false);
+        }
+        // Queue selection takes Ctrl+C to remove the highlighted prompt (ADR 0013).
+        if app.queue.selected.is_some() && !app.queue.editing && composer_reachable(app) {
+            message_queue::handle_selection_key(app, client, key);
             return Some(false);
         }
         app.chat_input.normalize_positions();
@@ -165,21 +175,12 @@ fn copy_selected_input(app: &App) -> bool {
 }
 
 fn composer_owns_key(app: &App) -> bool {
-    !app.approval.open
-        && !app.question_app.open
-        && !app.config_screen.open
-        && !app.resume_picker.open
-        && !app.mcp.open
-        && !app.mcp_oauth.open
-        && !app.connector_auth.open
-        && !app.rewind.open
-        && !app.theme_picker.open
-        && !app.model_picker.open
-        && !app.log_level_picker.open
-        && !app.thinking_picker.open
-        && !app.voice_app.open
-        && !app.subagents.list.focused
-        && (app.queue.selected.is_none() || app.queue.editing)
+    app.focus() == Focus::Composer && (app.queue.selected.is_none() || app.queue.editing)
+}
+
+/// Whether the composer and its queue mode receive keys before any modal or view.
+pub(crate) fn composer_reachable(app: &App) -> bool {
+    app.focus() == Focus::Composer && app.subagents.viewed_subagent_id.is_none()
 }
 
 /// Handle one key press; true means the application should exit.
@@ -210,37 +211,6 @@ fn handle_key_inner(
         return exit;
     }
     app.chat_input.normalize_positions();
-    // The question app owns keys while the server waits for the user's answer,
-    // except the app-level priority bindings that scroll the transcript.
-    if app.question_app.open {
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        match key.code {
-            KeyCode::Up if shift => scroll_chat(app, true, KEY_SCROLL_STEP),
-            KeyCode::Down if shift => scroll_chat(app, false, KEY_SCROLL_STEP),
-            _ => question_input::handle_key(app, client, key),
-        }
-        return false;
-    }
-    // The theme picker owns keys while open.
-    if app.theme_picker.open {
-        handle_theme_key(app, client, key);
-        return false;
-    }
-    // The model picker owns keys while open.
-    if app.model_picker.open {
-        handle_model_key(app, client, key);
-        return false;
-    }
-    // The log-level picker owns keys while open.
-    if app.log_level_picker.open {
-        handle_log_level_key(app, client, key);
-        return false;
-    }
-    // The thinking picker owns keys while open.
-    if app.thinking_picker.open {
-        handle_thinking_key(app, client, key);
-        return false;
-    }
     // The subagent list owns navigation and selection while focused (Python
     // `SubagentList`); other keys fall through, and the unfocused composer
     // never edits (Python's TextArea ignores keys without focus).
@@ -307,14 +277,17 @@ fn handle_key_inner(
         }
     }
     // Queue selection locks the input: navigation, removal, edit and escape are
-    // intercepted before any editing key (ADR 0013).
-    if app.queue.selected.is_some() && !app.queue.editing {
+    // intercepted before any editing key (ADR 0013), only where its hints show.
+    if app.queue.selected.is_some() && !app.queue.editing && composer_reachable(app) {
         message_queue::handle_selection_key(app, client, key);
         return false;
     }
     // Editing a queued prompt: only Escape is special, the rest edits the text.
-    if app.queue.editing && key.code == KeyCode::Esc {
+    if app.queue.editing && key.code == KeyCode::Esc && composer_reachable(app) {
         message_queue::end_edit(app);
+        return false;
+    }
+    if crate::external_editor::request(app, &key) {
         return false;
     }
     // Cut the chat input selection or current line; copy is an app-level priority binding.
@@ -339,34 +312,10 @@ fn handle_key_inner(
         paste_image::request(app, true);
         return false;
     }
-    let mode = match key.code {
-        KeyCode::Char('!') => Some(crate::input_modes::InputMode::Bash),
-        KeyCode::Char('/') => Some(crate::input_modes::InputMode::Slash),
-        KeyCode::Char('&') if crate::commands::has_command("/teleport") => {
-            Some(crate::input_modes::InputMode::Teleport)
-        }
-        _ => None,
-    };
-    let modified = key
-        .modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
-    if !modified
-        && app.chat_input.mode == crate::input_modes::InputMode::Prompt
-        && app.chat_input.input.is_empty()
-        && mode.is_some()
-    {
+    if app.chat_input.apply_mode_key(&key) {
+        app.chat_input.scroll = None;
+        crate::long_paste::dismiss(app);
         reset_history_state(app);
-        app.chat_input.mode = mode.unwrap_or_default();
-        completion_manager::input_changed(app);
-        return false;
-    }
-    if matches!(key.code, KeyCode::Backspace)
-        && app.chat_input.mode != crate::input_modes::InputMode::Prompt
-        && app.chat_input.input.is_empty()
-        && app.chat_input.cursor == 0
-    {
-        reset_history_state(app);
-        app.chat_input.mode = crate::input_modes::InputMode::Prompt;
         completion_manager::input_changed(app);
         return false;
     }
@@ -441,8 +390,7 @@ fn handle_key_inner(
             submission::interrupt_turn(app, client);
             app.overlays.last_escape = Some(std::time::Instant::now());
         }
-        // A summary request is in flight: cancel it, without arming the
-        // double-escape (Python `_try_interrupt_no_job_steps`).
+        // An active narrator stops without arming the double-escape (Python `_try_interrupt_no_job_steps`).
         KeyCode::Esc if turn_summary::cancel(app) => {}
         KeyCode::Esc => handle_escape(app, client),
         // Ctrl+O toggles every tool group and result body (Python `toggle_tool`).
@@ -550,7 +498,7 @@ fn move_cursor_page(app: &mut App, down: bool) {
 }
 
 /// The `/theme` picker owns keys: arrows/jk preview, Enter selects, Esc reverts.
-fn handle_theme_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
+pub fn handle_theme_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
             theme_picker::cancel(app);
@@ -620,8 +568,9 @@ pub fn handle_mcp_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
         return;
     }
     match key.code {
+        // Esc backs out one level: the tool list to the source list, then closes.
+        KeyCode::Esc if app.mcp.viewing_name.is_some() => mcp::back(app),
         KeyCode::Esc => mcp::close(app),
-        KeyCode::Backspace => mcp::back(app),
         KeyCode::Up | KeyCode::Char('k') => mcp::navigate(app, false),
         KeyCode::Down | KeyCode::Char('j') => mcp::navigate(app, true),
         KeyCode::Enter => mcp::select(app),
@@ -632,138 +581,58 @@ pub fn handle_mcp_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     }
 }
 
-/// The connector auth app owns keys while open (Python `ConnectorAuthApp.BINDINGS`
-/// plus its plain `OptionList`, which has no `j`/`k` navigation).
+/// The connector auth app owns keys while open (Python `ConnectorAuthApp.BINDINGS`).
 pub fn handle_connector_auth_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     match key.code {
-        KeyCode::Esc | KeyCode::Backspace => connector_auth::close(app, client, false),
+        KeyCode::Esc => connector_auth::close(app, client, false),
         KeyCode::Char('r') | KeyCode::Char('R') => connector_auth::refresh(app, client),
-        KeyCode::Up => connector_auth::navigate(app, false),
-        KeyCode::Down => connector_auth::navigate(app, true),
+        KeyCode::Up | KeyCode::Char('k') => connector_auth::navigate(app, false),
+        KeyCode::Down | KeyCode::Char('j') => connector_auth::navigate(app, true),
         KeyCode::Enter => connector_auth::select(app),
         _ => {}
     }
 }
 
-/// The MCP OAuth app owns keys while open (Python `MCPOAuthApp.BINDINGS` plus
-/// its plain `OptionList`, which has no `j`/`k` navigation).
+/// The MCP OAuth app owns keys while open (Python `MCPOAuthApp.BINDINGS`).
 pub fn handle_mcp_oauth_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     match key.code {
-        KeyCode::Esc | KeyCode::Backspace => mcp_oauth::close(app, client),
+        KeyCode::Esc => mcp_oauth::close(app, client),
         KeyCode::Char('r') | KeyCode::Char('R') => mcp_oauth::refresh(app, client),
-        KeyCode::Up => mcp_oauth::navigate(app, false),
-        KeyCode::Down => mcp_oauth::navigate(app, true),
+        KeyCode::Up | KeyCode::Char('k') => mcp_oauth::navigate(app, false),
+        KeyCode::Down | KeyCode::Char('j') => mcp_oauth::navigate(app, true),
         KeyCode::Enter => mcp_oauth::select(app),
         _ => {}
     }
 }
 
-/// The `/model` picker owns keys: arrows/jk navigate, Enter selects, Esc cancels.
+/// The `/model` picker owns keys: arrows/jk navigate, Enter saves to config,
+/// `s` keeps the pick for this session only, Esc cancels.
 /// Unlike the theme picker, navigation does not live-preview (Python `ModelPickerApp`).
-fn handle_model_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
+pub fn handle_model_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => model_picker::cancel(app),
         KeyCode::Up | KeyCode::Char('k') => model_picker::navigate(app, false),
         KeyCode::Down | KeyCode::Char('j') => model_picker::navigate(app, true),
-        KeyCode::Enter => select_model(app, client),
+        KeyCode::Enter => model_picker::select(app, client, Scope::Saved),
+        KeyCode::Char('s') => model_picker::select(app, client, Scope::Session),
         _ => {}
     }
 }
 
-/// Commit the highlighted model: close the picker and persist the alias (`""`
-/// for Default/unpinned) via `config/write`, mirroring Python's `_persist_model`.
-/// The written runtime comes back on the response, then a `config/reload` follows
-/// (Python `_reload_config`); both runtimes are applied on the main thread.
-fn select_model(app: &mut App, client: &Arc<Client>) {
-    let alias = model_picker::selected_alias(app);
-    app.model_picker.open = false;
-    let Some(session_id) = app.session.session_id.clone() else {
-        return;
-    };
-    let client = client.clone();
-    let model_tx = app.model_picker.tx.clone();
-    let pending = app.commit_started();
-    tokio::spawn(async move {
-        let ops = vec![config_write::set_op("/active_model", alias)];
-        let written =
-            config_write::write(&client, &session_id, ops, "app-server config update").await;
-        let reload = serde_json::json!({
-            "sessionId": session_id,
-            "reloadRuntime": true,
-        });
-        let reloaded = match written.is_ok() {
-            true => client.request(method::CONFIG_RELOAD, reload).await.ok(),
-            false => None,
-        };
-        // Only the final runtime reaches the UI: the written one is superseded
-        // before it could be seen, and one event keeps the commit's last paint
-        // and the idle marker in step.
-        let event = match (reloaded, written) {
-            (Some(runtime), _) => model_picker::Event::Reloaded(runtime),
-            (None, Ok(runtime)) => model_picker::Event::Written(runtime),
-            (None, Err(_)) => model_picker::Event::Failed,
-        };
-        deliver(model_tx, event, &pending).await;
-    });
-}
-
-/// The `/thinking` picker owns keys: arrows/jk navigate, Enter selects, Esc cancels.
-fn handle_thinking_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
+/// The `/thinking` picker owns keys: arrows/jk navigate, Enter commits to
+/// `enter_scope`, `s` keeps the level for this session only, Esc cancels.
+pub fn handle_thinking_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => thinking_picker::cancel(app),
         KeyCode::Up | KeyCode::Char('k') => thinking_picker::navigate(app, false),
         KeyCode::Down | KeyCode::Char('j') => thinking_picker::navigate(app, true),
-        KeyCode::Enter => select_thinking(app, client),
+        KeyCode::Enter => {
+            let scope = thinking_picker::enter_scope(app);
+            thinking_picker::select(app, client, scope);
+        }
+        KeyCode::Char('s') => thinking_picker::select(app, client, Scope::Session),
         _ => {}
     }
-}
-
-/// Commit the highlighted thinking level: close the picker and persist via
-/// `config/write` to `/models/<alias>/thinking`, then `config/reload`.
-fn select_thinking(app: &mut App, client: &Arc<Client>) {
-    let level = thinking_picker::selected_level(app).to_owned();
-    app.thinking_picker.open = false;
-    let Some(session_id) = app.session.session_id.clone() else {
-        return;
-    };
-    let alias = app.model_picker.current_model.clone();
-    if alias.is_empty() {
-        return;
-    }
-    let alias = escape_json_pointer(&alias);
-    let client = client.clone();
-    let thinking_tx = app.thinking_picker.tx.clone();
-    let pending = app.commit_started();
-    tokio::spawn(async move {
-        let path = format!("/models/{alias}/thinking");
-        let failure_prefix = format!("Failed to apply: thinking {level} — ");
-        let ops = vec![config_write::set_op(&path, level)];
-        let written =
-            config_write::write(&client, &session_id, ops, "app-server thinking update").await;
-        // Only a clean write is worth reloading; `_run_settings_update` mounts the error.
-        let event = match written {
-            Err(error) => thinking_failed(&failure_prefix, &error),
-            Ok(_) => {
-                let reload = serde_json::json!({
-                    "sessionId": session_id,
-                    "reloadRuntime": true,
-                });
-                match client.request(method::CONFIG_RELOAD, reload).await {
-                    Ok(runtime) => thinking_picker::Event::Reloaded(runtime),
-                    // Python's `_run_settings_update` wraps write + reload
-                    // in one try/except: a reload failure mounts the same
-                    // "Failed to apply" error as a write rejection.
-                    Err(error) => thinking_failed(&failure_prefix, &error.to_string()),
-                }
-            }
-        };
-        deliver(thinking_tx, event, &pending).await;
-    });
-}
-
-/// Python `_run_settings_update`: a failed update mounts an `ErrorMessage`.
-fn thinking_failed(prefix: &str, error: &str) -> thinking_picker::Event {
-    thinking_picker::Event::Failed(format!("{prefix}{error}"))
 }
 
 /// Hand a commit's answer to the main thread, which releases the commit once it
@@ -942,8 +811,9 @@ fn handle_paste_inner(app: &mut App, text: &str) -> Option<(usize, String, Vec<S
         app.chat_input.sync_mentions_at(lo);
     }
     app.chat_input.anchor = None;
+    let text = app.chat_input.open_pasted_mode(text);
     // A path list stays inline: the existence probe turns it into compact mentions.
-    let candidates = match names {
+    let candidates = match app.chat_input.mode.names_images() {
         true => paste_path::path_candidates(text),
         false => Vec::new(),
     };
@@ -1012,8 +882,7 @@ fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
         question_input::handle_key(app, client, esc);
         return false;
     }
-    // A summary request is in flight: cancel it (Python's ladder runs the
-    // narrator step before touching the queue).
+    // An active narrator stops first; Python's ladder runs it before the queue step.
     if turn_summary::cancel(app) {
         return false;
     }
@@ -1065,9 +934,4 @@ fn handle_ctrl_d(app: &mut App) -> bool {
 fn request_quit_confirmation(app: &mut App, key: QuitConfirmKey) {
     let queued = app.queue.len();
     app.quit.request_confirmation(key, queued);
-}
-
-/// Escape a JSON pointer token (Python `_escape_json_pointer_token`).
-fn escape_json_pointer(value: &str) -> String {
-    value.replace('~', "~0").replace('/', "~1")
 }

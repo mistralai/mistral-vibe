@@ -157,7 +157,7 @@ falls back to the current default model.
 The configuration file uses TOML format. When it does not exist, Vibe uses its
 built-in defaults and creates a sparse file on the first persisted setting.
 Settings can also be overridden via environment variables with the `VIBE_`
-prefix (e.g., `VIBE_ACTIVE_MODEL=local`).
+prefix (e.g., `VIBE_ACTIVE_MODEL=my-local-model`).
 
 Custom prompt IDs are resolved from project-local `.vibe/prompts/` first, then
 from `~/.vibe/prompts/`, and finally from the built-in bundled prompts.
@@ -171,12 +171,17 @@ active_model = "mistral-medium-3.5"  # Model alias to pin; omit or set "" to fol
 # UI preferences
 theme = "auto"  # Follow terminal background, then OS light/dark preference
 disable_welcome_banner_animation = false
+cursor_blink = true  # Blink the input cursor; false keeps it steady
 autocopy_to_clipboard = true  # Enable automatic copying of selected text to clipboard
 file_watcher_for_autocomplete = true  # Refresh @ suggestions after workspace changes
 ask_confirmation_on_exit = true  # Require a second Ctrl+D to quit (Ctrl+C always confirms)
 show_greeting = true  # Show "Hello {name}" greeting below the banner at startup (Mistral providers, once per 24h)
 log_level = "WARNING"  # Optional. DEBUG | INFO | WARNING | ERROR | CRITICAL — log level for ~/.vibe/logs/vibe.log
 ```
+
+`cursor_blink` controls the main input cursor in both Python and Rust terminals.
+Change it through `/config`, or edit `config.toml` and run `/reload`; no restart
+is needed.
 
 ### Copy and Text Selection
 
@@ -189,13 +194,19 @@ bypass_tool_permissions = false    # Skip tool approval prompts
 worktree_limit = 15                # Maximum recent managed worktrees retained by Desktop; only clean, remote-backed, inactive worktrees are pruned
 system_prompt_id = "cli"          # System prompt: "cli", "lean", or custom .md filename
 compaction_prompt_id = "compact"  # Compaction prompt: built-in "compact" or custom .md filename
+title_prompt_id = "session_title" # Session title prompt: built-in "session_title" or custom .md filename
 enable_telemetry = true
+enable_background_processes = true  # false: no tools.process in run_typescript; commands only run to completion in the foreground
+enable_subagents = true            # false: no tools.subagent in run_typescript; the agent works alone
 enable_update_checks = true       # Daily update check (uv or PyPI); prompts on next launch when a newer release exists
 enable_notifications = true
 experimental_enable_tab_status = true  # Experimental: update the terminal tab title with state indicators (>> running, ? waiting)
+experimental_enable_model_catalog = false  # Experimental: fetch the curated model catalog from the Mistral provider at session start; failures fall back to local config
+experimental_enable_document_library_connector = false  # Experimental: expose the document_library connector and its MCP tools
 enable_system_trust_store = false  # Use OS trust store for outbound HTTPS
 api_timeout = 720.0               # API request timeout in seconds
 api_retry_max_elapsed_time = 300.0  # Retry budget for retryable API failures in seconds
+api_stream_idle_timeout = 0.0     # Silence after the model starts answering that counts as a stall, in seconds; 0 disables
 auto_compact_threshold = 200000   # Fallback for models with neither their own threshold nor a declared window
 
 # Git commit behavior
@@ -270,15 +281,19 @@ input_price = 1.5
 output_price = 7.5
 cached_input_price = 0.15         # per million cached input tokens; omit to bill at input_price
 thinking = "high"                 # "off", "low", "medium", "high", "max"
-thinking_levels = ["off", "high"] # levels /thinking offers; omit for all five, [] for off only
+thinking_levels = ["off", "high"] # levels /thinking offers; omit for all five, [] for off only. Including "off" claims the model accepts a no-reasoning request (mistral provider)
 auto_compact_threshold = 200000
 supports_images = true            # vision-capable; allows @-mentioned images
 # max_context_length = 262144     # optional; auto-compaction defaults to 80% of the declared window
+# top_p = 0.95                    # optional nucleus sampling, (0, 1]; omit for the provider default
+# max_output_tokens = 32768       # optional per-request output cap; a reply cut off at it ends `vibe -p` with outcome `length`
 
 [[models]]
+# A user-defined local model served by llama.cpp; the built-in list ships only
+# the hosted Mistral Medium 3.5.
 name = "devstral"
 provider = "llamacpp"
-alias = "local"
+alias = "my-local-model"
 
 # Optional override. A non-vision active model already picks up any
 # supports_images model on its OWN provider automatically; set this only to
@@ -521,8 +536,14 @@ Connectors are listed and titled by their backend `display_name` (falling back
 to the connector name); the stable alias still keys config, tool names, and
 selection.
 
+The built-in `document_library` connector is gated behind
+`experimental_enable_document_library_connector` (default: false) while its MCP
+tools stabilize; when off, only `web_search` is requested from the connector
+bootstrap.
+
 ```toml
 enable_connectors = true          # Master switch (default: true)
+experimental_enable_document_library_connector = false  # Expose the document_library connector (default: false)
 
 [[connectors]]
 name = "github"
@@ -777,6 +798,10 @@ vibe [PROMPT]                       # Start interactive session with optional pr
 vibe -p TEXT / --prompt TEXT         # Programmatic mode using `default_agent`, one-shot, exit
 vibe -p TEXT --auto-approve          # Programmatic mode with all tool calls approved
 vibe -p TEXT --agent lean --yolo      # Lean mode with all tool calls approved
+vibe -p < task.md                   # Programmatic mode reading the prompt from stdin
+vibe --prompt-file PATH             # Programmatic mode reading the prompt from a file
+vibe -p TEXT --output-dir DIR       # Write DIR/export.json (outcome, usage, cost, config) and copy the session journal to DIR/session on every exit
+vibe -p TEXT --time-limit SECONDS   # Stop the run after SECONDS (outcome `deadline`); SIGTERM stops it the same way (outcome `terminated`)
 vibe --agent NAME                   # Select agent profile (falls back to `default_agent` config)
 vibe --auto-approve / --yolo         # Approve all tool calls for the selected agent
 vibe --workdir DIR                  # Change working directory
@@ -790,14 +815,21 @@ vibe -v / --version                 # Show version
 vibe --setup                        # Run onboarding/setup
 vibe update / vibe --check-upgrade  # Check for a Vibe update now, prompt to install it, and exit
 vibe --max-turns N                  # Max assistant turns (programmatic mode)
-vibe --max-price DOLLARS            # Max cost limit (programmatic mode)
-vibe --max-tokens N                 # Max total session tokens (programmatic mode)
+vibe --max-price DOLLARS            # Max cost limit (programmatic mode; outcome `price_limit`)
+vibe --max-tokens N                 # Max total session tokens (programmatic mode; outcome `token_limit`)
 vibe --enabled-tools TOOL           # Enable specific tools (repeatable)
 vibe --disabled-tools TOOL          # Disable specific tools (repeatable)
 vibe --output text|json|streaming   # Output format (programmatic mode)
 vibe --experimental-harness        # Select the Unified Harness backend (redundant: it is the default runtime)
 vibe --legacy-harness             # Force the legacy Python harness (temporary escape hatch)
 ```
+
+Programmatic mode exit codes: `0` the agent finished; `1` usage or config error;
+`2` infrastructure failure (model API after retries, runtime); `3` the agent
+stopped without finishing, on a limit or a model refusal (`turn_limit`,
+`token_limit`, `price_limit`, `deadline`, `terminated`, `length`, `refusal`).
+`export.json` records the same `outcome`. A stopped session can be resumed with
+`--resume SESSION_ID`.
 
 ## Built-in Agents
 
@@ -1074,10 +1106,10 @@ enters queue selection mode: the last queued item is highlighted and
 the input is locked (no cursor, no typing). **Up/Down** navigate
 between queued prompts, **Enter** loads the selected prompt into the input
 for editing (press Enter again to update it in-place and leave selection
-mode, restoring the previous input text), **Backspace**
-or **Delete** removes the selected item and moves selection to the
-next, and **Esc** exits selection mode and restores the original
-input text.
+mode, restoring the previous input text), **Backspace** (or **Delete** in the
+Python CLI, **Ctrl+C** in the Rust CLI) removes the selected item and moves
+selection to the next, and **Esc** exits selection mode and restores the
+original input text.
 
 ## Plugins
 
@@ -1233,7 +1265,7 @@ Two entry points:
   `user-invocable` skill is loaded for that turn; its rendered instructions
   follow the literal prompt in the same user message, and the transcript shows
   one `Loaded skill` entry per skill. Typing `/` anywhere but at the start of
-  the prompt (where it still opens the slash command menu) opens the same
+  the prompt (where, on an empty input, it opens the slash command menu) opens the same
   caret-based completion popup as `@` file mentions. A mention must be the
   lowercase skill name standing on its own, so paths such as `/usr/bin` and
   mentions inside inline code or fenced code blocks load nothing.
@@ -1248,6 +1280,10 @@ using OpenAI's `agents/openai.yaml` convention can set
 `policy.allow_implicit_invocation: false` for the same provider-independent behavior.
 
 A `/` at the very start of the input opens the slash menu (commands and skills).
+In the Rust CLI, typing `/`, `!` or `&` on an empty (or fully selected) input
+switches to that mode; the same character typed before existing text or after
+leading spaces is sent as a plain message, never as a command. Backspace at the
+start of a `/`, `!` or `&` input leaves the mode and keeps the text.
 A `/word` typed mid-prompt (not the first word) instead shows an inline ghost-text
 preview of the best-matching skill name; press `Tab` to accept it. Only skills are
 offered inline, and no popup is shown.
@@ -1273,6 +1309,10 @@ offered inline, and no popup is shown.
   pause before showing tool-approval / ask-user-question dialogs (default:
   `1000`). Set to `0` to disable. Negative or non-numeric values fall back
   to the default.
+- `VISUAL` / `EDITOR` - Editor that `Ctrl+G` opens on the current input, split
+  like a shell command (e.g. `code --wait`); `VISUAL` wins, the fallback is
+  `nano`. The input is replaced with the saved text only when the editor exits
+  successfully, so the editor must wait until the file is closed.
 
 ## API Keys (.env file)
 

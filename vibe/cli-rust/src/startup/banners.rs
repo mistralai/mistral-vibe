@@ -12,6 +12,7 @@ use crate::app::App;
 use crate::commands::submission::new_message_id;
 use crate::commands::CommandEvent;
 use crate::server::{method, Client, WorkspaceUntrustedConfigResponse};
+use crate::terminal_detect;
 use crate::transcript::local;
 use crate::utils::{cache_store, whats_new_cache};
 
@@ -145,11 +146,9 @@ fn promo_whats_new_suffix() -> String {
     )
 }
 
-/// Python `should_show_promo` and `_is_vscode_family_terminal`: every
-/// `TERM_PROGRAM=vscode` variant (VS Code, Insiders, Cursor) lands in the
-/// family, so the terminal check reduces to the program name.
+/// Python `should_show_promo` gated by `_is_vscode_family_terminal`.
 fn should_show_promo() -> bool {
-    std::env::var("TERM_PROGRAM").is_ok_and(|program| program.to_lowercase() == "vscode")
+    terminal_detect::is_vscode_family(terminal_detect::detect())
         && SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .is_ok_and(|now| now.as_secs() >= PROMO_START)

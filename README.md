@@ -253,6 +253,7 @@ Most modern terminals should work, but older or minimal terminal emulators may h
 Simply run `vibe` to enter the interactive chat loop.
 
 - **Multi-line Input**: Press `Ctrl+J` or `Shift+Enter` for select terminals to insert a newline.
+- **Input Cursor**: The main input cursor blinks by default. Set `cursor_blink = false` in `config.toml` for a steady cursor. Changes apply without restarting through `/config` or `/reload` in both Python and Rust terminals.
 - **File Paths**: Reference files in your prompt using the `@` symbol for smart autocompletion (e.g., `> Read the file @src/agent.py`). A bare `@` quickly lists immediate non-hidden entries; after a path character, Git workspaces suggest tracked and non-ignored files. Pasting a standalone existing absolute or home-relative file or folder also creates a mention.
 - **Shell Commands**: Prefix any command with `!` to execute it directly in your shell, bypassing the agent (e.g., `> !ls -l`).
 - **External Editor**: Press `Ctrl+G` to edit your current input in an external editor.
@@ -303,8 +304,8 @@ vibe --prompt "Refactor the main function in cli/main.py to be more modular." --
 When using `--prompt`, you can specify additional options:
 
 - **`--max-turns N`**: Limit the maximum number of assistant turns. The session will stop after N turns.
-- **`--max-price DOLLARS`**: Set a maximum cost limit in dollars. The session will be interrupted if the cost exceeds this limit.
-- **`--max-tokens N`**: Set a maximum cumulative LLM token budget for the session, counting both prompt and completion tokens. The session will be interrupted if usage exceeds this limit.
+- **`--max-price DOLLARS`**: Set a maximum cost limit in dollars for this run. The turn is interrupted once the cost exceeds this limit, and the outcome is `price_limit`.
+- **`--max-tokens N`**: Set a maximum cumulative LLM token budget for this run, counting both prompt and completion tokens. The turn is interrupted once usage exceeds this limit, and the outcome is `token_limit`.
 - **`--agent NAME`**: Select the agent profile for this run.
 - **`--auto-approve`, `--yolo`**: Approves all tool calls without prompting, including in interactive sessions. Can be combined with any `--agent` value.
 - **`--enabled-tools TOOL`**: Enable specific tools. In programmatic mode, this disables all other tools. Can be specified multiple times. Supports exact names, glob patterns (e.g., `bash*`), or regex with `re:` prefix (e.g., `re:^serena_.*$`).
@@ -314,11 +315,201 @@ When using `--prompt`, you can specify additional options:
   - `json`: All messages as JSON at the end
   - `streaming`: Newline-delimited JSON per message
 
+  On a resumed session, `text` and `streaming` cover only the new run, so a run that ends without a reply of its own prints none; `json` holds the whole session.
+- **`--prompt-file PATH`**: Read the prompt from a file instead of `--prompt`. With `-p` and no text, the prompt is read from stdin.
+- **`--time-limit SECONDS`**: Stop the run after this many seconds. The active turn and its tool processes are stopped, and the session can be resumed with `--resume`. SIGTERM stops a run the same way.
+- **`--output-dir DIR`**: Write `DIR/export.json` and copy the session journal to `DIR/session/`, whichever way the run ends. The export records the Vibe version, the effective config (header and environment values redacted), token usage, cost, the number of model calls the agent made (`steps`), the stop reason and the outcome. When the session had config issues, such as a skill or a config file it could not load, the export lists them under `warnings`, each as `{"message": str, "source": str | null}`, where `source` names the file or skill it is about; the field is left out when there are none, and the run goes on regardless. Usage, cost and `steps` count this run only, also on a resumed session, while the copied journal holds the whole session. Only an argument the parser itself rejects (an unknown flag, a malformed value) exits 1 without an export.
+
 Example:
 
 ```bash
 vibe --prompt "Analyze the codebase" --max-turns 5 --max-price 1.0 --max-tokens 50000 --output json
+vibe --prompt-file task.md --auto-approve --time-limit 1800 --output-dir out/
 ```
+
+#### Exit Codes
+
+| Code | Outcome in `export.json` | Meaning |
+| --- | --- | --- |
+| `0` | `finished` | The agent finished. |
+| `1` | `usage_error`, `config_error` | The run could not start as asked. |
+| `2` | `infrastructure_failure` | The model API (after retries) or the runtime failed. |
+| `3` | `turn_limit`, `token_limit`, `price_limit`, `deadline`, `terminated`, `length`, `refusal` | The agent stopped without finishing: a limit or a model refusal; score what it left. `length` means the conversation or the last answer hit a model token limit: the context window, or the output-token cap (`max_output_tokens` on the model). |
+| `4` | `aborted` | The `--agent-socket` server aborted the run (experimental, see below); `error.message` in `export.json` is the server's message. |
+
+A model refusal ends the run as `refusal`, exit `3`; `error` in `export.json` has the code `refusal`, and its message gives the refusal's category and explanation when the model sends them. Only the legacy runtime (`--legacy-harness`) reports a refusal as one.
+
+#### Agent Socket (`--agent-socket`, experimental)
+
+Experimental: the option is hidden from `--help`, and it and the protocol below
+may change or go away without notice.
+
+`vibe -p --agent-socket PATH` runs the same session as `vibe -p` on the host,
+with the same export, exit codes, limits and SIGTERM handling, connected to an
+agent server on the Unix socket `PATH`. The server serves two independent
+things, either or both:
+
+- **A sandbox.** The session's file and shell tools run in it instead of on
+  this host, and the session starts in the sandbox's workspace (see "Sandboxed
+  sessions" below).
+- **Tools.** The server declares them in its handshake, and the session offers
+  them to the model next to Vibe's own; each call goes back to the server. A
+  tool's `modelAccess` decides whether the model calls it directly, from
+  `run_typescript` as `tools.<namespace>.<name>`, or both. `--enabled-tools` and
+  `--disabled-tools` filter only Vibe's own tools. Without a sandbox, the
+  session runs on this host as plain `vibe -p` does.
+
+The option needs `-p` or `--prompt-file`, and cannot be combined with
+`--workdir`, `--worktree`, `--add-dir`, `--continue` or `--teleport`; those are
+usage errors (exit 1). It is not supported on Windows (exit 1).
+
+To continue a finished run with a new prompt, start a new run with
+`--resume SESSION_ID`, taking the ID from `session_id` in the first run's
+`export.json`. The new run redoes the handshake, so the server may be a new one
+and declares its tools again; the model sees the whole earlier conversation
+followed by the new prompt. Every limit (`--max-turns`, `--time-limit`,
+`--max-tokens`, `--max-price`) counts from the new run's start. Its export, under
+the same `session_id`, counts only its own `steps`, `usage` and `cost_usd`; its
+`journal_dir` holds the whole session, earlier runs included.
+
+##### Sandboxed sessions
+
+When the server serves a sandbox, the workspace context (git metadata and
+`AGENTS.md` files) is read from the sandbox. Session storage, model calls, MCP
+servers and hooks stay on this host. Background processes run in the sandbox,
+which must be POSIX for them, as `enable_background_processes` says. Rewinding
+the session restores no files, since the files are in the sandbox. If the
+sandbox fails, the run ends as `infrastructure_failure`.
+
+Vibe's tool helper can crash in a sandbox that works: it exits part way through
+a tool call without answering, say from a segmentation fault or an
+out-of-memory kill. The model then reads a tool error saying the command may or
+may not have run, with the exit code and what the helper printed, and the turn
+goes on. The third crash in a row ends the run as `infrastructure_failure`; a
+tool call the helper answers, even with an error, resets the count. Sessions
+sharing the sandbox, such as subagents, share the count. A helper that cannot
+start at all (no interpreter at `python`) ends the run at once, as does a crash
+outside the model's tool calls, such as while copying skills into the sandbox
+or saving a large output there.
+
+As on the host, when the model reads a file, the `AGENTS.md` files in the
+directories between it and the workspace are added to what it reads, once per
+session. Looking for them costs a `sandbox/readFile` request per directory, so
+a session looks in each directory once. When Vibe's own `write_file` or
+`search_replace` writes an `AGENTS.md`, its directory is looked in again on the
+next read below it; a `bash` command whose text names `AGENTS.md` makes every
+directory be looked in again. An `AGENTS.md` that appears any other way, for
+example from a script or `git checkout`, in a directory already looked in is
+not seen for the rest of the session.
+
+File tools follow symlinks in the sandbox, as on the host. Approvals, though,
+match a path as written, since this host cannot see the sandbox's links. So
+without `--auto-approve`, approving a link also allows its target, and a link
+in the workspace that points outside it counts as a workspace path, for example
+for `accept-edits`. The target is still in the sandbox. Runs with
+`--auto-approve`, such as evaluation runs, ask for no approval and are not
+affected.
+
+A tool output too large to hand the model whole is kept with the session on
+this host, as with plain `vibe -p`, and also saved in an owner-only directory
+under the sandbox's temporary directory. The model is given that sandbox path,
+so it reads the output back with the sandboxed tools.
+
+Only the user's Vibe files are loaded on this host, and `--trust` has no
+effect. Of the project's own files, only the `AGENTS.md` files and the skills
+(`.vibe/skills` and `.agents/skills`) are read from the sandbox. The rest of the
+project's `.vibe/` directory (config, agents, tools, hooks, plugins and
+prompts) is ignored, whereas `vibe -p --trust` loads it: loading it would run
+code the sandbox controls on this host, such as hooks, MCP servers and tools.
+A run whose sandbox workspace has it logs a warning.
+
+The model reads skills with the sandboxed tools, so the skills read on this
+host (the user's, and the plugins', the built-in ones included) are copied into
+the sandbox's temporary directory under `mistralai-vibe-skills/<digest>/`,
+outside the workspace, and the model is given those paths. A copy is named by
+the digest of its files, checked before it is reused, and uploaded only when
+missing, so later runs on the same sandbox reuse it. A skill with more than 200
+files, a file over 256 KiB, more than 1 MiB of files besides `SKILL.md`, or a
+`SKILL.md` over 2 MiB is not copied, and the run goes without it. Each skill
+left out, for that or because the copy failed, is logged and listed in the
+session's config issues, and so in the export's `warnings`.
+
+##### Protocol
+
+The caller creates the socket with mode `0600` inside a `0700` directory, and
+serves it for the whole run. A Unix socket path is limited to 104 bytes on macOS
+(108 on Linux), so keep it short, for example under `/tmp`.
+
+For each request, Vibe opens a new connection, writes one line, reads one line
+and closes the connection; concurrent requests use concurrent connections.
+Answer them concurrently too: a request's timeout covers the time it waits
+behind others, such as a background process's poll behind a long shell
+command. A line is a compact JSON-RPC 2.0 message with camelCase fields, followed by `\n`.
+Replies may carry fields Vibe does not know, which it ignores.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `agent/initialize` | `{"protocolVersion": 2, "vibeVersion": str}` | `{"protocolVersion": 2, "workspace"?: str, "python"?: str, "tools"?: [ToolDefinition], "toolTimeoutSeconds"?: float, "instructions"?: str}` |
+| `sandbox/execute` | `{"command": str, "cwd": str, "timeout": float \| null}` | `{"exitCode": int, "stdout": str, "stderr": str}` |
+| `sandbox/readFile` | `{"path": str, "maxBytes": int}` | `{"contentBase64": str \| null}` |
+| `tools/call` | `{"callbackId": str, "name": str, "input": any, "toolCallId": str}` | `{"output"?: any, "annotations"?: object, "error"?: {"message": str, "code"?: str, "details"?: any}}` |
+
+- `agent/initialize` is called once, before the session starts, and must
+  answer within 60 seconds. The server must
+  answer with protocol version 2. `workspace` and `python` come together, or
+  not at all when the server serves no sandbox: `workspace` is the absolute
+  sandbox path the session starts in, and `python` the interpreter that runs
+  Vibe's tool helper (Python 3.9 or later). Each tool is
+  `{"namespace"?: str, "name": str, "description"?: str, "inputSchema"?: object, "outputSchema"?: object, "modelAccess"?: "direct" | "programmatic" | "both"}`;
+  `namespace` defaults to `client` and `modelAccess` to `programmatic`. A
+  namespace cannot be `vibe` or `ui`, nor the name of an MCP server the session
+  has, and a `<namespace>.<name>` is declared once. `toolTimeoutSeconds`, a
+  positive number, is how long a `tools/call` may take; it defaults to 600.
+  `instructions` are project instructions for the session. The system prompt
+  carries them where it carries the project's `AGENTS.md` files, under the
+  same heading and with the same weight, followed by any `AGENTS.md` found in
+  the workspace. They are left out, like the `AGENTS.md` files, when
+  `include_project_context` is off. Without a socket, the same text goes in
+  an `AGENTS.md` at the root of the workspace, which `vibe -p` reads when the
+  directory is trusted (`--trust`).
+  If the handshake fails, the run ends as `infrastructure_failure` (exit 2);
+  if it declares a tool Vibe cannot offer, as `usage_error` (exit 1), before
+  the model is called.
+- `sandbox/execute` runs `command` with `sh` in `cwd`, with the sandbox's own
+  environment. Vibe runs its tool helper with `cwd` `/` and passes the
+  session's working directory in the command itself, so a model that deletes
+  or moves that directory gets a tool error, as on the host. A non-zero exit
+  is a result, not an error. A command that
+  outlives `timeout` seconds is answered with the error code `-32001`: the
+  model reads it as a timed-out command, as on the host, and the turn goes
+  on. A server that stops a command sooner, at a limit of its own, says so in
+  the error's optional `data`, as `{"timeoutSeconds": float}`, and the model
+  is told that limit; without it, the model is told no limit. To stop a
+  command, the server kills the process it started (swerex kills its process
+  group); the processes the command started go with it. Vibe waits 30
+  seconds past `timeout` for the reply; if none comes, it closes the
+  connection and the sandbox has failed.
+- `sandbox/readFile` returns at most `maxBytes` of a regular file, base64
+  encoded, or `null` when there is no such file.
+- `tools/call` runs one call of a declared tool. `callbackId` is unique to the
+  call, `name` is `<namespace>.<name>`, and `toolCallId` the model's call it
+  answers. `output`
+  is the tool's result, and `error` makes the call a tool error. Either way the
+  model reads it and the turn goes on. So does an error reply, a malformed
+  reply, a lost connection, or no reply within `toolTimeoutSeconds`: each is a
+  tool error. A shorter `--time-limit` shortens the wait to match.
+
+For a sandbox request, any other error reply, a malformed reply, or a
+connection that closes or cannot be opened means the sandbox failed: the turn
+fails and the run ends as `infrastructure_failure` (exit 2). A tool helper
+command that exits non-zero is a crash of the helper, not of the sandbox; see
+[Sandboxed sessions](#sandboxed-sessions).
+
+The server can end the run itself, from any request, by answering it with the
+error code `-32002` and a message: `{"code": -32002, "message": str}`. Vibe
+stops the run as SIGTERM does and exits 4, with the outcome `aborted` and the
+server's message as `error.message` in `export.json`. Vibe gives the abort no
+meaning of its own; the message is for whoever reads the export.
 
 ### TUI Implementations
 
@@ -595,7 +786,7 @@ system_prompt_id = "my_custom_prompt"
 
 This will load the prompt from `~/.vibe/prompts/my_custom_prompt.md`.
 
-Project-local prompts in `.vibe/prompts/` are also supported and override user-level prompts with the same name. This applies to all custom prompts (system and compaction).
+Project-local prompts in `.vibe/prompts/` are also supported and override user-level prompts with the same name. This applies to all custom prompts (system, compaction, and title).
 
 ### Custom Compaction Prompts
 
@@ -612,6 +803,19 @@ Any extra instructions passed to `/compact ...` are appended after the configure
 
 Compaction keeps the same session and visible conversation. Later model requests
 use the latest compacted context followed by newer messages.
+
+### Custom Title Prompts
+
+Vibe generates session titles in the background with the built-in prompt at `prompts/session_title.md`. You can replace it with a custom prompt from `~/.vibe/prompts/` (or `.vibe/prompts/`) using the same resolution rules as system prompts.
+
+To use a custom title prompt, set `title_prompt_id` in your configuration to match the filename (without the `.md` extension):
+
+```toml
+# Use a custom title prompt
+title_prompt_id = "my_title_prompt"
+```
+
+The configured prompt is the system prompt of the background call. Vibe still sends the session transcript as the user message, so the prompt only needs to describe how titles are written (length, language, style).
 
 ### Custom Agent Configurations
 
@@ -682,6 +886,15 @@ shell = "powershell.exe"
 ```
 
 The rollout assignment is server-managed and is not a `config.toml` option.
+
+`enable_background_processes = false` takes background processes (`tools.process`
+in `run_typescript`) away from the agent on the default runtime: its commands then
+run to completion in the foreground, and the system prompt no longer describes
+process tools. It defaults to `true`.
+
+`enable_subagents = false` likewise takes subagents (`tools.subagent` in
+`run_typescript`) away from the agent on the default runtime: the system prompt
+no longer describes them, and the agent works alone. It defaults to `true`.
 
 #### Enable/Disable Tools with Patterns
 

@@ -39,7 +39,9 @@ Wrap the ENTIRE summary in <summary></summary> tags and output nothing outside t
 
 <summary>
 ...your handoff summary here...
-</summary>"#;
+</summary>
+
+IMPORTANT: Exclude this entire message from the summary. It contains internal compaction instructions, not user conversation. Never mention or attribute to the user any requirement from this message, including summarization, text-only output, tool restrictions, formatting, or summary tags. Summarize only earlier messages. Preserve unresolved user requests as pending work; do not answer or perform them. Return only the <summary>...</summary> envelope."#;
 
 pub(in crate::core) fn prompt_message(extra_instructions: &str) -> StoredMessage {
     let extra_instructions = extra_instructions.trim();
@@ -98,6 +100,7 @@ pub(in crate::core) fn accept_summary(
     canonical_messages: &[StoredMessage],
     projected_messages: &[StoredMessage],
     candidate: &CompletionCandidate,
+    context_keys: &[String],
     tools: &[ToolDefinition],
     budget: CompactionBudget,
 ) -> Result<SummaryAcceptance, CoreError> {
@@ -126,8 +129,14 @@ pub(in crate::core) fn accept_summary(
         })
         .cloned()
         .ok_or_else(|| CoreError::invariant("compaction context is missing its system message"))?;
-    let Some(messages) =
-        fitted_replacement(canonical_messages, system_message, &summary, tools, budget)?
+    let Some(messages) = fitted_replacement(
+        canonical_messages,
+        system_message,
+        &summary,
+        context_keys,
+        tools,
+        budget,
+    )?
     else {
         return Ok(SummaryAcceptance::ReplacementTooLarge);
     };
@@ -137,19 +146,37 @@ pub(in crate::core) fn accept_summary(
 pub(in crate::core) fn minimum_replacement_fits(
     canonical_messages: &[StoredMessage],
     generated_system: StoredMessage,
+    context_keys: &[String],
     tools: &[ToolDefinition],
     budget: CompactionBudget,
 ) -> Result<bool, CoreError> {
-    Ok(fitted_replacement(canonical_messages, generated_system, "x", tools, budget)?.is_some())
+    Ok(fitted_replacement(
+        canonical_messages,
+        generated_system,
+        "x",
+        context_keys,
+        tools,
+        budget,
+    )?
+    .is_some())
 }
 
 fn fitted_replacement(
     canonical_messages: &[StoredMessage],
     system_message: StoredMessage,
     summary: &str,
+    context_keys: &[String],
     tools: &[ToolDefinition],
     budget: CompactionBudget,
 ) -> Result<Option<Vec<StoredMessage>>, CoreError> {
+    // The pre-LLM hook delivers its current result again after compaction, so the replacement leaves room for it.
+    let reserved = current_context_tokens(canonical_messages, context_keys, budget.image_delivery)?;
+    let budget = CompactionBudget {
+        token_threshold: budget
+            .token_threshold
+            .map(|threshold| threshold.saturating_sub(reserved)),
+        ..budget
+    };
     let preamble = StoredMessage::injected(Message::user_text(PREVIOUS_USER_MESSAGES_PREAMBLE));
     let summary_message = StoredMessage::injected(Message::user_text(format!(
         "{PREVIOUS_USER_MESSAGES_CLOSE}\n\nHere is a summary of what has happened so far:\n\n{COMPACTION_SUMMARY_OPEN}\n{summary}\n{COMPACTION_SUMMARY_CLOSE}"
@@ -167,6 +194,29 @@ fn fitted_replacement(
         return Ok(None);
     }
     Ok(Some(messages))
+}
+
+/// Estimates the latest delivery of each key in the current pre-LLM hook result.
+fn current_context_tokens(
+    messages: &[StoredMessage],
+    context_keys: &[String],
+    image_delivery: ImageDeliveryMode,
+) -> Result<u64, CoreError> {
+    if context_keys.is_empty() {
+        return Ok(0);
+    }
+    let current = context_keys
+        .iter()
+        .map(|key| {
+            messages
+                .iter()
+                .rev()
+                .find(|stored| stored.context_key() == Some(key.as_str()))
+                .cloned()
+                .ok_or_else(|| CoreError::invariant("current context key has no stored message"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    estimate_model_input_tokens(&current, &[], image_delivery)
 }
 
 fn fit_replacement_to_budget(

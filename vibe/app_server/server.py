@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum, auto
+import os
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import JsonValue, ValidationError
@@ -31,6 +32,7 @@ from vibe.app_server._session_backend_port import (
     SessionBackendHostConfigRead,
     SessionBackendHostDelete,
     SessionBackendHostHistoryList,
+    SessionBackendHostLeaseWatch,
     SessionBackendHostPin,
     SessionBackendHostSeenState,
     SessionBackendNotificationSink,
@@ -42,6 +44,7 @@ from vibe.app_server._session_backend_port import (
     SessionEventSubscription,
 )
 from vibe.app_server._session_backend_services import SessionBackendServices
+from vibe.app_server._session_lease_subscription import SessionLeaseSubscription
 from vibe.app_server.connector_catalog import ConnectorCatalogService
 from vibe.app_server.events import (
     CallbackRequested,
@@ -245,6 +248,7 @@ class AppServer:
         self._client_requests: dict[int, PendingClientRequest] = {}
         self._abandoned_client_request_ids: set[int] = set()
         self._request_tasks: set[asyncio.Task[None]] = set()
+        self._leases = SessionLeaseSubscription(self._send_notification)
         self._backend_event_task: asyncio.Task[None] | None = None
         self._backend_event_backend: SessionBackend | None = None
         self._serve_task: asyncio.Task[None] | None = None
@@ -541,6 +545,7 @@ class AppServer:
         self, current: asyncio.Task[object] | None
     ) -> list[BaseException]:
         tasks = [task for task in self._request_tasks if task is not current]
+        tasks.extend(self._leases.take())
         backend_events = self._backend_event_task
         self._backend_event_task = None
         self._backend_event_backend = None
@@ -557,6 +562,7 @@ class AppServer:
         self, current: asyncio.Task[object] | None
     ) -> list[BaseException]:
         tasks = [task for task in self._request_tasks if task is not current]
+        tasks.extend(self._leases.take())
         backend_events = self._backend_event_task
         self._backend_event_task = None
         self._backend_event_backend = None
@@ -775,6 +781,11 @@ class AppServer:
             )
         if method == "session/delete":
             return await self._delete_session(raw_params)
+        if method == "session/lease/subscribe":
+            host = self._session_backend_host
+            if not isinstance(host, SessionBackendHostLeaseWatch):
+                raise method_not_found(method)
+            return await self._leases.subscribe(host)
         if _omits_session_id(method, raw_params):
             return await self._host_handler.dispatch(method, raw_params)
         if self._root is None:
@@ -1344,7 +1355,8 @@ class AppServer:
         self._client_capabilities = params.capabilities
         self._initialization = InitializationState.INITIALIZE_RECEIVED
         return InitializeResponse(
-            server_info=ServerInfo(name="vibe-app-server", version=__version__)
+            server_info=ServerInfo(name="vibe-app-server", version=__version__),
+            process_id=os.getpid(),
         )
 
     def _initialized_client_info(self) -> ClientInfo:

@@ -8,8 +8,8 @@ from e2e.app_server.scenario import Timeline
 _PROMPT = "read the big file"
 _CONTENT = "   1→first line\n   2→second line"
 
-# The settled read-file disclosure header lands on SGR row 32.
-_CLICK = "\x1b[<0;1;32M\x1b[<0;1;32m"
+# The settled read-file disclosure header lands on SGR row 15.
+_CLICK = "\x1b[<0;1;15M\x1b[<0;1;15m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

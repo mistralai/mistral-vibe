@@ -8,6 +8,12 @@
      "path": "/models/mistral-medium-3.5/thinking",
      "targetLayer": null,
      "value": "high"
+    },
+    {
+     "op": "set",
+     "path": "/models/mistral-medium-3.5/thinking",
+     "targetLayer": "overrides",
+     "value": "high"
     }
    ],
    "reason": "app-server thinking update",

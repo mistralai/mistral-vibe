@@ -22,8 +22,8 @@ _SOURCES = [
     }
 ]
 
-# The settled web-search disclosure header lands on SGR row 29.
-_CLICK = "\x1b[<0;1;29M\x1b[<0;1;29m"
+# The settled web-search disclosure header lands on SGR row 15.
+_CLICK = "\x1b[<0;1;15M\x1b[<0;1;15m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

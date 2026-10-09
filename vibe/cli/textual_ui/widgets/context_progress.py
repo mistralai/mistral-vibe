@@ -5,24 +5,14 @@ from typing import Any
 
 from textual.reactive import reactive
 
+from vibe.cli.textual_ui.count_format import format_compact_count
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-
-_THOUSAND = 1_000
-_MILLION = 1_000_000
 
 
 @dataclass
 class TokenState:
     max_tokens: int = 0
     current_tokens: int = 0
-
-
-def format_token_count(tokens: int) -> str:
-    if tokens >= _MILLION:
-        return f"{tokens / _MILLION:.1f}M"
-    if tokens >= _THOUSAND:
-        return f"{tokens // _THOUSAND}k"
-    return str(tokens)
 
 
 class ContextProgress(NoMarkupStatic):
@@ -38,7 +28,7 @@ class ContextProgress(NoMarkupStatic):
 
         ratio = min(1, new_state.current_tokens / new_state.max_tokens)
         text = (
-            f"{format_token_count(new_state.current_tokens)}/"
-            f"{format_token_count(new_state.max_tokens)} tokens ({ratio:.0%})"
+            f"{format_compact_count(new_state.current_tokens)}/"
+            f"{format_compact_count(new_state.max_tokens)} tokens ({ratio:.0%})"
         )
         self.update(text)

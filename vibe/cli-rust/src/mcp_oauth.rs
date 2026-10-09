@@ -7,11 +7,17 @@ use serde_json::json;
 use crate::app::{App, ToastSeverity};
 use crate::clipboard;
 use crate::external_url;
+use crate::hints::{self, action};
 
 use crate::server::{method, Client};
 
 /// Shortcut line of the app (Python `_HELP`).
-pub const HELP: &str = "R Retry  Backspace Back";
+const HELP: &[hints::Hint] = &[
+    hints::NAVIGATE,
+    hints::SELECT,
+    ("r", action::RETRY),
+    hints::BACK,
+];
 /// Indent of the three action options (Python `_OPTION_PADDING`).
 const OPTION_PADDING: &str = "  ";
 /// Seconds the copy toast stays up (Python `copy_text_to_clipboard` timeout).
@@ -58,7 +64,7 @@ pub fn open(app: &mut App, client: &Arc<Client>, server_name: String) {
     start_login(app, client);
 }
 
-/// Esc/Backspace (Python `MCPOAuthClosed()`).
+/// Esc (Python `MCPOAuthClosed()`).
 pub fn close(app: &mut App, client: &Arc<Client>) {
     dismiss(app);
     crate::mcp::reopen(app, client, false, String::new());
@@ -145,17 +151,10 @@ fn on_login_failed(app: &mut App, message: String) {
     app.mcp_oauth.status_message = Some(message);
 }
 
-/// Move the highlight, clamped like Textual's `OptionList`.
+/// Move the highlight, wrapping at the ends.
 pub fn navigate(app: &mut App, down: bool) {
-    let last = rows(app).iter().filter(|row| row.selectable()).count();
-    if last == 0 {
-        return;
-    }
-    app.mcp_oauth.selected = if down {
-        (app.mcp_oauth.selected + 1).min(last - 1)
-    } else {
-        app.mcp_oauth.selected.saturating_sub(1)
-    };
+    let count = rows(app).iter().filter(|row| row.selectable()).count();
+    app.mcp_oauth.selected = crate::list_nav::wrap(app.mcp_oauth.selected, count, down);
 }
 
 /// Enter on the highlighted option (Python `on_option_list_option_selected`).
@@ -240,7 +239,7 @@ fn toggle_url(app: &mut App) {
 pub fn rows(app: &App) -> Vec<Row> {
     if app.mcp_oauth.failed {
         return vec![Row::Note(
-            "Authentication failed. Press R to retry.".to_owned(),
+            "Authentication failed. Press r to retry.".to_owned(),
         )];
     }
     let Some(_) = app.mcp_oauth.auth_url.as_deref() else {
@@ -251,7 +250,7 @@ pub fn rows(app: &App) -> Vec<Row> {
         Row::Blank,
         Row::Action(
             OptionId::Open,
-            format!("{OPTION_PADDING}Press enter to open auth in your browser"),
+            format!("{OPTION_PADDING}Press Enter to open auth in your browser"),
         ),
         Row::Action(
             OptionId::Copy,
@@ -280,9 +279,12 @@ pub fn detail(app: &App) -> String {
 }
 
 /// The help line, prefixed with the current status (Python `_set_help_text`).
-pub fn help_text(app: &App) -> String {
-    match &app.mcp_oauth.status_message {
-        Some(status) => format!("{status}  {HELP}"),
-        None => HELP.to_owned(),
-    }
+pub fn help_text(app: &App) -> Vec<(String, bool)> {
+    let status = app.mcp_oauth.status_message.as_ref();
+    let status = status.map(|status| (format!("{status}  "), false));
+    let keys = hints::runs(HELP).into_iter();
+    status
+        .into_iter()
+        .chain(keys.map(|(text, is_key)| (text.to_owned(), is_key)))
+        .collect()
 }

@@ -32,6 +32,7 @@ fn capture_rejects_compaction_state_that_disagrees_with_its_lifecycle() {
                     crate::core::action_id::compaction("task", 1),
                     "different-turn".to_string(),
                     active.iterations,
+                    Vec::new(),
                     projection,
                 ),
             };
@@ -56,6 +57,7 @@ fn capture_rejects_compaction_state_that_disagrees_with_its_lifecycle() {
                     crate::core::action_id::compaction("task", 1),
                     "work".to_string(),
                     0,
+                    Vec::new(),
                     projection,
                 ),
             };

@@ -1,5 +1,6 @@
-//! Loading area: a spinner, gradient status label, and interrupt hint.
+//! Loading area: a spinner, gradient status label, and key hints.
 
+mod hint;
 mod snake;
 
 use std::time::{Duration, Instant};
@@ -192,6 +193,10 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
         return;
     }
     let teleport_since = crate::teleport::loading_since(app);
+    // Queue mode's own keys replace every other hint for exactly as long as it lasts.
+    let queue_hints = crate::input::composer_reachable(app)
+        .then(|| crate::message_queue::mode_hints(app))
+        .flatten();
     if !app.view.command_loading
         && teleport_since.is_none()
         && !matches!(
@@ -199,6 +204,11 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
             Status::Starting | Status::Generating { .. }
         )
     {
+        if let Some(hints) = queue_hints {
+            let mut spans = Vec::new();
+            hint::push(&mut spans, String::new(), hints);
+            f.render_widget(Line::from(spans), content);
+        }
         return;
     }
     // `--resume` goes straight to its picker; the engine still coming up behind
@@ -223,50 +233,31 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
     spans.push(Span::styled("… ", color(1 + anim.label.chars().count())));
 
     // Background slash commands have no timer or controls; manual shell commands do.
-    if app.view.command_loading && app.session.shell_operation_id.is_none() {
-        f.render_widget(Line::from(spans), content);
-        return;
-    }
-
-    let muted = theme::muted_style();
-    let key = Style::default()
-        .fg(theme::primary())
-        .add_modifier(Modifier::BOLD);
     // Startup keeps queue cancellation available without offering turn interruption.
-    if app.session.status == Status::Starting {
-        if crate::message_queue::has_removable(app) {
-            spans.push(Span::styled("(", muted));
-            spans.push(Span::styled("Ctrl+C", key));
-            spans.push(Span::styled(" to cancel last queued message)", muted));
-        }
+    let background = app.view.command_loading && app.session.shell_operation_id.is_none();
+    if background || app.session.status == Status::Starting {
+        let hints = match queue_hints {
+            Some(hints) => hints.to_vec(),
+            None if background => Vec::new(),
+            None => hint::starting(app),
+        };
+        hint::push(&mut spans, String::new(), &hints);
         f.render_widget(Line::from(spans), content);
         return;
     }
 
-    // Muted interrupt hint; status is always `Generating` here (draw returned above otherwise).
+    // Status is always `Generating` here (draw returned above otherwise).
     let elapsed = match (app.session.shell_started_at, app.session.status) {
         (Some(since), _) => anim.elapsed(since),
         (None, Status::Generating { since }) => anim.elapsed(since),
         _ => teleport_since.map_or_else(Duration::default, |since| anim.elapsed(since)),
     };
-    spans.push(Span::styled(
-        format!("({} ", format_elapsed(elapsed.as_secs())),
-        muted,
-    ));
-    // Ctrl+C cancels a queued prompt before interrupting (Python `LoadingWidget._format_hint`).
-    if !crate::message_queue::has_removable(app) {
-        spans.push(Span::styled("Esc/Ctrl+C", key));
-        spans.push(Span::styled(" to interrupt)", muted));
-    } else {
-        spans.push(Span::styled("Esc", key));
-        spans.push(Span::styled(" to interrupt · ", muted));
-        if app.session.active_turn_id.is_some() {
-            spans.push(Span::styled("Enter", key));
-            spans.push(Span::styled(" to steer · ", muted));
-        }
-        spans.push(Span::styled("Ctrl+C", key));
-        spans.push(Span::styled(" to cancel last queued message)", muted));
-    }
+    let hints = queue_hints.map_or_else(|| hint::running(app), <[_]>::to_vec);
+    hint::push(
+        &mut spans,
+        format!("{} ", format_elapsed(elapsed.as_secs())),
+        &hints,
+    );
 
     // A callback is waiting for the user to stop typing (Python `.loading-debounce`).
     if app.question_app.pending.is_some()

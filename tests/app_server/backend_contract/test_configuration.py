@@ -77,7 +77,7 @@ async def test_active_model_update_preserves_usage_and_updates_prices(
     backend_contract_session: AppServerSession,
 ) -> None:
     """*Prepare*: Configure prices and accumulate usage with the default model.
-    *Do*: Switch to the differently priced local model.
+    *Do*: Switch to the differently priced built-in medium model.
     *Assert*: Usage totals remain while prices change to the new model's rates.
     """
     # Prepare
@@ -105,15 +105,15 @@ async def test_active_model_update_preserves_usage_and_updates_prices(
 
     # Do
     await backend_contract_session.resources.config.update(
-        {"active_model": "local"}, reload_runtime=True
+        {"active_model": "mistral-medium-3.5"}, reload_runtime=True
     )
 
     # Assert
     after = backend_contract_session.resources.runtime.stats
     assert after.session_prompt_tokens == before.session_prompt_tokens
     assert after.session_completion_tokens == before.session_completion_tokens
-    assert after.input_price_per_million == 0
-    assert after.output_price_per_million == 0
+    assert after.input_price_per_million == 1.5
+    assert after.output_price_per_million == 7.5
 
 
 @pytest.mark.asyncio

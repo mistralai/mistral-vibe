@@ -5,32 +5,34 @@ use crate::server::{HistoryEntry, NoticeDetail};
 
 pub(crate) const KEY_PREFIX: &str = "tool-group:";
 
-#[derive(Clone, Copy)]
-pub enum Outcome {
-    Success,
-    Error,
-    Muted,
-}
-
 pub struct Group<'a> {
     pub key: String,
     pub first: bool,
     pub last: bool,
     pub finalized: bool,
-    pub kinds: Vec<&'a str>,
+    /// Each effect kind in first-seen order, with how many calls it made.
+    pub kinds: Vec<(&'a str, usize)>,
     pub reasoning: bool,
-    pub outcome: Outcome,
 }
 
 impl Group<'_> {
+    /// Kinds sharing a verb merge into one segment: `ran 2 commands and 1 search`.
     pub fn label(&self, running: bool) -> String {
-        let mut labels = self
-            .kinds
-            .iter()
-            .map(|kind| category_label(kind, running))
+        let mut verbs: Vec<(&str, Vec<String>)> = Vec::new();
+        for &(kind, count) in &self.kinds {
+            let (verb, noun) = category_terms(kind, count, running);
+            let counted = format!("{count} {noun}");
+            match verbs.iter_mut().find(|(seen, _)| *seen == verb) {
+                Some((_, nouns)) => nouns.push(counted),
+                None => verbs.push((verb, vec![counted])),
+            }
+        }
+        let mut labels = verbs
+            .into_iter()
+            .map(|(verb, nouns)| format!("{verb} {}", join_and(&nouns)))
             .collect::<Vec<_>>();
         if self.reasoning {
-            labels.push(if running { "thinking" } else { "thought" });
+            labels.push(if running { "thinking" } else { "thought" }.to_owned());
         }
         let mut label = labels.join(", ");
         if let Some(first) = label.get_mut(0..1) {
@@ -90,49 +92,48 @@ pub fn renders_nothing(entry: &HistoryEntry, local: bool) -> bool {
     }
 }
 
-pub fn outcome(entry: &HistoryEntry) -> Option<Outcome> {
-    let HistoryEntry::Effect(effect) = entry else {
-        return None;
-    };
-    let state = effect.state.as_ref()?;
-    match state.status.as_deref() {
-        Some("failed") => Some(Outcome::Error),
-        Some("cancelled" | "skipped") => Some(Outcome::Muted),
-        Some("completed") if !effect.success() => Some(Outcome::Error),
-        Some("completed") => Some(Outcome::Success),
-        _ => None,
+/// The kind a group counts an effect under: unknown or missing kinds share `tool`.
+pub fn label_kind(kind: Option<&str>) -> &str {
+    match kind {
+        Some(kind) if category(kind).is_some() => kind,
+        _ => "tool",
     }
 }
 
-fn category_label(kind: &str, running: bool) -> &'static str {
-    match (kind, running) {
-        ("file_read", true) => "reading files",
-        ("file_read", false) => "read files",
-        ("file_edit", true) => "editing files",
-        ("file_edit", false) => "edited files",
-        ("file_write", true) => "writing files",
-        ("file_write", false) => "wrote files",
-        ("file_search", true) => "searching files",
-        ("file_search", false) => "searched files",
-        ("shell", true) => "running commands",
-        ("shell", false) => "ran commands",
-        ("web_search", true) => "searching the web",
-        ("web_search", false) => "searched the web",
-        ("web_fetch", true) => "fetching pages",
-        ("web_fetch", false) => "fetched pages",
-        ("todo", true) => "updating todos",
-        ("todo", false) => "updated todos",
-        ("user_question", true) => "asking questions",
-        ("user_question", false) => "asked questions",
-        ("skill", true) => "loading skills",
-        ("skill", false) => "loaded skills",
-        ("subagent", true) => "running subagents",
-        ("subagent", false) => "ran subagents",
-        ("worktree", true) => "creating worktrees",
-        ("worktree", false) => "created worktrees",
-        (_, true) => "calling tools",
-        (_, false) => "called tools",
+/// The verb and noun of `{verb} {count} {noun}`, e.g. `read 10 files`.
+fn category_terms(kind: &str, count: usize, running: bool) -> (&'static str, &'static str) {
+    let (done, active, one, many) =
+        category(kind).unwrap_or(("called", "calling", "tool", "tools"));
+    let verb = if running { active } else { done };
+    let noun = if count == 1 { one } else { many };
+    (verb, noun)
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn join_and(items: &[String]) -> String {
+    match items.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => items.join(""),
     }
+}
+
+/// Past verb, running verb, and singular and plural nouns of a known kind.
+fn category(kind: &str) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+    Some(match kind {
+        "file_read" => ("read", "reading", "file", "files"),
+        "file_edit" => ("edited", "editing", "file", "files"),
+        "file_write" => ("wrote", "writing", "file", "files"),
+        "file_search" => ("ran", "running", "search", "searches"),
+        "shell" => ("ran", "running", "command", "commands"),
+        "web_search" => ("ran", "running", "web search", "web searches"),
+        "web_fetch" => ("fetched", "fetching", "page", "pages"),
+        "todo" => ("updated todos", "updating todos", "time", "times"),
+        "user_question" => ("asked", "asking", "question", "questions"),
+        "skill" => ("loaded", "loading", "skill", "skills"),
+        "subagent" => ("ran", "running", "subagent", "subagents"),
+        "worktree" => ("created", "creating", "worktree", "worktrees"),
+        _ => return None,
+    })
 }
 
 /// Hook lifecycle notices are not rendered inline, except a completed hook with

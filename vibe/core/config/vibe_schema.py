@@ -23,6 +23,7 @@ from vibe.core.config._defaults import (
     DEFAULT_API_CONNECT_TIMEOUT,
     DEFAULT_API_POOL_TIMEOUT,
     DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
+    DEFAULT_API_STREAM_IDLE_TIMEOUT,
     DEFAULT_API_TIMEOUT,
     DEFAULT_API_WRITE_TIMEOUT,
     DEFAULT_AUTO_COMPACT_THRESHOLD,
@@ -141,19 +142,11 @@ DEFAULT_ACTIVE_MODEL_CONFIG = ModelConfig(
     cached_input_price=0.15,
     thinking="high",
     supports_images=True,
+    thinking_levels=["off", "high"],
+    max_context_length=262144,  # 256k window per the model card
 )
 
-DEFAULT_MODELS = [
-    DEFAULT_ACTIVE_MODEL_CONFIG,
-    ModelConfig(
-        name="devstral",
-        provider="llamacpp",
-        display_name="Devstral (local)",
-        alias="local",
-        input_price=0.0,
-        output_price=0.0,
-    ),
-]
+DEFAULT_MODELS = [DEFAULT_ACTIVE_MODEL_CONFIG]
 
 # Sentinel ``active_model`` value meaning "not pinned": the config resolves it to
 # the default model (see ``get_active_model``). Kept distinct from pinning the
@@ -457,6 +450,17 @@ class VibeConfigSchema(ConfigSchema):
         default_factory=list, description="Preferred MCP server configuration entries."
     )
     enable_connectors: Annotated[bool, WithReplaceMerge()] = True
+    experimental_enable_document_library_connector: Annotated[
+        bool, WithReplaceMerge()
+    ] = Field(
+        default=False,
+        description=(
+            "Experimental: expose the Mistral document_library connector and its"
+            " MCP tools. Off by default while the backend endpoints are"
+            " stabilized; when enabled, document_library is requested from the"
+            " connector bootstrap alongside web_search."
+        ),
+    )
     connectors: Annotated[list[ConnectorConfig], WithUnionMerge(merge_key="name")] = (
         Field(
             default_factory=list,
@@ -554,6 +558,15 @@ class VibeConfigSchema(ConfigSchema):
             " precedence on name collision."
         ),
     )
+    experimental_enable_model_catalog: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Experimental: fetch the curated model catalog from the Mistral"
+            " provider at session start and cache it per user on disk. Requires"
+            " a Mistral provider and API key; any failure silently falls back"
+            " to local config."
+        ),
+    )
 
     # Tracing
     enable_otel: Annotated[bool, WithReplaceMerge()] = Field(
@@ -586,6 +599,9 @@ class VibeConfigSchema(ConfigSchema):
         default_factory=list
     )
     disable_welcome_banner_animation: Annotated[bool, WithReplaceMerge()] = False
+    cursor_blink: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True, description="Blink the input cursor. Disable for a steady cursor."
+    )
     show_greeting: Annotated[bool, WithReplaceMerge()] = Field(
         default=True,
         description="Show greeting at startup (Mistral providers only, once per 24h).",
@@ -616,7 +632,23 @@ class VibeConfigSchema(ConfigSchema):
     enable_telemetry: Annotated[bool, WithReplaceMerge()] = True
     system_prompt_id: Annotated[str, WithReplaceMerge()] = SystemPrompt.CLI
     managed_shell_tools_enabled: Annotated[bool, WithReplaceMerge()] = False
+    enable_background_processes: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
+        description=(
+            "Offer the agent background processes (tools.process in "
+            "run_typescript). Off, commands only run to completion in the "
+            "foreground."
+        ),
+    )
+    enable_subagents: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
+        description=(
+            "Offer the agent subagents (tools.subagent in run_typescript). Off, "
+            "the agent works alone."
+        ),
+    )
     compaction_prompt_id: Annotated[str, WithReplaceMerge()] = UtilityPrompt.COMPACT
+    title_prompt_id: Annotated[str, WithReplaceMerge()] = UtilityPrompt.SESSION_TITLE
     include_commit_signature: Annotated[bool, WithReplaceMerge()] = True
     include_model_info: Annotated[bool, WithReplaceMerge()] = True
     include_project_context: Annotated[bool, WithReplaceMerge()] = True
@@ -629,6 +661,14 @@ class VibeConfigSchema(ConfigSchema):
     api_timeout: Annotated[float, WithReplaceMerge()] = DEFAULT_API_TIMEOUT
     api_retry_max_elapsed_time: Annotated[float, WithReplaceMerge()] = (
         DEFAULT_API_RETRY_MAX_ELAPSED_TIME
+    )
+    api_stream_idle_timeout: Annotated[float, WithReplaceMerge()] = Field(
+        default=DEFAULT_API_STREAM_IDLE_TIMEOUT,
+        ge=0,
+        description=(
+            "Seconds of silence after the model starts answering before the "
+            "response counts as stalled. 0 disables the limit. Unified harness only."
+        ),
     )
     api_connect_timeout: Annotated[float, WithReplaceMerge()] = (
         DEFAULT_API_CONNECT_TIMEOUT
@@ -897,6 +937,14 @@ class VibeConfigSchema(ConfigSchema):
             builtins={"compact": UtilityPrompt.COMPACT.path},
         )
 
+    @property
+    def title_prompt(self) -> str:
+        return load_prompt(
+            self.title_prompt_id,
+            setting_name="title_prompt_id",
+            builtins={"session_title": UtilityPrompt.SESSION_TITLE.path},
+        )
+
     @model_validator(mode="after")
     def _inject_routed_model(self) -> VibeConfigSchema:
         alias = self.routed_default_model
@@ -1105,6 +1153,11 @@ class VibeConfigSchema(ConfigSchema):
     @model_validator(mode="after")
     def _check_compaction_prompt(self) -> VibeConfigSchema:
         _ = self.compaction_prompt
+        return self
+
+    @model_validator(mode="after")
+    def _check_title_prompt(self) -> VibeConfigSchema:
+        _ = self.title_prompt
         return self
 
 

@@ -7,23 +7,15 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
 
-use super::model_picker::draw_help;
-use super::theme_picker::marker_green;
-use super::{bottom_bar, loading, theme, transcript};
+use super::{hint_line, list_cursor, theme};
 use crate::app::App;
+use crate::config_write::Scope;
+use crate::hints::{self, action, key, Hint};
 
 /// Draw the whole screen with the picker replacing the input box.
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    f.buffer_mut()
-        .set_style(area, Style::default().bg(theme::background()));
-    let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
-    let picker_height = box_height(app);
-    let chunks = super::bottom_app_chunks(app, area, loading_height, picker_height);
-    transcript::draw(app, f, chunks[0]);
-    loading::draw(app, f, chunks[1]);
-    draw_box(app, f, chunks[2]);
-    super::todo::draw_row(app, f, chunks[4]);
-    bottom_bar::draw(app, f, chunks[3]);
+    let kind = super::bottom_app::Kind::Thinking;
+    super::bottom_app::draw(app, f, area, box_height(app), kind, draw_box);
 }
 
 fn box_height(app: &App) -> u16 {
@@ -62,38 +54,37 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
     for (row, i) in (0..rows).enumerate() {
         draw_option(app, f, bx, top + row as u16, w, i);
     }
-    draw_help(f, bx + 2, by + h - 2);
+    hint_line::draw(f, bx + 2, by + h - 2, hints(app));
+}
+
+/// After a session-only model pick, Enter keeps the level for the session too.
+const SESSION_HINTS: &[Hint] = &[
+    hints::NAVIGATE,
+    (key::ENTER_S, action::SESSION_ONLY),
+    hints::CANCEL,
+];
+
+fn hints(app: &App) -> &'static [Hint] {
+    match crate::thinking_picker::enter_scope(app) {
+        Scope::Saved => hint_line::PICK_HINTS,
+        Scope::Session => SESSION_HINTS,
+    }
 }
 
 fn draw_option(app: &App, f: &mut Frame, bx: u16, y: u16, w: u16, i: usize) {
     let is_hl = i == app.thinking_picker.selected;
     let current = crate::thinking_picker::is_current(app, i);
     if is_hl {
-        let bar = Rect::new(bx + 3, y, w.saturating_sub(6), 1);
-        f.buffer_mut()
-            .set_style(bar, Style::default().bg(theme::block_cursor_bg()));
+        list_cursor::paint(f, Rect::new(bx + 3, y, w.saturating_sub(6), 1));
     }
-    let row_bg = if is_hl {
-        theme::block_cursor_bg()
-    } else {
-        theme::background()
+    let (base, _) = list_cursor::styles(is_hl);
+    let marker_style = list_cursor::marker_style(base, current);
+    f.buffer_mut()
+        .set_string(bx + 3, y, list_cursor::marker(current), marker_style);
+    let name_style = match current {
+        true => base.add_modifier(Modifier::BOLD),
+        false => base,
     };
-    let text_fg = if is_hl {
-        theme::block_cursor_fg()
-    } else {
-        theme::foreground()
-    };
-    let marker = if current { "› " } else { "  " };
-    let marker_fg = if current { marker_green() } else { text_fg };
-    let mut marker_style = Style::default().fg(marker_fg).bg(row_bg);
-    if is_hl {
-        marker_style = marker_style.add_modifier(Modifier::BOLD);
-    }
-    f.buffer_mut().set_string(bx + 3, y, marker, marker_style);
-    let mut name_style = Style::default().fg(text_fg).bg(row_bg);
-    if is_hl || current {
-        name_style = name_style.add_modifier(Modifier::BOLD);
-    }
     let label = app.thinking_picker.levels[i].as_str();
     let display = capitalize(label);
     f.buffer_mut().set_string(bx + 5, y, display, name_style);

@@ -8,9 +8,6 @@ import json
 import logging
 import time
 
-import httpx
-from mistralai.client.errors import MistralError
-
 from mistralai_vibe_local_harness.protocol import (
     JsonObject,
     RustCompletionFailedEvent,
@@ -40,6 +37,10 @@ from mistralai_vibe_local_harness.vibe._runtime_config import (
 )
 from mistralai_vibe_local_harness.vibe.adapters._correlation import (
     CORRELATION_ID_HEADER,
+)
+from mistralai_vibe_local_harness.vibe.adapters._provider_failure import (
+    ProviderFailure,
+    read_provider_failure,
 )
 from mistralai_vibe_local_harness.vibe.adapters.generic import (
     execute_generic_completion,
@@ -218,13 +219,18 @@ async def execute_completion(
         credential: ProviderCredentialResult = await config.credentials.resolve()
     except Exception as exc:
         # A resolver is not allowed to fail the turn with an untyped error.
-        return _stream_failed_event(action, exc, provider=config.provider, route=route)
+        return _logged_failure(
+            action,
+            _stream_failed_event(action, exc, provider=config.provider, route=route),
+            elapsed_s=None,
+        )
     if isinstance(credential, ProviderAuthRequired):
         return _auth_required_event(action, credential)
 
     # Emit before the provider call and outside the try so a sink error is not
     # misclassified as a provider stream failure.
     _emit_request_sent(action, messages, config, route)
+    started = time.perf_counter()
 
     # Built last: the emitter owns a publication task that only ``aclose`` stops,
     # so no return may sit between here and the block whose ``finally`` closes it.
@@ -284,21 +290,30 @@ async def execute_completion(
         else:
             raise ValueError(f"Unsupported completion backend: {config.backend}")
     except Exception as exc:
-        rejection = _REJECTION_REASONS.get(_provider_status(exc) or 0)
+        elapsed_s = time.perf_counter() - started
+        rejection = credential_rejection(read_provider_failure(exc))
         if rejection is None:
-            return _stream_failed_event(
-                action, exc, provider=config.provider, route=route
+            return _logged_failure(
+                action,
+                _stream_failed_event(
+                    action, exc, provider=config.provider, route=route
+                ),
+                elapsed_s=elapsed_s,
             )
         # Tell the credential's owner what the borrower observed, so the
         # material just refused is not re-sent on the next turn.
         await config.credentials.reject(
             observed_revision=credential.revision, reason=rejection
         )
-        return _unauthorized_event(
+        return _logged_failure(
             action,
-            rejection,
-            credential.api_key_source,
-            details=_failure_details(action, config.provider, route, exc),
+            _unauthorized_event(
+                action,
+                rejection,
+                credential.api_key_source,
+                details=_failure_details(action, config.provider, route, exc),
+            ),
+            elapsed_s=elapsed_s,
         )
     finally:
         if emitter is not None:
@@ -344,6 +359,7 @@ def report_request_sent(
     *,
     purpose: CompletionPurpose,
     iteration: int,
+    turn_id: str | None = None,
 ) -> None:
     """Report a completion request's shape to the Host's telemetry sink.
 
@@ -370,6 +386,7 @@ def report_request_sent(
             nb_context_chars=nb_context_chars,
             nb_context_messages=len(messages),
             nb_prompt_chars=nb_prompt_chars,
+            turn_id=turn_id,
         )
     )
 
@@ -381,25 +398,20 @@ def _emit_request_sent(
     route: LocalModelRoute,
 ) -> None:
     report_request_sent(
-        messages, config, route, purpose=action.purpose, iteration=action.iteration
+        messages,
+        config,
+        route,
+        purpose=action.purpose,
+        iteration=action.iteration,
+        turn_id=action.turn_id,
     )
 
 
-def _provider_status(exc: BaseException) -> int | None:
-    """Read an HTTP status off a provider exception, structurally.
-
-    The Mistral SDK, HTTPX, and any future adapter each expose one of
-    ``status_code`` or ``status``, on the exception or on its ``response``.
-    Importing any one of them here would pin the Harness to a single client.
-    """
-    for source in (exc, getattr(exc, "response", None)):
-        if source is None:
-            continue
-        for attribute in ("status_code", "status"):
-            value = getattr(source, attribute, None)
-            if isinstance(value, int) and not isinstance(value, bool):
-                return value
-    return None
+def credential_rejection(failure: ProviderFailure) -> ProviderRejectionReason | None:
+    """Why the provider refused the credential, when the failure says it did."""
+    if failure.response is None:
+        return None
+    return _REJECTION_REASONS.get(failure.response.status)
 
 
 def _auth_required_event(
@@ -437,6 +449,32 @@ def _unauthorized_event(
     )
 
 
+def _logged_failure(
+    action: RustLLMCallAction,
+    event: RustCompletionFailedEvent,
+    *,
+    elapsed_s: float | None,
+) -> RustCompletionFailedEvent:
+    """Record a failed model call in the Host log before the turn reports it.
+
+    The failure event only reaches the session projection; without this record
+    the process log shows a request going out and nothing after it.
+    """
+    error = event.error
+    logger.warning(
+        "Model call failed code=%s purpose=%s turn_id=%s action_id=%s "
+        "elapsed_s=%s details=%s message=%s",
+        error.code,
+        action.purpose,
+        action.turn_id,
+        action.action_id,
+        "n/a" if elapsed_s is None else f"{elapsed_s:.1f}",
+        json.dumps(error.details, sort_keys=True),
+        error.message,
+    )
+    return event
+
+
 def _stream_failed_event(
     action: RustLLMCallAction,
     exc: BaseException,
@@ -448,63 +486,11 @@ def _stream_failed_event(
         action_id=action.action_id,
         error=RustProtocolError(
             code="model_stream_failed",
-            message=_failure_message(exc),
+            message=read_provider_failure(exc).message,
             retryable=False,
             details=_failure_details(action, provider, route, exc),
         ),
     )
-
-
-def _failure_message(exc: BaseException) -> str:
-    """The failure sentence, carrying the provider's own explanation.
-
-    A status error renders as the status line and the URL, which says the
-    request failed but not why. The body usually says why, and that is the part
-    a user can act on.
-    """
-    rendered = str(exc)
-    detail = _provider_message(exc)
-    if detail is None or detail in rendered:
-        return rendered
-    return f"{rendered}: {detail}"
-
-
-def _provider_message(exc: BaseException) -> str | None:
-    """The message a provider put in an error response body.
-
-    The OpenAI-compatible ``error.message`` first, then its common variants.
-    """
-    body = _response_body(exc)
-    if body is None:
-        return None
-    try:
-        payload = json.loads(body)
-    except ValueError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    error = payload.get("error")
-    for candidate in (
-        error.get("message") if isinstance(error, dict) else None,
-        error if isinstance(error, str) else None,
-        payload.get("message"),
-        payload.get("detail"),
-    ):
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
-    return None
-
-
-def _response_body(exc: BaseException) -> str | None:
-    if isinstance(exc, MistralError):
-        return exc.body
-    if not isinstance(exc, httpx.HTTPStatusError):
-        return None
-    try:
-        return exc.response.text
-    except httpx.ResponseNotRead:
-        # Reading here would block on a connection the failure already abandoned.
-        return None
 
 
 def _failure_details(
@@ -516,20 +502,20 @@ def _failure_details(
         "purpose": action.purpose,
         "exceptionType": type(exc).__name__,
     }
-    if (status := _provider_status(exc)) is not None:
-        details["httpStatus"] = status
-
-    if isinstance(exc, MistralError):
-        headers = exc.headers
-    elif isinstance(exc, httpx.HTTPStatusError):
-        headers = exc.response.headers
-    else:
+    response = read_provider_failure(exc).response
+    if response is None:
         return details
+    details["httpStatus"] = response.status
     # Only the failed response identifies this request; a previous response's
     # correlation ID belongs to a different completion or retry attempt.
-    if correlation_id := headers.get(CORRELATION_ID_HEADER):
+    if correlation_id := response.headers.get(CORRELATION_ID_HEADER):
         details["correlationId"] = correlation_id
     return details
 
 
-__all__ = ["INVALID_API_KEY_MESSAGE", "execute_completion", "invalid_api_key_message"]
+__all__ = [
+    "INVALID_API_KEY_MESSAGE",
+    "credential_rejection",
+    "execute_completion",
+    "invalid_api_key_message",
+]

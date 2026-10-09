@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import cache
 import json
+import logging
 import re
 from typing import Any, ClassVar
 
@@ -25,6 +27,8 @@ from mistralai_vibe_local_harness.vibe.adapters.generic._model import (
 )
 from mistralai_vibe_local_harness.vibe.adapters.generic._provider import ProviderView
 
+logger = logging.getLogger(__name__)
+
 
 def _parse_stop_info(reason: str | None, raw: Any) -> StopInfo | None:
     if reason is None and not isinstance(raw, dict):
@@ -34,6 +38,8 @@ def _parse_stop_info(reason: str | None, raw: Any) -> StopInfo | None:
 
 
 REASONING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+# With thinking on, the Messages API refuses a lower ``top_p`` than this.
+THINKING_MIN_TOP_P = 0.95
 
 
 class AnthropicMapper:
@@ -224,6 +230,16 @@ STREAMING_EVENT_TYPES = {
 }
 
 
+@cache
+def _warn_top_p_left_off(top_p: float) -> None:
+    logger.warning(
+        "Leaving top_p=%s off the Anthropic request: with thinking on, the API "
+        "takes only a top_p of %s or more",
+        top_p,
+        THINKING_MIN_TOP_P,
+    )
+
+
 class AnthropicAdapter(APIAdapter):
     endpoint: ClassVar[str] = "/v1/messages"
     API_VERSION = "2023-06-01"
@@ -308,6 +324,15 @@ class AnthropicAdapter(APIAdapter):
             max_tokens if max_tokens is not None else self.DEFAULT_ADAPTIVE_MAX_TOKENS
         )
 
+    def _apply_top_p(self, payload: dict[str, Any], top_p: float | None) -> None:
+        """Put ``top_p`` on a payload whose thinking config is already set."""
+        if top_p is None:
+            return
+        if "thinking" in payload and top_p < THINKING_MIN_TOP_P:
+            _warn_top_p_left_off(top_p)
+            return
+        payload["top_p"] = top_p
+
     def _build_payload(
         self,
         *,
@@ -319,12 +344,14 @@ class AnthropicAdapter(APIAdapter):
         tool_choice: dict[str, Any] | None,
         stream: bool,
         thinking: str,
+        top_p: float | None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"model": model_name, "messages": messages}
 
         self._apply_thinking_config(
             payload, messages=messages, max_tokens=max_tokens, thinking=thinking
         )
+        self._apply_top_p(payload, top_p)
 
         if system_blocks := self._build_system_blocks(system_prompt):
             payload["system"] = system_blocks
@@ -342,7 +369,7 @@ class AnthropicAdapter(APIAdapter):
 
         return payload
 
-    def prepare_request(
+    def prepare_request(  # noqa: PLR0913 - one keyword per request setting
         self,
         *,
         model_name: str,
@@ -355,6 +382,7 @@ class AnthropicAdapter(APIAdapter):
         provider: ProviderView,
         api_key: str | None = None,
         thinking: str = "off",
+        top_p: float | None = None,
     ) -> PreparedRequest:
         system_prompt, converted_messages = self._mapper.prepare_messages(messages)
         converted_tools = self._mapper.prepare_tools(tools)
@@ -369,6 +397,7 @@ class AnthropicAdapter(APIAdapter):
             tool_choice=converted_tool_choice,
             stream=enable_streaming,
             thinking=thinking,
+            top_p=top_p,
         )
 
         headers = {

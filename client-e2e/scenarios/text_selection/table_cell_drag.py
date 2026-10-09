@@ -18,7 +18,7 @@ _ANSWER = "\n".join([
         "the viewport | Neighboring content must stay outside the selection |"
     ),
 ])
-_DRAG = "\x1b[<0;20;30M\x1b[<32;100;30M\x1b[<0;100;30m"
+_DRAG = "\x1b[<0;20;18M\x1b[<32;100;18M\x1b[<0;100;18m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

@@ -2,7 +2,7 @@
 
 Todo semantics come from the legacy tool's own module so the two harnesses cannot
 drift; only the storage differs, and the list is deliberately not carried across
-compaction -- that is the scratchpad's job.
+compaction -- durable notes belong in the scratchpad, which the agent reads back.
 
 Design: ``vibe/docs/design/unified-harness-todo-and-scratchpad.md``.
 """
@@ -266,7 +266,9 @@ def _succeeded(
         action_id=action.action_id,
         call_id=action.call_id,
         result=RustToolSuccessResult(
-            content=[RustTextContentBlock(text=json.dumps(payload))],
+            content=[
+                RustTextContentBlock(text=json.dumps(payload, ensure_ascii=False))
+            ],
             structured_content=payload,
         ),
     )

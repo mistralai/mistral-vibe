@@ -26,6 +26,7 @@ from vibe.app_server._legacy_session_backend import (
     LegacySessionBackend,
     LegacySessionBackendHost,
 )
+from vibe.app_server._loop_prompt import scheduled_loop_display
 from vibe.app_server._projection import project_history
 from vibe.app_server._resources import ResourceRequestHandler
 from vibe.app_server._root_session import RootSessionCoordinator
@@ -481,6 +482,7 @@ class LegacySessionRuntimeController:
             await self._sessions.close_children()
             self._root_session.attach(replacement.session_id)
             replacement.start_initialize_experiments()
+            replacement.start_fetch_model_catalog()
         except BaseException:
             with suppress(BaseException):
                 await replacement_backend.shutdown()
@@ -859,6 +861,9 @@ class LegacySessionRuntimeController:
                         TurnStartParams(
                             session_id=self._agent_loop.session_id,
                             message=[TextContentBlock(text=loop.prompt)],
+                            user_display_content=scheduled_loop_display(
+                                loop.id, now_ms()
+                            ),
                         ),
                         scheduled_loop_id=loop.id,
                     )

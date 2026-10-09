@@ -8,7 +8,7 @@ from e2e.app_server.scenario import Action, Timeline
 _PROMPT = "show docs"
 _URL = "https://docs.example.com"
 _ANSWER = f"## Docs\n\nOpen [Docs]({_URL})."
-_ROW, _COL = 32, 8
+_ROW, _COL = 19, 8
 _CLICK = f"\x1b[<0;{_COL};{_ROW}M\x1b[<0;{_COL};{_ROW}m"
 
 expected_actions = {

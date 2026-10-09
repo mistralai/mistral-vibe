@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from textual.pilot import Pilot
+from textual.widgets import Input
 
 from tests.conftest import build_test_agent_loop
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp, default_config
@@ -304,6 +305,8 @@ def test_snapshot_connectors_fuzzy_search(snap_compare: SnapCompare) -> None:
     async def run_before(pilot: Pilot) -> None:
         await _run_mcp_command(pilot, "/connectors")
         await pilot.press("up", "s", "l")
+        # A slow runner can cross the 0.5s blink tick and hide the cursor.
+        pilot.app.query_one("#mcp-search", Input).cursor_blink = False
         await pilot.pause(0.1)
 
     assert snap_compare(

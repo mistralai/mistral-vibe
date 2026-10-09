@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::post_ready::AccountReads;
 use crate::server::{UserQuestion, UserQuestionRequest};
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::Frame;
 use serde_json::Value;
 use tokio::sync::mpsc::Sender;
@@ -32,7 +32,7 @@ use crate::ui::loading::LoadingAnim;
 use crate::utils::file_index::FileIndex;
 use crate::utils::history_manager::HistoryManager;
 use crate::utils::startup_cache::StartupConfig;
-use crate::utils::transcript_cache::TranscriptCache;
+use crate::utils::transcript_cache::{QueueSpacer, TranscriptCache};
 use crate::voice::{Recording, TranscribeState, TranscriptionConfig, VoiceEvent};
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -100,12 +100,11 @@ pub struct SelectionState {
     pub had_selection_at_press: bool,
 }
 
-/// An inline status line (Python `InlineNotice`), shown until `until`; `None`
-/// pins it until something clears it, like Python's `timeout=None`.
+/// An inline status line (Python `InlineNotice`), shown until `until`.
 pub struct Notice {
     pub text: String,
     pub severity: ToastSeverity,
-    pub until: Option<Instant>,
+    pub until: Instant,
 }
 
 /// Toast severity, selecting the left-border color (Python `App.notify` severity).
@@ -278,8 +277,7 @@ pub struct View {
     pub transcript_cache: TranscriptCache,
     /// Bounded prepared Markdown retained across redraws for stable assistant entries.
     pub markdown_cache: ui::markdown::MarkdownCache,
-    /// Effect entry ids expanded by a click, showing their result body (Python `CollapsibleSection`).
-    /// Folded group keys live here too, as `group:<first member id>`.
+    /// Unfolded entry ids and `tool-group:<first member id>` keys, including a lone call's future group.
     pub expanded: HashSet<String>,
     /// Python `_tools_collapsed`: the Ctrl+O bulk fold state applied to every
     /// group and collapsible result body at once.
@@ -309,14 +307,22 @@ pub struct View {
     /// The loading-area row a drag can select, published by whichever screen
     /// paints it (Python's loading widgets are selectable Statics).
     pub loading_selection_region: Region,
-    /// The question box content a drag can select while a question is pending.
-    pub question_selection_region: Region,
-    /// Question-box `(y, x0, x1)` cells painted as option prefixes (cursor,
-    /// numbering, checkbox), so a selection never highlights or copies them.
-    pub question_selection_chrome: Vec<RowSpan>,
+    /// The box content a drag can select while a bottom app replaces the input box.
+    pub bottom_app_selection_region: Region,
+    /// Bottom-app box `(y, x0, x1)` cells painted as chrome (question option
+    /// prefixes, scrollbars), so a selection never highlights or copies them.
+    pub bottom_app_selection_chrome: Vec<RowSpan>,
+    /// Bottom-app box rows that continue a wrapped line, so a copy rejoins them.
+    pub bottom_app_selection_folds: crate::selection::Folds,
+    /// The bottom app drawn last frame and its box rect, which own the box selection.
+    pub bottom_app: Option<(crate::ui::bottom_app::Kind, Rect)>,
+    /// Wrapped rows of each toast painted last frame, keyed by toast id.
+    pub toast_folds: Vec<(u64, crate::selection::Folds)>,
     /// Inclusive `(y, x0, x1)` cells inside the region that belong to no widget,
     /// so Textual never selects them: padding around and between widgets.
     pub selection_chrome: Vec<(u16, u16, u16)>,
+    /// Hang indent cells of painted transcript rows, cut out of the highlight only.
+    pub selection_hangs: Vec<(u16, u16, u16)>,
     /// Last rendered selectable-region scrollbar geometry for edge auto-scroll.
     pub selection_scrollbar: ui::scrollbar::State,
     /// Current chat input box, used to map mouse drags to the editor document.
@@ -338,6 +344,8 @@ pub struct View {
     pub pulse_frame: usize,
     /// Current phase of the software block cursor's blink (toggled every 0.5s).
     pub cursor_on: bool,
+    /// Chat input caret cell painted this frame, where dead-key and IME previews should draw.
+    pub cursor_position: Option<Position>,
     /// Whether the terminal window holds focus (Python `App.app_focus`); the
     /// caret stops blinking and stays dark while it does not.
     pub app_focus: bool,
@@ -350,6 +358,8 @@ pub struct View {
     pub entry_rows: Vec<(usize, i32, u16)>,
     /// Whether the last transcript frame showed the document's first row.
     pub at_top: bool,
+    /// Rows the last transcript frame inserted above the queue to keep it at the bottom.
+    pub queue_spacer: QueueSpacer,
 }
 
 impl Default for View {
@@ -375,9 +385,13 @@ impl Default for View {
             toast_text_areas: Vec::new(),
             toast_selection_region: Region::default(),
             loading_selection_region: Region::default(),
-            question_selection_region: Region::default(),
-            question_selection_chrome: Vec::new(),
+            bottom_app_selection_region: Region::default(),
+            bottom_app_selection_chrome: Vec::new(),
+            bottom_app_selection_folds: crate::selection::Folds::default(),
+            bottom_app: None,
+            toast_folds: Vec::new(),
             selection_chrome: Vec::new(),
+            selection_hangs: Vec::new(),
             selection_scrollbar: ui::scrollbar::State::default(),
             input_area: Rect::default(),
             mouse_regions: Vec::new(),
@@ -388,11 +402,13 @@ impl Default for View {
             command_loading: false,
             pulse_frame: 0,
             cursor_on: true,
+            cursor_position: None,
             app_focus: true,
             scroll_to_entry: None,
             scroll_anchor: None,
             entry_rows: Vec::new(),
             at_top: false,
+            queue_spacer: QueueSpacer::default(),
         }
     }
 }
@@ -463,14 +479,14 @@ pub struct ConfigScreen {
     pub fields: Vec<ConfigField>,
     /// Writable persistence layers from `config/fields/read`.
     pub targets: Vec<String>,
-    /// Highlighted field index in the config screen (Up/Down navigation).
+    /// Highlighted field index in the config screen (↑↓/jk navigation).
     pub selected: usize,
     /// Top line offset of the option list, reconciled to keep the selection visible.
     pub scroll: usize,
     /// Mouse-wheel scrolling temporarily detaches the viewport from the highlight.
     pub free_scroll: bool,
-    /// Free-text filter owned by the settings modal.
-    pub query: String,
+    /// Search field filtering the settings rows.
+    pub search: crate::search_field::Search,
     /// Full terminal area from the most recent config render, used for mouse hit testing.
     pub area: Rect,
     /// Nested editor opened by Enter on a writable settings field.
@@ -531,6 +547,9 @@ pub struct Agents {
 pub struct ModelOption {
     pub alias: String,
     pub display_name: String,
+    /// The model's configured thinking level and the levels it offers.
+    pub thinking: String,
+    pub thinking_levels: Vec<String>,
 }
 
 /// `/model` picker state (Python's `ModelPickerApp` bottom-app).
@@ -552,6 +571,8 @@ pub struct ModelPicker {
     pub is_pinned: bool,
     /// Display name of the default model, shown in the Default row hint.
     pub default_display_name: String,
+    /// Alias the Default row resolves to (`defaultModelAlias`).
+    pub default_alias: String,
     /// Sender carrying the `config/write` and `config/reload` answers, so the
     /// commit re-applies the server's config (Python `_reload_config`).
     pub tx: Option<Sender<crate::model_picker::Event>>,
@@ -588,6 +609,8 @@ pub struct ThinkingPicker {
     pub current_level: String,
     /// The levels the active model offers (`activeModel.thinkingLevels`).
     pub levels: Vec<String>,
+    /// A `/model` pick held until its chained thinking level is chosen or skipped.
+    pub model_pick: Option<crate::thinking_picker::ModelPick>,
     /// Sender carrying the `config/write` and `config/reload` answers.
     pub tx: Option<Sender<crate::thinking_picker::Event>>,
 }
@@ -666,6 +689,10 @@ pub struct QuestionApp {
     pub other_texts: BTreeMap<usize, String>,
     /// Caret byte offset into the current question's free-text answer.
     pub other_cursor: usize,
+    /// First visible wrapped row of the free-text field once it overflows.
+    pub other_scroll: usize,
+    /// Per-frame screen geometry of the free-text field, to map a click to the caret.
+    pub other_field: Option<crate::question_app::OtherField>,
     /// When the app opened, so buffered keys cannot answer it instantly.
     pub mount_time: Option<Instant>,
     /// Screen row of the in-flight mouse press, so a same-row release can
@@ -676,7 +703,7 @@ pub struct QuestionApp {
 /// `/mcp` browser state (Python's `MCPApp` bottom-app).
 #[derive(Default)]
 pub struct MCPApp {
-    pub search: crate::mcp::search::Search,
+    pub search: crate::search_field::Search,
     /// While set the browser replaces the input box: title, option list, hint.
     pub open: bool,
     /// Latest `mcp/read` projection, refreshed by `mcp/refresh` and `mcp/toggle`.
@@ -795,6 +822,7 @@ pub struct App {
     pub paste_image: crate::paste_image::State,
     pub voice: Voice,
     pub voice_app: crate::voice_app::VoiceApp,
+    pub proxy_setup: crate::proxy_setup::ProxySetupApp,
     pub config_screen: ConfigScreen,
     pub theme_picker: ThemePicker,
     pub model_picker: ModelPicker,
@@ -811,6 +839,7 @@ pub struct App {
     pub approval: crate::approval::State,
     pub question_app: QuestionApp,
     pub mcp: MCPApp,
+    pub plugins: crate::plugins::State,
     pub mcp_oauth: MCPOAuthApp,
     pub connector_auth: ConnectorAuthApp,
     /// The pre-session workspace-trust gate.
@@ -844,6 +873,8 @@ pub struct App {
     pub pending_commands: Vec<String>,
     /// Ctrl+Z requested suspend; the event loop performs the SIGTSTP cycle.
     pub suspend_requested: bool,
+    /// Ctrl+G requested the external editor; the event loop hands it the terminal.
+    pub external_editor_requested: bool,
     /// App-server child exited unexpectedly (stdout EOF during steady state).
     pub server_closed: bool,
     /// Sub-agents view state: child sessions, the status list, the viewed child.
@@ -934,8 +965,12 @@ impl App {
         self.pending_commits.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Follow the terminal's focus (Python `TextArea.set_app_focus`): the caret
-    /// goes dark while unfocused, and the blink tick only runs while focused.
+    /// Only the main input ignores the shared blink phase when blinking is disabled.
+    pub fn main_input_cursor_on(&self) -> bool {
+        self.view.app_focus && (!self.session.startup_config.cursor_blink || self.view.cursor_on)
+    }
+
+    /// Follow terminal focus; unfocused carets stay hidden.
     pub fn set_app_focus(&mut self, focused: bool) {
         self.view.app_focus = focused;
         self.view.cursor_on = focused;
@@ -1162,7 +1197,7 @@ impl App {
         self.overlays.notice = Some(Notice {
             text,
             severity: ToastSeverity::Information,
-            until: Some(Instant::now() + Duration::from_secs(VOICE_NOTICE_SECS)),
+            until: Instant::now() + Duration::from_secs(VOICE_NOTICE_SECS),
         });
     }
 

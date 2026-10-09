@@ -47,6 +47,9 @@ class SessionTelemetry:
         """Pre-mark a resumed session's terminal effects so they never re-emit."""
         self._recorded.add(effect_id)
 
+    def is_recorded(self, effect_id: str) -> bool:
+        return effect_id in self._recorded
+
     def claim(self, effect_id: str) -> bool:
         """Return ``True`` the first time an effect id is seen, ``False`` after.
 

@@ -139,6 +139,16 @@ def test_config_view_reports_the_configured_default_agent() -> None:
     assert config.model_dump(mode="json", by_alias=True)["defaultAgent"] == "plan"
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_config_view_projects_cursor_blink(enabled: bool) -> None:
+    config = project_config_view(build_test_vibe_config(cursor_blink=enabled))
+
+    assert config.model_dump(mode="json", by_alias=True)["cursorBlink"] is enabled
+    legacy_payload = config.model_dump(mode="json", by_alias=True)
+    del legacy_payload["cursorBlink"]
+    assert type(config).model_validate(legacy_payload).cursor_blink is True
+
+
 def test_config_view_projects_the_tls_trust_policy() -> None:
     config = project_config_view(build_test_vibe_config(enable_system_trust_store=True))
 

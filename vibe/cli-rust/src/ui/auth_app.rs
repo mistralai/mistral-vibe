@@ -5,7 +5,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
 
-use super::{bottom_bar, loading, theme, transcript};
+use super::theme;
 use crate::app::App;
 use crate::utils::text::wrap_hard;
 
@@ -63,25 +63,18 @@ pub fn draw(
     view: &View,
     target: crate::mouse::MouseTarget,
 ) -> Rect {
-    f.buffer_mut()
-        .set_style(area, Style::default().bg(theme::background()));
-
-    let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
     let detail = detail_lines(&view.detail, area.width);
-    let chunks = super::bottom_app_chunks(
-        app,
-        area,
-        loading_height,
-        box_height(view.rows.len(), detail.len()),
-    );
-
-    transcript::draw(app, f, chunks[0]);
-    loading::draw(app, f, chunks[1]);
-    crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Blocked);
-    let list_area = draw_box(f, chunks[2], view, &detail);
-    crate::mouse::register_region(app, list_area, target);
-    super::todo::draw_row(app, f, chunks[4]);
-    bottom_bar::draw(app, f, chunks[3]);
+    let height = box_height(view.rows.len(), detail.len());
+    let mut list_area = Rect::default();
+    let kind = if target == crate::mouse::MouseTarget::McpOAuth {
+        super::bottom_app::Kind::McpOAuth
+    } else {
+        super::bottom_app::Kind::ConnectorAuth
+    };
+    super::bottom_app::draw(app, f, area, height, kind, |app, f, area| {
+        list_area = draw_box(f, area, view, &detail);
+        crate::mouse::register_region(app, list_area, target);
+    });
     list_area
 }
 
@@ -192,12 +185,8 @@ fn draw_row(f: &mut Frame, area: Rect, y: u16, row: &Row, highlighted: bool) {
     let mut style = base_style();
     if highlighted {
         let bar = Rect::new(area.x + 3, y, area.width.saturating_sub(GUTTER), 1);
-        f.buffer_mut()
-            .set_style(bar, Style::default().bg(theme::block_cursor_bg()));
-        style = Style::default()
-            .fg(theme::block_cursor_fg())
-            .bg(theme::block_cursor_bg())
-            .add_modifier(Modifier::BOLD);
+        super::list_cursor::paint(f, bar);
+        style = super::list_cursor::style();
     }
     draw_spans(f, area.x + 3, y, &row.spans, style);
 }

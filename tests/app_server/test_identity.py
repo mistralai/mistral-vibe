@@ -68,7 +68,7 @@ async def test_identity_controller_returns_none_without_key(
 
 
 @pytest.mark.asyncio
-async def test_identity_controller_skips_non_mistral_active_model(
+async def test_identity_controller_skips_config_without_mistral_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "server-secret")
@@ -87,6 +87,33 @@ async def test_identity_controller_skips_non_mistral_active_model(
 
     assert identity is None
     assert gateway.calls == []
+
+
+@pytest.mark.asyncio
+async def test_identity_controller_reads_mistral_provider_for_non_mistral_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "server-secret")
+    base_config = build_test_vibe_config()
+    active = base_config.get_active_provider()
+    generic = active.model_copy(
+        update={"backend": Backend.GENERIC, "api_base": "https://other.test/v1"}
+    )
+    mistral = active.model_copy(
+        update={"name": "mistral-extra", "backend": Backend.MISTRAL}
+    )
+    config = base_config.model_copy(update={"providers": [generic, mistral]})
+    agent_loop = build_test_agent_loop(config=config)
+    gateway = FakeIdentityGateway(IdentityResult(id="user-1"))
+
+    try:
+        identity = await IdentityController(agent_loop, gateway).read()
+    finally:
+        await agent_loop.aclose()
+
+    assert identity is not None
+    assert identity.id == "user-1"
+    assert gateway.calls == [("https://api.mistral.ai/v1", "server-secret")]
 
 
 @pytest.mark.asyncio

@@ -122,19 +122,22 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return is_quit(key);
     }
     match key.code {
-        KeyCode::Up => {
+        KeyCode::Up | KeyCode::Char('k') => {
             scroll_by(app, -1);
         }
-        KeyCode::Down => {
+        KeyCode::Down | KeyCode::Char('j') => {
             scroll_by(app, 1);
         }
-        KeyCode::Left => app.trust.selected = (app.trust.selected + count - 1) % count,
-        KeyCode::Right => app.trust.selected = (app.trust.selected + 1) % count,
-        KeyCode::Enter => decide(app, app.trust.selected),
-        KeyCode::Char(digit @ '1'..='3') => {
-            decide(app, digit as usize - '1' as usize);
+        KeyCode::Left | KeyCode::Right => {
+            let right = key.code == KeyCode::Right;
+            app.trust.selected = crate::list_nav::wrap(app.trust.selected, count, right);
         }
-        _ => {}
+        KeyCode::Enter => decide(app, app.trust.selected),
+        _ => {
+            if let Some(option) = crate::list_nav::digit(&key, count) {
+                decide(app, option);
+            }
+        }
     }
     false
 }

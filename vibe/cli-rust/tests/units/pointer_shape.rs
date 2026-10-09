@@ -49,7 +49,7 @@ fn remote_project_targets_have_matching_pointer_shapes() {
     let mut app = App::default();
     app.vibe_code_project.search_area = Rect::new(2, 2, 10, 1);
     app.vibe_code_project.list_area = Rect::new(2, 4, 20, 2);
-    app.view.selection_region.area = Rect::new(2, 2, 20, 4);
+    app.view.bottom_app_selection_region.area = Rect::new(2, 2, 20, 4);
     app.vibe_code_project.items = vec![Item::Create {
         name: "project".into(),
         recommended: true,

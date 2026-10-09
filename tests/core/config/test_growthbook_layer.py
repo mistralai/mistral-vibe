@@ -708,7 +708,7 @@ async def test_routing_experiment_does_not_override_pinned_model(
     config_dir: Path,
 ) -> None:
     config_path = config_dir / "config.toml"
-    config_path.write_text('active_model = "local"\n', encoding="utf-8")
+    config_path.write_text('active_model = "mistral-medium-3.5"\n', encoding="utf-8")
     orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     layer.set_variants(
@@ -721,8 +721,8 @@ async def test_routing_experiment_does_not_override_pinned_model(
     await orchestrator.reload()
 
     config = orchestrator.config
-    assert config.active_model == "local"
-    assert config.get_active_model().alias == "local"
+    assert config.active_model == "mistral-medium-3.5"
+    assert config.get_active_model().alias == "mistral-medium-3.5"
     assert _ROUTED_TEST_ALIAS in config.models
 
 

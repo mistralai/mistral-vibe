@@ -244,11 +244,7 @@ fn navigate(app: &mut App, client: &Arc<Client>, down: bool) {
     if len == 0 {
         return;
     }
-    app.resume_picker.selected = if down {
-        (app.resume_picker.selected + 1) % len
-    } else {
-        (app.resume_picker.selected + len - 1) % len
-    };
+    app.resume_picker.selected = crate::list_nav::wrap(app.resume_picker.selected, len, down);
     app.resume_picker.free_scroll = false;
     app.resume_picker.delete_confirm = None;
     preview(app, client);

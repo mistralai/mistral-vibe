@@ -2,7 +2,10 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
+use crate::core::action_id;
 use crate::core::error::CoreError;
+use crate::core::features::permissions::GrantKey;
+use crate::core::features::programmatic_tool_calling::ProgrammaticName;
 use crate::core::features::programmatic_tool_calling::model::{
     PartialEvaluation, ToolFunction, ToolKind, ToolState,
 };
@@ -27,6 +30,11 @@ enum ProgramOperationStage {
         hook_action_id: String,
         hook_binding_ids: Vec<String>,
     },
+    AwaitingApproval {
+        approval_action_id: String,
+        grant_key: GrantKey,
+        programmatic_name: ProgrammaticName,
+    },
     Pending,
     AwaitingPostHook {
         hook_action_id: String,
@@ -46,6 +54,21 @@ pub(crate) struct ProgramExecution {
 pub(super) struct ProgramContinuation {
     pub(super) partial_evaluation: PartialEvaluation,
     pub(super) round: u32,
+}
+
+impl ProgramContinuation {
+    pub(super) fn after_round(
+        partial_evaluation: PartialEvaluation,
+        round: u32,
+    ) -> Result<Self, CoreError> {
+        let round = round
+            .checked_add(1)
+            .ok_or_else(|| CoreError::invariant("program replay round overflowed"))?;
+        Ok(Self {
+            partial_evaluation,
+            round,
+        })
+    }
 }
 
 pub(super) enum PendingProgramHook<'a> {
@@ -104,6 +127,12 @@ pub(crate) enum PendingProgramRecord {
         hook_action_id: String,
         hook_binding_ids: Vec<String>,
     },
+    AwaitingApproval {
+        call: ExternalToolCall,
+        approval_action_id: String,
+        grant_key: GrantKey,
+        programmatic_name: ProgrammaticName,
+    },
     Pending {
         call: ExternalToolCall,
     },
@@ -157,6 +186,83 @@ impl PendingProgramOperation {
             stage: ProgramOperationStage::Pending,
         }
     }
+
+    pub(super) fn awaiting_approval(
+        call: ExternalToolCall,
+        grant_key: GrantKey,
+        programmatic_name: ProgrammaticName,
+    ) -> Self {
+        Self {
+            stage: ProgramOperationStage::AwaitingApproval {
+                approval_action_id: action_id::approval(&call.action_id),
+                grant_key,
+                programmatic_name,
+            },
+            call,
+        }
+    }
+}
+
+pub(super) fn resolve_tool_state(
+    partial_evaluation: &mut PartialEvaluation,
+    operation_id: &str,
+    result: ToolResult,
+) -> Result<(), CoreError> {
+    let operation = partial_evaluation
+        .tool_state
+        .iter_mut()
+        .find(|operation| matches!(operation, ToolState::Pending { id, .. } if id == operation_id))
+        .ok_or_else(|| {
+            CoreError::invariant(format!("pending operation {operation_id:?} was not found"))
+        })?;
+    let ToolState::Pending { kind, id, function } = operation.clone() else {
+        unreachable!();
+    };
+    *operation = match result {
+        ToolResult::Failure {
+            content,
+            structured_content,
+            meta: _,
+            error,
+        } => {
+            let mut rejection = serde_json::json!({
+                "name": error.code,
+                "message": error.message,
+                "details": error.details,
+            });
+            if let Some(value) = structured_content
+                .into_value()
+                .filter(|value| !value.is_null())
+            {
+                rejection
+                    .as_object_mut()
+                    .expect("tool rejection is an object")
+                    .insert("structuredContent".to_string(), value);
+            }
+            ToolState::Rejected {
+                kind,
+                id,
+                function,
+                error: rejection,
+                content: retained_program_content(content),
+            }
+        }
+        ToolResult::Success {
+            content,
+            structured_content,
+            ..
+        } => {
+            let result = programmatic_tool_result_value(&structured_content, &content);
+            ToolState::Resolved {
+                kind,
+                id,
+                function,
+                result,
+                content: retained_program_content(content),
+            }
+        }
+    };
+    Ok(())
 }
 
 impl ProgramExecution {
@@ -187,6 +293,17 @@ impl ProgramExecution {
                         tool_call: (&operation.call).into(),
                     },
                 },
+                ProgramOperationStage::AwaitingApproval {
+                    approval_action_id,
+                    grant_key,
+                    programmatic_name,
+                } => Action::approval(
+                    approval_action_id.clone(),
+                    turn_id,
+                    grant_key,
+                    &operation.call,
+                    programmatic_name.display_name(),
+                ),
                 ProgramOperationStage::Pending => Action::external_tool(&operation.call, turn_id),
                 ProgramOperationStage::AwaitingPostHook {
                     hook_action_id,
@@ -246,8 +363,35 @@ impl ProgramExecution {
         hook_action_id: &str,
         effective_call: ExternalToolCall,
     ) -> Result<(), CoreError> {
-        let operation = self
-            .pending_operations
+        let operation = self.awaiting_pre_hook_operation_mut(hook_action_id)?;
+        operation.call = effective_call;
+        operation.stage = ProgramOperationStage::Pending;
+        Ok(())
+    }
+
+    pub(super) fn await_approval_after_pre_hook(
+        &mut self,
+        hook_action_id: &str,
+        effective_call: ExternalToolCall,
+        approval_action_id: String,
+        grant_key: GrantKey,
+        programmatic_name: ProgrammaticName,
+    ) -> Result<(), CoreError> {
+        let operation = self.awaiting_pre_hook_operation_mut(hook_action_id)?;
+        operation.call = effective_call;
+        operation.stage = ProgramOperationStage::AwaitingApproval {
+            approval_action_id,
+            grant_key,
+            programmatic_name,
+        };
+        Ok(())
+    }
+
+    fn awaiting_pre_hook_operation_mut(
+        &mut self,
+        hook_action_id: &str,
+    ) -> Result<&mut PendingProgramOperation, CoreError> {
+        self.pending_operations
             .iter_mut()
             .find(|operation| {
                 matches!(
@@ -258,10 +402,35 @@ impl ProgramExecution {
                     } if pending_hook_action_id == hook_action_id
                 )
             })
-            .ok_or_else(|| CoreError::invariant("program pre-hook operation was not found"))?;
-        operation.call = effective_call;
+            .ok_or_else(|| CoreError::invariant("program pre-hook operation was not found"))
+    }
+
+    pub(crate) fn pending_approval(&self, approval_action_id: &str) -> Option<&ExternalToolCall> {
+        let operation_index = self.pending_approval_index(approval_action_id)?;
+        Some(&self.pending_operations[operation_index].call)
+    }
+
+    pub(crate) fn approve_pending_approval(
+        &mut self,
+        approval_action_id: &str,
+    ) -> Option<&ExternalToolCall> {
+        let operation_index = self.pending_approval_index(approval_action_id)?;
+        let operation = &mut self.pending_operations[operation_index];
+
         operation.stage = ProgramOperationStage::Pending;
-        Ok(())
+        Some(&operation.call)
+    }
+
+    fn pending_approval_index(&self, approval_action_id: &str) -> Option<usize> {
+        self.pending_operations.iter().position(|operation| {
+            matches!(
+                &operation.stage,
+                ProgramOperationStage::AwaitingApproval {
+                    approval_action_id: pending_action_id,
+                    ..
+                } if pending_action_id == approval_action_id
+            )
+        })
     }
 
     pub(super) fn await_post_hook(
@@ -306,21 +475,22 @@ impl ProgramExecution {
         &mut self,
         hook_action_id: &str,
     ) -> Result<PendingProgramOperation, CoreError> {
-        let operation_index = self
-            .pending_operations
-            .iter()
-            .position(|operation| match &operation.stage {
-                ProgramOperationStage::AwaitingPreHook {
-                    hook_action_id: pending_hook_action_id,
-                    ..
-                }
-                | ProgramOperationStage::AwaitingPostHook {
-                    hook_action_id: pending_hook_action_id,
-                    ..
-                } => pending_hook_action_id == hook_action_id,
-                ProgramOperationStage::Pending => false,
-            })
-            .ok_or_else(|| CoreError::invariant("pending program hook was not found"))?;
+        let operation_index =
+            self.pending_operations
+                .iter()
+                .position(|operation| match &operation.stage {
+                    ProgramOperationStage::AwaitingPreHook {
+                        hook_action_id: pending_hook_action_id,
+                        ..
+                    }
+                    | ProgramOperationStage::AwaitingPostHook {
+                        hook_action_id: pending_hook_action_id,
+                        ..
+                    } => pending_hook_action_id == hook_action_id,
+                    ProgramOperationStage::AwaitingApproval { .. }
+                    | ProgramOperationStage::Pending => false,
+                })
+                .ok_or_else(|| CoreError::invariant("pending program hook was not found"))?;
         Ok(self.pending_operations.remove(operation_index))
     }
 
@@ -330,6 +500,19 @@ impl ProgramExecution {
         result: ToolResult,
     ) -> Result<Option<ProgramContinuation>, CoreError> {
         let operation = self.take_pending_operation(action_id)?;
+        self.resolve_operation(&operation.call.call_id, result)?;
+        self.continuation()
+    }
+
+    pub(super) fn resolve_pending_approval(
+        &mut self,
+        approval_action_id: &str,
+        result: ToolResult,
+    ) -> Result<Option<ProgramContinuation>, CoreError> {
+        let operation_index = self
+            .pending_approval_index(approval_action_id)
+            .ok_or_else(|| CoreError::invariant("pending program approval was not found"))?;
+        let operation = self.pending_operations.remove(operation_index);
         self.resolve_operation(&operation.call.call_id, result)?;
         self.continuation()
     }
@@ -349,78 +532,17 @@ impl ProgramExecution {
         operation_id: &str,
         result: ToolResult,
     ) -> Result<(), CoreError> {
-        let operation = self
-            .partial_evaluation
-            .tool_state
-            .iter_mut()
-            .find(
-                |operation| matches!(operation, ToolState::Pending { id, .. } if id == operation_id),
-            )
-            .ok_or_else(|| {
-                CoreError::invariant(format!("pending operation {operation_id:?} was not found"))
-            })?;
-        let ToolState::Pending { kind, id, function } = operation.clone() else {
-            unreachable!();
-        };
-        *operation = match result {
-            ToolResult::Failure {
-                content,
-                structured_content,
-                meta: _,
-                error,
-            } => {
-                let mut rejection = serde_json::json!({
-                    "name": error.code,
-                    "message": error.message,
-                    "details": error.details,
-                });
-                if let Some(value) = structured_content
-                    .into_value()
-                    .filter(|value| !value.is_null())
-                {
-                    rejection
-                        .as_object_mut()
-                        .expect("tool rejection is an object")
-                        .insert("structuredContent".to_string(), value);
-                }
-                ToolState::Rejected {
-                    kind,
-                    id,
-                    function,
-                    error: rejection,
-                    content: retained_program_content(content),
-                }
-            }
-            ToolResult::Success {
-                content,
-                structured_content,
-                ..
-            } => {
-                let result = programmatic_tool_result_value(&structured_content, &content);
-                ToolState::Resolved {
-                    kind,
-                    id,
-                    function,
-                    result,
-                    content: retained_program_content(content),
-                }
-            }
-        };
-        Ok(())
+        resolve_tool_state(&mut self.partial_evaluation, operation_id, result)
     }
 
     fn continuation(&self) -> Result<Option<ProgramContinuation>, CoreError> {
         if !self.pending_operations.is_empty() {
             return Ok(None);
         }
-        let round = self
-            .round
-            .checked_add(1)
-            .ok_or_else(|| CoreError::invariant("program replay round overflowed"))?;
-        Ok(Some(ProgramContinuation {
-            partial_evaluation: self.partial_evaluation.clone(),
-            round,
-        }))
+        Ok(Some(ProgramContinuation::after_round(
+            self.partial_evaluation.clone(),
+            self.round,
+        )?))
     }
 
     #[cfg(test)]
@@ -727,6 +849,7 @@ fn validate_pending_program_record(
 ) -> Result<(), String> {
     let call = match pending {
         PendingProgramRecord::AwaitingPreHook { call, .. }
+        | PendingProgramRecord::AwaitingApproval { call, .. }
         | PendingProgramRecord::Pending { call }
         | PendingProgramRecord::AwaitingPostHook { call, .. } => call,
     };
@@ -740,7 +863,7 @@ fn validate_pending_program_record(
     {
         return Err("program provided-tool identity must not be empty".to_string());
     }
-    let Some(programmatic_name) = call.call.programmatic_name() else {
+    let Some(programmatic_name) = call.call.programmatic_runtime_name() else {
         return Err(format!(
             "program operation {id:?} targets a direct-only built-in"
         ));
@@ -763,6 +886,16 @@ fn validate_pending_program_record(
                 hook_binding_ids,
                 HookPoint::PreToolCall,
             )?;
+        }
+        PendingProgramRecord::AwaitingApproval {
+            approval_action_id, ..
+        } => {
+            let expected_action_id = action_id::approval(&call.action_id);
+            if approval_action_id != &expected_action_id {
+                return Err(format!(
+                    "program approval action ID {approval_action_id:?} does not match derived action ID {expected_action_id:?}"
+                ));
+            }
         }
         PendingProgramRecord::Pending { .. } => {}
         PendingProgramRecord::AwaitingPostHook {
@@ -818,11 +951,12 @@ fn programmatic_tool_result_value(
     }
     let text = content
         .iter()
-        .filter_map(|block| match block {
+        .map(|block| match block {
             ContentBlock::Text(content) => Some(content.text.as_str()),
             _ => None,
         })
-        .collect::<String>();
+        .collect::<Option<String>>()
+        .unwrap_or_default();
     if !text.is_empty() {
         return serde_json::from_str(&text).unwrap_or(Value::String(text));
     }
@@ -865,6 +999,16 @@ impl From<&PendingProgramOperation> for PendingProgramRecord {
                 hook_action_id: hook_action_id.clone(),
                 hook_binding_ids: hook_binding_ids.clone(),
             },
+            ProgramOperationStage::AwaitingApproval {
+                approval_action_id,
+                grant_key,
+                programmatic_name,
+            } => Self::AwaitingApproval {
+                call: operation.call.clone(),
+                approval_action_id: approval_action_id.clone(),
+                grant_key: grant_key.clone(),
+                programmatic_name: programmatic_name.clone(),
+            },
             ProgramOperationStage::Pending => Self::Pending {
                 call: operation.call.clone(),
             },
@@ -896,6 +1040,19 @@ impl TryFrom<(&str, PendingProgramRecord)> for PendingProgramOperation {
                 stage: ProgramOperationStage::AwaitingPreHook {
                     hook_action_id,
                     hook_binding_ids,
+                },
+            },
+            PendingProgramRecord::AwaitingApproval {
+                call,
+                approval_action_id,
+                grant_key,
+                programmatic_name,
+            } => Self {
+                call,
+                stage: ProgramOperationStage::AwaitingApproval {
+                    approval_action_id,
+                    grant_key,
+                    programmatic_name,
                 },
             },
             PendingProgramRecord::Pending { call } => Self {

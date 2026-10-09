@@ -76,8 +76,8 @@ expected_actions = {
 
 timeline: Timeline = [
     "x",
-    _click(25, 25),  # rust: the `~/pics/cat.png` link; python: the prompt row
+    _click(25, 13),  # rust: the `~/pics/cat.png` link; python: the prompt row
     _click(
-        25, 26
+        25, 14
     ),  # rust: the `/opt/data/charts.png` link; python: the `~/pics/cat.png` link
 ]

@@ -11,7 +11,7 @@ expected_clipboard = "return value;"
 
 _PROMPT = "show one indented line"
 _ANSWER = "```\n    return value;\n```"
-_CLICK = "\x1b[<0;10;32M\x1b[<0;10;32m"
+_CLICK = "\x1b[<0;10;15M\x1b[<0;10;15m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

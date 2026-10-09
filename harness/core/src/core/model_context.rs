@@ -2,7 +2,7 @@ use crate::core::config::ImageDeliveryMode;
 use crate::core::error::CoreError;
 use crate::core::model_input_projection::project_model_input_messages;
 use crate::core::step_protocol::ModelMessageUpdate;
-use crate::core::wire::message::StoredMessage;
+use crate::core::wire::message::{Message, StoredMessage};
 
 /// Everything the model sees, plus the bookkeeping `HarnessSession` needs to
 /// ship it incrementally.
@@ -68,6 +68,15 @@ impl ModelContext {
 
     pub(crate) fn messages(&self) -> &[StoredMessage] {
         &self.messages
+    }
+
+    /// Returns the most recent message delivered under `key`.
+    pub(crate) fn latest_keyed_message(&self, key: &str) -> Option<&Message> {
+        self.messages
+            .iter()
+            .rev()
+            .find(|stored| stored.context_key() == Some(key))
+            .map(|stored| &stored.message)
     }
 
     pub(crate) fn message_count(&self) -> usize {

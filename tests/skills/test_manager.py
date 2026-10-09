@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -678,3 +678,88 @@ class TestRegistrySkillDiscovery:
         manager = SkillManager(lambda: config)
 
         assert "evil" not in manager.available_skills
+
+
+class TestSkillManagerRediscovery:
+    def test_edited_skill_is_picked_up_by_the_next_discovery(
+        self, skills_dir: Path
+    ) -> None:
+        create_skill(skills_dir, "evolving", "Before")
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        assert SkillManager(lambda: config).available_skills[
+            "evolving"
+        ].description == ("Before")
+
+        create_skill(skills_dir, "evolving", "After the edit")
+
+        skill = SkillManager(lambda: config).available_skills["evolving"]
+        assert skill.description == "After the edit"
+
+    def test_unchanged_skill_is_not_parsed_again(
+        self, skills_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from vibe.core.skills import manager as manager_module
+
+        create_skill(skills_dir, "stable")
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        SkillManager(lambda: config)
+        parses: list[str] = []
+        parse = manager_module.parse_skill_markdown
+
+        def counting_parse(content: str) -> Any:
+            parses.append(content)
+            return parse(content)
+
+        monkeypatch.setattr(manager_module, "parse_skill_markdown", counting_parse)
+
+        assert "stable" in SkillManager(lambda: config).available_skills
+        assert parses == []
+
+    def test_openai_policy_added_later_is_picked_up(self, skills_dir: Path) -> None:
+        skill_dir = create_skill(skills_dir, "late-policy")
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        assert (
+            SkillManager(lambda: config).available_skills["late-policy"].model_invocable
+        )
+
+        (skill_dir / "agents").mkdir()
+        (skill_dir / "agents" / "openai.yaml").write_text(
+            "policy:\n  allow_implicit_invocation: false\n", encoding="utf-8"
+        )
+
+        skill = SkillManager(lambda: config).available_skills["late-policy"]
+        assert skill.model_invocable is False
+
+    def test_cached_skill_still_reports_its_issues(self, skills_dir: Path) -> None:
+        skill_dir = create_skill(skills_dir, "bad-policy")
+        (skill_dir / "agents").mkdir()
+        metadata_path = skill_dir / "agents" / "openai.yaml"
+        metadata_path.write_text(
+            'policy:\n  allow_implicit_invocation: "false"\n', encoding="utf-8"
+        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+
+        first = SkillManager(lambda: config)
+        second = SkillManager(lambda: config)
+
+        assert [issue.file for issue in first.config_issues] == [metadata_path]
+        assert [issue.file for issue in second.config_issues] == [metadata_path]
+
+    def test_cached_skill_still_warns_about_its_directory_name(
+        self, skills_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from vibe.core.skills import manager as manager_module
+
+        create_skill(skills_dir, "original").rename(skills_dir / "renamed")
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            manager_module.logger,
+            "warning",
+            lambda message, *args: warnings.append(message % args),
+        )
+
+        SkillManager(lambda: config)
+        SkillManager(lambda: config)
+
+        assert len([w for w in warnings if "doesn't match directory name" in w]) == 2

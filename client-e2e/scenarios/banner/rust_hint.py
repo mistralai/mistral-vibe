@@ -8,7 +8,7 @@ _SHIFT_TAB = "\x1b[Z"
 env = {"VIBE_TEST_SHOW_RUST_HINT": "1"}
 screen_contains = {
     "rust": (
-        "Experimental Rust TUI - unset `VIBE_CLI` (or set it to `python`) for the legacy Python TUI.",
+        "You are using the new Vibe TUI. To switch back to the classic TUI, set the `VIBE_CLI` environment variable to `python`.",
     )
 }
 

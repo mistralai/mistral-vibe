@@ -50,6 +50,7 @@ async def test_full_toml_to_vibe_config_schema(tmp_path: Path) -> None:
 disable_welcome_banner_animation = true
 api_timeout = 300.0
 api_retry_max_elapsed_time = 120.0
+api_stream_idle_timeout = 600.0
 active_model = "codestral"
 disabled_tools = ["bash"]
 default_agent = "plan"
@@ -75,12 +76,19 @@ provider = "mistral"
     assert config.disable_welcome_banner_animation is True
     assert config.api_timeout == 300.0
     assert config.api_retry_max_elapsed_time == 120.0
+    assert config.api_stream_idle_timeout == 600.0
     assert config.active_model == "codestral"
     assert config.models["codestral"].alias == "codestral"
     assert "bash" in config.disabled_tools
     assert config.default_agent == "plan"
     assert "search" in config.enabled_skills
     assert config.enable_otel is True
+
+
+def test_stream_idle_timeout_is_off_by_default_and_never_negative() -> None:
+    assert VibeConfigSchema().api_stream_idle_timeout == 0.0
+    with pytest.raises(ValidationError):
+        VibeConfigSchema(api_stream_idle_timeout=-1.0)
 
 
 def test_duplicate_model_alias_last_wins() -> None:
@@ -155,6 +163,32 @@ def test_smart_approve_default_flag_offers_and_defaults() -> None:
     config = VibeConfigSchema(smart_approve_default=True)
     assert config.smart_approve_offered() is True
     assert config.resolve_default_agent() == "smart-approve"
+
+
+def test_default_model_carries_the_sourced_values() -> None:
+    # The default model is what a fresh install runs; a typo in a price,
+    # level set, or window would otherwise ship silently. Sources: Mistral's
+    # model card (prices, 256k window) and the API docs (reasoning_effort:
+    # none and high).
+    from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG, DEFAULT_MODELS
+
+    assert DEFAULT_MODELS == [DEFAULT_ACTIVE_MODEL_CONFIG]
+    default = DEFAULT_ACTIVE_MODEL_CONFIG
+    assert (default.name, default.alias) == (
+        "mistral-vibe-cli-latest",
+        "mistral-medium-3.5",
+    )
+    assert default.display_name == "Mistral Medium 3.5"
+    assert default.temperature == 1.0
+    assert (default.input_price, default.output_price, default.cached_input_price) == (
+        1.5,
+        7.5,
+        0.15,
+    )
+    assert default.thinking == "high"
+    assert list(default.thinking_levels) == ["off", "high"]
+    assert default.max_context_length == 262144
+    assert default.supports_images is True
 
 
 def test_unpinned_active_model_resolves_to_default_model() -> None:
@@ -303,13 +337,13 @@ def test_gated_model_not_injected_without_routing() -> None:
 
 def test_routed_model_available_but_not_active_when_pinned_to_other() -> None:
     config = VibeConfigSchema.model_validate({
-        "active_model": "local",
+        "active_model": "mistral-medium-3.5",
         "routed_default_model": _ROUTED_TEST_ALIAS,
         "routed_model_config": _ROUTED_TEST_MODEL_JSON,
     })
 
-    assert config.active_model == "local"
-    assert config.get_active_model().alias == "local"
+    assert config.active_model == "mistral-medium-3.5"
+    assert config.get_active_model().alias == "mistral-medium-3.5"
     assert _ROUTED_TEST_ALIAS in config.models
     assert config.resolve_default_model_alias() == _ROUTED_TEST_ALIAS
 

@@ -81,7 +81,7 @@ class VertexAnthropicAdapter(AnthropicAdapter):
         super().__init__()
         self.credentials = _CREDENTIALS
 
-    def prepare_request(
+    def prepare_request(  # noqa: PLR0913 - one keyword per request setting
         self,
         *,
         model_name: str,
@@ -94,6 +94,7 @@ class VertexAnthropicAdapter(AnthropicAdapter):
         provider: ProviderView,
         api_key: str | None = None,
         thinking: str = "off",
+        top_p: float | None = None,
     ) -> PreparedRequest:
         project_id = provider.project_id
         region = provider.region
@@ -117,6 +118,7 @@ class VertexAnthropicAdapter(AnthropicAdapter):
             max_tokens=max_tokens,
             thinking=thinking,
         )
+        self._apply_top_p(payload, top_p)
 
         if system_blocks := self._build_system_blocks(system_prompt):
             payload["system"] = system_blocks

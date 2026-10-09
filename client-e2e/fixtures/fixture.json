@@ -75,7 +75,8 @@
             "alias": "mistral-medium-3.5",
             "thinking": "medium",
             "supportsImages": true,
-            "displayName": "mistral-medium-3.5"
+            "displayName": "mistral-medium-3.5",
+            "thinkingLevels": ["off", "medium", "high"]
           },
           {
             "name": "devstral-small-latest",
@@ -301,7 +302,8 @@
               "alias": "mistral-medium-3.5",
               "thinking": "medium",
               "supportsImages": true,
-              "displayName": "mistral-medium-3.5"
+              "displayName": "mistral-medium-3.5",
+              "thinkingLevels": ["off", "medium", "high"]
             },
             {
               "name": "devstral-small-latest",
@@ -1888,7 +1890,8 @@
               "alias": "mistral-medium-3.5",
               "thinking": "medium",
               "supportsImages": true,
-              "displayName": "mistral-medium-3.5"
+              "displayName": "mistral-medium-3.5",
+              "thinkingLevels": ["off", "medium", "high"]
             },
             {
               "name": "devstral-small-latest",

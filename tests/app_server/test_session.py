@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import suppress
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import time
 from types import SimpleNamespace
@@ -1410,6 +1411,12 @@ async def test_due_loop_runs_as_an_unsolicited_server_turn(tmp_path: Path) -> No
         if isinstance(entry, PublicMessageEntry) and entry.role == "user"
     )
     assert entries.index(notice) == user_index + 1
+    prompt = entries[user_index]
+    assert isinstance(prompt, PublicMessageEntry)
+    assert prompt.user_display_content is not None
+    marker = prompt.user_display_content.content[0]
+    assert marker["type"] == "vibe.scheduled_loop"
+    assert marker["loopId"] == "scheduled-1"
     assert session.state.latest_turn is not None
     assert session.state.latest_turn.status == "completed"
     assert metadata.loops[0].next_fire_at >= before_fire + 30
@@ -2521,7 +2528,8 @@ async def test_initialize_requires_initialized_notification() -> None:
             "serverInfo": {
                 "name": "vibe-app-server",
                 "version": response.server_info.version,
-            }
+            },
+            "processId": os.getpid(),
         }
 
         with pytest.raises(AppServerResponseError) as exc_info:

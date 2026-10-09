@@ -1,4 +1,4 @@
-"""Pasting into the question app's free-text row, never the composer."""
+"""Pasting into the question app's free-text row keeps every line, never the composer."""
 
 from __future__ import annotations
 
@@ -20,8 +20,12 @@ handshake = {"callback/result": {"accepted": True}}
 # released callback onward.
 capture_startup = False
 capture_steps = {1, 2, 3, 4, 5}
-screen_contains = {"rust": ("SQLite Enterprise",), "python": ("SQLite Enterprise",)}
-screen_excludes = {"rust": ("Ignored second line",), "python": ("Ignored second line",)}
+screen_contains = {
+    "rust": ("SQLite Enterprise", "with WAL"),
+    "python": ("SQLite Enterprise",),
+}
+# Python's single-line `Input` keeps only the first pasted line.
+screen_excludes = {"python": ("with WAL",)}
 
 _DOWN = "\x1b[B"
 
@@ -47,8 +51,8 @@ timeline: Timeline = [
     _DOWN,
     _DOWN,
     _DOWN,
-    # Only the first pasted line may land, and only in the free-text row.
-    paste("SQLite Enterprise\nIgnored second line"),
+    # Every pasted line lands, and only in the free-text row.
+    paste("SQLite Enterprise\nwith WAL"),
 ]
 
 # Each key must land on a settled UI: batching changes the outcome here.

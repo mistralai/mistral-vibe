@@ -29,10 +29,15 @@ impl CompactionProjection {
         tools: &[ToolDefinition],
         budget: CompactionBudget,
     ) -> Result<CompactionProjectionFit, CoreError> {
+        // Keyed hook context is redelivered after compaction, so the summary must not freeze it.
         let mut messages = if canonical_messages.is_empty() {
             vec![generated_system]
         } else {
-            canonical_messages.to_vec()
+            canonical_messages
+                .iter()
+                .filter(|stored| stored.context_key().is_none())
+                .cloned()
+                .collect()
         };
         messages.push(prompt_message(extra_instructions));
         Self::restore(messages, 0)?.fit_to_budget(tools, budget)

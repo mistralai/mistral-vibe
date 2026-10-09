@@ -13,7 +13,7 @@ fn app_with(fields: &[(&str, &str, bool)], query: &str) -> App {
         })).collect::<Vec<_>>(),
     }));
     config::apply_loaded(&mut app, loaded);
-    app.config_screen.query = query.into();
+    app.config_screen.search.query = query.into();
     app
 }
 
@@ -117,7 +117,7 @@ fn refresh_preserves_the_field_when_fuzzy_ranks_change() {
             targets: Vec::new(),
         },
     );
-    assert_eq!(app.config_screen.query, "api");
+    assert_eq!(app.config_screen.search.query, "api");
     assert_eq!(names(&app)[app.config_screen.selected], "api_key");
     assert_eq!(app.config_screen.selected, 0);
 }

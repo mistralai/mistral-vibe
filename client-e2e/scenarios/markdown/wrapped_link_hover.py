@@ -15,9 +15,9 @@ _ANSWER = f"Read [{_LABEL}]({_URL}) before refactoring."
 
 expected_actions = {"rust": [Action("open_url", _URL)]}
 
-# The label wraps from one-based cell (8, 31) to (30, 32); SGR button 35 is a bare pointer move.
-_HOVER_TAIL = "\x1b[<35;10;32M"
-_CLICK_TAIL = "\x1b[<0;10;32M\x1b[<0;10;32m"
+# The label wraps from one-based cell (8, 15) to (30, 16); SGR button 35 is a bare pointer move.
+_HOVER_TAIL = "\x1b[<35;10;16M"
+_CLICK_TAIL = "\x1b[<0;10;16M\x1b[<0;10;16m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

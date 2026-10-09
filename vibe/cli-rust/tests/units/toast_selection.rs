@@ -182,6 +182,23 @@ fn a_selection_follows_its_toast_when_a_newer_one_shifts_the_rack() {
 }
 
 #[test]
+fn copying_a_wrapped_toast_rejoins_its_rows() {
+    let text = "Could not reach the app server: connection refused while resuming the session";
+    let mut app = App::default();
+    app.show_toast(text.to_owned(), ToastSeverity::Error, TOAST_SECS);
+    redraw(&mut app);
+    let (_, area) = *app.view.toast_text_areas.last().expect("a painted toast");
+    assert_eq!(area.height, 2, "the toast wraps onto a second row");
+
+    selection::press_toast(&mut app, (area.x, area.y));
+    selection::drag(&mut app, (area.right() - 1, area.bottom() - 1));
+    selection::release(&mut app);
+    redraw(&mut app);
+
+    assert_eq!(selected_text(&app), Some(text));
+}
+
+#[test]
 fn a_held_press_paints_no_highlight() {
     let mut app = drawn();
     let before = redraw(&mut app);

@@ -317,7 +317,7 @@ fn enter_selects_the_newest_prompt_and_saves_the_draft() {
     assert!(!app.queue.editing);
 
     assert!(!mq::enter(&mut app), "already open");
-    assert!(app.overlays.notice.is_some(), "controls hint appears");
+    assert!(mq::mode_hints(&app).is_some(), "controls hint appears");
 }
 
 #[test]
@@ -388,7 +388,7 @@ fn exit_after_editing_clears_the_input() {
     mq::exit(&mut app);
     assert_eq!(app.queue.selected, None);
     assert!(app.chat_input.input.is_empty());
-    assert!(app.overlays.notice.is_none(), "the edit hint is cleared");
+    assert!(mq::mode_hints(&app).is_none(), "the edit hint is cleared");
 }
 
 #[tokio::test]
@@ -405,7 +405,7 @@ async fn saving_an_edit_exits_selection_and_restores_the_draft() {
     assert!(!app.queue.editing);
     assert_eq!(app.queue.items[0].text, "second edited");
     assert_eq!(app.chat_input.input, "draft text");
-    assert!(app.overlays.notice.is_none(), "the edit hint is cleared");
+    assert!(mq::mode_hints(&app).is_none(), "the edit hint is cleared");
 }
 
 #[test]

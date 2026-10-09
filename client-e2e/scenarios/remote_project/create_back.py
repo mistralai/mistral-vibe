@@ -9,7 +9,7 @@ handshake = project_handshake()
 request_methods = METHODS
 timeline: Timeline = [
     "/remote-project\r",
-    "New project",
+    "/New project",
     "\r",
     "\x7f",
     "\r",

@@ -28,7 +28,8 @@ fn custom_domain_state() -> OnboardingState {
 }
 
 fn open_custom_domain(state: &mut OnboardingState) {
-    // Target: choose "Other" (Down + Enter).
+    // Target: choose "Other" (Down + Enter) from the first option; ↓ wraps.
+    state.sign_in_target_selected = 0;
     screens::handle_key(state, key(KeyCode::Down));
     assert!(matches!(screens::handle_key(state, enter()), _));
     assert_eq!(state.screen, Screen::CustomDomain);

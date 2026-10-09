@@ -7,14 +7,15 @@ use std::time::Instant;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use super::markdown::LinkedLines;
 use super::theme;
 use crate::utils::startup_cache::StartupConfig;
-use petit_chat::PetitChat;
+use petit_chat::{CatVariant, PetitChat};
 
 /// Rust-only hint shown as its own line under the banner info block; suppressed
 /// under the e2e replay harness so it never breaks parity with the Python CLI.
 const RUST_BUILD_HINT: &str =
-    "Experimental Rust TUI - unset `VIBE_CLI` (or set it to `python`) for the legacy Python TUI.";
+    "You are using the new Vibe TUI. To switch back to the classic TUI, set the `VIBE_CLI` environment variable to `python`.";
 
 /// The welcome banner: an animated cat above a static info block.
 #[derive(Default)]
@@ -38,15 +39,23 @@ impl Banner {
         self.greeting = greeting;
     }
 
+    /// Switch the cat variant based on the active model name.
+    /// "ml4" or "Mistral Large" → LeChonk, anything else → LeChat.
+    pub fn sync_model_variant(&mut self, config: &StartupConfig) {
+        let variant = CatVariant::from_model(&config.active_model_display_name);
+        self.chat.set_variant(variant);
+    }
+
     /// The current cat frame as a braille grid, for screens that reuse it.
     pub fn chat_frame(&self) -> String {
         self.chat.render()
     }
 
     /// The full banner: the cat rows followed by the info block.
-    pub fn view(&self, config: &StartupConfig) -> Vec<Line<'static>> {
+    pub fn view(&self, config: &StartupConfig) -> LinkedLines {
         // `#banner-container` `padding: 1 1 0 0`: one blank row above the cat.
-        let mut lines: Vec<Line> = vec![Line::from("")];
+        let mut lines = LinkedLines::default();
+        lines.push_gap();
         lines.extend(
             self.chat
                 .render()
@@ -64,7 +73,7 @@ impl Banner {
             Some(plan) => format!(" · {plan}"),
             None => String::new(),
         };
-        lines.push(Line::from(""));
+        lines.push_gap();
         lines.push(Line::from(vec![
             Span::styled("Mistral Vibe", brand),
             Span::raw(" "),
@@ -80,7 +89,7 @@ impl Banner {
             Span::styled(" for more information", meta),
         ]));
         if show_rust_hint() {
-            lines.push(Line::from(""));
+            lines.push_gap();
             lines.push(Line::from(Span::styled(
                 RUST_BUILD_HINT,
                 theme::text(theme::warning()),
@@ -88,7 +97,7 @@ impl Banner {
         }
         // `.greeting-message` `margin-top: 1`: one blank row above the greeting.
         if let Some(greeting) = &self.greeting {
-            lines.push(Line::from(""));
+            lines.push_gap();
             lines.push(Line::from(Span::styled(greeting.clone(), meta)));
         }
         lines

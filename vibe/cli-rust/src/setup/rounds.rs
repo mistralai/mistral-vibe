@@ -144,7 +144,7 @@ pub async fn setup_round(
 /// only when it lands), marking the startup metric's first frame — a
 /// pre-loop paint already marked it, and the mark is once.
 pub fn paint_relaunch(mut run: EventLoop, timings: &mut StartupRecorder) -> EventLoop {
-    let _ = run.terminal.draw(|frame| run.app.draw(frame));
+    let _ = crate::terminal::draw(&mut run.terminal, &mut run.app);
     timings.record("first_draw");
     crate::startup::mark_first_draw();
     run

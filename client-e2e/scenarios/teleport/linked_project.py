@@ -17,7 +17,7 @@ request_methods = METHODS
 on_request = {START: [event("summarizing_context"), event("checking_git"), *complete()]}
 expected_actions = {"rust": [Action("open_url", URL)]}
 
-_ROW, _COL = 32, 18
+_ROW, _COL = 14, 18
 _CLICK = f"\x1b[<0;{_COL};{_ROW}M\x1b[<0;{_COL};{_ROW}m"
 
 timeline: Timeline = ["/teleport\r", _CLICK]

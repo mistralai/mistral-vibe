@@ -15,7 +15,7 @@ _TASK = "find the transcript grouping code"
 
 screen_contains = {
     client: (
-        "Read files, ran subagents",
+        "Read 2 files, ran 2 subagents",
         f"Explored {_TASK}",
         "response: Found the code.",
         "turns_used: 1",
@@ -34,6 +34,6 @@ timeline: Timeline = [
     read_file("after.txt", "   1→after", num_lines=1),
     assistant_msg("Done."),
     turn_completed(),
-    "\x1b[<0;1;30M\x1b[<0;1;30m",
-    "\x1b[<0;5;29M\x1b[<0;5;29m",
+    "\x1b[<0;1;15M\x1b[<0;1;15m",
+    "\x1b[<0;5;18M\x1b[<0;5;18m",
 ]

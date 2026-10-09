@@ -17,7 +17,7 @@ from vibe.app_server.models import (
     PublicChildSession,
     RunningSessionStatus,
 )
-from vibe.cli.textual_ui.widgets.context_progress import format_token_count
+from vibe.cli.textual_ui.count_format import format_compact_count
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 
 _MAIN_SESSION_ID = "\x00main"
@@ -274,7 +274,7 @@ class SubagentList(NavigableOptionList):
                 (_display_name(session.agent_type), "bold"),
                 f" ({_display_name(session.name)}) ",
                 (f"[{status}]", status_style),
-                (f" · {format_token_count(context_tokens)} tokens", "$text-muted"),
+                (f" · {format_compact_count(context_tokens)} tokens", "$text-muted"),
             ),
             selected=session.id == self._selected_session_id,
             marked=self._marker_session_id == session.id,

@@ -26,6 +26,33 @@ pub struct TranscriptLayout {
     revision: u64,
     pub height: u16,
     pub entries: Vec<LayoutEntry>,
+    /// Layout row of the first queued prompt, if any.
+    pub queue_top: Option<u16>,
+}
+
+impl TranscriptLayout {
+    /// The blank rows that push the queued run down by `free` rows, to the viewport bottom.
+    pub fn queue_spacer(&self, free: u16) -> QueueSpacer {
+        self.queue_top
+            .map_or_else(QueueSpacer::default, |at| QueueSpacer { at, height: free })
+    }
+}
+
+/// Blank rows inserted at layout row `at`, above the queued run.
+#[derive(Clone, Copy, Default)]
+pub struct QueueSpacer {
+    pub at: u16,
+    pub height: u16,
+}
+
+impl QueueSpacer {
+    /// Shift a layout row at or below the spacer past it.
+    pub fn offset(self, top: u16) -> u16 {
+        match top >= self.at {
+            true => top.saturating_add(self.height),
+            false => top,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -125,12 +152,14 @@ impl TranscriptCache {
         width: u16,
         height: u16,
         entries: Vec<LayoutEntry>,
+        queue_top: Option<u16>,
     ) {
         let slot = self.width_slot(width);
         self.layouts[slot] = TranscriptLayout {
             revision,
             height,
             entries,
+            queue_top,
         };
     }
 

@@ -23,6 +23,7 @@ use crate::core::capabilities::PluginContextDefinition;
 use crate::core::config::{HarnessConfigUpdate, HarnessSettings};
 use crate::core::features::compaction::CompactionTrigger;
 use crate::core::features::notifications::Notification;
+use crate::core::features::permissions::{ApprovalFailureReason, ApprovalOutcome};
 use crate::core::hooks::{HookPoint, HookResult};
 use crate::core::wire::completion::CompletionResult;
 use crate::core::wire::content::ContentBlock;
@@ -139,6 +140,14 @@ pub(crate) enum HarnessConfigurationChange {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum HarnessCommand {
+    ApprovalCompleted {
+        action_id: String,
+        outcome: ApprovalOutcome,
+    },
+    ApprovalFailed {
+        action_id: String,
+        reason: ApprovalFailureReason,
+    },
     UserMessage {
         turn_id: String,
         content: Vec<ContentBlock>,
@@ -208,6 +217,8 @@ pub(crate) enum HarnessCommand {
 impl HarnessCommand {
     pub(crate) fn command_type(&self) -> &'static str {
         match self {
+            Self::ApprovalCompleted { .. } => "approval_completed",
+            Self::ApprovalFailed { .. } => "approval_failed",
             Self::UserMessage { .. } => "user_message",
             Self::ContextMessage { .. } => "context_message",
             Self::Notification { .. } => "notification",
@@ -231,7 +242,9 @@ impl HarnessCommand {
 
     pub(crate) fn correlated_action_id(&self) -> Option<&str> {
         match self {
-            Self::CompletionModelInputResyncRequested { action_id }
+            Self::ApprovalCompleted { action_id, .. }
+            | Self::ApprovalFailed { action_id, .. }
+            | Self::CompletionModelInputResyncRequested { action_id }
             | Self::CompletionSucceeded { action_id, .. }
             | Self::CompletionFailed { action_id, .. }
             | Self::HookCompleted { action_id, .. }
@@ -277,6 +290,11 @@ pub(crate) enum PendingCompletionPurpose {
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum PendingActionInspection {
+    Approval {
+        action_id: String,
+        call_id: String,
+        grant_key: String,
+    },
     Completion {
         purpose: PendingCompletionPurpose,
         action_id: String,

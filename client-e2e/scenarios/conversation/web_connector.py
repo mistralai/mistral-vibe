@@ -54,11 +54,11 @@ _BLOCKED = {
 }
 
 # The settled tool group header, then each connector entry header once unfolded.
-_EXPAND = "\x1b[<0;1;30M\x1b[<0;1;30m"
-_EXPAND_SEARCH = "\x1b[<0;8;28M\x1b[<0;8;28m"
-# The unreadable page first: unfolding it lifts the rows above it by one.
-_EXPAND_BLOCKED = "\x1b[<0;8;30M\x1b[<0;8;30m"
-_EXPAND_PAGE = "\x1b[<0;8;28M\x1b[<0;8;28m"
+_EXPAND = "\x1b[<0;1;15M\x1b[<0;1;15m"
+_EXPAND_SEARCH = "\x1b[<0;8;16M\x1b[<0;8;16m"
+# The unreadable page first: unfolding it leaves the page row above it in place.
+_EXPAND_BLOCKED = "\x1b[<0;8;23M\x1b[<0;8;23m"
+_EXPAND_PAGE = "\x1b[<0;8;22M\x1b[<0;8;22m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

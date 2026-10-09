@@ -1,5 +1,11 @@
 //! Pure logic tests share one integration-test binary.
 
+/// Keep the units binary off the host clipboard: install the null sink.
+#[ctor::ctor]
+fn isolate_host_clipboard() {
+    vibe_rs::clipboard::set_sink(std::sync::Arc::new(vibe_rs::clipboard::NullClipboard));
+}
+
 #[path = "units/app_server_crash.rs"]
 mod app_server_crash;
 #[path = "units/argument_hint.rs"]
@@ -16,12 +22,18 @@ mod caret_focus;
 mod check_upgrade_flags;
 #[path = "units/clear_history.rs"]
 mod clear_history;
+#[path = "units/clipboard_isolation.rs"]
+mod clipboard_isolation;
 #[path = "units/collapsed_pastes.rs"]
 mod collapsed_pastes;
+#[path = "units/color_literals.rs"]
+mod color_literals;
 #[path = "units/command_result_layout.rs"]
 mod command_result_layout;
 #[path = "units/compact_handoff.rs"]
 mod compact_handoff;
+#[path = "units/composer_blur.rs"]
+mod composer_blur;
 #[path = "units/composer_mentions.rs"]
 mod composer_mentions;
 #[path = "units/composer_pastes.rs"]
@@ -32,8 +44,12 @@ mod config_filter;
 mod config_issues;
 #[path = "units/config_selection.rs"]
 mod config_selection;
+#[path = "units/config_write.rs"]
+mod config_write;
 #[path = "units/connector_web.rs"]
 mod connector_web;
+#[path = "units/count_format.rs"]
+mod count_format;
 #[path = "units/credentials.rs"]
 mod credentials;
 #[path = "units/dotenv.rs"]
@@ -42,8 +58,12 @@ mod dotenv;
 mod effect_entry;
 #[path = "units/effect_output.rs"]
 mod effect_output;
+#[path = "units/external_editor.rs"]
+mod external_editor;
 #[path = "units/file_mention_matching.rs"]
 mod file_mention_matching;
+#[path = "units/focus.rs"]
+mod focus;
 #[path = "units/foreign_session.rs"]
 mod foreign_session;
 #[path = "units/headless_cli_flags.rs"]
@@ -52,6 +72,8 @@ mod headless_cli_flags;
 mod headless_logic;
 #[path = "units/headless_prompt.rs"]
 mod headless_prompt;
+#[path = "units/hints.rs"]
+mod hints;
 #[path = "units/history_loading.rs"]
 mod history_loading;
 #[path = "units/image_placeholders.rs"]
@@ -62,12 +84,22 @@ mod image_prompt;
 mod inline_images;
 #[path = "units/input_edit_keys.rs"]
 mod input_edit_keys;
+#[path = "units/input_line_edges.rs"]
+mod input_line_edges;
+#[path = "units/input_mode_edges.rs"]
+mod input_mode_edges;
 #[path = "units/input_modes.rs"]
 mod input_modes;
 #[path = "units/interactive_agent_config.rs"]
 mod interactive_agent_config;
 #[path = "units/launch.rs"]
 mod launch;
+#[path = "units/linked_lines_gaps.rs"]
+mod linked_lines_gaps;
+#[path = "units/list_nav.rs"]
+mod list_nav;
+#[path = "units/list_scroll.rs"]
+mod list_scroll;
 #[path = "units/long_paste.rs"]
 mod long_paste;
 #[path = "units/markdown_cache.rs"]
@@ -92,10 +124,16 @@ mod message_queue_replacement;
 mod message_queue_serialization;
 #[path = "units/misc_state.rs"]
 mod misc_state;
+#[path = "units/model_picker.rs"]
+mod model_picker;
 #[path = "units/mouse_routing.rs"]
 mod mouse_routing;
 #[path = "units/mutation_runtime.rs"]
 mod mutation_runtime;
+#[path = "units/narrator_audio.rs"]
+mod narrator_audio;
+#[path = "units/narrator_status.rs"]
+mod narrator_status;
 #[path = "units/notice_state.rs"]
 mod notice_state;
 #[path = "units/observability_rotating.rs"]
@@ -130,12 +168,18 @@ mod paste_path_list;
 mod paste_probe;
 #[path = "units/pending_commands.rs"]
 mod pending_commands;
+#[path = "units/plugins.rs"]
+mod plugins;
 #[path = "units/pointer_shape.rs"]
 mod pointer_shape;
 #[path = "units/provider_auth.rs"]
 mod provider_auth;
+#[path = "units/proxy_setup.rs"]
+mod proxy_setup;
 #[path = "units/question_app.rs"]
 mod question_app;
+#[path = "units/question_app_free_text.rs"]
+mod question_app_free_text;
 #[path = "units/question_app_hide_other.rs"]
 mod question_app_hide_other;
 #[path = "units/question_app_input_keymap.rs"]
@@ -144,10 +188,16 @@ mod question_app_input_keymap;
 mod question_app_paste;
 #[path = "units/question_app_prefix_chrome.rs"]
 mod question_app_prefix_chrome;
+#[path = "units/question_app_space_toggle.rs"]
+mod question_app_space_toggle;
 #[path = "units/queue_feedback_session.rs"]
 mod queue_feedback_session;
+#[path = "units/queue_hints.rs"]
+mod queue_hints;
 #[path = "units/queue_images.rs"]
 mod queue_images;
+#[path = "units/queue_spacer.rs"]
+mod queue_spacer;
 #[path = "units/quit_confirmation.rs"]
 mod quit_confirmation;
 #[path = "units/reader_frame_split.rs"]
@@ -172,6 +222,12 @@ mod scroll_anchor;
 mod scrollbar_drag;
 #[path = "units/scrollbar_track_click.rs"]
 mod scrollbar_track_click;
+#[path = "units/search_field.rs"]
+mod search_field;
+#[path = "units/selection_folds.rs"]
+mod selection_folds;
+#[path = "units/selection_prompt_marker.rs"]
+mod selection_prompt_marker;
 #[path = "units/selection_spans.rs"]
 mod selection_spans;
 #[path = "units/setup_probe.rs"]
@@ -218,6 +274,8 @@ mod toast_selection;
 mod todo_sidebar_close;
 #[path = "units/toggle_scroll.rs"]
 mod toggle_scroll;
+#[path = "units/tool_group_membership.rs"]
+mod tool_group_membership;
 #[path = "units/transcript_diff.rs"]
 mod transcript_diff;
 #[path = "units/transcript_images.rs"]
@@ -226,6 +284,8 @@ mod transcript_images;
 mod transcript_patch;
 #[path = "units/transcript_tool_group.rs"]
 mod transcript_tool_group;
+#[path = "units/tts_request.rs"]
+mod tts_request;
 #[path = "units/turn_error_message.rs"]
 mod turn_error_message;
 #[path = "units/update_brew_oracle.rs"]
@@ -247,3 +307,5 @@ mod voice_settings;
 mod voice_text;
 #[path = "units/voice_tracking.rs"]
 mod voice_tracking;
+#[path = "units/whoami.rs"]
+mod whoami;

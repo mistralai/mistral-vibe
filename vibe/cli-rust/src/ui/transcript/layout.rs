@@ -22,7 +22,11 @@ pub(super) fn build<'a>(
     if cache.layout(revision, width).is_none() {
         let mut top = 0u16;
         let mut entries = Vec::new();
+        let mut queue_top = None;
         for entry in transcript.lines_from(cache.history_from()) {
+            if entry.pending && queue_top.is_none() {
+                queue_top = Some(top);
+            }
             let entry_expanded = expanded.contains(entry.id);
             let group_expanded = entry
                 .group
@@ -32,6 +36,7 @@ pub(super) fn build<'a>(
             let key = effective_revision(
                 entry.rev,
                 entry_expanded,
+                entry.group.is_some(),
                 group_expanded,
                 group_first,
                 entry.queue_header,
@@ -66,20 +71,23 @@ pub(super) fn build<'a>(
             });
             top = top.saturating_add(geometry.height);
         }
-        cache.store_layout(revision, width, top, entries);
+        cache.store_layout(revision, width, top, entries, queue_top);
     }
     cache.layout(revision, width).expect("layout was cached")
 }
 
+/// Group membership is keyed too: a neighbor can (un)group an entry without bumping its revision.
 fn effective_revision(
     revision: u64,
     entry_expanded: bool,
+    grouped: bool,
     group_expanded: bool,
     group_first: bool,
     queue_header: bool,
 ) -> u64 {
     revision
-        .wrapping_mul(16)
+        .wrapping_mul(32)
+        .wrapping_add(u64::from(grouped) * 16)
         .wrapping_add(u64::from(entry_expanded) * 8)
         .wrapping_add(u64::from(group_expanded) * 4)
         .wrapping_add(u64::from(group_first) * 2)

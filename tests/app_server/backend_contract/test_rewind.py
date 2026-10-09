@@ -300,6 +300,32 @@ async def test_a_turn_can_be_rewound_after_an_earlier_turn_was_interrupted(
 
 
 @pytest.mark.asyncio
+async def test_a_turn_can_be_rewound_after_the_session_was_renamed_between_turns(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    # A title lands once the turn that prompted it is over, the automatic one
+    # included. Writing it down must not leave the session looking busy to the
+    # rewind that follows.
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("First answer")
+    )
+    await _act(backend_contract_persistent_session, "First", "user-1")
+    await backend_contract_persistent_session.resources.sessions.rename("Renamed")
+
+    result = await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "First"),
+        restore_files=False,
+        inplace=True,
+    )
+
+    assert result.message == "First"
+    assert result.state.session.title == "Renamed"
+    assert _texts(backend_contract_persistent_session) == []
+
+
+@pytest.mark.asyncio
 async def test_rewind_rejects_an_entry_that_is_not_a_rewindable_message(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],

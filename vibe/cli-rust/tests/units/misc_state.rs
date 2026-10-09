@@ -5,6 +5,7 @@ use vibe_rs::app::App;
 use vibe_rs::completion_manager as completion;
 use vibe_rs::config::{self, ConfigField};
 use vibe_rs::config_fields::{format_value, parse};
+use vibe_rs::input_modes::InputMode;
 use vibe_rs::utils::history_manager::HistoryManager;
 
 #[test]
@@ -16,6 +17,8 @@ fn history_skips_blanks_and_immediate_repeats() {
     history.add("first");
     history.add("second");
     assert_eq!(history.entries().len(), 2);
+    history.add(" /help \n");
+    assert_eq!(history.entries().last().map(String::as_str), Some(" /help"));
 }
 
 #[test]
@@ -85,8 +88,9 @@ fn history_reset_clears_navigation_mid_walk() {
 #[test]
 fn slash_completion_ranks_help_first_and_opens_the_popup() {
     let mut app = App::default();
-    app.chat_input.input = "/he".into();
-    app.chat_input.cursor = 3;
+    app.chat_input.mode = InputMode::Slash;
+    app.chat_input.input = "he".into();
+    app.chat_input.cursor = 2;
     completion::input_changed(&mut app);
 
     assert!(completion::is_open(&app));
@@ -115,8 +119,7 @@ fn completion_closes_on_no_trigger_and_clears_entries() {
 #[test]
 fn completion_navigation_cycles_with_wraparound() {
     let mut app = App::default();
-    app.chat_input.input = "/".into();
-    app.chat_input.cursor = 1;
+    app.chat_input.mode = InputMode::Slash;
     completion::input_changed(&mut app);
     let count = app.completion.entries.len();
     assert!(count >= 2, "the empty slash query lists commands");
@@ -135,8 +138,9 @@ fn completion_navigation_cycles_with_wraparound() {
 #[test]
 fn completion_dismiss_closes_and_remembers_the_dismissal() {
     let mut app = App::default();
-    app.chat_input.input = "/he".into();
-    app.chat_input.cursor = 3;
+    app.chat_input.mode = InputMode::Slash;
+    app.chat_input.input = "he".into();
+    app.chat_input.cursor = 2;
     completion::input_changed(&mut app);
     assert!(completion::dismiss(&mut app));
     assert!(!completion::is_open(&app));
@@ -150,11 +154,12 @@ fn completion_dismiss_closes_and_remembers_the_dismissal() {
 #[test]
 fn slash_accept_replaces_the_typed_prefix() {
     let mut app = App::default();
-    app.chat_input.input = "/he".into();
-    app.chat_input.cursor = 3;
+    app.chat_input.mode = InputMode::Slash;
+    app.chat_input.input = "he".into();
+    app.chat_input.cursor = 2;
     completion::input_changed(&mut app);
     assert!(completion::accept(&mut app));
-    assert_eq!(app.chat_input.input, "/help");
+    assert_eq!(app.chat_input.input, "help");
     assert!(!completion::is_open(&app), "accepting closes the popup");
     assert_eq!(app.completion.selected, 0);
 }
@@ -195,7 +200,7 @@ fn config_screen_filter_resolves_fields_by_name_popular_first() {
         "popular first"
     );
 
-    app.config_screen.query = "theme".into();
+    app.config_screen.search.query = "theme".into();
     let found: Vec<&str> = config::filtered(&app)
         .iter()
         .map(|field| field.name.as_str())

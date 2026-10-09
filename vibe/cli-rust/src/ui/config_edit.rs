@@ -12,6 +12,7 @@ use ratatui::Frame;
 use super::{composer_layout::ComposerLayout, scrollbar, tab_cells::cells, theme};
 use crate::app::App;
 use crate::config_edit::{self, ConfigEdit};
+use crate::hints::{self, action, key};
 pub(super) use layout::draw_too_small;
 use layout::{height, paragraph, Layout};
 
@@ -31,7 +32,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
             app,
             f,
             area,
-            "Enlarge terminal to edit this setting. Esc Cancel",
+            "Enlarge terminal to edit this setting. Esc cancel",
         );
         return;
     };
@@ -137,9 +138,7 @@ fn input(f: &mut Frame, mut area: Rect, edit: &mut ConfigEdit) {
     let inner = layout::input_inner(area);
     edit.input_width = Some(inner.width);
     f.render_widget(block, area);
-    let cursor_style = Style::default()
-        .fg(theme::block_cursor_fg())
-        .bg(theme::block_cursor_bg());
+    let cursor_style = theme::block_caret(Style::default());
     let layout = ComposerLayout::hard_wrapped(&edit.draft, edit.cursor, inner.width);
     let offset = layout.viewport_top(edit.scroll.unwrap_or(0), usize::from(inner.height));
     edit.scroll = Some(offset);
@@ -228,16 +227,7 @@ fn draw_choices(
                 content.width,
                 (bottom - start) as u16,
             );
-            let style = if index == selected {
-                Style::default()
-                    .fg(theme::block_cursor_fg())
-                    .bg(theme::block_cursor_bg())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-                    .fg(theme::foreground())
-                    .bg(theme::surface())
-            };
+            let (style, _) = super::list_cursor::styles_on(index == selected, theme::surface());
             if index == selected {
                 f.buffer_mut().set_style(
                     Rect::new(rect.x, rect.y, area.width - 2, rect.height),
@@ -265,38 +255,21 @@ fn draw_choices(
 }
 
 fn help(f: &mut Frame, area: Rect, choices: bool, multiline: bool) {
+    let narrow = area.width < 60;
     let save = match (choices, multiline) {
-        (true, _) => "Enter Select",
-        (false, true) => "Ctrl+S Save",
-        _ => "Enter Save",
+        (true, _) => hints::SELECT,
+        (false, true) => (key::CTRL_S, action::SAVE),
+        _ => (key::ENTER, action::SAVE),
     };
-    let mut hints = Vec::new();
-    if choices {
-        hints.push(("↑↓/jk", "Navigate"));
+    let layer = if narrow {
+        action::LAYER
+    } else {
+        action::CHANGE_LAYER
+    };
+    let mut list = Vec::new();
+    if choices && !narrow {
+        list.push(hints::NAVIGATE);
     }
-    let (key, action) = save.split_once(' ').unwrap();
-    hints.extend([(key, action), ("Esc", "Cancel"), ("Tab", "Change Layer")]);
-    if area.width < 60 {
-        hints.retain(|(key, _)| *key != "↑↓/jk");
-        hints.last_mut().unwrap().1 = "Layer";
-    }
-    let mut spans = Vec::new();
-    for (index, (key, action)) in hints.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::raw("  "));
-        }
-        let style = if choices {
-            Style::default()
-                .fg(theme::primary())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            theme::dim(theme::muted())
-        };
-        spans.push(Span::styled(*key, style));
-        spans.push(Span::styled(
-            format!(" {action}"),
-            theme::dim(theme::muted()),
-        ));
-    }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    list.extend([save, hints::CANCEL, (key::TAB, layer)]);
+    super::hint_line::draw_clipped(f, area.x, area.y, area.width, &list);
 }

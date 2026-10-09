@@ -13,14 +13,12 @@ atomically.
 
 from __future__ import annotations
 
-import json
-import os
-import time
 from typing import TYPE_CHECKING, Any
 
 from vibe.core.experiments._constants import EVAL_CACHE_TTL_SECONDS
 from vibe.core.experiments.models import EvalResponse
 from vibe.core.paths import EXPERIMENT_EVAL_CACHE_FILE
+from vibe.core.utils.keyed_json_cache import load_keyed_entry, store_keyed_entry
 from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
@@ -31,19 +29,12 @@ def load_cached_eval_response(config: VibeConfigSchema) -> EvalResponse | None:
     key = _cache_key(config)
     if key is None:
         return None
-    entry = _read_entries().get(key)
-    if not isinstance(entry, dict):
-        return None
-    stored_at = entry.get("stored_at_timestamp")
-    payload = entry.get("payload")
-    if not isinstance(stored_at, int) or not isinstance(payload, dict):
-        return None
-    if stored_at <= int(time.time()) - EVAL_CACHE_TTL_SECONDS:
-        return None
-    try:
-        return EvalResponse.model_validate(payload)
-    except Exception:
-        return None
+    return load_keyed_entry(
+        EXPERIMENT_EVAL_CACHE_FILE.path,
+        key,
+        ttl_seconds=EVAL_CACHE_TTL_SECONDS,
+        parse=_parse_eval_payload,
+    )
 
 
 def store_cached_eval_response(
@@ -52,12 +43,9 @@ def store_cached_eval_response(
     key = _cache_key(config)
     if key is None:
         return
-    entries = _read_entries()
-    entries[key] = {
-        "stored_at_timestamp": int(time.time()),
-        "payload": response.model_dump(mode="json"),
-    }
-    _write_entries(entries)
+    store_keyed_entry(
+        EXPERIMENT_EVAL_CACHE_FILE.path, key, response.model_dump(mode="json")
+    )
 
 
 def clear_cached_eval_responses() -> None:
@@ -67,41 +55,19 @@ def clear_cached_eval_responses() -> None:
         logger.debug("Failed to delete experiment eval cache file", exc_info=True)
 
 
+def _parse_eval_payload(payload: Any) -> EvalResponse | None:
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return EvalResponse.model_validate(payload)
+    except Exception:
+        return None
+
+
 def _cache_key(config: VibeConfigSchema) -> str | None:
+    # The eval cache is telemetry-gated: no telemetry, no bucketing.
     if not config.enable_telemetry or not config.experiments.enable:
         return None
-    from vibe.core.experiments.manager import hash_api_key
-    from vibe.core.telemetry.send import get_mistral_provider_and_api_key
+    from vibe.core.telemetry.send import mistral_credential_cache_key
 
-    provider_and_key = get_mistral_provider_and_api_key(config)
-    if provider_and_key is None:
-        return None
-    _provider, api_key = provider_and_key
-    return hash_api_key(api_key)
-
-
-def _read_entries() -> dict[str, Any]:
-    try:
-        with EXPERIMENT_EVAL_CACHE_FILE.path.open(encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _write_entries(entries: dict[str, Any]) -> None:
-    cache_path = EXPERIMENT_EVAL_CACHE_FILE.path
-    tmp_path = cache_path.with_name(f".{cache_path.name}.{os.getpid()}.tmp")
-    try:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with tmp_path.open("w", encoding="utf-8") as f:
-            json.dump(entries, f, separators=(",", ":"))
-        os.replace(tmp_path, cache_path)
-    except (OSError, TypeError):
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        logger.debug(
-            "Failed to write experiment eval cache file %s", cache_path, exc_info=True
-        )
+    return mistral_credential_cache_key(config)

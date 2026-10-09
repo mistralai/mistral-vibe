@@ -131,6 +131,18 @@ async def smoke_binary(binary: Path, *, experimental_harness: bool) -> None:
             fail(f"{failure}\nstderr: {stderr}")
 
 
+def require_bundled_winpty(binary_dir: Path) -> None:
+    winpty_dir = binary_dir / "_internal" / "winpty"
+    has_extension = any(winpty_dir.glob("_winpty*.pyd"))
+    has_conpty = (winpty_dir / "conpty.dll").is_file()
+    if not (has_extension and has_conpty):
+        fail(
+            f"winpty is not bundled under {winpty_dir}; the Windows shell would "
+            "silently fall back to the non-PTY backend"
+        )
+    print("PASS: winpty bundled")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("binary_dir", type=Path)
@@ -144,7 +156,9 @@ def main() -> None:
     binary = binary_dir / binary_name
     if not binary.exists():
         fail(f"binary not found at {binary}")
-    if platform.system() != "Windows":
+    if platform.system() == "Windows":
+        require_bundled_winpty(binary_dir)
+    else:
         binary.chmod(0o755)
 
     asyncio.run(smoke_binary(binary, experimental_harness=args.experimental_harness))

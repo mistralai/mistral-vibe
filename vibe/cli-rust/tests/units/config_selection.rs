@@ -17,7 +17,7 @@ fn loaded(names: &[&str]) -> config::Loaded {
 fn refresh_preserves_selection_filter_and_scroll() {
     let mut app = App::default();
     config::apply_loaded(&mut app, loaded(&["other", "setting_a", "setting_b"]));
-    app.config_screen.query = "setting".into();
+    app.config_screen.search.query = "setting".into();
     app.config_screen.selected = 1;
     app.config_screen.scroll = 12;
     app.config_screen.free_scroll = true;
@@ -26,7 +26,7 @@ fn refresh_preserves_selection_filter_and_scroll() {
     config::apply_loaded(&mut app, loaded(&["other", "setting_a", "setting_b"]));
 
     assert_eq!(app.config_screen.selected, 1);
-    assert_eq!(app.config_screen.query, "setting");
+    assert_eq!(app.config_screen.search.query, "setting");
     assert_eq!(app.config_screen.scroll, 12);
     assert!(app.config_screen.free_scroll);
     assert!(!app.config_screen.loading);

@@ -11,7 +11,7 @@ use super::{entry, paint, table_cells};
 use crate::selection::{TableCellHit, TableCellKey};
 use crate::transcript::Transcript;
 use crate::ui::markdown;
-use crate::utils::transcript_cache::TranscriptLayout;
+use crate::utils::transcript_cache::{QueueSpacer, TranscriptLayout};
 
 pub(super) fn document_height(
     banner: &[Line<'static>],
@@ -31,6 +31,8 @@ pub(super) struct Hitmaps<'a> {
     pub tables: &'a mut Vec<TableCellHit>,
     /// `(index, top, height)` of each painted entry, `top` relative to the viewport top.
     pub rows: &'a mut Vec<(usize, i32, u16)>,
+    /// Hang indent cells cut out of the selection highlight, filled only while selecting.
+    pub hangs: Option<&'a mut Vec<(u16, u16, u16)>>,
 }
 
 pub(super) struct Viewport<'a> {
@@ -40,6 +42,7 @@ pub(super) struct Viewport<'a> {
     pub top: i32,
     /// The startup banner with the promo under it, and the promo's links.
     pub banner: &'a markdown::LinkedLines,
+    pub spacer: QueueSpacer,
     pub pulse_frame: usize,
     pub selected: Option<&'a str>,
     pub selected_table: Option<&'a (TableCellKey, usize)>,
@@ -62,6 +65,7 @@ pub(super) fn render(
         diffs,
         tables,
         rows,
+        mut hangs,
     } = hitmaps;
     let Viewport {
         layout,
@@ -69,6 +73,7 @@ pub(super) fn render(
         width,
         mut top,
         banner,
+        spacer,
         pulse_frame,
         selected,
         selected_table,
@@ -104,7 +109,7 @@ pub(super) fn render(
         .entries
         .partition_point(|entry| entry.top.saturating_add(entry.height) <= hidden_height);
     for positioned in &layout.entries[first..] {
-        let entry_y = top + positioned.top as i32;
+        let entry_y = top + i32::from(spacer.offset(positioned.top));
         if entry_y >= viewport_bottom {
             break;
         }
@@ -132,6 +137,9 @@ pub(super) fn render(
             rewind == Some(value.id),
             Some(markdown_cache),
         );
+        if let Some(hangs) = hangs.as_deref_mut().filter(|_| content_visible) {
+            super::document::hang_cells(hangs, area, entry_y, &rendered, positioned.prewrapped);
+        }
         let document_y = (entry_y - document_top) as u16;
         if content_visible {
             tables.extend(table_cells::collect(

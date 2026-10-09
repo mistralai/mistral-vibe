@@ -77,7 +77,7 @@ fn app_with_multi_select_question() -> App {
 
 fn question_selection(anchor: (u16, i32), head: (u16, i32)) -> Selection {
     Selection {
-        owner: RegionId::Question,
+        owner: RegionId::BottomApp,
         anchor,
         head,
         pending_copy: false,
@@ -92,8 +92,8 @@ fn question_selection(anchor: (u16, i32), head: (u16, i32)) -> Selection {
 fn a_press_on_an_option_prefix_anchors_no_selection() {
     let mut app = app_with_question();
     app.question_app.option_rows = vec![(7, 0), (8, 1)];
-    app.view.question_selection_region = question_region(2, 6, 60, 10);
-    app.view.question_selection_chrome = vec![(7, 2, 6), (8, 2, 6)];
+    app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
+    app.view.bottom_app_selection_chrome = vec![(7, 2, 6), (8, 2, 6)];
 
     handle_mouse(
         &mut app,
@@ -114,8 +114,8 @@ fn a_press_on_an_option_prefix_anchors_no_selection() {
 fn a_same_cell_press_on_a_prefix_still_clicks_its_option() {
     let mut app = app_with_question();
     app.question_app.option_rows = vec![(7, 0), (8, 1)];
-    app.view.question_selection_region = question_region(2, 6, 60, 10);
-    app.view.question_selection_chrome = vec![(7, 2, 6), (8, 2, 6)];
+    app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
+    app.view.bottom_app_selection_chrome = vec![(7, 2, 6), (8, 2, 6)];
 
     handle_mouse(
         &mut app,
@@ -130,8 +130,8 @@ fn a_same_cell_press_on_a_prefix_still_clicks_its_option() {
 fn a_same_cell_press_on_a_multi_select_prefix_still_ticks_its_option() {
     let mut app = app_with_multi_select_question();
     app.question_app.option_rows = vec![(7, 0), (8, 1)];
-    app.view.question_selection_region = question_region(2, 6, 60, 10);
-    app.view.question_selection_chrome = vec![(7, 2, 10)];
+    app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
+    app.view.bottom_app_selection_chrome = vec![(7, 2, 10)];
 
     handle_mouse(
         &mut app,
@@ -160,8 +160,8 @@ fn a_drag_across_an_option_row_excludes_its_prefix_cells() {
         Style::default(),
     );
     let mut app = app_with_question();
-    app.view.question_selection_region = question_region(2, 6, 40, 2);
-    app.view.question_selection_chrome = vec![(7, 2, 6)];
+    app.view.bottom_app_selection_region = question_region(2, 6, 40, 2);
+    app.view.bottom_app_selection_chrome = vec![(7, 2, 6)];
     app.selection.region = Some(question_selection((2, 0), (34, 1)));
     app.selection.granularity = Granularity::Char;
 
@@ -182,8 +182,8 @@ fn a_drag_across_a_multi_select_option_excludes_its_checkbox_prefix() {
     buf.set_string(0, 6, "│ Pick one", Style::default());
     buf.set_string(0, 7, "│   1. [ ] Alpha - First choice", Style::default());
     let mut app = app_with_multi_select_question();
-    app.view.question_selection_region = question_region(2, 6, 40, 2);
-    app.view.question_selection_chrome = vec![(7, 2, 10)];
+    app.view.bottom_app_selection_region = question_region(2, 6, 40, 2);
+    app.view.bottom_app_selection_chrome = vec![(7, 2, 10)];
     app.selection.region = Some(question_selection((2, 0), (30, 1)));
     app.selection.granularity = Granularity::Char;
 
@@ -204,8 +204,8 @@ fn a_drag_across_the_free_text_row_excludes_its_prefix() {
     buf.set_string(0, 7, "│ › 2. Second", Style::default());
     buf.set_string(0, 8, "│ › 3. draft answer", Style::default());
     let mut app = app_with_question();
-    app.view.question_selection_region = question_region(2, 6, 40, 3);
-    app.view.question_selection_chrome = vec![(6, 2, 6), (7, 2, 6), (8, 2, 6)];
+    app.view.bottom_app_selection_region = question_region(2, 6, 40, 3);
+    app.view.bottom_app_selection_chrome = vec![(6, 2, 6), (7, 2, 6), (8, 2, 6)];
     app.selection.region = Some(question_selection((2, 0), (18, 2)));
     app.selection.granularity = Granularity::Char;
 

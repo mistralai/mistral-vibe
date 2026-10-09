@@ -1,11 +1,13 @@
 //! Edit-effect diff rows, mirroring the Textual `diff_rendering` widget.
 
 mod line_numbers;
+mod wrap;
 
 use line_numbers::next_line_number;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use unicode_width::UnicodeWidthStr;
+pub use wrap::{banded, wrap_row};
 
 use super::super::{highlight, theme};
 use super::difflib;

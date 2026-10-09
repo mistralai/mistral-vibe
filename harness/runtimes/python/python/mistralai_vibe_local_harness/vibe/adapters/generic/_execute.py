@@ -9,14 +9,10 @@ chunks, and translate the final assistant message back into a
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncGenerator, Callable, Mapping
 from html import escape
-from http import HTTPStatus
 import json
 import logging
-import ssl
-import time
 from typing import Any, cast
 
 import httpx
@@ -45,18 +41,25 @@ from mistralai_vibe_local_harness.protocol import (
     RustUserMessage,
     tool_call_wire_arguments,
 )
-from mistralai_vibe_local_harness.session_protocol import PublicRetryCategory
 from mistralai_vibe_local_harness.vibe._credentials import ProviderCredentialSnapshot
 from mistralai_vibe_local_harness.vibe._runtime_config import (
     LocalModelRoute,
     LocalRuntimeAdapterConfig,
     ProviderDeltaObserver,
-    ProviderRetry,
     ProviderRetryObserver,
     ProviderStreamDelta,
 )
 from mistralai_vibe_local_harness.vibe._ssl import build_ssl_context
 from mistralai_vibe_local_harness.vibe.adapters._correlation import correlation_hook
+from mistralai_vibe_local_harness.vibe.adapters._provider_failure import (
+    IncompleteProviderStream,
+    until_connection_lost,
+)
+from mistralai_vibe_local_harness.vibe.adapters._retry import (
+    RetryNotices,
+    call_with_retries,
+)
+from mistralai_vibe_local_harness.vibe.adapters._stream_idle import StreamIdleGuard
 from mistralai_vibe_local_harness.vibe.adapters.generic._base import (
     MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS,
     APIAdapter,
@@ -87,25 +90,9 @@ logger = logging.getLogger(__name__)
 # assistant turn can send them back for KV-cache reuse.
 _REASONING_PAYLOADS_META_KEY = "vibe_reasoning_payloads"
 
-# Retry transient failures for as long as ``retry_max_elapsed_time_s`` allows,
-# rather than using a fixed attempt count.
-_RETRYABLE_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
-_RETRYABLE_REQUEST_ERRORS: tuple[type[httpx.RequestError], ...] = (
-    httpx.TimeoutException,
-    httpx.ConnectError,
-    httpx.ReadError,
-    httpx.WriteError,
-    httpx.RemoteProtocolError,
-)
-# A TLS fault while the response body streams arrives here as a bare
-# `ssl.SSLError` that no `httpx.RequestError` entry can match. Certificate rejection is the one
-# deterministic case: it will fail the same way on every attempt.
-_NON_RETRYABLE_TLS_ERRORS: tuple[type[ssl.SSLError], ...] = (
-    ssl.SSLCertVerificationError,
-)
-_INITIAL_RETRY_DELAY_S = 0.5
-_MAX_RETRY_DELAY_S = 30.0
-_RETRY_BACKOFF = 2.0
+# The finish reason OpenAI-compatible providers, Mistral among them, report when
+# they abort a generation part way.
+_ABORTED_FINISH_REASON = "error"
 
 # A completion is only interpretable next to the request knobs that decided it:
 # which model answered, what reasoning effort it was given, and how many tools it
@@ -116,10 +103,6 @@ _COMPLETION_WITHOUT_WORK_LOG = (
     "provider=%s api_style=%s model=%s reasoning_effort=%s tools_offered=%d "
     "finish_reason=%s parts=%s output_tokens=%s"
 )
-
-
-class _IncompleteStreamError(RuntimeError):
-    """A provider that emits finish reasons closed the stream without one."""
 
 
 def _openai_responses_adapter() -> APIAdapter:
@@ -186,24 +169,14 @@ async def execute_generic_completion(
     route = route or config.active_model
     provider = _provider_view(config)
     adapter = _get_adapter(provider.api_style)
-    retry_active = False
-
-    async def report_retry(retry: ProviderRetry | None) -> None:
-        nonlocal retry_active
-        retry_active = retry is not None
-        if on_retry is not None:
-            await on_retry(retry)
-
-    async def clear_retry_after_response(response: httpx.Response) -> None:
-        if response.is_success and retry_active:
-            await report_retry(None)
-
+    notices = RetryNotices(on_retry)
     request = adapter.prepare_request(
         model_name=route.model,
         messages=[_to_llm_message(message) for message in messages],
         temperature=route.temperature,
+        top_p=route.top_p,
         tools=[_to_available_tool(tool) for tool in tools],
-        max_tokens=config.max_tokens,
+        max_tokens=config.output_token_cap(route),
         tool_choice=None,
         enable_streaming=True,
         provider=provider,
@@ -221,9 +194,6 @@ async def execute_generic_completion(
 
     base = request.base_url or provider.api_base.rstrip("/")
     url = f"{base}{request.endpoint}"
-    response_hooks = [correlation_hook(config)]
-    if on_retry is not None:
-        response_hooks.append(clear_retry_after_response)
 
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(config.timeout_s),
@@ -237,18 +207,22 @@ async def execute_generic_completion(
         # Mistral-hosted models reached through the generic (OpenAI-compatible)
         # path still return mistral-correlation-id; capture it like the native
         # adapter. Non-Mistral providers omit the header (sink gets None).
-        event_hooks={"response": response_hooks},
+        event_hooks={"response": [correlation_hook(config), notices.clear_on_success]},
     ) as client:
-        result = await _complete_with_retries(
-            client=client,
-            url=url,
-            body=request.body,
-            headers=headers,
-            provider=provider,
-            model=route.model,
+        result = await call_with_retries(
+            lambda: _complete_once(
+                client=client,
+                url=url,
+                body=request.body,
+                headers=headers,
+                provider=provider,
+                model=route.model,
+                idle_timeout_s=config.stream_idle_timeout_s,
+                read_timeout_s=config.timeout_s,
+                on_delta=on_delta,
+            ),
             max_elapsed_time_s=config.retry_max_elapsed_time_s,
-            on_retry=report_retry if on_retry is not None else None,
-            on_delta=on_delta,
+            notices=notices,
         )
 
     _warn_on_workless_completion(
@@ -289,63 +263,6 @@ def _warn_on_workless_completion(
     )
 
 
-async def _complete_with_retries(
-    *,
-    client: httpx.AsyncClient,
-    url: str,
-    body: bytes,
-    headers: dict[str, str],
-    provider: ProviderView,
-    model: str,
-    max_elapsed_time_s: float,
-    on_retry: ProviderRetryObserver | None,
-    on_delta: ProviderDeltaObserver | None = None,
-) -> RustCompletionResult:
-    start = time.monotonic()
-    attempt = 0
-    while True:
-        try:
-            # A failure part way through the stream is as retryable as one
-            # before it starts: `_complete_once` buffers the whole response and
-            # returns once, so nothing has entered the model-visible result.
-            # Provisional output is different: a retried attempt has already
-            # published its partial stream through ``on_delta``, so the retry
-            # notice must reach the same observer chain before the next
-            # attempt, letting the projection discard the failed attempt.
-            return await _complete_once(
-                client=client,
-                url=url,
-                body=body,
-                headers=headers,
-                provider=provider,
-                model=model,
-                on_delta=on_delta,
-            )
-        except Exception as exc:
-            budget_spent = time.monotonic() - start >= max_elapsed_time_s
-            if budget_spent or not _is_retryable_error(exc):
-                raise
-            delay = _next_retry_delay(exc, attempt)
-            if on_retry is not None:
-                category, detail = _retry_reason(exc)
-                await on_retry(
-                    ProviderRetry(
-                        category=category,
-                        detail=detail,
-                        delay_s=delay,
-                        retry_attempt=attempt + 1,
-                    )
-                )
-            logger.warning(
-                "Retrying generic completion (attempt %d, delay %.2fs): %r",
-                attempt + 1,
-                delay,
-                exc,
-            )
-            await asyncio.sleep(delay)
-            attempt += 1
-
-
 async def _complete_once(
     *,
     client: httpx.AsyncClient,
@@ -354,6 +271,8 @@ async def _complete_once(
     headers: dict[str, str],
     provider: ProviderView,
     model: str,
+    idle_timeout_s: float | None,
+    read_timeout_s: float,
     on_delta: ProviderDeltaObserver | None = None,
 ) -> RustCompletionResult:
     # Adapters buffer parse state, so a retried attempt gets a fresh one.
@@ -361,9 +280,16 @@ async def _complete_once(
     accumulated: LLMChunk | None = None
     usage = LLMUsage()
     has_usage = False
-    raw_chunks = _stream_json_chunks(client, url, body, headers)
-    async for parsed in adapter.parse_stream(raw_chunks, provider):
+    idle_guard = StreamIdleGuard(idle_timeout_s, read_timeout_s=read_timeout_s)
+    raw_chunks = _stream_json_chunks(client, url, body, headers, idle_guard)
+    async for parsed in until_connection_lost(
+        adapter.parse_stream(raw_chunks, provider),
+        # Read when the stream fails, so it must see the latest chunk.
+        complete=lambda: accumulated is not None and accumulated.stop is not None,  # noqa: B023
+    ):
         chunk = parsed.chunk
+        if _carries_model_output(chunk):
+            idle_guard.output_started()
         # Adapters synthesise a zero ``LLMUsage`` for chunks the provider sent no
         # usage on, so summing ``chunk.usage`` cannot tell "the provider reported
         # nothing" from "the provider reported zero". Track the payloads that
@@ -380,16 +306,33 @@ async def _complete_once(
                 await on_delta(ProviderStreamDelta(text=text, reasoning=reasoning))
 
     if accumulated is None:
-        raise _IncompleteStreamError(
+        raise IncompleteProviderStream(
             f"Model stream from {provider.name} ({model}) produced no chunks."
         )
     if provider.emits_finish_reason and accumulated.stop is None:
-        raise _IncompleteStreamError(
+        raise IncompleteProviderStream(
             f"Model stream from {provider.name} ({model}) ended without a finish reason."
+        )
+    if (
+        accumulated.stop is not None
+        and accumulated.stop.reason == _ABORTED_FINISH_REASON
+    ):
+        raise IncompleteProviderStream(
+            f"Model stream from {provider.name} ({model}) ended with the error "
+            "finish reason."
         )
     return _to_completion_result(
         accumulated.model_copy(update={"usage": usage if has_usage else None})
     )
+
+
+def _carries_model_output(chunk: LLMChunk) -> bool:
+    """Whether a parsed chunk holds model output rather than a preamble.
+
+    Providers may open a stream with a role-only or metadata event.
+    """
+    message = chunk.message
+    return bool(message.content or message.reasoning_content or message.tool_calls)
 
 
 def _reports_usage(response_data: dict[str, Any]) -> bool:
@@ -405,63 +348,12 @@ def _reports_usage(response_data: dict[str, Any]) -> bool:
     return isinstance(response, dict) and isinstance(response.get("usage"), dict)
 
 
-def _is_retryable_error(error: Exception) -> bool:
-    if isinstance(error, _IncompleteStreamError):
-        return True
-    status = _http_status(error)
-    if status is not None:
-        return status in _RETRYABLE_HTTP_STATUS
-    if isinstance(error, ssl.SSLError):
-        return not isinstance(error, _NON_RETRYABLE_TLS_ERRORS)
-    return isinstance(error, _RETRYABLE_REQUEST_ERRORS)
-
-
-def _retry_reason(error: Exception) -> tuple[PublicRetryCategory, str]:
-    status = _http_status(error)
-    if status is not None:
-        if status == HTTPStatus.TOO_MANY_REQUESTS:
-            category = "rate_limited"
-        elif status == HTTPStatus.REQUEST_TIMEOUT:
-            category = "timed_out"
-        elif status >= HTTPStatus.INTERNAL_SERVER_ERROR:
-            category = "server_error"
-        else:
-            category = "unknown"
-        return category, f"HTTP {status}"
-    if isinstance(error, httpx.TimeoutException):
-        return "timed_out", type(error).__name__
-    if isinstance(error, _RETRYABLE_REQUEST_ERRORS + (ssl.SSLError,)):
-        return "connection", type(error).__name__
-    return "unknown", type(error).__name__
-
-
-def _http_status(error: Exception) -> int | None:
-    if isinstance(error, httpx.HTTPStatusError):
-        return error.response.status_code
-    # OpenAIResponsesStreamError carries a mapped HTTP status.
-    status = getattr(error, "status", None)
-    return status if isinstance(status, int) else None
-
-
-def _next_retry_delay(error: Exception, attempt: int) -> float:
-    retry_after = _retry_after_seconds(error)
-    if retry_after is not None:
-        return min(retry_after, _MAX_RETRY_DELAY_S)
-    capped_attempt = min(attempt, 10)
-    return min(
-        _INITIAL_RETRY_DELAY_S * (_RETRY_BACKOFF**capped_attempt), _MAX_RETRY_DELAY_S
-    )
-
-
-def _retry_after_seconds(error: Exception) -> float | None:
-    if not isinstance(error, httpx.HTTPStatusError):
-        return None
-    value = error.response.headers.get("retry-after", "").strip()
-    return float(value) if value.isdigit() else None
-
-
 async def _stream_json_chunks(
-    client: httpx.AsyncClient, url: str, body: bytes, headers: dict[str, str]
+    client: httpx.AsyncClient,
+    url: str,
+    body: bytes,
+    headers: dict[str, str],
+    idle_guard: StreamIdleGuard,
 ) -> AsyncGenerator[dict[str, Any]]:
     async with client.stream(
         method="POST", url=url, content=body, headers=headers
@@ -469,7 +361,9 @@ async def _stream_json_chunks(
         if not response.is_success:
             await response.aread()
         response.raise_for_status()
-        async for line in iter_sse_lines(response):
+        # Every line counts as activity once armed, so heartbeats and comments
+        # keep a slow but live stream going.
+        async for line in idle_guard.watch(iter_sse_lines(response)):
             if line.strip() == "" or line.startswith(":"):
                 continue
             delimiter = ": "

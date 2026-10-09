@@ -56,7 +56,12 @@ pub(super) fn entry(
     bottom
 }
 
-fn paint_prewrapped(buffer: &mut Buffer, rect: Rect, offset: u16, lines: &[Line<'static>]) {
+pub(super) fn paint_prewrapped(
+    buffer: &mut Buffer,
+    rect: Rect,
+    offset: u16,
+    lines: &[Line<'static>],
+) {
     for (row, line) in lines
         .iter()
         .skip(offset as usize)

@@ -95,7 +95,7 @@ impl State {
         self.query = Field::default();
         self.items.clear();
         self.scroll = 0;
-        self.search_focused = true;
+        self.search_focused = false;
         self.pressed = None;
         self.dragged_field = None;
         self.refresh(None);
@@ -136,20 +136,12 @@ impl State {
 
     pub fn navigate(&mut self, down: bool) {
         let len = self.items.len();
-        let Some(selected) = (1..=len)
-            .map(|offset| {
-                if down {
-                    (self.selected + offset) % len
-                } else {
-                    (self.selected + len - offset) % len
-                }
-            })
-            .find(|&index| self.items[index].selectable())
+        let selectable = |index: usize| self.items[index].selectable();
+        let Some(selected) = crate::list_nav::wrap_selectable(self.selected, len, down, selectable)
         else {
             return;
         };
         self.selected = selected;
-        self.search_focused = false;
         self.free_scroll = false;
     }
 }

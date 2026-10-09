@@ -114,6 +114,10 @@ async def test_preserves_accents_when_matching_latin1_encoded_file(
         io_utils.locale, "getpreferredencoding", lambda _do_setlocale: "utf-8"
     )
     monkeypatch.setattr(io_utils, "_encoding_from_best_match", lambda _raw: "cp1252")
+    # Force byte-oriented matching in the grep subprocess. In a UTF-8 locale
+    # BSD grep (macOS) classifies the latin-1 file as binary and skips it, so
+    # the search finds nothing regardless of the decode path under test.
+    monkeypatch.setenv("LC_ALL", "C")
     (tmp_path / "menu.txt").write_bytes("café au lait\nthé glacé\n".encode("latin-1"))
 
     result = await collect_result(

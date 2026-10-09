@@ -20,7 +20,7 @@ _ANSWER = "\n".join([
         "the viewport | Resizing keeps borders aligned and every word visible |"
     ),
 ])
-_CLICK = "\x1b[<0;20;30M\x1b[<0;20;30m"
+_CLICK = "\x1b[<0;20;18M\x1b[<0;20;18m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

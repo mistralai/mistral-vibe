@@ -25,27 +25,28 @@ def _click(column: int, row: int) -> str:
     return f"\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m"
 
 
-# After Ctrl+O: group header row 20, edit header 21, diff 22-26, "Done." 28, shell gap 29, shell header 30.
+# After Ctrl+O: group 15, notes 16, its diff 17-21, todo 22-24, "Done." 26, shell gap 27, shell 28.
 timeline: Timeline = [
     f"{_PROMPT}\r",
     turn_started(),
     user_msg(_PROMPT),
     edit_file("notes.txt", [(3, _OLD, _NEW)]),
+    edit_file("todo.txt", [(1, "one\n", "ONE\n")]),
     assistant_msg("Done."),
     turn_completed(),
     manual_shell("printf 'one\\ntwo'", "one\ntwo\n"),
     "\x0f",
-    _select(28),
-    _click(12, 24),
-    _select(28),
-    _click(2, 20),
-    _select(28),
-    _click(2, 29),
-    _select(28),
-    _click(2, 30),
-    # The folded shell body shifts the transcript down two rows.
-    _select(30),
-    _click(2, 23),
+    _select(26),
+    _click(12, 19),
+    _select(26),
+    _click(2, 15),
+    _select(26),
+    _click(2, 27),
+    _select(26),
+    _click(2, 28),
+    # Folding the shell body leaves the rows above it in place.
+    _select(26),
+    _click(2, 16),
 ]
 
 capture_steps = {3, 5, 7, 9, 11}

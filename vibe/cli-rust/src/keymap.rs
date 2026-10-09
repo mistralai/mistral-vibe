@@ -17,6 +17,7 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let alt = k.modifiers.contains(KeyModifiers::ALT);
     let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+    let command = k.modifiers.contains(KeyModifiers::SUPER);
     // Ctrl or Alt turns caret/delete keys into their word-wise variant.
     let word = ctrl || alt;
     match k.code {
@@ -50,6 +51,8 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
         // Shift extends a selection; Shift+Ctrl/Alt extends by word (Textual
         // `cursor_*(select=True)`). Shift+Up/Down are left unmapped so the app
         // handles them as scroll.
+        KeyCode::Left if command && shift => Some(Action::SelectLineStart),
+        KeyCode::Right if command && shift => Some(Action::SelectLineEnd),
         KeyCode::Left if shift && word => Some(Action::SelectWordLeft),
         KeyCode::Left if shift => Some(Action::SelectLeft),
         KeyCode::Right if shift && word => Some(Action::SelectWordRight),
@@ -58,6 +61,9 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
         KeyCode::End if shift => Some(Action::SelectLineEnd),
         KeyCode::F(7) => Some(Action::SelectAll),
         KeyCode::F(6) => Some(Action::SelectLine),
+        // Kitty-protocol Cmd+Left/Right; other terminals send Ctrl+A/E or Home/End.
+        KeyCode::Left if command => Some(Action::CursorLineStart),
+        KeyCode::Right if command => Some(Action::CursorLineEnd),
         KeyCode::Left if word => Some(Action::CursorWordLeft),
         KeyCode::Left => Some(Action::CursorLeft),
         KeyCode::Right if word => Some(Action::CursorWordRight),

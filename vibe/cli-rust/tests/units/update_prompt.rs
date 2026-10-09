@@ -3,7 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use vibe_rs::update_notifier::gateway::UpdateSource;
 use vibe_rs::update_prompt::{
-    apply_key, option_text, UpdateChoice, UpdatePromptMode, UpdatePromptResult, UpdatePromptState,
+    apply_key, option_span, UpdateChoice, UpdatePromptMode, UpdatePromptResult, UpdatePromptState,
 };
 
 fn dialog(mode: UpdatePromptMode) -> UpdatePromptState {
@@ -114,13 +114,17 @@ fn key_mapping_mirrors_the_python_bindings() {
 }
 
 #[test]
-fn option_text_marks_only_the_selected_choice() {
+fn option_span_marks_only_the_selected_choice() {
     let state = dialog(UpdatePromptMode::Startup);
-    assert_eq!(option_text(UpdateChoice::Update, &state), "› Update now");
-    assert_eq!(
-        option_text(UpdateChoice::Continue, &state),
-        "  Continue with current version"
+    let update = option_span(UpdateChoice::Update, &state);
+    let other = option_span(UpdateChoice::Continue, &state);
+    assert_eq!(update.content, " Update now ");
+    assert_eq!(other.content, " Continue with current version ");
+    assert!(
+        update.style.bg.is_some(),
+        "the selected chip is a cursor bar"
     );
+    assert!(other.style.bg.is_none());
 }
 
 #[test]

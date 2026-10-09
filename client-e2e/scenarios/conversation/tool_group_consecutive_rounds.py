@@ -40,4 +40,4 @@ timeline: Timeline = [
     turn_completed(),
 ]
 
-screen_contains = {"rust": ("Ran commands, thought",)}
+screen_contains = {"rust": ("Ran 3 commands, thought",)}

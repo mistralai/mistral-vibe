@@ -19,8 +19,8 @@ handshake = {
 
 _PROMPT = "run two commands"
 
-# The folded group header lands on SGR row 30.
-_CLICK = "\x1b[<0;1;30M\x1b[<0;1;30m"
+# The folded group header lands on SGR row 15.
+_CLICK = "\x1b[<0;1;15M\x1b[<0;1;15m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

@@ -7,8 +7,7 @@ use ratatui::Frame;
 
 use super::{selection, theme};
 use crate::app::{App, ToastSeverity};
-use crate::selection::{Region, RegionId};
-use crate::utils::text::wrap_hard;
+use crate::selection::{fold, Fold, Folds, Region, RegionId};
 
 // Textual `Toast { width: 60 }` renders as 59 cells inside the ToastRack, docked
 // bottom-right with a 2-column right margin. Interior text is `width - border(1) -
@@ -25,6 +24,7 @@ pub fn draw(app: &mut App, f: &mut Frame, anchor: Rect) {
         .toasts
         .retain(|toast| toast.until.is_none_or(|until| now < until));
     app.view.toast_text_areas.clear();
+    app.view.toast_folds.clear();
     if app.overlays.toasts.is_empty() {
         reconcile_selection(app, f);
         return;
@@ -42,8 +42,10 @@ pub fn draw(app: &mut App, f: &mut Frame, anchor: Rect) {
     let x = area.width - RIGHT_MARGIN - box_width;
     let mut bottom = anchor.y;
     let mut text_areas = Vec::new();
+    let mut toast_folds = Vec::new();
     for toast in app.overlays.toasts.iter_mut().rev() {
-        let mut lines = wrap_hard(&toast.text, text_width);
+        let (mut lines, mut gaps): (Vec<_>, Vec<_>) =
+            fold::wrap_hard(&toast.text, text_width).into_iter().unzip();
         let omitted = toast.omitted;
         if omitted > 0 {
             let noun = if omitted == 1 {
@@ -52,7 +54,10 @@ pub fn draw(app: &mut App, f: &mut Frame, anchor: Rect) {
                 "notifications"
             };
             let message = format!("{omitted} earlier {noun} omitted");
-            lines.extend(wrap_hard(&message, text_width));
+            let (more, more_gaps): (Vec<_>, Vec<_>) =
+                fold::wrap_hard(&message, text_width).into_iter().unzip();
+            lines.extend(more);
+            gaps.extend(more_gaps);
         }
         let height = lines.len() as u16 + 2; // padding-top + lines + padding-bottom
         if bottom < height {
@@ -65,11 +70,17 @@ pub fn draw(app: &mut App, f: &mut Frame, anchor: Rect) {
             toast.id,
             Rect::new(x + 2, y + 1, text_width as u16, lines.len() as u16),
         ));
+        let rows = (y + 1..)
+            .zip(gaps)
+            .filter_map(|(row, gap)| Some((row, Fold::hung(gap, 0)?)))
+            .collect();
+        toast_folds.push((toast.id, Folds { x: x + 2, rows }));
         bottom = y;
     }
     // The rack paints newest first; keep the published rects in stack order.
     text_areas.reverse();
     app.view.toast_text_areas = text_areas;
+    app.view.toast_folds = toast_folds;
     // The toasts paint last, so their text takes the pointer from the widgets
     // below; a selection is anchored in one toast, never across two.
     for index in 0..app.view.toast_text_areas.len() {

@@ -422,7 +422,9 @@ class CompletedPublicTurn(SessionProtocolModel):
     input_entry_id: EntryId | None = None
     started_at: UnixTimeMilliseconds
     completed_at: UnixTimeMilliseconds
-    stop_reason: Literal["limit"] | None = None
+    # ``limit``: the Turn hit its iteration limit. ``length``: its last answer
+    # was cut off at the output-token cap.
+    stop_reason: Literal["limit", "length"] | None = None
 
 
 class FailedPublicTurn(SessionProtocolModel):

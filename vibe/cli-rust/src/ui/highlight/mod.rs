@@ -1,6 +1,6 @@
 //! Syntax highlighting: syntect grammars painted with Textual's token palette.
 
-mod palette;
+use crate::ui::theme::syntax as palette;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};

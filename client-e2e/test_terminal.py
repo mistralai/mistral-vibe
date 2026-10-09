@@ -40,6 +40,13 @@ def test_truecolor_sgr_does_not_set_dimmed_text() -> None:
     assert Attr.DIM not in terminal.snapshot("truecolor").cells[0][0].attrs
 
 
+def test_double_width_grapheme_clears_its_continuation_cell() -> None:
+    terminal = Terminal(ROWS, COLUMNS)
+    terminal.feed("all\r ❤️".encode())
+
+    assert terminal.snapshot("wide").cells[0][2].character == ""
+
+
 def test_osc8_target_is_retained_across_feed_boundaries() -> None:
     terminal = Terminal(ROWS, COLUMNS)
     terminal.feed(b"\x1b]8;id=docs;https://docs.")
@@ -65,6 +72,39 @@ def test_osc52_clipboard_is_retained_across_feed_boundaries() -> None:
     clipboard.feed(b"tZQ==\x07after")
 
     assert clipboard.text == "copy me"
+
+
+def test_vs16_emoji_spans_two_cells_and_keeps_following_text() -> None:
+    terminal = Terminal(ROWS, COLUMNS)
+    terminal.feed("stale\r❤\ufe0f end".encode())
+    cells = terminal.snapshot("emoji").cells[0]
+
+    assert [cell.character for cell in cells[:6]] == ["❤\ufe0f", "", " ", "e", "n", "d"]
+
+
+def test_keycap_mark_stays_on_the_base_glyph() -> None:
+    terminal = Terminal(ROWS, COLUMNS)
+    terminal.feed("stale\r1\ufe0f\u20e3 x".encode())
+    cells = terminal.snapshot("keycap").cells[0]
+
+    assert [cell.character for cell in cells[:5]] == [
+        "1\ufe0f\u20e3",
+        "",
+        " ",
+        "x",
+        "e",
+    ]
+
+    split = Terminal(ROWS, COLUMNS)
+    split.feed(b"1")
+    split.feed("\ufe0f".encode())
+    split.feed("\u20e3 x".encode())
+    assert [cell.character for cell in split.snapshot("split").cells[0][:4]] == [
+        "1\ufe0f\u20e3",
+        "",
+        " ",
+        "x",
+    ]
 
 
 def test_metadata_tracking_preserves_pyte_rendering() -> None:

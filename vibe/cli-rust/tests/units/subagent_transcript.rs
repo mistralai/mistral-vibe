@@ -38,6 +38,20 @@ fn user_entry(id: &str, text: &str, source: &str) -> Value {
     })
 }
 
+/// Two calls, the fewest that still fold into a tool group.
+fn tool_group() -> Vec<Value> {
+    ["e1", "e2"]
+        .map(|id| {
+            json!({
+                "id": id,
+                "type": "effect",
+                "detail": {"kind": "shell", "display": {"verb": "Running"}},
+                "state": {"status": "completed"},
+            })
+        })
+        .to_vec()
+}
+
 fn child(id: &str, status: SessionStatus) -> PublicChildSession {
     PublicChildSession {
         id: id.into(),
@@ -252,15 +266,9 @@ fn a_same_length_rebuild_bumps_the_revision() {
 #[test]
 fn toggling_tools_expands_the_viewed_children_groups() {
     let mut app = vibe_rs::app::App::default();
-    let effect = json!({
-        "id": "e1",
-        "type": "effect",
-        "detail": {"kind": "shell", "display": {"verb": "Running"}},
-        "state": {"status": "completed"},
-    });
     app.subagents
         .transcripts
-        .replace_history("a", vec![effect], true, false);
+        .replace_history("a", tool_group(), true, false);
     let ids = app
         .subagents
         .transcripts
@@ -340,15 +348,9 @@ fn needs_complete_pages_only_without_a_shared_tail_id() {
 #[test]
 fn clicking_a_group_header_expands_the_viewed_children_group() {
     let mut app = vibe_rs::app::App::default();
-    let effect = json!({
-        "id": "e1",
-        "type": "effect",
-        "detail": {"kind": "shell", "display": {"verb": "Running"}},
-        "state": {"status": "completed"},
-    });
     app.subagents
         .transcripts
-        .replace_history("a", vec![effect], true, false);
+        .replace_history("a", tool_group(), true, false);
     let group_key = app
         .subagents
         .transcripts
@@ -393,6 +395,7 @@ fn toggling_tools_collapses_the_viewed_children_group_cache() {
                 height: 1,
                 prewrapped: false,
             }],
+            None,
         );
     }
     app.toggle_tools();
@@ -435,15 +438,9 @@ fn clicking_the_composer_takes_focus_from_the_subagent_list() {
 #[test]
 fn hovering_a_child_group_header_asks_for_the_hand() {
     let mut app = vibe_rs::app::App::default();
-    let effect = json!({
-        "id": "e1",
-        "type": "effect",
-        "detail": {"kind": "shell", "display": {"verb": "Running"}},
-        "state": {"status": "completed"},
-    });
     app.subagents
         .transcripts
-        .replace_history("a", vec![effect], true, false);
+        .replace_history("a", tool_group(), true, false);
     let group_key = app
         .subagents
         .transcripts
@@ -488,6 +485,7 @@ fn copying_a_child_view_selection_extracts_the_child_transcript() {
                 height: 5,
                 prewrapped: false,
             }],
+            None,
         );
     }
     app.view.selection_region.area = Rect::new(0, 0, 40, 10);

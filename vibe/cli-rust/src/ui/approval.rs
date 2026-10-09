@@ -8,8 +8,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use super::{bottom_bar, loading, scrollbar, theme, transcript};
+use super::{list_cursor, scrollbar, theme};
 use crate::app::App;
+use crate::hints::{self, action, key};
 use crate::utils::text::wrap_hard;
 
 const MAX_HEIGHT_RATIO: (u16, u16) = (7, 10);
@@ -21,9 +22,6 @@ const OPTIONS: [&str; 4] = [
 ];
 
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    f.buffer_mut()
-        .set_style(area, Style::default().bg(theme::background()));
-    let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
     let max_height = (area.height * MAX_HEIGHT_RATIO.0 / MAX_HEIGHT_RATIO.1).max(2);
     let rows = rows(
         app,
@@ -31,14 +29,14 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         max_height.saturating_sub(2),
     );
     let box_height = (rows.lines.len() as u16 + 2).min(max_height);
-    let chunks = super::bottom_app_chunks(app, area, loading_height, box_height);
-
-    transcript::draw(app, f, chunks[0]);
-    loading::draw(app, f, chunks[1]);
-    crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Approval);
-    draw_box(app, f, chunks[2], rows);
-    super::todo::draw_row(app, f, chunks[4]);
-    bottom_bar::draw(app, f, chunks[3]);
+    super::bottom_app::draw(
+        app,
+        f,
+        area,
+        box_height,
+        super::bottom_app::Kind::Approval,
+        |app, f, area| draw_box(app, f, area, rows),
+    );
 }
 
 struct ApprovalRows {
@@ -173,7 +171,7 @@ fn rows(app: &mut App, width: u16, max_rows: u16) -> ApprovalRows {
     let detail_start = title_rows.len() as u16;
     title_rows.extend(detail_rows.lines);
     title_rows.push(Line::default());
-    title_rows.extend(option_rows(app.approval.selected));
+    title_rows.extend(option_rows(app.approval.selected, width));
     title_rows.push(Line::default());
     title_rows.push(help());
     ApprovalRows {
@@ -185,38 +183,22 @@ fn rows(app: &mut App, width: u16, max_rows: u16) -> ApprovalRows {
     }
 }
 
-fn option_rows(selected: usize) -> impl Iterator<Item = Line<'static>> {
+fn option_rows(selected: usize, width: u16) -> impl Iterator<Item = Line<'static>> {
     OPTIONS.into_iter().enumerate().map(move |(index, label)| {
-        let focused = index == selected;
+        let text = format!("  {}. {label}", index + 1);
+        if index == selected {
+            let bar = list_cursor::padded(&text, usize::from(width));
+            return Line::from(Span::styled(bar, list_cursor::style()));
+        }
         let color = if index == OPTIONS.len() - 1 {
             theme::error()
-        } else if focused {
-            theme::success()
         } else {
             theme::foreground()
         };
-        let style = if focused {
-            theme::text(color).add_modifier(Modifier::BOLD)
-        } else {
-            theme::text(color)
-        };
-        let cursor = if focused { "› " } else { "  " };
-        Line::from(Span::styled(
-            format!("{cursor}{}. {label}", index + 1),
-            style,
-        ))
+        Line::from(Span::styled(text, theme::text(color)))
     })
 }
 
 fn help() -> Line<'static> {
-    let key = theme::text(theme::primary()).add_modifier(Modifier::BOLD);
-    let label = theme::muted_style();
-    Line::from(vec![
-        Span::styled("↑↓/jk", key),
-        Span::styled(" navigate  ", label),
-        Span::styled("Enter", key),
-        Span::styled(" select  ", label),
-        Span::styled("Esc", key),
-        Span::styled(" reject", label),
-    ])
+    super::hint_line::line(&[hints::NAVIGATE, hints::SELECT, (key::ESC, action::REJECT)])
 }

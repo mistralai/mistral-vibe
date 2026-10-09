@@ -10,8 +10,9 @@ use crate::app::App;
 use crate::config;
 use crate::selection::{self, Release};
 use crate::server::Client;
+use crate::transcript::grouping::KEY_PREFIX;
 use crate::utils::scroll::ScrollAnchor;
-use crate::{approval, connector_auth, external_url, mcp, mcp_oauth, question_input};
+use crate::{connector_auth, external_url, mcp, mcp_oauth, question_input};
 
 pub(super) fn dispatch(
     app: &mut App,
@@ -20,30 +21,33 @@ pub(super) fn dispatch(
     target: MouseTarget,
     event: MouseEvent,
 ) {
-    let at = (event.column, event.row);
     match target {
         MouseTarget::Transcript | MouseTarget::Composer => selection_event(app, target, event),
         MouseTarget::Toast => toast_event(app, event),
         MouseTarget::BottomBar => bottom_bar_event(app, event),
         MouseTarget::Loading => loading_event(app, event),
-        MouseTarget::Approval => approval::handle_mouse(app, event),
         MouseTarget::Question => question_input::handle_mouse(app, event),
         MouseTarget::RemoteProject => crate::vibe_code_project::input::mouse(app, client, event),
-        MouseTarget::Mcp => match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => mcp::press(app, at),
-            MouseEventKind::Up(MouseButton::Left) => mcp::release(app, at),
-            _ => {}
-        },
-        MouseTarget::McpOAuth => match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => mcp_oauth::press(app, at),
-            MouseEventKind::Up(MouseButton::Left) => mcp_oauth::release(app, at),
-            _ => {}
-        },
-        MouseTarget::ConnectorAuth => match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => connector_auth::press(app, at),
-            MouseEventKind::Up(MouseButton::Left) => connector_auth::release(app, at),
-            _ => {}
-        },
+        MouseTarget::Mcp => bottom_app_event(app, event, mcp::press, mcp::release),
+        MouseTarget::Plugins => bottom_app_event(
+            app,
+            event,
+            |app, at| crate::plugins::click(app, at, false),
+            |app, at| crate::plugins::click(app, at, true),
+        ),
+        MouseTarget::McpOAuth => bottom_app_event(app, event, mcp_oauth::press, mcp_oauth::release),
+        MouseTarget::ConnectorAuth => {
+            bottom_app_event(app, event, connector_auth::press, connector_auth::release)
+        }
+        MouseTarget::ProxySetup => {
+            bottom_app_event(app, event, crate::proxy_setup::press, |_, _| {})
+        }
+        MouseTarget::BottomApp
+        | MouseTarget::Approval
+        | MouseTarget::ThemePicker
+        | MouseTarget::ModelPicker
+        | MouseTarget::LogLevelPicker
+        | MouseTarget::ResumePicker => bottom_app_event(app, event, |_, _| {}, |_, _| {}),
         MouseTarget::Trust => crate::trust_folders::handle_mouse(app, event),
         // The pinned todo line opens the full plan, like Python's row click.
         MouseTarget::TodoRow => {
@@ -60,15 +64,36 @@ pub(super) fn dispatch(
         // pre-session and routes its own mouse events).
         MouseTarget::Blocked
         | MouseTarget::Completion
-        | MouseTarget::ThemePicker
-        | MouseTarget::ModelPicker
-        | MouseTarget::LogLevelPicker
-        | MouseTarget::ResumePicker
-        | MouseTarget::Rewind
         | MouseTarget::OnboardingThemeList
         | MouseTarget::OnboardingPreview
         | MouseTarget::OnboardingLinks
         | MouseTarget::OnboardingInputs => {}
+    }
+}
+
+/// A bottom-app box: a drag selects its text, and a release on the pressed
+/// cell that selected nothing runs the box's click, so a drag never activates an option.
+fn bottom_app_event(
+    app: &mut App,
+    event: MouseEvent,
+    press: fn(&mut App, (u16, u16)),
+    release: fn(&mut App, (u16, u16)),
+) {
+    let at = (event.column, event.row);
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            press(app, at);
+            selection::press_owned(app, at, selection::RegionId::BottomApp);
+        }
+        MouseEventKind::Drag(MouseButton::Left) => selection::drag(app, at),
+        MouseEventKind::Up(MouseButton::Left) => {
+            let same_cell = app.selection.press == Some(at);
+            let selected = matches!(selection::release(app), Release::Selected);
+            if same_cell && !selected {
+                release(app, at);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -111,6 +136,7 @@ fn subagent_list_event(app: &mut App, event: MouseEvent) {
             app.subagents.list.focused = true;
             app.subagents.list.press_row = Some(index);
             app.set_app_focus(false);
+            crate::selection::blur_composer(app);
         }
         // A click is press then release on the same option (Textual OptionList).
         MouseEventKind::Up(MouseButton::Left) => {
@@ -179,7 +205,13 @@ fn selection_event(app: &mut App, target: MouseTarget, event: MouseEvent) {
             // (it clears only via its own timeout or a queue-mode event).
             app.selection.had_selection_at_press =
                 app.selection.region.is_some() || app.selection.bottom_bar.is_some();
-            selection::press(app, at);
+            // A bottom app hides the composer but leaves its last rect behind, so
+            // only a press routed to the painted composer may select in it.
+            if target == MouseTarget::Composer {
+                selection::press(app, at);
+            } else {
+                selection::press_owned(app, at, selection::RegionId::Main);
+            }
         }
         MouseEventKind::Drag(MouseButton::Left) => selection::drag(app, at),
         MouseEventKind::Up(MouseButton::Left) => {
@@ -224,7 +256,7 @@ pub fn toggle_effect_at(app: &mut App, row: u16) {
     // The child view swaps its transcript and cache in only at render time,
     // so the expandability check and the layout cache to invalidate both
     // follow the viewed child, like `App::toggle_tools`.
-    if let Some(child) = app
+    let lone = if let Some(child) = app
         .subagents
         .viewed_subagent_id
         .as_deref()
@@ -234,13 +266,23 @@ pub fn toggle_effect_at(app: &mut App, row: u16) {
             return;
         }
         child.cache.invalidate_layouts();
+        child.transcript.group_of(&id).is_none()
     } else {
         if !app.view.transcript.is_expandable(&id) {
             return;
         }
         app.view.transcript_cache.invalidate_layouts();
-    }
+        app.view.transcript.group_of(&id).is_none()
+    };
     let reveal = !app.view.expanded.remove(&id);
+    // A lone call carries its fold into the group a later call may open under its id.
+    if lone && !id.starts_with(KEY_PREFIX) {
+        let group_key = format!("{KEY_PREFIX}{id}");
+        app.view.expanded.remove(&group_key);
+        if reveal {
+            app.view.expanded.insert(group_key);
+        }
+    }
     if reveal {
         app.view.expanded.insert(id.clone());
     }

@@ -77,6 +77,9 @@ pub struct StartupConfig {
     pub disable_welcome_banner_animation: bool,
     /// Whether a mouse selection copies itself on release.
     pub autocopy_to_clipboard: bool,
+    /// Main input blink preference; older caches keep the default blinking caret.
+    #[serde(default = "default_cursor_blink")]
+    pub cursor_blink: bool,
     pub active_model: String,
     pub active_model_display_name: String,
     /// Python `config.images_supported`: model vision or a backend image describer.
@@ -117,6 +120,7 @@ impl Default for StartupConfig {
             theme: "auto".into(),
             disable_welcome_banner_animation: false,
             autocopy_to_clipboard: true,
+            cursor_blink: default_cursor_blink(),
             active_model: String::new(),
             active_model_display_name: String::new(),
             images_supported: false,
@@ -137,6 +141,10 @@ impl Default for StartupConfig {
             cached_at: 0,
         }
     }
+}
+
+fn default_cursor_blink() -> bool {
+    true
 }
 
 fn default_enable_update_checks() -> bool {
@@ -236,6 +244,10 @@ impl StartupConfig {
                 .get("autocopyToClipboard")
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
+            cursor_blink: config
+                .get("cursorBlink")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(default_cursor_blink),
             active_model: format!("{model_name}[{thinking}]"),
             active_model_display_name: model_name.to_owned(),
             images_supported: config

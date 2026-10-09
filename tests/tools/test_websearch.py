@@ -16,7 +16,7 @@ import pytest
 
 from tests.conftest import build_test_vibe_config
 from tests.mock.utils import collect_result
-from vibe.core.config import ProviderConfig, VibeConfigSchema
+from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
 from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError
 from vibe.core.tools.builtins.web_search import (
     WebSearch,
@@ -60,6 +60,10 @@ def _llamacpp_provider() -> ProviderConfig:
     return ProviderConfig(
         name="llamacpp", api_base="http://127.0.0.1:8080/v1", backend=Backend.GENERIC
     )
+
+
+def _llamacpp_model() -> ModelConfig:
+    return ModelConfig(name="devstral", provider="llamacpp", alias="local-llamacpp")
 
 
 def _make_response(
@@ -294,7 +298,11 @@ def test_resolve_server_url_with_default_provider(websearch):
 
 def test_resolve_server_url_no_mistral_provider(websearch):
     ctx = _ctx_with_config(
-        build_test_vibe_config(active_model="local", providers=[_llamacpp_provider()])
+        build_test_vibe_config(
+            active_model="local-llamacpp",
+            models=[_llamacpp_model()],
+            providers=[_llamacpp_provider()],
+        )
     )
     assert websearch._resolve_server_url(ctx) is None
 
@@ -324,7 +332,8 @@ def test_is_available_uses_mistral_provider_api_key_env_var(monkeypatch):
 def test_is_available_uses_non_active_mistral_provider(monkeypatch):
     monkeypatch.setenv("TEST_API_KEY", "provider-key")
     config = build_test_vibe_config(
-        active_model="local",
+        active_model="local-llamacpp",
+        models=[_llamacpp_model()],
         providers=[_llamacpp_provider(), _mistral_provider("TEST_API_KEY")],
     )
     monkeypatch.delenv("TEST_API_KEY", raising=False)
@@ -340,7 +349,9 @@ def test_is_available_falls_back_to_default_api_key_env_var_without_mistral_prov
 ):
     monkeypatch.setenv("MISTRAL_API_KEY", "fallback-key")
     config = build_test_vibe_config(
-        active_model="local", providers=[_llamacpp_provider()]
+        active_model="local-llamacpp",
+        models=[_llamacpp_model()],
+        providers=[_llamacpp_provider()],
     )
 
     assert WebSearch.is_available(config) is True
@@ -380,7 +391,9 @@ def test_tool_manager_websearch_availability_falls_back_without_mistral_provider
 ):
     monkeypatch.setenv("MISTRAL_API_KEY", "fallback-key")
     config = build_test_vibe_config(
-        active_model="local", providers=[_llamacpp_provider()]
+        active_model="local-llamacpp",
+        models=[_llamacpp_model()],
+        providers=[_llamacpp_provider()],
     )
     manager = ToolManager(lambda: config)
 

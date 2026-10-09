@@ -5,9 +5,11 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use super::event::{dispatch, CommandEvent};
-use super::simple::{add_text, status_text};
+use super::simple::status_text;
+use super::submission::new_message_id;
 use crate::app::App;
 use crate::server::{method, Client};
+use crate::transcript::local;
 
 /// Markdown punctuation that changes inline parsing when left bare.
 const MD_INLINE: &[char] = &[
@@ -18,7 +20,7 @@ const MD_INLINE: &[char] = &[
 pub(super) fn status(app: &mut App, client: &Arc<Client>) {
     let stats = status_text(app);
     let Some((session_id, tx)) = dispatch(app) else {
-        add_text(app, &stats);
+        add_agent_statistics(app, &new_message_id(), &stats);
         return;
     };
     let client = client.clone();
@@ -26,8 +28,13 @@ pub(super) fn status(app: &mut App, client: &Arc<Client>) {
         let read = client
             .request(method::PROVIDER_AUTH_READ, json!({"sessionId": session_id}))
             .await;
-        let _ = tx.try_send(CommandEvent::Result(attach(stats, read)));
+        let _ = tx.try_send(CommandEvent::AgentStatistics(attach(stats, read)));
     });
+}
+
+/// Mount the `/status` message, whose exact counts render muted (Python `.agent-statistics`).
+pub(crate) fn add_agent_statistics(app: &mut App, id: &str, text: &str) {
+    local::add_message(&mut app.view.transcript, id, "agent_statistics", text);
 }
 
 /// The command text from a `providerAuth/read` outcome: statistics always

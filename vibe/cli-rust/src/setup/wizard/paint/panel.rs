@@ -15,7 +15,7 @@
 //! of its own.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::Frame;
 
 use super::browser_sign_in;
@@ -26,11 +26,6 @@ use crate::setup::wizard::{
     BrowserSignInState, InputCard, OnboardingInput, OnboardingState, SignInVariant, ValidationState,
 };
 use crate::ui::theme;
-
-/// Heading color (Python `$mistral_orange_title`); not the selection orange.
-pub(super) const TITLE_ORANGE: Color = Color::Rgb(0xff, 0x5a, 0x00);
-/// Idle card border (Python `.onboarding-card` border).
-pub(super) const CARD_BORDER: Color = Color::Rgb(0x30, 0x30, 0x40);
 
 /// The chrome above the body: three cat rows, the title, the subtitle.
 const CHROME_ROWS: u16 = 5;
@@ -86,13 +81,8 @@ pub(super) enum Row {
 
 /// The hint line's copy, one flavor per screen family.
 pub(super) enum Hint {
-    /// `Press <key><suffix>`, the key highlighted.
-    Press {
-        key: &'static str,
-        suffix: &'static str,
-    },
-    /// The option screens' navigation hints.
-    Options { escape_action: String },
+    /// Shortcut hints, left-aligned.
+    Keys(&'static [crate::hints::Hint]),
     /// The browser sign-in's centered variant hint.
     Browser(SignInVariant),
 }
@@ -226,10 +216,7 @@ pub(super) fn render(
                 }
             }
             Row::Hint(hint) => match hint {
-                Hint::Press { key, suffix } => input::draw_press_hint(f, x, row_y, key, suffix),
-                Hint::Options { escape_action } => {
-                    options::draw_hints(f, x, row_y, escape_action);
-                }
+                Hint::Keys(keys) => crate::ui::hint_line::draw(f, x, row_y, keys),
                 Hint::Browser(variant) => browser_sign_in::draw_hint(f, rect, *variant),
             },
         }
@@ -277,7 +264,7 @@ fn orange_title(f: &mut Frame, x: u16, y: u16, text: &str) {
         y,
         text,
         Style::default()
-            .fg(TITLE_ORANGE)
+            .fg(theme::fixed::ONBOARDING_TITLE)
             .add_modifier(Modifier::BOLD),
     );
 }

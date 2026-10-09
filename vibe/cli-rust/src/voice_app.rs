@@ -49,7 +49,9 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => close(app, client),
         KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k') => {
-            app.voice_app.selected = (app.voice_app.selected + 1) % LABELS.len();
+            let down = matches!(key.code, KeyCode::Down | KeyCode::Char('j'));
+            let selected = app.voice_app.selected;
+            app.voice_app.selected = crate::list_nav::wrap(selected, LABELS.len(), down);
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let picker = &mut app.voice_app;

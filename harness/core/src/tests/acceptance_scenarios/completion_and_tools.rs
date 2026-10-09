@@ -655,6 +655,96 @@ fn three_programmatic_tool_calls_resume_the_model_and_complete_the_turn() {
 }
 
 ///
+/// *Prepare*: A TypeScript program reads a file whose tool result holds a status line as text and
+/// the file itself as an embedded resource.
+/// *Do*: Return that result to the program, which returns the resource text, then complete the
+/// follow-up model call.
+/// *Assert*: The program reads the file from the resource block, and the model receives the
+/// program's value followed by the retained resource.
+///
+#[test]
+fn programs_read_embedded_resources_next_to_text() {
+    // Prepare
+    let turn_id = "turn-programmatic-embedded-resource";
+    let call_id = "program-embedded-resource";
+    let mut runtime = SynchronousRuntime::new(config());
+    let first_completion = runtime.start_turn(turn_id, "read the README");
+    let source = "async function main() { const result = await tools.file_system.read_file({ path: 'README.md' }); return result.find((block) => block.type === 'resource').resource.text; }";
+    let file = json!({
+        "type": "resource",
+        "resource": {
+            "uri": "repo://owner/repo/contents/README.md",
+            "mimeType": "text/markdown",
+            "text": "# Project\n",
+        },
+    });
+    let read = runtime
+        .complete_with_typescript_program(
+            turn_id,
+            &first_completion,
+            call_id,
+            source,
+            [runtime_tool(
+                "file_system.read_file",
+                json!({"path": "README.md"}),
+            )],
+        )
+        .only_action();
+    let read_result = json!({
+        "type": "tool_succeeded",
+        "action_id": read["action_id"],
+        "call_id": read["call_id"],
+        "result": {
+            "type": "success",
+            "content": [
+                {"type": "text", "text": "successfully downloaded text file (SHA: 5a7b0ca)"},
+                file,
+            ],
+        },
+    });
+    let program_content = json!([
+        {"type": "text", "text": r##""# Project\n""##},
+        {"type": "text", "text": "Additional content from `tools.file_system.read_file` (call 1):"},
+        file,
+    ]);
+
+    // Do
+    let final_completion = runtime
+        .apply(
+            read_result.clone(),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe_tool_result(&read, &read_result)
+                .observe_tool_execution_finished(
+                    call_id,
+                    json!({
+                        "type": "success",
+                        "content": program_content,
+                        "structured_content": "# Project\n",
+                    }),
+                ),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(
+        &final_completion,
+        "append",
+        &[
+            model_assistant_typescript(call_id, source),
+            json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": "run_typescript",
+                "outcome": "success",
+                "content": program_content,
+            }),
+        ],
+    );
+    runtime.finish_turn_with_text(turn_id, &final_completion, "the README is a title");
+}
+
+///
 /// *Prepare*: A TypeScript program constructs a filesystem write argument with a lone UTF-16 surrogate.
 /// *Do*: Submit the program through the serialized Core interface.
 /// *Assert*: Core completes `run_typescript` with a non-retryable serialization failure and dispatches no filesystem Action.

@@ -9,6 +9,7 @@ use ratatui::Frame;
 use super::super::mouse::{self, MouseTarget};
 use super::theme;
 use crate::app::App;
+use crate::hints;
 use crate::todo_tracker::{self, TodoItem, TodoStatus};
 
 /// Exactly one line: it sits above the input box, which any growth would shove down.
@@ -113,7 +114,7 @@ pub fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         .collect();
     f.render_widget(Paragraph::new(visible), list_area);
     f.render_widget(
-        Paragraph::new(Span::styled("esc to close", theme::muted_style()))
+        Paragraph::new(super::hint_line::line(&[hints::CLOSE]))
             .alignment(ratatui::layout::Alignment::Right),
         hint_area,
     );

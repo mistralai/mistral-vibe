@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
+import threading
 from types import MappingProxyType
 from typing import TYPE_CHECKING
+
+from cachetools import LRUCache
 
 from vibe.core.config.harness_files import (
     HarnessFilesManager,
@@ -33,6 +37,82 @@ from vibe.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedSkillFile:
+    metadata: SkillMetadata
+    prompt: str
+    openai_allows_implicit_invocation: bool
+    issues: tuple[SkillConfigIssue, ...]
+
+
+type _FileStamp = tuple[int, int, int] | None
+
+# Every derivation of every session in the process re-discovers skills, and
+# parsing frontmatter dominates that cost. Keyed by path and invalidated by the
+# stat of both files a parse reads, so an edited skill is re-parsed on the next
+# discovery. Bounded because each worktree brings its own project skill paths.
+_parsed_skill_files: LRUCache[
+    Path, tuple[tuple[_FileStamp, _FileStamp], _ParsedSkillFile]
+] = LRUCache(maxsize=1024)
+_parsed_skill_files_lock = threading.Lock()
+
+
+def _file_stamp(path: Path) -> _FileStamp:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_ino, stat.st_mtime_ns, stat.st_size
+
+
+def _parse_skill_file(skill_path: Path) -> _ParsedSkillFile:
+    stamp = (
+        _file_stamp(skill_path),
+        _file_stamp(openai_skill_metadata_path(skill_path)),
+    )
+    with _parsed_skill_files_lock:
+        cached = _parsed_skill_files.get(skill_path)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    parsed = _read_skill_file(skill_path)
+    with _parsed_skill_files_lock:
+        _parsed_skill_files[skill_path] = (stamp, parsed)
+    return parsed
+
+
+def _read_skill_file(skill_path: Path) -> _ParsedSkillFile:
+    try:
+        content = read_safe(skill_path).text
+    except OSError as e:
+        raise SkillParseError(f"Cannot read file: {e}") from e
+
+    frontmatter, body = parse_skill_markdown(content)
+    metadata = SkillMetadata.model_validate(frontmatter)
+
+    issues: tuple[SkillConfigIssue, ...] = ()
+    try:
+        openai_metadata = load_openai_skill_metadata(skill_path)
+    except SkillParseError as e:
+        metadata_path = openai_skill_metadata_path(skill_path)
+        logger.warning("Failed to parse skill metadata at %s: %s", metadata_path, e)
+        allows_implicit_invocation = False
+        issues = (
+            SkillConfigIssue(
+                file=metadata_path, message=f"Model invocation disabled: {e}"
+            ),
+        )
+    else:
+        allows_implicit_invocation = (
+            openai_metadata is None or openai_metadata.allows_implicit_invocation
+        )
+    return _ParsedSkillFile(
+        metadata=metadata,
+        prompt=body.strip(),
+        openai_allows_implicit_invocation=allows_implicit_invocation,
+        issues=issues,
+    )
 
 
 class SkillManager:
@@ -294,12 +374,24 @@ class SkillManager:
         check_dir_name: bool = True,
     ) -> SkillInfo | None:
         try:
-            skill_info = self._parse_skill_file(
+            parsed = _parse_skill_file(skill_file)
+            skill_name_from_dir = skill_file.parent.name
+            if check_dir_name and parsed.metadata.name != skill_name_from_dir:
+                logger.warning(
+                    "Skill name '%s' doesn't match directory name '%s' at %s",
+                    parsed.metadata.name,
+                    skill_name_from_dir,
+                    skill_file,
+                )
+            self._config_issues.extend(parsed.issues)
+            return SkillInfo.from_metadata(
+                parsed.metadata,
                 skill_file,
+                prompt=parsed.prompt,
                 source=source,
                 scope=scope,
                 registry=registry,
-                check_dir_name=check_dir_name,
+                model_invocable=parsed.openai_allows_implicit_invocation,
             )
         except Exception as e:
             logger.warning("Failed to parse skill at %s: %s", skill_file, e)
@@ -307,58 +399,6 @@ class SkillManager:
                 SkillConfigIssue(file=skill_file, message=f"Failed to load: {e}")
             )
             return None
-        return skill_info
-
-    def _parse_skill_file(
-        self,
-        skill_path: Path,
-        *,
-        source: SkillSource,
-        scope: SkillScope,
-        registry: RegistryRef | None = None,
-        check_dir_name: bool = True,
-    ) -> SkillInfo:
-        try:
-            content = read_safe(skill_path).text
-        except OSError as e:
-            raise SkillParseError(f"Cannot read file: {e}") from e
-
-        frontmatter, body = parse_skill_markdown(content)
-        metadata = SkillMetadata.model_validate(frontmatter)
-
-        if check_dir_name:
-            skill_name_from_dir = skill_path.parent.name
-            if metadata.name != skill_name_from_dir:
-                logger.warning(
-                    "Skill name '%s' doesn't match directory name '%s' at %s",
-                    metadata.name,
-                    skill_name_from_dir,
-                    skill_path,
-                )
-
-        return SkillInfo.from_metadata(
-            metadata,
-            skill_path,
-            prompt=body.strip(),
-            source=source,
-            scope=scope,
-            registry=registry,
-            model_invocable=self._openai_allows_implicit_invocation(skill_path),
-        )
-
-    def _openai_allows_implicit_invocation(self, skill_path: Path) -> bool:
-        metadata_path = openai_skill_metadata_path(skill_path)
-        try:
-            metadata = load_openai_skill_metadata(skill_path)
-        except SkillParseError as e:
-            logger.warning("Failed to parse skill metadata at %s: %s", metadata_path, e)
-            self._config_issues.append(
-                SkillConfigIssue(
-                    file=metadata_path, message=f"Model invocation disabled: {e}"
-                )
-            )
-            return False
-        return metadata is None or metadata.allows_implicit_invocation
 
     @property
     def _reserved_builtins(self) -> Mapping[str, SkillInfo]:

@@ -224,6 +224,7 @@ pub fn focus_first(app: &mut App) -> bool {
     app.subagents.list.highlighted = 0;
     app.subagents.list.focused = true;
     app.set_app_focus(false);
+    crate::selection::blur_composer(app);
     true
 }
 

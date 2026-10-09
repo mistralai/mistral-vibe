@@ -4,6 +4,8 @@ uv run --with-editable ../agents/harness/harness/runtimes/python python scripts/
 Uses only localhost fixture responses. Requires macOS or Linux (ps).
 RSS covers app-server process trees, excluding this driver and Electron.
 Each turn streams 32 chunks at 20 ms intervals (2 ms with --saturated).
+--history N runs N untimed turns in each new session before it is measured,
+since per-update cost grows with the length of a session's history.
 The direct-process baseline includes an initialized catalogue and spare process;
 it measures interpreter sharing, not Desktop's prewarm acquisition latency.
 """
@@ -196,7 +198,9 @@ async def sample(processes: list[Process]) -> dict[str, int | float]:
     }
 
 
-async def run(shared: bool, port: int) -> None:
+async def run(  # noqa: PLR0915
+    shared: bool, port: int, history: int
+) -> None:
     with tempfile.TemporaryDirectory(prefix="vibe-benchmark-") as directory:
         root = Path(directory)
         (root / "config.toml").write_text(CONFIG.replace("PORT", str(port)))
@@ -276,18 +280,20 @@ async def run(shared: bool, port: int) -> None:
 
             for target in (1, 5, 10, 20):
                 started = time.perf_counter()
-                sessions.extend(
-                    await asyncio.gather(
-                        *(create() for _ in range(target - len(sessions)))
-                    )
+                created = await asyncio.gather(
+                    *(create() for _ in range(target - len(sessions)))
                 )
                 created_ms = (time.perf_counter() - started) * 1000
+                for _ in range(history):
+                    await asyncio.gather(*(turn(s) for s in created))
+                sessions.extend(created)
                 durations = await asyncio.gather(*(turn(s) for s in sessions))
                 await asyncio.sleep(0.25)
                 print(
                     json.dumps({
                         "mode": "shared" if shared else "dedicated",
                         "sessions": target,
+                        "history_turns": history,
                         "create_batch_ms": round(created_ms),
                         "turn_median_ms": round(statistics.median(durations)),
                         **await sample(processes),
@@ -321,16 +327,27 @@ async def main() -> None:
         action="store_true",
         help="Stream large chunks with a 2 ms interval to expose CPU contention.",
     )
+    parser.add_argument(
+        "--history",
+        type=int,
+        default=0,
+        help="Untimed turns each new session runs before it is measured.",
+    )
     args = parser.parse_args()
     print(
-        json.dumps({"saturated": args.saturated, "platform": sys.platform}), flush=True
+        json.dumps({
+            "saturated": args.saturated,
+            "history": args.history,
+            "platform": sys.platform,
+        }),
+        flush=True,
     )
     server = await asyncio.start_server(
         partial(model, saturated=args.saturated), "127.0.0.1", 0
     )
     async with server:
         for shared in (False, True):
-            await run(shared, server.sockets[0].getsockname()[1])
+            await run(shared, server.sockets[0].getsockname()[1], args.history)
 
 
 if __name__ == "__main__":

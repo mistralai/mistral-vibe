@@ -257,6 +257,7 @@ fn apply_ready(
     app.completion.skills = startup::read_skills(&runtime);
     app.voice.mode_enabled = config.voice_mode_enabled;
     app.voice.transcription = config.transcription;
+    crate::narrator_manager::apply_runtime(app, &runtime);
     model_picker::apply_runtime(app, &runtime);
     crate::thinking_picker::apply_runtime(app, &runtime);
     agents::apply_runtime(app, &runtime);
@@ -360,6 +361,7 @@ pub fn apply_runtime_value(app: &mut App, runtime: &Value) {
         apply_final_startup_config(app, config);
     }
     crate::voice_app::apply_runtime(app, runtime);
+    crate::narrator_manager::apply_runtime(app, runtime);
     if narrator_enabled != app.session.startup_config.narrator_enabled {
         turn_summary::cancel(app);
     }
@@ -447,6 +449,7 @@ fn show_startup_config(app: &mut App, config: startup_cache::StartupConfig) {
     app.session.tokens.1 = config.context_window;
     app.completion.skills.clone_from(&config.skills);
     agents::show_startup_agents(app, &config);
+    app.view.banner.sync_model_variant(&config);
     app.session.startup_config = config;
     completion_manager::refresh(app);
 }

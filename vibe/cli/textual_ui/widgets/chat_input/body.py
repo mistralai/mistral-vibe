@@ -252,14 +252,12 @@ class ChatInputBody(VoiceManagerListener, Widget):
         if not self.input_widget:
             return
         self.input_widget.read_only = True
-        self.input_widget.cursor_blink = False
         self.input_widget.show_cursor = False
 
     def _unlock_input_for_edit(self) -> None:
         if not self.input_widget:
             return
         self.input_widget.read_only = False
-        self.input_widget.cursor_blink = True
         self.input_widget.show_cursor = True
 
     def _resnapshot_queue_items(self) -> list[tuple[int, str]]:
@@ -643,8 +641,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
             self.screen.get_widget_by_id("input-box").add_class("border-recording")
 
             if self.input_widget:
-                self.input_widget.cursor_blink = False
-                self.input_widget.add_class("recording")
+                self.input_widget.recording = True
             if self.prompt_widget:
                 self.prompt_widget.display = False
             self._recording_indicator = RecordingIndicator(self._voice_manager)
@@ -658,8 +655,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
             self.screen.get_widget_by_id("input-box").remove_class("border-recording")
 
             if self.input_widget:
-                self.input_widget.cursor_blink = True
-                self.input_widget.remove_class("recording")
+                self.input_widget.recording = False
             if self.prompt_widget:
                 self.prompt_widget.display = True
                 self._update_prompt()
@@ -677,8 +673,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
             pass
 
         if self.input_widget:
-            self.input_widget.cursor_blink = True
-            self.input_widget.remove_class("recording")
+            self.input_widget.recording = False
         if self.prompt_widget:
             self.prompt_widget.display = True
             self._update_prompt()

@@ -97,7 +97,9 @@ thinking = "off"
                     assert frame["channelId"] == channel
                     break
         await asyncio.sleep(0)
-        gc.collect()
+        # One pass can leave cycles that only become collectable after it.
+        for _ in range(3):
+            gc.collect()
         assert not serving.done()
         assert all(reference() is None for reference in references)
         assert not any(

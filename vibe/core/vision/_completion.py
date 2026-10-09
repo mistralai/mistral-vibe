@@ -16,10 +16,9 @@ if TYPE_CHECKING:
 
 MAX_DESCRIPTION_TOKENS = 2_048
 
-# "off" is the level that sends no reasoning effort at all -- except on the
-# Mistral backend, where it omits the field rather than setting it, leaving a
-# reasoning-capable describer to reason at the server default. "low" is the
-# level that maps to ``reasoning_effort="none"`` there.
+# "off" leaves reasoning_effort unset on uncurated Mistral models, which
+# leaves the server default (reasoning on) in charge; "low" is the pick that
+# sends reasoning_effort="none" there.
 _NO_REASONING: dict[Backend, ThinkingLevel] = {Backend.MISTRAL: "low"}
 
 
@@ -38,7 +37,7 @@ async def complete_vision(
     # dense screenshot exhausts the budget mid-trace and comes back with no
     # content at all.
     describing = model.model_copy(
-        update={"thinking": _NO_REASONING.get(Backend(provider.backend), "off")}
+        update={"thinking": _NO_REASONING.get(provider.backend, "off")}
     )
     # A fresh backend per call rather than a session-lived one: the vision
     # model may sit on a provider the session never otherwise reaches.

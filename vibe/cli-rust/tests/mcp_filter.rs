@@ -87,9 +87,18 @@ fn source_filter_does_not_filter_the_selected_sources_tools() {
 fn pasted_query_is_bounded_at_a_unicode_character_boundary() {
     let mut app = App::default();
     search::focus(&mut app);
-    search::paste(&mut app, &"é".repeat(search::MAX_QUERY_BYTES));
-    assert_eq!(app.mcp.search.query.len(), search::MAX_QUERY_BYTES);
-    assert_eq!(app.mcp.search.cursor, search::MAX_QUERY_BYTES);
+    search::paste(
+        &mut app,
+        &"é".repeat(vibe_rs::search_field::MAX_QUERY_BYTES),
+    );
+    assert_eq!(
+        app.mcp.search.query.len(),
+        vibe_rs::search_field::MAX_QUERY_BYTES
+    );
+    assert_eq!(
+        app.mcp.search.cursor,
+        vibe_rs::search_field::MAX_QUERY_BYTES
+    );
     assert!(app.mcp.search.query.chars().all(|ch| ch == 'é'));
     assert!(app.chat_input.input.is_empty());
 }

@@ -64,6 +64,10 @@ pub mod method {
     pub const CONFIG_WRITE: &str = "config/write";
     /// Re-read config and runtime after a change (Python `_reload_config`).
     pub const CONFIG_RELOAD: &str = "config/reload";
+    /// Read the proxy variables `/proxy-setup` edits (Python `read_proxy`).
+    pub const CONFIG_PROXY_READ: &str = "config/proxy/read";
+    /// Persist the changed proxy variables (Python `update_proxy`).
+    pub const CONFIG_PROXY_WRITE: &str = "config/proxy/write";
     /// The pre-session setup surface (Python app-server `_setup.py`).
     pub const SETUP_STATUS: &str = "setup/status";
     pub const SETUP_STORE_CREDENTIAL: &str = "setup/store-credential";
@@ -92,6 +96,10 @@ pub mod method {
     pub const CONNECTOR_AUTH_READ: &str = "connectors/auth/read";
     /// Re-discover the tools of one connector after its browser sign-in.
     pub const CONNECTOR_REFRESH: &str = "connectors/refresh";
+    /// The session's plugin catalogue browsed by `/plugins`.
+    pub const PLUGIN_CATALOG_READ: &str = "plugin_catalog/read";
+    /// Re-pin the session's plugins (`/reload-plugins`).
+    pub const PLUGIN_RELOAD: &str = "plugin/reload";
     /// Client -> server: the semantic answer to a `callback/call` request.
     pub const CALLBACK_RESULT: &str = "callback/result";
     /// Ask the server-owned feedback resource whether the prompt is eligible.

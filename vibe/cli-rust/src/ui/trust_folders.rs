@@ -20,6 +20,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     // Nothing is selectable until the dialog below claims its own text column.
     app.view.selection_region = Region::default();
     app.view.selection_chrome.clear();
+    app.view.selection_hangs.clear();
     app.view.selection_scrollbar.clear();
     if area.height < 3 || area.width == 0 {
         return;

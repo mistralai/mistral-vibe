@@ -7,15 +7,30 @@ from enum import StrEnum
 from functools import cached_property, lru_cache
 from itertools import product
 from typing import NamedTuple, cast
+import unicodedata
 
 import pyte
 from pyte import modes
+from wcwidth import wcwidth
 
 _OSC8_START = b"\x1b]8;"
 _SGR_DIM = 2
 _SGR_RESET_DIM = {0, 22}
 _SGR_EXTENDED_COLOR = {38, 48, 58}
 _SGR_TRUECOLOR = 2
+_VS16 = "\ufe0f"
+# Marks pyte treats as unprintable and drops, including the keycap U+20E3.
+_EMOJI_MARK_CATEGORIES = {"Mn", "Me", "Cf"}
+
+
+def _emoji_mark_end(data: str, index: int) -> int:
+    while index < len(data) and _is_emoji_mark(data[index]):
+        index += 1
+    return index
+
+
+def _is_emoji_mark(char: str) -> bool:
+    return wcwidth(char) == 0 and unicodedata.category(char) in _EMOJI_MARK_CATEGORIES
 
 
 class Attr(StrEnum):
@@ -65,6 +80,8 @@ class Snapshot:
     cells: tuple[tuple[Cell, ...], ...]
     clipboard: str | None = None
     title: str = ""
+    cursor: tuple[int, int] | None = None
+    """Terminal cursor as ``(row, column)``, where IME and dead-key previews draw."""
 
     @cached_property
     def rows(self) -> tuple[str, ...]:
@@ -124,6 +141,56 @@ class _TrackedScreen(pyte.Screen):
     def reset(self) -> None:
         super().reset()
         self.cursor.attrs = self.default_char
+
+    def draw(self, data: str) -> None:
+        # pyte stops at VS16 and drops the rest of the run; terminals keep the text that follows.
+        index = self._take_leading_emoji_marks(data)
+        while index < len(data):
+            vs = data.find(_VS16, index)
+            if vs < 0:
+                super().draw(data[index:])
+                return
+            if vs > index:
+                super().draw(data[index:vs])
+            end = _emoji_mark_end(data, vs + 1)
+            self._widen_previous_glyph(data[vs:end])
+            index = end
+
+    def _take_leading_emoji_marks(self, data: str) -> int:
+        end = _emoji_mark_end(data, 0)
+        if not end:
+            return 0
+        marks = data[:end]
+        if _VS16 in marks:
+            self._widen_previous_glyph(marks)
+        else:
+            self._attach_emoji_marks(marks)
+        return end
+
+    def _attach_emoji_marks(self, marks: str) -> None:
+        x = self.cursor.x
+        if not x:
+            return
+        line = self.buffer[self.cursor.y]
+        target = x - 1
+        # A continuation stub is empty; the mark belongs on the base glyph before it.
+        if not line[target].data and target:
+            target -= 1
+        if not line[target].data:
+            return
+        line[target] = line[target]._replace(data=line[target].data + marks)
+
+    def _widen_previous_glyph(self, tail: str) -> None:
+        x = self.cursor.x
+        if not x or x >= self.columns:
+            return
+        line = self.buffer[self.cursor.y]
+        previous = line[x - 1]
+        if not previous.data or _VS16 in previous.data:
+            return
+        line[x - 1] = previous._replace(data=previous.data + tail)
+        line[x] = self.cursor.attrs._replace(data="")
+        self.cursor.x = x + 1
 
     def select_graphic_rendition(self, *attrs: int) -> None:
         dimmed = self._cursor_attrs().dimmed
@@ -201,7 +268,8 @@ class Terminal:
             tuple(_cell(screen.buffer[y][x]) for x in range(self._columns))
             for y in range(self._rows)
         )
-        return Snapshot(label, cells, clipboard, screen.title)
+        cursor = (screen.cursor.y, screen.cursor.x)
+        return Snapshot(label, cells, clipboard, screen.title, cursor)
 
 
 def _osc8_prefix_length(data: bytearray) -> int:

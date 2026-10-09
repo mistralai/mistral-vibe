@@ -9,8 +9,8 @@ _PROMPT = "give me Paul Vezia's profile"
 _ANSWER = "• Paul Vezia — Senior AI Engineer at Publicis. [LinkedIn profile](https://www.linkedin.com)"
 
 # SGR button 35 is pointer motion with no button held. LinkedIn starts at the
-# one-based terminal cell (50, 32) after this turn settles.
-_ROW, _COL = 32, 50
+# one-based terminal cell (50, 15) after this turn settles.
+_ROW, _COL = 15, 50
 _HOVER = f"\x1b[<35;{_COL};{_ROW}M"
 
 timeline: Timeline = [

@@ -109,12 +109,34 @@ def _connector_tool_to_remote(tool: dict[str, Any]) -> RemoteTool | None:
 
 
 _DEFAULT_BASE_URL = "https://api.mistral.ai"
+# Sent as a repeated query param; a comma-joined string is read as one bogus name.
+# Off-by-default: gated builtins (e.g. document_library) are added only when a
+# caller opts in via ``builtin_connectors``; this is the safe fallback set so any
+# caller that omits ``builtins=`` never silently re-exposes a gated connector.
+_DEFAULT_BUILTIN_CONNECTORS = ("web_search",)
 
 
-def _bootstrap_cache_key(api_key: str, server_url: str | None) -> str:
+def builtin_connectors(*, enable_document_library_connector: bool) -> tuple[str, ...]:
+    """Builtin connectors to request from bootstrap, gated by experimental flags.
+
+    ``document_library`` is withheld unless explicitly enabled so its (currently
+    unstable) MCP tools are not surfaced by default.
+    """
+    connectors = _DEFAULT_BUILTIN_CONNECTORS
+    if enable_document_library_connector:
+        connectors += ("document_library",)
+    return connectors
+
+
+def _bootstrap_cache_key(
+    api_key: str,
+    server_url: str | None,
+    builtins: tuple[str, ...] = _DEFAULT_BUILTIN_CONNECTORS,
+) -> str:
     base_url = server_url or _DEFAULT_BASE_URL
+    builtins_key = ",".join(builtins)
     return hashlib.sha256(
-        f"{base_url}\0{api_key}\0supports_mcp=true".encode()
+        f"{base_url}\0{api_key}\0supports_mcp=true\0{builtins_key}".encode()
     ).hexdigest()
 
 
@@ -449,10 +471,12 @@ class ConnectorRegistry:
         server_url: str | None = None,
         *,
         catalog_entries: tuple[ConnectorCatalogEntry, ...] | None = None,
+        builtins: tuple[str, ...] = _DEFAULT_BUILTIN_CONNECTORS,
     ) -> None:
         self._api_key = api_key
         self._server_url = server_url
-        self._bootstrap_cache_key = _bootstrap_cache_key(api_key, server_url)
+        self._builtins = builtins
+        self._bootstrap_cache_key = _bootstrap_cache_key(api_key, server_url, builtins)
         self._cache: dict[str, dict[str, type[BaseTool]]] | None = None
         self._connector_names: list[str] = []
         self._connector_connected: dict[str, bool] = {}
@@ -471,6 +495,7 @@ class ConnectorRegistry:
             api_key=self._api_key,
             server_url=self._server_url,
             catalog_entries=self._host_catalog_entries,
+            builtins=self._builtins,
         )
 
     def reconfigure(self, entries: tuple[ConnectorCatalogEntry, ...]) -> None:
@@ -540,7 +565,7 @@ class ConnectorRegistry:
         headers = {"Authorization": f"Bearer {self._api_key}"}
         params = {
             "include_auth_actionable_connectors": "true",
-            "builtin_connectors": "web_search",
+            "builtin_connectors": self._builtins,
             "supports_mcp": "true",
         }
         async with VibeAsyncHTTPClient(

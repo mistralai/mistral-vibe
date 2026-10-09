@@ -1,4 +1,4 @@
-//! Effect result-body formatting: todo buckets, shell transcript, sanitized bodies, edit parsing.
+//! Effect result-body formatting: todo buckets, shell transcript, sanitized bodies, edit parsing, scratchpad notes.
 
 use serde_json::{json, Value};
 use vibe_rs::server::effect_output::{format_effect_output, todo_rows, BodyLine};
@@ -253,4 +253,19 @@ fn web_fetch_content_trims_outer_newlines_like_yield_text() {
 
     let ansi = json!({"content": "\n\x1b[31mbold\x1b[0m\n"});
     assert_eq!(format(Some("web_fetch"), Some(&ansi)), ["bold"]);
+}
+
+#[test]
+fn scratchpad_output_shows_the_note_else_the_file_names() {
+    let note = json!({"path": "plan.md", "content": "# Plan\n\x1b[31mship\x1b[0m\n", "files": []});
+    assert_eq!(format(Some("scratchpad"), Some(&note)), ["# Plan", "ship"]);
+
+    let listed = json!({"path": null, "content": null, "files": ["plan.md", "notes/api.md"]});
+    assert_eq!(
+        format(Some("scratchpad"), Some(&listed)),
+        ["plan.md", "notes/api.md"]
+    );
+
+    let empty = json!({"path": null, "content": null, "files": []});
+    assert!(format(Some("scratchpad"), Some(&empty)).is_empty());
 }

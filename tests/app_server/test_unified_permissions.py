@@ -1279,3 +1279,41 @@ def test_scope_names_survive_the_round_trip() -> None:
     Runtime as opaque JSON, so a rename on either side would silently stop matching.
     """
     assert PermissionScope.COMMAND_PATTERN.value == "command_pattern"
+
+
+@pytest.mark.asyncio
+async def test_a_sandboxed_resolver_leaves_home_relative_paths_to_the_sandbox(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resolver whose paths name files in a sandbox.
+    *Do*: Decide a write to a ``~/`` path and to a relative one.
+    *Assert*: The ``~/`` path is authorized as written, for the sandbox to expand,
+    instead of joined onto the cwd; the relative one is joined lexically.
+    """
+    # Prepare
+    orchestrator = FakeConfigOrchestrator(
+        build_test_vibe_config(tools={"write_file": {"permission": "always"}})
+    )
+    store = PermissionStore()
+    manager = ToolManager(
+        lambda: orchestrator.config,
+        defer_mcp=True,
+        cwd=tmp_path,
+        harness_files=HarnessFilesManager().for_session(tmp_path),
+        permission_getter=store.get_tool_permission,
+    )
+    resolver = UnifiedPermissionResolver(
+        manager, store, orchestrator, path_space="sandbox"
+    )
+
+    # Do
+    home = await resolver.resolve(
+        "file_system.write_file", {"path": "~/notes.txt", "content": "x"}
+    )
+    relative = await resolver.resolve(
+        "file_system.write_file", {"path": "sub/../notes.txt", "content": "x"}
+    )
+
+    # Assert
+    assert home.authorized_path == Path("~/notes.txt")
+    assert relative.authorized_path == tmp_path / "notes.txt"

@@ -12,7 +12,7 @@ from e2e.app_server.events import (
 from e2e.app_server.scenario import Timeline
 
 _PROMPT = "run a quiet command"
-_CLICK = "\x1b[<0;1;30M\x1b[<0;1;30m"
+_CLICK = "\x1b[<0;1;15M\x1b[<0;1;15m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

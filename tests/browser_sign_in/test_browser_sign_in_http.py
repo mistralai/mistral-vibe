@@ -170,6 +170,39 @@ async def test_http_api_logs_exchange_failure_status_and_detail_without_secrets(
 
 
 @pytest.mark.asyncio
+async def test_http_api_explains_workspace_api_key_creation_denied_on_exchange() -> (
+    None
+):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403, json={"error_code": 9004, "detail": "forbidden upstream"}
+        )
+
+    async with build_gateway(handler) as gateway:
+        with pytest.raises(BrowserSignInError, match="select another workspace") as err:
+            await gateway.exchange("process-1", "exchange-1", "verifier-1")
+
+    assert err.value.code == BrowserSignInErrorCode.EXCHANGE_FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(403, json={"detail": "forbidden"}),
+        httpx.Response(403, json={"error_code": 9015, "detail": "forbidden"}),
+        httpx.Response(500, json={"error_code": 9004, "detail": "boom"}),
+    ],
+)
+async def test_http_api_keeps_generic_exchange_error_for_other_failures(
+    response: httpx.Response,
+) -> None:
+    async with build_gateway(lambda _request: response) as gateway:
+        with pytest.raises(BrowserSignInError, match="exchange browser sign-in"):
+            await gateway.exchange("process-1", "exchange-1", "verifier-1")
+
+
+@pytest.mark.asyncio
 async def test_http_api_translates_transport_errors() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("boom", request=request)

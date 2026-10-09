@@ -2,6 +2,10 @@ use uuid::Uuid;
 
 const ACTION_ID_DOMAIN: &str = "mistral.ai/harness-core/action-id/v1";
 
+pub(crate) fn approval(subject_tool_action_id: &str) -> String {
+    derive("approval", &[subject_tool_action_id])
+}
+
 pub(crate) fn completion(task_id: &str, compaction_count: u64, message_count: usize) -> String {
     let compaction_count = compaction_count.to_string();
     let message_count = message_count.to_string();
@@ -65,6 +69,7 @@ mod tests {
             hook("subject", "post_llm_call"),
             filesystem("write", "direct", "call"),
             filesystem("write", "run_typescript", "call"),
+            approval("subject"),
         ];
 
         assert!(

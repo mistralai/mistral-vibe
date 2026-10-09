@@ -2,11 +2,12 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::Frame;
 
 use super::{notice, theme};
 use crate::app::App;
+use crate::selection::fold;
 use crate::selection::region::{self, RegionId, RowSpan};
 
 /// The non-scrolling region a surface that paints all its own text publishes
@@ -32,6 +33,12 @@ pub(crate) fn loading_region(app: &mut App, f: &mut Frame, area: Rect) {
 /// Highlight the selection inside the main screen region.
 pub fn overlay(app: &mut App, f: &mut Frame) {
     overlay_region(app, f, RegionId::Main);
+}
+
+/// Draw the transcript above a bottom app with its selection highlight and paint-time copy.
+pub(crate) fn draw_transcript(app: &mut App, f: &mut Frame, area: Rect) {
+    super::transcript::draw(app, f, area);
+    overlay(app, f);
 }
 
 /// Highlight the in-flight selection `owner` published, unless it is still a plain click.
@@ -70,8 +77,14 @@ fn cache_and_copy(app: &mut App, f: &mut Frame, spans: &[RowSpan]) -> bool {
     {
         return true;
     }
-    let text =
-        region::extract_document(app).unwrap_or_else(|| region::extract(f.buffer_mut(), spans));
+    let text = region::extract_document(app).unwrap_or_else(|| {
+        let owner = app
+            .selection
+            .region
+            .as_ref()
+            .map_or(RegionId::Main, |sel| sel.owner);
+        fold::extract(f.buffer_mut(), spans, &region::folds(app, owner))
+    });
     if text.is_empty() {
         app.selection.region = None;
         return false;
@@ -119,21 +132,18 @@ fn is_group_header(buf: &Buffer, chat: Rect, y: u16) -> bool {
 /// (ALABASTER) palette and folding the label's dim in (Python
 /// `TextOpacity.process_segments` over `ANSIToTruecolor`).
 fn group_label_style() -> Style {
-    const MONOKAI_BRIGHT_BLUE: Color = Color::Rgb(157, 101, 255);
-    const MONOKAI_BLACK: Color = Color::Rgb(26, 26, 26);
-    const ALABASTER_CYAN: Color = Color::Rgb(0, 131, 178);
-    const ALABASTER_BRIGHT_WHITE: Color = Color::Rgb(247, 247, 247);
-    /// Textual `DIM_FACTOR` / the header's `text-opacity`.
-    const DIM_FACTOR: f32 = 0.66;
+    use theme::fixed::{alabaster, monokai};
+    use theme::DIM_FACTOR;
+    /// The header's `text-opacity`.
     const TEXT_OPACITY: f32 = 0.55;
 
     let (bg, fg) = if theme::is_ansi() {
         // The theme's raw `screen-selection-*` colors, indexed into the palette
         // Textual picks by dark vs light (`bright_blue`/`black` vs `cyan`/`bright_white`).
         let (bg, selection_fg) = if theme::is_dark() {
-            (MONOKAI_BRIGHT_BLUE, MONOKAI_BLACK)
+            (monokai::BRIGHT_BLUE, monokai::BLACK)
         } else {
-            (ALABASTER_CYAN, ALABASTER_BRIGHT_WHITE)
+            (alabaster::CYAN, alabaster::BRIGHT_WHITE)
         };
         let dimmed = theme::blend(bg, selection_fg, DIM_FACTOR);
         (bg, theme::blend(bg, dimmed, TEXT_OPACITY))

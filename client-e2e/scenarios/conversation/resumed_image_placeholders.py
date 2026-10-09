@@ -66,5 +66,5 @@ screen_contains = {
     )
 }
 
-# Rows 21 and 22 hold the `[Image #1]` and `[Image #2]` links from column 21.
-timeline: Timeline = ["x", _click(24, 21), _click(24, 22)]
+# Rows 13 and 14 hold the `[Image #1]` and `[Image #2]` links from column 21.
+timeline: Timeline = ["x", _click(24, 13), _click(24, 14)]

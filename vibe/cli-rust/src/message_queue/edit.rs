@@ -5,7 +5,6 @@ use std::sync::Arc;
 use crate::app::App;
 use crate::server::Client;
 use crate::transcript::local;
-use crate::ui;
 
 use super::replacement::replace_group;
 use super::requests::enqueue_prompt;
@@ -16,7 +15,6 @@ use super::requests::enqueue_prompt;
 pub fn save_edit(app: &mut App, client: &Arc<Client>, text: String) {
     replace_selected(app, client, text);
     app.queue.editing = false;
-    ui::notice::clear(app);
     super::selection::exit(app);
     crate::completion_manager::input_changed(app);
 }

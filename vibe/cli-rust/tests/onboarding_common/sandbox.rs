@@ -24,6 +24,7 @@ pub fn sandbox() -> Sandbox {
     let home = tempfile::tempdir().expect("temp home");
     std::fs::create_dir_all(home.path().join("logs")).expect("logs dir");
     let action_log = home.path().join("logs").join("actions.jsonl");
+    std::env::remove_var("MISTRAL_API_KEY");
     std::env::set_var("VIBE_HOME", home.path());
     std::env::set_var("VIBE_TEST_DISABLE_KEYRING", "1");
     std::env::set_var("VIBE_E2E_ACTION_LOG", &action_log);

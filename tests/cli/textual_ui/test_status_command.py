@@ -21,6 +21,7 @@ from tests.conftest import (
 )
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
+from vibe.app_server.models import AgentStatsSnapshot
 from vibe.app_server.protocol import (
     AppServerResponseError,
     ProtocolError,
@@ -91,6 +92,70 @@ async def test_legacy_session_keeps_statistics_only(vibe_app: VibeApp) -> None:
         text = _mounted_text(mount)
         assert "## Agent Statistics" in text
         assert "## Model & Provider" not in text
+
+
+@pytest.mark.asyncio
+async def test_statistics_show_compact_counts_with_exact_values(
+    vibe_app: VibeApp,
+) -> None:
+    async with vibe_app.run_test():
+        vibe_app.app_server.resources.runtime._state.stats = AgentStatsSnapshot(
+            steps=42,
+            session_prompt_tokens=1_234_567,
+            session_completion_tokens=45_678,
+            session_cached_tokens=800_987,
+            last_turn_prompt_tokens=98_000,
+            last_turn_completion_tokens=765,
+            last_turn_cached_tokens=12_345,
+        )
+        mount = AsyncMock()
+        vibe_app._mount_and_scroll = mount
+
+        await vibe_app._show_status()
+
+        text = _mounted_text(mount)
+        assert "- **Steps**: 42\n" in text
+        assert (
+            "- **Session Prompt Tokens**: 1.23M _(1,234,567)_, "
+            "including 801k _(800,987)_ cached\n"
+        ) in text
+        assert "- **Session Completion Tokens**: 45.7k _(45,678)_\n" in text
+        assert "- **Session Total LLM Tokens**: 1.28M _(1,280,245)_\n" in text
+        assert (
+            "- **Last Turn Tokens**: 98.8k _(98,765)_, "
+            "including 12.3k _(12,345)_ cached\n"
+        ) in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["ansi-dark", "textual-dark"])
+async def test_exact_counts_render_as_muted_secondary_text(theme: str) -> None:
+    app = build_test_vibe_app()
+    async with app.run_test() as pilot:
+        app.theme = theme
+        app.app_server.resources.runtime._state.stats = AgentStatsSnapshot(
+            session_prompt_tokens=1_234_567
+        )
+
+        await app._show_status()
+        await pilot.pause()
+
+        message = app.query_one(".agent-statistics", UserCommandMessage)
+        rows = {
+            content.plain: block
+            for block in message.query(MarkdownBlock)
+            if isinstance(content := block.content, Content)
+        }
+        row = next(plain for plain in rows if "Session Prompt Tokens" in plain)
+        exact_style = rows[row].get_visual_style("em")
+        regular_style = rows[row].get_visual_style()
+
+    assert "Session Prompt Tokens: 1.23M (1,234,567)" in row
+    assert not exact_style.italic
+    if theme.startswith("ansi"):
+        assert exact_style.dim
+    else:
+        assert exact_style.foreground != regular_style.foreground
 
 
 @pytest.mark.asyncio

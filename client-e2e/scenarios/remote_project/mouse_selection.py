@@ -11,7 +11,7 @@ expected_clipboard = "New"
 capture_steps = {4}
 timeline: Timeline = [
     "/remote-project\r",
-    "New project",
+    "/New project",
     "\r",
     "\x1b[<0;19;34M\x1b[<32;22;34M\x1b[<0;22;34m",
     "\x03",

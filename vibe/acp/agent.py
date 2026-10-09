@@ -60,6 +60,7 @@ from acp.schema import (
     SessionModeState,
     SetSessionConfigOptionResponse,
     SseMcpServer,
+    StopReason,
     TerminalAuthMethod,
     TitledMultiSelectItems,
     ToolCallUpdate,
@@ -156,11 +157,12 @@ from vibe.app_server.models import (
     PathGrantScope,
     PublicCallbackEntry,
     PublicRetryCategory,
-    PublicTurnStatus,
-    PublicTurnStopReason,
+    PublicTurn,
     TurnErrorCode,
+    TurnStop,
     UserInputCallbackDetail,
     UserInputCallbackOutput,
+    turn_stop,
 )
 from vibe.app_server.protocol import (
     AppServerResponseError,
@@ -292,6 +294,18 @@ class _TurnInput:
     user_display_content: UserDisplayContent | None = None
     mention_stats: MentionStats | None = None
     injected: bool = False
+
+
+def _early_stop_reason(turn: PublicTurn | None) -> StopReason | None:
+    match turn_stop(turn):
+        case TurnStop.INTERRUPTED:
+            return "cancelled"
+        case TurnStop.LIMIT:
+            return "max_turn_requests"
+        case TurnStop.LENGTH:
+            return "max_tokens"
+        case None:
+            return None
 
 
 def _project_acp_mcp_servers(
@@ -839,12 +853,8 @@ class VibeAcpAgent(AcpAgent):
             raise InternalError(str(exc)) from exc
         self._send_usage_update(session)
         turn = next(reversed(session.app_server.state.turns or []), None)
-        if turn is not None and turn.status is PublicTurnStatus.INTERRUPTED:
-            return PromptResponse(stop_reason="cancelled", usage=self._usage(session))
-        if turn is not None and turn.stop_reason is PublicTurnStopReason.LIMIT:
-            return PromptResponse(
-                stop_reason="max_turn_requests", usage=self._usage(session)
-            )
+        if (stop_reason := _early_stop_reason(turn)) is not None:
+            return PromptResponse(stop_reason=stop_reason, usage=self._usage(session))
         show_feedback = await session.app_server.resources.feedback.should_show(
             pending_user_messages=1
         )

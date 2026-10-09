@@ -166,4 +166,7 @@ pub mod event {
     pub const TRANSCRIPTION_CANCEL: &str = "vibe.audio.transcription.cancel_recording";
     pub const TRANSCRIPTION_DONE: &str = "vibe.audio.transcription.done";
     pub const TRANSCRIPTION_ERROR: &str = "vibe.audio.transcription.error";
+    pub const READ_ALOUD_REQUESTED: &str = "vibe.read_aloud.requested";
+    pub const READ_ALOUD_PLAY_STARTED: &str = "vibe.read_aloud.play_started";
+    pub const READ_ALOUD_ENDED: &str = "vibe.read_aloud.ended";
 }

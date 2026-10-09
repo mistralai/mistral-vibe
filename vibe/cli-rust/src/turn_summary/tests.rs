@@ -119,3 +119,31 @@ fn stale_generation_summary_is_ignored() {
     );
     assert_eq!(app.narrator.state, NarratorState::Idle);
 }
+
+#[test]
+fn a_summary_queued_before_cancel_is_not_spoken() {
+    let mut app = App::default();
+    app.session.startup_config.narrator_enabled = true;
+    app.session.session_id = Some("s1".into());
+    let (tx, _rx) = tokio::sync::mpsc::channel(2);
+    app.narrator.tx = Some(tx);
+    app.narrator.speech_config = crate::tts::SpeechConfig::from_runtime(&serde_json::json!({
+        "runtime": {"config": {"speech": {
+            "model": {"name": "tts", "voice": "v"},
+            "provider": {"apiBase": "https://api.mistral.ai"},
+        }}}
+    }));
+    on_turn_start(&mut app, "hello");
+    app.narrator.state = NarratorState::Summarizing;
+    assert!(cancel(&mut app));
+    let generation = app.narrator.summary.generation();
+    apply_event(
+        &mut app,
+        Event::Summary {
+            generation,
+            summary: Some("late".into()),
+        },
+    );
+    assert_eq!(app.narrator.state, NarratorState::Idle);
+    assert!(app.narrator.speech.is_none());
+}

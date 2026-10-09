@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::core::action_id;
+use crate::core::features::permissions::GrantKey;
 use crate::core::features::programmatic_tool_calling::RUN_TYPESCRIPT_NAME;
 use crate::core::features::programmatic_tool_calling::{
     PendingProgramRecord, ProgramCapture, ProgramExecution, ProgramFunctionRecord,
@@ -12,7 +14,10 @@ use crate::core::tools::external::{ExternalToolCall, ToolOrigin};
 use crate::core::wire::content::ContentBlock;
 use crate::core::wire::tool::ToolCall;
 
-use super::schema::{CheckpointExternalTool, CheckpointProgramFunction, CheckpointToolResult};
+use super::schema::{
+    CheckpointExternalTool, CheckpointProgramFunction, CheckpointProgrammaticName,
+    CheckpointToolResult,
+};
 use super::tool::{
     capture_external_tool_call, restore_external_tool_call, validate_external_tool_identity,
     validate_tool_hook_action_id,
@@ -82,7 +87,7 @@ fn validate_program_function_target(
     call: &ExternalToolCall,
 ) -> Result<(), String> {
     validate_external_tool_identity(&call.call)?;
-    let Some(programmatic_name) = call.call.programmatic_name() else {
+    let Some(programmatic_name) = call.call.programmatic_runtime_name() else {
         return Err(format!(
             "program operation {:?} targets a direct-only built-in",
             call.call_id
@@ -199,6 +204,11 @@ enum CheckpointProgramExternalExecution {
         hook_binding_ids: Vec<String>,
         call: CheckpointExternalTool,
     },
+    AwaitingApproval {
+        grant_key: String,
+        programmatic_name: CheckpointProgrammaticName,
+        call: CheckpointExternalTool,
+    },
     Pending {
         call: CheckpointExternalTool,
     },
@@ -231,6 +241,16 @@ impl CheckpointProgramExternalExecution {
                 ..
             } => Self::AwaitingPreHook {
                 hook_binding_ids: hook_binding_ids.clone(),
+                call: CheckpointExternalTool::capture(&call.call),
+            },
+            PendingProgramRecord::AwaitingApproval {
+                call,
+                grant_key,
+                programmatic_name,
+                ..
+            } => Self::AwaitingApproval {
+                grant_key: grant_key.as_str().to_owned(),
+                programmatic_name: CheckpointProgrammaticName::capture(programmatic_name),
                 call: CheckpointExternalTool::capture(&call.call),
             },
             PendingProgramRecord::Pending { call } => Self::Pending {
@@ -268,6 +288,20 @@ impl CheckpointProgramExternalExecution {
                     ToolOrigin::Programmatic,
                     HookPoint::PreToolCall,
                 )?;
+            }
+            PendingProgramRecord::AwaitingApproval {
+                call,
+                approval_action_id,
+                ..
+            } => {
+                validate_program_function_target(function, call)?;
+                capture_external_tool_call(call, operation_id, ToolOrigin::Programmatic)?;
+                let expected_action_id = action_id::approval(&call.action_id);
+                if approval_action_id != &expected_action_id {
+                    return Err(format!(
+                        "checkpoint approval action ID {approval_action_id:?} does not match derived action ID {expected_action_id:?}"
+                    ));
+                }
             }
             PendingProgramRecord::Pending { call } => {
                 validate_program_function_target(function, call)?;
@@ -316,6 +350,28 @@ impl CheckpointProgramExternalExecution {
                         call,
                         hook_action_id,
                         hook_binding_ids,
+                    }),
+                }
+            }
+            Self::AwaitingApproval {
+                grant_key,
+                programmatic_name,
+                call,
+            } => {
+                let call = restore_external_tool_call(
+                    call,
+                    &id,
+                    ToolOrigin::Programmatic,
+                    invocation_name.clone(),
+                );
+                ProgramOperationRecord::ExternalPending {
+                    id,
+                    function,
+                    pending: Box::new(PendingProgramRecord::AwaitingApproval {
+                        approval_action_id: action_id::approval(&call.action_id),
+                        grant_key: GrantKey::try_from(grant_key)?,
+                        programmatic_name: programmatic_name.restore(),
+                        call,
                     }),
                 }
             }

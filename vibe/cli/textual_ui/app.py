@@ -22,6 +22,7 @@ from rich import print as rprint
 from textual.app import WINDOWS, App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, VerticalGroup, VerticalScroll
+from textual.css.query import NoMatches
 from textual.dom import NoScreen
 from textual.driver import Driver
 from textual.events import AppBlur, AppFocus, MouseScrollDown, MouseScrollUp, MouseUp
@@ -138,6 +139,7 @@ from vibe.cli.plan_offer.presentation import plan_offer_cta, plan_title
 from vibe.cli.process_start import PROCESS_START_MONOTONIC, PROCESS_START_WALLCLOCK
 from vibe.cli.terminal_detect import Terminal, detect_terminal
 from vibe.cli.textual_ui._resume_errors import resume_failure_message
+from vibe.cli.textual_ui.count_format import format_count_markdown
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.mcp_commands import (
     MCP_ADD_HELP,
@@ -1221,6 +1223,10 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_mount(self) -> None:
         if self._app_server is None and self._start_app_server is not None:
             init = self._initial_config_response
+            if init is not None:
+                self.query_one(
+                    ChatTextArea
+                ).cursor_blink_enabled = init.config.cursor_blink
             initial_theme = init.config.theme if init is not None else FALLBACK_THEME
             await self._apply_theme(initial_theme)
             self.call_after_refresh(self._record_tui_displayed)
@@ -1236,6 +1242,7 @@ class VibeApp(App):  # noqa: PLR0904
         self.run_worker(self._bootstrap_session(), exclusive=False)
 
     async def _mount_after_session_ready(self) -> None:
+        self.query_one(ChatTextArea).cursor_blink_enabled = self.config.cursor_blink
         await self._apply_theme(self.config.theme)
         self.app_server.resources.config.subscribe(self._on_config_changed)
         set_config_log_level(self.config.log_level)
@@ -1290,6 +1297,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._fatal_init_error = True
 
     def _on_config_changed(self, config: ConfigView) -> None:
+        self.query_one(ChatTextArea).cursor_blink_enabled = config.cursor_blink
         resolved_theme = resolve_theme(resolve_theme_name(config.theme))
         if resolved_theme != self.theme:
             self.run_worker(self._apply_theme(config.theme))
@@ -4213,28 +4221,30 @@ class VibeApp(App):  # noqa: PLR0904
     async def _show_status(self, **kwargs: Any) -> None:
         stats = self.app_server.resources.runtime.stats
         session_cached = (
-            f" _(including {stats.session_cached_tokens:,} cached)_"
+            f", including {format_count_markdown(stats.session_cached_tokens)} cached"
             if stats.session_cached_tokens > 0
             else ""
         )
         last_turn_cached = (
-            f" _(including {stats.last_turn_cached_tokens:,} cached)_"
+            f", including {format_count_markdown(stats.last_turn_cached_tokens)} cached"
             if stats.last_turn_cached_tokens > 0
             else ""
         )
         status_text = f"""## Agent Statistics
 
-- **Steps**: {stats.steps:,}
-- **Session Prompt Tokens**: {stats.session_prompt_tokens:,}{session_cached}
-- **Session Completion Tokens**: {stats.session_completion_tokens:,}
-- **Session Total LLM Tokens**: {stats.session_total_llm_tokens:,}
-- **Last Turn Tokens**: {stats.last_turn_total_tokens:,}{last_turn_cached}
+- **Steps**: {format_count_markdown(stats.steps)}
+- **Session Prompt Tokens**: {format_count_markdown(stats.session_prompt_tokens)}{session_cached}
+- **Session Completion Tokens**: {format_count_markdown(stats.session_completion_tokens)}
+- **Session Total LLM Tokens**: {format_count_markdown(stats.session_total_llm_tokens)}
+- **Last Turn Tokens**: {format_count_markdown(stats.last_turn_total_tokens)}{last_turn_cached}
 - **Cost**: ${stats.session_cost:.4f}
 """
         auth_section = await self._provider_auth_section()
         if auth_section:
             status_text = f"{status_text}\n{auth_section}"
-        await self._mount_and_scroll(UserCommandMessage(status_text))
+        message = UserCommandMessage(status_text)
+        message.add_class("agent-statistics")
+        await self._mount_and_scroll(message)
 
     async def _provider_auth_section(self) -> str:
         """The read-only "Model & Provider" section; empty when unavailable.
@@ -4279,7 +4289,7 @@ class VibeApp(App):  # noqa: PLR0904
         if identity is None:
             await self._mount_and_scroll(
                 UserCommandMessage(
-                    "## Who am I\n\nNo identity information is available for the active model."
+                    "## Who am I\n\nNo Mistral account information is available."
                 )
             )
             return
@@ -5399,7 +5409,8 @@ class VibeApp(App):  # noqa: PLR0904
         """Return all UserMessage widgets currently visible in #messages.
 
         Only includes completed messages with a public history id (i.e. real
-        user messages, not queued prompts or slash-command echo messages).
+        user messages, not queued prompts, slash-command echo messages, or
+        prompts a scheduled loop sent).
         """
         return [
             child
@@ -5408,6 +5419,7 @@ class VibeApp(App):  # noqa: PLR0904
                 isinstance(child, UserMessage)
                 and child.history_entry_id is not None
                 and not child.pending
+                and child.fired_loop is None
             )
         ]
 
@@ -6316,7 +6328,12 @@ class VibeApp(App):  # noqa: PLR0904
             whats_new_message = WhatsNewMessage(body)
             if self._history_widget_indices:
                 whats_new_message.add_class("after-history")
-            chat = self._chat_widget
+            try:
+                chat = self._chat_widget
+            except NoMatches:
+                # Post-ready startup runs in a worker that can resume after the
+                # DOM is gone (e.g. run_test teardown); skip this cosmetic message.
+                return
             should_anchor = chat.is_at_bottom
             await chat.mount(whats_new_message, after=self._messages_area)
             self._whats_new_message = whats_new_message
@@ -6337,7 +6354,12 @@ class VibeApp(App):  # noqa: PLR0904
         if username is None:
             return
         greeting_message = GreetingMessage(username)
-        chat = self._chat_widget
+        try:
+            chat = self._chat_widget
+        except NoMatches:
+            # Post-ready startup runs in a worker that can resume after the
+            # DOM is gone (e.g. run_test teardown); skip this cosmetic message.
+            return
         # Mount after banner so it appears below banner and scrolls up with messages
         await chat.mount(greeting_message, after=self._banner)
         self._greeting_message = greeting_message
@@ -6378,7 +6400,12 @@ class VibeApp(App):  # noqa: PLR0904
         if not self._show_vscode_extension_promo:
             return
         promo_message = VscodeExtensionPromoMessage()
-        chat = self._chat_widget
+        try:
+            chat = self._chat_widget
+        except NoMatches:
+            # Post-ready startup runs in a worker that can resume after the
+            # DOM is gone (e.g. run_test teardown); skip this cosmetic message.
+            return
         should_anchor = chat.is_at_bottom
         await chat.mount(promo_message, before=self._messages_area)
         if should_anchor:

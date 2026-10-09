@@ -2911,8 +2911,10 @@ async def test_runtime_is_built_only_when_session_start_crosses_json_rpc(
     blueprint = Mock()
     blueprint.config = agent_loop.config
 
-    def build_root(*, session_id: str, session_lease: SessionLease) -> AgentLoop:
-        del session_id
+    def build_root(
+        *, session_id: str, session_lease: SessionLease, fresh_session: bool = False
+    ) -> AgentLoop:
+        del session_id, fresh_session
         agent_loop.replace_session_lease(session_lease)
         return agent_loop
 
@@ -3252,6 +3254,7 @@ async def test_config_mutations_are_rejected_without_a_session(
         ("config/proxy/read", {}),
         ("config/proxy/write", {"changes": {}}),
         ("config/fields/read", {}),
+        ("config/effective/read", {}),
     )
 
     try:

@@ -7,6 +7,7 @@ import io
 from itertools import groupby
 from xml.etree import ElementTree
 
+from rich.cells import cell_len
 from rich.color_triplet import ColorTriplet
 from rich.console import Console
 from rich.style import Style
@@ -64,11 +65,28 @@ def _run_key(
     )
 
 
+def _vs16_already_wide(character: str) -> bool:
+    # Rich counts ❤+VS16 as two columns; the empty continuation must not add a third.
+    return "\ufe0f" in character and cell_len(character) > 1
+
+
+def _without_vs16_stubs(cells: tuple[Cell, ...]) -> tuple[Cell, ...]:
+    visible: list[Cell] = []
+    skip_stub = False
+    for cell in cells:
+        if skip_stub and not cell.character:
+            skip_stub = False
+            continue
+        skip_stub = _vs16_already_wide(cell.character)
+        visible.append(cell)
+    return tuple(visible)
+
+
 def _row_text(cells: tuple[Cell, ...]) -> Text:
     """Build a Rich Text for one grid row, carrying each cell's fg/bg/attrs."""
     text = Text()
     for (foreground, background, attrs, _, _), run in groupby(
-        enumerate(cells), key=_run_key
+        enumerate(_without_vs16_stubs(cells)), key=_run_key
     ):
         style = Style(
             color=_rich_color(foreground),

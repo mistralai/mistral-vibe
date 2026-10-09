@@ -196,7 +196,7 @@
 </text><text class="terminal-r1" x="1464" y="800.8" textLength="12.2" clip-path="url(#terminal-line-32)">
 </text><text class="terminal-r1" x="1464" y="825.2" textLength="12.2" clip-path="url(#terminal-line-33)">
 </text><text class="terminal-r1" x="0" y="849.6" textLength="1464" clip-path="url(#terminal-line-34)">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</text><text class="terminal-r1" x="1464" y="849.6" textLength="12.2" clip-path="url(#terminal-line-34)">
-</text><text class="terminal-r5" x="0" y="874" textLength="158.6" clip-path="url(#terminal-line-35)">/test/workdir</text><text class="terminal-r5" x="170.8" y="874" textLength="134.2" clip-path="url(#terminal-line-35)">[PID&#160;00000]</text><text class="terminal-r5" x="1220" y="874" textLength="244" clip-path="url(#terminal-line-35)">12k/200k&#160;tokens&#160;(6%)</text>
+</text><text class="terminal-r5" x="0" y="874" textLength="158.6" clip-path="url(#terminal-line-35)">/test/workdir</text><text class="terminal-r5" x="170.8" y="874" textLength="134.2" clip-path="url(#terminal-line-35)">[PID&#160;00000]</text><text class="terminal-r5" x="1195.6" y="874" textLength="268.4" clip-path="url(#terminal-line-35)">12.5k/200k&#160;tokens&#160;(6%)</text>
     </g>
     </g>
 </svg>

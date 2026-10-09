@@ -9,8 +9,9 @@ highlighted while the input remains focused and locked.
 In selection mode:
 
 - Up and Down move between queued prompts.
-- Backspace or Delete removes the selected prompt through
-  `session/turn/queue/remove`.
+- Backspace removes the selected prompt through
+  `session/turn/queue/remove`; the Rust CLI also binds Ctrl+C, the Python
+  CLI Delete.
 - Enter loads the selected prompt into the input for editing.
 - Escape exits queue mode and restores the original draft.
 
@@ -94,6 +95,16 @@ mode unlocks the input and loads the selected prompt.
 The app-level Escape binding is disabled while queue mode is active so Escape
 can reach `ChatTextArea` and cancel the selection or edit.
 
+## Key hints
+
+In the Rust CLI, while queue selection or editing is active and the composer
+receives keys, its controls replace the loading line's turn hints (interrupt,
+steer, cancel last queued message) for exactly as long as the mode lasts. Hints
+are derived from the same state the keys dispatch on at render time, never shown
+on a timer: a turn hint is offered only when its key would perform that action
+(for example, Enter to steer only on an empty, steerable input). The Python CLI
+still shows the selection controls as a timed notice.
+
 ## Promotion races
 
 The app server can promote the oldest queued prompt while the user is selecting
@@ -131,6 +142,9 @@ persistent input history with temporary app-server queue entries.
   `QueueController`; use the callbacks above.
 - Keep the `queue-selected` CSS class in `VibeApp`, which owns the selected
   widget reference.
+- In the Rust CLI, derive key hints from the predicates their key handlers
+  use; do not show queue-mode hints through timed notices. The Python CLI still
+  shows the selection controls as a timed notice.
 
 ## Flag To User When
 

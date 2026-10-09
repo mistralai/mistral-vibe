@@ -22,4 +22,4 @@ handshake = mcp_handshake([
 
 _DOWN = "\x1b[B"
 
-timeline: Timeline = ["/mcp github_app\r", _DOWN * 5, _DOWN * 8, "d", "\x7f"]
+timeline: Timeline = ["/mcp github_app\r", _DOWN * 5, _DOWN * 8, "d", "\x1b"]

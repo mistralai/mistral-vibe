@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from dataclasses import dataclass
 import os
-import signal
 import sys
 from typing import cast
 
@@ -18,9 +16,17 @@ from mistralai_vibe_local_harness.protocol import (
     RustToolSucceededEvent,
     RustToolSuccessResult,
 )
+from mistralai_vibe_local_harness.vibe import _sandbox_helper
 from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
+from mistralai_vibe_local_harness.vibe._sandbox import (
+    SandboxAdapter,
+    SandboxToolTimeoutError,
+    run_helper,
+)
 
-MAX_OUTPUT_BYTES = 16_000
+MAX_OUTPUT_BYTES = _sandbox_helper.MAX_OUTPUT_BYTES
+SANDBOX_TIMEOUT_RESERVE_SECONDS = 30.0
+"""Time the sandbox helper gets past the command's own timeout to report it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,41 +63,52 @@ async def execute_shell_tool(
 
 
 async def run_bash(args: BashArgs, config: LocalRuntimeAdapterConfig) -> BashResult:
-    process: asyncio.subprocess.Process | None = None
-    try:
-        spawned = await _spawn_bash_command(args.command, config)
-        process = spawned.process
-        try:
-            (
-                stdout_bytes,
-                stdout_truncated,
-                stderr_bytes,
-                stderr_truncated,
-            ) = await asyncio.wait_for(
-                _communicate_bounded(process), timeout=args.timeout_seconds
-            )
-        except TimeoutError as exc:
-            await _kill(process)
-            raise TimeoutError(
-                f"Command timed out after {args.timeout_seconds}s: {args.command!r}"
-            ) from exc
+    """Run a bash command where the workspace lives.
 
-        stdout = _decode_output(stdout_bytes, spawned.output_encoding)
-        stderr = _decode_output(stderr_bytes, spawned.output_encoding)
-        return BashResult(
+    A Sandbox Adapter runs it in the sandbox, with the sandbox's environment
+    and the fixed non-interactive settings; neither the host's environment nor
+    ``config.env`` is passed in.
+    """
+    if config.sandbox is not None:
+        return await _run_bash_in_sandbox(args, config, config.sandbox)
+    spawned = await _spawn_bash_command(args.command, config)
+    return BashResult.model_validate(
+        await _sandbox_helper.collect_bash(
+            spawned.process,
             command=args.command,
-            stdout=stdout,
-            stderr=stderr,
-            returncode=process.returncode or 0,
-            was_truncated=stdout_truncated or stderr_truncated,
+            timeout_seconds=args.timeout_seconds,
+            output_encoding=spawned.output_encoding,
         )
-    except asyncio.CancelledError:
-        if process is not None:
-            await _kill(process)
-        raise
-    finally:
-        if process is not None:
-            await _kill(process)
+    )
+
+
+async def _run_bash_in_sandbox(
+    args: BashArgs, config: LocalRuntimeAdapterConfig, sandbox: SandboxAdapter
+) -> BashResult:
+    try:
+        response = await run_helper(
+            sandbox,
+            "bash",
+            {
+                "command": args.command,
+                "timeout_seconds": args.timeout_seconds,
+                "cwd": str(config.workspace.cwd),
+                "shell": config.shell,
+            },
+            timeout=args.timeout_seconds + SANDBOX_TIMEOUT_RESERVE_SECONDS,
+            crashes=config.helper_crashes,
+        )
+    except SandboxToolTimeoutError as exc:
+        # The sandbox stopped the command: the same failure as a local timeout.
+        # Its limit was shorter than the command's, or the helper's own
+        # timeout would have stopped the command first, so it names its own.
+        limit = (
+            "at the sandbox's time limit"
+            if exc.timeout is None
+            else f"after {exc.timeout:g}s"
+        )
+        raise TimeoutError(f"Command timed out {limit}: {args.command!r}") from exc
+    return BashResult.model_validate(response)
 
 
 async def _spawn_bash_command(
@@ -99,14 +116,8 @@ async def _spawn_bash_command(
 ) -> SpawnedShell:
     env = _shell_env(config.env)
     argv = _shell_argv(command, config, env)
-    process = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        stdin=asyncio.subprocess.DEVNULL,
-        cwd=config.workspace.cwd,
-        env=env,
-        start_new_session=sys.platform != "win32",
+    process = await _sandbox_helper.spawn_shell(
+        argv, cwd=str(config.workspace.cwd), env=env
     )
     return SpawnedShell(process=process, output_encoding="utf-8")
 
@@ -142,78 +153,10 @@ def _shell_argv(
             )
 
 
-async def _communicate_bounded(
-    process: asyncio.subprocess.Process,
-) -> tuple[bytes, bool, bytes, bool]:
-    stdout, stderr, _ = await asyncio.gather(
-        _read_bounded(process.stdout), _read_bounded(process.stderr), process.wait()
-    )
-    return *stdout, *stderr
-
-
-async def _read_bounded(reader: asyncio.StreamReader | None) -> tuple[bytes, bool]:
-    if reader is None:
-        return b"", False
-    chunks: list[bytes] = []
-    size = 0
-    truncated = False
-    while chunk := await reader.read(4096):
-        remaining = MAX_OUTPUT_BYTES - size
-        if remaining > 0:
-            chunks.append(chunk[:remaining])
-            size += min(len(chunk), remaining)
-        if len(chunk) > remaining:
-            truncated = True
-    return b"".join(chunks), truncated
-
-
 def _shell_env(extra_env: dict[str, str]) -> dict[str, str]:
-    env = {
-        **os.environ,
-        "CI": "true",
-        "NONINTERACTIVE": "1",
-        "NO_TTY": "1",
-        **extra_env,
-    }
-    if sys.platform == "win32":
-        return {**env, "GIT_PAGER": "more", "PAGER": "more"}
-    env.pop("LC_ALL", None)
-    return {
-        **env,
-        "TERM": "dumb",
-        "DEBIAN_FRONTEND": "noninteractive",
-        "GIT_PAGER": "cat",
-        "PAGER": "cat",
-        "LESS": "-FX",
-        "LC_CTYPE": "C.UTF-8",
-    }
-
-
-def _decode_output(raw: bytes, encoding: str) -> str:
-    return raw.decode(encoding, errors="replace")
-
-
-async def _kill(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is not None:
-        return
-    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-        if sys.platform == "win32":
-            killer = await asyncio.create_subprocess_exec(
-                "taskkill",
-                "/F",
-                "/T",
-                "/PID",
-                str(process.pid),
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await killer.wait()
-        else:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-        process.terminate()
-    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-        await process.wait()
+    return _sandbox_helper.shell_env(
+        os.environ, extra_env, windows=sys.platform == "win32"
+    )
 
 
 def _succeeded(

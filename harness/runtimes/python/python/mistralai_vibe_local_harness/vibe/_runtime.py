@@ -400,6 +400,9 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     def runtime_state(self) -> RuntimeStateV3:
         return self._store.load().runtime_state
 
+    def stored_session(self) -> StoredSession:
+        return self._store.load()
+
     @property
     def background_processes(self) -> list[PublicBackgroundProcess]:
         processes = sorted(
@@ -1384,6 +1387,10 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         async with self._lock:
             self._guard_open()
             await self._catch_up_projection()
+            # Projection-only writes between turns, such as a rename, are
+            # journalled with nothing left to fold them, so a quiescent Session
+            # folds them here instead of refusing the replacement.
+            await self._compact_store()
             stored = self._store.load()
             if not stored.runtime_state.quiescent or stored.journal:
                 raise RuntimeError(
@@ -2154,7 +2161,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             )
             raise
         except Exception as exc:
-            event = _failed_action_event(action, str(exc))
+            event = _failed_action_event(action, exc)
         failed = isinstance(
             event,
             RustCompletionFailedEvent
@@ -2250,7 +2257,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             )
         except ProcessActionError as error:
             return process_failed(action, error.error)
-        if config.process_authority != "host_shell":
+        if config.process_authority == "disabled":
             return process_failed(
                 action,
                 process_error(
@@ -4243,7 +4250,10 @@ async def _cancel_tasks(tasks: Sequence[asyncio.Task[RustEvent]]) -> None:
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def _failed_action_event(action: RustAction, message: str) -> RustEvent:
+def _failed_action_event(action: RustAction, reason: str | Exception) -> RustEvent:
+    message = (
+        reason if isinstance(reason, str) else str(reason) or type(reason).__name__
+    )
     error = RustProtocolError(
         code="effect_recovery_failed", message=message, retryable=False, details=None
     )

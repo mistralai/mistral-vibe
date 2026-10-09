@@ -97,3 +97,4 @@ class ClientToolTerminalOutputResponse(ProtocolModel):
 
 class InitializeResponse(ProtocolModel):
     server_info: ServerInfo
+    process_id: int | None = None

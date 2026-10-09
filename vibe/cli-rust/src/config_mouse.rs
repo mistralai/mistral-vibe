@@ -13,7 +13,7 @@ pub fn row_at(app: &App, column: u16, row: u16) -> Option<usize> {
     }
     let fields = config::filtered(app);
     let line = app.config_screen.scroll + (row - top) as usize;
-    if !app.config_screen.query.trim().is_empty() && fields.len() <= 5 {
+    if !app.config_screen.search.query.trim().is_empty() && fields.len() <= 5 {
         return (line < fields.len()).then_some(line);
     }
     let popular = fields.iter().filter(|field| field.popular).count();

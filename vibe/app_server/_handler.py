@@ -609,6 +609,7 @@ class CoreRequestHandler:
             self._agent_loop.start_initialize_experiments(
                 defer_new_session_telemetry=params.kind is SessionKind.EPHEMERAL
             )
+            self._agent_loop.start_fetch_model_catalog()
             return DispatchResult(
                 SessionStartResponse(
                     state=(state := self._public_state(params.history_limit)),

@@ -7,6 +7,7 @@ from typing import Protocol
 from vibe.app_server.models import (
     AccountAction,
     AccountActionKind,
+    AccountApiKeyView,
     AccountPlanKind,
     AccountPlanView,
     AccountStatus,
@@ -51,6 +52,13 @@ __all__ = [
 
 _PAID_CHAT_PLANS = {"INDIVIDUAL", "EDU", "TEAM"}
 _RECONCILE_REASON = "tenant-domain-reconcile"
+# /whoami answers the plan type from the key scope, so the mapping is one-to-one.
+_KEY_SCOPES = {
+    AccountPlanKind.API: "workspace",
+    AccountPlanKind.CHAT: "vibe",
+    AccountPlanKind.MISTRAL_CODE: "codestral",
+}
+_KEY_PREVIEW_CHARS = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,10 +230,6 @@ class AccountController:
         vibe_base_url = runtime_config.vibe_base_url
         console_base_url = runtime_config.console_base_url
         upgrade = _account_action(AccountActionKind.UPGRADE_TO_PRO, vibe_base_url)
-        # The account UI is only for Mistral-hosted models: a third-party model
-        # never shows a plan. But we still fetch /whoami whenever a Mistral
-        # credential exists so telemetry's user_plan is populated regardless of
-        # the active backend. The gate below is on rendering, not on fetching.
         # Resolve a Mistral credential (prefers the active provider, else the
         # first configured Mistral provider). Runs in a thread because key
         # resolution can touch the keyring / filesystem.
@@ -298,14 +302,20 @@ class AccountController:
         )
 
         plan = _Plan.from_result(result)
+        plan_view = AccountPlanView(kind=plan.kind, name=plan.name, title=plan.title)
+        api_key_view = AccountApiKeyView(
+            preview=_key_preview(api_key),
+            scope=_KEY_SCOPES[plan.kind],
+            access_scope=result.primitive_access_scope,
+        )
         tenant_update = _TenantDomainUpdate(provider_name=provider.name, whoami=result)
 
         if not self._agent_loop.config.is_active_model_mistral():
-            # Telemetry captured the real plan above; suppress the account UI
-            # for a non-Mistral active model. Tenant-domain reconciliation still
-            # targets the Mistral provider that supplied this account response.
             return tenant_update, AccountView(
-                status=AccountStatus.UNAVAILABLE, teleport_action=upgrade
+                status=AccountStatus.UNAVAILABLE,
+                plan=plan_view,
+                teleport_action=upgrade,
+                api_key=api_key_view,
             )
 
         switch_key = _account_action(AccountActionKind.SWITCH_API_KEY, vibe_base_url)
@@ -318,12 +328,18 @@ class AccountController:
         teleport_eligible = plan.kind is not AccountPlanKind.MISTRAL_CODE
         return tenant_update, AccountView(
             status=AccountStatus.READY,
-            plan=AccountPlanView(kind=plan.kind, name=plan.name, title=plan.title),
+            plan=plan_view,
             plan_offer=plan_offer,
             rate_limit_action=(upgrade if plan.rate_limit_upgrade_available else None),
             teleport_eligible=teleport_eligible,
             teleport_action=None if teleport_eligible else switch_key,
+            api_key=api_key_view,
         )
+
+
+def _key_preview(api_key: str) -> str:
+    # Never reveal more than a quarter of the secret.
+    return f"{api_key[: min(_KEY_PREVIEW_CHARS, len(api_key) // 4)]}****"
 
 
 def _account_action(kind: AccountActionKind, vibe_base_url: str) -> AccountAction:

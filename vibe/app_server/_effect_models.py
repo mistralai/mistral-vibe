@@ -328,6 +328,13 @@ ScratchpadEffectInput = Annotated[
 ]
 
 
+# A write or read carries the note's text, a list the scratchpad's file names.
+class ScratchpadEffectOutput(ProtocolModel):
+    path: str | None = None
+    content: str | None = None
+    files: list[str] = Field(default_factory=list)
+
+
 class ScratchpadEffectDetail(_EffectDetailBase):
     kind: Literal[ToolEffectKind.SCRATCHPAD] = ToolEffectKind.SCRATCHPAD
     input: ScratchpadEffectInput

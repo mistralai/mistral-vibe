@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::core::features::compaction::{
@@ -228,6 +230,8 @@ enum CheckpointActivePhase {
     AwaitingCompaction {
         compaction_id: String,
         projection: CheckpointCompactionProjection,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_keys: Option<Vec<String>>,
     },
     AwaitingToolBatch {
         batch: CheckpointToolBatch,
@@ -258,6 +262,8 @@ impl CheckpointActivePhase {
                 Ok(Self::AwaitingCompaction {
                     compaction_id: pending.compaction_id().to_string(),
                     projection: CheckpointCompactionProjection::capture(pending.projection())?,
+                    context_keys: (!pending.context_keys().is_empty())
+                        .then(|| pending.context_keys().to_vec()),
                 })
             }
             ActivePhase::AwaitingToolBatch { batch } => Ok(Self::AwaitingToolBatch {
@@ -285,11 +291,13 @@ impl CheckpointActivePhase {
             Self::AwaitingCompaction {
                 compaction_id,
                 projection,
+                context_keys,
             } => Ok(ActivePhase::AwaitingCompaction {
                 pending: PendingCompaction::in_turn(
                     compaction_id,
                     turn_id.to_string(),
                     iterations,
+                    restore_context_keys(context_keys, context)?,
                     projection.restore(generated_system, tools, budget)?,
                 ),
             }),
@@ -301,6 +309,37 @@ impl CheckpointActivePhase {
             }),
         }
     }
+}
+
+/// Restores the keys of the current pre-LLM hook result that a pending
+/// compaction leaves room for.
+fn restore_context_keys(
+    context_keys: Option<Vec<String>>,
+    context: &ModelContext,
+) -> Result<Vec<String>, String> {
+    let Some(context_keys) = context_keys else {
+        return Ok(Vec::new());
+    };
+    if context_keys.is_empty() {
+        return Err("checkpoint compaction context keys must not be empty".to_string());
+    }
+    let mut unique = BTreeSet::new();
+    for key in &context_keys {
+        if key.is_empty() {
+            return Err("checkpoint context key must not be empty".to_string());
+        }
+        if !unique.insert(key.as_str()) {
+            return Err(format!(
+                "duplicate checkpoint compaction context key {key:?}"
+            ));
+        }
+        if context.latest_keyed_message(key).is_none() {
+            return Err(format!(
+                "checkpoint compaction context key {key:?} has no keyed message"
+            ));
+        }
+    }
+    Ok(context_keys)
 }
 
 fn capture_pending_steer(

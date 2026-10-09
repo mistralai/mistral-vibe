@@ -80,6 +80,13 @@ pub struct BrowserSignInState {
     pub sign_in_started_at: Option<Instant>,
 }
 
+impl BrowserSignInState {
+    /// A spawned flow that has not reached its waiting step nor failed yet.
+    pub fn is_starting(&self) -> bool {
+        self.running && self.variant == SignInVariant::Pending && self.step == SignInStep::Open
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignInVariant {
     Pending,

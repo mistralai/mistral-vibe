@@ -116,7 +116,9 @@ class UnifiedSessionCatalog:
         self._write_if_changed(cached, document)
         return tuple(document.entries)
 
-    def entry(self, session_id: str) -> SessionCatalogEntryV1 | None:
+    def entry(
+        self, session_id: str, store: UnifiedSessionStore | None = None
+    ) -> SessionCatalogEntryV1 | None:
         """Read one entry without reconciling every unrelated session."""
         if not self._unified_root.exists():
             return None
@@ -133,7 +135,7 @@ class UnifiedSessionCatalog:
             key = self._read_key(session_id)
             if prior is not None and prior.key == key:
                 return prior
-            entry = self._load_entry(session_id, key)
+            entry = self._load_entry(session_id, key, store)
         except Exception:
             return None
 
@@ -170,9 +172,12 @@ class UnifiedSessionCatalog:
             return
 
     def _load_entry(
-        self, session_id: str, key: SessionCatalogKeyV1
+        self,
+        session_id: str,
+        key: SessionCatalogKeyV1,
+        store: UnifiedSessionStore | None = None,
     ) -> SessionCatalogEntryV1:
-        store = UnifiedSessionStore(self._storage_root, session_id)
+        store = store or UnifiedSessionStore(self._storage_root, session_id)
         stored = store.load()
         # Cache the raw preview; liveness is dynamic, so ``list`` settles a
         # mid-turn row per query against the lease rather than baking it in here.

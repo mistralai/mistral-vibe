@@ -9,6 +9,8 @@ use super::deadlines::{
     approval_pause_deadline, feedback_deadline, preview_deadline, spinner_deadline,
     subagent_refresh_deadline, typing_pause_deadline,
 };
+use super::external_editor::open_external_editor;
+use super::handoff::TerminalHandoff;
 use super::helpers::{apply_command, redraw_frame, replay_marker};
 use super::keys::{handle_input_event, InputOutcome, LoopState};
 use super::notifications::{absorb_notification, surface_server_close};
@@ -44,6 +46,30 @@ impl EventLoop {
             if self.app.suspend_requested {
                 self.app.suspend_requested = false;
                 suspend_once(&mut self.app, &mut self.terminal, &mut self.terminal_guard)?;
+                continue;
+            }
+            if self.app.external_editor_requested {
+                self.app.external_editor_requested = false;
+                let handoff = TerminalHandoff {
+                    terminal: &mut self.terminal,
+                    guard: &mut self.terminal_guard,
+                    reader: &self.input_reader,
+                };
+                let quit = open_external_editor(
+                    &mut self.app,
+                    &self.client,
+                    handoff,
+                    sources,
+                    shutdown,
+                    &mut deferred_notification,
+                )
+                .await?;
+                if quit {
+                    return Ok(LoopExit::Quit);
+                }
+                state.idle_marker_emitted = false;
+                state.redraw_pending = true;
+                state.real_event_pending = true;
                 continue;
             }
             if self.app.approval.has_capacity() {
@@ -146,10 +172,9 @@ impl EventLoop {
                         state.redraw_pending = true;
                     }
                 }
-                // Replay freezes the frame: a settled capture must not catch
-                // the `summarizing` row mid-animation.
+                // Replay freezes the frame so a settled capture never catches the row mid-animation.
                 _ = narrator_anim.tick(), if !replaying
-                    && self.app.narrator.state == turn_summary::NarratorState::Summarizing =>
+                    && self.app.narrator.state != turn_summary::NarratorState::Idle =>
                 {
                     self.app.narrator.frame = self.app.narrator.frame.wrapping_add(1);
                     state.redraw_pending = true;

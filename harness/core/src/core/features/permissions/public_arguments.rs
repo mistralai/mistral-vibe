@@ -12,12 +12,12 @@ use crate::core::tools::external::{ExternalTool, ExternalToolCall};
 ///
 /// Filter text uses recursively sorted object keys and Python-style JSON
 /// separators so matching is deterministic and compatible with existing rules.
-pub(super) struct PublicArguments<'call> {
+pub(crate) struct PublicArguments<'call> {
     value: &'call Value,
 }
 
 impl<'call> PublicArguments<'call> {
-    pub(super) fn from_call(call: &'call ExternalToolCall) -> Self {
+    pub(crate) fn from_call(call: &'call ExternalToolCall) -> Self {
         let value = match &call.call {
             ExternalTool::RuntimeBuiltin { arguments, .. }
             | ExternalTool::Provided { arguments, .. } => arguments,
@@ -38,6 +38,16 @@ impl<'call> PublicArguments<'call> {
             ))
             .expect("serializing JSON arguments cannot fail");
         String::from_utf8(output).expect("JSON serialization produces UTF-8")
+    }
+
+    pub(super) fn to_canonical_json(&self) -> Vec<u8> {
+        let mut value = self.value.to_owned();
+        value.sort_all_objects();
+        serde_json::to_vec(&value).expect("serializing JSON arguments cannot fail")
+    }
+
+    pub(crate) fn to_value(&self) -> Value {
+        self.value.clone()
     }
 }
 

@@ -16,6 +16,7 @@ from mistralai_vibe_local_harness.protocol import (
 from vibe.app_server._provided_tools import VIBE_TOOL_GROUP, VibeProvidedTools
 from vibe.app_server._unified_scratchpad import SCRATCHPAD_TOOL_NAME
 from vibe.app_server._unified_tool_projection import (
+    is_large_output_receipt,
     project_unified_history_entry,
     unified_tool_category,
 )
@@ -39,6 +40,7 @@ from vibe.app_server.models import (
     PublicEffectEntry,
     RunningEffectState,
     ScratchpadEffectDetail,
+    ScratchpadEffectOutput,
     ScratchpadListInput,
     ScratchpadReadInput,
     ScratchpadWriteInput,
@@ -627,6 +629,245 @@ def test_failed_recognized_tool_keeps_semantic_call_detail() -> None:
     assert projected.state.error.message == "File not found"
 
 
+def _large_output_receipt() -> dict[str, object]:
+    # The Harness swaps an oversized result for this receipt (large_output/mod.rs).
+    return {
+        "type": "success",
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    "<system>The tool output is large. To preserve your context "
+                    "window, it was saved to the file system under /tmp/r.json.</system>"
+                    '\n<truncated-output>\n{\n  "content": "# Mistral…\n</truncated-output>'
+                ),
+            }
+        ],
+    }
+
+
+def test_an_oversized_read_keeps_its_semantic_header() -> None:
+    entry = _effect(
+        "file_system.read_file",
+        {"path": "README.md"},
+        result=_large_output_receipt(),
+        approval_note="Auto-approved",
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, FileReadEffectDetail)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.output is None
+    display = projected.state.display
+    assert (display.verb, display.message, display.suffix) == (
+        "Read",
+        "README.md",
+        "(truncated)",
+    )
+    assert display.success
+    assert display.approval_note == "Auto-approved"
+    assert "<truncated-output>" in projected.state.output_text
+    assert is_large_output_receipt(entry)
+    assert not is_large_output_receipt(projected)
+
+
+def test_an_oversized_shell_keeps_its_streamed_output_as_the_body() -> None:
+    entry = _effect(
+        "file_system.bash",
+        {"command": "ls -R"},
+        result=_large_output_receipt(),
+        output_text="a\nb\n",
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.output_text == "a\nb\n"
+
+
+def test_a_structured_result_mentioning_the_receipt_tag_still_projects() -> None:
+    entry = _effect(
+        "read_file",
+        {"path": "notes.md"},
+        result={
+            "content": [{"type": "text", "text": "<truncated-output> is a tag"}],
+            "structured_content": {
+                "path": "notes.md",
+                "content": "<truncated-output> is a tag\n",
+                "offset": 0,
+                "lines_read": 1,
+            },
+        },
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert not is_large_output_receipt(entry)
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.message == "1 line from notes.md"
+
+
+@pytest.mark.parametrize(
+    ("name", "input_value", "detail_type"),
+    [
+        ("file_system.bash", {"command": "ls -R"}, ShellEffectDetail),
+        ("grep", {"pattern": "TODO", "path": "src/"}, FileSearchEffectDetail),
+        ("web_fetch", {"url": "https://example.com/page"}, WebFetchEffectDetail),
+    ],
+)
+def test_an_oversized_result_settles_the_semantic_call_header(
+    name: str, input_value: object, detail_type: type
+) -> None:
+    entry = _effect(name, input_value, result=_large_output_receipt())
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, detail_type)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.output is None
+    call = projected.detail.display
+    assert projected.state.display.verb == call.settled_verb
+    assert projected.state.display.message == (call.settled_message or call.message)
+    assert projected.state.display.suffix == "(truncated)"
+
+
+def test_read_paths_display_relative_to_the_root_holding_them(tmp_path: Path) -> None:
+    repo, docs = tmp_path / "repo", tmp_path / "docs"
+    path = repo / "src" / "main.py"
+    entry = _effect(
+        "file_system.read_file",
+        {"path": str(path)},
+        result={
+            "structured_content": {
+                "path": str(path),
+                "content": "x\n",
+                "offset": 0,
+                "lines_read": 1,
+            }
+        },
+    )
+
+    projected = project_unified_history_entry(entry, (repo, docs))
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, FileReadEffectDetail)
+    shown = str(Path("src", "main.py"))
+    assert projected.detail.display.message == shown
+    assert projected.detail.display.summary == f"Reading {shown}"
+    assert projected.detail.input is not None
+    assert projected.detail.input.file_path == str(path)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.message == f"1 line from {shown}"
+    assert FileReadEffectOutput.model_validate(projected.state.output).file_path == (
+        str(path)
+    )
+
+
+@pytest.mark.parametrize(
+    ("relative", "shown"),
+    [
+        (("app", "x.py"), "x.py"),
+        (("docs", "guide.md"), str(Path("guide.md"))),
+        (("lib", "y.py"), str(Path("lib", "y.py"))),
+    ],
+)
+def test_the_first_display_root_holding_a_path_wins(
+    tmp_path: Path, relative: tuple[str, ...], shown: str
+) -> None:
+    roots = (tmp_path / "app", tmp_path / "docs", tmp_path)
+    entry = _effect(
+        "read_file", {"path": str(tmp_path.joinpath(*relative))}, error="failed"
+    )
+
+    projected = project_unified_history_entry(entry, roots)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert projected.detail.display.message == shown
+
+
+def test_paths_outside_the_roots_or_relative_stay_as_given(tmp_path: Path) -> None:
+    outside = str(tmp_path / "elsewhere" / "a.py")
+    roots = (tmp_path / "repo",)
+
+    absolute = project_unified_history_entry(
+        _effect("read_file", {"path": outside}, error="failed"), roots
+    )
+    relative = project_unified_history_entry(
+        _effect("read_file", {"path": "src/a.py"}, error="failed"), roots
+    )
+
+    assert isinstance(absolute, PublicEffectEntry)
+    assert isinstance(relative, PublicEffectEntry)
+    assert absolute.detail.display.message == outside
+    assert relative.detail.display.message == "src/a.py"
+
+
+def test_edit_write_and_grep_paths_display_relative(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    target = str(root / "notes.txt")
+    edit = _effect(
+        "file_system.search_replace",
+        {"file_path": target, "content": [{"old_str": "a", "new_str": "b"}]},
+        error="failed",
+    )
+    write = _effect(
+        "file_system.write_file", {"path": target, "content": "x"}, error="failed"
+    )
+    grep = _effect(
+        "grep", {"pattern": "TODO", "path": str(root / "src")}, error="failed"
+    )
+
+    projected = [project_unified_history_entry(e, (root,)) for e in (edit, write, grep)]
+
+    messages = [
+        entry.detail.display.message
+        for entry in projected
+        if isinstance(entry, PublicEffectEntry)
+    ]
+    assert messages == ["notes.txt", "notes.txt", "'TODO' in src"]
+
+
+def test_a_grep_over_the_cwd_names_no_folder(tmp_path: Path) -> None:
+    entry = _effect("grep", {"pattern": "TODO", "path": str(tmp_path)}, error="failed")
+
+    projected = project_unified_history_entry(entry, (tmp_path,))
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert projected.detail.display.message == "'TODO'"
+
+
+def test_an_oversized_read_header_displays_a_relative_path(tmp_path: Path) -> None:
+    entry = _effect(
+        "file_system.read_file",
+        {"path": str(tmp_path / "README.md")},
+        result=_large_output_receipt(),
+    )
+
+    projected = project_unified_history_entry(entry, (tmp_path,))
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.message == "README.md"
+
+
+def test_an_oversized_labeled_tool_keeps_its_receipt_body() -> None:
+    receipt = _large_output_receipt()
+    entry = _effect("connector.github.search", {"q": "x"}, result=receipt)
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, GenericEffectDetail)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.output == receipt
+    assert projected.state.display.suffix == ""
+
+
 def test_projects_unified_ask_user_question_result() -> None:
     questions_input = {
         "questions": [
@@ -1074,6 +1315,56 @@ def test_projects_the_scratchpad_call(
     assert (projected.state.display.verb, projected.state.display.message) == settled
 
 
+@pytest.mark.parametrize(
+    ("arguments", "result", "expected"),
+    [
+        # The executor echoes no note back, so a write's text comes from the call.
+        (
+            {"action": "write", "path": "plan.md", "content": "ship it"},
+            {"verb": "Wrote", "path": "plan.md", "content": None},
+            ScratchpadEffectOutput(path="plan.md", content="ship it"),
+        ),
+        (
+            {"action": "write", "path": "plan.md", "content": ""},
+            {"verb": "Wrote", "path": "plan.md"},
+            ScratchpadEffectOutput(path="plan.md", content=""),
+        ),
+        (
+            {"action": "read", "path": "plan.md"},
+            {"verb": "Read", "path": "plan.md", "content": "ship it"},
+            ScratchpadEffectOutput(path="plan.md", content="ship it"),
+        ),
+        (
+            {"action": "read", "path": "plan.md"},
+            {"verb": "Read", "path": "plan.md", "content": ""},
+            ScratchpadEffectOutput(path="plan.md", content=""),
+        ),
+        (
+            {"action": "list"},
+            {"verb": "Listed", "files": ["plan.md", "notes/api.md"]},
+            ScratchpadEffectOutput(files=["plan.md", "notes/api.md"]),
+        ),
+        ({"action": "list"}, {"verb": "Listed"}, ScratchpadEffectOutput()),
+    ],
+)
+def test_the_scratchpad_result_replaces_the_tool_envelope(
+    arguments: dict[str, object],
+    result: dict[str, object],
+    expected: ScratchpadEffectOutput,
+) -> None:
+    entry = _effect(
+        f"vibe.{SCRATCHPAD_TOOL_NAME}",
+        arguments,
+        result={"type": "success", "structured_content": result, "_meta": {}},
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert ScratchpadEffectOutput.model_validate(projected.state.output) == expected
+
+
 def test_a_scratchpad_action_outside_the_union_stays_generic() -> None:
     entry = _effect(
         f"vibe.{SCRATCHPAD_TOOL_NAME}",
@@ -1104,6 +1395,9 @@ def test_the_scratchpad_executor_result_projects_end_to_end(tmp_path: Path) -> N
     assert isinstance(projected.state, CompletedEffectState)
     assert projected.state.display.verb == "Wrote"
     assert projected.state.display.message == "plan.md"
+    assert ScratchpadEffectOutput.model_validate(
+        projected.state.output
+    ) == ScratchpadEffectOutput(path="plan.md", content="ship it")
 
 
 def test_a_scratchpad_result_the_projector_cannot_read_is_left_alone() -> None:

@@ -38,11 +38,17 @@ from tests.backend.data.mistral import (
     TOOL_CONVERSATION_PARAMS as MISTRAL_TOOL_CONVERSATION_PARAMS,
 )
 from tests.constants import CHAT_COMPLETIONS_PATH
+from vibe.config_values import THINKING_LEVELS, ThinkingLevel
 from vibe.core.config import ModelConfig, ProviderConfig
 from vibe.core.llm.backend.base import build_chat_payload
 from vibe.core.llm.backend.factory import BACKEND_FACTORY, create_backend
 from vibe.core.llm.backend.generic import GenericBackend, OpenAIAdapter
-from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper, _cached_tokens
+from vibe.core.llm.backend.mistral import (
+    MistralBackend,
+    MistralMapper,
+    _cached_tokens,
+    _reasoning_effort,
+)
 from vibe.core.llm.exceptions import BackendError, BackendErrorBuilder, ModelCall
 from vibe.core.llm.types import BackendLike
 from vibe.core.types import Backend, FunctionCall, LLMChunk, LLMMessage, Role, ToolCall
@@ -1133,13 +1139,27 @@ class TestMistralBackendReasoningEffort:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("thinking", "expected_effort"),
-        [("off", None), ("low", "none"), ("medium", "high"), ("high", "high")],
+        ("thinking", "thinking_levels", "expected_effort"),
+        [
+            # The uncurated default set makes no claim about the model, so
+            # "off" leaves the field unset for the server default: some
+            # hosted models reject the explicit "none".
+            ("off", list(THINKING_LEVELS), None),
+            ("low", list(THINKING_LEVELS), "none"),
+            ("medium", list(THINKING_LEVELS), "high"),
+            ("high", list(THINKING_LEVELS), "high"),
+            ("max", list(THINKING_LEVELS), "high"),
+            # A curated set offering "off" claims the model supports it.
+            ("off", ["off", "high"], "none"),
+            ("high", ["off", "high"], "high"),
+            ("off", ["off", "medium", "high"], "none"),
+        ],
     )
     async def test_complete_passes_reasoning_effort(
         self,
         backend: MistralBackend,
         thinking: Literal["off", "low", "medium", "high"],
+        thinking_levels: list[ThinkingLevel],
         expected_effort: str | None,
     ) -> None:
         model = ModelConfig(
@@ -1147,6 +1167,7 @@ class TestMistralBackendReasoningEffort:
             provider="mistral",
             alias="mistral-small",
             thinking=thinking,
+            thinking_levels=thinking_levels,
         )
         messages = [LLMMessage(role=Role.user, content="hi")]
 
@@ -1174,6 +1195,55 @@ class TestMistralBackendReasoningEffort:
             call_kwargs = mock_client.chat.complete_async.call_args.kwargs
             assert call_kwargs["reasoning_effort"] == expected_effort
             assert call_kwargs["temperature"] == 0.2
+
+    def test_off_on_a_curated_set_that_lacks_it_leaves_the_field_unset(self) -> None:
+        # Compaction forces "off" through model_copy, which bypasses the
+        # validator that would re-derive an out-of-set level. The set's claim
+        # wins there: a curated set not offering "off" leaves the field unset
+        # rather than sending "none" the model may reject.
+        model = ModelConfig(
+            name="m", provider="mistral", alias="m", thinking_levels=["high"]
+        ).model_copy(update={"thinking": "off"})
+
+        assert _reasoning_effort(model) is None
+
+    @pytest.mark.asyncio
+    async def test_stream_passes_reasoning_effort_for_curated_off(
+        self, backend: MistralBackend
+    ) -> None:
+        # The stream call site shares _reasoning_effort with complete; this
+        # pins the wiring on the streaming path.
+        model = ModelConfig(
+            name="mistral-small-latest",
+            provider="mistral",
+            alias="mistral-small",
+            thinking="off",
+            thinking_levels=["off", "high"],
+        )
+        captured: dict[str, object] = {}
+
+        async def _capture(**kwargs: object) -> None:
+            captured.update(kwargs)
+            raise RuntimeError("stop")
+
+        with patch.object(backend, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.chat.stream_async = _capture
+            mock_get_client.return_value = mock_client
+            with pytest.raises(RuntimeError, match="stop"):
+                await anext(
+                    backend.complete_streaming(
+                        model=model,
+                        messages=[LLMMessage(role=Role.user, content="hi")],
+                        temperature=1.0,
+                        tools=None,
+                        max_tokens=None,
+                        tool_choice=None,
+                        extra_headers=None,
+                    )
+                )
+
+        assert captured["reasoning_effort"] == "none"
 
     @pytest.mark.asyncio
     async def test_complete_omits_reasoning_content_when_thinking_off(

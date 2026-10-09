@@ -12,9 +12,8 @@ from e2e.app_server.events import (
 from e2e.app_server.scenario import Timeline
 
 _PROMPT = "show safe output"
-# The group header, then the shell result row it reveals: shell output folds twice.
-_EXPAND_GROUP = "\x1b[<0;1;30M\x1b[<0;1;30m"
-_EXPAND_RESULT = "\x1b[<0;8;30M\x1b[<0;8;30m"
+# The lone shell call stays ungrouped, so its own header row unfolds the output.
+_EXPAND_RESULT = "\x1b[<0;1;15M\x1b[<0;1;15m"
 _OUTPUT = "old\rfinal \x1b[31mred\x1b[0m \x1b]0;hidden\x07visible\x07\n"
 
 screen_contains = {"python": ("final red visible",), "rust": ("final red visible",)}
@@ -27,6 +26,5 @@ timeline: Timeline = [
     bash("printf output", _OUTPUT),
     assistant_msg("Done."),
     turn_completed(),
-    _EXPAND_GROUP,
     _EXPAND_RESULT,
 ]

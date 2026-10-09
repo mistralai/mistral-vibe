@@ -11,7 +11,7 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-screen_rows = {"rust": {15: "  ⎣ ⏵ Ran cat app.log"}}
+screen_rows = {"rust": {11: "⏵ Ran cat app.log"}}
 
 _WHEEL_UP = "\x1b[<64;60;10M"
 _CTRL_O = "\x0f"
@@ -36,6 +36,6 @@ timeline: Timeline = [
     turn_completed(),
     _CTRL_O,
     _WHEEL_UP * 30,
-    # SGR row 16 hits a log line while the result header is above the viewport.
-    "\x1b[<0;10;16M\x1b[<0;10;16m",
+    # SGR row 12 hits a log line while the result header is above the viewport.
+    "\x1b[<0;10;12M\x1b[<0;10;12m",
 ]

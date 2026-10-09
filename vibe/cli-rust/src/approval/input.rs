@@ -45,11 +45,9 @@ pub fn key_action(key: &KeyEvent) -> Option<KeyAction> {
         KeyCode::PageUp => Some(KeyAction::ScrollUp),
         KeyCode::PageDown => Some(KeyAction::ScrollDown),
         KeyCode::Enter => Some(KeyAction::Submit),
-        KeyCode::Char('1' | 'y') => Some(KeyAction::Choose(0)),
-        KeyCode::Char('2') => Some(KeyAction::Choose(1)),
-        KeyCode::Char('3') => Some(KeyAction::Choose(2)),
-        KeyCode::Char('4' | 'n') | KeyCode::Esc => Some(KeyAction::Choose(3)),
-        _ => None,
+        KeyCode::Char('y') => Some(KeyAction::Choose(0)),
+        KeyCode::Char('n') | KeyCode::Esc => Some(KeyAction::Choose(OPTION_COUNT - 1)),
+        _ => crate::list_nav::digit(key, OPTION_COUNT).map(KeyAction::Choose),
     }
 }
 
@@ -74,8 +72,7 @@ fn scroll_detail(app: &mut App, down: bool, amount: usize) {
 }
 
 fn navigate(app: &mut App, down: bool) {
-    let step = if down { 1 } else { OPTION_COUNT - 1 };
-    app.approval.selected = (app.approval.selected + step) % OPTION_COUNT;
+    app.approval.selected = crate::list_nav::wrap(app.approval.selected, OPTION_COUNT, down);
 }
 
 fn choose(app: &mut App, client: &Arc<Client>, option: usize) {

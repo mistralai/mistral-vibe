@@ -59,10 +59,7 @@ pub(super) fn draw(
         rows.push(Row::Feedback(validation));
     }
     rows.push(Row::Blank(2));
-    rows.push(Row::Hint(Hint::Press {
-        key: "Esc",
-        suffix: " to go back",
-    }));
+    rows.push(Row::Hint(Hint::Keys(&[crate::hints::BACK])));
     render(
         app,
         wizard,

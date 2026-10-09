@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import importlib
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ from mistralai_vibe_local_harness.vibe._processes._backend import (
     ProcessCommandEnvironment,
     PtyBackend,
     TerminalBackendError,
+    stop_terminals_by_signals,
 )
 
 _POWERSHELL_SHELLS = ("pwsh.exe", "powershell.exe")
@@ -57,6 +59,16 @@ class WindowsTerminal:
             if deadline is not None and time.monotonic() >= deadline:
                 raise subprocess.TimeoutExpired("Windows PTY", timeout or 0)
             time.sleep(0.05)
+
+    def group_is_alive(self) -> bool:
+        return self.poll() is None
+
+    def wait_for_group_exit(self, timeout: float) -> bool:
+        try:
+            self.wait(timeout)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
 
     def wait_readable(self, timeout_seconds: float) -> bool:
         if self._read_buffer:
@@ -129,8 +141,10 @@ class WindowsTerminalBackend:
         raise TerminalBackendError("no PowerShell shell found")
 
     def start_terminal(
-        self, *, shell: str, command: str, cwd: Path, env: dict[str, str]
+        self, *, shell: str | None, command: str, cwd: Path, env: dict[str, str]
     ) -> WindowsTerminal:
+        if shell is None:
+            raise TerminalBackendError("no shell was resolved")
         winpty = importlib.import_module("winpty")
         enums = importlib.import_module("winpty.enums")
         argv = (
@@ -160,8 +174,13 @@ class WindowsTerminalBackend:
             process.cancel_io()
         raise TerminalBackendError("no Windows PTY backend could start the process")
 
-    def request_termination(self, terminal: ManagedTerminal) -> None:
-        self.force_termination(terminal)
+    def stop_terminals(
+        self, terminals: Sequence[ManagedTerminal], grace_seconds: float
+    ) -> list[bool]:
+        # A console process tree has no termination it may handle: kill it.
+        return stop_terminals_by_signals(
+            terminals, [self.force_termination], grace_seconds
+        )
 
     def force_termination(self, terminal: ManagedTerminal) -> None:
         if not isinstance(terminal, WindowsTerminal):
@@ -180,6 +199,9 @@ class WindowsTerminalBackend:
             raise TerminalBackendError(
                 "taskkill did not terminate the Windows PTY root"
             )
+
+    def close(self) -> None:
+        return
 
 
 def _resolve_executable(candidate: str, env: dict[str, str]) -> str | None:

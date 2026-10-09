@@ -47,11 +47,28 @@ fn a_bare_slash_mid_prompt_lists_every_skill() {
 
 #[test]
 fn a_leading_slash_keeps_the_slash_command_menu() {
-    let app = app_with("/co");
+    let mut app = app_with("co");
+    app.chat_input.mode = InputMode::Slash;
+    completion_manager::input_changed(&mut app);
 
     assert!(!completion_manager::active_is_mention(&app));
     assert!(labels(&app).contains(&"/code-review"));
     assert!(labels(&app).contains(&"/compact"));
+}
+
+#[test]
+fn a_literal_leading_slash_in_a_prompt_opens_no_menu() {
+    let app = app_with("/co");
+
+    assert!(!completion_manager::is_open(&app));
+}
+
+#[test]
+fn a_slash_word_after_leading_whitespace_completes_skills() {
+    let app = app_with(" /co");
+
+    assert!(completion_manager::active_is_mention(&app));
+    assert_eq!(labels(&app).first(), Some(&"/code-review"));
 }
 
 #[test]

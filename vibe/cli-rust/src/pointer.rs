@@ -88,7 +88,7 @@ pub fn shape(app: &App) -> Shape {
         }
         return if project.selectable_index_at(at).is_some() {
             Shape::Pointer
-        } else if app.view.selection_region.contains(at) {
+        } else if app.view.bottom_app_selection_region.contains(at) {
             Shape::Text
         } else {
             Shape::Default

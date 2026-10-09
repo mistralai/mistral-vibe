@@ -19,6 +19,7 @@ from vibe.app_server._account import (
 )
 from vibe.app_server.models import (
     AccountActionKind,
+    AccountApiKeyView,
     AccountPlanKind,
     AccountStatus,
     AccountView,
@@ -219,10 +220,6 @@ async def test_account_controller_no_plan_data_when_no_mistral_provider(
 async def test_account_controller_fetches_plan_for_non_mistral_active_with_mistral_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Core of the change: the active model is a third-party backend, but a
-    # Mistral provider with a key is still configured. We MUST call whoami and
-    # capture the real plan for telemetry / GrowthBook — while suppressing the
-    # account UI (no plan shown) because the active model is not Mistral.
     monkeypatch.setenv("MISTRAL_API_KEY", "server-secret")
     base_config = build_test_vibe_config()
     active = base_config.get_active_provider()
@@ -241,10 +238,14 @@ async def test_account_controller_fetches_plan_for_non_mistral_active_with_mistr
     finally:
         await agent_loop.aclose()
 
-    # UI suppressed for the non-Mistral active model ...
     assert account.status is AccountStatus.UNAVAILABLE
-    assert account.plan is None
-    # ... but whoami WAS called and telemetry captured the real plan.
+    assert account.plan is not None
+    assert account.plan.title == "[Subscription] Pro"
+    assert account.api_key is not None
+    assert account.api_key.scope == "vibe"
+    assert account.plan_offer is None
+    assert account.rate_limit_action is None
+    assert not account.teleport_eligible
     assert len(gateway.calls) == 1
     assert agent_loop.user_plan == "Pro"
 
@@ -580,6 +581,58 @@ async def test_account_resource_round_trips_without_exposing_key(
     request_json = AccountReadParams(session_id="session").model_dump_json()
     assert "server-secret" not in request_json
     assert "server-secret" not in account.model_dump_json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("plan_type", "scope"),
+    [
+        (AccountPlanKind.API, "workspace"),
+        (AccountPlanKind.CHAT, "vibe"),
+        (AccountPlanKind.MISTRAL_CODE, "codestral"),
+    ],
+)
+async def test_account_controller_describes_api_key(
+    monkeypatch: pytest.MonkeyPatch, plan_type: AccountPlanKind, scope: str
+) -> None:
+    monkeypatch.setenv(
+        "MISTRAL_API_KEY", "mstrl_abcdefghijklmnopqrstuvwxyz0123456789AB"
+    )
+    agent_loop = build_test_agent_loop()
+    gateway = FakeAccountGateway(
+        WhoAmIResult(
+            plan_type=plan_type, plan_name="FREE", primitive_access_scope="shared_only"
+        )
+    )
+
+    try:
+        account = await AccountController(agent_loop, gateway).read()
+    finally:
+        await agent_loop.aclose()
+
+    assert account.api_key == AccountApiKeyView(
+        preview="mstrl_abcd****", scope=scope, access_scope="shared_only"
+    )
+
+
+@pytest.mark.asyncio
+async def test_account_key_preview_reveals_at_most_a_quarter_of_short_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "0123456789abcdef")
+    agent_loop = build_test_agent_loop()
+    gateway = FakeAccountGateway(
+        WhoAmIResult(plan_type=AccountPlanKind.API, plan_name="FREE")
+    )
+
+    try:
+        account = await AccountController(agent_loop, gateway).read()
+    finally:
+        await agent_loop.aclose()
+
+    assert account.api_key is not None
+    assert account.api_key.preview == "0123****"
+    assert account.api_key.access_scope is None
 
 
 @pytest.mark.asyncio

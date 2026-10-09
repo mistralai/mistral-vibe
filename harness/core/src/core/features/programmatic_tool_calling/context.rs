@@ -1,10 +1,10 @@
 use serde_json::Value;
 
 use crate::core::error::CoreError;
+use crate::core::features::permissions::PermissionResolution;
 use crate::core::tools::external::{ExternalTool, ExternalToolCall};
-use crate::core::wire::tool::ToolResult;
 
-use super::descriptor::TypeScriptTool;
+use super::descriptor::{ProgrammaticName, TypeScriptTool};
 use super::settings::Settings;
 
 /// One program operation resolved against the same immutable session snapshot
@@ -40,7 +40,7 @@ pub(crate) struct ProgramContext<'a> {
     resolve_operation: &'a dyn Fn(&str, Value) -> Option<ResolvedProgramOperation>,
     post_hook_binding_ids: &'a dyn Fn(&ExternalToolCall) -> Vec<String>,
     effective_call: &'a dyn Fn(&ExternalToolCall, Value) -> Result<ExternalToolCall, CoreError>,
-    permission_denial: &'a dyn Fn(&ExternalToolCall) -> Option<ToolResult>,
+    permission_resolution: &'a dyn Fn(&ExternalToolCall) -> PermissionResolution,
 }
 
 impl<'a> ProgramContext<'a> {
@@ -53,7 +53,7 @@ impl<'a> ProgramContext<'a> {
         resolve_operation: &'a dyn Fn(&str, Value) -> Option<ResolvedProgramOperation>,
         post_hook_binding_ids: &'a dyn Fn(&ExternalToolCall) -> Vec<String>,
         effective_call: &'a dyn Fn(&ExternalToolCall, Value) -> Result<ExternalToolCall, CoreError>,
-        permission_denial: &'a dyn Fn(&ExternalToolCall) -> Option<ToolResult>,
+        permission_resolution: &'a dyn Fn(&ExternalToolCall) -> PermissionResolution,
     ) -> Self {
         Self {
             descriptors,
@@ -63,7 +63,7 @@ impl<'a> ProgramContext<'a> {
             resolve_operation,
             post_hook_binding_ids,
             effective_call,
-            permission_denial,
+            permission_resolution,
         }
     }
 
@@ -103,7 +103,25 @@ impl<'a> ProgramContext<'a> {
         (self.effective_call)(original, arguments)
     }
 
-    pub(crate) fn permission_denial(self, call: &ExternalToolCall) -> Option<ToolResult> {
-        (self.permission_denial)(call)
+    pub(crate) fn permission_resolution(self, call: &ExternalToolCall) -> PermissionResolution {
+        (self.permission_resolution)(call)
+    }
+
+    pub(crate) fn resolve_programmatic_name(
+        self,
+        call: &ExternalToolCall,
+    ) -> Result<ProgrammaticName, CoreError> {
+        let runtime_name = call.call.programmatic_runtime_name().ok_or_else(|| {
+            CoreError::invariant("programmatic approval call has no Runtime name")
+        })?;
+        self.descriptors
+            .iter()
+            .find(|descriptor| descriptor.name == runtime_name)
+            .map(|descriptor| descriptor.programmatic_name.clone())
+            .ok_or_else(|| {
+                CoreError::invariant(format!(
+                    "programmatic approval call targets unknown Runtime name {runtime_name:?}"
+                ))
+            })
     }
 }

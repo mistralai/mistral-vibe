@@ -69,6 +69,10 @@ impl State {
             .map(|geometry| geometry.virtual_size.saturating_sub(geometry.window_size))
     }
 
+    pub fn area(&self) -> Option<Rect> {
+        self.geometry.map(|geometry| geometry.area)
+    }
+
     pub fn contains(&self, at: (u16, u16)) -> bool {
         self.geometry
             .is_some_and(|geometry| geometry.area.contains(at.into()))

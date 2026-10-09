@@ -16,7 +16,6 @@ handshake["vibeCode/projects/open"]["view"]["state"]["projects"] = [
 ]
 timeline: Timeline = [
     "/remote-project\r",
-    "\t",
     "j" * 25,
     "\x1b[<65;50;25M",
     "\x1b[A",

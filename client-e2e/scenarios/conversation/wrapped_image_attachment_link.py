@@ -54,5 +54,5 @@ def _click(column: int, row: int) -> str:
 
 timeline: Timeline = [
     "x",
-    _click(3, 27),  # `charts final.png`, the label's continuation row
+    _click(3, 14),  # `charts final.png`, the label's continuation row
 ]

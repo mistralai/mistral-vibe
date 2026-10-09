@@ -37,12 +37,15 @@ def build_chat_payload(
     max_tokens: int | None,
     tool_choice: StrToolChoice | AvailableTool | None,
     thinking: str,
+    top_p: float | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model_name,
         "messages": messages,
         "temperature": temperature,
     }
+    if top_p is not None:
+        payload["top_p"] = top_p
     apply_reasoning_effort(payload, thinking)
     if tools:
         payload["tools"] = [tool.model_dump(exclude_none=True) for tool in tools]
@@ -94,7 +97,7 @@ class APIAdapter(ABC):
     endpoint: ClassVar[str]
 
     @abstractmethod
-    def prepare_request(
+    def prepare_request(  # noqa: PLR0913 - one keyword per request setting
         self,
         *,
         model_name: str,
@@ -107,6 +110,7 @@ class APIAdapter(ABC):
         provider: ProviderView,
         api_key: str | None = None,
         thinking: str = "off",
+        top_p: float | None = None,
     ) -> PreparedRequest: ...
 
     @abstractmethod

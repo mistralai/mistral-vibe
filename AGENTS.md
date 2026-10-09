@@ -2,7 +2,7 @@
 
 Conventions for AI agents and humans contributing to **Mistral Vibe** — a Python 3.12+ CLI coding assistant managed with `uv`.
 
-Layout: `vibe/core` is the engine (agent loop, tools, LLM backends, config); `vibe/cli` is the Textual TUI; `vibe/acp` bridges to the Agent Client Protocol; `vibe/setup` runs first-run wizards. Tests live in `tests/` with autouse fixtures in `conftest.py` and test doubles in `tests/stubs/`.
+Layout: `vibe/core` is the engine (agent loop, tools, LLM backends, config); `vibe/cli` is the legacy Python (Textual) TUI; `vibe/cli-rust` is the Rust (Ratatui) TUI that will replace it, a thin client over `vibe-app-server`; `vibe/acp` bridges to the Agent Client Protocol; `vibe/setup` runs first-run wizards. Tests live in `tests/` with autouse fixtures in `conftest.py` and test doubles in `tests/stubs/`.
 
 ## Architecture Decisions
 
@@ -29,6 +29,14 @@ When creating or editing an ADR, follow the `write-vibe-adr` skill and keep the 
 | Outbound TLS connections, certificate roots, or `enable_system_trust_store` | [0015 Outbound TLS Trust Policy](docs/adr/0015-outbound-tls-trust-policy.md) |
 | Rust CLI delivery surface, thin-client boundary, unidirectional state, or bounded-resource rules | [0016 Rust CLI Delivery Surface](docs/adr/0016-rust-cli-delivery-surface.md) |
 | Narration playback, TTS, audio output device following, or the `AudioPlayer`/`DeviceFollower`/`NarrationController` classes | [0017 Narration Playback in the ACP Subprocess](docs/adr/0017-narration-playback-in-subprocess.md) |
+
+## Terminal UI changes
+
+The Python TUI is still the default in production but is being deprecated in favor of the Rust TUI. Every user-visible change to the Python TUI (`vibe/cli`, plus the Textual screens in `vibe/setup`), whether a new feature, behavior change, or bug fix, must also land in `vibe/cli-rust` in the same PR.
+
+- Put server-owned behavior (session, config and persistence, tools, network; see the ownership table in ADR 0009) behind an app-server method or notification so both clients only render it. Keep presentation state (widgets, layout, focus, selection, editing) in each client.
+- For the Rust side, follow `vibe/cli-rust/AGENTS.md` and cover the behavior with a `client-e2e` scenario and golden (see `client-e2e/AGENTS.md`).
+- Exceptions: Rust-only changes and divergences allowed by `vibe/cli-rust/AGENTS.md`; changes to a feature not yet ported to Rust (state the gap in the PR notes, do not port the parent feature); intentionally Python-only fixes (one-line justification in the PR notes).
 
 ## Commands
 

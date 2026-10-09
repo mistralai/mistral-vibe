@@ -193,7 +193,7 @@ fn remote_project_fields_extend_selection_during_a_drag() {
 fn remote_project_reuses_double_and_triple_click_selection() {
     let mut app = App::default();
     app.vibe_code_project.open = true;
-    app.view.selection_region = Region {
+    app.view.bottom_app_selection_region = Region {
         area: Rect::new(2, 2, 20, 4),
         top: 2,
         ..Region::default()

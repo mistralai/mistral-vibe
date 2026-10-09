@@ -12,6 +12,9 @@ from typing import Any, ClassVar, TypedDict, cast
 
 from pydantic import TypeAdapter
 
+from mistralai_vibe_local_harness.vibe.adapters._provider_failure import (
+    ProviderStreamError,
+)
 from mistralai_vibe_local_harness.vibe.adapters.generic._base import (
     APIAdapter,
     ParsedStreamChunk,
@@ -46,13 +49,7 @@ _ERROR_HTTP_STATUS = {
 }
 
 
-class StreamHTTPError(RuntimeError):
-    def __init__(self, message: str, status: int | None) -> None:
-        self.status = status
-        super().__init__(message)
-
-
-class OpenAIResponsesStreamError(StreamHTTPError):
+class OpenAIResponsesStreamError(ProviderStreamError):
     def __init__(self, error_type: str, message: str) -> None:
         self.error_type = error_type
         self.message = message
@@ -616,6 +613,7 @@ class OpenAIResponsesAdapter(APIAdapter):
         tool_choice: StrToolChoice | AvailableTool | None,
         thinking: str,
         enable_streaming: bool,
+        top_p: float | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model_name,
@@ -625,6 +623,8 @@ class OpenAIResponsesAdapter(APIAdapter):
         }
         if self._is_temperature_supported(model_name):
             payload["temperature"] = temperature
+            if top_p is not None:
+                payload["top_p"] = top_p
 
         payload["reasoning"] = {"effort": self._map_reasoning_effort(thinking)}
 
@@ -656,7 +656,7 @@ class OpenAIResponsesAdapter(APIAdapter):
             headers["Authorization"] = f"Bearer {api_key}"
         return headers
 
-    def prepare_request(
+    def prepare_request(  # noqa: PLR0913 - one keyword per request setting
         self,
         *,
         model_name: str,
@@ -669,6 +669,7 @@ class OpenAIResponsesAdapter(APIAdapter):
         provider: ProviderView,
         api_key: str | None = None,
         thinking: str = "off",
+        top_p: float | None = None,
     ) -> PreparedRequest:
         input_items = self._convert_messages(messages)
 
@@ -681,6 +682,7 @@ class OpenAIResponsesAdapter(APIAdapter):
             tool_choice=tool_choice,
             thinking=thinking,
             enable_streaming=enable_streaming,
+            top_p=top_p,
         )
 
         headers = self.build_headers(api_key)
@@ -807,4 +809,4 @@ class OpenAIResponsesAdapter(APIAdapter):
         )
 
 
-__all__ = ["OpenAIResponsesAdapter", "OpenAIResponsesStreamError", "StreamHTTPError"]
+__all__ = ["OpenAIResponsesAdapter", "OpenAIResponsesStreamError"]

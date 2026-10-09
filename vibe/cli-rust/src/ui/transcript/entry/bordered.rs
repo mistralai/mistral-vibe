@@ -4,24 +4,37 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::expand_marker;
-use crate::transcript::grouping::{Group, Outcome};
+use crate::transcript::grouping::Group;
 use crate::ui::markdown::LinkedLines;
 use crate::ui::{pulse, theme};
+use crate::utils::text;
 
-/// Columns the border occupies before a row: two pad cells, the glyph, one pad.
-const BORDER_WIDTH: u16 = 4;
+/// Columns a tool border occupies: the glyph under its toggle arrow, then one pad.
+pub(super) const BORDER_WIDTH: u16 = 2;
 /// Columns Textual's result container keeps free on the right.
 const RESULT_MARGIN: u16 = 2;
+/// Pad cells a message, notice, or interrupt border keeps before its glyph.
+const INSET_WIDTH: u16 = 2;
 
-/// Cells a bordered row may paint: the entry width less border and margin.
+/// Cells a tool-bordered row may paint: the entry width less border and margin.
 pub(super) fn body_width(width: u16) -> u16 {
     width
         .saturating_sub(BORDER_WIDTH)
         .saturating_sub(RESULT_MARGIN)
 }
 
-/// The border opening one row; `⎣` closes the run, as `ExpandingBorder` does.
+/// Cells an inset-bordered row may paint.
+pub(super) fn inset_body_width(width: u16) -> u16 {
+    body_width(width).saturating_sub(INSET_WIDTH)
+}
+
+/// The tool border opening one row; `⎣` closes the run, as `ExpandingBorder` does.
 pub(super) fn prefix(last: bool, style: Style) -> Span<'static> {
+    Span::styled(if last { "⎣ " } else { "⎢ " }, style)
+}
+
+/// The border of a message, notice, or interrupt, two cells in.
+pub(super) fn inset_prefix(last: bool, style: Style) -> Span<'static> {
     Span::styled(if last { "  ⎣ " } else { "  ⎢ " }, style)
 }
 
@@ -31,24 +44,24 @@ pub(super) fn push_group_header(
     expanded: bool,
     running: bool,
     pulse_frame: usize,
+    width: u16,
 ) {
-    let marker = if running {
-        pulse::glyph(pulse_frame).to_string()
+    let label_style = theme::dim(theme::effect_message());
+    let (marker, marker_style) = if running {
+        (
+            pulse::glyph(pulse_frame).to_string(),
+            theme::text(theme::foreground()),
+        )
     } else {
-        expand_marker(expanded).to_owned()
-    };
-    let marker_style = if running {
-        theme::text(theme::foreground())
-    } else {
-        match group.outcome {
-            Outcome::Success => theme::text(theme::status_ready()),
-            Outcome::Error => theme::text(theme::error()),
-            Outcome::Muted => theme::muted_style(),
-        }
+        (expand_marker(expanded).to_owned(), label_style)
     };
     lines.push(Line::from(vec![
         Span::styled(format!("{marker} "), marker_style),
-        Span::styled(group.label(running), theme::dim(theme::effect_message())),
+        // One row, so hit-testing and cached heights never depend on the label.
+        Span::styled(
+            text::ellipsize(&group.label(running), usize::from(width).saturating_sub(2)),
+            label_style,
+        ),
     ]));
 }
 

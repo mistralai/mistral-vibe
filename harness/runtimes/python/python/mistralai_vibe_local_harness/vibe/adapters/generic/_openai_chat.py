@@ -77,7 +77,7 @@ class OpenAIAdapter(APIAdapter):
             for msg in messages
         ]
 
-    def prepare_request(
+    def prepare_request(  # noqa: PLR0913 - one keyword per request setting
         self,
         *,
         model_name: str,
@@ -90,6 +90,7 @@ class OpenAIAdapter(APIAdapter):
         provider: ProviderView,
         api_key: str | None = None,
         thinking: str = "off",
+        top_p: float | None = None,
     ) -> PreparedRequest:
         converted_messages = self._convert_messages(messages, provider)
 
@@ -101,6 +102,7 @@ class OpenAIAdapter(APIAdapter):
             max_tokens=max_tokens,
             tool_choice=tool_choice,
             thinking=thinking,
+            top_p=top_p,
         )
 
         stream_options: dict[str, Any] = {"include_usage": True}
@@ -226,7 +228,7 @@ class ReasoningAdapter(APIAdapter):
 
         return result
 
-    def prepare_request(
+    def prepare_request(  # noqa: PLR0913 - one keyword per request setting
         self,
         *,
         model_name: str,
@@ -239,6 +241,7 @@ class ReasoningAdapter(APIAdapter):
         provider: ProviderView,
         api_key: str | None = None,
         thinking: str = "off",
+        top_p: float | None = None,
     ) -> PreparedRequest:
         converted_messages = [self._convert_message(msg) for msg in messages]
 
@@ -250,6 +253,7 @@ class ReasoningAdapter(APIAdapter):
             max_tokens=max_tokens,
             tool_choice=tool_choice,
             thinking=thinking,
+            top_p=top_p,
         )
 
         return finalize_chat_request(

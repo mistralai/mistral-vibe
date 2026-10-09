@@ -13,12 +13,13 @@ use tokio::sync::mpsc;
 use crate::app::{App, ToastSeverity};
 pub use crate::config_fields::{ConfigField, Loaded};
 use crate::model_picker;
+use crate::search_field::{self, Outcome, Search};
 pub fn open(app: &mut App, client: &Arc<Client>, tx: &mpsc::Sender<Loaded>) {
     app.config_screen.fields.clear();
     app.config_screen.selected = 0;
     app.config_screen.scroll = 0;
     app.config_screen.free_scroll = false;
-    app.config_screen.query.clear();
+    app.config_screen.search = Search::default();
     app.config_screen.edit = None;
     app.config_screen.loading = true;
     app.config_screen.open = true;
@@ -64,7 +65,7 @@ pub fn filtered(app: &App) -> Vec<&ConfigField> {
     use crate::utils::fuzzy;
     use std::cmp::Reverse;
 
-    let query = app.config_screen.query.trim();
+    let query = app.config_screen.search.query.trim();
     if query.is_empty() {
         let mut fields: Vec<_> = app.config_screen.fields.iter().collect();
         fields.sort_by_key(|field| !field.popular);
@@ -100,31 +101,31 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, tx: &mpsc::Sender<Loaded>
         reset_selected(app, client, tx);
         return;
     }
+    match search_field::handle_key(&mut app.config_screen.search, &key) {
+        Outcome::Pass => {}
+        Outcome::Consumed => return,
+        Outcome::Filtered => return query_changed(app),
+    }
+    let plain = !key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
     match key.code {
         KeyCode::Esc => close(app),
-        KeyCode::Up => move_by(app, -1),
-        KeyCode::Down => move_by(app, 1),
+        KeyCode::Up => step(app, false),
+        KeyCode::Down => step(app, true),
+        KeyCode::Char('k') if plain => step(app, false),
+        KeyCode::Char('j') if plain => step(app, true),
         KeyCode::PageUp => move_by(app, -10),
         KeyCode::PageDown => move_by(app, 10),
-        KeyCode::Backspace => {
-            app.config_screen.query.pop();
-            app.config_screen.selected = 0;
-            app.config_screen.scroll = 0;
-            app.config_screen.free_scroll = false;
-        }
-        KeyCode::Char(c)
-            if !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-        {
-            app.config_screen.query.push(c);
-            app.config_screen.selected = 0;
-            app.config_screen.scroll = 0;
-            app.config_screen.free_scroll = false;
-        }
         KeyCode::Enter => edit_selected(app),
         _ => {}
     }
+}
+
+fn query_changed(app: &mut App) {
+    app.config_screen.selected = 0;
+    app.config_screen.scroll = 0;
+    app.config_screen.free_scroll = false;
 }
 
 pub fn handle_mouse(
@@ -145,7 +146,11 @@ pub fn handle_mouse(
         return;
     }
     if let MouseEventKind::Down(MouseButton::Left) = event.kind {
-        if let Some(index) = crate::config_mouse::row_at(app, event.column, event.row) {
+        let search = &mut app.config_screen.search;
+        if search.area.contains((event.column, event.row).into()) {
+            search.focused = true;
+        } else if let Some(index) = crate::config_mouse::row_at(app, event.column, event.row) {
+            app.config_screen.search.focused = false;
             app.config_screen.selected = index;
         }
     }
@@ -156,19 +161,27 @@ pub fn handle_paste(app: &mut App, text: String) {
         crate::config_edit::paste(app, text);
         return;
     }
-    app.config_screen.query.push_str(&text);
-    app.config_screen.selected = 0;
-    app.config_screen.scroll = 0;
-    app.config_screen.free_scroll = false;
+    if search_field::paste(&mut app.config_screen.search, &text) {
+        query_changed(app);
+    }
 }
 
 fn close(app: &mut App) {
     app.config_screen.open = false;
-    app.config_screen.query.clear();
+    app.config_screen.search = Search::default();
     app.config_screen.edit = None;
     crate::selection::scrolled(app);
 }
 
+/// ↑↓/jk: one row, wrapping at the ends.
+fn step(app: &mut App, down: bool) {
+    let count = filtered(app).len();
+    let selected = app.config_screen.selected;
+    app.config_screen.selected = crate::list_nav::wrap(selected, count, down);
+    app.config_screen.free_scroll = false;
+}
+
+/// PageUp/PageDown: a page of rows, clamped at the ends.
 fn move_by(app: &mut App, delta: isize) {
     let count = filtered(app).len();
     if count == 0 {

@@ -25,9 +25,11 @@ from vibe.core.tools.connectors.connector_registry import (
     ConnectorAuthAction,
     ConnectorRegistry,
     RemoteTool,
+    _bootstrap_cache_key,
     _connector_error_message,
     _normalize_name,
     _unwrap_http_status_error,
+    builtin_connectors,
     create_connector_proxy_tool_class,
 )
 from vibe.core.tools.manager import ToolManager
@@ -1189,14 +1191,60 @@ class TestAuthActionablediscovery:
             return_value=httpx.Response(200, json=payload)
         )
 
-        registry = ConnectorRegistry(api_key="test-key")
+        registry = ConnectorRegistry(
+            api_key="test-key",
+            builtins=builtin_connectors(enable_document_library_connector=True),
+        )
         await registry.get_tools_async()
 
         assert route.called
         called_url = str(route.calls.last.request.url)
         assert "include_auth_actionable_connectors=true" in called_url
+        # Repeated query param, not a comma-joined value.
         assert "builtin_connectors=web_search" in called_url
+        assert "builtin_connectors=document_library" in called_url
+        assert "web_search%2Cdocument_library" not in called_url
         assert "supports_mcp=true" in called_url
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_document_library_withheld_when_connector_disabled(self) -> None:
+        payload = _make_bootstrap_response([])
+        route = respx.get(_BOOTSTRAP_URL).mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+
+        registry = ConnectorRegistry(
+            api_key="test-key",
+            builtins=builtin_connectors(enable_document_library_connector=False),
+        )
+        await registry.get_tools_async()
+
+        assert route.called
+        called_url = str(route.calls.last.request.url)
+        assert "builtin_connectors=web_search" in called_url
+        assert "builtin_connectors=document_library" not in called_url
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_clone_configuration_preserves_builtins(self) -> None:
+        payload = _make_bootstrap_response([])
+        route = respx.get(_BOOTSTRAP_URL).mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+
+        registry = ConnectorRegistry(
+            api_key="test-key",
+            builtins=builtin_connectors(enable_document_library_connector=True),
+        )
+        # The clone must keep the opted-in builtins; otherwise a cloned registry
+        # would silently re-hide (or re-expose) document_library.
+        await registry.clone_configuration().get_tools_async()
+
+        assert route.called
+        called_url = str(route.calls.last.request.url)
+        assert "builtin_connectors=web_search" in called_url
+        assert "builtin_connectors=document_library" in called_url
 
     @respx.mock
     @pytest.mark.asyncio
@@ -1436,6 +1484,32 @@ class TestAuthActionablediscovery:
         assert "linear" in registry.get_connector_names()
         assert registry.get_auth_action("linear") == ConnectorAuthAction.OAUTH
         assert registry.get_connector_id("linear") == "c-1"
+
+
+def test_builtin_connectors_gates_document_library() -> None:
+    assert builtin_connectors(enable_document_library_connector=False) == (
+        "web_search",
+    )
+    assert builtin_connectors(enable_document_library_connector=True) == (
+        "web_search",
+        "document_library",
+    )
+
+
+def test_bootstrap_cache_key_folds_builtins() -> None:
+    # Different builtins must produce different cache keys so the two flag states
+    # never read each other's cached catalog from disk.
+    disabled = _bootstrap_cache_key(
+        "test-key", None, builtin_connectors(enable_document_library_connector=False)
+    )
+    enabled = _bootstrap_cache_key(
+        "test-key", None, builtin_connectors(enable_document_library_connector=True)
+    )
+    assert disabled != enabled
+    # Same builtins -> stable, reproducible key.
+    assert disabled == _bootstrap_cache_key(
+        "test-key", None, builtin_connectors(enable_document_library_connector=False)
+    )
 
 
 # ---------------------------------------------------------------------------

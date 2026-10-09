@@ -27,6 +27,8 @@ from vibe.app_server.protocol import (
     AgentsListResponse,
     AgentSwitchParams,
     AppServerResponseError,
+    ConfigEffectiveReadParams,
+    ConfigEffectiveReadResponse,
     ConfigFieldsReadParams,
     ConfigFieldsReadResponse,
     ConfigMutationResponse,
@@ -117,6 +119,16 @@ class ConfigResource:
         return validate_wire(
             ConfigSchemaReadResponse,
             await client.request("config/schema", ConfigSchemaReadParams()),
+        )
+
+    async def read_effective(self) -> ConfigEffectiveReadResponse:
+        client = await self._connection.connect()
+        return validate_wire(
+            ConfigEffectiveReadResponse,
+            await client.request(
+                "config/effective/read",
+                ConfigEffectiveReadParams(session_id=self._state.session_id),
+            ),
         )
 
     async def read_fields(self) -> ConfigFieldsReadResponse:

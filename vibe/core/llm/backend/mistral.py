@@ -262,6 +262,24 @@ _THINKING_TO_REASONING_EFFORT: dict[str, ReasoningEffortValue] = {
 }
 
 
+def _reasoning_effort(model: ModelConfig) -> ReasoningEffortValue | None:
+    """The wire value for the model's thinking level, if any.
+
+    "off" sends "none" only when a curated level set offers it: some hosted
+    models (the zai-glm family) reject the explicit value, and the uncurated
+    default set makes no claim about the model, so "off" leaves the field
+    unset for the server default there. Every other level keeps the
+    historical mapping.
+    """
+    if (
+        model.thinking == "off"
+        and "off" in model.thinking_levels
+        and model.thinking_levels_curated
+    ):
+        return "none"
+    return _THINKING_TO_REASONING_EFFORT.get(model.thinking)
+
+
 class MistralBackend:
     def __init__(
         self,
@@ -466,7 +484,7 @@ class MistralBackend:
             api_key_origin=self._api_key_origin,
         )
         try:
-            reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
+            reasoning_effort = _reasoning_effort(model)
             response = await self._get_client().chat.complete_async(
                 model=model.name,
                 messages=[
@@ -547,7 +565,7 @@ class MistralBackend:
             api_key_origin=self._api_key_origin,
         )
         try:
-            reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
+            reasoning_effort = _reasoning_effort(model)
 
             stream = await self._get_client().chat.stream_async(
                 model=model.name,

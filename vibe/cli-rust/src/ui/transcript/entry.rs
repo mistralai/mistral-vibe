@@ -15,8 +15,9 @@ mod user;
 
 use super::super::markdown::{self, LinkedLines};
 use super::super::{pulse, theme};
+use crate::selection::{fold, Fold};
 use crate::transcript::TranscriptEntry;
-use bordered::{prefix, prefix_group_body, push_group_header};
+use bordered::{inset_prefix, prefix_group_body, push_group_header, BORDER_WIDTH};
 use effect::{push_effect, EffectView};
 use message::message_text;
 use notice::push_notice;
@@ -80,6 +81,18 @@ impl RenderedEntry {
             .map_or(self.lines.lines(), |prepared| prepared.lines())
     }
 
+    pub fn folds(&self) -> &[Option<Fold>] {
+        self.prepared
+            .as_ref()
+            .map_or(self.lines.folds(), |prepared| prepared.linked().folds())
+    }
+
+    pub fn gaps(&self) -> &[usize] {
+        self.prepared
+            .as_ref()
+            .map_or(self.lines.gaps(), |prepared| prepared.linked().gaps())
+    }
+
     pub fn prewrapped(&self, width: u16) -> bool {
         self.prepared.as_ref().map_or_else(
             || {
@@ -133,13 +146,14 @@ pub(super) fn render(
     let mut lines = LinkedLines::default();
     if let Some(group) = &entry.group {
         if group.first {
-            lines.push(Line::from(""));
+            lines.push_gap();
             push_group_header(
                 &mut lines,
                 group,
                 expansion.group,
                 !group.finalized,
                 pulse_frame,
+                width,
             );
         }
         if !expansion.group {
@@ -147,7 +161,11 @@ pub(super) fn render(
         }
     }
     let mut content = LinkedLines::default();
-    let content_width = width.saturating_sub(if entry.group.is_some() { 4 } else { 0 });
+    let content_width = width.saturating_sub(if entry.group.is_some() {
+        BORDER_WIDTH
+    } else {
+        0
+    });
     let in_progress = entry.entry.in_progress();
     match entry.entry {
         H::Reasoning(reasoning) => {
@@ -159,6 +177,7 @@ pub(super) fn render(
                 entry.local,
                 expansion.entry,
                 pulse_frame,
+                content_width,
             );
         }
         H::Effect(effect) => {
@@ -218,7 +237,7 @@ pub(super) fn diff_gutter(entry: &TranscriptEntry<'_>, expanded: bool) -> Option
 /// `.tool-group` packs its members, so only the entry opening the group is preceded by a gap.
 fn push_group_gap(lines: &mut LinkedLines, grouped: bool) {
     if !grouped {
-        lines.push(Line::from(""));
+        lines.push_gap();
     }
 }
 
@@ -229,6 +248,7 @@ fn push_reasoning(
     local: bool,
     expanded: bool,
     pulse_frame: usize,
+    width: u16,
 ) {
     let marker = if in_progress {
         pulse::glyph(pulse_frame).to_string()
@@ -243,16 +263,22 @@ fn push_reasoning(
         Span::styled(format!("{marker} "), style),
         Span::styled(label, style),
     ]));
-    if expanded {
-        for text_line in text.lines() {
-            lines.push(Line::from(Span::styled(format!("  {text_line}"), style)));
+    if !expanded {
+        return;
+    }
+    // `.reasoning-message-content` pads two cells on each side.
+    let body_width = width.saturating_sub(4) as usize;
+    for line in text.lines() {
+        for (row, gap) in fold::wrap_hard(line, body_width) {
+            let row = Line::from(Span::styled(format!("  {row}"), style));
+            lines.push_folded(row, Fold::hung(gap, 2));
         }
     }
 }
 
 fn push_interrupt(lines: &mut LinkedLines) {
     lines.push(Line::from(vec![
-        prefix(true, theme::text(theme::foreground())),
+        inset_prefix(true, theme::text(theme::foreground())),
         Span::styled(
             "Interrupted · What should Vibe do instead?",
             theme::text(theme::warning()),

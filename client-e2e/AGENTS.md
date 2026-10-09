@@ -51,5 +51,5 @@ with `make store_golden` and review the diff before committing.
 
 - Each golden stores SVG per snapshot (`snapshot_NN_<label>.svg`) and normalized
   requests (`requests.json`).
-- Generate: `make store_golden` (or `uv run --no-project --with pyte --with rich python store_golden.py <scenario>`).
+- Generate: `make store_golden`. For one scenario, use the pinned command from the `migrate-cli-to-rust` skill; unpinned `pyte`/`rich` can render different SVGs.
 - Test: `make test_golden`.

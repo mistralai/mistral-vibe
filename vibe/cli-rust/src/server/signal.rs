@@ -30,6 +30,17 @@ impl ShutdownSignal {
             _ = self.hup.recv() => {}
         }
     }
+
+    /// Like `wait`, but Ctrl+C belongs to a foreground child such as an editor.
+    pub async fn wait_ignoring_interrupt(&mut self) {
+        loop {
+            tokio::select! {
+                _ = self.term.recv() => return,
+                _ = self.hup.recv() => return,
+                _ = self.int.recv() => {}
+            }
+        }
+    }
 }
 
 #[cfg(not(unix))]
@@ -49,5 +60,11 @@ pub fn install() -> Result<ShutdownSignal> {
 impl ShutdownSignal {
     pub async fn wait(&mut self) {
         let _ = self.ctrl_c.recv().await;
+    }
+
+    /// Like `wait`, but Ctrl+C belongs to a foreground child such as an editor.
+    pub async fn wait_ignoring_interrupt(&mut self) {
+        while self.ctrl_c.recv().await.is_some() {}
+        std::future::pending::<()>().await;
     }
 }

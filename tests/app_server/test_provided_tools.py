@@ -12,6 +12,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustEvent,
     RustProvidedToolCall,
     RustProvidedToolCallAction,
+    RustTextContentBlock,
     RustToolFailedEvent,
     RustToolSucceededEvent,
 )
@@ -149,6 +150,20 @@ async def test_a_write_is_visible_to_the_next_read(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_tool_result_reaches_the_model_without_unicode_escapes(
+    tmp_path: Path,
+) -> None:
+    execute = _executor(tmp_path)
+
+    written = await execute(_call("a1", action="write", todos=[_item("1", "مرحبا")]))
+
+    assert isinstance(written, RustToolSucceededEvent)
+    [block] = written.result.content
+    assert isinstance(block, RustTextContentBlock)
+    assert '"content": "مرحبا"' in block.text
+
+
+@pytest.mark.asyncio
 async def test_each_session_holds_its_own_list(tmp_path: Path) -> None:
     tools = VibeProvidedTools()
     first = _executor(tmp_path, "session-1", tools=tools)
@@ -240,8 +255,8 @@ async def test_a_scratchpad_write_lands_in_the_sessions_own_directory(
         "files": [],
         "message": "Wrote notes/plan.md",
     }
-    # The hook reads the directory rather than the executor's state, so the write
-    # has to be on disk where `scratchpad_dir` will look for it.
+    # Notes live in the session's own directory, so they share its lifetime: the
+    # write has to land where `scratchpad_dir` points.
     assert (
         scratchpad_dir(tmp_path, "session-1") / "notes" / "plan.md"
     ).read_text() == "ship it"

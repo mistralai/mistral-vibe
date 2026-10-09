@@ -18,21 +18,16 @@ from unified_runtime import collect_unified_runtime
 _core_builtins_datas, core_builtins_binaries, core_builtins_hidden_imports = (
     collect_all("vibe.core.tools.builtins")
 )
-# pywinpty is Windows-only (see pyproject.toml marker); skip on POSIX builds.
-if sys.platform == "win32":
-    winpty_datas, winpty_binaries, winpty_hidden_imports = collect_all("winpty")
-else:
-    winpty_datas, winpty_binaries, winpty_hidden_imports = [], [], []
 _harness_datas, harness_binaries, harness_hidden_imports = collect_unified_runtime()
 
 # rich lazily loads Unicode width tables via importlib.import_module() at runtime,
 # which PyInstaller's static analysis cannot discover.
 hidden_imports = ["truststore"] + collect_submodules("rich._unicode_data")
-for item in core_builtins_hidden_imports + winpty_hidden_imports + harness_hidden_imports:
+for item in core_builtins_hidden_imports + harness_hidden_imports:
     if isinstance(item, str):
         hidden_imports.append(item)
 
-binaries = core_builtins_binaries + winpty_binaries + harness_binaries
+binaries = core_builtins_binaries + harness_binaries
 
 # Collect from the source tree: the wheel deliberately excludes
 # vibe/cli-rust/**, but the bundle must mirror the source md/tcss files.
@@ -43,7 +38,6 @@ datas = [
     for path in sorted(_source_vibe_dir.glob(pattern))
     if path.is_file()
 ]
-datas += winpty_datas
 datas += _harness_datas
 datas += [("vibe/core/tools/builtins/*.py", "vibe/core/tools/builtins")]
 # Built-in skills are read from source files at runtime, so collect_data_files

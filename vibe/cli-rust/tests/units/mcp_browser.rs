@@ -323,13 +323,13 @@ fn help_offers_connect_only_for_sources_enter_hands_to_auth() {
         vec![source("gh", "connector", errored)],
         json!({}),
     ));
-    assert_eq!(mcp::help_text(&app)[1].1, " Show tools  ");
+    assert_eq!(mcp::help_text(&app)[1].1, "show tools");
     let needs_auth = json!({"status": "needs_auth"});
     let app = open_app(&runtime(
         vec![source("gh", "connector", needs_auth)],
         json!({}),
     ));
-    assert_eq!(mcp::help_text(&app)[1].1, " Connect  ");
+    assert_eq!(mcp::help_text(&app)[1].1, "connect");
 }
 
 fn open_named(query: &str) -> App {

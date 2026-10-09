@@ -308,3 +308,35 @@ fn wide_project_names_keep_the_metadata_columns_aligned() {
         "1"
     );
 }
+
+#[test]
+fn picker_opens_on_the_list_and_escape_backs_out_of_search_first() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::sync::Arc;
+    use vibe_rs::server::Client;
+    use vibe_rs::vibe_code_project::input::handle_key;
+
+    let client = Arc::new(Client::stub());
+    let mut app = App::default();
+    app.vibe_code_project.open = true;
+    app.vibe_code_project.view = Some(view());
+    app.vibe_code_project.show_picker();
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    assert!(!app.vibe_code_project.search_focused, "lists open focused");
+
+    handle_key(&mut app, &client, key(KeyCode::Char('/')));
+    for ch in "zz".chars() {
+        handle_key(&mut app, &client, key(KeyCode::Char(ch)));
+    }
+    handle_key(&mut app, &client, key(KeyCode::Down));
+    assert!(
+        app.vibe_code_project.search_focused,
+        "arrows keep the field"
+    );
+    handle_key(&mut app, &client, key(KeyCode::Esc));
+    assert!(!app.vibe_code_project.search_focused);
+    assert_eq!(app.vibe_code_project.query.text, "zz", "the filter stays");
+    handle_key(&mut app, &client, key(KeyCode::Esc));
+    assert_eq!(app.vibe_code_project.query.text, "");
+    assert!(app.vibe_code_project.open);
+}

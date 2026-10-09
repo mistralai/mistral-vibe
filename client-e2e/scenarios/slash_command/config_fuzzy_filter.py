@@ -33,4 +33,4 @@ screen_contains = {client: ("api_timeout",) for client in ("rust", "python")}
 screen_excludes = {
     client: ("max_tokens", "color_depth") for client in ("rust", "python")
 }
-timeline: Timeline = ["/config\r", "network", "\x7f" * 7 + "APTO"]
+timeline: Timeline = ["/config\r", "/network", "\x7f" * 7 + "APTO"]

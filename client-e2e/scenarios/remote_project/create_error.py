@@ -8,4 +8,4 @@ from e2e.app_server.scenario import Timeline
 handshake = project_handshake()
 request_methods = METHODS
 handshake.pop("vibeCode/projects/create")
-timeline: Timeline = ["/remote-project\r", "New project", "\r", "\r", "\x1b"]
+timeline: Timeline = ["/remote-project\r", "/New project", "\r", "\r", "\x1b"]

@@ -48,6 +48,10 @@ pub(super) fn fixture_cases() -> Vec<FixtureCase> {
             state: between_turn_manual_compaction_state(),
         },
         FixtureCase {
+            file_name: "active-keyed-context.json",
+            state: keyed_context_state(),
+        },
+        FixtureCase {
             file_name: "active-hook-pre-agent.json",
             state: pre_agent_hook_state(),
         },
@@ -189,6 +193,7 @@ fn awaiting_completion_state(purpose: CompletionPurpose) -> HarnessState {
                 crate::core::action_id::compaction("checkpoint-fixture-task", 3),
                 turn_id.clone(),
                 iterations,
+                Vec::new(),
                 compaction_projection.expect("compaction fixture has a projection"),
             ),
         },
@@ -201,6 +206,15 @@ fn awaiting_completion_state(purpose: CompletionPurpose) -> HarnessState {
         model_input_ready: false,
         queued: QueuedTurn::Empty,
     });
+    state
+}
+
+fn keyed_context_state() -> HarnessState {
+    let mut state = awaiting_completion_state(CompletionPurpose::Agent);
+    state.context.push(StoredMessage::keyed_injection(
+        "github".to_string(),
+        Message::user_text("GitHub is connected."),
+    ));
     state
 }
 

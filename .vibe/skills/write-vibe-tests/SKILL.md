@@ -56,6 +56,7 @@ Prefer "make it testable" refactors first: isolate I/O, extract pure functions, 
 - Use descriptive test names; do not add test docstrings. Pytest displays docstrings instead of node IDs when present, which hurts.
 - Arrange, act, and assert clearly, but optimize for readability over ceremony.
 - Keep tests deterministic, fast, and explicit about failure.
+- Never let a test depend on wall-clock timing (sleeps, pauses, time windows, mtime ticks). Timing-dependent tests flake on loaded CI runners.
 - Use autouse fixtures from `tests/conftest.py` (`config_dir`, `tmp_working_directory`) for config/home/working-directory isolation.
 - Mark async tests with `@pytest.mark.asyncio`.
 - Mock outbound HTTP with `respx`.

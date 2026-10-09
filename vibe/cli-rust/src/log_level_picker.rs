@@ -34,13 +34,10 @@ pub fn open(app: &mut App) {
     app.log_level_picker.open = true;
 }
 
+/// Move the highlight up/down by one, wrapping at the ends.
 pub fn navigate(app: &mut App, down: bool) {
-    let last = options().len() - 1;
-    if down {
-        app.log_level_picker.selected = (app.log_level_picker.selected + 1).min(last);
-    } else {
-        app.log_level_picker.selected = app.log_level_picker.selected.saturating_sub(1);
-    }
+    let picker = &mut app.log_level_picker;
+    picker.selected = crate::list_nav::wrap(picker.selected, options().len(), down);
 }
 
 pub fn focus_badge(app: &mut App, badge: &'static str) {

@@ -2,7 +2,7 @@ use crate::core::error::CoreError;
 use std::collections::BTreeSet;
 
 use crate::core::features::programmatic_tool_calling::is_private_wrapper;
-use crate::core::hooks::{CompletionHookOutput, HookPoint, PreLlmCallOutput};
+use crate::core::hooks::{CompletionHookOutput, HookPoint, KeyedContextMessage, PreLlmCallOutput};
 use crate::core::step_protocol::DeterminismContext;
 use crate::core::tools::context::ToolContext;
 use crate::core::tools::execution::batch::{ToolBatchTransition, start_tool_batch};
@@ -96,6 +96,10 @@ pub(in crate::core::turn) struct CompletionTransition {
 
 pub(in crate::core::turn) enum CompletionResolution {
     Wait(Box<CompletionWait>),
+    ContinueWithContext {
+        context_messages: Vec<KeyedContextMessage>,
+        plan: AgentCompletionPlan,
+    },
     Retry {
         action_id: String,
         next_iteration: u32,
@@ -106,7 +110,6 @@ pub(in crate::core::turn) enum CompletionResolution {
 }
 
 pub(in crate::core::turn) enum CompletionWait {
-    Completion(AgentCompletionPlan),
     LifecycleHook(Box<PendingLifecycleHook>),
 }
 
@@ -179,11 +182,12 @@ fn resolve_completion_hook(
             completion_action_id,
             output,
         } => match output {
-            PreLlmCallOutput::Continue => Ok(CompletionResolution::Wait(Box::new(
-                CompletionWait::Completion(agent_completion_after_pre_llm_hook(
-                    completion_action_id,
-                )),
-            ))),
+            PreLlmCallOutput::Continue { context_messages } => {
+                Ok(CompletionResolution::ContinueWithContext {
+                    context_messages,
+                    plan: agent_completion_after_pre_llm_hook(completion_action_id),
+                })
+            }
             PreLlmCallOutput::Skip { .. } => {
                 Ok(CompletionResolution::Finish(CompletionFinish::Skipped {
                     action_id: completion_action_id,

@@ -46,6 +46,17 @@ pub fn init() -> std::io::Result<(Tui, TerminalGuard)> {
     Ok((terminal, guard))
 }
 
+/// Draw `app`, then park the hidden cursor on its caret, else the static bottom-left cell.
+pub fn draw(terminal: &mut Tui, app: &mut crate::app::App) -> std::io::Result<()> {
+    let area = terminal.draw(|frame| app.draw(frame))?.area;
+    let bottom_left = ratatui::layout::Position::new(area.x, area.bottom().saturating_sub(1));
+    let caret = app.view.cursor_position.take().unwrap_or(bottom_left);
+    terminal.set_cursor_position((
+        caret.x.min(area.right().saturating_sub(1)),
+        caret.y.min(area.bottom().saturating_sub(1)),
+    ))
+}
+
 /// Give the Ratatui terminal back, skipping its Drop when the terminal is gone:
 /// Ratatui 0.29 panics there if showing the cursor and stderr both fail.
 pub fn release(mut terminal: Tui) {

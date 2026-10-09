@@ -3,9 +3,8 @@ from __future__ import annotations
 from e2e.app_server.events import edit_file, turn_completed, turn_started, user_msg
 from e2e.app_server.scenario import Timeline
 
-# Under tool-call folding the expanded diff rows render inside the group's
-# `⎢` member gutter, so a wrapped continuation row carries both gutters.
-screen_contains = {"rust": (f"  ⎢   ⎢ {' ' * 8}{'x' * 38}!",)}
+# A wrapped diff row keeps the result's `⎢` border and hangs under the line-number gutter.
+screen_contains = {"rust": (f"⎢ {' ' * 8}{'x' * 32}!",)}
 screen_excludes = {"rust": ("▉", "▊", "▋", "▌", "▍", "▎", "▏")}
 
 _PROMPT = "extend the long line"
@@ -20,7 +19,7 @@ timeline: Timeline = [
     user_msg(_PROMPT),
     edit_file("wide.txt", [(10000, _OLD, _NEW)]),
     turn_completed(),
-    # The edit folds into a collapsed tool group; Ctrl+O expands it so the
+    # The lone edit stays ungrouped and folded; Ctrl+O expands it so the
     # wrapped diff rows render for the screen checks below.
     "\x0f",
 ]

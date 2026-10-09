@@ -90,6 +90,7 @@ from vibe.core.middleware import (
     TurnLimitMiddleware,
     make_plan_agent_reminder,
 )
+from vibe.core.model_catalog import ModelCatalogResponse, fetch_and_cache_model_catalog
 from vibe.core.plan_session import PlanSession
 from vibe.core.review import ReviewManager
 from vibe.core.rewind import RewindManager
@@ -556,6 +557,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         auto_title_enabled: bool = False,
         experiment_state: EvalResponse | None = None,
         await_experiment_model: bool = False,
+        model_catalog_state: ModelCatalogResponse | None = None,
+        await_model_catalog: bool = False,
         parent_session_id: str | None = None,
         cwd: Path | None = None,
         harness_files: HarnessFilesManager | None = None,
@@ -581,6 +584,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._init_error: Exception | None = None
         self._init_start_time = time.monotonic()
         self._experiments_task: asyncio.Task[None] | None = None
+        self._model_catalog_task: asyncio.Task[None] | None = None
         self._registry_skills_task: asyncio.Task[None] | None = None
         self._skills_adopted: int = 0
         self._plan_attrs_task: asyncio.Task[None] | None = None
@@ -639,6 +643,15 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             self.experiment_manager.hydrate(experiment_state)
 
         self._await_experiment_model = await_experiment_model
+        # The cached catalog (if any) is available from the first render; a
+        # successful background fetch hot-swaps it mid-session.
+        self._model_catalog = model_catalog_state
+        self._await_model_catalog = await_model_catalog
+        if model_catalog_state is not None:
+            logger.info(
+                "Model catalog applied from cache: %d models",
+                len(model_catalog_state.models),
+            )
         self.identity_cache = IdentityCache()
         self.whoami_cache = WhoAmICache()
         self.tool_manager = ToolManager(
@@ -809,10 +822,25 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     @property
     def awaiting_experiment_model(self) -> bool:
-        if not self._await_experiment_model:
-            return False
-        task = self._experiments_task
-        return task is None or not task.done()
+        if self._await_experiment_model:
+            task = self._experiments_task
+            if task is None or not task.done():
+                return True
+        # First-ever catalog fetch on a fresh session: the first turn waits
+        # for the catalog the same way it waits for experiment variants. With
+        # a cached catalog the fetch still runs, but in the background.
+        if self._await_model_catalog:
+            task = self._model_catalog_task
+            if task is not None and not task.done():
+                return True
+        return False
+
+    @property
+    def model_catalog(self) -> ModelCatalogResponse | None:
+        """The currently applicable catalog: cached at startup, hot-swapped by
+        the background fetch. None until a first successful fetch or cache read.
+        """
+        return self._model_catalog
 
     def _complete_init(self) -> None:
         """Run deferred heavy I/O: MCP and connector discovery.
@@ -839,7 +867,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         # task was cancelled — the session is being torn down.
         init_cancelled = any(
             task is not None and task is not asyncio.current_task() and task.cancelled()
-            for task in (self._experiments_task, self._plan_attrs_task)
+            for task in (
+                self._experiments_task,
+                self._plan_attrs_task,
+                self._model_catalog_task,
+            )
         )
         if init_cancelled:
             return
@@ -860,6 +892,14 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 continue
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        # Only the first fetch of a run with no catalog defers the first
+        # turn; the flag is cleared once it resolves, so later refreshes stay
+        # in the background and hot-swap on landing.
+        if self._await_model_catalog:
+            task = self._model_catalog_task
+            if task is not None and task is not asyncio.current_task():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     def _start_refresh_registry_skills(self) -> None:
         """Kick off registry skill sync in the background (flag-gated, run once)."""
@@ -1172,6 +1212,30 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._ready_telemetry_pending = True
         self._experiments_task = asyncio.create_task(self.initialize_experiments())
 
+    def start_fetch_model_catalog(self) -> None:
+        """Kick off the background catalog fetch at session start.
+
+        No-op when the experimental flag is off: no request, no cache access,
+        no first-turn deferral. The fetch itself is also gated on a Mistral
+        credential, so a user without one never sees a request either.
+        """
+        if (task := self._model_catalog_task) is not None and not task.done():
+            return
+        if not self.config.experimental_enable_model_catalog:
+            return
+        self._model_catalog_task = asyncio.create_task(self._fetch_model_catalog())
+
+    async def _fetch_model_catalog(self) -> None:
+        # fetch_and_cache_model_catalog is fail-open: a skipped or failed
+        # fetch (and any unexpected error inside it) leaves the current
+        # catalog untouched and never surfaces to the user.
+        response = await fetch_and_cache_model_catalog(self.config)
+        if response is not None:
+            self._model_catalog = response
+        # The deferral covers only the first fetch of a run with no catalog;
+        # later sessions refresh in the background and hot-swap.
+        self._await_model_catalog = False
+
     async def initialize_experiments(self) -> None:
         updated, user_plan = await session_initialize_experiments(
             config=self.config,
@@ -1334,6 +1398,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             self._experiments_task,
             self._registry_skills_task,
             self._plan_attrs_task,
+            self._model_catalog_task,
         ):
             if task is not None and not task.done():
                 task.cancel()
@@ -1376,9 +1441,20 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             return None
 
         server_url = get_server_url_from_api_base(provider.api_base)
-        from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
+        from vibe.core.tools.connectors.connector_registry import (
+            ConnectorRegistry,
+            builtin_connectors,
+        )
 
-        return ConnectorRegistry(api_key=api_key, server_url=server_url)
+        return ConnectorRegistry(
+            api_key=api_key,
+            server_url=server_url,
+            builtins=builtin_connectors(
+                enable_document_library_connector=(
+                    config.experimental_enable_document_library_connector
+                )
+            ),
+        )
 
     @staticmethod
     def _create_mcp_registry() -> MCPRegistry:
@@ -3488,6 +3564,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.replace_session_lease(lease)
         self._reset_title_state()
         await self.initialize_experiments()
+        self.start_fetch_model_catalog()
         self.emit_new_session_telemetry()
 
     def replace_session_lease(self, lease: SessionLease | None) -> None:
@@ -3531,6 +3608,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         # Commit — assignments and in-place resets only, from here on infallible.
         self._cancel_experiments_task()
+        # User-scoped, not session-scoped: an in-flight fetch may complete
+        # across the rebind, but the first-turn deferral goes with the init
+        # lifecycle. The caller kicks the next fetch after the rebind returns —
+        # the commit section stays pure assignments.
+        self._await_model_catalog = False
         self.session_id = session_id
         self.parent_session_id = parent_session_id
         self.scratchpad_dir = scratchpad_dir

@@ -7,12 +7,10 @@ use crate::selection::cells::{is_blank, skip_blanks_right, word_end, word_start}
 use crate::selection::region::RowSpan;
 use crate::selection::Granularity;
 
-/// Leading glyphs Textual paints as non-selectable chrome; each takes its own
-/// column plus the space after it before the selectable body starts. That
-/// trailing space is part of the match: body text may legitimately open with one
-/// of these glyphs (a wrapped row starting with an absolute path), and only the
-/// chrome ones are followed by their own padding column.
-const CHROME_GLYPHS: [&str; 8] = [">", "/", "⎢", "⎣", "⏵", "⏷", "■", "▌"];
+/// Leading chrome glyphs, each followed by its own padding column (body text may open with one too).
+const CHROME_GLYPHS: [&str; 6] = ["⎢", "⎣", "⏵", "⏷", "■", "▌"];
+/// Prompt and settled markers, chrome only in the first column: deeper in, a wrapped `>` or `/ path` row is content.
+const MARKER_GLYPHS: [&str; 3] = [">", "/", "✓"];
 const CHROME_WIDTH: u16 = 2;
 /// Assistant markdown is inset by two display-only cells. Selection starts
 /// after that inset but keeps any additional, content-owned indentation.
@@ -145,15 +143,17 @@ fn body(
         return None;
     }
     let mut lo = first_x.min(content_start);
-    if chrome && CHROME_GLYPHS.contains(&first_symbol) && is_blank(buf, first_x + 1, y) {
+    let is_chrome = |x: u16, symbol: &str| {
+        (CHROME_GLYPHS.contains(&symbol) || (x == chat.x && MARKER_GLYPHS.contains(&symbol)))
+            && is_blank(buf, x.saturating_add(1), y)
+    };
+    if chrome && is_chrome(first_x, first_symbol) {
         // Expanded tool groups nest their own border around an effect's border
-        // (`  ⎢   ⎢ `). Textual excludes every leading chrome run before
+        // (`⎢ ⎢ `). Textual excludes every leading chrome run before
         // applying the diff's line-number gutter, so do the same here.
         let chrome_end = visible
             .iter()
-            .take_while(|(x, symbol)| {
-                CHROME_GLYPHS.contains(symbol) && is_blank(buf, x.saturating_add(1), y)
-            })
+            .take_while(|(x, symbol)| is_chrome(*x, symbol))
             .map(|(x, _)| x.saturating_add(CHROME_WIDTH))
             .last()
             .unwrap_or(first_x.saturating_add(CHROME_WIDTH));

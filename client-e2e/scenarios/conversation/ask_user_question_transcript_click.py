@@ -24,7 +24,7 @@ _QUESTION = [
 ]
 
 # The read-file disclosure remains in the transcript above the question app.
-_CLICK = "\x1b[<0;1;28M\x1b[<0;1;28m"
+_CLICK = "\x1b[<0;1;15M\x1b[<0;1;15m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

@@ -11,6 +11,8 @@ import sys
 import threading
 from typing import TYPE_CHECKING, Any, TypeGuard
 
+from cachetools import LRUCache
+
 from vibe.core.config.harness_files import (
     HarnessFilesManager,
     get_harness_files_manager,
@@ -71,6 +73,41 @@ def _compute_module_name(path: Path) -> str:
     path_hash = hashlib.md5(str(resolved).encode()).hexdigest()[:8]
     stem = re.sub(r"[^0-9A-Za-z_]", "_", path.stem) or "mod"
     return f"vibe_tools_discovered_{stem}_{path_hash}"
+
+
+type _DiscoveredTools = tuple[tuple[type[BaseTool], bool], ...]
+
+# Every derivation of every session in the process discovers tools again. A tool
+# module stays imported once loaded (see ``_load_tools_from_file``), so what a
+# search path yields is fixed by the tool files it lists. Keyed on that listing
+# rather than the directory mtime, whose coarse granularity on Linux can hide a
+# file added in the same tick as the previous scan. Bounded because each
+# worktree brings its own project tool paths.
+_discovered_tools: LRUCache[Path, tuple[tuple[Path, ...], _DiscoveredTools]] = LRUCache(
+    maxsize=256
+)
+_discovered_tools_lock = threading.Lock()
+
+
+def _discover_tools_in(base: Path, builtin_dir: Path) -> _DiscoveredTools:
+    if base.is_dir():
+        files = tuple(base.glob("*.py"))
+    elif base.name.endswith(".py") and base.is_file():
+        files = (base,)
+    else:
+        return ()
+    with _discovered_tools_lock:
+        cached = _discovered_tools.get(base)
+    if cached is not None and cached[0] == files:
+        return cached[1]
+    discovered = tuple(
+        (tool, not path.resolve().is_relative_to(builtin_dir))
+        for path in files
+        for tool in ToolManager._load_tools_from_file(path) or ()
+    )
+    with _discovered_tools_lock:
+        _discovered_tools[base] = (files, discovered)
+    return discovered
 
 
 class NoSuchToolError(Exception):
@@ -182,15 +219,7 @@ class ToolManager:
     ) -> Iterator[tuple[type[BaseTool], bool]]:
         builtin_dir = DEFAULT_TOOL_DIR.path.resolve()
         for base in search_paths:
-            if not base.is_dir() and base.name.endswith(".py"):
-                if tools := ToolManager._load_tools_from_file(base):
-                    for tool in tools:
-                        yield tool, not base.resolve().is_relative_to(builtin_dir)
-
-            for path in base.glob("*.py"):
-                if tools := ToolManager._load_tools_from_file(path):
-                    for tool in tools:
-                        yield tool, not path.resolve().is_relative_to(builtin_dir)
+            yield from _discover_tools_in(base, builtin_dir)
 
     @staticmethod
     def _load_tools_from_file(file_path: Path) -> list[type[BaseTool]] | None:

@@ -58,7 +58,7 @@ from mistralai_vibe_local_harness.vibe._local_actions import (
     PostAgentTurnHookHandler,
     ToolScopedHook,
 )
-from mistralai_vibe_local_harness.vibe._shell_tools import _kill
+from mistralai_vibe_local_harness.vibe._sandbox_helper import kill
 
 _DEFAULT_TIMEOUT_S = 60.0
 _HOOK_EVENT_NAME = "pre_tool"
@@ -431,7 +431,7 @@ async def _run_command(command: str, cwd: Path, timeout_s: float, stdin: bytes) 
     finally:
         # Kill the process group on timeout, cancellation, or error so a hook never
         # orphans a child. A no-op once the process has exited.
-        await _kill(process)
+        await kill(process)
     if process.returncode != 0:
         # Prefer stderr: stdout is reserved for the JSON response and is likely
         # empty / garbage when the hook crashed.

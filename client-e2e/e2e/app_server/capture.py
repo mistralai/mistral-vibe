@@ -129,6 +129,7 @@ def capture_scenario(
             snapshots = capture(
                 spec,
                 releases=tuple(step.release for step in scenario.steps),
+                releases_after=tuple(step.release_after for step in scenario.steps),
                 capture_startup=scenario.capture_startup,
                 capture_steps=scenario.capture_steps,
                 step_fd=step_fd,
@@ -215,7 +216,7 @@ def capture_headless_scenario(
 
 
 def _has_releases(scenario: Scenario) -> bool:
-    return any(step.release for step in scenario.steps)
+    return any(step.release or step.release_after for step in scenario.steps)
 
 
 def _step_fifo() -> tuple[str, str, int]:

@@ -1,4 +1,5 @@
 use super::*;
+use crate::input_modes::InputMode;
 
 fn selected(app: &mut App, has_file_changes: bool) {
     apply_event(
@@ -77,9 +78,54 @@ fn a_done_rewind_restores_the_message_into_the_composer() {
     );
     assert!(!app.rewind.open);
     assert_eq!(app.chat_input.input, "fix the parser");
-    assert_eq!(app.chat_input.cursor, 0);
+    assert_eq!(app.chat_input.cursor, "fix the parser".len());
     assert_eq!(app.session.session_id.as_deref(), Some("new-session-id"));
     assert!(!app.overlays.toasts.is_empty());
     // The fork notice is the only entry left after the history was replaced.
     assert_eq!(app.view.transcript.lines().count(), 1);
+}
+
+fn done(app: &mut App, message: &str) {
+    selected(app, false);
+    let state = serde_json::json!({"eventId": 3, "session": {"id": "session-id"}, "history": []});
+    apply_event(
+        app,
+        Event::Done {
+            message: message.into(),
+            restore_errors: Vec::new(),
+            old_session_id: "session-id".into(),
+            inplace: true,
+            state: Box::new(serde_json::from_value(state).expect("state")),
+        },
+    );
+}
+
+#[test]
+fn a_done_rewind_to_a_skill_reloads_it_in_slash_mode_with_it_selected() {
+    let mut app = App::default();
+    app.completion.skills = vec![("code-review".into(), "Review.".into())];
+    done(&mut app, "/code-review");
+    assert_eq!(app.chat_input.mode, InputMode::Slash);
+    assert_eq!(app.chat_input.cursor, "code-review".len());
+    let entry = &app.completion.entries[app.completion.selected];
+    assert_eq!(entry.label, "/code-review");
+    assert!(!app.completion.entries.iter().any(|e| e.label == "/help"));
+}
+
+#[test]
+fn a_done_rewind_to_a_literal_slash_message_reloads_it_as_a_prompt() {
+    let mut app = App::default();
+    done(&mut app, "/config");
+    assert_eq!(app.chat_input.mode, InputMode::Prompt);
+    assert_eq!(app.chat_input.input, "/config");
+    assert!(app.completion.entries.is_empty());
+}
+
+#[test]
+fn a_done_rewind_ending_on_a_mention_keeps_completions_closed() {
+    let mut app = App::default();
+    app.completion.skills = vec![("code-review".into(), "Review.".into())];
+    done(&mut app, "please run /code-review");
+    assert_eq!(app.chat_input.cursor, "please run /code-review".len());
+    assert!(app.completion.entries.is_empty());
 }

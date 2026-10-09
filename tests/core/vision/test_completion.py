@@ -88,8 +88,9 @@ async def test_describing_an_image_never_reasons_on_mistral(
     # The trace is charged against max_tokens, and a thinking model spends the
     # whole budget restating the image -- the response comes back with no
     # content at all and the image goes undescribed. On this backend "off"
-    # omits reasoning_effort rather than setting it, which leaves the server
-    # default in charge; "low" is what maps to reasoning_effort="none".
+    # leaves reasoning_effort unset rather than sending "none", which leaves
+    # the server default in charge; "low" is the pick that maps to
+    # reasoning_effort="none".
     backend = await _describe(monkeypatch)
 
     assert backend.kwargs["model"].thinking == "low"

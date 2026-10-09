@@ -183,6 +183,30 @@ def test_get_agents_md_section_renders_project_docs_only() -> None:
     assert "Contents of /repo/AGENTS.md" in section
 
 
+def test_get_agents_md_section_puts_given_project_instructions_first() -> None:
+    section = get_agents_md_section(
+        "# User doc",
+        [(Path("/repo"), "# Project doc")],
+        project_instructions="  # Given instructions\n",
+    )
+    assert section is not None
+    assert "(checked into the codebase)" not in section
+    assert (
+        section.index("## User instructions")
+        < section.index("## Project instructions")
+        < section.index("Instructions for this project:\n\n# Given instructions")
+        < section.index("Contents of /repo/AGENTS.md")
+    )
+
+
+def test_get_agents_md_section_renders_given_project_instructions_alone() -> None:
+    section = get_agents_md_section("", [], project_instructions="# Given")
+    assert section is not None
+    assert "## Project instructions\n\nInstructions for this project:" in section
+    assert "## User instructions" not in section
+    assert get_agents_md_section("", [], project_instructions=" \n ") is None
+
+
 def test_available_skills_excludes_skills_not_invocable_by_model() -> None:
     manager = MagicMock(spec=SkillManager)
     manager.available_skills = MappingProxyType({

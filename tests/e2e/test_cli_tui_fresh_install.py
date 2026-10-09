@@ -32,13 +32,102 @@ def _venv_executable(venv_path: Path, name: str) -> Path:
 # CI builds the combined wheel once and passes it here, so this test does not
 # compile both Rust artifacts again. Unset, the test builds its own.
 _PREBUILT_WHEEL_ENV = "VIBE_PREBUILT_WHEEL"
+_HARNESS_WHEEL_ENV = "VIBE_PREBUILT_HARNESS_WHEEL"
+_RUST_TUI_ENV = "VIBE_PREBUILT_RUST_TUI"
+
+# The two native artifacts come from their own projects, and the combined wheel
+# is assembled from them, exactly like CI's combined-wheel step. Building it in
+# this checkout instead swaps the bundled Harness runtime for a pure-Python
+# copy for the whole build, and any parallel test importing the package during
+# that swap fails with ModuleNotFoundError.
+_HARNESS_PYTHON_PROJECT = (
+    TESTS_ROOT.parent.parent / "agents" / "harness" / "harness" / "runtimes" / "python"
+)
+_CLI_RUST_DIR = TESTS_ROOT.parent / "vibe" / "cli-rust"
+_TUI_NAME = "vibe-rs.exe" if platform.system() == "Windows" else "vibe-rs"
+
+
+def _build_harness_wheel(harness_dist: Path) -> Path:
+    # Build the Harness wheel the way CI's local-harness-wheel step does: with
+    # maturin directly and, on Linux, zig + manylinux_2_28. A plain
+    # `uv build --wheel` there tags the wheel for the host glibc instead, and
+    # the assembled combined wheel inherits that tag, failing the manylinux
+    # assertion in ``_combined_wheel``.
+    # The sync exact-matches the lockfile without installing the project
+    # itself, so an editable Harness install in that venv is removed; the
+    # next `uv sync` in the project restores it.
+    subprocess.run(
+        [
+            "uv",
+            "sync",
+            "--frozen",
+            "--no-install-project",
+            "--directory",
+            str(_HARNESS_PYTHON_PROJECT),
+        ],
+        check=True,
+    )
+    maturin_command = [
+        "uv",
+        "run",
+        "--no-sync",
+        "--directory",
+        str(_HARNESS_PYTHON_PROJECT),
+        "maturin",
+        "build",
+        "--release",
+        "--locked",
+        "--out",
+        str(harness_dist),
+    ]
+    build_environment = {
+        **os.environ,
+        # CI's own wheel directory, separate from the one the Harness build
+        # backend manages: it wipes its directory on fingerprint changes,
+        # and this build does not hold the backend's lock.
+        "CARGO_TARGET_DIR": str(
+            _HARNESS_PYTHON_PROJECT / ".cache" / "cargo-target-ci-wheel"
+        ),
+    }
+    # The global test fixture mocks sys.platform to Linux; platform.system()
+    # reflects the host that actually runs the build.
+    if platform.system() == "Darwin":
+        # Stripped Mach-O images are refused by dyld on macOS 26+
+        # (rust-lang/rust#157750); keep the built extension importable, like
+        # the vibe build backend does.
+        build_environment["CARGO_PROFILE_RELEASE_STRIP"] = "none"
+    if platform.system() == "Linux":
+        maturin_command += ["--zig", "--compatibility", "manylinux_2_28"]
+    subprocess.run(maturin_command, check=True, env=build_environment)
+    harness_wheels = sorted(harness_dist.glob("mistralai_vibe_local_harness-*.whl"))
+    assert len(harness_wheels) == 1
+    return harness_wheels[0]
 
 
 def _build_wheel(dist_dir: Path) -> Path:
+    harness_wheel = _build_harness_wheel(dist_dir / "harness-wheel")
+    subprocess.run(
+        [
+            "cargo",
+            "build",
+            "--release",
+            "--locked",
+            "--manifest-path",
+            str(_CLI_RUST_DIR / "Cargo.toml"),
+            "--bin",
+            "vibe-rs",
+        ],
+        check=True,
+    )
     subprocess.run(
         ["uv", "build", "--wheel", "--out-dir", str(dist_dir)],
         cwd=TESTS_ROOT.parent,
         check=True,
+        env={
+            **os.environ,
+            _HARNESS_WHEEL_ENV: str(harness_wheel),
+            _RUST_TUI_ENV: str(_CLI_RUST_DIR / "target" / "release" / _TUI_NAME),
+        },
     )
     wheels = sorted(dist_dir.glob("mistral_vibe-*.whl"))
     assert len(wheels) == 1

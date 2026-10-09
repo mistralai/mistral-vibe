@@ -70,6 +70,35 @@ class TestQuestionAppGracePeriod:
             question_app.action_move_up()
             assert question_app.selected_option == 0
 
+    def test_space_toggle_ignored_within_grace_period(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(
+            "vibe.cli.textual_ui.widgets.question_app._INPUT_GRACE_PERIOD_S",
+            _TEST_GRACE_PERIOD_S,
+        )
+        app = QuestionApp(
+            UserQuestionRequest(
+                questions=[
+                    UserQuestion(
+                        question="Pick some",
+                        header="Pick",
+                        options=[QuestionChoice(label="A"), QuestionChoice(label="B")],
+                        multi_select=True,
+                    )
+                ]
+            )
+        )
+        app._mount_time = 100.0
+        with patch("vibe.cli.textual_ui.widgets.question_app.time") as mock_time:
+            mock_time.monotonic.return_value = 100.0 + _TEST_GRACE_PERIOD_S - 0.01
+            app.action_toggle_focused()
+            assert app.multi_selections.get(0, set()) == set()
+
+            mock_time.monotonic.return_value = 100.0 + _TEST_GRACE_PERIOD_S + 0.01
+            app.action_toggle_focused()
+            assert app.multi_selections[0] == {0}
+
     def test_number_key_consumed_but_not_acted_within_grace_period(
         self, question_app: QuestionApp
     ):

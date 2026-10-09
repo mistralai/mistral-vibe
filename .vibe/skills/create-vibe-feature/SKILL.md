@@ -16,7 +16,9 @@ Use this skill when implementing Vibe feature work. Keep changes scoped, archite
 | Area | Role | Path |
 | --- | --- | --- |
 | Core engine | Agent loop, domain events, tools, LLM backends, config, sessions, skills, hooks, telemetry types, shared models | `vibe/core/` |
-| Textual CLI | Interactive terminal UX, widgets, slash commands, manual shell commands, voice UI, local user affordances | `vibe/cli/` |
+| App server | Session, turn, config and persistence, tools, and callback ownership; typed JSON-RPC methods and notifications consumed by both TUIs and ACP | `vibe/app_server/` |
+| Textual CLI | Legacy Python TUI, still the production default: interactive terminal UX, widgets, slash commands, manual shell commands, voice UI, local user affordances | `vibe/cli/` |
+| Rust CLI | Ratatui TUI replacing the Textual CLI; thin client over `vibe-app-server` | `vibe/cli-rust/` |
 | ACP bridge | Agent Client Protocol session, tool, terminal, title, and content translation | `vibe/acp/` |
 | Setup | First-run, auth, onboarding, trusted folders, update prompts | `vibe/setup/` |
 | Tests | Unit, integration, e2e, Textual snapshots, stubs and fixtures | `tests/` |
@@ -33,13 +35,15 @@ Before implementation, read the matching ADRs:
 - Session logging, resume, rewind, transcript metadata, migrations: `docs/adr/0006-local-sessions.md`
 - Skills, agents, subagents, hooks, MCP, connectors, custom tools, discovery: `docs/adr/0007-extension-mechanisms.md`
 - Feature work, telemetry events, analytics properties, instrumentation verification: `docs/adr/0008-feature-instrumentation.md`
+- App-server RPCs, notifications, and delivery adapters: `docs/adr/0009-app-server-boundary.md`
+- Rust CLI thin-client boundary, unidirectional state, bounded resources: `docs/adr/0016-rust-cli-delivery-surface.md`
 
 If a change fits the current code but conflicts with ADR direction, flag it to the user before implementing.
 
 ## Workflow
 
 1. Read `README.md`, `AGENTS.md`, and the nearest relevant source files before editing.
-2. Identify the owning area. Keep UI behavior in `vibe/cli`, ACP translation in `vibe/acp`, setup flow in `vibe/setup`, and reusable engine behavior in `vibe/core`.
+2. Identify the owning area. Keep UI behavior in `vibe/cli` and `vibe/cli-rust`, ACP translation in `vibe/acp`, setup flow in `vibe/setup`, server-owned behavior behind an app-server method or notification in `vibe/app_server` (per ADR 0009), and reusable engine behavior in `vibe/core`. Any user-visible change to the Python TUI must also ship in the Rust TUI in the same PR; see "Terminal UI changes" in the Vibe project `AGENTS.md` (next to `pyproject.toml`).
 3. Study one or two existing features with the same shape before adding new files. Match naming, model placement, port/adapters, tests, and error patterns.
 4. Prefer a small change in the owning module. Add a port or abstraction only when it protects a meaningful boundary or makes replacement/testing easier.
 5. For feature work, plan telemetry with `instrument-feature-analytics` before writing tracking code.

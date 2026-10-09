@@ -3,44 +3,20 @@
 //! Python's `ThemePickerApp` and its TCSS in `app.tcss`.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
 
-use super::{bottom_bar, loading, scrollbar, theme, transcript};
+use super::{hint_line, list_cursor, list_scroll, scrollbar, theme};
 use crate::app::App;
+use crate::hints::{self, action, key, Hint};
 use crate::theme_picker::options;
-
-/// The `›` marker's `green`. Under an ANSI theme it's a raw terminal green; on
-/// truecolour themes it's mapped through Textual's terminal ANSI theme (Monokai
-/// for dark, Alabaster for light).
-pub(crate) fn marker_green() -> Color {
-    let active = theme::active();
-    if active.name.starts_with("ansi-") {
-        Color::Green
-    } else if active.dark {
-        Color::Rgb(0x98, 0xE0, 0x24)
-    } else {
-        Color::Rgb(0x44, 0x8C, 0x27)
-    }
-}
 
 /// Draw the whole screen with the picker replacing the input box, matching the
 /// Textual layout where `#chat` shrinks to make room for the bottom-app.
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    f.buffer_mut()
-        .set_style(area, Style::default().bg(theme::background()));
-
-    let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
-    let picker_height = box_height(area.height);
-    let chunks = super::bottom_app_chunks(app, area, loading_height, picker_height);
-
-    transcript::draw(app, f, chunks[0]);
-    loading::draw(app, f, chunks[1]);
-    crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Blocked);
-    draw_box(app, f, chunks[2]);
-    super::todo::draw_row(app, f, chunks[4]);
-    bottom_bar::draw(app, f, chunks[3]);
+    let kind = super::bottom_app::Kind::Theme;
+    super::bottom_app::draw(app, f, area, box_height(area.height), kind, draw_box);
 }
 
 /// Visible option rows: `min(count, 50vh)` (Textual `max-height: 50vh`).
@@ -103,33 +79,18 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
         // Highlight bar spans the option text (from the option's own left
         // padding up to, but not including, the scrollbar gutter).
         if is_hl {
-            let bar = Rect::new(bx + 3, y, w.saturating_sub(7), 1);
-            f.buffer_mut()
-                .set_style(bar, Style::default().bg(theme::block_cursor_bg()));
+            list_cursor::paint(f, Rect::new(bx + 3, y, w.saturating_sub(7), 1));
         }
-        let row_bg = if is_hl {
-            theme::block_cursor_bg()
-        } else {
-            theme::background()
-        };
-        let text_fg = if is_hl {
-            theme::block_cursor_fg()
-        } else {
-            theme::foreground()
-        };
-        let marker = if is_current { "› " } else { "  " };
-        let marker_fg = if is_current { marker_green() } else { text_fg };
         // Python styles the marker green only; the bold comes from the row
         // highlight, so an unhighlighted current row keeps a regular `›`.
-        let mut marker_style = Style::default().fg(marker_fg).bg(row_bg);
-        if is_hl {
-            marker_style = marker_style.add_modifier(Modifier::BOLD);
-        }
-        f.buffer_mut().set_string(bx + 3, y, marker, marker_style);
-        let mut name_style = Style::default().fg(text_fg).bg(row_bg);
-        if is_hl || is_current {
-            name_style = name_style.add_modifier(Modifier::BOLD);
-        }
+        let (base, _) = list_cursor::styles(is_hl);
+        let marker_style = list_cursor::marker_style(base, is_current);
+        f.buffer_mut()
+            .set_string(bx + 3, y, list_cursor::marker(is_current), marker_style);
+        let name_style = match is_current {
+            true => base.add_modifier(Modifier::BOLD),
+            false => base,
+        };
         f.buffer_mut().set_string(bx + 5, y, opts[i], name_style);
     }
 
@@ -147,41 +108,23 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
         );
     }
 
-    draw_help(f, bx + 2, by + h - 2);
+    hint_line::draw(f, bx + 2, by + h - 2, HINTS);
 }
 
-/// Keep the highlighted option visible (Textual `scroll_to_highlight`).
+/// Keep the highlighted option visible, the wheel's free scroll aside.
 fn reconcile_scroll(app: &mut App, total: usize, visible: usize) -> usize {
-    let sel = app.theme_picker.selected.min(total.saturating_sub(1));
-    let mut off = app.theme_picker.scroll;
-    if app.theme_picker.free_scroll {
-        off = off.min(total.saturating_sub(visible));
-    } else if sel < off {
-        off = sel;
-    } else if sel >= off + visible {
-        off = sel + 1 - visible;
-    }
-    off = off.min(total.saturating_sub(visible));
-    app.theme_picker.scroll = off;
-    off
+    let state = &mut app.theme_picker;
+    let offset = match state.free_scroll {
+        true => state.scroll.min(total.saturating_sub(visible)),
+        false => {
+            let selected = state.selected.min(total.saturating_sub(1));
+            list_scroll::follow(state.scroll, visible, total, selected..selected + 1, |_| {
+                true
+            })
+        }
+    };
+    state.scroll = offset;
+    offset
 }
 
-/// The hint line: `↑↓/jk` `Enter` `Esc` keys in bold $primary, labels in $text-muted.
-fn draw_help(f: &mut Frame, x: u16, y: u16) {
-    let key = Style::default()
-        .fg(theme::primary())
-        .bg(theme::background())
-        .add_modifier(Modifier::BOLD);
-    let label = theme::muted_style().bg(theme::background());
-    let mut cx = x;
-    for (k, l) in [
-        ("↑↓/jk", " Preview  "),
-        ("Enter", " Select  "),
-        ("Esc", " Cancel"),
-    ] {
-        f.buffer_mut().set_string(cx, y, k, key);
-        cx += k.chars().count() as u16;
-        f.buffer_mut().set_string(cx, y, l, label);
-        cx += l.chars().count() as u16;
-    }
-}
+const HINTS: &[Hint] = &[(key::NAV, action::PREVIEW), hints::SELECT, hints::CANCEL];

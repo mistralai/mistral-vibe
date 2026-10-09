@@ -166,9 +166,14 @@ pub(crate) fn cursor_word_right(input: &str, cursor: &mut usize) {
     *cursor = word_right_target(input, *cursor);
 }
 
-/// Move the cursor to the start of the current line, smart-home (`home`, `ctrl+a`).
+/// Move the cursor to the start of the current line, smart-home (`home`, `ctrl+a`);
+/// from column 0 it climbs to the start of the previous line.
 pub(crate) fn cursor_line_start(input: &str, cursor: &mut usize) {
     let (start, end) = line_bounds(input, *cursor);
+    if *cursor == start && start > 0 {
+        *cursor = line_bounds(input, start - 1).0;
+        return;
+    }
     let first_non_ws = input[start..end]
         .char_indices()
         .find(|(_, c)| !c.is_whitespace())
@@ -181,9 +186,14 @@ pub(crate) fn cursor_line_start(input: &str, cursor: &mut usize) {
     };
 }
 
-/// Move the cursor to the end of the current line (`end`, `ctrl+e`).
+/// Move the cursor to the end of the current line (`end`, `ctrl+e`); from a
+/// line end it moves on to the end of the next line.
 pub(crate) fn cursor_line_end(input: &str, cursor: &mut usize) {
-    *cursor = line_bounds(input, *cursor).1;
+    let end = line_bounds(input, *cursor).1;
+    *cursor = match *cursor == end && end < input.len() {
+        true => line_bounds(input, end + 1).1,
+        false => end,
+    };
 }
 
 /// Delete the word left of the cursor (`ctrl+w`, `alt+backspace`, `ctrl+backspace`).

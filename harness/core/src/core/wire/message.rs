@@ -133,6 +133,9 @@ pub(crate) enum StoredMessageSource {
 pub(crate) struct StoredMessage {
     pub message: Message,
     pub source: StoredMessageSource,
+    /// Identifies keyed hook context so Core can skip an unchanged delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_key: Option<String>,
 }
 
 impl Message {
@@ -278,6 +281,7 @@ impl StoredMessage {
         Self {
             message,
             source: StoredMessageSource::History,
+            context_key: None,
         }
     }
 
@@ -285,6 +289,15 @@ impl StoredMessage {
         Self {
             message,
             source: StoredMessageSource::Injection,
+            context_key: None,
+        }
+    }
+
+    pub(crate) fn keyed_injection(key: String, message: Message) -> Self {
+        Self {
+            message,
+            source: StoredMessageSource::Injection,
+            context_key: Some(key),
         }
     }
 
@@ -292,7 +305,12 @@ impl StoredMessage {
         Self {
             message,
             source: StoredMessageSource::GeneratedSystem,
+            context_key: None,
         }
+    }
+
+    pub(crate) fn context_key(&self) -> Option<&str> {
+        self.context_key.as_deref()
     }
 
     pub(crate) fn is_injected(&self) -> bool {

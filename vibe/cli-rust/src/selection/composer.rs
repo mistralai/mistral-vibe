@@ -1,6 +1,6 @@
 //! Composer surface: map screen cells to chat-input offsets and snap selections.
 
-use crate::app::App;
+use crate::app::{App, Surface};
 use crate::chat_input;
 use crate::selection::Granularity;
 use crate::utils::input_edit;
@@ -94,6 +94,15 @@ pub(super) fn drag(app: &mut App, at: (u16, u16)) {
     let (start, end) = app.chat_input.mentions.widen(start, end);
     app.chat_input.anchor = Some(start);
     app.chat_input.cursor = end;
+}
+
+/// Collapse the selection to the caret and end a composer drag (Python `ChatTextArea.on_blur`).
+pub fn blur_composer(app: &mut App) {
+    app.chat_input.anchor = None;
+    app.selection.composer_anchor = None;
+    if app.selection.drag == Some(Surface::Composer) {
+        app.selection.drag = None;
+    }
 }
 
 /// Copy the completed composer selection, or drop an empty one.

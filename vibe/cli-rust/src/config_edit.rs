@@ -90,12 +90,11 @@ pub fn handle_key(
         KeyCode::Tab if !app.config_screen.targets.is_empty() => {
             edit.target = (edit.target + 1) % app.config_screen.targets.len()
         }
-        KeyCode::Up | KeyCode::Char('k') if !choices.is_empty() => {
-            let index = choice_index(edit, &choices).saturating_sub(1);
-            select_choice(edit, &choices, index);
-        }
-        KeyCode::Down | KeyCode::Char('j') if !choices.is_empty() => {
-            let index = (choice_index(edit, &choices) + 1).min(choices.len() - 1);
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j')
+            if !choices.is_empty() =>
+        {
+            let down = matches!(key.code, KeyCode::Down | KeyCode::Char('j'));
+            let index = crate::list_nav::wrap(choice_index(edit, &choices), choices.len(), down);
             select_choice(edit, &choices, index);
         }
         _ => {}

@@ -7,4 +7,13 @@ from e2e.app_server.scenario import Timeline
 
 handshake = project_handshake()
 request_methods = METHODS
-timeline: Timeline = ["/remote-project\r", "Another", "\x1b[B", "/", "\x05\x15", "\x1b"]
+timeline: Timeline = [
+    "/remote-project\r",
+    "/Another",
+    "\x1b[B",
+    "\x1b",
+    "/",
+    "\x05\x15",
+    "\x1b",
+    "\x1b",
+]

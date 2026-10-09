@@ -372,6 +372,111 @@ fn programmatic_subtool_results_bypass_offloading() {
 }
 
 ///
+/// *Prepare*: `run_typescript` awaits one nested call under a post-tool hook and catches its failure.
+/// *Do*: Return a 9 MiB nested result, under the 16 MiB replay limit but over the 8 MiB limit for nested results, then pass the hook result through.
+/// *Assert*: The hook, the committed result, and the program only ever see a small failure, and the checkpoint never holds the payload.
+///
+// Validates a temporary workaround, not a load-bearing contract: replace it when large results pass by reference.
+#[test]
+fn programmatic_result_beyond_the_nested_result_limit_fails_before_the_post_tool_hook() {
+    const NESTED_RESULT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+
+    // Prepare
+    let turn_id = "turn-programmatic-replay-limit";
+    let call_id = "program-replay-limit";
+    let mut harness_config = large_output_config(ProvidedToolExposure::Programmatic);
+    harness_config.capabilities.hook_bindings = serde_json::from_value(json!([
+        {"id": "nested-post-tool", "point": "post_tool_call", "order": 0, "selector": {"type": "always"}}
+    ]))
+    .expect("post-tool hook configures");
+    let mut runtime = SynchronousRuntime::new(harness_config);
+    let first_completion = runtime.start_turn(turn_id, "fetch the whole trace");
+    let source = "async function main() { try { const trace = await tools.data.large_lookup({}); return { length: trace.length }; } catch { return { rejected: true }; } }";
+    let nested_action = runtime
+        .complete_with_typescript_program(
+            turn_id,
+            &first_completion,
+            call_id,
+            source,
+            [provided_action(json!({}))],
+        )
+        .only_action();
+    let oversized_result = text_tool_success(&nested_action, &"x".repeat(9 * 1024 * 1024));
+    let message = format!(
+        "The tool ran, but its result is too large to return to run_typescript: it exceeds the {} MiB limit. Request a smaller result by filtering, paginating, or narrowing the query, or split the work across multiple run_typescript calls.",
+        NESTED_RESULT_LIMIT_BYTES / (1024 * 1024)
+    );
+    let rejected_result = json!({
+        "type": "failure",
+        "content": [{"type": "text", "text": message}],
+        "error": {
+            "code": "tool_result_too_large",
+            "message": message,
+            "retryable": false,
+            "details": {"limit_bytes": NESTED_RESULT_LIMIT_BYTES},
+        },
+    });
+
+    // Do
+    let post_hook = runtime
+        .apply(
+            oversized_result,
+            running(turn_id).dispatch(hook_call(
+                "post_tool_call",
+                &["nested-post-tool"],
+                json!({
+                    "tool_call": {
+                        "call_id": nested_action["call_id"],
+                        "call": nested_action["call"],
+                    },
+                    "tool_result": rejected_result,
+                }),
+            )),
+        )
+        .only_action();
+    let checkpoint_bytes = runtime.checkpoint_value().to_string().len();
+    let outer_value = json!({"rejected": true});
+    let outer_serialized = serde_json::to_string_pretty(&outer_value).unwrap();
+    let next_completion = runtime
+        .apply(
+            hook_completed(
+                &post_hook,
+                "post_tool_call",
+                json!({"tool_result": rejected_result}),
+            ),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(tool_result_committed(
+                    turn_id,
+                    &nested_action,
+                    rejected_result.clone(),
+                ))
+                .observe(serialized_observation(
+                    turn_id,
+                    call_id,
+                    "run_typescript",
+                    outer_serialized.encode_utf16().count(),
+                ))
+                .observe_tool_execution_finished(call_id, run_typescript_success(outer_value)),
+        )
+        .only_action();
+
+    // Assert
+    assert!(
+        checkpoint_bytes < 1024 * 1024,
+        "the checkpoint must not hold the rejected payload ({checkpoint_bytes} bytes)"
+    );
+    runtime.assert_last_model_message_update(
+        &next_completion,
+        "append",
+        &[
+            model_assistant_typescript(call_id, source),
+            model_tool_text(call_id, "run_typescript", r#"{"rejected":true}"#),
+        ],
+    );
+}
+
+///
 /// *Prepare*: `run_typescript` executes two sequential `Promise.allSettled` batches containing
 /// six and thirty-six programmatic tool calls, then builds a fixed memory-pressure result.
 /// *Do*: Resolve every nested call with a production-sized JSON text block so final replay reaches

@@ -227,12 +227,7 @@ fn final_iteration_tool_call_runs_then_stops_with_a_limit_reason() {
                 "call-final",
                 tool_result["result"].clone(),
             ))
-            .observe(json!({
-                "type": "turn_completed",
-                "turn_id": turn_id,
-                "output": [],
-                "stop_reason": "iteration_limit",
-            })),
+            .observe(turn_completed_at_iteration_limit(turn_id, vec![])),
     );
 
     // The session is idle, not stranded: a follow-up turn starts its own
@@ -243,6 +238,17 @@ fn final_iteration_tool_call_runs_then_stops_with_a_limit_reason() {
             .dispatch(llm_call(0))
             .observe(turn_started("turn-after-limit", "continue")),
     );
+}
+
+#[test]
+fn completes_final_answer_at_iteration_limit_without_a_stop_reason() {
+    let turn_id = "turn-final-answer-at-iteration-limit";
+    let mut harness_config = config();
+    harness_config.settings.turn.max_iterations = Some(1);
+    let mut runtime = SynchronousRuntime::new(harness_config);
+    let completion = runtime.start_turn(turn_id, "answer once");
+
+    runtime.finish_turn_with_text(turn_id, &completion, "the accepted answer");
 }
 
 ///

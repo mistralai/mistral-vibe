@@ -19,7 +19,7 @@ handshake = {
     },
 }
 
-_HEADER_DRAG = "\x1b[<0;3;30M\x1b[<32;8;30M\x1b[<0;8;30m"
+_HEADER_DRAG = "\x1b[<0;3;15M\x1b[<32;8;15M\x1b[<0;8;15m"
 
 timeline: Timeline = [
     "think about it\r",

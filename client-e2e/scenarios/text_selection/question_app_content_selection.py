@@ -23,7 +23,7 @@ capture_startup = False
 capture_steps = {1, 2, 3}
 clipboard_clients = {"rust"}
 clipboard_contains = ("Which color scheme do you prefer?",)
-screen_contains = {"rust": ("› 2. Nord", "Copied"), "python": ("› 2. Nord", "Copied")}
+screen_contains = {"rust": ("2. Nord", "Copied"), "python": ("› 2. Nord", "Copied")}
 
 _QUESTIONS = [
     {

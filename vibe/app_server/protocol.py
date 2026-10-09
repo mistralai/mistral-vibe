@@ -111,6 +111,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "agents/list",
     "agents/uninstall",
     "callback/result",
+    "config/effective/read",
     "config/fields/read",
     "config/proxy/read",
     "config/proxy/write",
@@ -182,6 +183,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "session/fork",
     "session/history/clear",
     "session/history/list",
+    "session/lease/subscribe",
     "session/list",
     "session/log/read",
     "session/markAsSeen",
@@ -441,8 +443,26 @@ class SessionReadParams(ProtocolModel):
         return self.turns.limit if self.turns is not None else 1
 
 
+class SessionLeaseHolder(ProtocolModel):
+    process_id: int | None = None
+
+
 class SessionReadResponse(EventWatermarkResponse):
     state: PublicSessionState
+    lease_holder: SessionLeaseHolder | None = None
+
+
+class SessionLeaseUpdate(ProtocolModel):
+    session_id: str
+    lease_holder: SessionLeaseHolder | None = None
+
+
+class SessionLeaseSubscribeResponse(ProtocolModel):
+    held: list[SessionLeaseUpdate]
+
+
+class SessionLeaseEnded(ProtocolModel):
+    pass
 
 
 class SessionResumeParams(SessionOpenParams):
@@ -1011,6 +1031,21 @@ class ConfigFieldWire(ProtocolModel):
     @property
     def origin(self) -> str:
         return self.layer_values[0].layer if self.layer_values else "default"
+
+
+class ConfigEffectiveReadParams(ProtocolModel):
+    session_id: str
+
+
+class ConfigEffectiveReadResponse(ProtocolModel):
+    """The whole config the session runs with, credentials redacted.
+
+    Resolved after the agent profile and the session's own options, with
+    approval bypass as the session applies it; for records such as a headless
+    run's export, not for editing.
+    """
+
+    config: dict[str, JsonValue]
 
 
 class ConfigFieldsReadParams(ProtocolModel):

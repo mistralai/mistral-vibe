@@ -5,6 +5,7 @@ use ratatui::layout::Rect;
 
 use crate::app::App;
 use crate::selection::flow::{resolve, Flow};
+use crate::selection::fold::{self, Folds};
 use crate::selection::table;
 
 /// The scrolling document owned by a selectable region.
@@ -24,7 +25,7 @@ pub enum RegionId {
     Main,
     Toast(u64),
     Loading,
-    Question,
+    BottomApp,
 }
 
 /// The screen region a drag can select, published by whichever surface painted it.
@@ -94,7 +95,7 @@ pub fn get(app: &App, id: RegionId) -> Region {
         RegionId::Main => app.view.selection_region,
         RegionId::Toast(_) => app.view.toast_selection_region,
         RegionId::Loading => app.view.loading_selection_region,
-        RegionId::Question => app.view.question_selection_region,
+        RegionId::BottomApp => app.view.bottom_app_selection_region,
     }
 }
 
@@ -134,9 +135,9 @@ pub fn spans(app: &App, buf: &Buffer, chat: Rect) -> Vec<RowSpan> {
         false,
     );
     if !chrome {
-        // The question box cuts its option-prefix cells out of its row spans.
+        // A bottom-app box cuts its chrome cells (option prefixes, scrollbars) out of its row spans.
         let gaps = match selection.owner {
-            RegionId::Question => &app.view.question_selection_chrome,
+            RegionId::BottomApp => &app.view.bottom_app_selection_chrome,
             _ => return spans,
         };
         return spans
@@ -147,6 +148,7 @@ pub fn spans(app: &App, buf: &Buffer, chat: Rect) -> Vec<RowSpan> {
     spans
         .into_iter()
         .flat_map(|span| split(&app.view.selection_chrome, span))
+        .flat_map(|span| split(&app.view.selection_hangs, span))
         .collect()
 }
 
@@ -179,7 +181,7 @@ pub fn extract_document(app: &App) -> Option<String> {
         return None;
     }
     let document = crate::ui::transcript::selection_slice(app)?;
-    let spans = resolve(
+    let mut spans = resolve(
         Flow {
             selection: (selection.anchor, selection.head),
             origin: 0,
@@ -192,20 +194,21 @@ pub fn extract_document(app: &App) -> Option<String> {
         &document.gutters,
         true,
     );
-    Some(extract(&document.buffer, &spans))
+    spans.retain(|(y, _, _)| document.margins.binary_search(y).is_err());
+    Some(fold::extract(&document.buffer, &spans, &document.folds))
 }
 
 /// True when a press at `at` anchors a selection: inside the region and on a
 /// cell some widget owns, since Textual anchors nothing on bare padding. The
 /// chrome map belongs to its region: the transcript's padding and the
-/// question box's option prefixes; a toast publishes only its text rows.
+/// bottom-app box's prefixes and scrollbars; a toast publishes only its text rows.
 pub fn selectable(app: &App, at: (u16, u16), owner: RegionId) -> bool {
     if !get(app, owner).contains(at) {
         return false;
     }
     let chrome = match owner {
         RegionId::Main => &app.view.selection_chrome,
-        RegionId::Question => &app.view.question_selection_chrome,
+        RegionId::BottomApp => &app.view.bottom_app_selection_chrome,
         _ => return true,
     };
     !chrome
@@ -239,14 +242,20 @@ fn split(gaps: &[RowSpan], span: RowSpan) -> Vec<RowSpan> {
 
 /// Read the selected text back from the rendered buffer, one line per row.
 pub fn extract(buf: &Buffer, spans: &[RowSpan]) -> String {
-    spans
-        .iter()
-        .map(|&(y, x0, x1)| {
-            let row: String = (x0..=x1)
-                .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol()))
-                .collect();
-            row.trim_end().to_owned()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    fold::extract(buf, spans, &Folds::default())
+}
+
+/// The soft-wrap folds of a region that copies from the painted frame.
+pub fn folds(app: &App, id: RegionId) -> Folds {
+    match id {
+        RegionId::BottomApp => app.view.bottom_app_selection_folds.clone(),
+        RegionId::Toast(toast) => app
+            .view
+            .toast_folds
+            .iter()
+            .find(|(painted, _)| *painted == toast)
+            .map(|(_, folds)| folds.clone())
+            .unwrap_or_default(),
+        RegionId::Main | RegionId::Loading => Folds::default(),
+    }
 }

@@ -5,6 +5,7 @@ mod direct;
 use serde_json::json;
 
 use crate::core::features::large_output::PendingWrite;
+use crate::core::features::permissions::GrantKey;
 use crate::core::features::programmatic_tool_calling::ProgramExecution;
 use crate::core::hooks::HookCall;
 use crate::core::step_protocol::Action;
@@ -15,6 +16,11 @@ use crate::core::wire::tool::{ToolCall, ToolResult};
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ToolExecutionState {
+    DirectAwaitingApproval {
+        approval_action_id: String,
+        grant_key: GrantKey,
+        call: ExternalToolCall,
+    },
     DirectAwaitingPreHook {
         hook_action_id: String,
         hook_binding_ids: Vec<String>,
@@ -64,6 +70,20 @@ impl ToolBatch {
         self.executions
             .iter()
             .flat_map(|execution| match &execution.state {
+                ToolExecutionState::DirectAwaitingApproval {
+                    approval_action_id,
+                    grant_key,
+                    call,
+                    ..
+                } => vec![Action::approval(
+                    approval_action_id.clone(),
+                    turn_id,
+                    grant_key,
+                    call,
+                    call.call
+                        .direct_model_name()
+                        .expect("direct approval call has a model-visible name"),
+                )],
                 ToolExecutionState::DirectAwaitingPreHook {
                     hook_action_id,
                     hook_binding_ids,
@@ -118,6 +138,7 @@ impl ToolBatch {
             .map(|execution| match &execution.state {
                 ToolExecutionState::Completed { message } => Ok(message.clone()),
                 ToolExecutionState::DirectAwaitingPreHook { .. }
+                | ToolExecutionState::DirectAwaitingApproval { .. }
                 | ToolExecutionState::DirectPending { .. }
                 | ToolExecutionState::DirectAwaitingPostHook { .. }
                 | ToolExecutionState::ProgramPending { .. }

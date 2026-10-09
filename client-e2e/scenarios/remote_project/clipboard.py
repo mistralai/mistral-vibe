@@ -11,7 +11,7 @@ env = {"SSH_TTY": "/dev/test"}
 expected_clipboard = "New project"
 timeline: Timeline = [
     "/remote-project\r",
-    "New project",
+    "/New project",
     "\r",
     "\x03",
     "\x18",

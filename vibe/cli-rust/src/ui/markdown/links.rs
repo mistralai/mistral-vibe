@@ -7,6 +7,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::Sc;
+use crate::selection::Fold;
 use crate::ui::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,11 +38,23 @@ pub struct LinkedLines {
     lines: Vec<Line<'static>>,
     runs: Vec<Vec<Run>>,
     targets: Vec<Target>,
+    /// Per line: whether it continues the wrapped line above it.
+    folds: Vec<Option<Fold>>,
+    /// Sorted indexes of the blank lines pushed as spacing, which a copy skips.
+    gaps: Vec<usize>,
 }
 
 impl LinkedLines {
     pub fn lines(&self) -> &[Line<'static>] {
         &self.lines
+    }
+
+    pub fn folds(&self) -> &[Option<Fold>] {
+        &self.folds
+    }
+
+    pub fn gaps(&self) -> &[usize] {
+        &self.gaps
     }
 
     pub fn into_lines(self) -> Vec<Line<'static>> {
@@ -63,8 +76,27 @@ impl LinkedLines {
     }
 
     pub fn push(&mut self, line: Line<'static>) {
+        self.push_folded(line, None);
+    }
+
+    /// Push a blank spacing row (a Textual margin): layout, never copied.
+    pub fn push_gap(&mut self) {
+        self.gaps.push(self.lines.len());
+        self.push(Line::from(""));
+    }
+
+    /// Push `line`, continuing the wrapped line above when `fold` is set.
+    pub fn push_folded(&mut self, line: Line<'static>, fold: Option<Fold>) {
         self.lines.push(line);
         self.runs.push(Vec::new());
+        self.folds.push(fold);
+    }
+
+    /// Mark the last line as continuing the wrapped line above it.
+    pub fn fold_last(&mut self, fold: Option<Fold>) {
+        if let Some(last) = self.folds.last_mut() {
+            *last = fold;
+        }
     }
 
     /// Push `row` after its `lead` spans, recording the cells its linked characters land on.
@@ -87,25 +119,37 @@ impl LinkedLines {
         lead.extend(super::text::merge(row));
         self.lines.push(Line::from(lead));
         self.runs.push(runs);
+        self.folds.push(None);
     }
 
     pub fn append(&mut self, other: LinkedLines) {
         let base = self.targets.len();
+        let offset = self.lines.len();
+        self.gaps.extend(other.gaps.iter().map(|gap| gap + offset));
         self.lines.extend(other.lines);
         self.runs.extend(other.runs.into_iter().map(|mut runs| {
             runs.iter_mut().for_each(|run| run.link += base);
             runs
         }));
         self.targets.extend(other.targets);
+        self.folds.extend(other.folds);
     }
 
     /// Insert `span(index)` at the start of each line, shifting its runs by the span's width.
     pub fn prefix(&mut self, span: impl Fn(usize) -> Span<'static>) {
-        for (index, (line, runs)) in self.lines.iter_mut().zip(&mut self.runs).enumerate() {
+        let rows = self
+            .lines
+            .iter_mut()
+            .zip(&mut self.runs)
+            .zip(&mut self.folds);
+        for (index, ((line, runs), fold)) in rows.enumerate() {
             let span = span(index);
             let width = span.width();
             line.spans.insert(0, span);
             runs.iter_mut().for_each(|run| run.x += width);
+            if let Some(fold) = fold {
+                fold.hang = fold.hang.saturating_add(width as u16);
+            }
         }
     }
 
@@ -113,12 +157,22 @@ impl LinkedLines {
     pub fn retain(&mut self, mut keep: impl FnMut(usize, &Line<'static>) -> bool) {
         let lines = std::mem::take(&mut self.lines);
         let runs = std::mem::take(&mut self.runs);
-        (self.lines, self.runs) = lines
+        let folds = std::mem::take(&mut self.folds);
+        let gaps = std::mem::take(&mut self.gaps);
+        let mut kept = 0;
+        ((self.lines, self.runs), self.folds) = lines
             .into_iter()
             .zip(runs)
+            .zip(folds)
             .enumerate()
-            .filter(|(index, (line, _))| keep(*index, line))
-            .map(|(_, pair)| pair)
+            .filter(|(index, ((line, _), _))| {
+                let keep = keep(*index, line);
+                self.gaps
+                    .extend((keep && gaps.binary_search(index).is_ok()).then_some(kept));
+                kept += usize::from(keep);
+                keep
+            })
+            .map(|(_, row)| row)
             .unzip();
     }
 
@@ -131,6 +185,8 @@ impl LinkedLines {
                 .map(|runs| runs.capacity() * std::mem::size_of::<Run>())
                 .sum::<usize>()
             + self.targets.capacity() * std::mem::size_of::<Target>()
+            + self.folds.capacity() * std::mem::size_of::<Option<Fold>>()
+            + self.gaps.capacity() * std::mem::size_of::<usize>()
             + self
                 .targets
                 .iter()
@@ -149,9 +205,11 @@ impl From<Vec<Line<'static>>> for LinkedLines {
     fn from(lines: Vec<Line<'static>>) -> Self {
         let runs = std::iter::repeat_with(Vec::new).take(lines.len()).collect();
         Self {
+            folds: vec![None; lines.len()],
             lines,
             runs,
             targets: Vec::new(),
+            gaps: Vec::new(),
         }
     }
 }

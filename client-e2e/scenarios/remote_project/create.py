@@ -10,4 +10,4 @@ request_methods = METHODS
 handshake["vibeCode/projects/select"]["project"] = handshake[
     "vibeCode/projects/create"
 ]["project"]
-timeline: Timeline = ["/remote-project\r", "New project", "\r", "\t", "develop", "\r"]
+timeline: Timeline = ["/remote-project\r", "/New project", "\r", "\t", "develop", "\r"]

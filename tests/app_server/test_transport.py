@@ -5,6 +5,7 @@ import asyncio
 from contextlib import suppress
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import socket
 import sys
@@ -419,7 +420,8 @@ async def test_stdio_server_uses_the_same_json_rpc_lifecycle() -> None:
         "serverInfo": {
             "name": "vibe-app-server",
             "version": responses[0]["result"]["serverInfo"]["version"],
-        }
+        },
+        "processId": os.getpid(),
     }
     assert responses[1]["result"]["state"]["session"]["id"] == (agent_loop.session_id)
     assert responses[2]["result"]["state"]["session"]["id"] == (agent_loop.session_id)

@@ -376,6 +376,9 @@ pub(crate) fn awaiting_action_id(state: &HarnessState) -> String {
             .executions
             .iter()
             .find_map(|execution| match &execution.state {
+                ToolExecutionState::DirectAwaitingApproval {
+                    approval_action_id, ..
+                } => Some(approval_action_id.clone()),
                 ToolExecutionState::DirectAwaitingPreHook { hook_action_id, .. }
                 | ToolExecutionState::DirectAwaitingPostHook { hook_action_id, .. } => {
                     Some(hook_action_id.clone())

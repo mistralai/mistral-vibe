@@ -1,13 +1,11 @@
 //! Shared input-screen pieces: the labeled input card, the validation colors,
-//! the feedback row, and the "Press `<key>`" hint. Used by the custom-domain
-//! and API-key screens.
+//! and the feedback row. Used by the custom-domain and API-key screens.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
 
-use super::panel::CARD_BORDER;
 use crate::setup::wizard::{OnboardingInput, ValidationState};
 use crate::ui::theme;
 
@@ -17,11 +15,11 @@ pub(super) fn validation_border(validation: &ValidationState) -> Color {
         ValidationState::Valid => theme::success(),
         ValidationState::Invalid(_) => theme::error(),
         ValidationState::Warning(_) => theme::warning(),
-        ValidationState::None => CARD_BORDER,
+        ValidationState::None => theme::fixed::ONBOARDING_CARD_BORDER,
     }
 }
 
-/// The feedback row under an input: "Enter to submit" when valid, the message
+/// The feedback row under an input: the `Enter submit` hint when valid, the message
 /// when the state carries one.
 pub(super) fn draw_validation_feedback(
     f: &mut Frame,
@@ -32,7 +30,8 @@ pub(super) fn draw_validation_feedback(
 ) {
     match validation {
         ValidationState::Valid => {
-            draw_press_hint(f, x, y, "Enter", " to submit \u{21b5}");
+            let submit = [(crate::hints::key::ENTER, crate::hints::action::SUBMIT)];
+            crate::ui::hint_line::draw(f, x, y, &submit);
         }
         ValidationState::Invalid(msg) => {
             draw_wrapped(f, x, y, width, msg, theme::error());
@@ -133,21 +132,9 @@ pub(super) fn draw_caret(f: &mut Frame, x: u16, y: u16, under: char) {
 
 fn input_cursor_style() -> Style {
     if theme::input_cursor_reverse() {
-        Style::default().fg(Color::Black).bg(Color::Gray)
+        theme::fixed::ansi_caret()
     } else {
         let color = theme::input_cursor_bg();
         Style::default().fg(color).bg(color)
     }
-}
-
-/// `Press <key><suffix>`, with the key highlighted.
-pub(super) fn draw_press_hint(f: &mut Frame, x: u16, y: u16, key_name: &str, suffix: &str) {
-    let text = Style::default().fg(theme::foreground());
-    let key = Style::default()
-        .fg(theme::primary())
-        .add_modifier(Modifier::BOLD);
-    f.buffer_mut().set_string(x, y, "Press ", text);
-    f.buffer_mut().set_string(x + 6, y, key_name, key);
-    f.buffer_mut()
-        .set_string(x + 6 + key_name.len() as u16, y, suffix, text);
 }

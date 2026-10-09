@@ -12,7 +12,7 @@ expected_actions = {
     "python": [Action("open_url", _URL)],
 }
 
-_ROW, _COL = 32, 8
+_ROW, _COL = 15, 8
 _CLICK = f"\x1b[<0;{_COL};{_ROW}M\x1b[<0;{_COL};{_ROW}m"
 
 timeline: Timeline = [

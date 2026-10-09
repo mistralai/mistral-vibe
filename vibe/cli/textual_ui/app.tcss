@@ -509,6 +509,15 @@ Markdown {
     }
 }
 
+.user-message-fired-loop .user-message-prompt {
+    color: $primary;
+}
+
+.user-message-fired-loop-line {
+    width: 100%;
+    height: auto;
+}
+
 .user-message-separator {
     width: 100%;
     height: 1;
@@ -713,6 +722,18 @@ Markdown {
         MarkdownHeader {
             margin: 0;
         }
+    }
+}
+
+/* /status marks each exact count as emphasis to render it as secondary text. */
+.agent-statistics MarkdownBlock {
+    & > .em {
+        text-style: none;
+        color: $text-muted;
+    }
+
+    &:ansi > .em {
+        text-style: dim;
     }
 }
 
@@ -1713,6 +1734,19 @@ NarratorStatus {
        11 cols (ceil(WIDTH/2), WIDTH=22); see petit_chat.py / braille_renderer.py. */
     width: 12;
     height: 3;
+}
+
+/* The LeChonk variant (26x15 dots) renders 13 cols by 4 rows; the default
+   12x3 pinning above would clip its bottom row and right column. The class
+   is toggled by PetitChat.set_variant(). */
+.banner-chat.lechonk {
+    width: 14;
+    height: 4;
+}
+
+.banner-chat.lechonk .petit-chat {
+    width: 14;
+    height: 4;
 }
 
 #banner-info {

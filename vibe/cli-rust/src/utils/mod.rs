@@ -36,5 +36,6 @@ pub mod scroll;
 pub mod startup_cache;
 pub mod text;
 pub mod text_diff;
+pub mod tls;
 pub mod transcript_cache;
 pub mod whats_new_cache;

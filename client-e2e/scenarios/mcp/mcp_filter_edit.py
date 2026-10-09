@@ -10,16 +10,15 @@ request_methods = {"telemetry/record", "mcp/refresh", "mcp/toggle", "connectors/
 
 timeline: Timeline = [
     "/mcp\r",
-    "\x1b[A",
+    "/",
     "derjk",
     "\x15",
     "\x1b[B",
-    "\x1b[D",
     "\x1b[200~fsé\n\x1b[201~",
     "\x7f",
     "yx",
     "\x1b[D\x1b[3~",
-    "\r",
+    "\x1b",
     "r",
     "\r",
 ]

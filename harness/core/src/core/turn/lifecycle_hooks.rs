@@ -1,7 +1,7 @@
 use crate::core::error::CoreError;
 use crate::core::hooks::{
     CompletionHookOutput, HookCall, HookPoint, HookResult, PreAgentTurnOutput, PreLlmCallOutput,
-    hook_action_id,
+    hook_action_id, validate_keyed_context_messages,
 };
 use crate::core::require_action_id;
 use crate::core::step_protocol::Action;
@@ -228,6 +228,7 @@ impl PendingLifecycleHook {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(in crate::core::turn) enum HookResolution {
     RestoreTurn {
         suspended: SuspendedTurn,
@@ -302,12 +303,17 @@ pub(in crate::core::turn) fn resolve_lifecycle_hook(
                 ..
             },
             HookResult::PreLlmCall(output),
-        ) => Ok(HookResolution::ResolveCompletion(
-            CompletionHookResolution::PreLlm {
-                completion_action_id,
-                output,
-            },
-        )),
+        ) => {
+            if let PreLlmCallOutput::Continue { context_messages } = &output {
+                validate_keyed_context_messages(context_messages)?;
+            }
+            Ok(HookResolution::ResolveCompletion(
+                CompletionHookResolution::PreLlm {
+                    completion_action_id,
+                    output,
+                },
+            ))
+        }
         (
             PendingLifecycleHook::PostLlmCall {
                 completion_action_id,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -925,3 +926,26 @@ class DummyTool(BaseTool[DummyArgs, DummyResult, BaseToolConfig, BaseToolState])
         classes = list(ToolManager._iter_tool_classes([tools_dir]))
 
         assert any(c.get_name() == "todo" for c in classes)
+
+    def test_tool_added_to_a_discovered_directory_is_picked_up(self, tmp_path: Path):
+        tools_dir = tmp_path / "tools"
+        tools_dir.mkdir()
+        (tools_dir / "reexport_todo.py").write_text(
+            "from vibe.core.tools.builtins.todo import Todo\n"
+        )
+        listed = tools_dir.stat()
+        assert {c.get_name() for c in ToolManager._iter_tool_classes([tools_dir])} == {
+            "todo"
+        }
+
+        (tools_dir / "reexport_bash.py").write_text(
+            "from vibe.core.tools.builtins.bash import Bash\n"
+        )
+        # A coarse-grained clock (Linux) can leave the directory mtime where the
+        # previous scan saw it after an add.
+        os.utime(tools_dir, ns=(listed.st_atime_ns, listed.st_mtime_ns))
+
+        assert {c.get_name() for c in ToolManager._iter_tool_classes([tools_dir])} == {
+            "todo",
+            "bash",
+        }

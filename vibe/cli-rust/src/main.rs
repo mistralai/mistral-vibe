@@ -33,6 +33,7 @@ async fn main() -> std::process::ExitCode {
 
 async fn run() -> Result<std::process::ExitCode> {
     vibe_rs::rollout::install_panic_hint();
+    vibe_rs::clipboard::set_sink(Arc::new(vibe_rs::clipboard::SystemClipboard));
     let mut timings = StartupRecorder::new();
     timings.record("process_entry");
     // clap's parse_from treats the first element as the program name, so hand
@@ -223,6 +224,7 @@ async fn run() -> Result<std::process::ExitCode> {
     app.completion.files = files;
     app.completion.skills = startup_config.skills.clone();
     agents::show_startup_agents(&mut app, &startup_config);
+    app.view.banner.sync_model_variant(&startup_config);
     app.session.startup_config = startup_config;
     app.session.tokens = cached_tokens;
     app.subagents.main_tokens = cached_tokens;
@@ -232,7 +234,7 @@ async fn run() -> Result<std::process::ExitCode> {
     // answer opens the wizard on the SAME child (one child per round,
     // server-owned key persistence). A worktree run's verdict sits in the
     // replay buffer; the wizard round it opens spawns its own child.
-    let mut input = vibe_rs::terminal_events::spawn();
+    let (mut input, input_reader) = vibe_rs::terminal_events::spawn();
     // `--setup` never renders the chat frame: the wizard owns the first
     // paint and holds every choice behind the overlapped boot's welcome
     // gate, then prints and exits without a session, so the run ends here.
@@ -267,7 +269,7 @@ async fn run() -> Result<std::process::ExitCode> {
     // the wizard's pre-loop round owns the first frame and hands the booted
     // child back (below). A worktree run keeps the gate's sequencing.
     if !worktree_run && keyed {
-        terminal.draw(|frame| app.draw(frame))?;
+        terminal::draw(&mut terminal, &mut app)?;
         timings.record("first_draw");
         vibe_rs::startup::mark_first_draw();
     }
@@ -402,6 +404,7 @@ async fn run() -> Result<std::process::ExitCode> {
         show_unready_config,
         sources,
         input,
+        input_reader,
         crash_rx,
         shutdown,
     };

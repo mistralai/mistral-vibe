@@ -19,7 +19,7 @@ handshake = {
 _PROMPT = "run a few harmless commands"
 
 # Reasoning and every effect of the run fold into one ToolGroup: the settled
-# frame shows a single collapsed header (triangle + "Ran commands, read files,
+# frame shows a single collapsed header (triangle + "Ran 3 commands, read 1 file,
 # thought") instead of individual call and result rows.
 timeline: Timeline = [
     f"{_PROMPT}\r",

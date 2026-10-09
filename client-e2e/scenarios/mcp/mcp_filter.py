@@ -8,7 +8,7 @@ from e2e.app_server.scenario import Timeline
 handshake = mcp_handshake(sample_sources())
 request_methods = {"telemetry/record"}
 
-timeline: Timeline = ["/mcp\r", "/", "GH", "\x1b[B", "\r", "\x7f", "/zz"]
+timeline: Timeline = ["/mcp\r", "/", "GH", "\x1b[B", "\r", "\x1b", "/zz"]
 
 screen_contains = {"rust": ("No matching MCP servers or connectors", "GHzz")}
 screen_excludes = {"rust": ("Local MCP Servers", "Available Connectors")}

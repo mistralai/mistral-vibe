@@ -27,7 +27,7 @@ clipboard_contains = (
     "Solarized - Warm muted tones",
 )
 clipboard_excludes = ("1.", "›")
-screen_contains = {"rust": ("› 1. Solarized",)}
+screen_contains = {"rust": ("1. Solarized",)}
 
 _QUESTIONS = [
     {
@@ -39,7 +39,7 @@ _QUESTIONS = [
     }
 ]
 
-# A press on the "› 1." prefix anchors no selection, so dragging along the
+# A press on the "1." prefix anchors no selection, so dragging along the
 # option row copies nothing and never navigates (1-based SGR coordinates).
 _PREFIX_DRAG = "\x1b[<0;4;34M\x1b[<32;30;34M\x1b[<0;30;34m"
 # Drag from the title row down across the first option's label: the copy keeps

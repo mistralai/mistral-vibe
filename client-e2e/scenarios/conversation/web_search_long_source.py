@@ -27,14 +27,13 @@ _SOURCES = [
     }
 ]
 
-# The tool group header, then its web-search entry header.
-_EXPAND = "\x1b[<0;1;30M\x1b[<0;1;30m"
-_EXPAND_ENTRY = "\x1b[<0;8;30M\x1b[<0;8;30m"
+# The lone web search stays ungrouped, so its own header row unfolds the sources.
+_EXPAND = "\x1b[<0;1;15M\x1b[<0;1;15m"
 # Hovering either row of the wrapped title highlights both; the tail row hangs past the bullet.
-_HOVER = "\x1b[<35;20;29M"
-_HOVER_TAIL = "\x1b[<35;16;30M"
+_HOVER = "\x1b[<35;14;19M"
+_HOVER_TAIL = "\x1b[<35;8;20M"
 # Clicking the wrapped tail opens the source.
-_CLICK_TAIL = "\x1b[<0;16;30M\x1b[<0;16;30m"
+_CLICK_TAIL = "\x1b[<0;8;20M\x1b[<0;8;20m"
 
 expected_actions = {"rust": [Action("open_url", _SOURCES[0]["url"])]}
 
@@ -47,7 +46,6 @@ timeline: Timeline = [
     assistant_msg(_ANSWER),
     turn_completed(),
     _EXPAND,
-    _EXPAND_ENTRY,
     _HOVER,
     _HOVER_TAIL,
     _CLICK_TAIL,

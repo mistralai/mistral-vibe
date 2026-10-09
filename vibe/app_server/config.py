@@ -83,6 +83,8 @@ class ConfigView(ProtocolModel):
     theme: str
     log_level: str | None
     disable_welcome_banner_animation: bool
+    # Preserve blinking when reading an older app-server response (ADR 0014).
+    cursor_blink: bool = True
     show_greeting: bool
     autocopy_to_clipboard: bool
     file_watcher_for_autocomplete: bool

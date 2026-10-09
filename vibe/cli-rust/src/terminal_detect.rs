@@ -15,6 +15,14 @@ pub const HYPER: &str = "hyper";
 pub const WINDOWS_TERMINAL: &str = "windows_terminal";
 pub const UNKNOWN: &str = "unknown";
 
+/// Python `_VSCODE_FAMILY_TERMINALS`: the hosts the VS Code extension promo targets.
+pub const VSCODE_FAMILY_TERMINALS: [&str; 3] = [VSCODE, VSCODE_INSIDERS, CURSOR];
+
+/// Whether `terminal` is in `VSCODE_FAMILY_TERMINALS`.
+pub fn is_vscode_family(terminal: &str) -> bool {
+    VSCODE_FAMILY_TERMINALS.contains(&terminal)
+}
+
 /// Detect the host terminal from the process environment (Python `detect_terminal`).
 pub fn detect() -> &'static str {
     detect_from(&Env)

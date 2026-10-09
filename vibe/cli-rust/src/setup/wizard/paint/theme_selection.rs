@@ -6,8 +6,9 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::App;
+use crate::hints;
 use crate::setup::wizard::OnboardingState;
-use crate::ui::{scrollbar, theme};
+use crate::ui::{hint_line, scrollbar, theme};
 
 const PREVIEW_MD: &str = r#"### Heading
 
@@ -122,20 +123,10 @@ fn hovered_row(app: &App, rect: Rect) -> bool {
 }
 
 fn draw_navigation_hints(f: &mut Frame, list_x: u16, list_w: u16, y: u16) {
-    let text = Style::default().fg(text_color());
-    let key = Style::default()
-        .fg(theme::primary())
-        .add_modifier(Modifier::BOLD);
-    f.buffer_mut()
-        .set_string(list_x.saturating_sub(13), y, "Navigate ", text);
-    f.buffer_mut()
-        .set_string(list_x.saturating_sub(4), y, "↑↓", key);
-    f.buffer_mut()
-        .set_string(list_x + list_w + 2, y, "Press ", text);
-    f.buffer_mut()
-        .set_string(list_x + list_w + 8, y, "Enter", key);
-    f.buffer_mut()
-        .set_string(list_x + list_w + 13, y, " ↵", text);
+    let left = [hints::NAVIGATE];
+    let x = list_x.saturating_sub(hints::width(&left) + 2);
+    hint_line::draw_clipped(f, x, y, list_x.saturating_sub(x), &left);
+    hint_line::draw(f, list_x + list_w + 2, y, &[hints::SELECT]);
 }
 
 #[allow(clippy::too_many_arguments)]

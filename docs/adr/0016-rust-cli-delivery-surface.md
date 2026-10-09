@@ -22,7 +22,6 @@ client targets the app-server protocol, not a specific session backend.
 Rust gives a single static binary, predictable startup, and a memory-safe
 immediate-mode TUI (Ratatui/Crossterm) that fits the unidirectional state model.
 A concrete protocol client and declared bounds keep the single adapter honest.
-Detail lives in the [architecture design doc](../design/rust-cli-architecture.md).
 
 ## Agent Guidance
 
@@ -33,8 +32,6 @@ Detail lives in the [architecture design doc](../design/rust-cli-architecture.md
 - Declare a bound for every new queue, retained collection, frame, log, or
   cache; document overflow behavior.
 - Do not render the full transcript per frame; use the viewport-bounded window.
-- Do not add speculative abstractions (clipboard, selection, fold, shared
-  widget abstractions) without a second consumer.
 - Preserve first-draw-before-spawn and RAII terminal restoration on all exit
   paths.
 - The client never writes `config.toml`, the OS keyring, or `$VIBE_HOME/.env`.

@@ -309,6 +309,21 @@ def test_snapshot_multi_select_toggle_multiple(snap_compare: SnapCompare) -> Non
     )
 
 
+def test_snapshot_multi_select_space_toggle(snap_compare: SnapCompare) -> None:
+    async def run_before(pilot: Pilot) -> None:
+        await pilot.pause(0.1)
+        await pilot.press("space")
+        await pilot.press("down", "down")
+        await pilot.press("space")
+        await pilot.pause(0.1)
+
+    assert snap_compare(
+        "test_ui_snapshot_question_app.py:MultiSelectApp",
+        terminal_size=(80, 20),
+        run_before=run_before,
+    )
+
+
 def test_snapshot_multi_select_navigate_to_submit(snap_compare: SnapCompare) -> None:
     async def run_before(pilot: Pilot) -> None:
         await pilot.pause(0.1)

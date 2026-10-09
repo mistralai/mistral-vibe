@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import builtins
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
@@ -249,6 +250,8 @@ _INTEROP_HISTORY_ADAPTER = TypeAdapter(list[InteropHistoryMessageV1])
 
 logger = logging.getLogger(__name__)
 _SHORT_SESSION_ID_LENGTH = 8
+_READ_STORE_CACHE_SIZE = 8
+_READ_STORE_CACHE_BYTES = 32 * 1024 * 1024
 _PROCESS_OUTPUT_TARGET_BYTES = 500 * 1024 * 1024
 _LEASE_RETRY_DELAY_SECONDS = 0.01
 _PROCESS_OUTPUT_CLEANUP_DEBOUNCE_SECONDS = 5.0
@@ -397,6 +400,8 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
     def __init__(self, storage_root: Path | None = None) -> None:
         self._storage_root = storage_root or _default_storage_root()
         self._sessions: dict[str, _LoadedSessionEntry] = {}
+        self._read_stores: OrderedDict[str, UnifiedSessionStore] = OrderedDict()
+        self._read_store_retirements = 0
         self._loading_sessions: dict[str, _LoadingSession] = {}
         self._maintenance_sessions: dict[str, asyncio.Event] = {}
         self._registry_lock = asyncio.Lock()
@@ -472,7 +477,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         if adapter_config is not None:
             validate_process_config(adapter_config)
             if (
-                adapter_config.process_authority == "host_shell"
+                adapter_config.process_authority != "disabled"
                 and config.settings.tools.background_processes.mode == "enabled"
                 and config.settings.tools.command_environment.mode
                 != adapter_config.command_environment
@@ -764,7 +769,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                         raise
                 return attachment
             await self._wait_for_maintenance(session_id)
-            store = UnifiedSessionStore(self._storage_root, session_id)
+            store = self._read_store(session_id)
             load: _LoadingSession | None = None
             if store.exists:
                 owns_load, load = await self._claim_session_load(session_id)
@@ -836,7 +841,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                             list(hook_bindings),
                         )
                     session = await asyncio.to_thread(
-                        self._bind, stored, lease, plugins, hook_handlers
+                        self._bind,
+                        stored,
+                        lease,
+                        plugins,
+                        hook_handlers,
+                        cached_from=store,
                     )
                 except BaseException:
                     await self._release_bound_plugins(session_id)
@@ -850,7 +860,9 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 await self._initialize_integrations(session, push_to_core=False)
                 await session.recover()
                 await self._push_integration_capabilities(session)
-                stored = await asyncio.to_thread(store.load)
+                stored = await asyncio.to_thread(
+                    session._runtime_for_host().stored_session
+                )
             if operation == "import":
                 await self._initialize_integrations(session)
                 await self._initialize_subagents(session)
@@ -891,6 +903,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 await self._finish_session_load(session_id, error=exc)
             raise
         attachment = await self._register(session)
+        self._retire_read_stores((session_id,))
         if load is not None:
             await self._finish_session_load(session_id, loaded_session_id=session_id)
         record_session_operation(
@@ -1276,10 +1289,14 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         if session := self._live_session(params.session_id):
             result = await session.read(params)
             return HarnessSessionReadResult(snapshot=result.snapshot, cwd=session.cwd)
-        store = UnifiedSessionStore(self._storage_root, params.session_id)
+        store = self._read_store(params.session_id)
         if not store.exists:
+            self._retire_read_stores((params.session_id,))
             raise HarnessSessionNotFoundError(params.session_id)
+        retirements = self._read_store_retirements
         stored = await asyncio.to_thread(store.load)
+        if self._read_store_retirements == retirements:
+            self._admit_read_store(store)
         # No live runtime here, and if no process holds the lease the session is
         # not executing anywhere: settle its stalled projection.
         snapshot = stored.projection_state.snapshot
@@ -1294,6 +1311,30 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             snapshot=_snapshot(projection, params.history_limit),
             cwd=stored.runtime_state.session_metadata.cwd,
         )
+
+    def _read_store(self, session_id: str) -> UnifiedSessionStore:
+        store = self._read_stores.get(session_id)
+        if store is not None and store.root == self._storage_root:
+            return store
+        return UnifiedSessionStore(self._storage_root, session_id)
+
+    def _admit_read_store(self, store: UnifiedSessionStore) -> None:
+        if self._closed:
+            return
+        self._read_stores[store.session_id] = store
+        self._read_stores.move_to_end(store.session_id)
+        retained = sum(cached.last_load_bytes for cached in self._read_stores.values())
+        while len(self._read_stores) > 1 and (
+            len(self._read_stores) > _READ_STORE_CACHE_SIZE
+            or retained > _READ_STORE_CACHE_BYTES
+        ):
+            _, evicted = self._read_stores.popitem(last=False)
+            retained -= evicted.last_load_bytes
+
+    def _retire_read_stores(self, session_ids: Iterable[str]) -> None:
+        self._read_store_retirements += 1
+        for session_id in session_ids:
+            self._read_stores.pop(session_id, None)
 
     async def rename(self, session_id: str, title: str) -> SessionSnapshot:
         self._guard_open()
@@ -1406,7 +1447,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         resolved = self._resolve_unified_session_id(session_id) or session_id
         if session := self._live_session(resolved):
             return session.cwd
-        entry = await asyncio.to_thread(self._catalog_entry, resolved)
+        entry = await self._catalog_entry(resolved)
         if entry is not None:
             return entry.metadata.cwd
         if self._legacy_source_resolver is not None:
@@ -1417,18 +1458,21 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
 
     async def session_pin(self, session_id: str, pin: SessionPin) -> str | None:
         """Best-effort value stored for a session pin (see ``SessionPin``)."""
+        return (await self.session_pins(session_id))[pin]
+
+    async def session_pins(self, session_id: str) -> dict[SessionPin, str | None]:
         self._guard_open()
         resolved = self._resolve_unified_session_id(session_id) or session_id
         if session := self._live_session(resolved):
-            return session.pin(pin)
-        entry = await asyncio.to_thread(self._catalog_entry, resolved)
+            return {pin: session.pin(pin) for pin in SessionPin}
+        entry = await self._catalog_entry(resolved)
         if entry is not None:
-            return entry.metadata.pin(pin)
+            return {pin: entry.metadata.pin(pin) for pin in SessionPin}
         if self._legacy_source_loader is not None:
             source = self._legacy_source_loader(session_id)
             if source.state == "quiescent":
-                return source.pin(pin)
-        return None
+                return {pin: source.pin(pin) for pin in SessionPin}
+        return dict.fromkeys(SessionPin)
 
     async def create_or_restore_child(
         self,
@@ -1912,6 +1956,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         except BaseException as exc:
             raise HarnessSessionDeleteError(session_id, str(exc)) from exc
         finally:
+            self._retire_read_stores((session_id, *leases.children))
             if succeeded or not (retain_after_failure and leases_ready):
                 self._tree_deletion_leases.pop(session_id, None)
                 for child_session_id in reversed(sorted(leases.children)):
@@ -1977,6 +2022,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         if self._closed:
             return
         self._closed = True
+        self._read_stores.clear()
         orphan_diagnostic_tasks = tuple(self._orphan_diagnostic_tasks.values())
         self._orphan_diagnostic_tasks.clear()
         for task in orphan_diagnostic_tasks:
@@ -2602,6 +2648,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         runtime_config_override: RustHarnessConfig | None = None,
         adapter_config_override: LocalRuntimeAdapterConfig | None = None,
         integrations_enabled: bool = True,
+        cached_from: UnifiedSessionStore | None = None,
     ) -> UnifiedHarnessSessionBackend:
         public = stored.projection_state.snapshot.session
         pending_events: list[JsonObject] = []
@@ -2712,6 +2759,8 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         store = UnifiedSessionStore(
             self._storage_root, stored.manifest.session_id, lease=lease
         )
+        if cached_from is not None:
+            store.adopt_cached_generation(cached_from)
         runtime_holder: list[DurableSessionRuntime] = []
         process_manager = self._new_process_manager(
             store,
@@ -3369,17 +3418,27 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
     ) -> SessionProcessManager | None:
         if (
             adapter_config is None
-            or adapter_config.process_authority != "host_shell"
+            or adapter_config.process_authority == "disabled"
             or self._runtime_config_template.settings.tools.background_processes.mode
             != "enabled"
         ):
             return None
-        if adapter_config.command_environment == "unix":
+        if self._loop is None:
+            raise RuntimeError("The Unified Harness Host has no event loop")
+        if adapter_config.sandbox is not None:
+            from mistralai_vibe_local_harness.vibe._processes._sandbox import (
+                SandboxTerminalBackend,
+            )
+
+            backend: TerminalBackend = SandboxTerminalBackend(
+                adapter_config.sandbox, session_id=store.session_id, loop=self._loop
+            )
+        elif adapter_config.command_environment == "unix":
             from mistralai_vibe_local_harness.vibe._processes._posix import (
                 PosixTerminalBackend,
             )
 
-            backend: TerminalBackend = PosixTerminalBackend()
+            backend = PosixTerminalBackend()
         elif adapter_config.command_environment in {"git_bash", "powershell"}:
             from mistralai_vibe_local_harness.vibe._processes._windows import (
                 WindowsTerminalBackend,
@@ -3393,8 +3452,6 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             raise ValueError(
                 "host-shell process authority requires a native shell profile"
             )
-        if self._loop is None:
-            raise RuntimeError("The Unified Harness Host has no event loop")
         return SessionProcessManager(
             session_root=store.session_root,
             backend=backend,
@@ -3517,8 +3574,15 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 matches.append((provenance.imported_at, entry.session_id))
         return min(matches)[1] if matches else None
 
-    def _catalog_entry(self, session_id: str) -> SessionCatalogEntryV1 | None:
-        return UnifiedSessionCatalog(self._storage_root).entry(session_id)
+    async def _catalog_entry(self, session_id: str) -> SessionCatalogEntryV1 | None:
+        store = self._read_store(session_id)
+        retirements = self._read_store_retirements
+        entry = await asyncio.to_thread(
+            UnifiedSessionCatalog(self._storage_root).entry, session_id, store
+        )
+        if store.last_load_bytes and self._read_store_retirements == retirements:
+            self._admit_read_store(store)
+        return entry
 
     @staticmethod
     def _importable_history(stored: StoredSession) -> list[InteropHistoryMessageV1]:
@@ -4049,7 +4113,7 @@ def _snapshot(projection: ProjectionStateV1, history_limit: int) -> SessionSnaps
         ),
         history_limit=history_limit,
         watermark=projection.watermark,
-    )
+    ).model_copy(deep=True)
 
 
 def _validate_child_runtime_state(

@@ -97,7 +97,7 @@ impl RuntimeBuiltinToolName {
         }
     }
 
-    fn programmatic_name(self, invocation_name: &str) -> Option<String> {
+    fn programmatic_runtime_name(self, invocation_name: &str) -> Option<String> {
         match self {
             Self::SelfSleep => Some("sleep".to_string()),
             Self::FileSystemReadFile => Some("read_file".to_string()),
@@ -324,13 +324,13 @@ impl ExternalTool {
         }
     }
 
-    pub(crate) fn programmatic_name(&self) -> Option<String> {
+    pub(crate) fn programmatic_runtime_name(&self) -> Option<String> {
         match self {
             Self::RuntimeBuiltin {
                 name,
                 invocation_name,
                 ..
-            } => name.programmatic_name(invocation_name),
+            } => name.programmatic_runtime_name(invocation_name),
             Self::Provided {
                 group_name,
                 tool_name,

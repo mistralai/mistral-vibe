@@ -5,6 +5,7 @@ use std::process::Command;
 #[test]
 #[ignore]
 fn helper_copy() {
+    vibe_rs::clipboard::set_sink(std::sync::Arc::new(vibe_rs::clipboard::SystemClipboard));
     let text = std::env::var("VIBE_TEST_CLIPBOARD_TEXT").expect("clipboard text");
     assert!(!vibe_rs::clipboard::copy_to_clipboard(&text));
 }

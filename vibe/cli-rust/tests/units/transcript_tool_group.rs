@@ -22,15 +22,6 @@ fn user_message(id: &str) -> serde_json::Value {
     })
 }
 
-fn assistant_text(id: &str, text: &str) -> serde_json::Value {
-    json!({
-        "id": id,
-        "type": "message",
-        "role": "assistant",
-        "content": [{"type": "text", "text": text}],
-    })
-}
-
 fn answered_callback(id: &str) -> serde_json::Value {
     json!({
         "id": id,
@@ -118,7 +109,7 @@ fn trailing_group_keeps_running_after_a_successful_turn() {
 #[test]
 fn trailing_group_settles_on_a_failed_or_interrupted_turn() {
     // Python `stop_current_tool_call` finalizes the open group on turn error.
-    let mut tail = live(&[effect("e1", "completed")]);
+    let mut tail = live(&[effect("e1", "completed"), effect("e2", "completed")]);
     tail.finalize_tool_group();
     assert!(!running(&tail));
 }
@@ -127,15 +118,21 @@ fn trailing_group_settles_on_a_failed_or_interrupted_turn() {
 fn trailing_group_settles_on_a_later_non_groupable_entry() {
     // Python `_handle_entry_added` finalizes the group when the new entry
     // cannot join it, and a groupable entry afterwards opens the next one.
-    let closed = live(&[effect("e1", "completed"), user_message("m1")]);
+    let closed = live(&[
+        effect("e1", "completed"),
+        effect("e2", "completed"),
+        user_message("m1"),
+    ]);
     assert!(!running(&closed));
     let reopened = live(&[
         effect("e1", "completed"),
-        user_message("m1"),
         effect("e2", "completed"),
+        user_message("m1"),
+        effect("e3", "completed"),
+        effect("e4", "completed"),
     ]);
     assert!(!running(&reopened));
-    assert!(!reopened.entry(2).unwrap().group.expect("groups").finalized);
+    assert!(!reopened.entry(3).unwrap().group.expect("groups").finalized);
 }
 
 #[test]
@@ -182,19 +179,6 @@ fn widget_less_server_notice_keeps_call_rounds_in_one_group() {
 }
 
 #[test]
-fn assistant_text_still_splits_call_rounds() {
-    let transcript = live(&[
-        effect("e1", "completed"),
-        assistant_text("m1", "Working on it."),
-        effect("e2", "completed"),
-    ]);
-    assert_eq!(
-        transcript.expandable_ids(),
-        vec!["tool-group:e1".to_owned(), "tool-group:e2".to_owned()]
-    );
-}
-
-#[test]
 fn unknown_entry_keeps_call_rounds_in_one_group() {
     let transcript = live(&[
         effect("e1", "completed"),
@@ -224,26 +208,32 @@ fn agent_change_keeps_call_rounds_in_one_group() {
 /// so a widget-less entry may also open or close the run.
 #[test]
 fn widget_less_entry_first_keeps_header_on_first_call() {
-    let transcript = live(&[answered_callback("cb1"), effect("e1", "completed")]);
+    let transcript = live(&[
+        answered_callback("cb1"),
+        effect("e1", "completed"),
+        effect("e2", "completed"),
+    ]);
     assert_eq!(
         transcript.expandable_ids(),
         vec!["tool-group:e1".to_owned()]
     );
-    let group = transcript.entry(1).unwrap().group.unwrap();
-    assert!(group.first);
-    assert!(group.last);
+    assert!(transcript.entry(1).unwrap().group.unwrap().first);
+    assert!(transcript.entry(2).unwrap().group.unwrap().last);
 }
 
 #[test]
 fn widget_less_entry_last_keeps_border_on_last_call() {
-    let transcript = live(&[effect("e1", "completed"), answered_callback("cb1")]);
+    let transcript = live(&[
+        effect("e1", "completed"),
+        effect("e2", "completed"),
+        answered_callback("cb1"),
+    ]);
     assert_eq!(
         transcript.expandable_ids(),
         vec!["tool-group:e1".to_owned()]
     );
-    let group = transcript.entry(0).unwrap().group.unwrap();
-    assert!(group.first);
-    assert!(group.last);
+    assert!(transcript.entry(0).unwrap().group.unwrap().first);
+    assert!(transcript.entry(1).unwrap().group.unwrap().last);
 }
 
 #[test]
@@ -264,13 +254,15 @@ fn scheduled_loop_notice_does_not_split_call_rounds() {
 fn scheduled_loop_prompt_splits_call_rounds() {
     let transcript = live(&[
         effect("e1", "completed"),
+        effect("e2", "completed"),
         user_message("u1"),
         scheduled_loop_notice("n1"),
-        effect("e2", "completed"),
+        effect("e3", "completed"),
+        effect("e4", "completed"),
     ]);
     assert_eq!(
         transcript.expandable_ids(),
-        vec!["tool-group:e1".to_owned(), "tool-group:e2".to_owned()]
+        vec!["tool-group:e1".to_owned(), "tool-group:e3".to_owned()]
     );
 }
 
@@ -278,9 +270,15 @@ fn scheduled_loop_prompt_splits_call_rounds() {
 fn local_notice_still_splits_call_rounds() {
     let mut notice = server_notice("n1");
     notice["local"] = true.into();
-    let transcript = live(&[effect("e1", "completed"), notice, effect("e2", "completed")]);
+    let transcript = live(&[
+        effect("e1", "completed"),
+        effect("e2", "completed"),
+        notice,
+        effect("e3", "completed"),
+        effect("e4", "completed"),
+    ]);
     assert_eq!(
         transcript.expandable_ids(),
-        vec!["tool-group:e1".to_owned(), "tool-group:e2".to_owned()]
+        vec!["tool-group:e1".to_owned(), "tool-group:e3".to_owned()]
     );
 }

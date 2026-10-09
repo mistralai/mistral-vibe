@@ -24,7 +24,7 @@ pub use cache::{MarkdownCache, MAX_MARKDOWN_CACHE_BYTES, MAX_MARKDOWN_CACHE_ENTR
 pub use fence::{lang as fence_lang, lines as fence_lines};
 pub use links::{screen_links, Link, LinkKind, LinkedLines};
 pub use parse::parse;
-pub(crate) use text::{cell_width, wrap_chars};
+pub(crate) use text::{cell_width, is_blank_line, wrap_chars, wrap_chars_folded};
 
 const PAD: usize = 2;
 
@@ -186,7 +186,12 @@ pub fn render_widget(text: &str, width: u16) -> Vec<Line<'static>> {
 /// and every heading follow their content directly and a gap is only the
 /// previous block's bottom margin.
 pub fn command_result(text: &str, width: u16) -> Vec<Line<'static>> {
-    prepare(text, width, ASSISTANT, true).lines.into_lines()
+    command_result_linked(text, width).into_lines()
+}
+
+/// [`command_result`] keeping the lines' links and wrap folds.
+pub fn command_result_linked(text: &str, width: u16) -> LinkedLines {
+    prepare(text, width, ASSISTANT, true).lines
 }
 
 /// A markdown body under a heavy left border (Python `.whats-new-message`,
@@ -196,21 +201,20 @@ pub fn command_result(text: &str, width: u16) -> Vec<Line<'static>> {
 /// leading and trailing blank rows the plain renderer inserts are dropped.
 pub fn guttered(text: &str, width: u16, color: ratatui::style::Color) -> LinkedLines {
     let mut body = prepare(text, width.saturating_sub(2), BANNER, false).lines;
-    let blank = |line: &Line<'static>| line.spans.iter().all(|span| span.content.trim().is_empty());
     let first = body
         .lines()
         .iter()
-        .position(|line| !blank(line))
+        .position(|line| !is_blank_line(line))
         .unwrap_or(body.len());
     let end = body
         .lines()
         .iter()
-        .rposition(|line| !blank(line))
+        .rposition(|line| !is_blank_line(line))
         .map_or(first, |last| last + 1);
     let gap = body
         .lines()
         .get(first + 1)
-        .is_some_and(blank)
+        .is_some_and(is_blank_line)
         .then_some(first + 1);
     body.retain(|index, _| index >= first && index < end && Some(index) != gap);
     let gutter = Style::default().fg(color);
@@ -254,6 +258,12 @@ fn prepare(text: &str, width: u16, frame: Frame, command: bool) -> PreparedMarkd
             (true, true) => (0, 0),
             _ => margins(block, frame, command),
         };
+        // A marginless ANSI chat fence still stands one row apart from a neighbouring block.
+        let apart = usize::from(
+            matches!(block, Block::Code(_))
+                && frame.profile == Profile::Assistant
+                && super::theme::is_ansi(),
+        );
         let gap = match prev_bottom {
             // A chat message opens with one blank row of its own; a bare widget
             // starts directly at the first block's top margin.
@@ -261,13 +271,16 @@ fn prepare(text: &str, width: u16, frame: Frame, command: bool) -> PreparedMarkd
                 Profile::Widget => top,
                 Profile::Assistant => 1 + top,
             },
-            Some(previous) => previous.max(top),
+            Some(previous) => previous.max(top).max(apart),
         };
         for _ in 0..gap {
-            out.lines.push(Line::from(""));
+            match prev_bottom {
+                None => out.lines.push_gap(),
+                Some(_) => out.lines.push(Line::from("")),
+            }
         }
         render::render_block(block, width, frame, &mut out);
-        prev_bottom = Some(bottom);
+        prev_bottom = Some(bottom.max(apart));
     }
     if frame.profile == Profile::Widget {
         // The last block's bottom margin is part of the widget's scroll height.

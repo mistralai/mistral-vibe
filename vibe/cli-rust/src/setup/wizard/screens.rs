@@ -41,8 +41,8 @@ fn handle_welcome(state: &mut OnboardingState, key: KeyEvent) -> Option<Action> 
 
 fn handle_theme(state: &mut OnboardingState, key: KeyEvent) -> Option<Action> {
     match key.code {
-        KeyCode::Up | KeyCode::Down => {
-            step_theme(state, key.code == KeyCode::Up);
+        KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k') => {
+            step_theme(state, matches!(key.code, KeyCode::Up | KeyCode::Char('k')));
             None
         }
         KeyCode::Enter => {
@@ -90,12 +90,9 @@ fn preview_selected_theme(state: &OnboardingState) {
 
 fn handle_auth_method(state: &mut OnboardingState, key: KeyEvent) -> Option<Action> {
     match key.code {
-        KeyCode::Up => {
-            state.auth_method_selected = state.auth_method_selected.saturating_sub(1);
-            None
-        }
-        KeyCode::Down => {
-            state.auth_method_selected = (state.auth_method_selected + 1).min(1);
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
+            let down = matches!(key.code, KeyCode::Down | KeyCode::Char('j'));
+            state.auth_method_selected = crate::list_nav::wrap(state.auth_method_selected, 2, down);
             None
         }
         KeyCode::Enter => {
@@ -117,14 +114,11 @@ fn handle_auth_method(state: &mut OnboardingState, key: KeyEvent) -> Option<Acti
 
 fn handle_sign_in_target(state: &mut OnboardingState, key: KeyEvent) -> Option<Action> {
     match key.code {
-        KeyCode::Up => {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
+            let down = matches!(key.code, KeyCode::Down | KeyCode::Char('j'));
             state.override_confirm_armed = false;
-            state.sign_in_target_selected = state.sign_in_target_selected.saturating_sub(1);
-            None
-        }
-        KeyCode::Down => {
-            state.override_confirm_armed = false;
-            state.sign_in_target_selected = (state.sign_in_target_selected + 1).min(1);
+            let selected = state.sign_in_target_selected;
+            state.sign_in_target_selected = crate::list_nav::wrap(selected, 2, down);
             None
         }
         KeyCode::Enter => {

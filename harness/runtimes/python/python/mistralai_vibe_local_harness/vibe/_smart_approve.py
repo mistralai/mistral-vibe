@@ -20,15 +20,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from enum import StrEnum, auto
 import hashlib
 import json
 import logging
+from pathlib import Path
+import re
 import time
-from typing import Protocol
+from typing import Literal, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue
 
 from mistralai_vibe_local_harness.protocol import (
     RustCompletionResult,
@@ -121,6 +123,9 @@ class RiskClassificationRequest(BaseModel):
     # The directories this session may write to. Static configuration, not session
     # history -- the same boundary the file tools already enforce.
     writable_roots: list[str] = Field(default_factory=list)
+    # The writable roots that are source checkouts, as found on disk. Only these
+    # are shown to the classifier by name rather than by location.
+    project_roots: list[str] = Field(default_factory=list)
 
     def args_hash(self) -> str:
         # Identifies one exact call. Its only use is scoping a human's session grant
@@ -175,15 +180,60 @@ def build_classification_request(
     messages: Sequence[RustMessage],
     *,
     writable_roots: Sequence[str] = (),
+    project_roots: Sequence[str] | None = None,
 ) -> RiskClassificationRequest:
-    """Build the stripped classifier input for a pending tool call."""
+    """Build the stripped classifier input for a pending tool call.
+
+    ``project_roots`` is which writable roots are checkouts, as decided when the
+    roots were configured; without it, the disk is read now.
+    """
     return RiskClassificationRequest(
         tool_name=_tool_name(call),
         args=call.arguments,
         user_message=_recent_user_message(messages),
         recent_answers=_recent_clarifications(messages),
         writable_roots=list(writable_roots),
+        project_roots=list(
+            project_checkouts(writable_roots)
+            if project_roots is None
+            else project_roots
+        ),
     )
+
+
+def project_checkouts(roots: Sequence[str]) -> list[str]:
+    """The roots that are source checkouts, which the classifier sees by name."""
+    return [root for root in roots if _is_project_checkout(root)]
+
+
+def _is_project_checkout(root: str) -> bool:
+    """Whether a writable root is a source checkout the classifier may see by name.
+
+    Being writable is not evidence that a directory is ordinary: a session can be
+    given ``~/.kube`` or ``~/.password-store``. A checkout is a directory holding a
+    ``.git`` entry. Below a hidden directory only a linked worktree qualifies (its
+    ``.git`` is a file), which is how tools keep checkouts under their own state
+    directories; a repository that is itself kept hidden stays identifiable.
+    """
+    path = Path(root)
+    git = _git_entry(path)
+    if git is None:
+        return False
+    hidden = any(part.startswith(".") for part in path.parts)
+    return git == "file" if hidden else True
+
+
+def _git_entry(root: Path) -> Literal["file", "directory"] | None:
+    """What ``root/.git`` is on disk; the checkout rule's only filesystem read."""
+    git = root / ".git"
+    try:
+        if git.is_file():
+            return "file"
+        if git.is_dir():
+            return "directory"
+    except OSError:
+        pass
+    return None
 
 
 async def classify_tool_call(
@@ -201,9 +251,10 @@ async def classify_tool_call(
     """
     factory = classifier_factory or default_tool_risk_classifier
     # Swap the classify route onto the fast model with deterministic decoding
-    # (temperature 0, thinking off), independent of the session: a thinking session
-    # must not send a thinking request to the small classifier. config.model is
-    # re-derived from active_model in __post_init__, so model= alone would be ignored.
+    # (temperature 0, thinking off, no top_p or output cap), independent of the
+    # session: a thinking session must not send a thinking request to the small
+    # classifier. config.model is re-derived from active_model in __post_init__, so
+    # model= alone would be ignored.
     classifier = factory(
         replace(
             config,
@@ -212,6 +263,8 @@ async def classify_tool_call(
                 model=classify_model,
                 temperature=0.0,
                 thinking="off",
+                top_p=None,
+                max_output_tokens=None,
             ),
         )
     )
@@ -462,7 +515,27 @@ def _strip_code_fences(content: str) -> str:
 
 
 def _build_user_message(request: RiskClassificationRequest) -> str:
-    args_text = json.dumps(request.args, ensure_ascii=False)[:_MAX_ARGS_CHARS]
+    """The classifier's view of one call: the call, the user's words, the roots.
+
+    Paths inside a writable root that is a source checkout are shown relative to
+    it, as ``<workspace>/...``. Where such a root sits on disk is not evidence, and
+    showing it lets the model judge the location instead of the action: a checkout
+    whose absolute path passes through a ``.vibe`` directory reads as the agent's
+    own config. Other roots keep their location, which may be the evidence that
+    matters. Only the rendering changes; ``request.args`` stays exact.
+
+    The agent writes the arguments, so it can type a root's name itself. Nothing
+    is renamed for a call whose arguments already contain one: the name would
+    vouch for text that is not a path under the root (in a shell,
+    ``<workspace>/x`` reads from ``workspace`` and writes to ``/x``).
+    """
+    named_roots = (
+        ()
+        if _NAME_PREFIX in json.dumps(request.args, ensure_ascii=False).lower()
+        else _named_roots(request.project_roots)
+    )
+    args = _relative_to_roots(request.args, named_roots)
+    args_text = json.dumps(args, ensure_ascii=False)[:_MAX_ARGS_CHARS]
     parts = [f"Tool: {request.tool_name}", f"Arguments: {args_text}"]
     if request.user_message:
         parts.append(f"User request: {request.user_message[:_MAX_USER_MESSAGE_CHARS]}")
@@ -472,12 +545,116 @@ def _build_user_message(request: RiskClassificationRequest) -> str:
             + "\n".join(f"- {answer}" for answer in request.recent_answers)
         )
     if request.writable_roots:
+        names = {named.root: named.name for named in named_roots}
         parts.append(
             "Writable roots (trusted; the session's configured boundary, not something "
-            "the agent can assert): paths under these are the user's own working area.\n"
-            + "\n".join(f"- {root}" for root in request.writable_roots)
+            "the agent can assert): paths under these are the user's own working area. "
+            "Arguments refer to each root by the name listed here.\n"
+            + "\n".join(f"- {names.get(root, root)}" for root in request.writable_roots)
         )
     return "\n".join(parts)
+
+
+_WORKSPACE_NAME = "<workspace>"
+# Every root name starts with this, whatever the number of roots.
+_NAME_PREFIX = "<workspace"
+
+
+@dataclass(frozen=True, slots=True)
+class _NamedRoot:
+    root: str
+    name: str
+    spelling: re.Pattern[str]
+
+
+def _named_roots(roots: Sequence[str]) -> tuple[_NamedRoot, ...]:
+    """The roots shown by name, innermost first so a nested root wins.
+
+    A root that contains the home directory keeps its absolute form. It is a whole
+    account rather than a project: startup items and credentials live there under
+    ordinary names, and ``<workspace>/Library/...`` would hide that from the model.
+    Without a known home directory, no root can be shown to be narrower, so none is
+    named.
+    """
+    home = _home()
+    if home is None:
+        return ()
+    named = [
+        root
+        for root in roots
+        if not any(candidate.is_relative_to(root) for candidate in home)
+    ]
+    names = (
+        [_WORKSPACE_NAME]
+        if len(named) == 1
+        else [f"<workspace-{index}>" for index in range(1, len(named) + 1)]
+    )
+    return tuple(
+        sorted(
+            (
+                _NamedRoot(root=root, name=name, spelling=_root_spelling(root, home))
+                for root, name in zip(named, names, strict=True)
+            ),
+            key=lambda named_root: len(named_root.root),
+            reverse=True,
+        )
+    )
+
+
+def _home() -> tuple[Path, ...] | None:
+    """The home directory, as given and as resolved, or ``None`` when unknown."""
+    try:
+        home = Path.home()
+    except RuntimeError:
+        return None
+    return (home, home.resolve())
+
+
+def _root_spelling(root: str, homes: Sequence[Path]) -> re.Pattern[str]:
+    """Match a root as a whole path, written absolutely or through ``~``.
+
+    Either separator matches. A match must start and end where a path clearly
+    does, so ``/srv/repo`` is not matched inside ``/srv/repo2``, ``/srv/repo~``,
+    ``/mnt/srv/repo`` or ``host:/srv/repo``. Anything ambiguous keeps its real
+    path, which shows the classifier more rather than less. Roots are stored
+    resolved, so under a symlinked home only the resolved home is their parent;
+    both spellings of home are tried.
+    """
+    spellings = [root]
+    root_path = Path(root)
+    for home in homes:
+        if root_path.is_relative_to(home):
+            tilde = "~/" + root_path.relative_to(home).as_posix()
+            if tilde not in spellings:
+                spellings.append(tilde)
+    alternatives = "|".join(
+        r"[/\\]".join(re.escape(part) for part in re.split(r"[/\\]", spelling))
+        for spelling in spellings
+    )
+    return re.compile(_PATH_START + f"(?:{alternatives})" + _PATH_END)
+
+
+# A root may only follow the start of the text, whitespace, a quote, an
+# assignment or a shell operator, and only be followed by the end of the text, a
+# separator, whitespace, a quote or a shell operator.
+_PATH_START = r"(?<![^\s\"'`=;&|(<>])"
+_PATH_END = r"(?![^/\\\s\"'`;&|)<>])"
+
+
+def _relative_to_roots(
+    value: JsonValue, named_roots: Sequence[_NamedRoot]
+) -> JsonValue:
+    if isinstance(value, str):
+        for named in named_roots:
+            value = named.spelling.sub(named.name, value)
+        return value
+    if isinstance(value, list):
+        return [_relative_to_roots(item, named_roots) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _relative_to_roots(item, named_roots) for key, item in value.items()
+        }
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -555,13 +732,13 @@ Evaluate the REAL-WORLD IMPACT of the action, not just the surface text.
 - If commands are chained with && or |, evaluate the whole chain.
 - Look through wrappers (bash -c, python -c, env VAR=..., sudo) to the actual operation.
 - A generated local script is not low-risk just because its body is omitted. Inspect its content if available.
-- **Judge only the tool call in front of you.** Do not penalise a safe action because a risky action might follow later. `git add`, `git status`, `git log`, and `git commit` are always low/medium risk even if the user previously mentioned pushing to main — only the push itself is high risk.
+- **Judge only the tool call in front of you.** Do not penalise a safe action because a risky action might follow later. `git add`, `git status`, `git log`, and `git commit` are always low/medium risk even if the user previously mentioned pushing to main — only the push itself is high risk. The same holds for intent: a user request to open a PR, push or deploy does not make a local edit, read or commit riskier, and a call that does not itself push, deploy or contact a remote service must not be scored as if it did.
 
 ## Risk taxonomy
 
 - **low**: routine, narrowly scoped, easy-to-reverse actions. No credential access, no untrusted network export, no security weakening, no data loss risk. Examples: reading files, listing dirs, grep, git status/log/diff/show/add, running tests, linting, formatting, git push to a personal feature branch.
-- **medium**: meaningful but bounded blast radius, or reversible side effects. Examples: editing project files, writing new files, installing declared dependencies, git commit (local only, no network), git push to a shared non-protected branch.
-- **high**: dangerous or costly-to-reverse actions. Examples: force-pushing over history, deleting files, running migrations, accessing secrets, network exfiltration, modifying shared resources, pushing to main/master/release branches.
+- **medium**: meaningful but bounded blast radius, or reversible side effects. Examples: editing project files -- including CI, build and deployment configuration such as `.github/workflows/`, `.buildkite/`, a Makefile or a Dockerfile, which change nothing shared until they are pushed -- writing new files, installing declared dependencies, git commit (local only, no network), git push to a shared non-protected branch.
+- **high**: dangerous or costly-to-reverse actions. Examples: force-pushing over history, deleting files, running migrations, accessing secrets, network exfiltration, modifying shared resources (remote services, shared infrastructure, jobs or data other people use -- a file in the workspace is not one), pushing to main/master/release branches.
   - **Deleting inside a writable root is not high risk.** A user who has given the session write access to a directory has already accepted that its contents change: creating, editing and removing a file there are the same permission, so a delete confined to a WRITABLE ROOT (or to a temp directory such as /tmp) is **medium**, or **low** for an obvious scratch file. Reserve **high** for deletes that reach outside those roots, for recursive deletes of a directory tree, and for anything matching a block rule. Prompting on routine cleanup inside the user's own working area teaches people to switch the gate off wholesale.
 - **critical**: obvious credential exfiltration to untrusted destinations, or major irreversible destruction. Examples: posting .env contents to an external URL, force-pushing to main, mass-deleting cloud resources.
 
@@ -641,4 +818,5 @@ __all__ = [
     "build_classification_request",
     "classify_tool_call",
     "default_tool_risk_classifier",
+    "project_checkouts",
 ]

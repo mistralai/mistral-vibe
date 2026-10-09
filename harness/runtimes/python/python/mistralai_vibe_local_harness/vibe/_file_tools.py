@@ -1,21 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
-import os
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-import stat
-import tempfile
-from typing import IO, Annotated, cast
+from typing import Annotated, cast
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    JsonValue,
-    StringConstraints,
-    ValidationError,
-)
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints
 
 from mistralai_vibe_local_harness.protocol import (
     RustProtocolError,
@@ -25,19 +16,23 @@ from mistralai_vibe_local_harness.protocol import (
     RustToolSucceededEvent,
     RustToolSuccessResult,
 )
+from mistralai_vibe_local_harness.vibe import _sandbox_helper
 from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
+from mistralai_vibe_local_harness.vibe._sandbox import (
+    SandboxAdapter,
+    run_helper,
+    sandbox_path,
+)
+from mistralai_vibe_local_harness.vibe._sandbox_helper import FileToolName
 
-SNIFF_BYTES = 4_096
-_FIRST_PRINTABLE = 0x20
-_DEL = 0x7F
-_C1_CONTROL_END = 0x9F
-DEFAULT_LINE_LIMIT = 2_000
-MAX_READ_BYTES = 50 * 1_024
-MAX_WRITE_BYTES = 64_000
-MAX_WRITE_PREVIOUS_CONTENT_BYTES = 64_000
-MAX_EDIT_FILE_SIZE_BYTES = 512 * 1_024 * 1_024
+DEFAULT_LINE_LIMIT = _sandbox_helper.DEFAULT_LINE_LIMIT
+MAX_READ_BYTES = _sandbox_helper.MAX_READ_BYTES
+MAX_WRITE_BYTES = _sandbox_helper.MAX_WRITE_BYTES
+MAX_WRITE_PREVIOUS_CONTENT_BYTES = _sandbox_helper.MAX_WRITE_PREVIOUS_CONTENT_BYTES
+MAX_EDIT_FILE_SIZE_BYTES = _sandbox_helper.MAX_EDIT_FILE_SIZE_BYTES
 SEARCH_REPLACE_ANNOTATION_KEY = "mistralai.vibe.sdk.search_replace"
 WRITE_FILE_ANNOTATION_KEY = "mistralai.vibe.sdk.write_file"
+SANDBOX_FILE_TOOL_TIMEOUT_SECONDS = 120.0
 
 
 class ReadFileArgs(BaseModel):
@@ -107,416 +102,195 @@ class SearchReplaceAnnotations(BaseModel):
     blocks: list[SearchReplacePreviewBlock]
 
 
+class ReadFileResponse(BaseModel):
+    result: ReadFileResult
+    annotations: None = None
+
+    def meta(self) -> dict[str, JsonValue] | None:
+        return None
+
+
+class WriteFileResponse(BaseModel):
+    result: WriteFileResult
+    annotations: str | None = None
+
+    def meta(self) -> dict[str, JsonValue] | None:
+        if self.annotations is None:
+            return None
+        previous = WriteFileAnnotations(previous_content=self.annotations)
+        return {WRITE_FILE_ANNOTATION_KEY: previous.model_dump(mode="json")}
+
+
+class SearchReplaceResponse(BaseModel):
+    result: SearchReplaceResult
+    annotations: list[SearchReplacePreviewBlock]
+
+    def meta(self) -> dict[str, JsonValue] | None:
+        previews = SearchReplaceAnnotations(blocks=self.annotations)
+        return {SEARCH_REPLACE_ANNOTATION_KEY: previews.model_dump(mode="json")}
+
+
+@dataclass(frozen=True, slots=True)
+class FileTool:
+    """How one file tool's arguments and helper response are read."""
+
+    name: FileToolName
+    arguments: type[ReadFileArgs] | type[WriteFileArgs] | type[SearchReplaceArgs]
+    response: (
+        type[ReadFileResponse] | type[WriteFileResponse] | type[SearchReplaceResponse]
+    )
+
+
+FILE_TOOLS: Mapping[str, FileTool] = {
+    "file_system.read_file": FileTool("read_file", ReadFileArgs, ReadFileResponse),
+    "file_system.write_file": FileTool("write_file", WriteFileArgs, WriteFileResponse),
+    "file_system.search_replace": FileTool(
+        "search_replace", SearchReplaceArgs, SearchReplaceResponse
+    ),
+}
+
+
 async def execute_file_tool(
     action: RustRuntimeBuiltinToolCallAction,
     config: LocalRuntimeAdapterConfig,
     *,
     additional_read_roots: tuple[Path, ...] = (),
+    workspace_read_roots: tuple[Path, ...] = (),
     authorized_path: Path | None = None,
 ) -> RustToolSucceededEvent | RustToolFailedEvent:
-    return await asyncio.to_thread(
-        _execute_file_tool_sync,
-        action,
-        config,
-        additional_read_roots=additional_read_roots,
-        authorized_path=authorized_path,
+    """Run one file tool where the workspace lives.
+
+    With a Sandbox Adapter, the tool runs in the sandbox, except reads of the
+    host-owned ``additional_read_roots``, such as attachments.
+    ``workspace_read_roots`` are directories where the tools run that
+    ``read_file`` may read as well, such as the one saved outputs are read
+    back from.
+    """
+    try:
+        tool = _file_tool(action)
+        arguments = tool.arguments.model_validate(action.call.arguments).model_dump(
+            mode="json"
+        )
+        raw_response = await _run_file_tool(
+            tool,
+            arguments,
+            config,
+            additional_read_roots=additional_read_roots,
+            workspace_read_roots=workspace_read_roots,
+            authorized_path=authorized_path,
+        )
+        response = tool.response.model_validate(raw_response)
+    except (OSError, UnicodeError, ValueError) as exc:
+        return _failed(action, str(exc))
+    return _succeeded(
+        action, response.result.model_dump(mode="json"), meta=response.meta()
     )
 
 
-def _execute_file_tool_sync(
-    action: RustRuntimeBuiltinToolCallAction,
+def _file_tool(action: RustRuntimeBuiltinToolCallAction) -> FileTool:
+    tool = FILE_TOOLS.get(action.call.name)
+    if tool is None:
+        raise ValueError(f"Unsupported file tool: {action.call.name}")
+    return tool
+
+
+async def _run_file_tool(
+    tool: FileTool,
+    arguments: dict[str, JsonValue],
     config: LocalRuntimeAdapterConfig,
     *,
-    additional_read_roots: tuple[Path, ...] = (),
-    authorized_path: Path | None = None,
-) -> RustToolSucceededEvent | RustToolFailedEvent:
-    try:
-        match action.call.name:
-            case "file_system.read_file":
-                read_args = ReadFileArgs.model_validate(action.call.arguments)
-                result = read_file(
-                    read_args,
-                    _target_path(
-                        read_args.path,
-                        config,
-                        authorized_path,
-                        additional_roots=additional_read_roots,
-                    ),
-                )
-                return _succeeded(action, result.model_dump(mode="json"))
-            case "file_system.write_file":
-                write_args = WriteFileArgs.model_validate(action.call.arguments)
-                write_result, write_annotations = write_file(
-                    write_args, _target_path(write_args.path, config, authorized_path)
-                )
-                return _succeeded(
-                    action,
-                    write_result.model_dump(mode="json"),
-                    meta=None
-                    if write_annotations is None
-                    else {
-                        WRITE_FILE_ANNOTATION_KEY: write_annotations.model_dump(
-                            mode="json"
-                        )
-                    },
-                )
-            case "file_system.search_replace":
-                edit_args = SearchReplaceArgs.model_validate(action.call.arguments)
-                result, annotations = search_replace(
-                    edit_args,
-                    _target_path(edit_args.file_path, config, authorized_path),
-                )
-                return _succeeded(
-                    action,
-                    result.model_dump(mode="json"),
-                    meta={
-                        SEARCH_REPLACE_ANNOTATION_KEY: annotations.model_dump(
-                            mode="json"
-                        )
-                    },
-                )
-            case _:
-                raise ValueError(f"Unsupported file tool: {action.call.name}")
-    except (OSError, UnicodeError, ValidationError, ValueError) as exc:
-        return _failed(action, str(exc))
-
-
-def read_file(args: ReadFileArgs, path: Path) -> ReadFileResult:
-    handle, status = _open_file(path)
-    with handle:
-        file_size_bytes = status.st_size
-        raw_prefix = handle.read(SNIFF_BYTES)
-    for encoding in _candidate_encodings(raw_prefix):
-        try:
-            offset = _resolve_read_offset(path, encoding=encoding, offset=args.offset)
-            content, was_truncated = _read_content(
-                path, encoding=encoding, offset=offset, limit=args.limit
-            )
-            return ReadFileResult(
-                path=str(path),
-                content=content,
-                file_size_bytes=file_size_bytes,
-                returned_bytes=len(content.encode("utf-8")),
-                offset=offset,
-                lines_read=len(content.splitlines()),
-                was_truncated=was_truncated,
-            )
-        except UnicodeDecodeError:
-            continue
-    raise ValueError(f"Could not decode text file with supported encodings: {path}")
-
-
-def write_file(
-    args: WriteFileArgs, path: Path
-) -> tuple[WriteFileResult, WriteFileAnnotations | None]:
-    content_bytes = args.content.encode("utf-8")
-    if len(content_bytes) > MAX_WRITE_BYTES:
-        raise ValueError(f"Content exceeds {MAX_WRITE_BYTES} bytes limit")
-    if path.exists() and path.is_dir():
-        raise ValueError(f"Path is a directory, not a file: {path}")
-
-    file_existed = path.exists()
-    previous_content = _replaced_content(path) if file_existed else None
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(path, args.content, "utf-8")
-    return (
-        WriteFileResult(
-            path=str(path), bytes_written=len(content_bytes), file_existed=file_existed
+    additional_read_roots: tuple[Path, ...],
+    workspace_read_roots: tuple[Path, ...],
+    authorized_path: Path | None,
+) -> JsonValue:
+    sandbox = config.sandbox
+    on_host = sandbox is None or (
+        tool.name == "read_file"
+        and _is_within(
+            authorized_path
+            or sandbox_path(
+                str(arguments[_sandbox_helper.FILE_TOOL_PATH_KEYS[tool.name]]),
+                cwd=config.workspace.cwd,
+            ),
+            additional_read_roots,
+        )
+    )
+    request = {
+        "tool": tool.name,
+        "arguments": arguments,
+        "policy": _path_policy(
+            config,
+            authorized_path,
+            # The Host's resolver approves a sandbox path as written, unable to
+            # see the sandbox's links, so the helper follows them itself.
+            authorized_as_written=sandbox is not None and not on_host,
+            additional_roots=_read_roots(
+                tool,
+                sandbox=sandbox,
+                on_host=on_host,
+                host=additional_read_roots,
+                workspace=workspace_read_roots,
+            ),
         ),
-        None
-        if previous_content is None
-        else WriteFileAnnotations(previous_content=previous_content),
+    }
+    if on_host or sandbox is None:
+        return await asyncio.to_thread(_sandbox_helper.run_file_tool, request)
+    return await run_helper(
+        sandbox,
+        "file",
+        request,
+        timeout=SANDBOX_FILE_TOOL_TIMEOUT_SECONDS,
+        crashes=config.helper_crashes,
     )
 
 
-def _replaced_content(path: Path) -> str | None:
-    """The text a write is about to replace, when it is small enough to carry."""
-    try:
-        if path.stat().st_size > MAX_WRITE_PREVIOUS_CONTENT_BYTES:
-            return None
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return None
+def _read_roots(
+    tool: FileTool,
+    *,
+    sandbox: SandboxAdapter | None,
+    on_host: bool,
+    host: tuple[Path, ...],
+    workspace: tuple[Path, ...],
+) -> tuple[Path, ...]:
+    if tool.name != "read_file":
+        return ()
+    if sandbox is None:
+        return (*workspace, *host)
+    # Host and sandbox roots are paths in different file systems.
+    return host if on_host else workspace
 
 
-def search_replace(
-    args: SearchReplaceArgs, path: Path
-) -> tuple[SearchReplaceResult, SearchReplaceAnnotations]:
-    handle, status = _open_file(path)
-    with handle:
-        if status.st_size > MAX_EDIT_FILE_SIZE_BYTES:
-            raise ValueError(
-                f"File exceeds {MAX_EDIT_FILE_SIZE_BYTES} byte edit limit: {path}"
-            )
-        raw = handle.read()
-    original, encoding = _decode_editable_text(raw, path)
-    updated = original
-    previews: list[SearchReplacePreviewBlock] = []
-    lines_changed = 0
-    warnings: list[str] = []
-
-    for index, block in enumerate(args.content):
-        if block.old_str == block.new_str:
-            raise ValueError(f"block {index}: old_str and new_str must differ")
-        matches = updated.count(block.old_str)
-        if matches == 0:
-            raise ValueError(f"block {index}: old_str not found in {path}")
-        if matches > 1 and not block.replace_all:
-            raise ValueError(
-                f"block {index}: old_str is not unique; found {matches} matches in {path}"
-            )
-
-        replacement_count = matches if block.replace_all else 1
-        old_lines = block.old_str.splitlines(keepends=True)
-        new_lines = block.new_str.splitlines(keepends=True)
-        line_delta = 0
-        for match_start in _find_matches(
-            updated, block.old_str, limit=replacement_count
-        ):
-            old_start_line = updated[:match_start].count("\n") + 1
-            previews.append(
-                SearchReplacePreviewBlock(
-                    old_start_line=old_start_line,
-                    new_start_line=old_start_line + line_delta,
-                    old_lines=old_lines,
-                    new_lines=new_lines,
-                )
-            )
-            line_delta += len(new_lines) - len(old_lines)
-        lines_changed += max(len(old_lines), len(new_lines)) * replacement_count
-        updated = updated.replace(block.old_str, block.new_str, replacement_count)
-
-    if updated == original:
-        warnings.append("search/replace blocks leave the file unchanged")
-    else:
-        _atomic_write_text(path, updated, encoding)
-
-    return (
-        SearchReplaceResult(
-            file=str(path), lines_changed=lines_changed, warnings=warnings
-        ),
-        SearchReplaceAnnotations(blocks=previews),
-    )
-
-
-def _target_path(
-    raw_path: str,
+def _path_policy(
     config: LocalRuntimeAdapterConfig,
     authorized: Path | None,
     *,
-    additional_roots: tuple[Path, ...] = (),
-) -> Path:
-    """The path to act on: the one the Host cleared, else a fresh resolution.
-
-    Re-resolving a cleared path would discard a grant made past the roots, and
-    would let a symlink moved since the check take effect.
-    """
-    if authorized is not None:
-        return authorized
-    return _resolve_file_path(raw_path, config, additional_roots=additional_roots)
+    authorized_as_written: bool,
+    additional_roots: tuple[Path, ...],
+) -> dict[str, JsonValue]:
+    return {
+        "cwd": str(config.workspace.cwd),
+        "roots": [str(root) for root in (*config.workspace.roots, *additional_roots)],
+        "roots_are_a_boundary": _roots_are_a_boundary(config),
+        "authorized": None if authorized is None else str(authorized),
+        "authorized_as_written": authorized_as_written,
+    }
 
 
 def _roots_are_a_boundary(config: LocalRuntimeAdapterConfig) -> bool:
     """False when a command reads the path anyway and no one is left to ask.
 
-    Host-shell commands carry the Host process's permissions (harness ADR 0009)
-    and bypassed approvals retire the resolver, so the refusal would only pick
-    which tool the model uses.
+    Host-shell commands carry the Host process's permissions (harness ADR 0009),
+    sandboxed commands reach the whole sandbox, and bypassed approvals retire
+    the resolver, so the refusal would only pick which tool the model uses.
     """
-    return not (config.process_authority == "host_shell" and config.bypass_approval)
-
-
-def _resolve_file_path(
-    raw_path: str,
-    config: LocalRuntimeAdapterConfig,
-    *,
-    additional_roots: tuple[Path, ...] = (),
-) -> Path:
-    if not raw_path.strip():
-        raise ValueError("Path cannot be empty")
-    path = Path(raw_path).expanduser()
-    if not path.is_absolute():
-        path = config.workspace.cwd / path
-    resolved = path.resolve()
-    if not _roots_are_a_boundary(config):
-        return resolved
-    roots = (*config.workspace.roots, *additional_roots)
-    resolved_roots = tuple(root.expanduser().resolve() for root in roots)
-    if not any(resolved.is_relative_to(root) for root in resolved_roots):
-        raise ValueError(f"Path is outside the workspace: {resolved}")
-    return resolved
-
-
-def _find_matches(text: str, needle: str, *, limit: int) -> list[int]:
-    starts: list[int] = []
-    start = 0
-    while len(starts) < limit:
-        index = text.find(needle, start)
-        if index < 0:
-            return starts
-        starts.append(index)
-        start = index + len(needle)
-    return starts
-
-
-_NO_FOLLOW = getattr(os, "O_NOFOLLOW", 0)
-
-
-def _no_follow_opener(path: str, flags: int) -> int:
-    return os.open(path, flags | _NO_FOLLOW)
-
-
-def _open_bytes(path: Path) -> IO[bytes]:
-    """Open for binary reading, refusing a symlinked final component.
-
-    Every path reaching these tools is already resolved, so a link standing
-    there is a swap made since. Guards that component only, and is a no-op on
-    Windows, which has no ``O_NOFOLLOW``.
-    """
-    return open(path, "rb", opener=_no_follow_opener)
-
-
-def _open_file(path: Path) -> tuple[IO[bytes], os.stat_result]:
-    """Open a file for binary reading and return (handle, status).
-
-    Raises ValueError for missing files, directories, and non-regular files.
-    """
-    try:
-        handle = _open_bytes(path)
-    except FileNotFoundError as exc:
-        raise ValueError(f"File not found at: {path}") from exc
-    status = os.fstat(handle.fileno())
-    if stat.S_ISDIR(status.st_mode):
-        handle.close()
-        raise ValueError(f"Path is a directory, not a file: {path}")
-    if not stat.S_ISREG(status.st_mode):
-        handle.close()
-        raise ValueError(f"Path is not a regular file: {path}")
-    return handle, status
-
-
-def _open_text(path: Path, encoding: str) -> IO[str]:
-    """Text counterpart of :func:`_open_bytes`."""
-    return open(
-        path, encoding=encoding, errors="strict", newline="", opener=_no_follow_opener
+    commands_read_anyway = (
+        config.process_authority == "host_shell" or config.sandbox is not None
     )
+    return not (commands_read_anyway and config.bypass_approval)
 
 
-def _resolve_read_offset(path: Path, *, encoding: str, offset: int) -> int:
-    if offset >= 0:
-        return offset
-    if offset != -1:
-        raise ValueError(
-            "offset must be greater than or equal to 0, or -1 to read the last line"
-        )
-
-    line_count = 0
-    with _open_text(path, encoding) as handle:
-        for line_count, _line in enumerate(handle, start=1):  # noqa: B007 - counting only
-            pass
-    return max(line_count - 1, 0)
-
-
-def _read_content(
-    path: Path, *, encoding: str, offset: int, limit: int | None
-) -> tuple[str, bool]:
-    parts: list[str] = []
-    bytes_written = 0
-    seen = 0
-    yielded = 0
-
-    with _open_text(path, encoding) as handle:
-        for line in handle:
-            if seen < offset:
-                seen += 1
-                continue
-            if limit is not None and yielded >= limit:
-                return "".join(parts), True
-
-            line_bytes = len(line.encode("utf-8"))
-            if bytes_written + line_bytes <= MAX_READ_BYTES:
-                parts.append(line)
-                bytes_written += line_bytes
-                yielded += 1
-                continue
-
-            remaining = MAX_READ_BYTES - bytes_written
-            if remaining > 0:
-                parts.append(
-                    line.encode("utf-8")[:remaining].decode("utf-8", errors="ignore")
-                )
-            return "".join(parts), True
-
-    return "".join(parts), False
-
-
-def _decode_editable_text(raw: bytes, path: Path) -> tuple[str, str]:
-    for encoding in _candidate_encodings(raw[:SNIFF_BYTES]):
-        try:
-            text = raw.decode(encoding, errors="strict")
-            if _looks_binary(text, raw, encoding):
-                raise ValueError(f"Binary files are not supported: {path}")
-            return text, encoding
-        except UnicodeDecodeError:
-            continue
-    raise ValueError(f"Could not decode text file with supported encodings: {path}")
-
-
-def _looks_binary(text: str, raw: bytes, encoding: str) -> bool:
-    if b"\x00" in raw and not encoding.startswith(("utf-16", "utf-32")):
-        return True
-    return any(
-        character not in "\t\n\r\v\f\x1c\x1d\x1e\x85"
-        and (
-            ord(character) < _FIRST_PRINTABLE
-            or _DEL <= ord(character) <= _C1_CONTROL_END
-        )
-        for character in text[:SNIFF_BYTES]
-    )
-
-
-def _atomic_write_text(path: Path, content: str, encoding: str) -> None:
-    temporary_path: Path | None = None
-    try:
-        mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding=encoding,
-            errors="strict",
-            newline="",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            temporary_path = Path(handle.name)
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-
-        if mode is not None:
-            temporary_path.chmod(mode)
-        os.replace(temporary_path, path)
-        temporary_path = None
-    finally:
-        if temporary_path is not None:
-            with suppress(OSError):
-                temporary_path.unlink(missing_ok=True)
-
-
-def _candidate_encodings(raw: bytes) -> list[str]:
-    candidates = [_encoding_from_bom(raw), "utf-8", "cp1252", "latin-1"]
-    return list(dict.fromkeys(encoding for encoding in candidates if encoding))
-
-
-def _encoding_from_bom(raw: bytes) -> str | None:
-    if raw.startswith(b"\xef\xbb\xbf"):
-        return "utf-8-sig"
-    if raw.startswith(b"\xff\xfe\x00\x00") or raw.startswith(b"\x00\x00\xfe\xff"):
-        return "utf-32"
-    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
-        return "utf-16"
-    return None
+def _is_within(path: Path, roots: tuple[Path, ...]) -> bool:
+    return any(path.is_relative_to(root) for root in roots)
 
 
 def _succeeded(

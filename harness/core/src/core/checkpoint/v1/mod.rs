@@ -193,6 +193,9 @@ fn collect_tool_execution_action_ids(
     ids: &mut HashSet<String>,
 ) -> Result<(), String> {
     match &execution.state {
+        ToolExecutionState::DirectAwaitingApproval {
+            approval_action_id, ..
+        } => insert_pending_action_id(ids, approval_action_id),
         ToolExecutionState::DirectAwaitingPreHook {
             hook_action_id,
             hook_binding_ids,
@@ -235,6 +238,9 @@ fn collect_tool_execution_action_ids(
                             "pending program checkpoint cannot contain a completion action"
                                 .to_string(),
                         );
+                    }
+                    Action::Approval { effect_id, .. } => {
+                        insert_pending_action_id(ids, &effect_id)?;
                     }
                     Action::Filesystem { .. } => {
                         return Err(

@@ -10,6 +10,7 @@ from textual import events
 from textual._context import NoActiveAppError
 from textual.binding import Binding
 from textual.message import Message
+from textual.reactive import reactive
 from textual.widgets import TextArea
 from textual.widgets.text_area import Location, Selection, TextAreaTheme
 
@@ -45,6 +46,9 @@ FEEDBACK_SNOOZE_LABEL = "snooze"
 
 class ChatTextArea(TextArea):
     ALLOW_SELECT: ClassVar[bool] = False
+    # User preference, separate from TextArea.cursor_blink (the effective state).
+    cursor_blink_enabled: reactive[bool] = reactive(True)
+    recording: reactive[bool] = reactive(False, toggle_class="recording")
 
     _CHAT_THEME: ClassVar[TextAreaTheme] = TextAreaTheme(
         name="vibe-chat",
@@ -186,6 +190,9 @@ class ChatTextArea(TextArea):
         self._drag_anchor: Location | None = None
         self._dragged: bool = False
 
+        for attribute in ("cursor_blink_enabled", "read_only", "recording"):
+            self.watch(self, attribute, self._refresh_cursor_blink)
+
     # Workaround for an undo crash fixed upstream in
     # https://github.com/Textualize/textual/pull/6687 — remove this override
     # once that fix ships in our pinned Textual version.
@@ -206,11 +213,24 @@ class ChatTextArea(TextArea):
 
     def set_app_focus(self, has_focus: bool) -> None:
         self._app_has_focus = has_focus
-        self.cursor_blink = has_focus
+        self._refresh_cursor_blink()
         if has_focus and self.has_focus:
             self._focus_relinquished = False
         if has_focus and not self.has_focus and not self._focus_relinquished:
             self.call_after_refresh(self.focus)
+
+    def _refresh_cursor_blink(self) -> None:
+        self.cursor_blink = (
+            self.cursor_blink_enabled
+            and self._app_has_focus
+            and not self.read_only
+            and not self.recording
+        )
+        if not self.cursor_blink and self.has_focus:
+            # A steady caret must not inherit the hidden blink phase: Textual
+            # resets the phase in its cursor_blink watcher only when the value
+            # actually changes, so force the caret visible here.
+            self._pause_blink(visible=True)
 
     def on_click(self, event: events.Click) -> None:
         self._mark_cursor_moved_if_needed()

@@ -7,6 +7,12 @@ pub(crate) struct ProgrammaticName {
     pub name: String,
 }
 
+impl ProgrammaticName {
+    pub(crate) fn display_name(&self) -> String {
+        format!("tools.{}.{}", self.namespace, self.name)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct TypeScriptTool {
     pub name: String,

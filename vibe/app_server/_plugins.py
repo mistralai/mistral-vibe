@@ -91,6 +91,7 @@ if TYPE_CHECKING:
         SessionPluginProjection,
     )
     from vibe.app_server._plugin_mcp import PluginMCPCatalog
+    from vibe.app_server._sandbox_skills import SandboxSkills
     from vibe.core.config.models import MCPServer
     from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
 
@@ -281,6 +282,7 @@ class UnifiedPluginProvider:
         agent_tools: Callable[[], AgentToolCatalogue] | None = None,
         agent_types: Callable[[], Sequence[AgentTypeSource]] | None = None,
         builtin_plugin_roots: list[Path] | None = None,
+        sandbox_skills: SandboxSkills | None = None,
     ) -> None:
         self._plugins_root = Path(storage_root).expanduser().resolve() / "plugins"
         self._workdir = workdir
@@ -300,6 +302,9 @@ class UnifiedPluginProvider:
         # and read per bind for the same reason as the catalogue above: an edited
         # file has to reach the next bind.
         self._agent_types = agent_types
+        # Set when the session runs its tools in a sandbox: Core is pointed at
+        # the copies of the skills there.
+        self._sandbox_skills = sandbox_skills
         self._bound: dict[str, SessionPlugins] = {}
         self._binding: set[str] = set()
         self._observers: list[Callable[[str, SessionPlugins], Awaitable[None]]] = []
@@ -437,6 +442,8 @@ class UnifiedPluginProvider:
                 else reconcile_plugin_routes(published, materialized)
             ),
         )
+        if self._sandbox_skills is not None:
+            await self._sandbox_skills.install(materialized.resolution.skills.values())
         for observer in self._observers:
             await observer(session_id, bound)
         self._bound[session_id] = bound
@@ -450,9 +457,16 @@ class UnifiedPluginProvider:
         # profile is a name the model can call and the Runtime cannot spawn.
         from mistralai_vibe_local_harness.vibe.plugins import SessionPluginProjection
 
+        skills = bound.materialized.resolution.skills
         definitions = project_model_invocable_plugin_contexts(
-            core_plugins(bound), bound.materialized.resolution.skills
+            core_plugins(bound), skills
         )
+        if self._sandbox_skills is not None:
+            from vibe.app_server._sandbox_skills import relocate_plugin_contexts
+
+            definitions = relocate_plugin_contexts(
+                definitions, skills, self._sandbox_skills.locate
+            )
         agents = list(bound.materialized.resolution.agents)
         workspace = list(self._agent_types() if self._agent_types is not None else ())
         if not agents and not workspace:

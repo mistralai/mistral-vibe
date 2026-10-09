@@ -1,9 +1,13 @@
 //! `ask_user_question` bottom-app state, mirroring Python's `QuestionApp`.
 
 mod answers;
+mod other;
 mod scroll;
 
-pub use answers::{cancel, dismiss, select, select_option, submit_other, toggle_selection};
+pub use answers::{
+    cancel, dismiss, select, select_option, submit_other, toggle_focused, toggle_selection,
+};
+pub use other::{handle_other_key, other_caret_at, paste_other, OtherField};
 pub use scroll::{reconcile_scroll, visible_option_rows};
 
 use std::sync::OnceLock;
@@ -95,6 +99,8 @@ pub fn show_pending(app: &mut App) {
     state.multi_selections.clear();
     state.other_texts.clear();
     state.other_cursor = 0;
+    state.other_scroll = 0;
+    state.other_field = None;
     state.mount_time = Some(Instant::now());
 }
 
@@ -198,12 +204,18 @@ pub fn navigate_to_option(app: &mut App, option_idx: usize) {
 
 pub fn move_up(app: &mut App) {
     let total = total_options(app);
-    navigate_to_option(app, (app.question_app.selected_option + total - 1) % total);
+    navigate_to_option(
+        app,
+        crate::list_nav::wrap(app.question_app.selected_option, total, false),
+    );
 }
 
 pub fn move_down(app: &mut App) {
     let total = total_options(app);
-    navigate_to_option(app, (app.question_app.selected_option + 1) % total);
+    navigate_to_option(
+        app,
+        crate::list_nav::wrap(app.question_app.selected_option, total, true),
+    );
 }
 
 pub fn next_question(app: &mut App) {
@@ -226,6 +238,7 @@ pub fn prev_question(app: &mut App) {
 
 pub(super) fn switch_question(app: &mut App, new_idx: usize) {
     app.question_app.current_question_idx = new_idx;
+    app.question_app.other_scroll = 0;
     navigate_to_option(app, restore_cursor(app, new_idx));
 }
 
