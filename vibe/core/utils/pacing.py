@@ -62,13 +62,27 @@ class AdaptivePacer:
             self._last_call_at = self._clock_now()
             self._rate_limited_this_call = False
 
-    def on_rate_limited(self) -> None:
-        """Slow down after a rate limit. Multiplicative increase of the interval."""
+    def on_rate_limited(self, retry_after_seconds: float | None = None) -> None:
+        """Slow down after a rate limit. Multiplicative increase of the interval.
+
+        When the server said how long to wait, that becomes the floor. The
+        AIMD schedule is a guess about a limit nobody described; a `Retry-After`
+        is the limit describing itself, and starting the next call a second
+        later because the guess says so is how a run walks straight back into
+        the same 429.
+
+        The floor is still capped at `max_interval_seconds`, so a server asking
+        for an hour does not park the agent for an hour.
+        """
         if self._min_interval == 0.0:
             self._min_interval = self.base_interval_seconds
         else:
             self._min_interval = min(
                 self._min_interval * self.decrease_factor, self.max_interval_seconds
+            )
+        if retry_after_seconds is not None and retry_after_seconds > 0:
+            self._min_interval = min(
+                max(self._min_interval, retry_after_seconds), self.max_interval_seconds
             )
         self._last_rate_limited_at = self._clock_now()
         self._seen_rate_limit = True
