@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 from collections.abc import Iterator
 import importlib
 import sys
@@ -14,6 +15,7 @@ from vibe.cli.textual_ui.terminal_input_filter import (
     _DRIVER_MODULE_PREFIX,
     _ENABLE_SGR_MOUSE,
     FilteringXTermParser,
+    _tolerant_incremental_decoder,
     filter_input,
     patch_driver_parser,
     strip_malformed_mouse,
@@ -117,6 +119,8 @@ def test_all_noise_chunk_does_not_trip_eof() -> None:
 # A legacy X10 mouse report. After tolerant decoding a high-column coordinate
 # byte becomes U+FFFD, but the `ESC [ M` introducer is intact.
 X10_MOUSE_REPORT = "\x1b[M@\ufffdC"
+# What the terminal sends: column 112 is encoded as 112 + 32 = 0x90.
+X10_MOUSE_REPORT_BYTES = b"\x1b[M@\x90C"
 
 
 @pytest.fixture
@@ -171,6 +175,11 @@ def restore_driver_parsers() -> Iterator[None]:
     for module in _driver_modules().values():
         if module.__dict__.get("XTermParser") is FilteringXTermParser:
             module.__dict__["XTermParser"] = XTermParser
+        if (
+            module.__dict__.get("getincrementaldecoder")
+            is _tolerant_incremental_decoder
+        ):
+            module.__dict__["getincrementaldecoder"] = codecs.getincrementaldecoder
 
 
 @pytest.mark.usefixtures("restore_driver_parsers")
@@ -190,6 +199,21 @@ def test_patch_driver_parser_leaves_no_driver_module_unfiltered() -> None:
         _DRIVER_MODULE_PREFIX + name
         for name in ("linux_driver", "linux_inline_driver", "web_driver")
     }
+
+
+@pytest.mark.usefixtures("restore_driver_parsers")
+@pytest.mark.parametrize("name", ["linux_driver", "linux_inline_driver", "web_driver"])
+def test_patch_driver_parser_makes_stdin_decoding_tolerant(name: str) -> None:
+    module = importlib.import_module(_DRIVER_MODULE_PREFIX + name)
+
+    patch_driver_parser()
+
+    # The same call the driver's input thread makes.
+    decode = module.getincrementaldecoder("utf-8")().decode
+    assert decode(X10_MOUSE_REPORT_BYTES) == X10_MOUSE_REPORT
+    # Still incremental: a character split across reads is not replaced.
+    assert decode("é".encode()[:1]) == ""
+    assert decode("é".encode()[1:]) == "é"
 
 
 @pytest.mark.usefixtures("restore_driver_parsers")

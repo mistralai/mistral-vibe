@@ -1,9 +1,11 @@
 """Harden Textual's input path against malformed terminal bytes.
 
-Three defenses, applied by rebinding ``XTermParser`` in every imported
-``textual.drivers.*`` module (``WindowsDriver`` builds the parser in
-``textual.drivers.win32``, not its own module). Each works around a Textual
-upstream limitation; remove the corresponding defense once the linked fix ships.
+Four defenses, applied by rebinding names in every imported
+``textual.drivers.*`` module: ``XTermParser`` for the first three
+(``WindowsDriver`` builds the parser in ``textual.drivers.win32``, not its own
+module) and ``getincrementaldecoder`` for the fourth. Each works around a
+Textual upstream limitation; remove the corresponding defense once the linked
+fix ships.
 
 1. Drop malformed SGR mouse reports (e.g. ``\\x1b[<32;NaN;NaNM``). VS Code's
    integrated terminal emits these when xterm.js geometry is briefly invalid
@@ -26,11 +28,22 @@ upstream limitation; remove the corresponding defense once the linked fix ships.
    so the mouse silently stops tracking. Seeing an X10 report, we re-enable SGR
    mouse mode so the terminal switches back and tracking recovers.
    Upstream: https://github.com/Textualize/textual/issues/6668
+
+4. Decode stdin with ``errors="replace"``. Textual decodes it strictly, so one
+   invalid UTF-8 byte raises ``UnicodeDecodeError`` in the input thread and the
+   app exits. X10 reports carry such bytes from column 96 on (``column + 32`` >
+   0x7F): the first report after a reattach can arrive before defense 3
+   restores SGR, and GNU screen 4.00.03 (macOS's ``/usr/bin/screen``) never
+   leaves X10. The byte becomes U+FFFD and the parser drops the report like any
+   other X10 report.
+   Upstream: https://github.com/Textualize/textual/issues/6456
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import codecs
+from collections.abc import Callable, Iterable
+from functools import partial
 import os
 import re
 import sys
@@ -70,6 +83,12 @@ def strip_terminal_reports(data: str) -> str:
 
 def filter_input(data: str) -> str:
     return strip_terminal_reports(strip_malformed_mouse(data))
+
+
+def _tolerant_incremental_decoder(
+    encoding: str,
+) -> Callable[[], codecs.IncrementalDecoder]:
+    return partial(codecs.getincrementaldecoder(encoding), errors="replace")
 
 
 def _write_to_terminal(sequence: str) -> bool:
@@ -156,6 +175,8 @@ def patch_driver_parser() -> None:
     for name, module in list(sys.modules.items()):
         if not name.startswith(_DRIVER_MODULE_PREFIX):
             continue
+        if module.__dict__.get("getincrementaldecoder") is codecs.getincrementaldecoder:
+            module.__dict__["getincrementaldecoder"] = _tolerant_incremental_decoder
         if module.__dict__.get("XTermParser") is not XTermParser:
             continue
         module.__dict__["XTermParser"] = FilteringXTermParser
