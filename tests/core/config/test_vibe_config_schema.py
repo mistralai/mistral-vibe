@@ -147,9 +147,9 @@ def test_subagent_status_list_is_enabled_by_default() -> None:
     assert VibeConfigSchema().show_subagent_status_list is True
 
 
-def test_smart_approve_is_not_offered_by_default() -> None:
+def test_smart_approve_is_offered_by_default_but_not_default() -> None:
     config = VibeConfigSchema()
-    assert config.smart_approve_offered() is False
+    assert config.smart_approve_offered() is True
     assert config.resolve_default_agent() == "accept-edits"
 
 

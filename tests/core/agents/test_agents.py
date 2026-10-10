@@ -102,28 +102,29 @@ class TestAgentManager:
         assert agent.name == "ask"
         assert agent.agent_type == AgentType.AGENT
 
-    def test_smart_approve_hidden_from_the_picker_by_default(
+    def test_smart_approve_is_in_the_picker_by_default(
         self,
         build_config: ConfigBuilder,
         load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        """Smart approve ships dark: without the flag it is not in the picker/cycle."""
+        """Smart approve is available to all users, but is not the default mode."""
         manager = AgentManager(load_orchestrator(build_config()))
-
-        assert "smart-approve" not in manager.available_agents
-        assert "smart-approve" not in manager.get_agent_order()
-
-    def test_smart_approve_available_flag_exposes_it_in_the_picker(
-        self,
-        build_config: ConfigBuilder,
-        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
-    ) -> None:
-        """The availability flag adds smart approve to the picker/cycle."""
-        config = build_config(smart_approve_available=True)
-        manager = AgentManager(load_orchestrator(config))
 
         assert "smart-approve" in manager.available_agents
         assert "smart-approve" in manager.get_agent_order()
+        assert manager.active_profile.name != "smart-approve"
+
+    def test_smart_approve_can_be_hidden_via_config(
+        self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        """Opting out via config removes smart approve from the picker/cycle."""
+        config = build_config(smart_approve_available=False)
+        manager = AgentManager(load_orchestrator(config))
+
+        assert "smart-approve" not in manager.available_agents
+        assert "smart-approve" not in manager.get_agent_order()
 
     def test_smart_approve_default_flag_offers_and_defaults(
         self,

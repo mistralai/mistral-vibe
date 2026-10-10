@@ -507,10 +507,10 @@ class VibeConfigSchema(ConfigSchema):
     )
     # Smart approve rollout, driven by GrowthBook (see experiments/active.py). The two
     # flags are independent, mirroring model routing (#49523): one exposes the mode in
-    # the picker, the other makes it the default. Kept off by default so smart approve
-    # ships dark until a cohort is opted in.
+    # the picker, the other makes it the default. Available to all users by default;
+    # the vibe_cli_smart_approve experiment can still gate it for a cohort.
     smart_approve_available: Annotated[bool, WithReplaceMerge()] = Field(
-        default=False,
+        default=True,
         description=(
             "Expose the smart-approve mode in the mode picker/cycle. "
             "Set by the vibe_cli_smart_approve experiment; does not change the default."

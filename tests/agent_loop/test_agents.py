@@ -429,11 +429,12 @@ class TestAgentManagerCycling:
             config=make_config(), agent_name=BuiltinAgentName.ASK, backend=backend
         )
         order = agent.agent_manager.get_agent_order()
-        assert len(order) == 4
+        assert len(order) == 5
         assert BuiltinAgentName.ASK in order
         assert BuiltinAgentName.AUTO_APPROVE in order
         assert BuiltinAgentName.PLAN in order
         assert BuiltinAgentName.ACCEPT_EDITS in order
+        assert BuiltinAgentName.SMART_APPROVE in order
 
     def test_next_agent_cycles_through_all(
         self, make_config: Callable[..., VibeConfigSchema], backend: FakeBackend

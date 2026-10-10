@@ -102,9 +102,9 @@ class AgentManager:
             name == BuiltinAgentName.SMART_APPROVE
             and not self.config.smart_approve_offered()
         ):
-            # Smart approve ships dark: it enters the picker/cycle only for a cohort
-            # the experiment (or config) has opted in. Explicit selection bypasses this
-            # in __init__.
+            # Smart approve is available to all users by default; the rollout gate
+            # only applies when it has been explicitly disabled via config or the
+            # experiment. Explicit selection bypasses this in __init__.
             return False
         if profile.install_required and name not in self.config.installed_agents:
             return False
