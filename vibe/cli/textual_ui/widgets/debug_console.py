@@ -18,6 +18,7 @@ from textual.strip import Strip
 from textual.widgets import Static
 
 from vibe.app_server.models import DebugLogEntry, DebugLogPage
+from vibe.app_server.protocol import AppServerResponseError
 from vibe.observability.logging import decode_log_message
 
 LOG_LEVEL_COLORS: dict[str, str] = {
@@ -237,6 +238,11 @@ class DebugConsole(Vertical):
             markups = [self._format_entry(entry) for entry in reversed(entries)]
             self._log_view.prepend_lines(markups)
             self._fill_viewport()
+        except AppServerResponseError:
+            # The session refuses requests while a lifecycle transition such as
+            # /branch or /compact holds it. A refused read must not take the
+            # whole app down with it.
+            return
         finally:
             self._reading = False
 
@@ -263,6 +269,9 @@ class DebugConsole(Vertical):
                 self._cursor += len(entries)
             for entry in reversed(entries):
                 self._log_view.write_line(self._format_entry(entry))
+        except AppServerResponseError:
+            # Refused for the same reason; the next poll picks the entries up.
+            return
         finally:
             self._reading = False
 
