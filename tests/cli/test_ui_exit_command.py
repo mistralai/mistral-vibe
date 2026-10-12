@@ -26,7 +26,8 @@ async def test_exit_synonym_runs_exit_handler_and_is_not_sent_as_prompt(
         monkeypatch.setattr(vibe_app, "_exit_app", _record_exit)
 
         chat_input = vibe_app.query_one(ChatInputContainer)
-        chat_input.post_message(ChatInputContainer.Submitted(alias))
+        submitted_value = alias if alias.startswith("/") or alias.startswith(":") else f">{alias}"
+        chat_input.post_message(ChatInputContainer.Submitted(submitted_value))
         await pilot.pause(0.2)
 
         assert calls == [alias]
