@@ -116,3 +116,39 @@ async def test_steer_during_tool_call_keeps_backend_payload_tool_paired() -> Non
         isinstance(e, UserMessageEvent) and e.content == _STEER_TEXT
         for e in injected_events
     )
+
+
+@pytest.mark.asyncio
+async def test_steer_during_tool_call_keeps_next_turn_tool_paired() -> None:
+    tool_call = ToolCall(
+        id="call_1",
+        index=0,
+        function=FunctionCall(name="todo", arguments='{"action": "read"}'),
+    )
+    backend = FakeBackend([
+        [mock_llm_chunk(content="Let me check your todos.", tool_calls=[tool_call])],
+        [mock_llm_chunk(content="Done.")],
+        [mock_llm_chunk(content="Sure.")],
+    ])
+    agent_loop = _make_steering_loop(backend)
+
+    async for event in agent_loop.act("please check the archi of vibe_sdk"):
+        if isinstance(event, ApprovalRequestEvent):
+            await agent_loop.inject_user_context(_STEER_TEXT, as_message=True)
+            agent_loop.resolve_approval_request(
+                event.request_id, ApprovalResponse.YES, None
+            )
+
+    async for _ in agent_loop.act("thanks"):
+        pass
+
+    # History still holds the steered message between the tool_use and its
+    # tool_result. The next turn must not treat the call as unanswered and add a
+    # placeholder result: the real one would then trail the steered message, which
+    # providers reject ("Unexpected role 'tool' after role 'user'").
+    next_turn_request = backend.requests_messages[-1]
+    assert next_turn_request[-1].content == "thanks"
+    assert [m.tool_call_id for m in next_turn_request if m.role == Role.tool] == [
+        "call_1"
+    ]
+    _assert_tool_calls_immediately_paired(next_turn_request)
