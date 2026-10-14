@@ -5,6 +5,7 @@ import time
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from vibe.core.compaction.context import (
+    close_incomplete_tool_round,
     collect_prior_user_messages,
     drop_oldest_round,
     extract_summary,
@@ -142,7 +143,7 @@ class CompactionManager:
         request_message = LLMMessage(role=Role.user, content=request)
         result, working = await self._summarize_call(
             list(snapshot),
-            lambda history: [*history, request_message],
+            lambda history: [*close_incomplete_tool_round(history), request_message],
             model=self._config().get_compaction_model(),
             tools=self._available_tools(),
             tool_choice=self._tool_choice(),
