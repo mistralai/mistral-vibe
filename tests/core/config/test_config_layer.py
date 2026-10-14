@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import copy
 from pathlib import Path
 import tomllib
 from typing import Annotated, Any
@@ -657,3 +659,37 @@ def test_toml_snapshot_drops_none_optional_fields_and_round_trips(
     reloaded_models = reloaded["models"]
     assert reloaded_models["paid"]["cached_input_price"] == 0.15
     assert "cached_input_price" not in reloaded_models["free"]
+
+
+@pytest.mark.asyncio
+async def test_deepcopy_does_not_pickle_contended_asyncio_lock() -> None:
+    """A contended asyncio.Lock holds a pending Future; deepcopy must not pickle it.
+
+    Regression for the mode-switch crash where ConfigBuilder.copy() deep-copied
+    layers whose base ConfigLayer._lock had waiters, raising
+    "cannot pickle '_asyncio.Future' object".
+    """
+    layer = StubLayer(name="stub")
+
+    async def hold_lock() -> None:
+        async with layer._lock:
+            await asyncio.sleep(0.5)
+
+    async def queue_waiter() -> None:
+        async with layer._lock:
+            pass
+
+    holder = asyncio.create_task(hold_lock())
+    await asyncio.sleep(0.05)  # let it acquire
+    waiter = asyncio.create_task(queue_waiter())
+    await asyncio.sleep(0.02)  # now a Future is pending on the lock
+    try:
+        copied = copy.deepcopy(layer)
+        assert copied is not layer
+        assert copied._lock is not layer._lock  # fresh lock, not pickled
+    finally:
+        holder.cancel()
+        waiter.cancel()
+        for task in (holder, waiter):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
