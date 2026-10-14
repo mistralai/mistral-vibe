@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
-from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.agents.models import PLAN, BuiltinAgentName, _plan_overrides
 from vibe.core.paths import PLANS_DIR
 from vibe.core.tools.base import ToolPermission
 
@@ -86,6 +90,32 @@ class TestPlanAgentResolvePermission:
 
         # Plan path is in the allowlist, so should be ALWAYS even though
         # PLANS_DIR lives outside the workdir.
+        assert ctx is not None
+        assert ctx.permission == ToolPermission.ALWAYS
+
+    def test_write_file_to_plan_path_allowed_when_home_is_a_symlink(
+        self, monkeypatch: pytest.MonkeyPatch, config_dir: Path, tmp_path: Path
+    ) -> None:
+        linked_home = tmp_path / "linked-home"
+        linked_home.symlink_to(config_dir.parent, target_is_directory=True)
+        monkeypatch.setattr(
+            "vibe.utils.paths._DEFAULT_VIBE_HOME", linked_home / ".vibe"
+        )
+        object.__setattr__(PLAN, "overrides", _plan_overrides())
+
+        config = build_test_vibe_config()
+        agent = build_test_agent_loop(config=config, agent_name=BuiltinAgentName.PLAN)
+
+        tool = agent.tool_manager.get("write_file")
+        from vibe.core.tools.builtins.write_file import WriteFileArgs
+
+        # The plan path given to the model goes through the symlink, and the
+        # tool resolves it before matching the allowlist.
+        plan_path = str(PLANS_DIR.path / "my-plan.md")
+        args = WriteFileArgs(file_path=plan_path, content="# Plan")
+
+        ctx = tool.resolve_permission(args)
+
         assert ctx is not None
         assert ctx.permission == ToolPermission.ALWAYS
 
