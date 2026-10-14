@@ -11,6 +11,9 @@ from mistralai_vibe_local_harness.vibe.adapters.generic._base import (
     build_chat_payload,
     finalize_chat_request,
 )
+from mistralai_vibe_local_harness.vibe.adapters.generic._content_blocks import (
+    split_content_blocks,
+)
 from mistralai_vibe_local_harness.vibe.adapters.generic._image import to_data_uri
 from mistralai_vibe_local_harness.vibe.adapters.generic._model import (
     AvailableTool,
@@ -41,6 +44,20 @@ class OpenAIAdapter(APIAdapter):
     ) -> dict[str, Any]:
         if field_name != "reasoning_content" and field_name in msg_dict:
             msg_dict["reasoning_content"] = msg_dict.pop(field_name)
+        return msg_dict
+
+    def _message_from_api(
+        self, msg_dict: dict[str, Any], field_name: str
+    ) -> dict[str, Any]:
+        msg_dict = self._reasoning_from_api(msg_dict, field_name)
+        content = msg_dict.get("content")
+        if isinstance(content, list):
+            # Mistral-compatible APIs mix text and thinking chunks in `content`;
+            # keep any reasoning the provider already sent in its own field.
+            text, reasoning = split_content_blocks(content)
+            msg_dict["content"] = text or ""
+            if reasoning and not msg_dict.get("reasoning_content"):
+                msg_dict["reasoning_content"] = reasoning
         return msg_dict
 
     def _user_with_images_to_parts(
@@ -123,20 +140,20 @@ class OpenAIAdapter(APIAdapter):
         if data.get("choices"):
             choice = data["choices"][0]
             if "message" in choice:
-                msg_dict = self._reasoning_from_api(choice["message"], field_name)
+                msg_dict = self._message_from_api(choice["message"], field_name)
                 return LLMMessage.model_validate(msg_dict)
             if "delta" in choice:
-                msg_dict = self._reasoning_from_api(choice["delta"], field_name)
+                msg_dict = self._message_from_api(choice["delta"], field_name)
                 if msg_dict.get("role") is None:
                     msg_dict["role"] = Role.assistant
                 return LLMMessage.model_validate(msg_dict)
             raise ValueError("Invalid response data: missing message or delta")
 
         if "message" in data:
-            msg_dict = self._reasoning_from_api(data["message"], field_name)
+            msg_dict = self._message_from_api(data["message"], field_name)
             return LLMMessage.model_validate(msg_dict)
         if "delta" in data:
-            msg_dict = self._reasoning_from_api(data["delta"], field_name)
+            msg_dict = self._message_from_api(data["delta"], field_name)
             if msg_dict.get("role") is None:
                 msg_dict["role"] = Role.assistant
             return LLMMessage.model_validate(msg_dict)
@@ -265,29 +282,6 @@ class ReasoningAdapter(APIAdapter):
         )
 
     @staticmethod
-    def _parse_content_blocks(
-        content: str | list[dict[str, Any]],
-    ) -> tuple[str | None, str | None]:
-        if isinstance(content, str):
-            return content or None, None
-
-        text_parts: list[str] = []
-        thinking_parts: list[str] = []
-
-        for block in content:
-            block_type = block.get("type")
-            if block_type == "text":
-                text_parts.append(block.get("text", ""))
-            elif block_type == "thinking":
-                for inner in block.get("thinking", []):
-                    if isinstance(inner, dict) and inner.get("type") == "text":
-                        thinking_parts.append(inner.get("text", ""))
-                    elif isinstance(inner, str):
-                        thinking_parts.append(inner)
-
-        return ("".join(text_parts) or None, "".join(thinking_parts) or None)
-
-    @staticmethod
     def _parse_tool_calls(
         tool_calls: list[dict[str, Any]] | None,
     ) -> list[ToolCall] | None:
@@ -311,7 +305,7 @@ class ReasoningAdapter(APIAdapter):
         reasoning_content: str | None = None
 
         if content is not None:
-            text_content, reasoning_content = self._parse_content_blocks(content)
+            text_content, reasoning_content = split_content_blocks(content)
 
         return LLMMessage(
             role=Role.assistant,

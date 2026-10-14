@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import httpx
 
+from vibe.core.llm.backend._content_blocks import split_content_blocks
 from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
 from vibe.core.llm.backend.anthropic import AnthropicAdapter
 from vibe.core.llm.backend.base import (
@@ -74,6 +75,20 @@ class OpenAIAdapter(APIAdapter):
     ) -> dict[str, Any]:
         if field_name != "reasoning_content" and field_name in msg_dict:
             msg_dict["reasoning_content"] = msg_dict.pop(field_name)
+        return msg_dict
+
+    def _message_from_api(
+        self, msg_dict: dict[str, Any], field_name: str
+    ) -> dict[str, Any]:
+        msg_dict = self._reasoning_from_api(msg_dict, field_name)
+        content = msg_dict.get("content")
+        if isinstance(content, list):
+            # Mistral-compatible APIs mix text and thinking chunks in `content`;
+            # keep any reasoning the provider already sent in its own field.
+            text, reasoning = split_content_blocks(content)
+            msg_dict["content"] = text or ""
+            if reasoning and not msg_dict.get("reasoning_content"):
+                msg_dict["reasoning_content"] = reasoning
         return msg_dict
 
     def _user_with_images_to_parts(
@@ -167,20 +182,20 @@ class OpenAIAdapter(APIAdapter):
         if data.get("choices"):
             choice = data["choices"][0]
             if "message" in choice:
-                msg_dict = self._reasoning_from_api(choice["message"], field_name)
+                msg_dict = self._message_from_api(choice["message"], field_name)
                 return LLMMessage.model_validate(msg_dict)
             if "delta" in choice:
-                msg_dict = self._reasoning_from_api(choice["delta"], field_name)
+                msg_dict = self._message_from_api(choice["delta"], field_name)
                 if msg_dict.get("role") is None:
                     msg_dict["role"] = Role.assistant
                 return LLMMessage.model_validate(msg_dict)
             raise ValueError("Invalid response data: missing message or delta")
 
         if "message" in data:
-            msg_dict = self._reasoning_from_api(data["message"], field_name)
+            msg_dict = self._message_from_api(data["message"], field_name)
             return LLMMessage.model_validate(msg_dict)
         if "delta" in data:
-            msg_dict = self._reasoning_from_api(data["delta"], field_name)
+            msg_dict = self._message_from_api(data["delta"], field_name)
             if msg_dict.get("role") is None:
                 msg_dict["role"] = Role.assistant
             return LLMMessage.model_validate(msg_dict)

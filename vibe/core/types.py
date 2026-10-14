@@ -257,11 +257,16 @@ def _content_before(v: Any) -> str:
     if isinstance(v, list):
         parts: list[str] = []
         for p in v:
-            if isinstance(p, dict) and isinstance(p.get("text"), str):
-                parts.append(p["text"])
+            if isinstance(p, dict):
+                # Parts without text (thinking, image_url, ...) have nothing to
+                # show; never fall back to the dict repr.
+                if isinstance(p.get("text"), str):
+                    parts.append(p["text"])
             else:
                 parts.append(str(p))
         return "\n".join(parts)
+    if isinstance(v, dict):
+        return _content_before([v])
     return str(v)
 
 
