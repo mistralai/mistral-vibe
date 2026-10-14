@@ -198,6 +198,22 @@ def reorder_for_tool_adjacency(messages: Sequence[LLMMessage]) -> list[LLMMessag
     return result
 
 
+def is_empty_assistant_message(msg: LLMMessage) -> bool:
+    """Return True if an assistant message contains no content, tool calls, or reasoning."""
+    if msg.role != Role.assistant or msg.tool_calls or msg.images:
+        return False
+    if msg.reasoning_content or msg.reasoning_payloads:
+        return False
+    if msg.content is None:
+        return True
+    return bool(isinstance(msg.content, str) and not msg.content.strip())
+
+
+def filter_empty_assistant_messages(messages: Sequence[LLMMessage]) -> list[LLMMessage]:
+    """Filter out empty assistant messages that would be rejected by LLM providers."""
+    return [m for m in messages if not is_empty_assistant_message(m)]
+
+
 def collect_prior_user_messages(
     messages: list[LLMMessage],
     summary_prefix: str,

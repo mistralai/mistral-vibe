@@ -53,6 +53,19 @@ class TestMapperPrepareMessages:
         _, converted = mapper.prepare_messages(messages)
         assert converted[0]["content"] == [{"type": "text", "text": "Hello"}]
 
+    def test_consecutive_user_messages_merged(self, mapper):
+        messages = [
+            LLMMessage(role=Role.user, content="First ask"),
+            LLMMessage(role=Role.user, content="Second ask"),
+        ]
+        _, converted = mapper.prepare_messages(messages)
+        assert len(converted) == 1
+        assert converted[0]["role"] == "user"
+        assert converted[0]["content"] == [
+            {"type": "text", "text": "First ask"},
+            {"type": "text", "text": "Second ask"},
+        ]
+
     def test_assistant_text(self, mapper):
         messages = [LLMMessage(role=Role.assistant, content="Sure")]
         _, converted = mapper.prepare_messages(messages)

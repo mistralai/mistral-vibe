@@ -60,7 +60,21 @@ class AnthropicMapper:
                             }
                             for att in msg.images
                         )
-                    converted.append({"role": "user", "content": user_content or ""})
+                    if converted and converted[-1]["role"] == "user":
+                        prev_content = converted[-1]["content"]
+                        if isinstance(prev_content, str):
+                            converted[-1]["content"] = (
+                                [{"type": "text", "text": prev_content}]
+                                if prev_content
+                                else []
+                            )
+                        if isinstance(converted[-1]["content"], list):
+                            converted[-1]["content"].extend(user_content)
+                    else:
+                        converted.append({
+                            "role": "user",
+                            "content": user_content or "",
+                        })
                 case Role.assistant:
                     converted.append(self._convert_assistant_message(msg))
                 case Role.tool:

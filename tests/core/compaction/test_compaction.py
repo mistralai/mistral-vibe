@@ -4,6 +4,8 @@ from vibe.core.compaction import (
     collect_prior_user_messages,
     drop_oldest_round,
     extract_summary,
+    filter_empty_assistant_messages,
+    is_empty_assistant_message,
     parse_previous_user_messages,
     render_compaction_context,
     render_teleport_summary_request,
@@ -471,3 +473,42 @@ def _assert_no_result_before_its_call(messages: list[LLMMessage]) -> None:
             assert message.tool_call_id in seen_calls, (
                 f"tool_result {message.tool_call_id} precedes its tool_use"
             )
+
+
+def test_is_empty_assistant_message() -> None:
+    assert is_empty_assistant_message(LLMMessage(role=Role.assistant, content=""))
+    assert is_empty_assistant_message(
+        LLMMessage(role=Role.assistant, content="   \n\t ")
+    )
+    assert is_empty_assistant_message(LLMMessage(role=Role.assistant, content=None))
+
+    # Assistant with text
+    assert not is_empty_assistant_message(
+        LLMMessage(role=Role.assistant, content="hello")
+    )
+    # Assistant with tool calls
+    tc = ToolCall(id="tc1", index=0, function=FunctionCall(name="bash", arguments="{}"))
+    assert not is_empty_assistant_message(
+        LLMMessage(role=Role.assistant, content="", tool_calls=[tc])
+    )
+    # Assistant with reasoning content
+    assert not is_empty_assistant_message(
+        LLMMessage(role=Role.assistant, content="", reasoning_content="thinking")
+    )
+    # Other roles are never considered empty assistant messages
+    assert not is_empty_assistant_message(LLMMessage(role=Role.user, content=""))
+    assert not is_empty_assistant_message(LLMMessage(role=Role.system, content=""))
+    assert not is_empty_assistant_message(LLMMessage(role=Role.tool, content=""))
+
+
+def test_filter_empty_assistant_messages() -> None:
+    messages = [
+        LLMMessage(role=Role.system, content="sys"),
+        LLMMessage(role=Role.user, content="u1"),
+        LLMMessage(role=Role.assistant, content=""),
+        LLMMessage(role=Role.assistant, content="   "),
+        LLMMessage(role=Role.user, content="u2"),
+        LLMMessage(role=Role.assistant, content="valid answer"),
+    ]
+    filtered = filter_empty_assistant_messages(messages)
+    assert [m.content for m in filtered] == ["sys", "u1", "u2", "valid answer"]

@@ -33,6 +33,8 @@ from vibe.core.compaction import (
 )
 from vibe.core.compaction.context import (
     extract_summary,
+    filter_empty_assistant_messages,
+    is_empty_assistant_message,
     render_teleport_summary_request,
     reorder_for_tool_adjacency,
     select_model_context,
@@ -3161,7 +3163,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         # Keep every tool_use adjacent to its tool_result: a message steered
         # into a running turn mid-tool-call can otherwise sit in that gap and
         # make the provider reject the request.
-        messages = reorder_for_tool_adjacency(select_model_context(messages))
+        messages = filter_empty_assistant_messages(
+            reorder_for_tool_adjacency(select_model_context(messages))
+        )
         if active_model.supports_images:
             return messages
         if not any(m.images for m in messages):
@@ -3481,6 +3485,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         if len(self.messages) < ACCEPTABLE_HISTORY_SIZE:
             return
         self._fill_missing_tool_responses()
+        if any(is_empty_assistant_message(m) for m in self.messages):
+            self.messages.reset(
+                [m for m in self.messages if not is_empty_assistant_message(m)]
+            )
 
     def _fill_missing_tool_responses(self) -> None:
         i = 1
