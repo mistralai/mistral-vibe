@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import abstractmethod
 import asyncio
 from collections.abc import Mapping
+import logging
 import os
 from pathlib import Path
 import tempfile
@@ -21,6 +22,8 @@ from vibe.core.config.models import (
     serialize_model_configs,
 )
 from vibe.core.config.types import EMPTY_CONFIG_SNAPSHOT, LayerConfigSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 class BaseTomlConfigLayer(ConfigLayer[RawConfig]):
@@ -62,7 +65,11 @@ def _read_toml_snapshot(path: Path) -> LayerConfigSnapshot:
     if not path.exists():
         return EMPTY_CONFIG_SNAPSHOT
     with open_fingerprinted_file(path) as (file, fingerprint):
-        data = tomllib.load(file)
+        try:
+            data = tomllib.load(file)
+        except tomllib.TOMLDecodeError as exc:
+            logger.warning("Ignoring unparseable TOML in %s: %s", path, exc)
+            return EMPTY_CONFIG_SNAPSHOT
     return LayerConfigSnapshot(
         data=_internal_toml_document(data), fingerprint=fingerprint
     )
