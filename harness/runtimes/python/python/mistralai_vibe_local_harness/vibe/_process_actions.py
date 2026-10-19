@@ -137,17 +137,44 @@ def validate_process_action(
 ) -> ValidatedProcessAction:
     name = action.call.name
     arguments = action.call.arguments
-    if name == "process.start":
-        return _validate_start(action, session_id=session_id, config=config)
-    if name == "process.output":
-        return _validate_output(action)
-    if name == "process.write":
-        return _validate_write(action, windows=config.command_environment != "unix")
-    if name == "process.list":
-        return ValidatedProcessList()
-    if name == "process.stop":
-        return ValidatedProcessStop(process_id=_required_string(arguments, "processId"))
-    raise ValueError(f"Not a process Action: {name}")
+    try:
+        if name == "process.start":
+            return _validate_start(action, session_id=session_id, config=config)
+        if name == "process.output":
+            return _validate_output(action)
+        if name == "process.write":
+            return _validate_write(action, windows=config.command_environment != "unix")
+        if name == "process.list":
+            return ValidatedProcessList()
+        if name == "process.stop":
+            return ValidatedProcessStop(
+                process_id=_required_string(arguments, "processId")
+            )
+        raise ValueError(f"Not a process Action: {name}")
+    except (KeyError, TypeError, ValueError) as error:
+        # Model-supplied arguments are untrusted JSON: a malformed one is a
+        # failed tool call, never a Runtime crash. Callers already render
+        # ProcessActionError as a tool failure, so any argument-parsing
+        # exception is normalized to the invalid_arguments payload here.
+        raise ProcessActionError(
+            process_error(
+                "invalid_arguments",
+                f"Invalid arguments for {name}: {error}",
+                {
+                    "tool": name,
+                    "errors": cast(
+                        JsonValue,
+                        [
+                            {
+                                "location": "",
+                                "type": "invalid_argument",
+                                "message": str(error),
+                            }
+                        ],
+                    ),
+                },
+            )
+        ) from error
 
 
 def validate_process_config(config: LocalRuntimeAdapterConfig) -> None:

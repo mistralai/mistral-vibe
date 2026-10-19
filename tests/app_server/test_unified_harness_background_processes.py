@@ -21,10 +21,17 @@ from mistralai_vibe_local_harness.protocol import (
     RustCompletionResultToolCallPart,
     RustCompletionSucceededEvent,
     RustLLMCallAction,
+    RustRuntimeBuiltinToolCall,
+    RustRuntimeBuiltinToolCallAction,
     RustTextContentBlock,
     RustTokenUsage,
 )
+from mistralai_vibe_local_harness.vibe._process_actions import (
+    ProcessActionError,
+    validate_process_action,
+)
 from mistralai_vibe_local_harness.vibe._processes._output import ProcessOutputStore
+from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
 from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
 from vibe.app_server._runtime import HarnessProcess
 from vibe.app_server._session_backend_port import (
@@ -309,6 +316,81 @@ async def test_vibe_background_process_approval_denial_never_starts_a_process(
         == []
     )
     await cast(Any, subscription.events).aclose()
+    await backend.shutdown()
+    await host.shutdown()
+
+
+def test_invalid_process_write_arguments_raise_a_process_action_error() -> None:
+    """*Prepare*: A process.write Action with no text, control, or bytesBase64.
+    *Do*: Validate the Action.
+    *Assert*: The failure is a ProcessActionError carrying the
+    invalid_arguments tool error, never a bare ValueError that the Runtime
+    call sites would let crash the session.
+    """
+    # Prepare
+    action = RustRuntimeBuiltinToolCallAction(
+        action_id="action-1",
+        turn_id="turn-1",
+        call_id="call-1",
+        call=RustRuntimeBuiltinToolCall(
+            name="process.write", arguments={"processId": "process-1"}
+        ),
+    )
+
+    # Do / Assert
+    with pytest.raises(ProcessActionError) as raised:
+        validate_process_action(
+            action, session_id="session-1", config=LocalRuntimeAdapterConfig()
+        )
+    assert raised.value.error.code == "invalid_arguments"
+    assert (
+        raised.value.error.message
+        == "Invalid arguments for process.write: process Action bytesBase64"
+        " must be a nonempty string"
+    )
+    assert raised.value.error.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_vibe_invalid_process_write_arguments_fail_the_tool_not_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A process-enabled Vibe Harness with auto-approval.
+    *Do*: Turn a process.write without text, control, or bytesBase64.
+    *Assert*: The turn completes and the model receives an invalid_arguments
+    tool failure; the session stays usable and no process is touched.
+    """
+    # Prepare
+    scripted = _ScriptedCompletion()
+    monkeypatch.setattr(
+        "mistralai_vibe_local_harness.vibe._local_actions.execute_completion", scripted
+    )
+    host, storage_root = await _process_host(tmp_path, auto_approve=True)
+    backend = (await host.start(_start_params(tmp_path, auto_approve=True))).backend
+
+    # Do
+    final_state = await _run_turn(
+        backend,
+        scripted,
+        "write",
+        "async function main() {"
+        " return tools.process.write({processId: 'process-00000000-0000'}); }",
+    )
+    model_input = _model_input_text(scripted.final_inputs[-1])
+
+    # Assert
+    assert not any(
+        isinstance(entry, PublicNoticeEntry) for entry in final_state.history or []
+    )
+    assert "invalid_arguments" in model_input
+    assert "Invalid arguments for process.write" in model_input
+    assert "bytesBase64 must be a nonempty string" in model_input
+    assert (
+        UnifiedSessionStore(storage_root, backend.session_id)
+        .load()
+        .runtime_state.processes
+        == []
+    )
     await backend.shutdown()
     await host.shutdown()
 
