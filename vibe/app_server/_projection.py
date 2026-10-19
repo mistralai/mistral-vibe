@@ -1,15 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 import hashlib
-from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal
 
-from vibe.app_server._history_projection import (
-    history_message_id,
-    project_message_history,
-)
-from vibe.app_server._session_model import active_model_is_pinned
 from vibe.app_server.config import (
     AudioProviderView,
     ConfigView,
@@ -20,24 +14,12 @@ from vibe.app_server.config import (
     TTSModelConfigView,
 )
 from vibe.app_server.models import (
-    AgentStatsSnapshot,
     AgentSummary,
-    ConfigIssue,
-    ConnectorCounts,
     DebugLogEntry,
     DebugLogPage,
-    MCPSourceKind,
-    MCPSourceStatus,
-    MCPSourceSummary,
-    MCPState,
-    MCPToolSummary,
-    PublicHistoryEntry,
-    SessionLogSummary,
     SkillSummary,
-    ToolSummary,
 )
-from vibe.core.agent_loop import AgentLoop
-from vibe.core.agents import AgentProfile, BuiltinAgentName
+from vibe.core.agents import AgentProfile
 from vibe.core.config import (
     ModelConfig,
     TranscribeClient,
@@ -51,20 +33,7 @@ from vibe.core.config import (
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.log_reader import PaginatedLogs
 from vibe.core.skills.models import SkillInfo, SkillSource
-from vibe.core.tools.connectors.connector_registry import ConnectorAuthAction
-from vibe.core.tools.connectors.counts import compute_connector_counts
-from vibe.core.tools.remote import AuthStatus, MCPTool
-from vibe.core.types import Role
 from vibe.core.utils import name_matches
-from vibe.utils.mcp import format_tool_display_description
-
-
-def project_config(agent_loop: AgentLoop) -> ConfigView:
-    return project_config_view(
-        agent_loop.config,
-        active_model_pinned=active_model_is_pinned(agent_loop.config_orchestrator),
-        awaiting_experiment_model=agent_loop.awaiting_experiment_model,
-    )
 
 
 def project_config_view(
@@ -135,10 +104,6 @@ def project_config_view(
     )
 
 
-def project_workdir(agent_loop: AgentLoop) -> str:
-    return agent_loop.config.displayed_workdir or str(agent_loop.cwd)
-
-
 def _project_audio_client(client: TranscribeClient | TTSClient) -> Literal["mistral"]:
     match client:
         case TranscribeClient.MISTRAL | TTSClient.MISTRAL:
@@ -161,6 +126,7 @@ def _project_model_config(
         supports_images=model.supports_images,
         display_name=model.display_name or model.alias,
         max_context_length=model.max_context_length,
+        auto_compact_threshold=model.auto_compact_threshold,
         image_delivery=image_delivery,
         thinking_levels=list(model.thinking_levels),
     )
@@ -202,63 +168,12 @@ def _project_tts_provider(provider: TTSProviderConfig) -> AudioProviderView:
     )
 
 
-def project_stats(agent_loop: AgentLoop) -> AgentStatsSnapshot:
-    stats = agent_loop.stats
-    return AgentStatsSnapshot(
-        steps=stats.steps,
-        session_prompt_tokens=stats.session_prompt_tokens,
-        session_completion_tokens=stats.session_completion_tokens,
-        session_cached_tokens=stats.session_cached_tokens,
-        input_price_per_million=stats.input_price_per_million,
-        output_price_per_million=stats.output_price_per_million,
-        cached_input_price_per_million=stats.cached_input_price_per_million,
-        tool_calls_agreed=stats.tool_calls_agreed,
-        tool_calls_rejected=stats.tool_calls_rejected,
-        tool_calls_failed=stats.tool_calls_failed,
-        tool_calls_succeeded=stats.tool_calls_succeeded,
-        context_tokens=stats.context_tokens,
-        last_turn_prompt_tokens=stats.last_turn_prompt_tokens,
-        last_turn_completion_tokens=stats.last_turn_completion_tokens,
-        last_turn_cached_tokens=stats.last_turn_cached_tokens,
-        last_turn_duration=stats.last_turn_duration,
-        tokens_per_second=stats.tokens_per_second,
-    )
-
-
 def project_agent_summaries(
     active: AgentProfile, available: Iterable[AgentProfile]
 ) -> tuple[AgentSummary, list[AgentSummary]]:
     return project_agent_summary(active), [
         project_agent_summary(profile) for profile in available
     ]
-
-
-# Modes hidden from the Unified Harness mode picker/cycle. They stay selectable
-# (resume, pinned running mode, explicit ``--agent``/switch); only the list the
-# client offers is trimmed.
-_UNIFIED_HIDDEN_PICKER_AGENTS: frozenset[str] = frozenset({BuiltinAgentName.PLAN})
-
-
-def project_unified_agent_summaries(
-    active: AgentProfile, available: Iterable[AgentProfile]
-) -> tuple[AgentSummary, list[AgentSummary]]:
-    """Project agents for a Unified Harness client, hiding plan mode from the picker.
-
-    The active profile is always projected, so a session already running a hidden
-    mode still reports it; only the selectable list drops the hidden modes.
-    """
-    visible = [
-        profile
-        for profile in available
-        if profile.name not in _UNIFIED_HIDDEN_PICKER_AGENTS
-    ]
-    return project_agent_summaries(active, visible)
-
-
-def project_agents(agent_loop: AgentLoop) -> tuple[AgentSummary, list[AgentSummary]]:
-    return project_agent_summaries(
-        agent_loop.agent_profile, agent_loop.agent_manager.available_agents.values()
-    )
 
 
 def project_skill_summaries(skills: Iterable[SkillInfo]) -> list[SkillSummary]:
@@ -279,10 +194,6 @@ def _skill_summary(
         "enabled": enabled,
         "locked": locked,
     })
-
-
-def project_skills(agent_loop: AgentLoop) -> list[SkillSummary]:
-    return project_skill_summaries(agent_loop.skill_manager.available_skills.values())
 
 
 def writable_disabled_skills(
@@ -351,199 +262,6 @@ def project_installed_skill_summaries(
     return [_skill_summary(info, _enabled(info), _locked(info)) for info in skills]
 
 
-def project_installed_skills(agent_loop: AgentLoop) -> list[SkillSummary]:
-    """One row per installed skill, mirroring the agent's resolved state.
-
-    ``installed_skills`` is the deduped, project/source-wins set the agent loads
-    (builtins excluded) *including* disabled skills, so a skill turned off stays
-    in the list marked not-enabled and can be turned back on; enabled rows are
-    exactly what the agent uses.
-    """
-    return project_installed_skill_summaries(
-        agent_loop.skill_manager.installed_skills(),
-        agent_loop.config,
-        writable_disabled_skills(agent_loop.config_orchestrator),
-    )
-
-
-def project_tools(agent_loop: AgentLoop) -> list[ToolSummary]:
-    custom_tool_names = agent_loop.tool_manager.custom_tool_names
-    return [
-        ToolSummary(name=name, is_custom=name in custom_tool_names)
-        for name in agent_loop.tool_manager.available_tools
-    ]
-
-
-def project_connectors(agent_loop: AgentLoop) -> ConnectorCounts:
-    connected, total = compute_connector_counts(
-        agent_loop.config, agent_loop.connector_registry
-    )
-    return ConnectorCounts(connected=connected, total=total)
-
-
-def project_mcp(
-    agent_loop: AgentLoop, *, discovery_errors: Mapping[str, str] | None = None
-) -> MCPState:
-    tools = _project_mcp_tools(agent_loop)
-    discovery_errors_set = set(discovery_errors) if discovery_errors else set()
-    connector_registry = agent_loop.connector_registry
-    connector_error = (
-        connector_registry.bootstrap_error() if connector_registry is not None else None
-    )
-    return MCPState(
-        sources=[
-            *_project_mcp_servers(agent_loop, tools, discovery_errors_set),
-            *_project_mcp_connectors(agent_loop, tools),
-        ],
-        discovery_errors=dict(discovery_errors or {}),
-        connector_error=connector_error,
-    )
-
-
-def _project_mcp_tools(
-    agent_loop: AgentLoop,
-) -> dict[tuple[MCPSourceKind, str], list[MCPToolSummary]]:
-    tools: dict[tuple[MCPSourceKind, str], list[MCPToolSummary]] = {}
-    available = agent_loop.tool_manager.available_tools
-    for tool_name, tool_class in agent_loop.tool_manager.registered_tools.items():
-        if not issubclass(tool_class, MCPTool):
-            continue
-        source_name = tool_class.get_server_name()
-        if source_name is None:
-            continue
-        kind = (
-            MCPSourceKind.CONNECTOR
-            if tool_class.is_connector()
-            else MCPSourceKind.SERVER
-        )
-        tools.setdefault((kind, source_name), []).append(
-            MCPToolSummary(
-                name=tool_class.get_remote_name(),
-                description=format_tool_display_description(
-                    tool_class.description, source_name=source_name
-                ),
-                enabled=tool_name in available,
-            )
-        )
-    return tools
-
-
-def _project_mcp_servers(
-    agent_loop: AgentLoop,
-    tools: dict[tuple[MCPSourceKind, str], list[MCPToolSummary]],
-    discovery_errors: set[str],
-) -> list[MCPSourceSummary]:
-    registry = agent_loop.mcp_registry
-    server_statuses = registry.status() if registry is not None else {}
-    sources: list[MCPSourceSummary] = []
-    for server in agent_loop.config.mcp_servers:
-        if server.disabled:
-            status = MCPSourceStatus.DISABLED
-        elif server.name in discovery_errors:
-            status = MCPSourceStatus.UNAVAILABLE
-        else:
-            match server_statuses.get(server.name):
-                case AuthStatus.NEEDS_AUTH:
-                    status = MCPSourceStatus.NEEDS_AUTH
-                case AuthStatus.OK:
-                    status = MCPSourceStatus.CONNECTED
-                case _:
-                    status = MCPSourceStatus.ENABLED
-        sources.append(
-            MCPSourceSummary(
-                name=server.name,
-                kind=MCPSourceKind.SERVER,
-                transport=server.transport,
-                status=status,
-                tools=sorted(
-                    tools.get((MCPSourceKind.SERVER, server.name), []),
-                    key=lambda tool: tool.name,
-                ),
-            )
-        )
-    return sources
-
-
-def _project_mcp_connectors(
-    agent_loop: AgentLoop, tools: dict[tuple[MCPSourceKind, str], list[MCPToolSummary]]
-) -> list[MCPSourceSummary]:
-    connector_registry = agent_loop.connector_registry
-    connector_configs = {
-        connector.name: connector for connector in agent_loop.config.connectors
-    }
-    connector_names = set(connector_configs)
-    if connector_registry is not None:
-        connector_names.update(connector_registry.get_connector_names())
-    sources: list[MCPSourceSummary] = []
-    for name in sorted(connector_names):
-        config = connector_configs.get(name)
-        disabled = config is None or config.disabled
-        if disabled:
-            status = MCPSourceStatus.DISABLED
-        elif connector_registry is None:
-            status = MCPSourceStatus.UNAVAILABLE
-        elif connector_registry.is_connected(name):
-            status = MCPSourceStatus.CONNECTED
-        else:
-            match connector_registry.get_auth_action(name):
-                case ConnectorAuthAction.OAUTH:
-                    status = MCPSourceStatus.NEEDS_AUTH
-                case ConnectorAuthAction.CREDENTIALS_SETUP:
-                    status = MCPSourceStatus.NEEDS_SETUP
-                case _:
-                    status = MCPSourceStatus.UNAVAILABLE
-        error = (
-            connector_registry.connector_error_for(name)
-            if connector_registry is not None
-            else None
-        )
-        source_tools = {
-            tool.name: tool for tool in tools.get((MCPSourceKind.CONNECTOR, name), [])
-        }
-        if connector_registry is not None:
-            for descriptor in connector_registry.get_catalog_tools(name):
-                source_tools.setdefault(
-                    descriptor.name,
-                    MCPToolSummary(
-                        name=descriptor.name,
-                        description=descriptor.description or "",
-                        enabled=False,
-                    ),
-                )
-        sources.append(
-            MCPSourceSummary(
-                name=name,
-                kind=MCPSourceKind.CONNECTOR,
-                transport="connector",
-                status=status,
-                tools=sorted(source_tools.values(), key=lambda tool: tool.name),
-                error=error,
-            )
-        )
-    return sources
-
-
-def project_session_log(agent_loop: AgentLoop) -> SessionLogSummary:
-    session_logger = agent_loop.session_logger
-    session_dir = session_logger.session_dir if session_logger.persisted else None
-    return SessionLogSummary(
-        enabled=session_logger.enabled,
-        session_id=session_logger.session_id,
-        persisted=session_logger.persisted,
-        path=str(session_dir) if session_dir is not None else None,
-        title=session_logger.title,
-        needs_initial_auto_title=session_logger.needs_initial_auto_title(),
-    )
-
-
-def project_diagnostics(agent_loop: AgentLoop) -> tuple[list[ConfigIssue], int]:
-    issues = [
-        *(_project_issue(issue) for issue in agent_loop.hook_config_issues),
-        *(_project_issue(issue) for issue in agent_loop.skill_manager.config_issues),
-    ]
-    return issues, agent_loop.hooks_count
-
-
 def project_debug_logs(logs: PaginatedLogs) -> DebugLogPage:
     return DebugLogPage(
         entries=[
@@ -565,28 +283,6 @@ def project_debug_logs(logs: PaginatedLogs) -> DebugLogPage:
     )
 
 
-def project_history(agent_loop: AgentLoop) -> list[PublicHistoryEntry]:
-    return project_message_history(
-        agent_loop.session_id,
-        agent_loop.messages,
-        agent_loop.session_logger.session_metadata,
-    )
-
-
-def history_user_message_index(agent_loop: AgentLoop, entry_id: str) -> int | None:
-    for index, message in enumerate(agent_loop.messages):
-        if message.role is not Role.user or message.injected:
-            continue
-        if history_message_id(message, index) == entry_id:
-            return index
-    return None
-
-
-class _ConfigIssue(Protocol):
-    file: Path
-    message: str
-
-
 def project_agent_summary(profile: AgentProfile) -> AgentSummary:
     return AgentSummary(
         name=profile.name,
@@ -595,7 +291,3 @@ def project_agent_summary(profile: AgentProfile) -> AgentSummary:
         safety=profile.safety,
         agent_type=profile.agent_type,
     )
-
-
-def _project_issue(issue: _ConfigIssue) -> ConfigIssue:
-    return ConfigIssue(file=str(issue.file), message=issue.message)

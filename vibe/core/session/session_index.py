@@ -71,25 +71,25 @@ def _build_info(
     if end_time:
         try:
             end_time = _convert_to_utc_iso(end_time)
-        except (ValueError, OSError):
+        except ValueError, OSError:
             end_time = None
     start_time = metadata.get("start_time")
     if start_time:
         try:
             start_time = _convert_to_utc_iso(start_time)
-        except (ValueError, OSError):
+        except ValueError, OSError:
             start_time = None
     bumped_at = metadata.get("bumped_at")
     if bumped_at:
         try:
             bumped_at = _convert_to_utc_iso(bumped_at)
-        except (ValueError, OSError):
+        except ValueError, OSError:
             bumped_at = None
     pinned_at = metadata.get("pinned_at")
     if pinned_at:
         try:
             pinned_at = _convert_to_utc_iso(pinned_at)
-        except (ValueError, OSError):
+        except ValueError, OSError:
             pinned_at = None
 
     origin_directory = metadata.get("origin_directory")
@@ -241,7 +241,7 @@ class SessionIndex:
             return None
         try:
             metadata = json.loads(read_safe(session_dir / METADATA_FILENAME).text)
-        except (OSError, json.JSONDecodeError):
+        except OSError, json.JSONDecodeError:
             return None
         if not isinstance(metadata, dict):
             return None
@@ -259,7 +259,7 @@ class SessionIndex:
         """Load the persisted index file, returning empty on corruption."""
         try:
             raw = json.loads(read_safe(self._index_path).text)
-        except (OSError, json.JSONDecodeError):
+        except OSError, json.JSONDecodeError:
             return {}
         if not isinstance(raw, dict):
             return {}

@@ -1,4 +1,4 @@
-//! Clipboard I/O, mirroring Python's `vibe/cli/clipboard.py`.
+//! Clipboard I/O: the native platform tool with an OSC 52 fallback.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -10,7 +10,7 @@ pub trait Clipboard: Send + Sync {
     fn copy(&self, text: &str) -> bool;
 }
 
-/// Production adapter: native tool plus OSC 52 fallback (Python `copy_to_clipboard`).
+/// Production adapter: native tool plus OSC 52 fallback.
 pub struct SystemClipboard;
 
 impl Clipboard for SystemClipboard {
@@ -58,12 +58,12 @@ pub fn copy_to_clipboard(text: &str) -> bool {
         .copy(text)
 }
 
-/// Python `_is_ssh_session`: skip the native tool over SSH so OSC 52 carries the copy.
+/// Skip the native tool over SSH so OSC 52 carries the copy.
 fn is_ssh_session() -> bool {
     std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
 }
 
-/// Pipe `text` into the platform clipboard tool (pbcopy/wl-copy/xclip/xsel/clip), like Python's pyperclip.
+/// Pipe `text` into the platform clipboard tool (pbcopy/wl-copy/xclip/xsel/clip).
 fn copy_native(text: &str) -> bool {
     let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
         &[("pbcopy", &[])]
@@ -97,7 +97,7 @@ fn copy_native(text: &str) -> bool {
     false
 }
 
-/// Copy `text` via OSC 52 on stdout, tmux-passthrough wrapped, matching Python.
+/// Copy `text` via OSC 52 on stdout, tmux-passthrough wrapped.
 fn copy_osc52(text: &str) {
     use base64::Engine as _;
 

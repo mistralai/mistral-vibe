@@ -260,6 +260,8 @@ class LocalRuntimeAdapterConfig:
     active_agent: str | None = None
     compaction_model: LocalModelRoute = field(default_factory=LocalModelRoute)
     title_model: LocalModelRoute | None = None
+    # System prompt of the title completion; None uses the built-in one.
+    title_prompt: str | None = None
     # Optional destination for the title completion when it must run on a
     # different provider than the session's active one (e.g. the fast Mistral
     # model while the session runs on Anthropic). ``None`` keeps the title on the
@@ -476,6 +478,7 @@ _LOCAL_RUNTIME_ADAPTER_BEHAVIOR_FIELDS = frozenset({
     "active_agent",
     "compaction_model",
     "title_model",
+    "title_prompt",
     "classifier_model",
     "max_tokens",
     "reasoning_field_name",

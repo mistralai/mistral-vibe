@@ -54,8 +54,8 @@ fn smart_approve_selects_agent_when_no_explicit_agent() {
 #[test]
 fn explicit_agent_wins_over_smart_approve() {
     assert_eq!(
-        control(&["--smart-approve", "--agent", "plan"]).agent,
-        Some("plan".into())
+        control(&["--smart-approve", "--agent", "ask"]).agent,
+        Some("ask".into())
     );
 }
 
@@ -104,12 +104,12 @@ fn agent_config_serializes_exec_control_camel_case() {
 fn agent_config_omits_auto_approve_when_false() {
     let value: Value = serde_json::to_value(AgentConfig {
         cwd: None,
-        agent: Some("plan".into()),
+        agent: Some("ask".into()),
         auto_approve: false,
         ..Default::default()
     })
     .unwrap();
-    assert_eq!(value, json!({"agent": "plan"}));
+    assert_eq!(value, json!({"agent": "ask"}));
 }
 
 #[test]

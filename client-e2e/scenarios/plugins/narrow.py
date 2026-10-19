@@ -30,4 +30,4 @@ request_methods = METHODS
 
 timeline: Timeline = [resize(30, 48), "/plugins\r", "\r", "jjj"]
 
-screen_contains = {"rust": ("long-description", "● Tools: delta")}
+screen_contains = ("long-description", "● Tools: delta")

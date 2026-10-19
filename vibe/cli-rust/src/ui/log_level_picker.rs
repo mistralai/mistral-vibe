@@ -57,20 +57,19 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
         theme::muted_style().bg(theme::background()),
     );
 
-    crate::mouse::register_region(
-        app,
-        Rect::new(
-            bx + 1,
-            by + 4,
-            area.width.saturating_sub(2),
-            options().len() as u16,
-        ),
-        crate::mouse::MouseTarget::LogLevelPicker,
-    );
+    let rows = options().len() as u16;
+    let list_area = Rect::new(bx + 1, by + 4, area.width.saturating_sub(2), rows);
+    let option_area = Rect::new(bx + 3, by + 4, area.width.saturating_sub(6), rows);
+    app.log_level_picker
+        .list
+        .layout_rows(options().len(), option_area);
+    crate::mouse::register_region(app, list_area, crate::mouse::MouseTarget::LogLevelPicker);
 
+    let mut badges = Vec::new();
     for (row, level) in options().iter().enumerate() {
-        draw_row(app, f, area, by + 4 + row as u16, level, &chain);
+        badges.extend(draw_row(app, f, area, by + 4 + row as u16, level, &chain));
     }
+    app.log_level_picker.badges = badges;
     hint_line::draw(f, bx + 2, by + area.height - 2, HINTS);
 }
 
@@ -84,7 +83,16 @@ fn subtitle(chain: &LogLevelChain) -> String {
     format!("Effective: {}  ({source})", chain.effective)
 }
 
-fn draw_row(app: &App, f: &mut Frame, area: Rect, y: u16, level: &str, chain: &LogLevelChain) {
+/// Paint one level row; returns the rectangles of the badges it shows.
+fn draw_row(
+    app: &App,
+    f: &mut Frame,
+    area: Rect,
+    y: u16,
+    level: &str,
+    chain: &LogLevelChain,
+) -> Vec<(Rect, &'static str)> {
+    let mut badges = Vec::new();
     let x = area.x + 3;
     let highlighted = crate::log_level_picker::selected_level(app) == level;
     if highlighted {
@@ -98,7 +106,7 @@ fn draw_row(app: &App, f: &mut Frame, area: Rect, y: u16, level: &str, chain: &L
     f.buffer_mut()
         .set_string(x + 2, y, format!("{level:<10}"), base);
 
-    // Python appends badges sequentially, so brackets widen the focused one and
+    // Badges are appended sequentially, so brackets widen the focused one and
     // an unhighlighted row leaves a bare gap for a badge it does not own.
     let mut cursor = x + 14;
     for badge in [BADGE_SESSION, BADGE_CONFIG] {
@@ -117,6 +125,8 @@ fn draw_row(app: &App, f: &mut Frame, area: Rect, y: u16, level: &str, chain: &L
                 cursor
             };
             f.buffer_mut().set_string(text_x, y, badge, style);
+            let width = badge.chars().count() as u16 + if focused { 2 } else { 0 };
+            badges.push((Rect::new(cursor, y, width, 1), badge));
             if focused {
                 f.buffer_mut()
                     .set_string(text_x + badge.chars().count() as u16, y, "]", base);
@@ -124,13 +134,14 @@ fn draw_row(app: &App, f: &mut Frame, area: Rect, y: u16, level: &str, chain: &L
         }
         cursor += badge.chars().count() as u16 + if focused { 2 } else { 0 } + 2;
     }
+    badges
 }
 
 /// Green when the badge holds this level; dim when it is neither set nor the
-/// one Enter would toggle (Python `_append_badge`).
+/// one Enter would toggle.
 fn badge_style(base: Style, set: bool, focused: bool) -> Style {
     if set {
-        return base.fg(list_cursor::current_color());
+        return list_cursor::accent(base, list_cursor::current_color());
     }
     if focused {
         base

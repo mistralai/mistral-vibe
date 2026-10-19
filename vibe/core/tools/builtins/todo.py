@@ -139,7 +139,7 @@ class Todo(
 
     async def run(
         self, args: TodoArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | TodoResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | TodoResult]:
         match args.action:
             case "read":
                 yield self._read_todos()

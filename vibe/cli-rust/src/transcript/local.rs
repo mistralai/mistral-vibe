@@ -1,8 +1,10 @@
 //! Client-owned transcript messages preserved until the server supersedes them.
 
+mod fork;
 mod positions;
 pub mod teleport;
 
+pub use fork::{add_branch_created, add_rewind_fork};
 pub(super) use positions::preserve_file_image_links;
 pub use positions::{preserve, restore, restore_positions};
 
@@ -74,7 +76,7 @@ pub fn add_prompt(
     }));
 }
 
-/// Mount a queued user prompt (Python `UserMessage(pending=True)`).
+/// Mount a queued user prompt.
 pub fn add_pending_prompt(transcript: &mut Transcript, id: &str, text: &str) {
     add_prompt(transcript, id, text, &[], true);
 }
@@ -144,13 +146,13 @@ fn prompt_content(text: &str, images: &[ImageAttachment]) -> Value {
     Value::Array(content)
 }
 
-/// Mount a client-owned command result (Python `UserCommandMessage`), the
+/// Mount a client-owned command result, the
 /// bordered block a slash command prints under its echo.
 pub fn add_command_result(transcript: &mut Transcript, id: &str, text: &str) {
     add_message(transcript, id, "command_result", text);
 }
 
-/// Mount a settled one-line status (Python `StatusMessage`).
+/// Mount a settled one-line status.
 pub fn add_status(transcript: &mut Transcript, id: &str, text: &str) {
     transcript.add(&serde_json::json!({
         "entry": {
@@ -163,39 +165,10 @@ pub fn add_status(transcript: &mut Transcript, id: &str, text: &str) {
     }));
 }
 
-/// Insert the bordered error result used by failed slash commands (Python
-/// `ErrorMessage`, which sanitizes and prefixes its body at render time).
+/// Insert the bordered error result used by failed slash commands; the body
+/// is sanitized and prefixed at render time.
 pub fn add_command_error(transcript: &mut Transcript, id: &str, text: &str) {
     add_message(transcript, id, "command_error", text);
-}
-
-/// Mount the settled status message a fork rewind prints (Python
-/// `RewindForkMessage`), naming the session before and after the fork.
-pub fn add_rewind_fork(
-    transcript: &mut Transcript,
-    id: &str,
-    old_session: &str,
-    new_session: &str,
-) {
-    let text = format!(
-        "Forked to a new session.\nsession: {} (before rewind) → {} (after rewind)",
-        short_session(old_session),
-        short_session(new_session),
-    );
-    transcript.add(&serde_json::json!({
-        "entry": {
-            "id": id,
-            "type": "checkpoint",
-            "kind": "rewind_fork",
-            "message": text,
-            "local": true,
-        }
-    }));
-}
-
-/// Python `shorten_session_id`: the first 8 characters of a session id.
-fn short_session(id: &str) -> &str {
-    id.get(..8).unwrap_or(id)
 }
 
 /// Mount a client-owned notice (e.g. app-server crash) preserved across snapshots.
@@ -211,7 +184,7 @@ pub fn add_notice(transcript: &mut Transcript, id: &str, message: &str) {
     }));
 }
 
-/// Mount the local interrupt marker (Python `InterruptMessage`), shown after a
+/// Mount the local interrupt marker, shown after a
 /// turn is cancelled with Escape. It is client-owned and preserved across
 /// snapshots like other local entries.
 pub fn add_interrupt(transcript: &mut Transcript, id: &str) {
@@ -225,14 +198,14 @@ pub fn add_interrupt(transcript: &mut Transcript, id: &str) {
     }));
 }
 
-/// Mount a borderless warning row (Python `WarningMessage`): plain text in
-/// `$warning`, appended to the messages area like Python's `_mount_and_scroll`.
+/// Mount a borderless warning row: plain text in `$warning`, appended to the
+/// messages area.
 pub fn add_warning(transcript: &mut Transcript, id: &str, text: &str) {
     add_message(transcript, id, "warning", text);
 }
 
-/// Mount the what's-new body (Python `WhatsNewMessage`), pinned below every
-/// message Python's messages area will ever hold, with its `after-history`
+/// Mount the what's-new body, pinned below every message the transcript
+/// will ever hold, with its `after-history`
 /// top margin decided by the history that exists at mount time.
 pub fn add_whats_new(transcript: &mut Transcript, id: &str, text: &str, after_history: bool) {
     transcript.add(&serde_json::json!({
@@ -249,8 +222,7 @@ pub fn add_whats_new(transcript: &mut Transcript, id: &str, text: &str, after_hi
     }));
 }
 
-/// Mount the custom-tools deprecation banner (Python
-/// `CustomToolsDeprecationMessage`), which composes its markdown from the
+/// Mount the custom-tools deprecation banner, composing its markdown from the
 /// sorted custom tool names and the replacement noun their count picks.
 pub fn add_custom_tools_deprecation(transcript: &mut Transcript, id: &str, names: &[String]) {
     let sorted = {
@@ -272,7 +244,7 @@ pub fn add_custom_tools_deprecation(transcript: &mut Transcript, id: &str, names
     add_message(transcript, id, "custom_tools_deprecation", &text);
 }
 
-/// Mount the compact status indicator (Python `CompactMessage`): a single
+/// Mount the compact status indicator: a single
 /// status row that starts spinning and settles to ✓/✕ in place.
 pub fn add_compact_status(transcript: &mut Transcript, id: &str) {
     transcript.add(&serde_json::json!({
@@ -287,8 +259,7 @@ pub fn add_compact_status(transcript: &mut Transcript, id: &str) {
     }));
 }
 
-/// Settle the compact status indicator: ✓ on success, ✕ on error (Python
-/// `CompactMessage.set_complete` / `set_error`).
+/// Settle the compact status indicator: ✓ on success, ✕ on error.
 pub fn settle_compact_status(transcript: &mut Transcript, id: &str, error: Option<&str>) {
     let text = match error {
         Some(msg) => format!("Error: {msg}"),

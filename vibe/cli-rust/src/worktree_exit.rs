@@ -1,5 +1,5 @@
-//! Worktree exit cleanup: the client-side prompt sequence of Python
-//! `_cleanup_worktree_on_exit`, driven over `workspace/git/worktrees/remove`.
+//! Worktree exit cleanup: the client-side prompt sequence, driven over
+//! `workspace/git/worktrees/remove`.
 
 use std::io::{IsTerminal, Write};
 use std::sync::Arc;
@@ -9,14 +9,14 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use crate::app::App;
 use crate::server::signal::ShutdownSignal;
 use crate::server::{method, Client, WorktreeRemoveParams, WorktreeRemoveResponse};
+use crate::terminal_read;
 use crate::worktree::WorktreeInfo;
 
 pub use crate::ui::theme::fixed::sgr::YELLOW;
 pub const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 
-/// Exit cleanup for a worktree this run created, mirroring Python
-/// `_run_cli_with_worktree_cleanup` + `_cleanup_worktree_on_exit`: only a
+/// Exit cleanup for a worktree this run created: only a
 /// clean interactive exit prompts, and only for a worktree `--worktree`
 /// asked for and Vibe created this run. Prompts stay client-side; git runs
 /// server-side over `workspace/git/worktrees/remove`. Never fails the exit.
@@ -26,11 +26,11 @@ pub async fn cleanup_on_exit(app: &App, client: &Arc<Client>, shutdown: &mut Shu
     }
     // The pin is this run's announce, not the session's tracking: a resumed
     // session's restored effect carries the original run's `created` verdict,
-    // and reuse must stay non-cleaning (Python `worktree_session.created`).
+    // and reuse must stay non-cleaning.
     let Some(info) = app.session.prepared_worktree.clone().filter(|w| w.created) else {
         return;
     };
-    // Python inspects before removing, so "Removing worktree" is printed only
+    // Inspect before removing, so "Removing worktree" is printed only
     // when the removal will really happen; the server's `inspect` probe is
     // that inspect, with no side effect.
     match inspect_request(client, &info.path).await {
@@ -59,7 +59,7 @@ pub async fn cleanup_on_exit(app: &App, client: &Arc<Client>, shutdown: &mut Shu
                 }
             }
             "kept_in_use" => {
-                // Python reports a held worktree at inspect time too, so the
+                // A held worktree is reported at inspect time too, so the
                 // user learns why nothing was removed; `outcome_lines` carries
                 // the other-holder count.
                 for (color, text) in outcome_lines(&info, &probe) {
@@ -81,7 +81,7 @@ pub async fn cleanup_on_exit(app: &App, client: &Arc<Client>, shutdown: &mut Shu
 }
 
 /// One remove RPC, parsed leniently; `None` on a transport or version-skew
-/// error, printed like Python's `Could not remove worktree` and never fatal.
+/// error, printed as `Could not remove worktree` and never fatal.
 async fn remove_request(
     client: &Arc<Client>,
     path: &str,
@@ -146,8 +146,8 @@ async fn remove_request_inner(
     }
 }
 
-/// The dirty prompt sequence (Python `_prompt_remove_worktree` +
-/// `_prompt_delete_attached_branch`), then the confirmed forced remove.
+/// The dirty prompt sequence (remove the worktree, then delete its attached
+/// branch), then the confirmed forced remove.
 async fn dirty_flow(
     client: &Arc<Client>,
     info: &WorktreeInfo,
@@ -183,7 +183,7 @@ async fn dirty_flow(
         false
     };
     let delete_branch = forced_delete_branch(probe.branch_created, attached_answer);
-    // Python prints "Removing worktree" only after its holder recheck passes;
+    // "Removing worktree" prints only after the holder recheck passes;
     // the forced remove is that recheck, so the line waits for the answer it
     // announces and a `kept_in_use` never walks it back.
     if let Some(response) = remove_request(client, &info.path, true, delete_branch, false).await {
@@ -237,7 +237,7 @@ pub fn outcome_lines(
             lines
         }
         "kept_in_use" => {
-            // Python counts the other holders; an older server does not send
+            // The other holders are counted; an older server does not send
             // the additive field, so the count degrades to the plain wording.
             let text = match response.holders {
                 Some(count) => format!(
@@ -265,7 +265,7 @@ pub fn removal_reason(response: &WorktreeRemoveResponse) -> String {
     }
 }
 
-/// Python's `[y/N]` prompts: y/yes/remove (delete for the branch prompt)
+/// The `[y/N]` prompts: y/yes/remove (delete for the branch prompt)
 /// answer yes; Ctrl+C, Ctrl+D or a signal answers no.
 async fn prompt_yes(prompt: &str, shutdown: &mut ShutdownSignal) -> bool {
     let mut stderr = std::io::stderr();
@@ -289,7 +289,6 @@ async fn prompt_yes(prompt: &str, shutdown: &mut ShutdownSignal) -> bool {
     let Some(line) = answer else {
         return false;
     };
-    // Python: `input().strip().lower() in {"y", "yes", "remove"|"delete"}`.
     is_yes(
         line.trim().to_lowercase().as_str(),
         prompt.starts_with("Also delete"),
@@ -300,7 +299,7 @@ async fn prompt_yes(prompt: &str, shutdown: &mut ShutdownSignal) -> bool {
 fn read_answer() -> Option<String> {
     let mut line = String::new();
     loop {
-        let Event::Key(key) = crossterm::event::read().ok()? else {
+        let Event::Key(key) = terminal_read::read().ok()? else {
             continue;
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -319,7 +318,7 @@ fn read_answer() -> Option<String> {
     }
 }
 
-/// Python's accepted answers: `y`/`yes` always, plus `remove` (or `delete`
+/// Accepted answers: `y`/`yes` always, plus `remove` (or `delete`
 /// on the attached-branch prompt) as the long form.
 pub fn is_yes(lowered: &str, branch_prompt: bool) -> bool {
     matches!(lowered, "y" | "yes") || lowered == if branch_prompt { "delete" } else { "remove" }

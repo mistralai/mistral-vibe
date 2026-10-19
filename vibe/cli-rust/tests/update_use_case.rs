@@ -206,6 +206,33 @@ async fn stale_cache_or_force_check_hits_the_gateway() {
 }
 
 #[tokio::test]
+async fn a_newer_answer_is_cached_as_the_pending_update_and_replaces_a_stale_entry() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = TempHome::new("newer-answer");
+
+    let gateway = FakeGateway::with(Some(latest("3.0.0")));
+    check(&gateway, "2.25.6", false).await.unwrap().unwrap();
+    let cached = home.read().unwrap();
+    assert_eq!(
+        (cached.latest_version.as_str(), cached.stored_at_timestamp),
+        ("3.0.0", NOW)
+    );
+    let pending = pending_update_from_cache(&FileSystemUpdateCacheRepository, "2.25.6").unwrap();
+    assert_eq!(pending.latest_version, "3.0.0");
+
+    home.seed(&cache("2.99.0", NOW - 3 * 24 * 3600));
+    let gateway = FakeGateway::with(Some(latest("3.1.0")));
+    check(&gateway, "2.25.6", false).await.unwrap().unwrap();
+    let cached = home.read().unwrap();
+    assert_eq!(
+        (cached.latest_version.as_str(), cached.stored_at_timestamp),
+        ("3.1.0", NOW)
+    );
+}
+
+#[tokio::test]
 async fn no_update_or_older_updates_write_the_cache_with_current() {
     let _guard = ENV_LOCK
         .lock()
@@ -222,7 +249,7 @@ async fn no_update_or_older_updates_write_the_cache_with_current() {
 
     let gateway = FakeGateway::with(Some(latest("2.25.6-rc1")));
     // The prerelease hack: hyphens become local version metadata, which
-    // outranks the bare release — like Python, this notifies.
+    // outranks the bare release, so this notifies.
     let result = check(&gateway, "2.25.6", true).await.unwrap().unwrap();
     assert_eq!(result.latest_version, "2.25.6-rc1");
     assert!(result.should_notify);
@@ -257,8 +284,7 @@ async fn gateway_errors_write_the_cache_and_carry_the_message() {
         "Rate limit exceeded while checking for updates."
     );
 
-    // The cache write keeps the seen/dismissed fields, like Python's
-    // read-modify-write.
+    // The cache write keeps the seen/dismissed fields (read-modify-write).
     let read = home.read().unwrap();
     assert_eq!(read.latest_version, "2.25.6");
     assert_eq!(read.stored_at_timestamp, NOW);
@@ -295,8 +321,8 @@ async fn a_check_that_cannot_persist_the_cache_still_answers() {
     let gateway = FakeGateway::with(Some(latest("3.0.0")));
     let result =
         get_update_if_available(&gateway, "2.25.6", &FailingWriteRepository, NOW, true).await;
-    // Python's `FileSystemCacheStore.write_section` swallows the write's
-    // `OSError`, so a read-only or malformed cache.toml costs the caching,
+    // A failed cache write is swallowed, so a read-only or malformed
+    // cache.toml costs the caching,
     // never the check's answer.
     assert_eq!(
         result,
@@ -458,7 +484,7 @@ async fn a_stale_tag_left_by_a_foreign_write_does_not_answer_the_check() {
     assert_eq!(result.latest_version, "2.99.0");
     assert_eq!(gateway.calls(), 0);
 
-    // Python's key-merge write moves the version and the timestamp but knows
+    // A key-merge cache.toml write moves the version and the timestamp but knows
     // nothing of the tag, which stays behind pointing at the old write.
     vibe_rs::utils::cache_store::write_section(
         "update_cache",
@@ -501,7 +527,7 @@ async fn a_voided_tag_reads_as_a_legacy_entry() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let home = TempHome::new("voided-tag");
-    // Python's cache write voids the pairing with a -1 sentinel, which no
+    // A cache write voids the pairing with a -1 sentinel, which no
     // stored timestamp can ever match.
     home.seed(&UpdateCache {
         latest_version: "2.99.0".to_owned(),

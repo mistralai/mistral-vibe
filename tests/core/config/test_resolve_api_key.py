@@ -8,7 +8,8 @@ from tests.conftest import ConfigBuilder, build_test_vibe_config
 from vibe.core.config import MissingAPIKeyError, ProviderConfig
 from vibe.core.llm.backend.mistral import MistralBackend
 from vibe.core.types import Backend
-from vibe.utils.api_keys import resolve_api_key
+from vibe.utils.api_keys import ApiKeySource, active_api_key, resolve_api_key
+import vibe.utils.keyring as keyring_utils
 from vibe.utils.keyring import clear_api_key_keyring_cache
 
 
@@ -92,8 +93,15 @@ def test_resolve_returns_none_when_keyring_raises(
     assert resolve_api_key("CUSTOM_API_KEY") is None
 
 
-def test_resolve_does_not_cache_keyring_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_shares_a_keyring_error_briefly_then_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = 0
+    elapsed = [0.0]
+    real_monotonic = keyring_utils.time.monotonic
+    monkeypatch.setattr(
+        keyring_utils.time, "monotonic", lambda: real_monotonic() + elapsed[0]
+    )
     monkeypatch.delenv("CUSTOM_API_KEY", raising=False)
 
     def _sometimes_unavailable(service: str, username: str) -> str:
@@ -106,6 +114,9 @@ def test_resolve_does_not_cache_keyring_errors(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(keyring, "get_password", _sometimes_unavailable)
 
     assert resolve_api_key("CUSTOM_API_KEY") is None
+    assert resolve_api_key("CUSTOM_API_KEY") is None
+    assert calls == 1
+    elapsed[0] = keyring_utils.READ_FAILURE_TTL_SECONDS
     assert resolve_api_key("CUSTOM_API_KEY") == "keyring-key"
     assert calls == 2
 
@@ -225,3 +236,28 @@ def test_mistral_api_key_empty_when_cache_cleared_and_unresolved(
     monkeypatch.setattr(keyring, "get_password", lambda service, username: None)
 
     assert config.resolve_mistral_api_key() == ""
+
+
+class TestActiveApiKey:
+    """The one statement of precedence, directly."""
+
+    def test_environment_wins(self) -> None:
+        assert active_api_key(env_value="env-key", keyring_value="ring-key") == (
+            ApiKeySource.ENVIRONMENT,
+            "env-key",
+        )
+
+    def test_keyring_decides_only_when_environment_is_empty(self) -> None:
+        assert active_api_key(env_value="", keyring_value="ring-key") == (
+            ApiKeySource.KEYRING,
+            "ring-key",
+        )
+        assert active_api_key(env_value=None, keyring_value="ring-key") == (
+            ApiKeySource.KEYRING,
+            "ring-key",
+        )
+
+    def test_nothing_is_active_when_both_hold_no_value(self) -> None:
+        assert active_api_key(env_value="", keyring_value=None) is None
+        assert active_api_key(env_value=None, keyring_value="") is None
+        assert active_api_key(env_value=None, keyring_value=None) is None

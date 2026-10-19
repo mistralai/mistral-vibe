@@ -1,5 +1,5 @@
 use super::CompactionBudget;
-use crate::core::config::ImageDeliveryMode;
+use crate::core::config::{ImageDeliveryMode, ImageTokenCost};
 use crate::core::error::CoreError;
 use crate::core::model_input_budget::{
     APPROX_BYTES_PER_TOKEN, estimate_model_content_tokens, estimate_model_input_tokens,
@@ -100,7 +100,6 @@ pub(in crate::core) fn accept_summary(
     canonical_messages: &[StoredMessage],
     projected_messages: &[StoredMessage],
     candidate: &CompletionCandidate,
-    context_keys: &[String],
     tools: &[ToolDefinition],
     budget: CompactionBudget,
 ) -> Result<SummaryAcceptance, CoreError> {
@@ -129,14 +128,8 @@ pub(in crate::core) fn accept_summary(
         })
         .cloned()
         .ok_or_else(|| CoreError::invariant("compaction context is missing its system message"))?;
-    let Some(messages) = fitted_replacement(
-        canonical_messages,
-        system_message,
-        &summary,
-        context_keys,
-        tools,
-        budget,
-    )?
+    let Some(messages) =
+        fitted_replacement(canonical_messages, system_message, &summary, tools, budget)?
     else {
         return Ok(SummaryAcceptance::ReplacementTooLarge);
     };
@@ -146,37 +139,19 @@ pub(in crate::core) fn accept_summary(
 pub(in crate::core) fn minimum_replacement_fits(
     canonical_messages: &[StoredMessage],
     generated_system: StoredMessage,
-    context_keys: &[String],
     tools: &[ToolDefinition],
     budget: CompactionBudget,
 ) -> Result<bool, CoreError> {
-    Ok(fitted_replacement(
-        canonical_messages,
-        generated_system,
-        "x",
-        context_keys,
-        tools,
-        budget,
-    )?
-    .is_some())
+    Ok(fitted_replacement(canonical_messages, generated_system, "x", tools, budget)?.is_some())
 }
 
 fn fitted_replacement(
     canonical_messages: &[StoredMessage],
     system_message: StoredMessage,
     summary: &str,
-    context_keys: &[String],
     tools: &[ToolDefinition],
     budget: CompactionBudget,
 ) -> Result<Option<Vec<StoredMessage>>, CoreError> {
-    // The pre-LLM hook delivers its current result again after compaction, so the replacement leaves room for it.
-    let reserved = current_context_tokens(canonical_messages, context_keys, budget.image_delivery)?;
-    let budget = CompactionBudget {
-        token_threshold: budget
-            .token_threshold
-            .map(|threshold| threshold.saturating_sub(reserved)),
-        ..budget
-    };
     let preamble = StoredMessage::injected(Message::user_text(PREVIOUS_USER_MESSAGES_PREAMBLE));
     let summary_message = StoredMessage::injected(Message::user_text(format!(
         "{PREVIOUS_USER_MESSAGES_CLOSE}\n\nHere is a summary of what has happened so far:\n\n{COMPACTION_SUMMARY_OPEN}\n{summary}\n{COMPACTION_SUMMARY_CLOSE}"
@@ -188,35 +163,13 @@ fn fitted_replacement(
         canonical_messages,
         user_budget,
         budget.image_delivery,
+        budget.image_cost,
     )?);
     messages.push(summary_message);
     if !fit_replacement_to_budget(&mut messages, tools, budget)? {
         return Ok(None);
     }
     Ok(Some(messages))
-}
-
-/// Estimates the latest delivery of each key in the current pre-LLM hook result.
-fn current_context_tokens(
-    messages: &[StoredMessage],
-    context_keys: &[String],
-    image_delivery: ImageDeliveryMode,
-) -> Result<u64, CoreError> {
-    if context_keys.is_empty() {
-        return Ok(0);
-    }
-    let current = context_keys
-        .iter()
-        .map(|key| {
-            messages
-                .iter()
-                .rev()
-                .find(|stored| stored.context_key() == Some(key.as_str()))
-                .cloned()
-                .ok_or_else(|| CoreError::invariant("current context key has no stored message"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    estimate_model_input_tokens(&current, &[], image_delivery)
 }
 
 fn fit_replacement_to_budget(
@@ -227,7 +180,9 @@ fn fit_replacement_to_budget(
     let Some(token_threshold) = budget.token_threshold else {
         return Ok(true);
     };
-    if estimate_model_input_tokens(messages, tools, budget.image_delivery)? < token_threshold {
+    if estimate_model_input_tokens(messages, tools, budget.image_delivery, budget.image_cost)?
+        < token_threshold
+    {
         return Ok(true);
     }
 
@@ -239,7 +194,8 @@ fn fit_replacement_to_budget(
         let removed = lower + (upper - lower) / 2;
         let mut candidate = messages.clone();
         candidate.drain(2..2 + removed);
-        if estimate_model_input_tokens(&candidate, tools, budget.image_delivery)? < token_threshold
+        if estimate_model_input_tokens(&candidate, tools, budget.image_delivery, budget.image_cost)?
+            < token_threshold
         {
             fitted = Some(candidate);
             upper = removed.saturating_sub(1);
@@ -256,8 +212,13 @@ fn fit_replacement_to_budget(
     if removable_user_messages > 0 {
         minimal.drain(2..2 + removable_user_messages);
     }
-    let Some(fitted) =
-        fit_latest_user_message_to_budget(&minimal, tools, token_threshold, budget.image_delivery)?
+    let Some(fitted) = fit_latest_user_message_to_budget(
+        &minimal,
+        tools,
+        token_threshold,
+        budget.image_delivery,
+        budget.image_cost,
+    )?
     else {
         return Ok(false);
     };
@@ -283,6 +244,7 @@ fn replacement_user_budget(
         ],
         tools,
         budget.image_delivery,
+        budget.image_cost,
     )?;
     Ok(usize::try_from(token_threshold.saturating_sub(required))
         .unwrap_or(usize::MAX)
@@ -327,6 +289,7 @@ fn collect_user_messages(
     messages: &[StoredMessage],
     max_tokens: usize,
     image_delivery: ImageDeliveryMode,
+    image_cost: ImageTokenCost,
 ) -> Result<Vec<StoredMessage>, CoreError> {
     let candidates = messages
         .iter()
@@ -343,7 +306,7 @@ fn collect_user_messages(
             }
             break;
         }
-        let cost = estimate_user_message_tokens(&stored.message, image_delivery)?;
+        let cost = estimate_user_message_tokens(&stored.message, image_delivery, image_cost)?;
         if cost <= remaining {
             selected.push(stored.clone());
             remaining -= cost;
@@ -364,6 +327,7 @@ fn collect_user_messages(
 fn estimate_user_message_tokens(
     message: &Message,
     image_delivery: ImageDeliveryMode,
+    image_cost: ImageTokenCost,
 ) -> Result<usize, CoreError> {
     let Message::User { content } = message else {
         return Err(CoreError::invariant(
@@ -377,6 +341,7 @@ fn estimate_user_message_tokens(
                 block,
                 "preserved user content",
                 image_delivery,
+                image_cost,
             )?)
             .unwrap_or(usize::MAX),
         };
@@ -475,6 +440,7 @@ pub(in crate::core) fn fit_latest_user_message_to_budget(
     tools: &[ToolDefinition],
     token_threshold: u64,
     image_delivery: ImageDeliveryMode,
+    image_cost: ImageTokenCost,
 ) -> Result<Option<Vec<StoredMessage>>, CoreError> {
     let Some(index) = latest_preserved_user_index(messages) else {
         return Ok(None);
@@ -494,7 +460,9 @@ pub(in crate::core) fn fit_latest_user_message_to_budget(
         };
         let mut candidate = messages.to_vec();
         candidate[index].message = truncated;
-        if estimate_model_input_tokens(&candidate, tools, image_delivery)? < token_threshold {
+        if estimate_model_input_tokens(&candidate, tools, image_delivery, image_cost)?
+            < token_threshold
+        {
             fitted = Some(candidate);
             lower = max_tokens + 1;
         } else {

@@ -29,12 +29,20 @@ fi
 # cache dir; concurrent builds race there, so each spec gets its own
 # PYINSTALLER_CONFIG_DIR. VIBE_SERIAL_PYINSTALLER=1 keeps the old
 # one-at-a-time behavior.
+#
+# PYTHONDONTWRITEBYTECODE: every spec imports the Unified Runtime package to
+# probe it, which writes __pycache__/*.pyc.<random> temp files into the venv,
+# while another spec's collect_all lists that same package as data. A temp
+# name does not end in .pyc, so it gets collected, then vanishes before
+# PyInstaller copies it ("Unable to find ... .pyc.<n>"). PyInstaller compiles
+# the bytecode it bundles itself, so the venv never needs these files.
 pids=()
 specs=("$@")
 run_spec() {
   local spec="$1"
   mkdir -p ".native-build/pyinstaller-work/${spec%.spec}"
-  PYINSTALLER_CONFIG_DIR="$PWD/.native-build/pyinstaller-config/${spec%.spec}" \
+  PYTHONDONTWRITEBYTECODE=1 \
+    PYINSTALLER_CONFIG_DIR="$PWD/.native-build/pyinstaller-config/${spec%.spec}" \
     uv run "${uv_run_args[@]}" pyinstaller \
     --workpath ".native-build/pyinstaller-work/${spec%.spec}" \
     "${spec}"

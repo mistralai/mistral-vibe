@@ -41,6 +41,131 @@ fn process_notification(id: &str, process_id: &str, message: &str) -> Value {
     })
 }
 
+/// *Prepare*: A two-identity replay budget and three accepted notifications.
+/// *Do*: Deliver them, restart Core, and retry both sides of the retention boundary.
+/// *Assert*: Recent and pending duplicates keep the current Action; an evicted ID is delivered again.
+#[test]
+fn notification_replay_is_bounded_without_losing_pending_delivery() {
+    // Prepare
+    let mut settings = config();
+    settings.settings.context.notifications.recent_ids = 2;
+    let mut runtime = SynchronousRuntime::new(settings);
+    let turn_id = "notification-retention";
+    let first = runtime.start_turn(turn_id, "collect results");
+    let notifications = [
+        process_notification("old", "process-old", "old result"),
+        process_notification("middle", "process-middle", "middle result"),
+        process_notification("recent", "process-recent", "recent result"),
+    ];
+    for notification in &notifications {
+        runtime.receive_notification(turn_id, notification, &[&first]);
+    }
+
+    // Do
+    let mut expected = running(turn_id)
+        .dispatch(llm_call(1))
+        .observe(assistant_text_committed(turn_id, &first, "continue"));
+    for notification in &notifications {
+        expected = expected.observe(notification_delivered(
+            turn_id,
+            observed_notification(notification),
+        ));
+    }
+    let second = runtime
+        .apply(text_completion(&first, "continue"), expected)
+        .only_action();
+    runtime.restart_from_checkpoint();
+    runtime.apply(notifications[2].clone(), running(turn_id).keep(&second));
+    runtime.receive_notification(turn_id, &notifications[0], &[&second]);
+    runtime.restart_from_checkpoint();
+    runtime.apply(notifications[0].clone(), running(turn_id).keep(&second));
+    let third = runtime
+        .apply(
+            text_completion(&second, "one more"),
+            running(turn_id)
+                .dispatch(llm_call(2))
+                .observe(assistant_text_committed(turn_id, &second, "one more"))
+                .observe(notification_delivered(
+                    turn_id,
+                    observed_notification(&notifications[0]),
+                )),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(
+        &third,
+        "replace",
+        &[
+            model_system(),
+            model_user_text("collect results"),
+            model_assistant_text("continue"),
+            model_notifications(&[&notifications[0], &notifications[1], &notifications[2]]),
+            model_assistant_text("one more"),
+            model_notifications(&[&notifications[0]]),
+        ],
+    );
+    runtime.finish_turn_with_text(turn_id, &third, "done");
+}
+
+/// *Prepare*: An active Session with room for one pending notification.
+/// *Do*: Fill the count or byte budget, retry retained work, and restore before delivery.
+/// *Assert*: Overflow is non-mutating and pending input remains deliverable exactly once.
+#[test]
+fn pending_notification_capacity_preserves_retained_input_through_restore() {
+    for byte_limited in [false, true] {
+        // Prepare
+        let mut settings = config();
+        settings.settings.context.notifications.pending_count = if byte_limited { 100 } else { 1 };
+        settings.settings.context.notifications.pending_bytes = 512;
+        let mut runtime = SynchronousRuntime::new(settings);
+        let turn_id = "notification-capacity";
+        let first = runtime.start_turn(turn_id, "collect results");
+        let retained = process_notification("retained", "process", "ready");
+        let overflow = process_notification(
+            "overflow",
+            "other",
+            &if byte_limited {
+                "x".repeat(1024)
+            } else {
+                "ready".to_string()
+            },
+        );
+        runtime.receive_notification(turn_id, &retained, &[&first]);
+
+        // Do
+        runtime.reject(overflow, json!({"code": "queue_full"}));
+        runtime.apply(retained.clone(), running(turn_id).keep(&first));
+        runtime.restart_from_checkpoint();
+        runtime.apply(retained.clone(), running(turn_id).keep(&first));
+        let second = runtime
+            .apply(
+                text_completion(&first, "continue"),
+                running(turn_id)
+                    .dispatch(llm_call(1))
+                    .observe(assistant_text_committed(turn_id, &first, "continue"))
+                    .observe(notification_delivered(
+                        turn_id,
+                        observed_notification(&retained),
+                    )),
+            )
+            .only_action();
+
+        // Assert
+        runtime.assert_last_model_message_update(
+            &second,
+            "replace",
+            &[
+                model_system(),
+                model_user_text("collect results"),
+                model_assistant_text("continue"),
+                model_notifications(&[&retained]),
+            ],
+        );
+        runtime.finish_turn_with_text(turn_id, &second, "done");
+    }
+}
+
 ///
 /// *Prepare*: A model starts one subagent through a programmatic tool call.
 /// *Do*: Accept the spawn result, deliver completion notification while a model action is pending, and finish after Core exposes it to the model.
@@ -52,7 +177,7 @@ fn one_subagent_completion_notification_reaches_the_model() {
     let turn_id = "turn-one-subagent";
     let mut runtime = SynchronousRuntime::new(config());
     let first_completion = runtime.start_turn(turn_id, "delegate one investigation");
-    let source = "async function main() { return tools.subagent.spawn({ agentName: 'researcher', message: 'Investigate the issue' }); }";
+    let source = "async function main() { return tools.agents.spawn({ name: 'researcher', message: 'Investigate the issue' }); }";
 
     // Do
     let spawn_action = runtime
@@ -62,9 +187,9 @@ fn one_subagent_completion_notification_reaches_the_model() {
             "program-one-subagent",
             source,
             [runtime_tool(
-                "subagent.spawn",
+                "agents.spawn",
                 json!({
-                    "agentName": "researcher",
+                    "name": "researcher",
                     "message": "Investigate the issue",
                 }),
             )],
@@ -126,8 +251,8 @@ fn one_subagent_completion_notification_reaches_the_model() {
     );
 
     // Assert
-    assert_eq!(spawn_action["call"]["name"], "subagent.spawn");
-    assert_eq!(spawn_action["call"]["arguments"]["agentName"], "researcher");
+    assert_eq!(spawn_action["call"]["name"], "agents.spawn");
+    assert_eq!(spawn_action["call"]["arguments"]["name"], "researcher");
 }
 
 #[test]
@@ -183,8 +308,9 @@ fn keeps_notification_pending_after_iteration_limit() {
             model_system(),
             model_user_text("write the answer"),
             model_assistant_text("the accepted answer"),
-            model_user_text("continue"),
+            // Input retained before the next Turn starts precedes that Turn's user message.
             model_notifications(&[&notification]),
+            model_user_text("continue"),
         ],
     );
 }
@@ -200,7 +326,7 @@ fn parallel_subagents_receive_messages_and_completion_notifications() {
     let turn_id = "turn-parallel-subagents";
     let mut runtime = SynchronousRuntime::new(config());
     let first_completion = runtime.start_turn(turn_id, "coordinate two researchers");
-    let spawn_source = "async function main() { return Promise.all([tools.subagent.spawn({ agentName: 'alpha', message: 'Investigate alpha' }), tools.subagent.spawn({ agentName: 'beta', message: 'Investigate beta' })]); }";
+    let spawn_source = "async function main() { return Promise.all([tools.agents.spawn({ name: 'alpha', message: 'Investigate alpha' }), tools.agents.spawn({ name: 'beta', message: 'Investigate beta' })]); }";
 
     // Do
     let spawn_actions = runtime
@@ -211,12 +337,12 @@ fn parallel_subagents_receive_messages_and_completion_notifications() {
             spawn_source,
             [
                 runtime_tool(
-                    "subagent.spawn",
-                    json!({"agentName": "alpha", "message": "Investigate alpha"}),
+                    "agents.spawn",
+                    json!({"name": "alpha", "message": "Investigate alpha"}),
                 ),
                 runtime_tool(
-                    "subagent.spawn",
-                    json!({"agentName": "beta", "message": "Investigate beta"}),
+                    "agents.spawn",
+                    json!({"name": "beta", "message": "Investigate beta"}),
                 ),
             ],
         )
@@ -253,7 +379,7 @@ fn parallel_subagents_receive_messages_and_completion_notifications() {
             model_tool("program-spawn-subagents", "run_typescript"),
         ],
     );
-    let message_source = "async function main() { return Promise.all([tools.subagent.sendMessage({ agentName: 'alpha', message: 'Check logs' }), tools.subagent.sendMessage({ agentName: 'beta', message: 'Check tests' })]); }";
+    let message_source = "async function main() { return Promise.all([tools.agents.send_message({ agent_path: 'alpha', message: 'Check logs' }), tools.agents.send_message({ agent_path: 'beta', message: 'Check tests' })]); }";
     let message_actions = runtime
         .complete_with_typescript_program(
             turn_id,
@@ -262,12 +388,12 @@ fn parallel_subagents_receive_messages_and_completion_notifications() {
             message_source,
             [
                 runtime_tool(
-                    "subagent.send_message",
-                    json!({"agentName": "alpha", "message": "Check logs"}),
+                    "agents.send_message",
+                    json!({"agent_path": "alpha", "message": "Check logs"}),
                 ),
                 runtime_tool(
-                    "subagent.send_message",
-                    json!({"agentName": "beta", "message": "Check tests"}),
+                    "agents.send_message",
+                    json!({"agent_path": "beta", "message": "Check tests"}),
                 ),
             ],
         )
@@ -351,8 +477,8 @@ fn parallel_subagents_receive_messages_and_completion_notifications() {
     );
 
     // Assert
-    assert_eq!(alpha_spawn["call"]["arguments"]["agentName"], "alpha");
-    assert_eq!(beta_spawn["call"]["arguments"]["agentName"], "beta");
+    assert_eq!(alpha_spawn["call"]["arguments"]["name"], "alpha");
+    assert_eq!(beta_spawn["call"]["arguments"]["name"], "beta");
     assert_eq!(alpha_message["call"]["arguments"]["message"], "Check logs");
     assert_eq!(beta_message["call"]["arguments"]["message"], "Check tests");
 }
@@ -633,7 +759,7 @@ fn steering_combines_subagent_and_background_process_notifications() {
     let turn_id = "turn-combined-steering";
     let mut runtime = SynchronousRuntime::new(config_with_background_processes());
     let first_completion = runtime.start_turn(turn_id, "delegate research and start the build");
-    let source = "async function main() { return Promise.all([tools.subagent.spawn({ agentName: 'researcher', message: 'Investigate' }), tools.process.start({ command: 'build' })]); }";
+    let source = "async function main() { return Promise.all([tools.agents.spawn({ name: 'researcher', message: 'Investigate' }), tools.process.start({ command: 'build' })]); }";
     let tool_actions = runtime
         .complete_with_typescript_program(
             turn_id,
@@ -642,8 +768,8 @@ fn steering_combines_subagent_and_background_process_notifications() {
             source,
             [
                 runtime_tool(
-                    "subagent.spawn",
-                    json!({"agentName": "researcher", "message": "Investigate"}),
+                    "agents.spawn",
+                    json!({"name": "researcher", "message": "Investigate"}),
                 ),
                 runtime_tool("process.start", json!({"command": "build"})),
             ],
@@ -652,7 +778,7 @@ fn steering_combines_subagent_and_background_process_notifications() {
     let [subagent_action, process_action]: [Value; 2] = tool_actions
         .try_into()
         .expect("combined work dispatches two actions");
-    assert_eq!(subagent_action["call"]["name"], "subagent.spawn");
+    assert_eq!(subagent_action["call"]["name"], "agents.spawn");
     assert_eq!(process_action["call"]["name"], "process.start");
     let subagent_result = structured_tool_success(&subagent_action, json!({"type": "success"}));
     runtime.apply(
@@ -717,10 +843,6 @@ fn steering_combines_subagent_and_background_process_notifications() {
                     &waiting_completion,
                     "combined work before steering",
                 ))
-                .observe(turn_steered(
-                    turn_id,
-                    "focus the final answer on regressions",
-                ))
                 .observe(notification_delivered(
                     turn_id,
                     observed_notification(&subagent_notification),
@@ -728,6 +850,10 @@ fn steering_combines_subagent_and_background_process_notifications() {
                 .observe(notification_delivered(
                     turn_id,
                     observed_notification(&process_notification),
+                ))
+                .observe(turn_steered(
+                    turn_id,
+                    "focus the final answer on regressions",
                 )),
         )
         .only_action();
@@ -736,8 +862,8 @@ fn steering_combines_subagent_and_background_process_notifications() {
         "append",
         &[
             model_assistant_text("combined work before steering"),
-            model_user_text("focus the final answer on regressions"),
             model_notifications(&[&subagent_notification, &process_notification]),
+            model_user_text("focus the final answer on regressions"),
         ],
     );
     runtime.finish_turn_with_text(turn_id, &follow_up_completion, "combined work redirected");

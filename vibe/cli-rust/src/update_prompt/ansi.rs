@@ -1,6 +1,8 @@
-//! Rich-style SGR spans for the update prompt's stdout lines (Python `rprint`).
+//! Rich-style SGR spans for the update prompt's stdout lines.
 
 use ratatui::style::{Color, Modifier, Style};
+
+use crate::ui::theme::color_system::for_terminal;
 
 /// One rich-markup span: styled from the active theme on a terminal without
 /// `NO_COLOR`, plain otherwise (rich's own gating). The caller's startup path
@@ -20,7 +22,7 @@ pub fn color_span(style: Style, text: &str) -> String {
 fn sgr(style: Style) -> String {
     let mut params = Vec::new();
     if let Some(color) = style.fg {
-        params.push(match color {
+        params.push(match for_terminal(color) {
             Color::Reset => "39".to_owned(),
             Color::Black => "30".into(),
             Color::Red => "31".into(),

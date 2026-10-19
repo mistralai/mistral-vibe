@@ -5,14 +5,23 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vibe_rs::app::{App, Status};
+use vibe_rs::input::handle_paste;
 use vibe_rs::paste_files::{image_files, parse_clipboard_files};
 use vibe_rs::paste_image::{
-    apply_event, clipboard_image_path, insert_image_token, is_paste_image_key,
-    write_clipboard_image, Event, PNG_MAGIC,
+    apply_event, clipboard_image_path, insert_image_token, is_paste_image_key, is_supported,
+    write_clipboard_image, Event, CHANNEL_CAP, MAX_IMAGE_BYTES, PNG_MAGIC,
 };
 
+fn toasts(app: &App) -> Vec<&str> {
+    app.overlays
+        .toasts
+        .iter()
+        .map(|toast| toast.text.as_str())
+        .collect()
+}
+
 #[test]
-fn writes_python_named_images_under_the_pasted_images_dir() {
+fn writes_timestamped_images_under_the_pasted_images_dir() {
     let path = write_clipboard_image(&[PNG_MAGIC, b"payload"].concat()).expect("write image");
 
     assert!(path.is_file());
@@ -133,6 +142,56 @@ fn ctrl_v_is_image_paste_only_on_supported_platforms() {
         ),
         true
     ));
+}
+
+#[test]
+fn only_an_empty_paste_reads_an_image_and_only_where_supported() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("build runtime");
+    let _entered = runtime.enter();
+    let (tx, _rx) = tokio::sync::mpsc::channel(CHANNEL_CAP);
+    let mut app = App::default();
+    app.paste_image.tx = Some(tx);
+
+    handle_paste(&mut app, "hello world".to_owned());
+    assert_eq!(app.paste_image.in_flight, 0);
+
+    handle_paste(&mut app, String::new());
+    assert_eq!(app.paste_image.in_flight, usize::from(is_supported()));
+    assert_eq!(app.chat_input.input, "hello world");
+    assert!(toasts(&app).is_empty());
+}
+
+#[test]
+fn an_empty_clipboard_only_warns_when_asked_explicitly() {
+    let mut app = App::default();
+    app.paste_image.in_flight = 2;
+
+    apply_event(&mut app, Event::Empty { notify: false });
+    assert!(toasts(&app).is_empty());
+    assert!(app.chat_input.input.is_empty());
+
+    apply_event(&mut app, Event::Empty { notify: true });
+    assert_eq!(toasts(&app), ["No image found on the clipboard."]);
+    assert!(app.chat_input.input.is_empty());
+    assert_eq!(app.paste_image.in_flight, 0);
+}
+
+#[test]
+fn an_oversized_clipboard_image_is_rejected_with_both_sizes() {
+    let mut app = App::default();
+
+    apply_event(
+        &mut app,
+        Event::TooLarge(MAX_IMAGE_BYTES + MAX_IMAGE_BYTES / 2),
+    );
+
+    assert_eq!(
+        toasts(&app),
+        ["Clipboard image is 15.0 MiB; max is 10.0 MiB."]
+    );
+    assert!(app.chat_input.input.is_empty());
 }
 
 #[test]

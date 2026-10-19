@@ -25,7 +25,6 @@ from vibe.setup.auth.whoami import (
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
-    from vibe.core.session.session_logger import SessionLogger
     from vibe.core.telemetry.types import LaunchContext
 
 EXPERIMENT_IDENTITY_TIMEOUT_S: Final = 10.0
@@ -156,66 +155,6 @@ async def initialize_experiments(
     except Exception:
         logger.exception("Failed to persist experiments")
     return True, user_plan
-
-
-async def hydrate_experiments_from_session(
-    *,
-    config: VibeConfigSchema,
-    manager: ExperimentManager,
-    session_logger: SessionLogger,
-) -> bool:
-    """Restore ONLY the sticky GrowthBook variant assignment from ``meta.json``.
-
-    Plan/org attributes and ``user_plan`` are user-scoped, not session-scoped,
-    so they are deliberately NOT read from ``meta.json``. The caller rebuilds
-    them from the identity + ``/whoami`` path (:func:`resolve_plan_attributes`),
-    so a resumed session reports the user's current plan — identical to a fresh
-    one, and resuming never changes the reported plan.
-
-    Returns whether the variant assignment was hydrated (for the prompt
-    refresh); the assignment stays frozen so variants do not re-bucket on
-    resume.
-    """
-    if not config.enable_telemetry:
-        return False
-    metadata = session_logger.session_metadata
-    if metadata is None or metadata.experiments is None:
-        return False
-    if not config.experiments.enable:
-        return False
-    manager.hydrate(metadata.experiments)
-    return True
-
-
-async def resolve_plan_attributes(
-    *,
-    config: VibeConfigSchema,
-    manager: ExperimentManager,
-    launch_context: LaunchContext | None,
-    harness: ExperimentSurface,
-    resolve_identity: IdentityResolver | None = None,
-    resolve_whoami: WhoAmIResolver | None = None,
-) -> str | None:
-    """Rebuild the user-scoped attribute snapshot + ``user_plan`` from identity
-    and ``/whoami`` (through their caches) and apply it via
-    ``manager.set_attributes`` — never ``manager.initialize``.
-
-    Run on resume so a resumed session's variant assignment stays frozen while
-    its plan/org data reflects the current user. Because the source is the user
-    cache (not ``meta.json``), resuming never changes the reported plan.
-    """
-    if not config.enable_telemetry:
-        return None
-    attributes, user_plan = await _fetch_plan_attributes(
-        config=config,
-        launch_context=launch_context,
-        resolve_identity=resolve_identity,
-        resolve_whoami=resolve_whoami,
-        harness=harness,
-    )
-    if attributes is not None:
-        manager.set_attributes(attributes)
-    return user_plan
 
 
 def _build_attributes(

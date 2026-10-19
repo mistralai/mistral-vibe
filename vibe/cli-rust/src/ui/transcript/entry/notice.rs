@@ -8,9 +8,9 @@ use crate::server::{NoticeDetail, NoticeEntry};
 use crate::ui::markdown::LinkedLines;
 use crate::ui::theme;
 
-/// Notices are side-channel signals, not transcript content: Python acts on each
-/// detail kind and renders nothing, except a completed hook with output which
-/// mounts a `HookSystemMessageLine` inside the run's container. A fired scheduled
+/// Notices are side-channel signals, not transcript content: each detail kind
+/// is acted on and renders nothing, except a completed hook with output which
+/// mounts a hook message line inside the run's container. A fired scheduled
 /// loop annotates its user prompt instead. Client-owned notices (app-server
 /// crash, failed suspend) render their message directly.
 pub(super) fn push_notice(
@@ -27,9 +27,8 @@ pub(super) fn push_notice(
         }
     }
     // Only client-owned notices (app-server crash, failed suspend) render their
-    // message. Server notices mount no widget unless handled above, matching
-    // Python's `_handle_notice` dispatch (e.g. `session_title_updated` only
-    // updates the title).
+    // message. Server notices mount nothing unless handled above (e.g.
+    // `session_title_updated` only updates the title).
     if !local {
         return;
     }
@@ -43,7 +42,7 @@ pub(super) fn push_notice(
     ]));
 }
 
-/// Python `HookSystemMessageLine`: `{severity icon} [{hook_name}] {content}` — the
+/// A hook message line: `{severity icon} [{hook_name}] {content}` — the
 /// icon colored by `status` (default warning), the text muted and dim. Visibility
 /// is gated by `is_hidden_hook_notice`, so a notice reaching here has both its
 /// hook name and content set inside an open container.
@@ -62,8 +61,7 @@ fn push_hook_message(lines: &mut LinkedLines, detail: &NoticeDetail, width: u16,
         Some("error") => ("✗", theme::error()),
         _ => ("⚠", theme::warning()),
     };
-    // Python's pre-tool container carries `hook-before-tool`, which matches no
-    // TCSS rule, so the line renders with no margin of its own.
+    // The pre-tool container gives the line no margin of its own.
     let body = format!("[{hook_name}] {content}");
     let body_width = width.saturating_sub(2) as usize;
     // `.hook-system-content`: `max-height: 3; overflow: hidden`, wrapping inside

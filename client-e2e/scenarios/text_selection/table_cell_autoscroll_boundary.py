@@ -6,8 +6,8 @@ from e2e.app_server.events import assistant_msg, turn_completed, turn_started, u
 from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
-screen_contains = {"rust": ("│ Table", "Selection remains scoped to this cell")}
-screen_rows = {"rust": {1: "  Earlier paragraph 08."}}
+screen_contains = ("│ Table", "Selection remains scoped to this cell")
+screen_rows = {1: "  Earlier paragraph 08."}
 
 _PROMPT = "keep the table selection still"
 _PREFACE = "\n\n".join(f"Earlier paragraph {index:02d}." for index in range(1, 21))

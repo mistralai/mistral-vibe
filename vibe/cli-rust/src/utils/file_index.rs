@@ -76,7 +76,7 @@ fn watch_files(
     }
 }
 
-// One git rebuild per drained burst, not one per event (Python defers to a single lazy rebuild).
+// One git rebuild per drained burst, not one per event.
 pub fn apply_events(
     root: &Path,
     paths: &RwLock<BTreeMap<String, bool>>,
@@ -209,7 +209,7 @@ pub fn git_ls_files(root: &Path) -> Option<BTreeMap<String, bool>> {
         if !path.exists() {
             continue;
         }
-        // Parent dirs exist only as ancestors of a listed file (Python _add_git_entry).
+        // Parent dirs exist only as ancestors of a listed file.
         let parts: Vec<&str> = rel.split('/').collect();
         let mut parent = String::new();
         for part in &parts[..parts.len() - 1] {

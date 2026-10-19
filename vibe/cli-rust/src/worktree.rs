@@ -8,7 +8,7 @@ use crate::server::{
 };
 
 /// A managed worktree the app-server moved the session into, reported by the
-/// settled `worktree` effect (Python `WorktreeEffect`). `created` is the
+/// settled `worktree` effect (app-server `WorktreeEffect`). `created` is the
 /// effect's verdict for the run that created it; a resumed session's
 /// restored projection also reports true, and the exit cleanup gate
 /// additionally requires `--worktree` to have been requested this run.
@@ -18,7 +18,7 @@ pub struct WorktreeInfo {
     pub branch: String,
     pub path: String,
     /// True only when this run created it; reused worktrees are never
-    /// auto-cleaned (Python `_run_cli_with_worktree_cleanup`).
+    /// auto-cleaned.
     pub created: bool,
 }
 
@@ -42,7 +42,7 @@ impl WorktreeInfo {
             .find_map(Self::from_entry)
     }
 
-    /// The session state's reported worktree (Python `PublicSessionWorktree`).
+    /// The session state's reported worktree (app-server `PublicSessionWorktree`).
     /// The additive field is the only source a session that has not run a
     /// turn has: the transcript effect only lands with the deferred first
     /// turn, while the state update rides the session move itself.
@@ -56,7 +56,7 @@ impl WorktreeInfo {
         })
     }
 
-    /// Parse a `worktree` effect (Python `WorktreeEffect`): `detail.input`
+    /// Parse a `worktree` effect (app-server `WorktreeEffect`): `detail.input`
     /// carries the name, branch, and path, and the settled verb says Created
     /// vs Reused. Only a completed effect resolves: while it runs the call
     /// display hardcodes `settledVerb: Created` (`WorktreeProgress`), and a
@@ -165,10 +165,9 @@ pub fn track_patch(app: &mut App, patch: &Value) {
 }
 
 /// Follow the server-side move: the session now runs in the worktree, so the
-/// client's notion of its cwd follows (Python chdirs the whole process; here
-/// the server moved the session). The worktree's path is the root, so this is
-/// the fallback; a snapshot's session cwd or the announce's `/cwd` value
-/// refines it to the subdirectory the session actually runs in.
+/// client's notion of its cwd follows. The worktree's path is the root, so
+/// this is the fallback; a snapshot's session cwd or the announce's `/cwd`
+/// value refines it to the subdirectory the session actually runs in.
 pub fn track(app: &mut App, info: WorktreeInfo) {
     if app.session.worktree.as_ref() == Some(&info) {
         return;

@@ -28,7 +28,7 @@ async def stream_until_complete[EventT, ResultT](
     completion: asyncio.Task[ResultT],
     *,
     event_task_name: str | None = None,
-) -> AsyncGenerator[EventT, None]:
+) -> AsyncGenerator[EventT]:
     pending_event: asyncio.Task[EventT] | None = None
     try:
         while not completion.done():
@@ -60,7 +60,7 @@ async def stream_request[EventT, ResponseT: ProtocolModel](
     params: ProtocolModel,
     events: asyncio.Queue[EventT],
     response_type: type[ResponseT],
-) -> AsyncGenerator[EventT | ResponseT, None]:
+) -> AsyncGenerator[EventT | ResponseT]:
     request = asyncio.create_task(
         client.request(method, params, wait_for_incoming=True)
     )

@@ -485,7 +485,7 @@ class GenericBackend:
         tool_choice: StrToolChoice | AvailableTool | None = None,
         extra_headers: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
-    ) -> AsyncGenerator[LLMChunk, None]:
+    ) -> AsyncGenerator[LLMChunk]:
         api_style = getattr(self._provider, "api_style", "openai")
         api_key, api_key_origin = self._resolve_credential(api_style)
         adapter = _get_adapter(api_style)

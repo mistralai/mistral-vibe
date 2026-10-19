@@ -1,5 +1,5 @@
 //! Regression: hovering an expandable entry or the composer left the pointer
-//! as an arrow, where Textual asks the terminal for a hand or an I-beam.
+//! as an arrow instead of a hand or an I-beam.
 
 use ratatui::layout::Rect;
 use serde_json::json;
@@ -48,12 +48,14 @@ fn hovering_the_composer_asks_for_the_beam() {
 fn remote_project_targets_have_matching_pointer_shapes() {
     let mut app = App::default();
     app.vibe_code_project.search_area = Rect::new(2, 2, 10, 1);
-    app.vibe_code_project.list_area = Rect::new(2, 4, 20, 2);
     app.view.bottom_app_selection_region.area = Rect::new(2, 2, 20, 4);
     app.vibe_code_project.items = vec![Item::Create {
         name: "project".into(),
         recommended: true,
     }];
+    app.vibe_code_project
+        .list
+        .layout_rows(1, Rect::new(2, 4, 20, 2));
     mouse::register_region(&mut app, Rect::new(2, 2, 10, 1), MouseTarget::RemoteProject);
     mouse::register_region(&mut app, Rect::new(2, 4, 20, 2), MouseTarget::RemoteProject);
 

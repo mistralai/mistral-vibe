@@ -133,6 +133,42 @@ fn sync_files_applies_an_index_update_that_landed_after_the_keys() {
 }
 
 #[test]
+fn a_query_typed_before_the_index_is_ready_accepts_nothing() {
+    let mut app = composer("@sr", "");
+    completion_manager::input_changed(&mut app);
+
+    completion_manager::tab(&mut app);
+
+    assert_eq!(app.chat_input.input, "@sr");
+}
+
+#[test]
+fn each_keystroke_refilters_so_tab_never_accepts_a_suggestion_for_an_older_query() {
+    let root = std::env::temp_dir().join(format!("vibe-rs-refilter-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("README.md"), "").unwrap();
+    std::fs::write(root.join("src/main.py"), "").unwrap();
+    let (files, changes) = FileIndex::start(Some(root.clone()));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !changes.has_changed().unwrap() {
+        assert!(Instant::now() < deadline, "file index never became ready");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut app = composer("@", "");
+    app.completion.files = files;
+    completion_manager::input_changed(&mut app);
+    assert_eq!(app.completion.entries[0].label, "@README.md");
+
+    app.chat_input.input = "@sr".into();
+    app.chat_input.cursor = 3;
+    completion_manager::input_changed(&mut app);
+    completion_manager::tab(&mut app);
+
+    assert_eq!(app.chat_input.input, "@src/");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn accept_without_suggestions_leaves_input_unchanged() {
     let mut app = composer("@missing", " suffix");
 
@@ -153,7 +189,7 @@ fn refresh_resets_highlight_only_when_the_suggestion_list_changes() {
     assert!(highlighted > 0);
 
     // An identical rebuild (a caret move within the same query) keeps the
-    // highlight, like Python's path_completion `_update_suggestions`.
+    // highlight.
     completion_manager::refresh(&mut app);
     assert_eq!(app.completion.selected, highlighted);
 

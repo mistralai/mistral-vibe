@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 from typing import Annotated, Literal, Self
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -179,10 +180,17 @@ class QueuedTurn(SessionProtocolModel):
 TURN_QUEUE_MAX_ITEMS = 32
 
 
+class TurnQueueEditState(SessionProtocolModel):
+    queue_item_id: QueueItemId
+
+
 class TurnQueue(SessionProtocolModel):
     items: list[QueuedTurn]
     paused: bool
     max_items: Annotated[int, Field(ge=1)]
+    editing: TurnQueueEditState | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ResolvedPluginDefinition(SessionProtocolModel):
@@ -246,6 +254,10 @@ type Procedure = Literal[
     "app_server/session/turn/queue/read",
     "app_server/session/turn/queue/remove",
     "app_server/session/turn/queue/replace",
+    "app_server/session/turn/queue/edit/start",
+    "app_server/session/turn/queue/edit/save",
+    "app_server/session/turn/queue/edit/cancel",
+    "app_server/session/turn/queue/edit/abandon",
     "app_server/session/turn/queue/steer",
     "app_server/session/turn/queue/resume",
     "app_server/session/turn/steer",
@@ -272,6 +284,10 @@ APP_SERVER_SESSION_IMPLEMENTED_PROCEDURES: tuple[Procedure, ...] = (
     "app_server/session/turn/queue/read",
     "app_server/session/turn/queue/remove",
     "app_server/session/turn/queue/replace",
+    "app_server/session/turn/queue/edit/start",
+    "app_server/session/turn/queue/edit/save",
+    "app_server/session/turn/queue/edit/cancel",
+    "app_server/session/turn/queue/edit/abandon",
     "app_server/session/turn/queue/steer",
     "app_server/session/turn/queue/resume",
     "app_server/session/turn/steer",
@@ -425,6 +441,12 @@ class CompletedPublicTurn(SessionProtocolModel):
     # ``limit``: the Turn hit its iteration limit. ``length``: its last answer
     # was cut off at the output-token cap.
     stop_reason: Literal["limit", "length"] | None = None
+    # Set only when a ``pre_agent_turn`` hook skipped the Turn: the text of the
+    # hook's reason, which is the Turn's whole output. Omitted when unset so a
+    # Turn that was not skipped stays readable by a reader without this field.
+    skip_reason: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class FailedPublicTurn(SessionProtocolModel):
@@ -662,6 +684,50 @@ class TurnQueueReplaceResponse(SessionProtocolModel):
     queue_item_id: QueueItemId
 
 
+class _TurnQueueEditParams(SessionProtocolModel):
+    session_id: SessionId
+    queue_item_id: QueueItemId
+    edit_id: UUID
+
+
+class TurnQueueEditStartParams(_TurnQueueEditParams):
+    pass
+
+
+class TurnQueueEditStartResponse(SessionProtocolModel):
+    queue_item_id: QueueItemId
+
+
+class TurnQueueEditSaveParams(_TurnQueueEditParams):
+    idempotency_key: str
+    entries: list[TurnInputEntry] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_entries(self) -> Self:
+        _validate_turn_input_entries(self.entries)
+        return self
+
+
+class TurnQueueEditSaveResponse(SessionProtocolModel):
+    queue_item_id: QueueItemId
+
+
+class TurnQueueEditCancelParams(_TurnQueueEditParams):
+    pass
+
+
+class TurnQueueEditCancelResponse(SessionProtocolModel):
+    pass
+
+
+class TurnQueueEditAbandonParams(_TurnQueueEditParams):
+    pass
+
+
+class TurnQueueEditAbandonResponse(SessionProtocolModel):
+    pass
+
+
 class TurnQueueSteerParams(SessionProtocolModel):
     session_id: SessionId
     queue_item_id: QueueItemId
@@ -754,6 +820,15 @@ __all__ = [
     "TurnId",
     "TurnInputEntry",
     "TurnQueue",
+    "TurnQueueEditAbandonParams",
+    "TurnQueueEditAbandonResponse",
+    "TurnQueueEditCancelParams",
+    "TurnQueueEditCancelResponse",
+    "TurnQueueEditSaveParams",
+    "TurnQueueEditSaveResponse",
+    "TurnQueueEditStartParams",
+    "TurnQueueEditStartResponse",
+    "TurnQueueEditState",
     "TurnQueueReadParams",
     "TurnQueueReadResponse",
     "TurnQueueRemoveParams",

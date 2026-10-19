@@ -55,7 +55,7 @@ pub(crate) use testing::{
     CompletionResult, CompletionResultPart, CompletionResultSemanticPart, ContextSettings,
     ExternalTool, ExternalToolCall, HarnessConfigurationChange, HarnessSettings, HookBinding,
     HookCall, HookPoint, HookResult, HookSelector, HookToolCall, HookToolKey, HookToolTarget,
-    ImageDeliveryMode, ImageDeliverySettings, ModelInputUpdate, ModelMessageUpdate,
+    ImageDeliveryMode, ImageDeliverySettings, ImageTokenCost, ModelInputUpdate, ModelMessageUpdate,
     ModelToolCatalogUpdate, Notification, NotificationLevel, NotificationSource,
     PendingActionInspection, PendingCompletionPurpose, PendingLifecycleHook, PreAgentTurnOutput,
     PreToolCallOutput, ProcessTerminalStatus, ProgramExecution, ProgrammaticToolSettings,
@@ -156,10 +156,16 @@ pub(crate) fn reconfigure_in_place(
     // Build and validate the whole next configuration before touching state so
     // this operation remains locally atomic as well as session-atomic.
     let (next_config, next_resolved_tools) = planned_config(&state.config, update)?;
-    let tool_catalog_changed = tool_catalog_source_changed(&state.config, &next_config);
+    // Settings can add or remove direct tools such as `wait`, so compare the
+    // compiled model tool list as well as the prompt and capability sources.
+    let tool_catalog_changed = tool_catalog_source_changed(&state.config, &next_config)
+        || state.resolved_tools.top_level_tools() != next_resolved_tools.top_level_tools();
     let agent_image_delivery_changed = state.config.settings.context.image_delivery.agent
         != next_config.settings.context.image_delivery.agent;
     state.config = next_config;
+    state
+        .notifications
+        .retain_recent(state.config.settings.context.notifications.recent_ids);
     state.resolved_tools = next_resolved_tools;
     state.hook_binding_index = capabilities::HookBindingIndex::from_config(&state.config);
     if tool_catalog_changed {
@@ -236,8 +242,8 @@ fn planned_config(
     let mut next = current.clone();
     if let Some(settings) = update.settings {
         subagents::validate_reconfiguration(
-            current.settings.tools.subagents,
-            settings.tools.subagents,
+            &current.settings.tools.subagents,
+            &settings.tools.subagents,
         )
         .map_err(|detail| CoreError::invalid_configuration("settings.tools.subagents", detail))?;
         next.settings = settings;
@@ -284,6 +290,7 @@ fn validate_compaction_budget(
         &messages,
         resolved_tools.top_level_tools(),
         config.settings.context.image_delivery.compaction,
+        config.settings.context.image_token_cost,
     )? >= token_threshold
     {
         return Err(CoreError::invalid_configuration(

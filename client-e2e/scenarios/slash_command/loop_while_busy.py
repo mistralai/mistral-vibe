@@ -27,19 +27,15 @@ timeline: Timeline = [
     "/loop cancel\r",
     "/loop 90s check build status\r",
 ]
-screen_contains = {
-    "rust": (
-        "Queued",
-        "/loop",
-        "/loop list",
-        "/loop cancel",
-        "/loop 90s check build status",
-    )
-}
-screen_excludes = {
-    "rust": (
-        "Slash commands cannot be queued",
-        "No scheduled loops.",
-        "not implemented",
-    )
-}
+screen_contains = (
+    "Queued",
+    "/loop",
+    "/loop list",
+    "/loop cancel",
+    "/loop 90s check build status",
+)
+screen_excludes = (
+    "Slash commands cannot be queued",
+    "No scheduled loops.",
+    "not implemented",
+)

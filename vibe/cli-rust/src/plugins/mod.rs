@@ -1,4 +1,4 @@
-//! `/plugins` browser and `/reload-plugins` (Python `VibeApp._show_plugins`, `_reload_plugins`, `PluginsApp`).
+//! `/plugins` browser and `/reload-plugins`.
 
 mod filter;
 mod request;
@@ -7,12 +7,14 @@ pub mod text;
 
 use std::sync::Arc;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
 use crate::app::App;
 use crate::commands::submission::new_message_id;
+use crate::option_list::{OptionList, SingleAction};
 use crate::search_field::Search;
+use crate::selection::RegionId;
 use crate::server::{Client, PluginCatalogState};
 use crate::transcript::local;
 use rows::Row;
@@ -24,10 +26,10 @@ pub const NO_PLUGIN_BACKEND: &str = "This session resolves no plugins.";
 pub const NONE_INSTALLED: &str = "No plugins are installed for this session.";
 /// A move far enough to land on the first or last row (Home/End).
 const EDGE: isize = isize::MAX / 2;
-/// Lines one wheel notch scrolls the option list (Textual's scroll step).
+/// Lines one wheel notch scrolls the option list.
 const WHEEL_STEP: usize = 2;
 
-/// The open browser (Python `PluginsApp`).
+/// The open browser.
 #[derive(Default)]
 pub struct State {
     /// While set the browser replaces the input box.
@@ -36,21 +38,16 @@ pub struct State {
     /// Plugin whose detail is shown, or `None` in the list view.
     pub viewing: Option<String>,
     pub filter: Search,
-    /// Highlighted row index; only plugin rows are selectable.
-    pub selected: usize,
-    pub scroll: usize,
-    /// Mouse-wheel scrolling temporarily detaches the viewport from the highlight.
-    pub free_scroll: bool,
-    /// Option-list viewport from the last render, used to route mouse clicks.
+    /// Highlighted row index (only plugin rows are selectable) and the viewport.
+    pub list: OptionList<SingleAction>,
+    /// Option-list viewport from the last render.
     pub list_area: Rect,
-    /// Row index of each laid-out visual line, so a click maps to its option.
-    pub line_rows: Vec<usize>,
     /// A reload is in flight; further ones are dropped so diffs never interleave.
     pub reloading: bool,
 }
 
 impl State {
-    /// The filter query as Python matches it: stripped and case-folded.
+    /// The filter query as matched: stripped and case-folded.
     pub fn query(&self) -> String {
         caseless::default_case_fold_str(self.filter.query.trim())
     }
@@ -127,25 +124,25 @@ fn fresh(app: &App) -> State {
     }
 }
 
-/// Rebuild the view: leave a detail a reload removed, highlight the first plugin (Python `_refresh_view`).
+/// Rebuild the view: leave a detail a reload removed, highlight the first plugin.
 pub(crate) fn reset_highlight(app: &mut App) {
     if rows::viewing_entry(&app.plugins).is_none() {
         app.plugins.viewing = None;
     }
-    app.plugins.selected = rows::rows(&app.plugins)
+    let first = rows::rows(&app.plugins)
         .iter()
         .position(Row::selectable)
         .unwrap_or(0);
-    app.plugins.scroll = 0;
-    app.plugins.free_scroll = false;
+    app.plugins.list.select(first);
+    app.plugins.list.reset_viewport();
 }
 
-/// The open browser owns keys (Python `PluginsApp.BINDINGS`).
+/// The open browser owns keys.
 pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     if filter::handle_key(app, key) {
         return;
     }
-    // Textual bindings never fire with a modifier held; Shift is how some layouts type `/`.
+    // Bindings never fire with a modifier held; Shift is how some layouts type `/`.
     if key
         .modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
@@ -181,7 +178,7 @@ fn back(app: &mut App) {
 
 fn select(app: &mut App) {
     let rows = rows::rows(&app.plugins);
-    let Some(Row::Entry(index)) = rows.get(app.plugins.selected) else {
+    let Some(Row::Entry(index)) = rows.get(app.plugins.list.selected()) else {
         return;
     };
     app.plugins.viewing = Some(app.plugins.catalog.plugins[*index].name.clone());
@@ -189,14 +186,13 @@ fn select(app: &mut App) {
     reset_highlight(app);
 }
 
-/// Textual `OptionList` moves: arrows wrap around, pages and Home/End clamp; the detail view scrolls instead.
+/// Option list moves: arrows wrap around, pages and Home/End clamp; the detail view scrolls instead.
 fn navigate(app: &mut App, delta: isize, wrap: bool) {
+    let list = &mut app.plugins.list;
     if app.plugins.viewing.is_some() {
-        app.plugins.free_scroll = true;
-        app.plugins.scroll = app.plugins.scroll.saturating_add_signed(delta);
+        list.detach_at(list.scroll().saturating_add_signed(delta));
         return;
     }
-    app.plugins.free_scroll = false;
     let selectable: Vec<usize> = rows::rows(&app.plugins)
         .iter()
         .enumerate()
@@ -207,7 +203,7 @@ fn navigate(app: &mut App, delta: isize, wrap: bool) {
     };
     let current = selectable
         .iter()
-        .position(|index| *index == app.plugins.selected)
+        .position(|index| *index == app.plugins.list.selected())
         .unwrap_or(0) as isize;
     let target = current.saturating_add(delta);
     let target = if wrap {
@@ -215,7 +211,7 @@ fn navigate(app: &mut App, delta: isize, wrap: bool) {
     } else {
         target.clamp(0, last as isize)
     };
-    app.plugins.selected = selectable[target as usize];
+    app.plugins.list.select(selectable[target as usize]);
 }
 
 /// One page of the option list, as last rendered.
@@ -225,43 +221,26 @@ fn page(app: &App) -> isize {
 
 /// The wheel scrolls the viewport without moving the highlight.
 pub fn wheel(app: &mut App, down: bool) {
-    app.plugins.free_scroll = true;
-    app.plugins.scroll = if down {
-        app.plugins.scroll.saturating_add(WHEEL_STEP)
-    } else {
-        app.plugins.scroll.saturating_sub(WHEEL_STEP)
-    };
+    app.plugins.list.wheel(down, WHEEL_STEP);
 }
 
-/// Mouse press highlights the plugin under the cursor; a release on it opens it, like Enter.
-pub fn click(app: &mut App, at: (u16, u16), release: bool) {
-    let filter = &mut app.plugins.filter;
-    if !release && app.plugins.viewing.is_none() && filter.area.contains(at.into()) {
-        filter.focused = true;
+/// A press on the search field focuses it; a click on a plugin opens it, like Enter.
+pub fn mouse(app: &mut App, event: MouseEvent) {
+    let at = (event.column, event.row);
+    let pressed = event.kind == MouseEventKind::Down(MouseButton::Left);
+    let on_search = app.plugins.viewing.is_none() && app.plugins.filter.area.contains(at.into());
+    let click =
+        crate::mouse::option_gesture(app, event, RegionId::BottomApp, |app| &mut app.plugins.list);
+    if on_search && pressed {
+        app.plugins.filter.focused = true;
         return;
     }
-    let Some(row) = row_at(app, at) else {
-        return;
-    };
-    if !release {
+    if pressed && app.plugins.list.index_at(at).is_some() {
         app.plugins.filter.focused = false;
-        app.plugins.selected = row;
-    } else if row == app.plugins.selected {
+    }
+    if click.is_some() {
         select(app);
     }
-}
-
-fn row_at(app: &App, at: (u16, u16)) -> Option<usize> {
-    let area = app.plugins.list_area;
-    if !app.plugins.open || !area.contains(at.into()) {
-        return None;
-    }
-    let line = app.plugins.scroll + (at.1 - area.y) as usize;
-    let row = *app.plugins.line_rows.get(line)?;
-    rows::rows(&app.plugins)
-        .get(row)
-        .is_some_and(Row::selectable)
-        .then_some(row)
 }
 
 fn add_result(app: &mut App, text: &str) {

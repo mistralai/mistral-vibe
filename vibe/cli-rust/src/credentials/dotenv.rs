@@ -1,4 +1,4 @@
-//! Load `$VIBE_HOME/.env` into the process environment (Python `load_dotenv_values`).
+//! Load `$VIBE_HOME/.env` into the process environment.
 
 use std::fs;
 use std::path::PathBuf;
@@ -26,8 +26,8 @@ pub fn load_dotenv_values() {
     };
     let mut set_keys = Vec::new();
     for (key, value) in parse(&content) {
-        // An explicit non-empty process/shell value wins over the .env file
-        // (Python `load_dotenv_values`); an empty one lets the file through.
+        // An explicit non-empty process/shell value wins over the .env file;
+        // an empty one lets the file through.
         let already_set = std::env::var_os(&key).is_some_and(|v| !v.is_empty());
         if !already_set {
             std::env::set_var(&key, &value);

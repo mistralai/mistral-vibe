@@ -31,7 +31,7 @@ use trust::resolve_workspace_trust;
 /// event loop reads.
 pub type WorktreeNotifications = (mpsc::Receiver<Notification>, mpsc::Sender<Notification>);
 
-/// `ClientInfo.name`, the server's telemetry `client_name` (Python sends `vibe_tui`).
+/// `ClientInfo.name`, the server's telemetry `client_name`.
 pub const CLIENT_NAME: &str = "vibe_rs";
 
 pub use crate::utils::startup_cache::read_skills;
@@ -149,6 +149,15 @@ pub async fn initialize_connection(client: &Client) -> Result<String> {
         .notify(method::INITIALIZED, json!({}))
         .await
         .context("initialized")?;
+    // The server names its own pid so the client can tell its leases from
+    // another process's; absent on an older server, and then nothing exempts.
+    if let Some(pid) = initialized
+        .pointer("/processId")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+    {
+        client.set_server_pid(pid);
+    }
     Ok(initialized
         .pointer("/serverInfo/version")
         .and_then(Value::as_str)
@@ -194,8 +203,8 @@ async fn handshake_inner(
         Some(version) => version,
         None => initialize_connection(&client).await?,
     };
-    // `--trust` grants the session trust outright (Python `prompt_for_workspace_trust
-    // = not trust_workspace`), so the gate would ask about a decision already taken.
+    // `--trust` grants the session trust outright, so the gate would ask about a
+    // decision already taken.
     // The wizard round's retry skips the gate: its answer was given on the
     // first pass and persisted, and the server reports an explicitly-untrusted
     // cwd again (`include_explicitly_untrusted=True`), so re-prompting would
@@ -212,8 +221,7 @@ async fn handshake_inner(
     // its target from it, and nothing else needs it. A worktree run cannot
     // scope its list yet — the worktree does not exist until the app-server
     // prepares it — so the list moves after the settle, scoped to the
-    // worktree directory (Python chdirs before its lookups; the settled cwd
-    // is the thin-client equivalent).
+    // worktree directory (the settled cwd).
     let mut sessions = None;
     let mut list_error = None;
     if !worktree && matches!(resume, StartupResume::Picker | StartupResume::Continue) {

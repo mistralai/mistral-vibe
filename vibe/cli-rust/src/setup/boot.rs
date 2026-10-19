@@ -13,7 +13,7 @@ use crate::startup::{HandshakeParams, StartupEvent};
 
 /// Boot the child behind the painted unready frame: `initialize`, then the
 /// session handshake on the same child — one task owning the ready channel
-/// end to end. The probe (Python `resolve_api_key`: env then keyring)
+/// end to end. The probe (env then keyring)
 /// already said the key is present, so no pre-session `setup/status` is
 /// asked; a probe-negative launch runs the wizard's pre-loop round instead
 /// and hands its booted child back to this handshake's retried spawn.

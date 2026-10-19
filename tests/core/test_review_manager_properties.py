@@ -17,12 +17,8 @@ from __future__ import annotations
 from pathlib import Path
 import random
 
-from vibe.core.checkpoints import (
-    Checkpointer,
-    CheckpointRecorder,
-    FileSnapshot,
-    FileState,
-)
+from tests.stubs.fake_checkpoint_capture import FakeCheckpointCapture, FileSnapshot
+from vibe.core.checkpoints import Checkpointer, FileState
 from vibe.core.review import AllTarget, ReviewManager, ScopeTarget
 from vibe.core.types import LLMMessage, MessageList, Role
 
@@ -112,7 +108,7 @@ class _Bundle:
 
     def __init__(self, messages: MessageList) -> None:
         checkpointer = Checkpointer()
-        recorder = CheckpointRecorder(checkpointer, messages)
+        recorder = FakeCheckpointCapture(checkpointer, messages)
         review = ReviewManager(checkpointer)
         self.create_checkpoint = recorder.create_checkpoint
         self.add_snapshot = recorder.add_snapshot

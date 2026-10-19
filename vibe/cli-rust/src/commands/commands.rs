@@ -1,6 +1,6 @@
-//! Built-in slash commands, hardcoded to mirror Python's `vibe/cli/commands.py`.
+//! Built-in slash commands, hardcoded in the client.
 
-/// One `/`-prefixed alias group (Python's `Command`); `side_channel` marks the
+/// One `/`-prefixed alias group; `side_channel` marks the
 /// commands that still run while the session is busy. The first alias is canonical.
 pub struct Command {
     pub aliases: &'static [&'static str],
@@ -61,6 +61,7 @@ const COMMANDS: &[Command] = &[
     cmd(&["/leanstall"], "Install the Lean 4 agent (leanstral)", false),
     cmd(&["/unleanstall"], "Uninstall the Lean 4 agent", false),
     cmd(&["/rewind"], "Rewind to a previous message (or press Esc twice)", false),
+    cmd(&["/branch"], "Fork the current conversation into a new resumable session, leaving this session unchanged. Resume the copy with `vibe --resume <id>`.", false),
     cmd(&["/retry"], "Continue an interrupted model response; optionally pass additional instructions", false).args("[instructions]"),
     cmd(&["/loop"], "Schedule a recurring prompt: /loop [schedule] [prompt]", false).args("[schedule] [prompt]"),
     cmd(&["/data-retention"], "Show data retention information", true),
@@ -79,13 +80,13 @@ const PASTE_IMAGE: Command = cmd(
     true,
 );
 
-/// `/paste-image` is macOS-only (Python `is_available`); the e2e replay hides it so goldens match on every OS.
+/// `/paste-image` is macOS-only; the e2e replay hides it so goldens match on every OS.
 fn available() -> impl Iterator<Item = &'static Command> {
     let paste_image = crate::paste_image::is_supported() && !crate::utils::is_replaying();
     COMMANDS.iter().chain(paste_image.then_some(&PASTE_IMAGE))
 }
 
-/// Whether a built-in command with this canonical alias is registered (Python `has_command`).
+/// Whether a built-in command with this canonical alias is registered.
 pub fn has_command(label: &str) -> bool {
     available().any(|command| command.aliases[0] == label)
 }
@@ -105,7 +106,7 @@ pub fn argument_hint(prefix: Option<char>, body: &str) -> Option<&'static str> {
         .filter(|arguments| !arguments.is_empty())
 }
 
-/// Whether the command runs while a turn is generating (Python `side_channel=True`).
+/// Whether the command runs while a turn is generating.
 pub fn is_side_channel(label: &str) -> bool {
     available().any(|command| command.aliases.contains(&label) && command.side_channel)
 }
@@ -115,7 +116,7 @@ pub fn parse(input: &str) -> Option<&'static str> {
     let mut words = input.split_whitespace();
     let word = words.next()?;
     // Bare aliases (e.g. `exit`) match only as the whole input, else a message
-    // starting with one would be swallowed (Python `parse_command`).
+    // starting with one would be swallowed.
     if !word.starts_with('/') && words.next().is_some() {
         return None;
     }
@@ -148,7 +149,7 @@ pub fn builtin() -> Vec<(String, String)> {
 }
 
 /// The full popup entry list, expanding aliases into individual entries,
-/// merging with skills as `/name`, sorted like Python's `_get_slash_entries`.
+/// merging with skills as `/name`, sorted by name then description.
 pub fn entries(skills: &[(String, String)]) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = available()
         .flat_map(|command| {

@@ -1,8 +1,7 @@
-//! Wizard seeding from the server's resolved view (`setup/status`), the
-//! Python `OnboardingContext` equivalent: the server owns the config read;
-//! the client keeps only the `VIBE_THEME` override (env wins over config),
-//! and the browser-sign-in answer comes off the wire, not a URL-presence
-//! guess.
+//! Wizard seeding from the server's resolved view (`setup/status`): the
+//! server owns the config read; the client keeps only the `VIBE_THEME`
+//! override (env wins over config), and the browser-sign-in answer comes
+//! off the wire, not a URL-presence guess.
 
 #[path = "../onboarding_common/status.rs"]
 pub(crate) mod status;

@@ -1,4 +1,4 @@
-//! Double-press quit confirmation (Python `QuitManager`).
+//! Double-press quit confirmation.
 
 use std::time::{Duration, Instant};
 
@@ -30,7 +30,7 @@ pub struct QuitPending {
 
 pub struct QuitManager {
     pending: Option<QuitPending>,
-    /// Python `ask_confirmation_on_exit`; only gates Ctrl+D.
+    /// The `ask_confirmation_on_exit` setting; only gates Ctrl+D.
     pub ask_confirmation_on_exit: bool,
 }
 
@@ -68,7 +68,7 @@ impl QuitManager {
     }
 }
 
-/// Python `QueueController.quit_warning_extra`.
+/// The quit warning's note about queued messages.
 pub fn quit_warning_extra(queued: usize) -> String {
     match queued {
         0 => String::new(),

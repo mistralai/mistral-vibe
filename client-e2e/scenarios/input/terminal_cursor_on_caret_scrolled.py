@@ -9,4 +9,4 @@ _SHIFT_ENTER = "\x1b[13;2u"
 timeline: Timeline = [_SHIFT_ENTER.join(f"line {n}" for n in range(30))]
 
 # The caret ends `line 29`: two-space gutter plus seven cells.
-screen_cursor = {"rust": (37, 9)}
+screen_cursor = (37, 9)

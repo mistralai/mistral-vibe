@@ -57,6 +57,9 @@ class FileEditEffectBatchInput(ProtocolModel):
 
 class FileEditEffectOccurrence(ProtocolModel):
     start_line: int | None = None
+    # Where the replaced text sits once this occurrence's own replacement
+    # has been applied: reversal anchors here, not on ``start_line``.
+    new_start_line: int | None = None
     old_text: str
     new_text: str
 
@@ -66,6 +69,9 @@ class FileEditEffectOutput(ProtocolModel):
     old_string: str | None = None
     new_string: str | None = None
     occurrences: list[FileEditEffectOccurrence] = Field(default_factory=list)
+    # The file's whole pre-edit text when the harness carried it: an exact
+    # before-state for restore paths, superseding positional reversal.
+    previous_content: str | None = None
 
     @model_validator(mode="after")
     def validate_diff_content(self) -> Self:

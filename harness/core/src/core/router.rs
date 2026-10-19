@@ -38,6 +38,19 @@ pub(crate) fn reduce(
             },
             determinism,
         ),
+        HarnessCommand::AgentMessage {
+            turn_id,
+            message,
+            mode,
+        } => dispatch(
+            state,
+            TurnEvent::UserMessage {
+                turn_id,
+                content: crate::core::helpers::render_agent_message(message)?,
+                mode,
+            },
+            determinism,
+        ),
         HarnessCommand::UserMessage {
             turn_id,
             content,

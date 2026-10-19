@@ -1,4 +1,4 @@
-//! Browser sign-in orchestration (Python `BrowserSignInService`): the
+//! Browser sign-in orchestration: the
 //! background task and its handle only — the wizard's view state folds the
 //! events in `wizard::sign_in`, so this module knows nothing about the
 //! wizard.

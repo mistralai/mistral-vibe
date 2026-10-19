@@ -12,7 +12,7 @@ use crate::ui::theme;
 use crate::utils::input_edit;
 
 /// Handle a key press for the current screen. Returns an action to take, or
-/// `None` when the key only moved wizard state (Python's handlers are void).
+/// `None` when the key only moved wizard state.
 pub fn handle_key(state: &mut OnboardingState, key: KeyEvent) -> Option<Action> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Some(Action::Cancel);
@@ -46,8 +46,8 @@ fn handle_theme(state: &mut OnboardingState, key: KeyEvent) -> Option<Action> {
             None
         }
         KeyCode::Enter => {
-            // Python `theme_next`: providers without browser-auth URLs
-            // (llama.cpp / local) skip the auth-method choice entirely.
+            // Providers without browser-auth URLs (llama.cpp / local) skip
+            // the auth-method choice entirely.
             state.screen = if state.context.supports_browser_sign_in {
                 Screen::AuthMethod
             } else {
@@ -64,7 +64,7 @@ fn handle_theme(state: &mut OnboardingState, key: KeyEvent) -> Option<Action> {
 }
 
 /// Move the selection one option with wraparound, shared by the arrow keys
-/// and the wheel (Python's pickers navigate one option at a time).
+/// and the wheel (one option at a time).
 pub(crate) fn step_theme(state: &mut OnboardingState, up: bool) {
     let total = crate::theme_picker::options().len().max(1);
     let step = if up { total - 1 } else { 1 };
@@ -79,7 +79,7 @@ pub(crate) fn select_theme(state: &mut OnboardingState, index: usize) {
     preview_selected_theme(state);
 }
 
-/// Repaint the wizard in the highlighted theme (Python `self.app.theme = resolve_theme`).
+/// Repaint the wizard in the highlighted theme.
 fn preview_selected_theme(state: &OnboardingState) {
     if let Some(name) = crate::theme_picker::options().get(state.theme_index) {
         if let Some(index) = theme::resolve(name) {
@@ -123,10 +123,10 @@ fn handle_sign_in_target(state: &mut OnboardingState, key: KeyEvent) -> Option<A
         }
         KeyCode::Enter => {
             if state.sign_in_target_selected == 0 {
-                // Python `action_select`: switching to the Mistral default
-                // overwrites a configured custom domain, so the first Enter
-                // only arms a warning and the second one proceeds. Python
-                // reads the immutable launch snapshot here — never a domain
+                // Switching to the Mistral default overwrites a configured
+                // custom domain, so the first Enter only arms a warning and
+                // the second one proceeds. This reads the immutable launch
+                // snapshot — never a domain
                 // the wizard itself configured and then backed out of.
                 let configured = configured_custom_domain(&state.config.provider)
                     .or_else(|| configured_custom_api_base(&state.config.provider));
@@ -187,8 +187,8 @@ fn handle_browser_sign_in(state: &mut OnboardingState, key: KeyEvent) -> Option<
         KeyCode::Esc if state.browser_sign_in.variant != super::SignInVariant::Success => {
             // Backing out abandons the attempted domain: the context returns
             // to the launch snapshot, so a later API-key submission cannot
-            // whoami the abandoned host (Python's Esc exits the whole wizard
-            // instead; the 'm' manual path below keeps the domain).
+            // whoami the abandoned host (the 'm' manual path below keeps the
+            // domain).
             state.context = state.config.clone();
             state.screen = Screen::SignInTarget;
             Some(Action::AbortSignIn)
@@ -227,7 +227,7 @@ fn handle_api_key(state: &mut OnboardingState, key: KeyEvent) -> Option<Action> 
 }
 
 /// The API key input's live validation: empty is unvalidated, anything
-/// else is valid (Python validates only on submit).
+/// else is valid (the key is only checked on submit).
 fn validate_api_key_input(input: &mut OnboardingInput) {
     input.validation = if input.value.is_empty() {
         ValidationState::None
@@ -236,7 +236,7 @@ fn validate_api_key_input(input: &mut OnboardingInput) {
     };
 }
 
-/// Paste into the focused wizard input (Python's Textual `Input` paste). The
+/// Paste into the focused wizard input. The
 /// inputs are single-line, so line breaks are dropped; the custom-domain
 /// inputs revalidate exactly like a typed character, and the API key input
 /// marks itself valid exactly like typing.

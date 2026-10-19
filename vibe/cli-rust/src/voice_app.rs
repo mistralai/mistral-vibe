@@ -1,4 +1,4 @@
-//! Voice settings drafts and app-server persistence, mirroring Python's VoiceApp.
+//! Voice settings drafts and app-server persistence.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ const PATHS: [&str; 2] = ["/voice_mode_enabled", "/narrator_enabled"];
 #[derive(Default)]
 pub struct VoiceApp {
     pub open: bool,
-    pub selected: usize,
+    pub list: crate::option_list::OptionList<crate::option_list::SingleAction>,
     pub values: [bool; 2],
     changes: [bool; 2],
 }
@@ -50,13 +50,13 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
         KeyCode::Esc => close(app, client),
         KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k') => {
             let down = matches!(key.code, KeyCode::Down | KeyCode::Char('j'));
-            let selected = app.voice_app.selected;
-            app.voice_app.selected = crate::list_nav::wrap(selected, LABELS.len(), down);
+            app.voice_app.list.step(down, LABELS.len(), true, |_| true);
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let picker = &mut app.voice_app;
-            picker.values[picker.selected] = !picker.values[picker.selected];
-            picker.changes[picker.selected] = true;
+            let selected = picker.list.selected();
+            picker.values[selected] = !picker.values[selected];
+            picker.changes[selected] = true;
         }
         _ => {}
     }

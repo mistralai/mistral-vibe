@@ -1,6 +1,6 @@
 //! Mouse interactions for the onboarding screens: click-to-select on the
 //! theme list, and clickable links and input cards. Wheel navigation stays
-//! with the arrow keys (Python's wizard has no list wheel).
+//! with the arrow keys.
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -39,7 +39,7 @@ pub fn handle_mouse(
             }
         }
         MouseTarget::OnboardingPreview => {}
-        // Click-to-focus, like Textual's `Input`: clicking a card focuses its
+        // Click-to-focus: clicking a card focuses its
         // input and places the caret at the clicked column, clamped to the
         // value. The feedback row stays change-driven, so a click between the
         // custom-domain cards never repaints it.

@@ -27,7 +27,5 @@ handshake = {
 }
 
 capture_startup = False
-screen_contains = {
-    "rust": ('"permission": "ask"', "Expected valid JSON", "Edit as JSON.")
-}
+screen_contains = ('"permission": "ask"', "Expected valid JSON", "Edit as JSON.")
 timeline: Timeline = ["/config\r", "\r", "x\x13"]

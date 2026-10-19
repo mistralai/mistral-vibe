@@ -41,7 +41,7 @@ pub fn split(app: &App, area: Rect) -> (Rect, Option<Rect>) {
 /// Both modifiers, because `is_todo_key` takes either and only macOS has a Cmd byte to send.
 const TOGGLE_HINT: &str = "Cmd/Alt+\\";
 
-/// Python `TodoStatusRow`: one muted summary line, ellipsized, clickable.
+/// The todo status row: one muted summary line, ellipsized, clickable.
 pub fn draw_row(app: &mut App, f: &mut Frame, area: Rect) {
     if area.width < 1 || area.height < 1 {
         return;
@@ -72,7 +72,7 @@ pub fn draw_row(app: &mut App, f: &mut Frame, area: Rect) {
     );
 }
 
-/// Python `TodoOverlayScreen` content: progress title, items by status, closing hint.
+/// The todo sidebar: progress title, items by status, closing hint.
 pub fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     if area.width < 6 || area.height < 5 {
         return;
@@ -120,7 +120,7 @@ pub fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     );
 }
 
-/// Python `TodoOverlayScreen._compose_items`: in-progress, pending, completed, cancelled.
+/// Sidebar items grouped in order: in-progress, pending, completed, cancelled.
 fn sidebar_rows(todos: &[TodoItem], width: usize) -> Vec<Line<'static>> {
     if todos.is_empty() {
         return vec![Line::from(Span::styled("No todos", theme::muted_style()))];
@@ -157,7 +157,7 @@ fn sidebar_rows(todos: &[TodoItem], width: usize) -> Vec<Line<'static>> {
     rows
 }
 
-/// Python `.todo-{status}` classes: active warns, done succeeds, cancelled mutes.
+/// Active warns, done succeeds, cancelled mutes.
 fn status_style(status: TodoStatus) -> Style {
     match status {
         TodoStatus::InProgress => theme::text(theme::warning()),

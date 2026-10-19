@@ -19,7 +19,7 @@ _RUST_PLACEHOLDER = "const CLI_SENTRY_DSN: Option<&str> = None;\n"
 def release_tree(tmp_path: Path) -> Path:
     python_target = tmp_path / _PYTHON_TARGET
     python_target.parent.mkdir(parents=True)
-    python_target.write_text("_CLI_SENTRY_DSN = None\n_ACP_SENTRY_DSN = None\n")
+    python_target.write_text("_ACP_SENTRY_DSN = None\n")
     rust_target = tmp_path / _RUST_TARGET
     rust_target.parent.mkdir(parents=True)
     rust_target.write_text(_RUST_PLACEHOLDER)
@@ -50,12 +50,13 @@ def _inject(
     )
 
 
-def test_release_injects_cli_dsn_into_python_and_rust(release_tree: Path) -> None:
+def test_release_injects_acp_dsn_into_python_and_cli_dsn_into_rust(
+    release_tree: Path,
+) -> None:
     result = _inject(release_tree, _CLI_DSN, _ACP_DSN, required=True)
 
     assert result.returncode == 0, result.stderr
     python_values = runpy.run_path(str(release_tree / _PYTHON_TARGET))
-    assert python_values["_CLI_SENTRY_DSN"] == _CLI_DSN
     assert python_values["_ACP_SENTRY_DSN"] == _ACP_DSN
 
     assert (release_tree / _RUST_TARGET).read_text() == (
@@ -70,7 +71,6 @@ def test_optional_missing_dsns_leave_sources_unchanged(release_tree: Path) -> No
     assert result.returncode == 0, result.stderr
     assert (release_tree / _RUST_TARGET).read_text() == _RUST_PLACEHOLDER
     python_values = runpy.run_path(str(release_tree / _PYTHON_TARGET))
-    assert python_values["_CLI_SENTRY_DSN"] is None
     assert python_values["_ACP_SENTRY_DSN"] is None
 
 
@@ -111,7 +111,7 @@ def test_rust_dsn_preserves_sed_metacharacters(release_tree: Path) -> None:
 
 
 @pytest.mark.parametrize("missing_rust", [False, True])
-def test_build_without_rust_tui_injects_python_dsns_without_rust_sources(
+def test_build_without_rust_tui_injects_acp_dsn_without_rust_sources(
     release_tree: Path, missing_rust: bool
 ) -> None:
     if missing_rust:
@@ -125,6 +125,5 @@ def test_build_without_rust_tui_injects_python_dsns_without_rust_sources(
 
     assert result.returncode == 0, result.stderr
     python_values = runpy.run_path(str(release_tree / _PYTHON_TARGET))
-    assert python_values["_CLI_SENTRY_DSN"] == _CLI_DSN
     assert python_values["_ACP_SENTRY_DSN"] == _ACP_DSN
     assert "continuing without the Rust terminal" in result.stderr

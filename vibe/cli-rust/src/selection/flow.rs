@@ -78,7 +78,7 @@ fn flow(
         (head, anchor)
     };
     let (left, right) = (chat.x, chat.x + chat.width.saturating_sub(1));
-    // Stock Textual selects up to the offset under the pointer, not through it,
+    // Selection ends before the offset under the pointer, not through it,
     // unless the pointer sits on the last column, where the offset clamps past it.
     let last = u16::from(end_exclusive && end.0 > left && end.0 < right);
     let top = chat.y as i32 - origin;
@@ -149,8 +149,8 @@ fn body(
     };
     if chrome && is_chrome(first_x, first_symbol) {
         // Expanded tool groups nest their own border around an effect's border
-        // (`⎢ ⎢ `). Textual excludes every leading chrome run before
-        // applying the diff's line-number gutter, so do the same here.
+        // (`⎢ ⎢ `). Exclude every leading chrome run before applying the
+        // diff's line-number gutter.
         let chrome_end = visible
             .iter()
             .take_while(|(x, symbol)| is_chrome(*x, symbol))
@@ -178,7 +178,7 @@ fn body(
     })
 }
 
-/// Widen the outer ends to whole words or whole rows (Python `_snap_endpoint`).
+/// Widen the outer ends to whole words or whole rows.
 fn snap(buf: &Buffer, mut rows: Vec<Row>, granularity: Granularity) -> Vec<RowSpan> {
     let last = match (granularity, rows.len()) {
         (Granularity::Char, _) | (_, 0) => return finish(rows),

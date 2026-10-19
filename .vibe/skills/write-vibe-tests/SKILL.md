@@ -1,6 +1,6 @@
 ---
 name: write-vibe-tests
-description: Write or refactor Mistral Vibe tests with proper decoupling. Use when adding behavior coverage, testing ports/adapters, replacing brittle mocks, creating fakes, adding characterization tests before refactors, or changing tests under tests/ for vibe/core, vibe/cli, vibe/acp, tools, config, sessions, skills, hooks, MCP, or setup.
+description: Write or refactor Mistral Vibe tests with proper decoupling. Use when adding behavior coverage, testing ports/adapters, replacing brittle mocks, creating fakes, adding characterization tests before refactors, or changing tests under tests/ for vibe/core, vibe/app_server, vibe/acp, tools, config, sessions, skills, hooks, MCP, or setup.
 metadata:
   display-name: Write Vibe Tests
   short-description: Write decoupled behavior tests for Vibe
@@ -22,11 +22,12 @@ If a refactor changes no observable behavior but breaks many tests, the tests ar
 | Code area | Preferred test boundary |
 | --- | --- |
 | Core use cases and services | Public function/class API, typed events, model outputs, persisted state |
-| Tools | `BaseTool.invoke`/`run`, typed args/results, permission behavior, user-facing errors |
-| LLM/backend orchestration | `AgentLoop` events and fake backend outputs |
+| Tools | Owning app-server capability contract, typed invocation/results, permissions and user-facing errors; `BaseTool.invoke`/`run` for retained BaseTool implementations |
+| LLM/backend orchestration | Native Unified Runtime through serialized app-server RPCs, with deterministic fake completion/discovery services |
 | Config | Pydantic model validation, layer merge outputs, migration results |
-| Sessions | Saved JSONL/metadata shape, resume/loader behavior, migration behavior |
-| CLI widgets | Textual snapshots, posted messages, rendered user-visible state |
+| Sessions | Runtime session operations, durability/recovery and app-server projections; JSONL/metadata only for the supported read-only historical importer |
+| Terminal UI (`vibe/cli-rust`) | Rust unit tests for pure logic, `client-e2e` scenarios and goldens for rendering and interaction (see `vibe/cli-rust/AGENTS.md`) |
+| Onboarding wizard (`vibe-acp --setup`) | Textual snapshots, rendered user-visible state |
 | ACP | ACP session updates and protocol-facing content, not core internals |
 
 ## Prefer Fakes Over Mocks
@@ -52,7 +53,7 @@ Prefer "make it testable" refactors first: isolate I/O, extract pure functions, 
 
 ## Test Shape
 
-- Stack: `pytest` + `pytest-asyncio` + `pytest-textual-snapshot` + `respx`.
+- Python stack: `pytest` + `pytest-asyncio` + `pytest-textual-snapshot` (onboarding only) + `respx`.
 - Use descriptive test names; do not add test docstrings. Pytest displays docstrings instead of node IDs when present, which hurts.
 - Arrange, act, and assert clearly, but optimize for readability over ceremony.
 - Keep tests deterministic, fast, and explicit about failure.
@@ -63,7 +64,7 @@ Prefer "make it testable" refactors first: isolate I/O, extract pure functions, 
 - Use the narrowest relevant test first, then broaden when shared contracts are touched.
 - Tests are exempt from the `ANN` and `PLR` ruff rules (see `per-file-ignores`).
 - Changes to managed shell tools, managed shell backends, shell prompts, or shell dependencies require focused POSIX/common validation and passing Windows shell CI. If Windows shell CI is unavailable, the PR notes must include manual native Windows commands and results.
-- After app-server session behavior, backend adapters, or shared contract-fixture changes, run both backend contract commands. A failing Unified frontier is expected before parity; include its complete pytest summary in parity-related PRs.
+- After app-server session behavior, backend adapters, or shared contract-fixture changes, run the Unified backend contract suite (`uv run pytest tests/app_server/backend_contract`) and the affected app-server/ACP tests. Preserve original snapshot scenarios when adapting fixtures to the Unified Runtime.
 
 ## Avoid
 

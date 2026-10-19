@@ -1,5 +1,4 @@
-//! Interactive-mode session flags, mirroring the Python interactive
-//! `SessionOptions` (cli.py) built from the shared CLI flags.
+//! Interactive-mode session flags built from the shared CLI flags.
 
 use clap::Parser;
 use vibe_rs::cli::Cli;
@@ -11,14 +10,14 @@ fn config_from(args: &[&str]) -> vibe_rs::server::AgentConfig {
 }
 
 #[test]
-fn interactive_defaults_match_python() {
+fn interactive_defaults() {
     let config = config_from(&["vibe-rs"]);
     assert_eq!(config.cwd.as_deref(), Some("/work"));
     assert_eq!(config.agent, None);
     assert!(!config.auto_approve);
     assert!(config.enabled_tools.is_empty());
     assert!(config.disabled_tools.is_empty());
-    // Budget flags stay headless-only, as in Python.
+    // Budget flags stay headless-only.
     assert_eq!(config.max_turns, None);
     assert_eq!(config.max_price, None);
     assert_eq!(config.max_session_tokens, None);
@@ -43,14 +42,14 @@ fn interactive_smart_approve_selects_agent_when_no_explicit_agent() {
 
 #[test]
 fn interactive_yolo_with_agent_keeps_flag() {
-    let config = config_from(&["vibe-rs", "--agent", "plan", "--yolo"]);
-    assert_eq!(config.agent.as_deref(), Some("plan"));
+    let config = config_from(&["vibe-rs", "--agent", "ask", "--yolo"]);
+    assert_eq!(config.agent.as_deref(), Some("ask"));
     assert!(config.auto_approve);
 }
 
 #[test]
 fn interactive_tool_filters_and_trust_are_wired() {
-    // Python uses action="append": repeat the flag; commas stay literal.
+    // Repeat the flag for several values; commas stay literal.
     let config = config_from(&[
         "vibe-rs",
         "--enabled-tools",

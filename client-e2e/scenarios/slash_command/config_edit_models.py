@@ -51,5 +51,5 @@ handshake = {
     },
 }
 
-screen_contains = {"rust": ("default (currently", "defaults")}
+screen_contains = ("default (currently", "defaults")
 timeline: Timeline = ["/config\r", "\r"]

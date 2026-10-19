@@ -13,6 +13,7 @@ use crate::core::wire::tool::{ProtocolError, ToolResult};
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TurnStopReason {
     IterationLimit,
+    Skipped,
 }
 
 /// What one Core feature function produced: actions for the Runtime to run and

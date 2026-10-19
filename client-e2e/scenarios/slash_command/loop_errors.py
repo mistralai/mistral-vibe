@@ -26,5 +26,5 @@ timeline: Timeline = [
     assistant_msg("Which recurring task should I cancel?"),
     turn_completed(),
 ]
-screen_contains = {"rust": ("/loop cancel", "Which recurring task should I cancel?")}
-screen_excludes = {"rust": ("Missing loop id.", "Usage:", "not implemented")}
+screen_contains = ("/loop cancel", "Which recurring task should I cancel?")
+screen_excludes = ("Missing loop id.", "Usage:", "not implemented")

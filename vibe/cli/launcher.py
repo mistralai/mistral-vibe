@@ -1,35 +1,91 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+import shlex
 import sys
 
-# Kept intentionally tiny: the `vibe` console script lands here, so a Rust
-# invocation must reach the Rust binary without importing the Python CLI stack.
-#
-# The implementation (Rust vs. Python) is chosen by the `VIBE_CLI` environment
-# variable (documented in the README "TUI Implementations" section):
-#   VIBE_CLI=rust    -> launch the Rust TUI
-#   VIBE_CLI=python  -> force the Python TUI
-# Anything else (including unset) follows the cached GrowthBook
-# `vibe_cli_rust_tui_rollout` variant, defaulting to the Python TUI.
+# Kept intentionally tiny: the `vibe` console script lands here and only execs
+# the Rust TUI, so it must not import the rest of the Python package.
+
+if sys.platform == "win32":
+    _BIN_NAME = "vibe-rs.exe"
+    _APP_SERVER_SCRIPT = "vibe-app-server.exe"
+else:
+    _BIN_NAME = "vibe-rs"
+    _APP_SERVER_SCRIPT = "vibe-app-server"
+
+# vibe/
+#   _bin/                <-- Exists if the Rust CLI is bundled in the wheel.
+#     vibe-rs(.exe)
+#   cli/
+#     launcher.py        <-- This file
+#   cli-rust/            <-- Source checkout only (excluded from the wheel).
+#     Cargo.toml
+#     target/
+#       release/
+#         vibe-rs(.exe)  <-- Exists after a release build in the source checkout.
+_PKG_ROOT = Path(__file__).resolve().parents[1]
+_BUNDLED_BIN = _PKG_ROOT / "_bin" / _BIN_NAME
+_MANIFEST = _PKG_ROOT / "cli-rust" / "Cargo.toml"
+_RELEASE_BIN = _PKG_ROOT / "cli-rust" / "target" / "release" / _BIN_NAME
+# The Python project root, where `uv run vibe-app-server` resolves.
+_PROJECT_ROOT = _PKG_ROOT.parent
 
 
 def main() -> None:
-    args = sys.argv[1:]
-    option_args = args[: args.index("--")] if "--" in args else args
-    python_only = args[:1] == ["--internal-posix-pty-helper"]
-    selector = os.environ.get("VIBE_CLI", "").strip().lower()
-    if not python_only and selector == "rust":
-        from vibe.cli._rust import exec_rust_cli
+    exec_rust_cli(sys.argv[1:])
 
-        exec_rust_cli(args)
-    elif not python_only and selector != "python":
-        from vibe.cli._rust import exec_rust_cli, rust_rollout_selected
 
-        if rust_rollout_selected(option_args):
-            exec_rust_cli(args, rollout=True)
+def exec_rust_cli(passthrough: list[str]) -> None:
+    """Run the Rust TUI, keeping the caller's cwd."""
+    env = {**os.environ}
+    if _BUNDLED_BIN.exists():
+        binary = _BUNDLED_BIN
+        # Wheel install: point the Rust client at the installed vibe-app-server
+        env["VIBE_APP_SERVER_BIN"] = str(
+            Path(sys.argv[0]).resolve().parent / _APP_SERVER_SCRIPT
+        )
+        env.pop("VIBE_APP_SERVER_CWD", None)
+        # A stale full-command override must not shadow the wheel's binary.
+        env.pop("VIBE_APP_SERVER_CMD", None)
+    else:
+        if not _MANIFEST.exists():
+            sys.exit(f"Rust CLI not bundled and no source checkout at {_MANIFEST}.")
+        if not _RELEASE_BIN.exists():
+            _build_release()
+        binary = _RELEASE_BIN
+        env.pop("VIBE_APP_SERVER_BIN", None)
+        env["VIBE_APP_SERVER_CWD"] = str(_PROJECT_ROOT)
+    argv = [str(binary), *passthrough]
+    if sys.platform == "win32":
+        # execvpe does not overlay the process on Windows; run and forward the code.
+        import subprocess
 
-    # Importing entrypoint also runs its module-top pty-helper check.
-    from vibe.cli.entrypoint import main as entrypoint_main
+        sys.exit(subprocess.run(argv, env=env).returncode)
+    os.execvpe(str(binary), argv, env)
 
-    entrypoint_main()
+
+def _build_release() -> None:
+    import subprocess
+
+    print("Building vibe-rs (first run, this may take a while)...", file=sys.stderr)
+    cmd = [
+        "cargo",
+        "build",
+        "--release",
+        "--manifest-path",
+        str(_MANIFEST),
+        "--bin",
+        "vibe-rs",
+        *shlex.split(os.environ.get("CARGO_BUILD_FLAGS", "")),
+    ]
+    try:
+        result = subprocess.run(cmd, cwd=_PROJECT_ROOT)
+    except FileNotFoundError:
+        sys.exit(
+            "cargo not found; install Rust (https://rustup.rs) to run vibe from a "
+            "source checkout."
+        )
+    if result.returncode != 0 or not _RELEASE_BIN.exists():
+        sys.exit("Failed to build vibe-rs.")

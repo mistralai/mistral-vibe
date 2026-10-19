@@ -17,7 +17,9 @@ fn drawn_cells(cells: &[Cell]) -> String {
         .iter()
         .enumerate()
         .map(|(x, cell)| (x as u16, 0, cell));
-    ResyncBackend::new(&mut out).draw(row).unwrap();
+    ResyncBackend::with_truecolor(&mut out, true)
+        .draw(row)
+        .unwrap();
     String::from_utf8(out).unwrap()
 }
 
@@ -91,6 +93,65 @@ fn ascii_output_matches_crossterm_backend() {
         .map(|(x, cell)| (x as u16, 0, cell));
     CrosstermBackend::new(&mut expected).draw(row).unwrap();
     assert_eq!(drawn_cells(&cells), String::from_utf8(expected).unwrap());
+}
+
+fn drawn_rgb(truecolor: bool) -> String {
+    let mut cell = Cell::new("x");
+    cell.set_style(
+        Style::new()
+            .fg(Color::Rgb(0xFF, 0x82, 0x05))
+            .bg(Color::Rgb(0x12, 0x12, 0x12)),
+    );
+    let mut out = Vec::new();
+    ResyncBackend::with_truecolor(&mut out, truecolor)
+        .draw(std::iter::once((0, 0, &cell)))
+        .unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn truecolor_terminal_gets_rgb_sgr() {
+    let out = drawn_rgb(true);
+    assert!(out.contains("38;2;255;130;5"), "{out:?}");
+    assert!(out.contains("48;2;18;18;18"), "{out:?}");
+}
+
+#[test]
+fn terminal_without_truecolor_gets_the_256_color_palette() {
+    // Terminal.app reads `38;2;255;130;5` as separate attributes: the trailing 5 blinks.
+    let out = drawn_rgb(false);
+    assert!(!out.contains(";2;"), "{out:?}");
+    assert!(out.contains("38;5;208"), "{out:?}");
+    assert!(out.contains("48;5;233"), "{out:?}");
+}
+
+#[test]
+fn downgraded_cells_keep_underline_color_and_resync_moves() {
+    let rgb = Color::Rgb(0xFF, 0x82, 0x05);
+    let cells: Vec<Cell> = ["a", "ណ្ដ", " ", "▇"]
+        .iter()
+        .map(|symbol| {
+            let mut cell = Cell::new(symbol);
+            cell.set_style(
+                Style::new()
+                    .underline_color(rgb)
+                    .add_modifier(Modifier::UNDERLINED),
+            );
+            cell
+        })
+        .collect();
+    let mut out = Vec::new();
+    let row = cells
+        .iter()
+        .enumerate()
+        .map(|(x, cell)| (x as u16, 0, cell));
+    ResyncBackend::with_truecolor(&mut out, false)
+        .draw(row)
+        .unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("58;5;208"), "{out:?}");
+    assert!(!out.contains(";2;"), "{out:?}");
+    assert!(out.contains("\x1b[1;3H ▇"), "{out:?}");
 }
 
 #[test]

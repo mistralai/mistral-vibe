@@ -39,7 +39,7 @@ pub struct QueueItem {
     /// Server queue id, `None` until the enqueue answer lands.
     pub queue_item_id: Option<String>,
     /// Transcript entry id of the queued message; the UI's stable identity for
-    /// this prompt, as Python tracks the `UserMessage` widget itself.
+    /// this prompt.
     pub message_id: String,
     /// User-entry id owned by the single merged server queue item. Later
     /// busy-time prompts keep their own UI id but share this server id.
@@ -71,7 +71,7 @@ enum ConsumedEdit {
     Confirmed { position: usize },
 }
 
-/// Render and edit the app server's accepted prompt queue (Python `QueueController`).
+/// Render and edit the app server's accepted prompt queue.
 #[derive(Default)]
 pub struct QueueController {
     /// Queued prompts in FIFO order; the oldest is promoted first.
@@ -84,7 +84,7 @@ pub struct QueueController {
     pub(crate) deferred_prompt: Option<String>,
     /// Whether the server holds the queue until the user resumes it.
     pub paused: bool,
-    /// When the user interrupted a turn the server had not started yet (Python `_pending_turn`).
+    /// When the user interrupted a turn the server had not started yet.
     pub interrupt_on_start: Option<std::time::Instant>,
     /// Highlighted prompt in queue mode, by message id, or `None` when closed.
     pub selected: Option<String>,
@@ -116,6 +116,15 @@ impl QueueController {
 
     pub fn len(&self) -> usize {
         self.items.len()
+    }
+
+    pub(crate) fn promotion_pending(&self, queue_item_id: &str) -> bool {
+        (self.started.iter().any(|id| id == queue_item_id)
+            && self.items.iter().any(|item| item.queue_item_id.is_none()))
+            || self.items.iter().any(|item| {
+                item.queue_item_id.as_deref() == Some(queue_item_id)
+                    && self.is_consumed(&item.server_message_id)
+            })
     }
 
     pub fn position(&self, message_id: &str) -> Option<usize> {
@@ -164,7 +173,7 @@ impl QueueController {
     }
 }
 
-/// A queued prompt was promoted (Python `QueueController.turn_started`).
+/// A queued prompt was promoted.
 pub fn turn_started(
     app: &mut App,
     client: &std::sync::Arc<crate::server::Client>,
@@ -214,6 +223,14 @@ fn remember_id(ids: &mut Vec<String>, id: String) {
 /// Drop one item and keep queue mode pointing at a prompt that still exists.
 pub(crate) fn drop_item(app: &mut App, index: usize) -> QueueItem {
     let item = app.queue.items.remove(index);
+    if !app
+        .queue
+        .items
+        .iter()
+        .any(|item| item.queue_item_id.is_none())
+    {
+        app.queue.started.clear();
+    }
     if app.queue.selected.as_deref() == Some(item.message_id.as_str()) {
         if app.queue.editing {
             app.queue.consumed_edit = Some(ConsumedEdit::AwaitingConfirmation { position: index });

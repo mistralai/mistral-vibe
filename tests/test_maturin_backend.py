@@ -54,6 +54,32 @@ def test_linux_wheel_build_environment_provides_zig(
     ]
 
 
+@pytest.mark.parametrize(
+    "arguments", ["--compatibility linux", "--compatibility=linux"]
+)
+def test_native_linux_intermediate_wheel_uses_the_image_toolchain(
+    monkeypatch: pytest.MonkeyPatch, arguments: str
+) -> None:
+    """*Prepare*: A Linux image requests a wheel for local PyInstaller consumption.
+    *Do*: Resolve the native build arguments.
+    *Assert*: The image compiler is used and the explicit wheel tag is retained.
+    """
+    # Prepare
+    backend = _load_backend(monkeypatch)
+    monkeypatch.setattr(backend.sys, "platform", "linux")
+    monkeypatch.setenv("MATURIN_PEP517_ARGS", arguments)
+
+    # Do
+    with backend._maturin_environment(portable_linux_wheel=True):
+        resolved = os.environ["MATURIN_PEP517_ARGS"]
+
+        # Assert
+        assert "--zig" not in resolved
+        assert arguments in resolved
+        assert "--locked" in resolved
+    assert os.environ["MATURIN_PEP517_ARGS"] == arguments
+
+
 def test_stage_harness_prefers_public_source(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -145,6 +171,49 @@ def test_stage_rust_cli_builds_into_private_target(
     assert cwd == project
     assert environment["CARGO_TARGET_DIR"] == str(target)
     assert bundled.read_bytes() == b"rust-cli"
+
+
+@pytest.mark.parametrize(
+    ("flags", "build_target"),
+    [
+        ("--target x86_64-apple-darwin", None),
+        ("--target=x86_64-apple-darwin", None),
+        ("", "x86_64-apple-darwin"),
+    ],
+)
+def test_stage_rust_cli_finds_a_cross_target_build(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    flags: str,
+    build_target: str | None,
+) -> None:
+    backend = _load_backend(monkeypatch)
+    project = tmp_path / "project"
+    manifest = project / "vibe/cli-rust/Cargo.toml"
+    target = project / ".native-build/vibe-rs-target"
+    bundled = project / "vibe/_bin" / backend._TUI_NAME
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("[package]\nname='vibe-rs'\n")
+
+    def run(command: list[str], *, cwd: Path, env: dict[str, str], check: bool) -> None:
+        built = target / "x86_64-apple-darwin/release" / backend._TUI_NAME
+        built.parent.mkdir(parents=True)
+        built.write_bytes(b"cross-rust-cli")
+
+    monkeypatch.setattr(backend, "_PROJECT_ROOT", project)
+    monkeypatch.setattr(backend, "_TUI_MANIFEST", manifest)
+    monkeypatch.setattr(backend, "_TUI_TARGET", target)
+    monkeypatch.setattr(backend, "_BUNDLED_TUI", bundled)
+    monkeypatch.setattr(backend.subprocess, "run", run)
+    monkeypatch.setenv("CARGO_BUILD_FLAGS", flags)
+    if build_target is None:
+        monkeypatch.delenv("CARGO_BUILD_TARGET", raising=False)
+    else:
+        monkeypatch.setenv("CARGO_BUILD_TARGET", build_target)
+
+    backend._stage_rust_cli()
+
+    assert bundled.read_bytes() == b"cross-rust-cli"
 
 
 def test_stage_rust_cli_skip_preserves_existing_binary(

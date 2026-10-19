@@ -1,4 +1,4 @@
-"""Assert Rust CLI output matches committed golden SVG snapshots.
+"""Assert CLI output matches committed golden SVG snapshots.
 
 A scenario with no golden gets one generated from the current capture and
 passes with a warning, so a new scenario is covered from its first run. The
@@ -18,12 +18,13 @@ import json
 import os
 from pathlib import Path
 import re
+import tempfile
 import warnings
 from xml.etree import ElementTree
 
 from e2e.app_server import golden
 from e2e.app_server.capture import Capture, capture_scenario
-from e2e.app_server.config import CLIENTS, REPLAY_BIN
+from e2e.app_server.config import CLIENT_BIN, GOLDEN_DIR, REPLAY_BIN, VIBE_DIR
 from e2e.app_server.golden import (
     golden_exists,
     golden_path,
@@ -32,7 +33,7 @@ from e2e.app_server.golden import (
     normalize_snapshot,
     store_golden,
 )
-from e2e.app_server.parity import normalize_requests
+from e2e.app_server.normalize import normalize_requests
 from e2e.app_server.scenario import (
     Action,
     Request,
@@ -48,24 +49,24 @@ _LIVE_DIR = golden_path("_live")
 
 
 def _assert_scenario_expectations(captured: Capture, scenario: Scenario) -> None:
-    if (expected := scenario.expected_actions.get("rust")) is not None:
+    if (expected := scenario.expected_actions) is not None:
         assert len(captured.actions) == len(expected) and all(
             want.matches(got)
             for want, got in zip(expected, captured.actions, strict=True)
-        ), f"rust actions {captured.actions!r} do not match {expected!r}"
+        ), f"actions {captured.actions!r} do not match {expected!r}"
     if not captured.snapshots:
         return
 
     snapshot = captured.snapshots[-1]
     screen = "\n".join(snapshot.rows)
-    for text in scenario.screen_contains.get("rust", ()):
-        assert text in screen, f"rust screen is missing {text!r}"
-    for text in scenario.screen_excludes.get("rust", ()):
-        assert text not in screen, f"rust screen contains {text!r}"
-    for row, text in scenario.screen_rows.get("rust", {}).items():
-        assert snapshot.rows[row] == text, f"rust screen row {row} differs"
-    if (cursor := scenario.screen_cursor.get("rust")) is not None:
-        assert snapshot.cursor == cursor, f"rust cursor {snapshot.cursor} != {cursor}"
+    for text in scenario.screen_contains:
+        assert text in screen, f"screen is missing {text!r}"
+    for text in scenario.screen_excludes:
+        assert text not in screen, f"screen contains {text!r}"
+    for row, text in scenario.screen_rows.items():
+        assert snapshot.rows[row] == text, f"screen row {row} differs"
+    if (cursor := scenario.screen_cursor) is not None:
+        assert snapshot.cursor == cursor, f"cursor {snapshot.cursor} != {cursor}"
 
     clipboard_expected = (
         scenario.expected_clipboard is not None
@@ -74,20 +75,15 @@ def _assert_scenario_expectations(captured: Capture, scenario: Scenario) -> None
     )
     if not clipboard_expected:
         return
-    if (
-        scenario.clipboard_clients is not None
-        and "rust" not in scenario.clipboard_clients
-    ):
-        return
 
     clipboard = snapshot.clipboard
-    assert clipboard is not None, "rust did not emit an OSC 52 payload"
+    assert clipboard is not None, "the client did not emit an OSC 52 payload"
     if scenario.expected_clipboard is not None:
         assert clipboard == scenario.expected_clipboard
     for text in scenario.clipboard_contains:
-        assert text in clipboard, f"rust clipboard is missing {text!r}"
+        assert text in clipboard, f"clipboard is missing {text!r}"
     for text in scenario.clipboard_excludes:
-        assert text not in clipboard, f"rust clipboard contains {text!r}"
+        assert text not in clipboard, f"clipboard contains {text!r}"
 
 
 @pytest.mark.parametrize(
@@ -104,7 +100,7 @@ def _assert_scenario_expectations(captured: Capture, scenario: Scenario) -> None
 def test_scenario_expectations_reject_wrong_actions(
     expected: list[Action], actual: list[Action]
 ) -> None:
-    scenario = Scenario(name="test", steps=[], expected_actions={"rust": expected})
+    scenario = Scenario(name="test", steps=[], expected_actions=expected)
 
     with pytest.raises(AssertionError):
         _assert_scenario_expectations(Capture([], actual, []), scenario)
@@ -112,7 +108,7 @@ def test_scenario_expectations_reject_wrong_actions(
 
 def test_scenario_expectations_accept_a_pattern_action() -> None:
     expected = [Action("open_url", re.compile(r"file:///tmp/a-\w+\.png"))]
-    scenario = Scenario(name="test", steps=[], expected_actions={"rust": expected})
+    scenario = Scenario(name="test", steps=[], expected_actions=expected)
 
     _assert_scenario_expectations(
         Capture([], [Action("open_url", "file:///tmp/a-x1.png")], []), scenario
@@ -128,7 +124,7 @@ def test_scenario_expectations_reject_wrong_clipboard() -> None:
 
 
 def test_scenario_expectations_reject_wrong_cursor() -> None:
-    scenario = Scenario(name="test", steps=[], screen_cursor={"rust": (0, 0)})
+    scenario = Scenario(name="test", steps=[], screen_cursor=(0, 0))
     captured = Capture([Snapshot("final", (), cursor=(0, 1))], [], [])
 
     with pytest.raises(AssertionError):
@@ -200,6 +196,16 @@ def test_svg_preserves_unicode_and_decorated_spaces(
     assert visible == expected
 
 
+@pytest.mark.parametrize("elapsed", ["12s", "1m5s", "2h1m0s"])
+def test_elapsed_counter_normalizes_to_one_width(elapsed: str) -> None:
+    def svg(counter: str) -> str:
+        terminal = Terminal(40, 120)
+        terminal.feed(f"   Generating… ({counter} Esc to interrupt)".encode())
+        return to_svg(normalize_snapshot(terminal.snapshot("loading")), "test")
+
+    assert svg(elapsed) == svg("3s")
+
+
 def test_golden_keeps_snapshots_in_each_scenario(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -264,9 +270,69 @@ def test_golden_requests_are_written_with_sorted_keys(
     assert list(params["b"]) == ["c", "d"]
 
 
+def test_golden_requests_mask_the_initialize_client_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(golden, "GOLDEN_DIR", tmp_path)
+    initialize = Request("initialize", {"clientInfo": {"version": "2.26.0"}})
+
+    store_golden("one", [], [initialize])
+
+    stored = json.loads((tmp_path / "one" / "requests.json").read_text())
+    assert stored[0]["params"]["clientInfo"]["version"] == "<client-version>"
+
+
+def test_golden_requests_keep_other_versions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(golden, "GOLDEN_DIR", tmp_path)
+    feedback = Request("feedback/record", {"properties": {"version": "2.26.0"}})
+
+    store_golden("one", [], [feedback])
+
+    stored = json.loads((tmp_path / "one" / "requests.json").read_text())
+    assert stored[0]["params"]["properties"]["version"] == "2.26.0"
+
+
+def test_normalize_snapshot_masks_the_update_dialog_current_version() -> None:
+    terminal = Terminal(24, 120)
+    terminal.feed("2.26.0 → 99.0.0   localhost,127.0.0.1   v9.9.9-fixture".encode())
+
+    normalized = normalize_snapshot(terminal.snapshot("update"))
+
+    assert normalized.rows[0] == (
+        "#.##.# → 99.0.0   localhost,127.0.0.1   v9.9.9-fixture"
+    )
+
+
+def test_goldens_are_environment_independent() -> None:
+    """Environment-dependent values must be masked or pinned, never stored."""
+    cargo = (VIBE_DIR / "vibe" / "cli-rust" / "Cargo.toml").read_text()
+    version = re.search(r'^version = "(.+)"', cargo, re.MULTILINE).group(1)
+    volatile = {
+        "client version": version,
+        "checkout path": str(VIBE_DIR),
+        "home directory": str(Path.home()),
+        # Only the harness's run-generated temp homes (mkdtemp `e2e_*` dirs)
+        # leak; scenario-pinned paths under the shared temp dir are deterministic.
+        "generated temp home": os.path.join(tempfile.gettempdir(), "e2e_"),
+    }
+    offenders = sorted(
+        f"{path.relative_to(GOLDEN_DIR).as_posix()} ({label})"
+        for path in GOLDEN_DIR.rglob("*")
+        if path.is_file() and path.relative_to(GOLDEN_DIR).parts[0] != "_live"
+        for label, needle in volatile.items()
+        if needle in path.read_text()
+    )
+    assert not offenders, (
+        f"goldens contain environment-dependent values: {offenders};"
+        " mask them in normalize.py or pin the scenario instead"
+    )
+
+
 @pytest.mark.parametrize("name", available_scenarios())
-def test_rust_matches_golden(name: str) -> None:
-    """Rust capture must match the committed golden for SVGs and requests."""
+def test_matches_golden(name: str) -> None:
+    """The capture must match the committed golden for SVGs and requests."""
     scenario = load_scenario(name)
     if scenario.skip_reason:
         pytest.skip(scenario.skip_reason)
@@ -274,10 +340,10 @@ def test_rust_matches_golden(name: str) -> None:
     if expected_titles is not None and scenario.capture_startup:
         expected_titles = expected_titles[1:]
     scenario.clamp_capture_startup()
-    if not os.path.exists(CLIENTS["rust"][0]) or not os.path.exists(REPLAY_BIN):
-        pytest.skip("Rust binary missing (run `make build`)")
+    if not CLIENT_BIN.exists() or not REPLAY_BIN.exists():
+        pytest.skip("Client binary missing (run `make build_test`)")
 
-    captured = capture_scenario(CLIENTS["rust"], scenario)
+    captured = capture_scenario(scenario)
     if expected_titles is not None:
         assert (
             tuple(snapshot.title for snapshot in captured.snapshots) == expected_titles

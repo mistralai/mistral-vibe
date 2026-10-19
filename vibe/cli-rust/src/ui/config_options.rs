@@ -3,14 +3,14 @@
 use super::config::{Opt, ADVANCED, CURSOR_W, GAP, NAME_W, POPULAR, VALUE_W};
 use crate::config::ConfigField;
 
-pub(super) fn build_lines(fields: &[ConfigField], selected: usize, sections: bool) -> Vec<Opt> {
+pub(super) fn build_lines(fields: &[ConfigField], sections: bool) -> Vec<Opt> {
     let mut out: Vec<Opt> = Vec::new();
     if !sections {
         return fields
             .iter()
             .enumerate()
-            .map(|(rank, field)| Opt::Row {
-                selected: rank == selected,
+            .map(|(index, field)| Opt::Row {
+                index,
                 name: truncate(&field.name, NAME_W),
                 value: truncate(&field.display_value(), VALUE_W),
             })
@@ -33,7 +33,7 @@ pub(super) fn build_lines(fields: &[ConfigField], selected: usize, sections: boo
         out.push(Opt::Header(columns_header()));
         for field in section {
             out.push(Opt::Row {
-                selected: rank == selected,
+                index: rank,
                 name: truncate(&field.name, NAME_W),
                 value: truncate(&field.display_value(), VALUE_W),
             });

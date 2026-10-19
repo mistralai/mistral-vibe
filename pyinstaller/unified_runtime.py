@@ -2,10 +2,10 @@
 
 The Unified Runtime — the ``mistralai_vibe_local_harness`` Python package and
 its native ``_native`` extension — is a required component of every frozen
-Vibe executable. ``vibe.spec``, ``vibe-acp.spec``, and ``vibe-app-server.spec``
-collect it through this helper unconditionally, and the build fails when it
-cannot be collected, so a packaging error can never produce a binary that
-silently falls back to the legacy harness.
+Vibe executable. ``vibe-acp.spec`` and ``vibe-app-server.spec`` collect it
+through this helper unconditionally, and the build fails when it cannot be
+collected, so a packaging error can never produce a binary that silently falls
+back to the legacy harness.
 
 On Windows the helper also collects ``winpty`` (pywinpty), which the Runtime
 and the managed shell load through ``importlib.import_module`` and PyInstaller

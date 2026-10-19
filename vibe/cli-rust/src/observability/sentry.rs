@@ -15,7 +15,7 @@ use sentry::ClientOptions;
 
 use crate::observability::scrub::scrub_paths;
 
-/// Compiled-in DSN, injected at release time like the Python `_CLI_SENTRY_DSN`.
+/// Compiled-in DSN, injected at release time.
 const CLI_SENTRY_DSN: Option<&str> = None;
 /// Own server name: Rust is a delivery surface beside `vibe-cli`, not the same one.
 const SERVER_NAME: &str = "vibe-rs";
@@ -110,8 +110,8 @@ fn scrub_named_fields(event: &mut Event<'static>) {
     }
 }
 
-/// Python's `_scrub_pii` walks the whole event dict. Do the same over the
-/// serialized form, which is what reaches Sentry, so stack frame `abs_path`,
+/// Scrub the whole event over its serialized form, which is what reaches
+/// Sentry, so stack frame `abs_path`,
 /// threads, contexts and tags are covered rather than enumerated.
 fn scrub_every_field(event: &mut Event<'static>) {
     let Ok(mut value) = serde_json::to_value(&*event) else {
@@ -225,7 +225,7 @@ pub fn install_panic_hook() {
     }));
 }
 
-/// Blocks briefly so a fatal path still ships its event, like the Python flush.
+/// Blocks briefly so a fatal path still ships its event.
 pub fn flush() {
     if let Some(client) = lock().as_ref() {
         client.flush(Some(std::time::Duration::from_secs(5)));

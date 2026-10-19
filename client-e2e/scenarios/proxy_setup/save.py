@@ -7,10 +7,8 @@ from e2e.app_server.scenario import Timeline
 
 handshake = proxy_handshake()
 request_methods = METHODS
-screen_contains = {
-    "rust": ("Proxy settings saved. Restart the CLI for changes to take effect.",)
-}
-screen_excludes = {"rust": ("Proxy Configuration",)}
+screen_contains = ("Proxy settings saved. Restart the CLI for changes to take effect.",)
+screen_excludes = ("Proxy Configuration",)
 timeline: Timeline = [
     "/proxy-setup\r",
     "http://proxy.example.com:8080",

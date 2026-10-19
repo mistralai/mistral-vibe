@@ -1,5 +1,5 @@
-//! The default-key probe (Python `os.environ.get` truthiness,
-//! `vibe/utils/api_keys.py`): absent, empty, and set.
+//! The default-key probe, where an empty value reads as absent: absent,
+//! empty, and set.
 
 use vibe_rs::credentials::default_key_present;
 

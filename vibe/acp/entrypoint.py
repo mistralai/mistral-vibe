@@ -9,7 +9,6 @@ import sys
 from vibe import __version__
 from vibe._experimental_harness import (
     ExperimentalHarnessUnavailableError,
-    add_experimental_harness_argument,
     require_experimental_harness,
 )
 from vibe.core.config.default_orchestrator import build_default_orchestrator
@@ -28,8 +27,6 @@ sys.stdin.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAcc
 @dataclass
 class Arguments:
     setup: bool
-    experimental_harness: bool
-    legacy_harness: bool
 
 
 def parse_arguments() -> Arguments:
@@ -38,23 +35,8 @@ def parse_arguments() -> Arguments:
         "-v", "--version", action="version", version=f"%(prog)s {__version__}"
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
-    harness_group = parser.add_mutually_exclusive_group()
-    add_experimental_harness_argument(parser, group=harness_group)
-    harness_group.add_argument(
-        "--legacy-harness",
-        action="store_true",
-        default=False,
-        help=(
-            "Force the legacy Python harness. Temporary escape hatch, kept "
-            "until the legacy runtime is removed."
-        ),
-    )
     args = parser.parse_args()
-    return Arguments(
-        setup=args.setup,
-        experimental_harness=args.experimental_harness,
-        legacy_harness=args.legacy_harness,
-    )
+    return Arguments(setup=args.setup)
 
 
 def main() -> None:
@@ -69,7 +51,7 @@ def main() -> None:
 
     from vibe.acp.agent import run_acp_server
     from vibe.core.config import load_dotenv_values
-    from vibe.observability.sentry import SentryTarget, init_sentry
+    from vibe.observability.sentry import init_sentry
     from vibe.setup.onboarding import run_onboarding
 
     environ_before_dotenv_load = os.environ.copy()
@@ -103,7 +85,6 @@ def main() -> None:
                     client_name="vibe_acp",
                     client_version=__version__,
                 ).sentry_tags(),
-                target=SentryTarget.ACP,
             )
         except Exception:
             pass  # error reporting disabled
@@ -113,13 +94,8 @@ def main() -> None:
     # startup with an actionable error, not surface as a per-session failure
     # on the live protocol.
     try:
-        if not args.legacy_harness:
-            require_experimental_harness()
-        run_acp_server(
-            environ_before_dotenv_load=environ_before_dotenv_load,
-            experimental_harness=args.experimental_harness,
-            legacy_harness=args.legacy_harness,
-        )
+        require_experimental_harness()
+        run_acp_server(environ_before_dotenv_load=environ_before_dotenv_load)
     except ExperimentalHarnessUnavailableError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

@@ -13,16 +13,13 @@ from e2e.app_server.scenario import Timeline
 _PROMPT = "delegate the investigation"
 _TASK = "find the transcript grouping code"
 
-screen_contains = {
-    client: (
-        "Read 2 files, ran 2 subagents",
-        f"Explored {_TASK}",
-        "response: Found the code.",
-        "turns_used: 1",
-        "completed: True",
-    )
-    for client in ("rust", "python")
-}
+screen_contains = (
+    "Read 2 files, ran 2 subagents",
+    f"Explored {_TASK}",
+    "response: Found the code.",
+    "turns_used: 1",
+    "completed: True",
+)
 
 timeline: Timeline = [
     f"{_PROMPT}\r",
@@ -34,6 +31,6 @@ timeline: Timeline = [
     read_file("after.txt", "   1→after", num_lines=1),
     assistant_msg("Done."),
     turn_completed(),
-    "\x1b[<0;1;15M\x1b[<0;1;15m",
-    "\x1b[<0;5;18M\x1b[<0;5;18m",
+    "\x1b[<0;1;11M\x1b[<0;1;11m",
+    "\x1b[<0;5;14M\x1b[<0;5;14m",
 ]

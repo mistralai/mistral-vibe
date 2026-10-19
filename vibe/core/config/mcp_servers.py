@@ -28,6 +28,17 @@ class MCPServerRemoveError(ValueError):
     pass
 
 
+MCP_DISABLED_MESSAGE = (
+    "MCP servers are disabled by your administrator. "
+    "Contact your organization admin to enable MCP."
+)
+
+
+def _ensure_mcp_enabled(config: VibeConfigSchema) -> None:
+    if not config.enable_mcp:
+        raise MCPServerAddError(MCP_DISABLED_MESSAGE)
+
+
 @dataclass(frozen=True)
 class PersistedMCPServerResult[ServerT: MCPHttp | MCPStreamableHttp | MCPStdio]:
     server: ServerT
@@ -46,6 +57,7 @@ _HOST_PREFIXES_TO_DROP = {"mcp", "www"}
 _GENERIC_ALIAS_SEGMENTS = {"api", "mcp", "server"}
 _LEADING_HOST_PREFIX_LABEL_MIN_COUNT = 3
 _MCP_SERVER_ADAPTER = TypeAdapter(MCPServer)
+_USER_MANAGED_FIELDS = {"prompt", "sampling_enabled", "disabled", "disabled_tools"}
 
 
 async def persist_oauth_mcp_server(
@@ -56,7 +68,10 @@ async def persist_oauth_mcp_server(
     scopes: list[str] | None = None,
     transport: MCPAddTransport = "streamable-http",
     allow_insecure_http: bool = False,
+    startup_timeout_sec: float | None = None,
+    tool_timeout_sec: float | None = None,
 ) -> PersistedMCPServerResult[MCPHttp | MCPStreamableHttp]:
+    _ensure_mcp_enabled(orchestrator.config)
     normalized_url = normalize_mcp_server_url(
         url, allow_insecure_http=allow_insecure_http
     )
@@ -87,6 +102,14 @@ async def persist_oauth_mcp_server(
             "transport": transport,
             "url": normalized_url,
             "auth": {"type": "oauth", "scopes": scopes or []},
+            **{
+                name: value
+                for name, value in (
+                    ("startup_timeout_sec", startup_timeout_sec),
+                    ("tool_timeout_sec", tool_timeout_sec),
+                )
+                if value is not None
+            },
         })
     except ValidationError as exc:
         raise MCPServerAddError(f"Invalid MCP server configuration: {exc}") from exc
@@ -101,6 +124,7 @@ async def persist_remote_mcp_server(
     *,
     allow_insecure_http: bool = False,
 ) -> PersistedMCPServerResult[MCPHttp | MCPStreamableHttp]:
+    _ensure_mcp_enabled(orchestrator.config)
     normalized_server = server.model_copy(
         update={
             "url": normalize_mcp_server_url(
@@ -133,10 +157,11 @@ async def persist_remote_mcp_server(
 async def persist_stdio_mcp_server(
     orchestrator: ConfigOrchestrator[VibeConfigSchema], server: MCPStdio
 ) -> PersistedMCPServerResult[MCPStdio]:
+    _ensure_mcp_enabled(orchestrator.config)
     if existing := _find_server_name(
         list(orchestrator.config.mcp_servers), server.name
     ):
-        if isinstance(existing, MCPStdio) and existing == server:
+        if isinstance(existing, MCPStdio) and _same_add_options(existing, server):
             return PersistedMCPServerResult(server=existing, created=False)
         raise MCPServerAddError(
             f"MCP server name `{server.name}` is already configured."
@@ -162,6 +187,8 @@ async def _append_persisted_mcp_server(
 async def remove_mcp_server(
     orchestrator: ConfigOrchestrator[VibeConfigSchema], name: str
 ) -> RemovedMCPServerResult:
+    if not orchestrator.config.enable_mcp:
+        raise MCPServerRemoveError(MCP_DISABLED_MESSAGE)
     normalized_name = normalize_mcp_server_name(name)
     if not normalized_name:
         raise MCPServerRemoveError("MCP server name must contain letters or numbers.")
@@ -342,7 +369,15 @@ def _remote_servers_equivalent(
 ) -> bool:
     if _url_key(existing.url) != _url_key(requested.url):
         return False
-    return existing.model_copy(update={"url": requested.url}) == requested
+    return _same_add_options(
+        existing.model_copy(update={"url": requested.url}), requested
+    )
+
+
+def _same_add_options(existing: MCPServer, requested: MCPServer) -> bool:
+    return type(existing) is type(requested) and existing.model_dump(
+        exclude=_USER_MANAGED_FIELDS
+    ) == requested.model_dump(exclude=_USER_MANAGED_FIELDS)
 
 
 def _url_key(value: str) -> str:
@@ -405,6 +440,7 @@ def _dedupe_server_name(base: str, existing_names: set[str]) -> str:
 
 
 __all__ = [
+    "MCP_DISABLED_MESSAGE",
     "MCPServerAddError",
     "MCPServerRemoveError",
     "PersistedMCPServerResult",

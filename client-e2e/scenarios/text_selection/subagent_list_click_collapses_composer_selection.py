@@ -31,4 +31,4 @@ timeline: Timeline = [
 capture_steps = {2, 3, 4, 5}
 
 # A surviving selection would be replaced by the typed key: "draft X".
-screen_contains = {"rust": ("draft Xtext",)}
+screen_contains = ("draft Xtext",)

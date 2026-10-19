@@ -139,7 +139,7 @@ class StdioJsonRpcTransport:
         try:
             self._writer.write(lines)
             self._writer.flush()
-        except (BrokenPipeError, ConnectionResetError):
+        except BrokenPipeError, ConnectionResetError:
             # The peer went away (e.g. client hit Ctrl-C). Stop the writer
             # cleanly so shutdown can complete instead of surfacing the error.
             return False

@@ -1,10 +1,10 @@
-//! Shared `config/write` request with Python's rejected/failed mutation handling.
+//! Shared `config/write` request with rejected/failed mutation handling.
 
 use serde_json::{json, Value};
 
 use crate::server::{method, Client};
 
-/// The session-only config layer (Python `OverridesLayer.NAME`).
+/// The session-only config layer, as the server names it.
 pub const OVERRIDES_LAYER: &str = "overrides";
 
 /// Where a model or thinking pick lands: saved to the user config, or this session only.
@@ -48,14 +48,41 @@ pub async fn write(
     let value = client
         .request(method::CONFIG_WRITE, params)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| crate::server::request_error::describe(&error))?;
     match mutation_error(&value) {
         Some(error) => Err(error),
         None => Ok(value),
     }
 }
 
-/// Python raises `AppServerResponseError` on a rejected or failed config mutation.
+/// Write a saved model/thinking pick through `config/model/write`, which a
+/// running turn parks until it ends; `Ok(true)` means parked. A server without
+/// that method gets `fallback` through the idle-only `config/write`.
+pub async fn write_model(
+    client: &Client,
+    session_id: &str,
+    mut pick: Value,
+    fallback: Vec<Value>,
+    reason: &str,
+) -> Result<bool, String> {
+    pick["sessionId"] = json!(session_id);
+    let value = match client.request_err(method::CONFIG_MODEL_WRITE, pick).await {
+        Ok(value) => value,
+        Err(error) if error.is_method_not_found() => {
+            return write(client, session_id, fallback, reason)
+                .await
+                .map(|_| false);
+        }
+        Err(error) if error.message.is_empty() => return Err(error.code()),
+        Err(error) => return Err(error.message),
+    };
+    match mutation_error(&value) {
+        Some(error) => Err(error),
+        None => Ok(value.get("status").and_then(Value::as_str) == Some("pending")),
+    }
+}
+
+/// The error of a rejected or failed config mutation, if any.
 pub fn mutation_error(value: &Value) -> Option<String> {
     if value
         .get("rejected")

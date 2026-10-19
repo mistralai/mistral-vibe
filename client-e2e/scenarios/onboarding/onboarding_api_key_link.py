@@ -12,7 +12,7 @@ request_methods = {"setup/status"}
 # row under the card is always reserved, so the panel sits one row higher).
 _CLICK_PROVIDER_LINK = "\x1b[<0;30;18M\x1b[<0;30;18m"
 
-expected_actions = {
-    "rust": [Action("open_url", "https://chat.mistral.ai/code/extensions?focus=key")]
-}
+expected_actions = [
+    Action("open_url", "https://chat.mistral.ai/code/extensions?focus=key")
+]
 timeline: Timeline = ["\r", "\r", "\x1b[B\r", _CLICK_PROVIDER_LINK]

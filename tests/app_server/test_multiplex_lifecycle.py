@@ -44,9 +44,7 @@ thinking = "off"
     references: list[weakref.ReferenceType[AppServer]] = []
 
     async def factory(channel: JsonRpcTransport) -> HarnessServer:
-        server = await create_harness_server(
-            channel, transport_kind="stdio", experimental_harness=True
-        )
+        server = await create_harness_server(channel, transport_kind="stdio")
         references.append(weakref.ref(server._server))
         return server
 

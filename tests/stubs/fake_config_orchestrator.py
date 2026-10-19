@@ -18,7 +18,7 @@ from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.orchestrator import (
     ConfigOrchestrator,
     _changed_keys_between,
-    _durable_model_aliases,
+    _sparse_override_model_aliases,
 )
 from vibe.core.config.patch import PatchOp, ensure_parent_paths
 from vibe.core.config.types import ConfigChangeEvent, ConflictStrategy
@@ -110,10 +110,10 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
     async def load_persistence_layer(self) -> RawConfig:
         return await UserConfigLayer().load()
 
-    async def durable_model_aliases(self) -> set[str]:
-        # Mirror the durable stack a real restart rebuilds: schema defaults plus
-        # the on-disk user and project layers the fake persists writes to.
-        return await _durable_model_aliases((
+    async def sparse_override_model_aliases(self) -> set[str]:
+        # Mirror the sparse-safe stack a real restart rebuilds: schema defaults
+        # plus the on-disk user and project layers the fake persists writes to.
+        return await _sparse_override_model_aliases((
             DefaultConfigLayer(schema=type(self._config)),
             UserConfigLayer(),
             ProjectConfigLayer(),

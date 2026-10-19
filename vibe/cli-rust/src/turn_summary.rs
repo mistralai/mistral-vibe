@@ -1,4 +1,4 @@
-//! Turn summary tracker and narrator state (Python `turn_summary`, `narrator_manager`).
+//! Turn summary tracker and narrator state.
 
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use crate::app::App;
 use crate::narrator_manager::{self, ReadAloudTracking, Speech};
 use crate::server::{method, Client, NarrationSummarizeParams, NarrationSummarizeResponse};
 
-/// One turn's accumulated data (Python `TurnSummaryData`).
+/// One turn's accumulated data.
 #[derive(Debug, Default)]
 pub struct TurnSummaryData {
     pub user_message: String,
@@ -19,14 +19,14 @@ pub struct TurnSummaryData {
 }
 
 impl TurnSummaryData {
-    /// Python joins the fragments with no separator.
+    /// The fragments joined with no separator.
     pub fn assistant_text(&self) -> String {
         self.assistant_fragments.concat()
     }
 }
 
 /// Accumulates one turn's data; each `start_turn` retires the previous turn's
-/// data by bumping its generation (Python `TurnSummaryTracker`).
+/// data by bumping its generation.
 #[derive(Debug, Default)]
 pub struct TurnSummaryTracker {
     data: Option<TurnSummaryData>,
@@ -76,7 +76,7 @@ impl TurnSummaryTracker {
     }
 }
 
-/// Narrator manager state (Python `NarratorState`).
+/// Narrator manager state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NarratorState {
     #[default]
@@ -103,29 +103,25 @@ pub enum Event {
     },
 }
 
-/// Client-side narrator state (Python `NarratorManager`).
+/// Client-side narrator state.
 #[derive(Default)]
 pub struct Narrator {
     pub state: NarratorState,
     pub summary: TurnSummaryTracker,
-    /// Summary request in flight, aborted by `cancel` (Python `_cancel_summary`).
+    /// Summary request in flight, aborted by `cancel`.
     cancel: Option<tokio::task::AbortHandle>,
-    /// Animation frame of the narrator row (Python `NarratorStatus._frame`).
+    /// Animation frame of the narrator row.
     pub frame: usize,
     pub tx: Option<Sender<Event>>,
-    /// Python's TTS client exists only with a `speech` config.
+    /// The TTS client exists only with a `speech` config.
     pub speech_config: Option<crate::tts::SpeechConfig>,
     pub speech: Option<Speech>,
     pub speech_id: u64,
     pub tracking: ReadAloudTracking,
 }
 
-/// Python `NarratorManager.on_turn_start`. The empty user message matches
-/// Python's live behavior: every server turn start routes through the
-/// unsolicited path (`_begin_unsolicited_turn` passes `""`); the non-injected
-/// `prompt_text` branch exists in Python (`_handle_turn`) but has no live call
-/// site. A disabled narrator accumulates nothing (Python swaps in
-/// `NoopTurnSummary`).
+/// Start a turn's summary; server turn starts pass an empty user message.
+/// A disabled narrator accumulates nothing.
 pub fn on_turn_start(app: &mut App, user_message: &str) {
     app.narrator.summary.start_turn(user_message);
     if !app.session.startup_config.narrator_enabled {
@@ -149,7 +145,7 @@ pub fn on_turn_cancel(app: &mut App) {
     app.narrator.summary.cancel_turn();
 }
 
-/// Python `_track_narrator_event`, entryAdded half: the user entry's id and
+/// Narrator tracking, entryAdded half: the user entry's id and
 /// the assistant entry's text feed the turn summary tracker.
 pub fn track_narrator_added(app: &mut App, params: &Value) {
     let Some(entry) = params.get("entry") else {
@@ -168,7 +164,7 @@ pub fn track_narrator_added(app: &mut App, params: &Value) {
     }
 }
 
-/// Python `_track_narrator_event`, entryUpdated half: assistant text appends.
+/// Narrator tracking, entryUpdated half: assistant text appends.
 pub fn track_narrator_updated(app: &mut App, params: &Value) {
     let Some(id) = params.get("entryId").and_then(Value::as_str) else {
         return;
@@ -186,8 +182,8 @@ pub fn track_narrator_updated(app: &mut App, params: &Value) {
     }
 }
 
-/// Python joins a message entry's text blocks with a blank line
-/// (`PublicMessageEntry.text`).
+/// A message entry's text blocks, joined with a blank line like the server's
+/// `PublicMessageEntry.text`.
 fn entry_text(entry: &Value) -> String {
     entry
         .get("content")
@@ -203,9 +199,8 @@ fn entry_text(entry: &Value) -> String {
         .unwrap_or_default()
 }
 
-/// The failed turn's error message for the summary request. Python resolves a
-/// friendly message (`_resolve_turn_error_message`); the raw wire message is
-/// the closest the thin client carries.
+/// The failed turn's error message for the summary request: the raw wire
+/// message, else its code.
 pub fn turn_error_message(params: &Value) -> String {
     params
         .pointer("/turn/error/message")
@@ -215,7 +210,7 @@ pub fn turn_error_message(params: &Value) -> String {
         .to_owned()
 }
 
-/// Python `_complete_unsolicited_turn`: an `incomplete_stream` failure with no
+/// An `incomplete_stream` failure with no
 /// queued server work auto-retries, and the retried turn's summary carries no
 /// error.
 pub fn retries_incomplete_stream(app: &App, params: &Value) -> bool {
@@ -223,7 +218,7 @@ pub fn retries_incomplete_stream(app: &App, params: &Value) -> bool {
         && app.queue.is_empty()
 }
 
-/// Python `NarratorManager.on_turn_end`: request the turn's summary to read aloud.
+/// Request the turn's summary to read aloud.
 pub fn on_turn_end(app: &mut App, client: &Arc<Client>) {
     let Some((data, generation)) = app.narrator.summary.end_turn() else {
         return;
@@ -273,7 +268,7 @@ pub fn on_turn_end(app: &mut App, client: &Arc<Client>) {
     app.narrator.cancel = Some(handle.abort_handle());
 }
 
-/// Python `NarratorManager.cancel`; returns whether the narrator was active.
+/// Cancel the narrator; returns whether it was active.
 pub fn cancel(app: &mut App) -> bool {
     let active = app.narrator.state != NarratorState::Idle;
     if active {
@@ -287,7 +282,7 @@ pub fn cancel(app: &mut App) -> bool {
     active
 }
 
-/// Python `_on_turn_summary`; a summary landing after `cancel` stays silent.
+/// Apply a summary event; a summary landing after `cancel` stays silent.
 pub fn apply_event(app: &mut App, event: Event) {
     let Event::Summary {
         generation,

@@ -13,10 +13,17 @@ pub enum CommandEvent {
     RemoteProject(Box<crate::vibe_code_project::Reply>),
     Teleport(Box<crate::teleport::Reply>),
     Plugins(Box<crate::plugins::Event>),
+    Leanstall(Box<super::leanstall::Event>),
     Result(String),
     /// The `/status` text, rendered with its exact counts muted.
     AgentStatistics(String),
     Renamed(String),
+    /// `/branch` forked the session into a detached copy.
+    Branched {
+        old_session_id: String,
+        new_session_id: String,
+        harness: Option<String>,
+    },
     Error(String),
     Runtime(Value, String),
     VoiceSettings {
@@ -77,7 +84,7 @@ pub(super) fn dispatch(app: &mut App) -> Option<(String, mpsc::Sender<CommandEve
     Some((session_id, tx))
 }
 
-/// Mounted once a `config/reload` lands, matching Python's `_reload_config`.
+/// Mounted once a `config/reload` lands.
 pub const RELOADED_MESSAGE: &str =
     "Configuration reloaded (includes agent instructions and skills).";
 

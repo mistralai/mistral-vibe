@@ -1,4 +1,4 @@
-//! Untrusted-workspace warning for headless mode, mirroring Python `_warn_if_workspace_untrusted`.
+//! Untrusted-workspace warning for headless mode.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -16,7 +16,7 @@ pub async fn warn_if_untrusted(client: &Client, cwd: Option<&str>) -> Result<()>
     Ok(())
 }
 
-/// Python keeps first-seen order when merging detected + repo-detected files.
+/// Keeps first-seen order when merging detected + repo-detected files.
 pub fn warning_from(resp: &Value) -> Option<String> {
     if resp.get("status").and_then(Value::as_str) != Some("untrusted") {
         return None;

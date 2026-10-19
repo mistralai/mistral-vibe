@@ -8,7 +8,7 @@ from scenarios.slash_command._config_fixtures import AUTO_COMPACT_HANDSHAKE
 handshake = AUTO_COMPACT_HANDSHAKE
 
 capture_startup = False
-screen_contains = {"rust": ("240000", "220000", "200000", "180000", "project config")}
+screen_contains = ("240000", "220000", "200000", "180000", "project config")
 timeline: Timeline = [
     "/config\r",
     "\r",

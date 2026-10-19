@@ -217,7 +217,6 @@ async def run(  # noqa: PLR0915
                 sys.executable,
                 "-c",
                 "from vibe.app_server.stdio import main; main()",
-                "--experimental-harness",
                 *(["--multiplex"] if shared else []),
                 env=env,
                 stdin=asyncio.subprocess.PIPE,

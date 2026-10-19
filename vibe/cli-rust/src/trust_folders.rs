@@ -1,4 +1,4 @@
-//! Workspace-trust gate shown before the session opens (Python `TrustFolderApp`).
+//! Workspace-trust gate shown before the session opens.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc;
@@ -15,9 +15,9 @@ pub const DECLINE: &str = "decline";
 pub struct TrustFolders {
     pub open: bool,
     pub details: Option<WorkspaceTrustDetails>,
-    /// `(decision, label)` in display order, like Python's `_build_options`.
+    /// `(decision, label)` in display order.
     pub options: Vec<(&'static str, String)>,
-    pub selected: usize,
+    pub list: crate::option_list::OptionList<crate::option_list::SingleAction>,
     /// First visible row of the detected-files region, like Python's `VerticalScroll`.
     pub scroll: usize,
     /// Largest useful `scroll`, written by the last draw.
@@ -63,12 +63,13 @@ pub fn open(app: &mut App, details: WorkspaceTrustDetails) {
     app.selection = Default::default();
     app.trust.details = Some(details);
     app.trust.options = build_options(&app.trust);
-    app.trust.selected = app
-        .trust
-        .options
-        .iter()
-        .position(|(decision, _)| *decision == TRUST_CWD)
-        .unwrap_or(0);
+    app.trust.list.highlight(
+        app.trust
+            .options
+            .iter()
+            .position(|(decision, _)| *decision == TRUST_CWD)
+            .unwrap_or(0),
+    );
     app.trust.scroll = 0;
     app.trust.scroll_max = 0;
     app.trust.open = true;
@@ -112,7 +113,7 @@ pub(crate) fn wheel(app: &mut App, up: bool) {
     scroll_by(app, if up { -2 } else { 2 });
 }
 
-/// Handle one key; `true` quits the client, as Python's Ctrl+C/Ctrl+Q do.
+/// Handle one key; `true` quits the client (Ctrl+C/Ctrl+Q).
 pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     if crate::input::handle_copy_key(app, &key) {
         return false;
@@ -129,10 +130,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             scroll_by(app, 1);
         }
         KeyCode::Left | KeyCode::Right => {
-            let right = key.code == KeyCode::Right;
-            app.trust.selected = crate::list_nav::wrap(app.trust.selected, count, right);
+            app.trust
+                .list
+                .step(key.code == KeyCode::Right, count, true, |_| true);
         }
-        KeyCode::Enter => decide(app, app.trust.selected),
+        KeyCode::Enter => decide(app, app.trust.list.selected()),
         _ => {
             if let Some(option) = crate::list_nav::digit(&key, count) {
                 decide(app, option);

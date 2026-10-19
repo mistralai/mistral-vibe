@@ -1,6 +1,6 @@
 ---
 name: create-vibe-feature
-description: Add or modify a feature in the Mistral Vibe Python CLI while following the app architecture ADRs. Use when working in vibe/core, vibe/cli, vibe/acp, vibe/setup, built-in tools, config, sessions, skills, hooks, MCP, connectors, or other Vibe feature code.
+description: Add or modify a feature in Mistral Vibe while following the app architecture ADRs. Use when working in vibe/core, vibe/app_server, vibe/cli-rust, vibe/acp, vibe/setup, built-in tools, config, sessions, skills, hooks, MCP, connectors, or other Vibe feature code.
 metadata:
   display-name: Create Vibe Feature
   short-description: Guide Mistral Vibe feature work
@@ -16,12 +16,12 @@ Use this skill when implementing Vibe feature work. Keep changes scoped, archite
 | Area | Role | Path |
 | --- | --- | --- |
 | Core engine | Agent loop, domain events, tools, LLM backends, config, sessions, skills, hooks, telemetry types, shared models | `vibe/core/` |
-| App server | Session, turn, config and persistence, tools, and callback ownership; typed JSON-RPC methods and notifications consumed by both TUIs and ACP | `vibe/app_server/` |
-| Textual CLI | Legacy Python TUI, still the production default: interactive terminal UX, widgets, slash commands, manual shell commands, voice UI, local user affordances | `vibe/cli/` |
-| Rust CLI | Ratatui TUI replacing the Textual CLI; thin client over `vibe-app-server` | `vibe/cli-rust/` |
+| App server | Session, turn, config and persistence, tools, and callback ownership; typed JSON-RPC methods and notifications consumed by the TUI and ACP | `vibe/app_server/` |
+| Terminal UI | Ratatui TUI, thin client over `vibe-app-server`: interactive terminal UX, widgets, slash commands, manual shell commands, voice UI, local user affordances | `vibe/cli-rust/` |
+| Launcher and audio | The `vibe` console script that execs the TUI; voice, narrator and audio helpers used by ACP | `vibe/cli/` |
 | ACP bridge | Agent Client Protocol session, tool, terminal, title, and content translation | `vibe/acp/` |
-| Setup | First-run, auth, onboarding, trusted folders, update prompts | `vibe/setup/` |
-| Tests | Unit, integration, e2e, Textual snapshots, stubs and fixtures | `tests/` |
+| Setup | Auth and the Textual onboarding wizard behind `vibe-acp --setup` | `vibe/setup/` |
+| Tests | Python unit, integration and e2e tests, stubs and fixtures; the TUI's tests live in `vibe/cli-rust/tests/` and `client-e2e/` | `tests/` |
 
 ## Architecture Routing
 
@@ -43,7 +43,7 @@ If a change fits the current code but conflicts with ADR direction, flag it to t
 ## Workflow
 
 1. Read `README.md`, `AGENTS.md`, and the nearest relevant source files before editing.
-2. Identify the owning area. Keep UI behavior in `vibe/cli` and `vibe/cli-rust`, ACP translation in `vibe/acp`, setup flow in `vibe/setup`, server-owned behavior behind an app-server method or notification in `vibe/app_server` (per ADR 0009), and reusable engine behavior in `vibe/core`. Any user-visible change to the Python TUI must also ship in the Rust TUI in the same PR; see "Terminal UI changes" in the Vibe project `AGENTS.md` (next to `pyproject.toml`).
+2. Identify the owning area. Keep UI behavior in `vibe/cli-rust`, ACP translation in `vibe/acp`, setup flow in `vibe/setup`, server-owned behavior behind an app-server method or notification in `vibe/app_server` (per ADR 0009), and reusable engine behavior in `vibe/core`. For terminal UI changes, see "Terminal UI changes" in the Vibe project `AGENTS.md` (next to `pyproject.toml`).
 3. Study one or two existing features with the same shape before adding new files. Match naming, model placement, port/adapters, tests, and error patterns.
 4. Prefer a small change in the owning module. Add a port or abstraction only when it protects a meaningful boundary or makes replacement/testing easier.
 5. For feature work, plan telemetry with `instrument-feature-analytics` before writing tracking code.
@@ -82,3 +82,5 @@ For behavior changes, run the narrowest relevant tests first, then broader check
 uv run pytest <path-or-test>
 uv run pyright
 ```
+
+For terminal UI changes, run the Rust gates from `vibe/cli-rust/AGENTS.md` (`make test_rust QUIET=1`, then the affected goldens or `make test QUIET=1`).

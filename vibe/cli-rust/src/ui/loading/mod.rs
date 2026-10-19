@@ -18,7 +18,7 @@ use crate::app::{App, Status};
 pub const DEFAULT_LOADING_STATUS: &str = "Generating";
 pub const THINKING_LOADING_STATUS: &str = "Thinking";
 pub const INITIALIZING_LOADING_STATUS: &str = "Initializing";
-/// Label while a turn retries after a transient failure (Python `set_retrying`).
+/// Label while a turn retries after a transient failure.
 pub const RETRYING_LOADING_STATUS: &str = "Retrying";
 /// Label for a slash command fetching in the background (`/whoami`).
 pub const COMMAND_LOADING_STATUS: &str = "Loading";
@@ -157,7 +157,7 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
         ..area
     };
 
-    // Python hides the main loading widget while a subagent is viewed and
+    // The main loading row is hidden while a subagent is viewed, which
     // shows the subagent's own status instead (Running / Waiting for input).
     if let Some(child) = app.subagents.viewed_child() {
         if let Some(status) = crate::subagents::subagent_loading_status(child.status) {
@@ -211,12 +211,6 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
         }
         return;
     }
-    // `--resume` goes straight to its picker; the engine still coming up behind
-    // it is not something the user is waiting on.
-    if app.session.status == Status::Starting && app.startup_picker_active() {
-        return;
-    }
-
     let anim = &app.view.loading;
     let color = |pos: usize| Style::default().fg(anim.color_at(pos));
 
@@ -259,7 +253,7 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
         &hints,
     );
 
-    // A callback is waiting for the user to stop typing (Python `.loading-debounce`).
+    // A callback is waiting for the user to stop typing.
     if app.question_app.pending.is_some()
         || (app.approval.active.is_none() && app.approval.has_pending())
     {
@@ -272,7 +266,7 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
     f.render_widget(Line::from(spans), content);
 }
 
-/// Mirrors Python `_format_elapsed`: `Ns`, then `NmNs`, then `NhNmNs`.
+/// `Ns`, then `NmNs`, then `NhNmNs`.
 fn format_elapsed(seconds: u64) -> String {
     if seconds < 60 {
         return format!("{seconds}s");

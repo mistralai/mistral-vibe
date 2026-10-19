@@ -1,6 +1,6 @@
 //! Standalone `Markdown` widget rendering (`render_widget`, the
-//! theme-selection preview's renderer): Textual default styles and
-//! margins. A separate binary because the palette it renders with is
+//! theme-selection preview's renderer): default styles and margins. A
+//! separate binary because the palette it renders with is
 //! process-global (`theme::set_active`); the chat profile's rules-dropped
 //! and task-list pins live in `units/markdown_parse.rs` instead.
 
@@ -18,7 +18,7 @@ fn line_text(line: &ratatui::text::Line<'_>) -> String {
 }
 
 #[test]
-fn widget_preview_matches_the_textual_markdown_layout() {
+fn widget_preview_matches_the_default_markdown_layout() {
     theme::set_active("tokyo-night");
     let lines = markdown::render_widget(PREVIEW, 64);
     let rows: Vec<String> = lines.iter().map(line_text).collect();

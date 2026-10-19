@@ -2,7 +2,7 @@
 
 Internal: nothing on the app-server wire declares these tools. A host that
 embeds the harness passes :class:`ClientTools` to the process, the way it
-passes a sandbox; ``vibe -p --agent-socket`` is the one such host today.
+passes a sandbox.
 
 The tools reach the Core as provided-tool groups, one per namespace, and run
 through a provided-tool executor like Vibe's own. The executor awaits the

@@ -11,7 +11,7 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-screen_contains = {"rust": ("- beta", "+ BETA")}
+screen_contains = ("- beta", "+ BETA")
 
 _PROMPT = "edit the file"
 

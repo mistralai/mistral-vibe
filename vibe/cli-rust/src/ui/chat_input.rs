@@ -15,13 +15,13 @@ use crate::app::{App, Status};
 use crate::mentions::Mention;
 use crate::server::AgentSafety;
 
-/// Border and border-title colors per agent safety (Python's
-/// `SAFETY_BORDER_CLASSES` and the `#input-box` TCSS rules).
+/// Border and border-title colors per agent safety.
 fn safety_colors(safety: AgentSafety) -> (Color, Color) {
     match safety {
         AgentSafety::Safe => (theme::success(), theme::success()),
         AgentSafety::Neutral => (theme::popup_border(), theme::muted()),
         AgentSafety::Destructive => (theme::warning(), theme::warning()),
+        AgentSafety::Smart => (theme::warning(), theme::warning()),
         AgentSafety::Yolo => (theme::error(), theme::error()),
     }
 }
@@ -45,9 +45,9 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) -> Option<Position> {
         ),
         Span::styled("─", Style::default().fg(border)),
     ]);
-    // Reserve one column on the right for the chat input content: Textual keeps a
-    // 1-cell scrollbar gutter there (`scrollbar-size: 1`, bar hidden), so text
-    // wraps and ends one column before the edge. The top/bottom borders still
+    // Reserve one column on the right for the chat input content: a 1-cell
+    // scrollbar gutter (bar hidden), so text wraps and ends one column before
+    // the edge. The top/bottom borders still
     // span the full width; only the inner content is inset.
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
@@ -126,7 +126,8 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) -> Option<Position> {
     let caret_y = (cursor_row >= scroll as usize && cursor_row < scroll as usize + content_h)
         .then(|| area.y + 1 + (cursor_row - scroll as usize) as u16)
         .filter(|_| owns_keys);
-    if let Some(y) = caret_y.filter(|_| caret.is_some() && cursor_line_bg != theme::background()) {
+    let line_lit = app.view.app_focus && cursor_line_bg != theme::background();
+    if let Some(y) = caret_y.filter(|_| line_lit) {
         let row = Rect::new(area.x + 2, y, area.width.saturating_sub(2), 1);
         f.buffer_mut().set_style(
             row,
@@ -241,7 +242,7 @@ fn render_body_line(
     hint: Option<&'static str>,
 ) -> Line<'static> {
     let input_style = styles.input;
-    // The caret block matches Textual's TextArea: a solid $input-cursor-background
+    // The caret block: a solid $input-cursor-background
     // cell, or reverse-video for ansi themes (terminal-default background).
     let block = if theme::input_cursor_reverse() {
         Style::default()

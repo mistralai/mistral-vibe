@@ -8,7 +8,7 @@ use crate::transcript::Transcript;
 pub struct PreservedEntry {
     id: String,
     raw: Value,
-    /// Server-owned entries that preceded it (Python's mount order).
+    /// Server-owned entries that preceded it (mount order).
     server_before: usize,
     /// Trailing local rows stay below rebuilt history.
     followed_by_server: bool,

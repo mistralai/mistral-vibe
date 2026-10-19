@@ -5,7 +5,6 @@ from collections.abc import AsyncGenerator
 import os
 from pathlib import Path, PureWindowsPath
 import re
-import shlex
 from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel, Field
@@ -19,6 +18,13 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.builtins._powershell_lexer import (
+    powershell_redirection_targets,
+    powershell_redirections,
+    split_powershell_arguments,
+    split_powershell_commands,
+)
+from vibe.core.tools.builtins._shell_permission_analysis import RedirectWrite
 from vibe.core.tools.builtins.bash import (
     BashToolConfig,
     CapturedShellResult,
@@ -153,170 +159,6 @@ def _powershell_treatment_available() -> bool:
     return powershell_shell_available() and not git_bash_shell_available()
 
 
-def _flush_windows_command_part(parts: list[str], buffer: list[str]) -> None:
-    part = "".join(buffer).strip()
-    if part:
-        parts.append(part)
-    buffer.clear()
-
-
-def _find_powershell_group_end(
-    command: str, opening_index: int, opening: str, closing: str
-) -> int | None:
-    depth = 1
-    quote: str | None = None
-    escaped = False
-    index = opening_index + 1
-
-    while index < len(command):
-        char = command[index]
-        if escaped:
-            escaped = False
-            index += 1
-            continue
-
-        if char == "`":
-            escaped = True
-            index += 1
-            continue
-
-        if char in {"'", '"'}:
-            if quote == char:
-                quote = None
-            elif quote is None:
-                quote = char
-            index += 1
-            continue
-
-        if quote == "'":
-            index += 1
-            continue
-
-        if quote == '"':
-            if command[index : index + 2] == "$(":
-                nested_end = _find_powershell_group_end(command, index + 1, "(", ")")
-                if nested_end is None:
-                    return None
-                index = nested_end + 1
-                continue
-            index += 1
-            continue
-
-        if char == opening:
-            depth += 1
-        elif char == closing:
-            depth -= 1
-            if depth == 0:
-                return index
-        index += 1
-
-    return None
-
-
-def _find_powershell_subexpression_end(command: str, start: int) -> int | None:
-    return _find_powershell_group_end(command, start + 1, "(", ")")
-
-
-def _append_powershell_group(
-    command: str, index: int, buffer: list[str], nested_expressions: list[str]
-) -> int | None:
-    opening = command[index]
-    if opening not in {"{", "("}:
-        return None
-    if opening == "{" and index > 0 and command[index - 1] in {"$", "@"}:
-        return None
-
-    closing = "}" if opening == "{" else ")"
-    group_end = _find_powershell_group_end(command, index, opening, closing)
-    if group_end is None:
-        return None
-    buffer.extend(command[index : group_end + 1])
-    nested_expressions.append(command[index + 1 : group_end])
-    return group_end + 1
-
-
-def _split_windows_command_parts(command: str) -> list[str]:
-    parts: list[str] = []
-    nested_expressions: list[str] = []
-    buffer: list[str] = []
-    quote: str | None = None
-    escaped = False
-    index = 0
-
-    while index < len(command):
-        char = command[index]
-        if escaped:
-            buffer.append(char)
-            escaped = False
-            index += 1
-            continue
-
-        if char == "`" or (
-            char == "^" and command[index + 1 : index + 2] in {"&", "|", ";"}
-        ):
-            buffer.append(char)
-            escaped = True
-            index += 1
-            continue
-
-        if quote != "'" and command[index : index + 2] == "$(":
-            subexpression_end = _find_powershell_subexpression_end(command, index)
-            if subexpression_end is not None:
-                buffer.extend(command[index : subexpression_end + 1])
-                nested_expressions.append(command[index + 2 : subexpression_end])
-                index = subexpression_end + 1
-                continue
-
-        if char in {"'", '"'}:
-            if quote == char:
-                quote = None
-            elif quote is None:
-                quote = char
-            buffer.append(char)
-            index += 1
-            continue
-
-        if quote is None:
-            if (
-                next_index := _append_powershell_group(
-                    command, index, buffer, nested_expressions
-                )
-            ) is not None:
-                index = next_index
-                continue
-            pair = command[index : index + 2]
-            if pair in {"&&", "||"}:
-                _flush_windows_command_part(parts, buffer)
-                index += 2
-                continue
-            # ``2>&1`` and ``*>&1`` duplicate an existing stream; the ampersand
-            # is part of the redirect rather than a command separator.
-            if char in {"&", "|", ";", "\n", "\r"} and not (
-                char == "&" and buffer and buffer[-1] == ">"
-            ):
-                _flush_windows_command_part(parts, buffer)
-                index += 1
-                continue
-
-        buffer.append(char)
-        index += 1
-
-    _flush_windows_command_part(parts, buffer)
-    for nested_expression in nested_expressions:
-        parts.extend(_split_windows_command_parts(nested_expression))
-    return parts
-
-
-def _split_windows_command_tokens(command: str) -> list[str]:
-    try:
-        lexer = shlex.shlex(command, posix=True)
-        lexer.whitespace_split = True
-        lexer.escape = ""
-        return list(lexer)
-    except ValueError:
-        return command.split()
-
-
 def _strip_windows_executable_suffix(value: str) -> str:
     lowered = value.lower()
     for suffix in _WINDOWS_EXECUTABLE_SUFFIXES:
@@ -353,7 +195,7 @@ def _windows_powershell_alias_target(executable: str) -> str | None:
 def _windows_command_match_forms(
     command: str, *, include_path_basename: bool = True
 ) -> list[str]:
-    tokens = _split_windows_command_tokens(command)
+    tokens = split_powershell_arguments(command)
     if not tokens:
         return []
 
@@ -384,7 +226,7 @@ def _windows_command_match_forms(
 
 def _windows_policy_pattern_forms(pattern: str) -> list[str]:
     normalized = pattern.lower()
-    tokens = _split_windows_command_tokens(pattern)
+    tokens = split_powershell_arguments(pattern)
     if not tokens:
         return [normalized]
 
@@ -483,7 +325,9 @@ def _expand_windows_powershell_path(
         return match.group(0)
 
     value = _WINDOWS_POWERSHELL_VARIABLE.sub(replace_variable, value)
-    unresolved = unresolved or "$" in value or "@(" in value
+    unresolved = (
+        unresolved or "$" in value or "@(" in value or value.startswith(("(", "{"))
+    )
     if value == "~" or value.startswith(("~/", "~\\")):
         value = f"{Path.home()}{value[1:]}"
     return value, unresolved
@@ -496,91 +340,76 @@ def _windows_attached_parameter_value(token: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _read_windows_redirection_target(
-    command: str, index: int
-) -> tuple[str | None, int]:
-    if command[index : index + 1] == ">":
-        index += 1
-    while command[index : index + 1].isspace():
-        index += 1
-    if command[index : index + 1] == "&":
-        return None, index + 1
-
-    target: list[str] = []
-    quote: str | None = None
-    escaped = False
-    while index < len(command):
-        char = command[index]
-        if escaped:
-            target.append(char)
-            escaped = False
-            index += 1
-            continue
-        if char == "`":
-            escaped = True
-            index += 1
-            continue
-        if char in {"'", '"'}:
-            if quote == char:
-                quote = None
-            elif quote is None:
-                quote = char
-            else:
-                target.append(char)
-            index += 1
-            continue
-        if quote is None and (char.isspace() or char in {"&", "|", ";", ">"}):
-            break
-        target.append(char)
-        index += 1
-    return "".join(target).strip() or None, index
-
-
-def _windows_redirection_targets(command: str) -> list[str]:
-    targets: list[str] = []
-    quote: str | None = None
-    escaped = False
-    index = 0
-
-    while index < len(command):
-        char = command[index]
-        if escaped:
-            escaped = False
-            index += 1
-            continue
-        if char == "`":
-            escaped = True
-            index += 1
-            continue
-        if char in {"'", '"'}:
-            if quote == char:
-                quote = None
-            elif quote is None:
-                quote = char
-            index += 1
-            continue
-        if quote is not None or char != ">":
-            index += 1
-            continue
-
-        target, index = _read_windows_redirection_target(command, index + 1)
-        if target is not None:
-            targets.append(target)
-
-    return targets
+_WINDOWS_DISCARD_TARGETS = {"$null", "nul", "nul:"}
 
 
 def _windows_file_redirection_targets(command: str) -> list[str]:
     """Return output redirects that can write a file.
 
     PowerShell's null variable and CMD's null device discard output. Descriptor
-    duplication is filtered by ``_read_windows_redirection_target``.
+    duplication such as ``2>&1`` has no target and never reaches this filter.
     """
     return [
         target
-        for target in _windows_redirection_targets(command)
-        if target.casefold() not in {"$null", "nul", "nul:"}
+        for target in powershell_redirection_targets(command)
+        if target.casefold() not in _WINDOWS_DISCARD_TARGETS
     ]
+
+
+# A target PowerShell opens exactly as written: an unquoted word with no
+# escape, variable or pattern, or a quoted one whose quotes expand nothing.
+_PLAIN_POWERSHELL_TARGET = re.compile(
+    r"(?P<word>[\w.\\/:+=~%-]+)|'(?P<single>[^'‘’‚‛\r\n]*)'|\"(?P<double>[^\"“”„`$\r\n]*)\""
+)
+# How a target left to the classifier starts: a relative name, ``~``, or a
+# variable or subexpression the command decides.
+_POWERSHELL_RELATIVE_START = re.compile(r"[\w.-]")
+_POWERSHELL_EXPANSION_START = re.compile(r"\$[\w{(:]")
+# Quotes, escapes and spaces a target may open with before its path does.
+_TARGET_PREFIX = "'\"‘’‚‛“”„` \t\r\n"
+
+
+def windows_redirect_writes(command: str) -> tuple[RedirectWrite, ...]:
+    """The files a PowerShell command's redirects write from a root.
+
+    A target from a root -- a drive, a share or the current drive's root -- is
+    placed only where it is spelled plainly. A relative, ``~`` or
+    variable-led target (``$env:TEMP\\x``) is not listed: it moves with what
+    the command sets, and is left to the classifier. Every other target is
+    listed with no path, an array (``> a, b``) included, so a spelling this
+    reader does not know is never taken for one it does.
+    """
+    writes: list[RedirectWrite] = []
+    for redirect in powershell_redirections(command):
+        spelling, value = redirect.spelling, redirect.value
+        if redirect.array:
+            writes.append(RedirectWrite(spelling, None))
+            continue
+        if value.casefold() in _WINDOWS_DISCARD_TARGETS:
+            continue
+        plain = _PLAIN_POWERSHELL_TARGET.fullmatch(spelling)
+        path = (
+            next(text for text in plain.groups() if text is not None)
+            if plain is not None
+            else None
+        )
+        if path is not None and path == value:
+            if _windows_rooted(path):
+                writes.append(RedirectWrite(spelling, path))
+            continue
+        head = spelling.lstrip(_TARGET_PREFIX)
+        if _windows_rooted(head) or not (
+            head.startswith("~")
+            or _POWERSHELL_EXPANSION_START.match(head)
+            or _POWERSHELL_RELATIVE_START.match(head)
+        ):
+            writes.append(RedirectWrite(spelling, None))
+    return tuple(dict.fromkeys(writes))
+
+
+def _windows_rooted(path: str) -> bool:
+    pure = PureWindowsPath(path)
+    return bool(pure.drive or pure.root)
 
 
 def _windows_path(
@@ -654,7 +483,7 @@ def _analyze_windows_paths(
             dynamic_paths.add(token)
 
     for part in command_parts:
-        tokens = _split_windows_command_tokens(part)
+        tokens = split_powershell_arguments(part)
         if not tokens:
             continue
         executable, arguments = _windows_invoked_command(tokens)
@@ -732,7 +561,7 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
         )
 
     def _is_standalone_denylisted(self, command: str) -> bool:
-        tokens = _split_windows_command_tokens(command)
+        tokens = split_powershell_arguments(command)
         if not tokens:
             return False
         _executable, arguments = _windows_invoked_command(tokens)
@@ -763,6 +592,10 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
     def _has_find_execution_predicate(command: str) -> bool:
         _ = command
         return False
+
+    @staticmethod
+    def _tokenize_command(command: str) -> list[str]:
+        return split_powershell_arguments(command)
 
     def _build_windows_context_permissions(
         self, command_parts: list[str], shell: str | None, env: dict[str, str] | None
@@ -808,13 +641,13 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
         shell: str | None,
         env: dict[str, str] | None,
     ) -> PermissionContext | None:
-        command_parts = _split_windows_command_parts(command)
+        command_parts = split_powershell_commands(command)
         if not command_parts:
             return None
 
         command_cwd = resolve_tool_path(cwd, self.cwd)
         guardrail_permission = self._resolve_guardrail_permission(
-            command_parts, command_cwd=command_cwd, preserve_backslashes=True
+            command_parts, command_cwd=command_cwd
         )
         if (
             guardrail_permission
@@ -918,7 +751,7 @@ class WindowsShell(
 
     async def run(
         self, args: WindowsShellArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | CapturedShellResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | CapturedShellResult]:
         requested_timeout = (
             float(args.timeout) if args.timeout is not None else args.timeout_seconds
         )
@@ -988,7 +821,7 @@ class WindowsShell(
                 stderr=stderr,
                 exit_code=proc.returncode or 0,
             )
-        except (ToolError, asyncio.CancelledError):
+        except ToolError, asyncio.CancelledError:
             raise
         except (ManagedShellError, ManagedShellBackendError) as exc:
             raise ToolError(str(exc)) from exc

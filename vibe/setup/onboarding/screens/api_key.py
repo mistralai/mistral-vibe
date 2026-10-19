@@ -9,14 +9,14 @@ from textual.events import MouseUp
 from textual.validation import Length
 from textual.widgets import Input, Link
 
-from vibe.cli.clipboard import copy_selection_to_clipboard
-from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
-from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
-from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import DEFAULT_VIBE_BASE_URL, ProviderConfig
 from vibe.core.telemetry.types import LaunchContext
 from vibe.setup.auth.api_key_persistence import resolve_api_key_provider
 from vibe.setup.onboarding.base import OnboardingScreen
+from vibe.setup.onboarding.clipboard import copy_selection_to_clipboard
+from vibe.setup.onboarding.shortcut_hints import shortcut, shortcut_hint
+from vibe.setup.onboarding.widgets.no_markup_static import NoMarkupStatic
+from vibe.setup.onboarding.widgets.petit_chat import PetitChat
 
 MISTRAL_PROVIDER_NAME = "mistral"
 MISTRAL_PROVIDER_HELP_NAME = "Mistral Vibe"

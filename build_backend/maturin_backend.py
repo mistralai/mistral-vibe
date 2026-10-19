@@ -508,6 +508,7 @@ def _stage_rust_cli() -> None:
 
     environment = os.environ.copy()
     environment["CARGO_TARGET_DIR"] = str(_TUI_TARGET)
+    build_flags = shlex.split(os.environ.get("CARGO_BUILD_FLAGS", ""))
     command = [
         "cargo",
         "build",
@@ -517,14 +518,17 @@ def _stage_rust_cli() -> None:
         str(_TUI_MANIFEST),
         "--bin",
         "vibe-rs",
-        *shlex.split(os.environ.get("CARGO_BUILD_FLAGS", "")),
+        *build_flags,
     ]
     try:
         subprocess.run(command, cwd=_PROJECT_ROOT, env=environment, check=True)
     except FileNotFoundError as error:
         raise NativeBuildError(_CARGO_MISSING) from error
 
-    built = _TUI_TARGET / "release" / _TUI_NAME
+    # Cargo writes a --target build under target/<triple>/ instead.
+    triple = _cargo_target_triple(build_flags) or os.environ.get("CARGO_BUILD_TARGET")
+    release_dir = _TUI_TARGET / triple if triple else _TUI_TARGET
+    built = release_dir / "release" / _TUI_NAME
     if not built.is_file():
         raise NativeBuildError(f"Rust CLI build did not produce {built}")
     staged = _TUI_TARGET.parent / f"staged-{_TUI_NAME}"
@@ -535,6 +539,15 @@ def _stage_rust_cli() -> None:
         staged.replace(_BUNDLED_TUI)
     finally:
         staged.unlink(missing_ok=True)
+
+
+def _cargo_target_triple(arguments: list[str]) -> str | None:
+    for index, argument in enumerate(arguments):
+        if argument.startswith("--target="):
+            return argument.removeprefix("--target=")
+        if argument == "--target" and index + 1 < len(arguments):
+            return arguments[index + 1]
+    return None
 
 
 @contextmanager
@@ -555,9 +568,14 @@ def _maturin_environment(*, portable_linux_wheel: bool = False) -> Iterator[None
         and not has_compatibility
     ):
         arguments.extend(["--compatibility", "manylinux_2_28"])
+    native_linux_wheel = "--compatibility=linux" in arguments or any(
+        argument == "--compatibility" and arguments[index + 1 : index + 2] == ["linux"]
+        for index, argument in enumerate(arguments)
+    )
     if (
         portable_linux_wheel
         and sys.platform.startswith("linux")
+        and not native_linux_wheel
         and "--zig" not in arguments
     ):
         arguments.append("--zig")

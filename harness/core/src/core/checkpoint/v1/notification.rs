@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::features::notifications::NotificationState;
+use crate::core::features::notifications::{AdmittedNotification, NotificationState};
 
 use super::schema::CheckpointNotification;
 
@@ -15,9 +15,13 @@ pub(super) struct CheckpointNotifications(Vec<CheckpointNotificationState>);
 enum CheckpointNotificationState {
     Pending {
         notification: CheckpointNotification,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preceding_steers: Option<usize>,
     },
     Ready {
         notification: CheckpointNotification,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preceding_steers: Option<usize>,
     },
     Received {
         id: String,
@@ -31,14 +35,17 @@ impl CheckpointNotifications {
             .pending()
             .map(|notification| notification.id.as_str())
             .collect::<BTreeSet<_>>();
-        for notification in state.pending() {
+        for entry in state.admissions() {
+            let notification = &entry.notification;
             entries.push(if state.ready_for_model() {
                 CheckpointNotificationState::Ready {
                     notification: CheckpointNotification::capture(notification),
+                    preceding_steers: Some(entry.preceding_steers),
                 }
             } else {
                 CheckpointNotificationState::Pending {
                     notification: CheckpointNotification::capture(notification),
+                    preceding_steers: Some(entry.preceding_steers),
                 }
             });
         }
@@ -50,12 +57,12 @@ impl CheckpointNotifications {
         Self(entries)
     }
 
-    pub(super) fn restore(self) -> Result<NotificationState, String> {
+    pub(super) fn restore(self, pending_steers: usize) -> Result<NotificationState, String> {
         let mut pending = Vec::new();
         let mut received_ids = BTreeSet::new();
+        let mut received_order = Vec::new();
         let mut received_tail_started = false;
         let mut ready_for_model = None;
-        let mut previous_received_id: Option<String> = None;
         for entry in self.0 {
             match entry {
                 entry @ (CheckpointNotificationState::Pending { .. }
@@ -67,12 +74,18 @@ impl CheckpointNotifications {
                         );
                     }
                     let entry_ready = matches!(&entry, CheckpointNotificationState::Ready { .. });
-                    let notification = match entry {
-                        CheckpointNotificationState::Pending { notification }
-                        | CheckpointNotificationState::Ready { notification } => notification,
+                    let (notification, position) = match entry {
+                        CheckpointNotificationState::Pending {
+                            notification,
+                            preceding_steers,
+                        }
+                        | CheckpointNotificationState::Ready {
+                            notification,
+                            preceding_steers,
+                        } => (notification, preceding_steers.unwrap_or(pending_steers)),
                         CheckpointNotificationState::Received { .. } => unreachable!(),
-                    }
-                    .restore();
+                    };
+                    let notification = notification.restore();
                     if ready_for_model
                         .replace(entry_ready)
                         .is_some_and(|ready| ready != entry_ready)
@@ -87,7 +100,11 @@ impl CheckpointNotifications {
                             notification.id
                         ));
                     }
-                    pending.push(notification);
+                    received_order.push(notification.id.clone());
+                    pending.push(AdmittedNotification {
+                        notification,
+                        preceding_steers: position,
+                    });
                 }
                 CheckpointNotificationState::Received { id } => {
                     received_tail_started = true;
@@ -96,23 +113,14 @@ impl CheckpointNotifications {
                             "checkpoint contains duplicate notification ID {id:?}"
                         ));
                     }
-                    if previous_received_id
-                        .as_ref()
-                        .is_some_and(|previous| previous >= &id)
-                    {
-                        return Err(
-                            "received checkpoint notification IDs must be strictly sorted"
-                                .to_string(),
-                        );
-                    }
-                    previous_received_id = Some(id);
+                    received_order.push(id);
                 }
             }
         }
         NotificationState::try_from_parts_with_delivery(
             pending,
             ready_for_model.unwrap_or(false),
-            received_ids,
+            received_order,
         )
         .map_err(|error| error.detail().to_string())
     }
@@ -129,16 +137,22 @@ mod tests {
     };
 
     #[test]
-    fn capture_preserves_pending_order_and_sorts_received_only_ids() {
+    fn capture_preserves_pending_order_and_recent_received_order() {
         let state = NotificationState::try_from_parts_with_delivery(
-            vec![notification("pending-z"), notification("pending-a")],
+            vec![notification("pending-z"), notification("pending-a")]
+                .into_iter()
+                .map(|notification| AdmittedNotification {
+                    notification,
+                    preceding_steers: 0,
+                })
+                .collect(),
             false,
-            BTreeSet::from([
+            vec![
                 "received-z".to_string(),
                 "pending-a".to_string(),
                 "received-a".to_string(),
                 "pending-z".to_string(),
-            ]),
+            ],
         )
         .unwrap();
 
@@ -150,17 +164,19 @@ mod tests {
             json!([
                 {
                     "type": "pending",
+                    "preceding_steers": 0,
                     "notification": notification_json("pending-z")
                 },
                 {
                     "type": "pending",
+                    "preceding_steers": 0,
                     "notification": notification_json("pending-a")
                 },
-                { "type": "received", "id": "received-a" },
-                { "type": "received", "id": "received-z" }
+                { "type": "received", "id": "received-z" },
+                { "type": "received", "id": "received-a" }
             ])
         );
-        let restored = checkpoint.restore().unwrap();
+        let restored = checkpoint.restore(0).unwrap();
         assert_eq!(restored, state);
         assert_eq!(
             serde_json::to_value(CheckpointNotifications::capture(&restored)).unwrap(),
@@ -184,20 +200,15 @@ mod tests {
                 "notification": notification_json("notification-2")
             }
         ]);
-        let unsorted_received = json!([
-            { "type": "received", "id": "notification-z" },
-            { "type": "received", "id": "notification-a" }
-        ]);
         let empty_id = json!([{ "type": "received", "id": "" }]);
 
         for (label, value) in [
             ("duplicate ID", duplicate),
             ("pending after received", pending_after_received),
-            ("unsorted received IDs", unsorted_received),
             ("empty ID", empty_id),
         ] {
             let checkpoint: CheckpointNotifications = serde_json::from_value(value).unwrap();
-            assert!(checkpoint.restore().is_err(), "restored {label}");
+            assert!(checkpoint.restore(0).is_err(), "restored {label}");
         }
     }
 

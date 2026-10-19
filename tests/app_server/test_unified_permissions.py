@@ -10,6 +10,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 import logging
 from pathlib import Path
+import sys
+import tempfile
 from typing import Any
 
 import pytest
@@ -35,7 +37,12 @@ from vibe.app_server._provided_tools import (
 )
 from vibe.app_server._unified_permissions import (
     RUST_BUILTIN_TOOL_SOURCES,
+    CommandEnvironment,
+    ShellWrites,
     UnifiedPermissionResolver,
+    git_bash_windows_path,
+    shell_writes,
+    windows_drive_path,
 )
 
 
@@ -60,6 +67,24 @@ def _resolver(
     if routes:
         resolver.provided_names.register("mcp", routes)
     return resolver, orchestrator
+
+
+def _shell_resolver(
+    tmp_path: Path, command_environment: CommandEnvironment
+) -> UnifiedPermissionResolver:
+    """The bridge over the default catalogue for a session in one shell."""
+    orchestrator = FakeConfigOrchestrator(build_test_vibe_config())
+    store = PermissionStore()
+    manager = ToolManager(
+        lambda: orchestrator.config,
+        defer_mcp=True,
+        cwd=tmp_path,
+        harness_files=HarnessFilesManager().for_session(tmp_path),
+        permission_getter=store.get_tool_permission,
+    )
+    return UnifiedPermissionResolver(
+        manager, store, orchestrator, command_environment=command_environment
+    )
 
 
 # The ids the harness mints: ``process-<hex>-<hex>`` over session and call ids.
@@ -1317,3 +1342,192 @@ async def test_a_sandboxed_resolver_leaves_home_relative_paths_to_the_sandbox(
     # Assert
     assert home.authorized_path == Path("~/notes.txt")
     assert relative.authorized_path == tmp_path / "notes.txt"
+
+
+@pytest.mark.asyncio
+async def test_a_shell_ask_carries_where_its_redirects_write(tmp_path: Path) -> None:
+    """*Prepare*: A resolver over the default tool catalogue.
+    *Do*: Resolve a bash call whose redirect hides behind a typed root name, as
+    in ``<workspace>/abs/path``, next to a relative redirect and one from a root
+    that names a variable.
+    *Assert*: The ask carries the plainly spelled target, resolved, and the one
+    only the shell can read, as written; not the relative one, which a ``cd``
+    could move.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path)
+    agent = tmp_path / "Library" / "LaunchAgents" / "x.plist"
+
+    # Do
+    outcome = await resolver.resolve(
+        "file_system.bash",
+        {
+            # Forward slashes: a backslash is an escape to the POSIX shells.
+            "command": f"cat tools/plist.tmpl <workspace>{agent.as_posix()} "
+            "2> err.log > /tmp/$NAME.log"
+        },
+    )
+
+    # Assert
+    assert outcome.decision == "ask"
+    assert outcome.shell_write_paths == (agent.resolve(),)
+    assert outcome.unplaced_shell_writes == ("/tmp/$NAME.log",)
+
+
+@pytest.mark.asyncio
+async def test_a_settled_or_non_shell_call_carries_no_write_paths(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resolver whose shells' allowlists cover a command.
+    *Do*: Resolve that command, and a write-file call.
+    *Assert*: Neither carries shell writes: an allowed call is never
+    classified, and only a shell command has redirects.
+    """
+    # Prepare
+    allowlist = {"allowlist": ["npm test"]}
+    resolver, _ = _resolver(
+        tmp_path, bash=allowlist, powershell=allowlist, git_bash=allowlist
+    )
+
+    # Do
+    allowed = await resolver.resolve("file_system.bash", {"command": "npm test"})
+    write = await resolver.resolve(
+        "file_system.write_file", {"path": "a.txt", "content": "x"}
+    )
+
+    # Assert
+    assert allowed.decision == "allow"
+    assert (allowed.shell_write_paths, allowed.unplaced_shell_writes) == ((), ())
+    assert (write.shell_write_paths, write.unplaced_shell_writes) == ((), ())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("environment", "builtin", "arguments", "unplaced"),
+    [
+        # PowerShell opens ``\tmp\out.log`` on whichever drive is current.
+        ("powershell", "file_system.bash", {"command": "echo x > /tmp/out.log"}, 1),
+        # Git Bash's ``/usr`` lies under its install directory.
+        ("git_bash", "file_system.bash", {"command": "echo x > /usr/x"}, 1),
+        # The process moves the directory Git Bash mounts at ``/tmp``.
+        (
+            "git_bash",
+            "process.start",
+            {"command": "echo x > /tmp/out.log", "env": {"TEMP": "C:\\keys"}},
+            1,
+        ),
+        (
+            "git_bash",
+            "process.start",
+            {"command": "echo x > /tmp/out.log", "env": {"TMPDIR": "C:\\keys"}},
+            1,
+        ),
+        # A POSIX shell reads ``C:\x`` as the relative ``C:x``.
+        ("unix", "file_system.bash", {"command": "echo x > C:\\x"}, 0),
+    ],
+)
+async def test_a_command_is_read_by_the_shell_the_session_runs(
+    tmp_path: Path,
+    environment: CommandEnvironment,
+    builtin: str,
+    arguments: dict[str, Any],
+    unplaced: int,
+) -> None:
+    """*Prepare*: A resolver for a session in one command environment.
+    *Do*: Resolve a shell call whose redirect target that shell opens from a
+    root it does not fix, or, for the POSIX shell, does not open from a root.
+    *Assert*: The target is unplaced where that shell's reading leaves its
+    file open, and not listed where that shell reads it as relative.
+    """
+    # Prepare
+    resolver = _shell_resolver(tmp_path, environment)
+
+    # Do
+    outcome = await resolver.resolve(builtin, arguments)
+
+    # Assert
+    assert outcome.decision == "ask"
+    assert outcome.shell_write_paths == ()
+    assert len(outcome.unplaced_shell_writes) == unplaced
+
+
+@pytest.mark.parametrize(
+    ("target", "temp_moved", "expected"),
+    [
+        ("/c/Users/me/x.ps1", False, "C:/Users/me/x.ps1"),
+        ("/d", False, "D:/"),
+        ("/tmp/out.log", False, f"{tempfile.gettempdir()}/out.log"),
+        ("/tmp/out.log", True, None),
+        ("C:/Users/me/x.ps1", False, "C:/Users/me/x.ps1"),
+        ("C:\\Users\\me\\x.ps1", False, "C:\\Users\\me\\x.ps1"),
+        ("/usr/bin/x", False, None),
+        ("/cd/x", False, None),
+        ("//server/share/x", False, None),
+        ("/c/work/../Users/me/x", False, None),
+        ("C:x", False, None),
+    ],
+)
+def test_git_bash_fixes_only_its_drive_and_temp_mounts(
+    target: str, temp_moved: bool, expected: str | None
+) -> None:
+    """Git Bash mounts each drive at ``/<letter>`` and its ``/tmp`` at the
+    temporary directory unless the process moves it. Any other POSIX path lies
+    under a mount Vibe does not read, and ``..`` may cross one.
+    """
+    assert git_bash_windows_path(target, temp_moved=temp_moved) == expected
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("C:\\Users\\me\\x.ps1", "C:\\Users\\me\\x.ps1"),
+        ("C:/Users/me/x.ps1", "C:/Users/me/x.ps1"),
+        ("\\\\server\\share\\x.txt", "\\\\server\\share\\x.txt"),
+        ("\\Users\\me\\x.ps1", None),
+        ("/Users/me/x.ps1", None),
+        ("C:x.ps1", None),
+        ("\\\\?\\C:\\x", None),
+        ("\\\\.\\pipe\\x", None),
+    ],
+)
+def test_powershell_fixes_only_drive_and_share_rooted_paths(
+    target: str, expected: str | None
+) -> None:
+    """``\\x`` and ``/x`` land on the drive current when the command runs, ``C:x``
+    under that drive's current directory, and a device path skips the
+    normalisation every other path goes through.
+    """
+    assert windows_drive_path(target) == expected
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="needs this host's drives")
+@pytest.mark.parametrize(
+    ("environment", "command"),
+    [
+        ("powershell", "echo x > C:\\Users\\me\\x.ps1"),
+        ("git_bash", "echo x > /c/Users/me/x.ps1"),
+        ("git_bash", "echo x > 'C:\\Users\\me\\x.ps1'"),
+    ],
+)
+def test_a_windows_shell_places_a_drive_rooted_write(
+    environment: CommandEnvironment, command: str
+) -> None:
+    """Each Windows shell's spelling of the same drive path names one file."""
+    writes = shell_writes(command, environment=environment)
+
+    assert writes == ShellWrites(paths=(Path("C:/Users/me/x.ps1").resolve(),))
+
+
+def test_sandbox_write_paths_are_normalised_without_this_hosts_links() -> None:
+    """*Prepare*: A command writing an absolute path with ``..`` in a sandbox.
+    *Do*: Read where it writes in the sandbox's path space.
+    *Assert*: Collapsed lexically: the path names a file in the sandbox, which
+    this host's file system does not hold.
+    """
+    # Do
+    writes = shell_writes(
+        "echo x > /work/repo/../etc/x", environment="unix", path_space="sandbox"
+    )
+
+    # Assert
+    assert writes == ShellWrites(paths=(Path("/work/etc/x"),))

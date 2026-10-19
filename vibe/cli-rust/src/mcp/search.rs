@@ -12,8 +12,7 @@ pub fn focus(app: &mut App) {
         return;
     }
     app.mcp.search.focused = true;
-    app.mcp.scroll = 0;
-    app.mcp.free_scroll = false;
+    app.mcp.list.reset_viewport();
 }
 
 /// Route a key through the shared search model; false when the list handles it.
@@ -32,9 +31,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 }
 
 fn query_changed(app: &mut App) {
-    app.mcp.selected = 0;
-    app.mcp.scroll = 0;
-    app.mcp.free_scroll = false;
+    app.mcp.list.reset();
     reconcile_selection(app);
 }
 

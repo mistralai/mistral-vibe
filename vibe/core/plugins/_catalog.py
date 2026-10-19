@@ -524,7 +524,7 @@ def _digestible_schemas(
         canonical_json(coerced_input)
         if coerced_output is not None:
             canonical_json(coerced_output)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     if not isinstance(coerced_input, dict):
         return None

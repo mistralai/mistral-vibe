@@ -8,10 +8,9 @@ from textual.containers import Center, Container, Horizontal, Vertical
 from textual.events import Resize
 from textual.widgets import Markdown, Static
 
-from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
-from vibe.cli.textual_ui.widgets.theme_picker import sorted_theme_names
-from vibe.cli.theme import resolve_theme
 from vibe.setup.onboarding.base import OnboardingScreen
+from vibe.setup.onboarding.shortcut_hints import shortcut, shortcut_hint
+from vibe.setup.onboarding.theme import resolve_theme, sorted_theme_names
 
 THEMES = sorted_theme_names()
 

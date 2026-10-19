@@ -29,11 +29,14 @@ from vibe.observability.logging import logger
 # claim just reserved. A bucket is always "<name>-<12 hex>", so this leading-dot
 # name cannot collide with one.
 CLAIMS_DIR_NAME = ".claims"
+# Removed worktrees are renamed here, which is atomic, then deleted at leisure.
+TRASH_DIR_NAME = ".trash"
 RECORD_FILENAME = "record.json"
 RECOVERY_FILENAME = "recovery.json"
 HOLDERS_DIR_NAME = "holders"
 _BUCKET_AND_NAME_PARTS = 2
 _STARTING_HOLDER = ".starting"
+REMOVING_HOLDER = ".removing"
 _PRUNE_LOCK_FILENAME = ".prune"
 _HELD_FILES: dict[Path, tuple[BinaryIO, int]] = {}
 _HELD_FILES_LOCK = Lock()
@@ -54,12 +57,15 @@ class WorktreeRecord(BaseModel):
     base_commit: str | None = None
     branch_created: bool
     claimed_at: datetime
-    # The aggregate flag lets startup pruning finish an interrupted reap. The
-    # maps make per-session cancellation reject a delayed request with the same
-    # identity without cancelling another archived session sharing this tree.
+    # Every session that worked here. The worktree is reaped once all of them
+    # are archived or deleted, read from their own saved state.
+    session_dirs: set[Path] = Field(default_factory=set)
+    # A removal an older Vibe requested and had not finished. Honoured, never
+    # set, and withdrawn when a session joins.
     reap_requested: bool = False
-    reap_requests: dict[str, str] = Field(default_factory=dict)
-    reap_cancellations: set[str] = Field(default_factory=set)
+    # Git's record of a checkout already moved to the trash, for a retry to
+    # finish removing when the removal stopped right after the move.
+    moved_checkout_admin: Path | None = None
 
     @classmethod
     def new(
@@ -136,12 +142,19 @@ class WorktreeClaim:
         managed_root = WORKTREES_DIR.path.resolve()
         try:
             relative = path.resolve().relative_to(managed_root)
-        except (OSError, ValueError):
+        except OSError, ValueError:
             return None
         parts = relative.parts
-        if len(parts) < _BUCKET_AND_NAME_PARTS or parts[0] == CLAIMS_DIR_NAME:
+        if len(parts) < _BUCKET_AND_NAME_PARTS or parts[0] in {
+            CLAIMS_DIR_NAME,
+            TRASH_DIR_NAME,
+        }:
             return None
         return cls(bucket=parts[0], name=parts[1])
+
+    @staticmethod
+    def trash_root() -> Path:
+        return WORKTREES_DIR.path.resolve() / TRASH_DIR_NAME
 
     # Only claimed names, never a listing of the bucket itself: a directory there
     # with no claim is either a live mkdir reservation or something the user
@@ -255,9 +268,13 @@ class WorktreeClaim:
         return candidate
 
     def add_holder(self, session_id: str) -> None:
-        self._acquire_holder(self._holder_path(session_id))
+        if session_id in {_STARTING_HOLDER, REMOVING_HOLDER}:
+            raise WorktreeRecordError(f"Reserved worktree holder id {session_id!r}.")
+        self._acquire_holder(self._holder_path(session_id), require_record=True)
 
     def remove_holder(self, session_id: str) -> None:
+        if session_id in {_STARTING_HOLDER, REMOVING_HOLDER}:
+            raise WorktreeRecordError(f"Reserved worktree holder id {session_id!r}.")
         self._release_holder(self._holder_path(session_id))
         # A delete that ran while this holder was still up could not rmdir past
         # it, and nothing revisits the leftovers - pruning skips a claim whose
@@ -268,7 +285,7 @@ class WorktreeClaim:
             self._discard_empty_directories()
 
     def holders(self) -> frozenset[str]:
-        return self._live_holders(exclude={_STARTING_HOLDER})
+        return self._live_holders(exclude={_STARTING_HOLDER, REMOVING_HOLDER})
 
     def holders_excluding(self, session_id: str | None) -> frozenset[str]:
         """The live holders minus the asking session, which never counts."""
@@ -289,26 +306,57 @@ class WorktreeClaim:
     def is_starting(self) -> bool:
         return bool(self._live_holders(include={_STARTING_HOLDER}))
 
-    def _acquire_holder(self, holder: Path, *, reference_counted: bool = True) -> None:
-        holder.parent.mkdir(parents=True, exist_ok=True)
+    @contextmanager
+    def removing(self, *, excluding: str | None = None) -> Iterator[bool]:
+        marker = self._holder_path(REMOVING_HOLDER)
         with _holder_registry_lock():
-            with _HELD_FILES_LOCK:
-                if held := _HELD_FILES.get(holder):
-                    if not reference_counted:
-                        raise WorktreeRecordError(
-                            f"Worktree holder {holder.name!r} is already active."
-                        )
-                    _HELD_FILES[holder] = (held[0], held[1] + 1)
-                    return
-                file = holder.open("a+b")
-                try:
-                    _acquire_file_lock(file)
-                except BlockingIOError as exc:
-                    file.close()
+            live = self._live_holders_locked()
+            if excluding not in {None, _STARTING_HOLDER, REMOVING_HOLDER}:
+                live -= {excluding}
+            acquired = not live
+            if acquired:
+                self._acquire_holder_locked(marker, reference_counted=False)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                self._release_holder(marker)
+                if not (self.directory / RECORD_FILENAME).exists():
+                    self._discard_empty_directories()
+
+    def _acquire_holder(
+        self,
+        holder: Path,
+        *,
+        reference_counted: bool = True,
+        require_record: bool = False,
+    ) -> None:
+        with _holder_registry_lock():
+            if require_record and self.read() is None:
+                raise WorktreeRecordError("Worktree claim is no longer available.")
+            if self._live_holders_locked(include={REMOVING_HOLDER}):
+                raise WorktreeRecordError("Worktree is being removed.")
+            self._acquire_holder_locked(holder, reference_counted=reference_counted)
+
+    def _acquire_holder_locked(self, holder: Path, *, reference_counted: bool) -> None:
+        holder.parent.mkdir(parents=True, exist_ok=True)
+        with _HELD_FILES_LOCK:
+            if held := _HELD_FILES.get(holder):
+                if not reference_counted:
                     raise WorktreeRecordError(
                         f"Worktree holder {holder.name!r} is already active."
-                    ) from exc
-                _HELD_FILES[holder] = (file, 1)
+                    )
+                _HELD_FILES[holder] = (held[0], held[1] + 1)
+                return
+            file = holder.open("a+b")
+            try:
+                _acquire_file_lock(file)
+            except BlockingIOError as exc:
+                file.close()
+                raise WorktreeRecordError(
+                    f"Worktree holder {holder.name!r} is already active."
+                ) from exc
+            _HELD_FILES[holder] = (file, 1)
 
     def _release_holder(self, holder: Path) -> None:
         if not holder.exists() and not _holder_is_owned(holder):
@@ -333,21 +381,28 @@ class WorktreeClaim:
     def _live_holders(
         self, *, include: set[str] | None = None, exclude: set[str] | None = None
     ) -> frozenset[str]:
+        with _holder_registry_lock():
+            return frozenset(
+                self._live_holders_locked(include=include, exclude=exclude)
+            )
+
+    def _live_holders_locked(
+        self, *, include: set[str] | None = None, exclude: set[str] | None = None
+    ) -> set[str]:
         directory = self.directory / HOLDERS_DIR_NAME
         live: set[str] = set()
-        with _holder_registry_lock():
-            try:
-                entries = tuple(directory.iterdir())
-            except FileNotFoundError:
-                return frozenset()
-            for entry in entries:
-                if include is not None and entry.name not in include:
-                    continue
-                if exclude is not None and entry.name in exclude:
-                    continue
-                if _holder_is_live(entry):
-                    live.add(entry.name)
-        return frozenset(live)
+        try:
+            entries = tuple(directory.iterdir())
+        except FileNotFoundError:
+            return live
+        for entry in entries:
+            if include is not None and entry.name not in include:
+                continue
+            if exclude is not None and entry.name in exclude:
+                continue
+            if _holder_is_live(entry):
+                live.add(entry.name)
+        return live
 
     def _write_json(self, filename: str, model: BaseModel) -> None:
         directory = self.directory

@@ -1,11 +1,9 @@
-"""Assert Rust headless output against deterministic app-server replay."""
+"""Assert headless output against deterministic app-server replay."""
 
 from __future__ import annotations
 
-import os
-
 from e2e.app_server.capture import capture_headless_scenario
-from e2e.app_server.config import CLIENTS
+from e2e.app_server.config import CLIENT_BIN
 from e2e.app_server.scenario import available_headless_scenarios, load_scenario
 import pytest
 
@@ -13,11 +11,10 @@ import pytest
 @pytest.mark.parametrize("name", available_headless_scenarios())
 def test_headless_scenario(name: str) -> None:
     scenario = load_scenario(name)
-    command = CLIENTS["rust"]
-    if not os.path.exists(command[0]):
-        pytest.skip(f"CLI missing: {command[0]} (run `make build`)")
+    if not CLIENT_BIN.exists():
+        pytest.skip(f"CLI missing: {CLIENT_BIN} (run `make build_test`)")
 
-    captured = capture_headless_scenario(command, scenario)
+    captured = capture_headless_scenario(scenario)
 
     assert captured.returncode == scenario.headless_returncode, captured.stderr
     assert captured.stdout_before_completion == list(scenario.stdout_before_completion)

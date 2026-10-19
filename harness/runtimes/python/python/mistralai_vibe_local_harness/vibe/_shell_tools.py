@@ -138,15 +138,9 @@ def _shell_argv(
                 WindowsTerminalBackend,
             )
 
-            shell = WindowsTerminalBackend(config.command_environment).resolve_shell(
-                config.shell, env
-            )
-            flags = (
-                ["-c"]
-                if config.command_environment == "git_bash"
-                else ["-NoLogo", "-NoProfile", "-Command"]
-            )
-            return [shell, *flags, command]
+            backend = WindowsTerminalBackend(config.command_environment)
+            shell = backend.resolve_shell(config.shell, env)
+            return backend.command_argv(shell, command, interactive=False)
         case _:
             raise ValueError(
                 f"Unsupported command environment on {sys.platform}: {config.command_environment}"

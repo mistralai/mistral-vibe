@@ -28,7 +28,7 @@ const PASTE_LINE_BREAKS: [char; 9] = [
 pub fn handle_other_key(app: &mut App, key: KeyEvent) -> bool {
     let handled = edit_field(app, key);
     if handled {
-        app.question_app.viewport.follow_selection();
+        app.question_app.list.follow();
     }
     handled
 }
@@ -51,7 +51,7 @@ fn edit_field(app: &mut App, key: KeyEvent) -> bool {
         &mut app.question_app.other_cursor,
         &mut anchor,
     );
-    // Like Python's `Input.Changed`, only a real value change stores and re-syncs.
+    // Only a real value change stores and re-syncs.
     if text != before {
         app.question_app.other_texts.insert(idx, text);
         sync_free_choice_selection(app);
@@ -84,14 +84,15 @@ pub fn paste_other(app: &mut App, text: &str) {
     let answer = app.question_app.other_texts.entry(idx).or_default();
     input_edit::insert(answer, &mut app.question_app.other_cursor, &text);
     sync_free_choice_selection(app);
-    app.question_app.viewport.follow_selection();
+    app.question_app.list.follow();
 }
 
-/// The answer offset under a screen cell of the field, or `None` above it.
+/// The answer offset under a screen cell of the field, or `None` above it or on
+/// its option prefix.
 pub fn other_caret_at(app: &App, column: u16, row: u16) -> Option<usize> {
     let field = app.question_app.other_field?;
     let visual_row = usize::try_from(i32::from(row) - field.y).ok()?;
-    let column = usize::from(column.saturating_sub(field.x));
+    let column = usize::from(column.checked_sub(field.x)?);
     Some(field_layout(app, field.text_width).offset_at(visual_row, column))
 }
 

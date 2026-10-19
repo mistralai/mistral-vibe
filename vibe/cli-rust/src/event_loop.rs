@@ -51,9 +51,9 @@ pub const FEEDBACK_CHANNEL_CAP: usize = 2;
 /// Bounded narrator channel; one summary and one clip are live, and senders await rather than drop.
 pub const NARRATOR_CHANNEL_CAP: usize = 2;
 /// How the steady loop ended: a plain quit, or the handshake's missing-key
-/// verdict — the wizard is a pre-session surface (Python `run_onboarding`
-/// runs from the entrypoint, never inside the TUI), so the loop hands its
-/// parts back to `main` for the wizard round and its child.
+/// verdict — the wizard is a pre-session surface that never runs inside the
+/// TUI, so the loop hands its parts back to `main` for the wizard round and
+/// its child.
 pub enum LoopExit {
     /// The user exited or an error ended the run.
     Quit,
@@ -133,6 +133,7 @@ pub struct EventSources {
     pub files: watch::Receiver<u64>,
     pub subagents: mpsc::Receiver<crate::subagents::Event>,
     pub older_history: mpsc::Receiver<crate::older_history::Event>,
+    pub debug_console: mpsc::Receiver<crate::debug_console::Event>,
 }
 
 impl EventLoop {
@@ -168,8 +169,8 @@ impl EventLoop {
         Ok(None)
     }
 
-    /// Run to an exit; the summary is read only on a clean exit (Python prints
-    /// the resume block only when `run_textual_ui` returned a summary).
+    /// Run to an exit; the summary is read only on a clean exit, the only case
+    /// that prints the resume block.
     pub async fn run(mut self) -> RunOutcome {
         let result = match self.steady().await {
             Ok(LoopExit::Quit) => Ok(()),
@@ -182,11 +183,12 @@ impl EventLoop {
             }
             Err(error) => Err(error),
         };
-        // Python `shutdown_cleanup`: stop narration so the clip ends with the TUI
-        // and `read_aloud.ended` is queued before the session/stop telemetry flush.
+        // Stop narration so the clip ends with the TUI and `read_aloud.ended` is
+        // queued before the session/stop telemetry flush.
         crate::turn_summary::cancel(&mut self.app);
         // Closing input cancels the stream without joining an OS reader thread.
         self.input.close();
+        crate::terminal_notifier::shutdown(&mut self.app.terminal_notifier);
         drop(self.terminal_guard);
         crate::terminal::release(self.terminal);
         // Read the exit summary while the server is still alive, before the
@@ -195,17 +197,15 @@ impl EventLoop {
             Ok(()) => Some(session_exit::exit_summary(&self.app, &self.client).await),
             Err(_) => None,
         };
-        // Python prints the resume block right after the TUI comes down and
-        // only then runs the worktree cleanup (`_cleanup_worktree_on_exit`
-        // lives in the `finally`, after `print_session_resume_message`).
+        // The resume block prints right after the TUI comes down, before the
+        // worktree cleanup.
         if result.is_ok() {
             session_exit::print_session_resume_message(summary.as_ref());
         }
         // Worktree exit cleanup runs while the server still serves requests:
         // session/stop is its exit signal, and the remove questions must be
-        // answered before it (Python asks with the engine still alive). The
-        // server discounts this session's own worktree holder, so a clean
-        // created worktree removes without a prompt.
+        // answered before it. The server discounts this session's own worktree
+        // holder, so a clean created worktree removes without a prompt.
         if result.is_ok() {
             crate::worktree_exit::cleanup_on_exit(&self.app, &self.client, &mut self.shutdown)
                 .await;
@@ -234,6 +234,7 @@ impl EventLoop {
                 None => tracing::debug!("app-server SIGKILLed after grace"),
             }
         }
+        crate::observability::memory::log_exit_rss();
         RunOutcome::Finished { result, summary }
     }
 }

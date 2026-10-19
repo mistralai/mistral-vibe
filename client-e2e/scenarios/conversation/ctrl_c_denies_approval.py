@@ -31,5 +31,5 @@ timeline: Timeline = [
 ]
 
 # The approval closes with a deny; the turn keeps running.
-screen_contains = {"rust": ("Esc/Ctrl+C to interrupt",)}
-screen_excludes = {"rust": ("↑↓/jk navigate", "Interrupted")}
+screen_contains = ("Esc/Ctrl+C to interrupt",)
+screen_excludes = ("↑↓/jk navigate", "Interrupted")

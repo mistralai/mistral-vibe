@@ -11,19 +11,9 @@ from vibe.core.compaction.context import (
     reorder_for_tool_adjacency,
     select_model_context,
 )
-from vibe.core.compaction.manager import (
-    CompactionFailedError,
-    CompactionFailureReason,
-    CompactionManager,
-    CompletionFn,
-)
 
 __all__ = [
     "COMPACT_USER_MESSAGE_MAX_TOKENS",
-    "CompactionFailedError",
-    "CompactionFailureReason",
-    "CompactionManager",
-    "CompletionFn",
     "collect_prior_user_messages",
     "drop_oldest_round",
     "extract_summary",

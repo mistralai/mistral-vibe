@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, runtime_checkable
 
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
+from vibe.app_server._mcp_add import persist_mcp_add
 from vibe.app_server._mcp_auth import MCPAuthenticationService
 from vibe.app_server._model import ProtocolModel, validate_wire
 from vibe.app_server._session_backend_port import (
@@ -50,11 +51,11 @@ from vibe.app_server.protocol import (
 from vibe.core.auth.mcp_oauth import MCPOAuthError
 from vibe.core.config import MCPHttp, MCPOAuth, MCPServer, MCPStdio, MCPStreamableHttp
 from vibe.core.config.mcp_servers import (
+    MCP_DISABLED_MESSAGE,
     MCPServerAddError,
     MCPServerRemoveError,
     PersistedMCPServerResult,
     RemovedMCPServerResult,
-    persist_oauth_mcp_server,
     persist_remote_mcp_server,
     persist_stdio_mcp_server,
     remove_mcp_server,
@@ -285,7 +286,10 @@ class MCPCatalogService:
                 )
                 if state is None:
                     raise RuntimeError("A targeted MCP refresh did not converge")
-                if context.plugin_mcp is not None:
+                if (
+                    context.plugin_mcp is not None
+                    and context.orchestrator.config.enable_mcp
+                ):
                     await context.plugin_mcp.refresh_all()
                 response = MCPCatalogMutationResponse(
                     runtime=self._runtime(context, self._project(context, state))
@@ -315,14 +319,7 @@ class MCPCatalogService:
     ) -> tuple[MCPAddResponse, bool]:
         context = await self._mutation_target(params.session_id, root)
         try:
-            result = await persist_oauth_mcp_server(
-                context.orchestrator,
-                url=params.url,
-                name=params.name,
-                scopes=params.scopes,
-                transport=params.transport,
-                allow_insecure_http=params.allow_insecure_http,
-            )
+            result = await persist_mcp_add(context.orchestrator, params)
         except ConcurrencyConflictError as exc:
             raise RequestFailure(ProtocolErrorCode.CONFLICT, str(exc)) from exc
         except MCPServerAddError as exc:
@@ -340,7 +337,7 @@ class MCPCatalogService:
         return (
             MCPAddResponse(
                 name=result.server.name,
-                url=result.server.url,
+                url=None if isinstance(result.server, MCPStdio) else result.server.url,
                 created=result.created,
                 runtime=runtime,
             ),
@@ -459,6 +456,8 @@ class MCPCatalogService:
         self, params: MCPLoginParams, root: SessionBackend | None, notify: Notify
     ) -> tuple[MCPCatalogMutationResponse, bool]:
         context = await self._mutation_target(params.session_id, root)
+        if not context.orchestrator.config.enable_mcp:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, MCP_DISABLED_MESSAGE)
         plugin_owned = context.plugin_entry(params.name) is not None
         # The catalog this session means by the name, handed to the service so
         # it does not decide ownership again over every session's bindings.
@@ -502,6 +501,8 @@ class MCPCatalogService:
         self, params: MCPLogoutParams, root: SessionBackend | None
     ) -> tuple[MCPCatalogMutationResponse, bool]:
         context = await self._mutation_target(params.session_id, root)
+        if not context.orchestrator.config.enable_mcp:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, MCP_DISABLED_MESSAGE)
         plugin_owned = context.plugin_entry(params.name) is not None
         owner = context.plugin_mcp if plugin_owned else context.catalog_owner
         if not plugin_owned:
@@ -673,6 +674,8 @@ class MCPCatalogService:
         servers = orchestrator.config.mcp_servers
         await self._authentication.bind_catalog(servers, owner=owner)
         resolved = tuple(self._resolve_server(server) for server in servers)
+        if not orchestrator.config.enable_mcp:
+            resolved = tuple(replace(server, disabled=True) for server in resolved)
         payload = [
             {
                 "name": server.name,
@@ -783,7 +786,9 @@ class MCPCatalogService:
             state,
             convergence_errors=convergence_errors,
             plugin_sources=(
-                () if context.plugin_mcp is None else context.plugin_mcp.sources()
+                ()
+                if context.plugin_mcp is None or not orchestrator.config.enable_mcp
+                else context.plugin_mcp.sources()
             ),
         )
         return MCPState(
@@ -879,6 +884,8 @@ class SessionlessMCPCatalog:
                 name=name,
                 owner=None,
             )
+        except MCPServerRemoveError:
+            raise
         except (MCPOAuthError, ValueError) as exc:
             raise MCPServerRemoveError(
                 f"Failed to remove OAuth credentials for `{name}`: {exc}"
@@ -1114,6 +1121,8 @@ async def _remove_server_with_credentials(
     name: str,
     owner: object | None,
 ) -> RemovedMCPServerResult:
+    if not orchestrator.config.enable_mcp:
+        raise MCPServerRemoveError(MCP_DISABLED_MESSAGE)
     if not _is_oauth(configured):
         return await remove_mcp_server(orchestrator, name)
     async with authentication.credential_removal(configured.name, owner=owner):

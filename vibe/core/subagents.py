@@ -34,7 +34,7 @@ class TaskResult(BaseModel):
 class SubagentRunnerPort(Protocol):
     def run(
         self, args: TaskArgs, ctx: InvokeContext
-    ) -> AsyncGenerator[ToolStreamEvent | TaskResult, None]: ...
+    ) -> AsyncGenerator[ToolStreamEvent | TaskResult]: ...
 
 
 @dataclass(slots=True)

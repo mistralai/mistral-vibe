@@ -39,7 +39,7 @@ async def migrate_config_layers(layers: Iterable[ConfigLayer[RawConfig]]) -> Non
 
         try:
             data = (await layer.load()).model_dump()
-        except (EmptyLayerError, UntrustedLayerError):
+        except EmptyLayerError, UntrustedLayerError:
             continue
         loaded.append((layer, data))
 

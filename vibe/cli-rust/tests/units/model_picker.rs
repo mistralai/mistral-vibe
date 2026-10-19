@@ -29,7 +29,7 @@ fn app_on(row: usize) -> App {
     let mut app = App::default();
     vibe_rs::event_handler::apply_runtime_value(&mut app, &runtime());
     model_picker::open(&mut app);
-    app.model_picker.selected = row;
+    app.model_picker.list.highlight(row);
     app
 }
 
@@ -109,9 +109,25 @@ fn unresolved_default_skips_the_thinking_picker() {
     let mut app = App::default();
     vibe_rs::event_handler::apply_runtime_value(&mut app, &runtime);
     model_picker::open(&mut app);
-    app.model_picker.selected = 0;
+    app.model_picker.list.highlight(0);
     select(&mut app, Scope::Saved);
     assert!(!app.model_picker.open);
     assert!(!app.thinking_picker.open);
     assert_eq!(app.thinking_picker.model_pick, None);
+}
+
+#[test]
+fn a_pinned_model_opens_highlighted_and_marked_current() {
+    let mut runtime = runtime();
+    runtime["runtime"]["config"]["activeModel"]["alias"] = json!("large");
+    runtime["runtime"]["config"]["activeModelPinned"] = json!(true);
+    let mut app = App::default();
+    vibe_rs::event_handler::apply_runtime_value(&mut app, &runtime);
+
+    model_picker::open(&mut app);
+
+    assert_eq!(app.model_picker.list.selected(), 2);
+    assert!(model_picker::is_current(&app, 2));
+    assert!(!model_picker::is_current(&app, 0));
+    assert_eq!(model_picker::selected_alias(&app), "large");
 }

@@ -27,5 +27,5 @@ handshake = {
 
 capture_startup = False
 capture_steps = {3}
-screen_contains = {"rust": ("connector_githuXb.retrieve_pull_req", "informationY")}
+screen_contains = ("connector_githuXb.retrieve_pull_req", "informationY")
 timeline: Timeline = ["/config\r", "\r", "\x1b[AX", "\x1b[BY", "\x13"]

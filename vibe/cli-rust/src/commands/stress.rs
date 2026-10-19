@@ -37,7 +37,7 @@ pub fn stop(app: &mut App) -> bool {
 }
 
 /// Toggle the firehose. First call emits `args` entries then stops (default
-/// 100), a second call aborts it early (mirrors Python's `stress.toggle`).
+/// 100), a second call aborts it early.
 pub fn toggle(app: &mut App, client: &Arc<Client>, args: &str) {
     if stop(app) {
         return;

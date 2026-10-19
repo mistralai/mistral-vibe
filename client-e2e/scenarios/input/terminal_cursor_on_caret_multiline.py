@@ -10,4 +10,4 @@ _LEFT = "\x1b[D"
 timeline: Timeline = [paste("first\n\t宽x"), _LEFT]
 
 # The caret sits on `x`: two-space gutter, a 4-cell tab, then the 2-cell `宽`.
-screen_cursor = {"rust": (36, 8)}
+screen_cursor = (36, 8)

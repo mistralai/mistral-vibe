@@ -1,4 +1,4 @@
-//! `/model` picker state. Mirrors Python's `ModelPickerApp`: a leading Default
+//! `/model` picker state: a leading Default
 //! (unpinned) row plus one row per configured model, current row marked, no live
 //! preview. A pick chains straight into `/thinking`, which writes both at once.
 
@@ -6,27 +6,30 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::app::{App, ModelOption};
+use crate::app::{App, ModelOption, ToastSeverity};
 use crate::config_write::Scope;
 use crate::event_handler;
 use crate::server::Client;
 use crate::thinking_picker::{self, ModelPick, THINKING_LEVELS};
 
-/// Alias persisted for the Default (unpinned) row (Python `UNPINNED_ACTIVE_MODEL`).
+/// Alias persisted for the Default (unpinned) row.
 pub const UNPINNED_ACTIVE_MODEL: &str = "";
 
-/// A `/config` model write's server answer, applied on the main thread.
+/// A `/config` field write's server answer, applied on the main thread.
 pub enum Event {
     /// Runtime returned by `config/write`.
     Written(Value),
-    /// The write failed; nothing to apply.
-    Failed,
+    /// The write failed; the message names the field and the server's reason.
+    Failed(String),
 }
+
+pub(crate) const FAILED_TOAST_SECS: u64 = 8;
 
 /// Apply the server's answer and release the commit that was in flight.
 pub fn apply_event(app: &mut App, event: Event) {
-    if let Event::Written(runtime) = event {
-        event_handler::apply_runtime_value(app, &runtime);
+    match event {
+        Event::Written(runtime) => event_handler::apply_runtime_value(app, &runtime),
+        Event::Failed(message) => app.show_toast(message, ToastSeverity::Error, FAILED_TOAST_SECS),
     }
     app.commit_finished();
 }
@@ -60,11 +63,9 @@ pub fn select(app: &mut App, client: &Arc<Client>, scope: Scope) {
     thinking_picker::open_for_model(app, pick, thinking, levels);
 }
 
-/// Open the picker highlighted on the current choice (Python `on_mount`).
+/// Open the picker highlighted on the current choice.
 pub fn open(app: &mut App) {
-    app.model_picker.selected = current_index(app);
-    app.model_picker.scroll = 0;
-    app.model_picker.free_scroll = false;
+    app.model_picker.list = crate::option_list::OptionList::new(current_index(app));
     app.model_picker.open = true;
 }
 
@@ -93,9 +94,8 @@ pub fn option_count(app: &App) -> usize {
 
 /// Move the highlight up/down by one, wrapping at the ends.
 pub fn navigate(app: &mut App, down: bool) {
-    app.model_picker.free_scroll = false;
     let count = option_count(app);
-    app.model_picker.selected = crate::list_nav::wrap(app.model_picker.selected, count, down);
+    app.model_picker.list.step(down, count, true, |_| true);
 }
 
 /// Whether row `i` is the current choice: Default when unpinned, else the pinned model.
@@ -108,7 +108,7 @@ pub fn is_current(app: &App, i: usize) -> bool {
 
 /// The alias to persist for the highlighted row (`""` for Default).
 pub fn selected_alias(app: &App) -> String {
-    let sel = app.model_picker.selected;
+    let sel = app.model_picker.list.selected();
     if sel == 0 {
         return UNPINNED_ACTIVE_MODEL.to_owned();
     }
@@ -152,8 +152,8 @@ pub fn apply_runtime(app: &mut App, response: &Value) {
         .to_owned();
 }
 
-/// Display name of the default model, looked up by `defaultModelAlias` (Python
-/// `ConfigView.default_display_name`); falls back to the alias itself.
+/// Display name of the default model, looked up by `defaultModelAlias`;
+/// falls back to the alias itself.
 fn default_display_name(config: &Value) -> String {
     let alias = config
         .get("defaultModelAlias")

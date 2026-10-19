@@ -49,17 +49,15 @@ handshake = {
     },
 }
 
-screen_contains = {
-    "rust": (
-        _PROMPT,
-        "Loaded 2 skills",
-        "Loaded skill: lint",
-        "Loaded skill: code-review",
-        "Lint first.",
-        "Review twice.",
-        "Both applied.",
-    )
-}
+screen_contains = (
+    _PROMPT,
+    "Loaded 2 skills",
+    "Loaded skill: lint",
+    "Loaded skill: code-review",
+    "Lint first.",
+    "Review twice.",
+    "Both applied.",
+)
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

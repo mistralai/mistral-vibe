@@ -1,1 +1,1 @@
-"""PTY test harness and app-server client parity adapter."""
+"""PTY test harness and app-server client adapter."""

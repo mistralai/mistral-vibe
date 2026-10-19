@@ -10,5 +10,5 @@ request_methods = METHODS
 
 timeline: Timeline = ["/plugins\r"]
 
-screen_contains = {"rust": ("No plugins are installed for this session.",)}
-screen_excludes = {"rust": ("Plugins opened...",)}
+screen_contains = ("No plugins are installed for this session.",)
+screen_excludes = ("Plugins opened...",)

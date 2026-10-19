@@ -1,4 +1,4 @@
-"""Remote-project empty parity."""
+"""Remote-project picker with no projects."""
 
 from __future__ import annotations
 

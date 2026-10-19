@@ -7,7 +7,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::ui::{highlight, theme};
 
-/// Textual's tab stop for fence content.
+/// Tab stop for fence content.
 const TAB_SIZE: usize = 8;
 
 /// The fence info string's first token: ```` ```rust,no_run ```` is still Rust.
@@ -33,7 +33,7 @@ pub fn lines(code: &str, lang: &str) -> Vec<Vec<Span<'static>>> {
         .collect()
 }
 
-/// Textual expands fence tabs to 8-column stops; a raw tab would move the cursor.
+/// Fence tabs expand to 8-column stops; a raw tab would move the cursor.
 fn expand_tabs(code: &str) -> String {
     if !code.contains('\t') {
         return code.to_string();

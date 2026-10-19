@@ -19,9 +19,8 @@ env = {
 handshake = {"callback/result": {"accepted": True}}
 capture_startup = False
 capture_steps = {1, 2, 3}
-clipboard_clients = {"rust"}
 expected_clipboard = "Permission for the bash tool"
-screen_contains = {"rust": ("echo second",)}
+screen_contains = ("echo second",)
 
 _FIRST = {"command": "echo first"}
 _SECOND = {"command": "echo second"}

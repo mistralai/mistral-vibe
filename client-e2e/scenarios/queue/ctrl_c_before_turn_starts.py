@@ -12,5 +12,5 @@ capture_steps = {1, 2}
 # Step 1 offers Ctrl+C for `second`; once it is removed, the unstarted first prompt is interruptible.
 timeline: Timeline = ["first\r", "second\r", "\x03"]
 
-screen_contains = {"rust": ("Esc/Ctrl+C to interrupt",)}
-screen_excludes = {"rust": ("> second", "cancel last queued message")}
+screen_contains = ("Esc/Ctrl+C to interrupt",)
+screen_excludes = ("> second", "cancel last queued message")

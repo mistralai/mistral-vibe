@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from vibe.app_server._dispatch import RequestFailure
+from vibe.app_server._worktree_cleanup import worktree_cleanup
 from vibe.app_server.protocol import ProtocolErrorCode, SessionOptions
 from vibe.core.git.errors import GitError
 from vibe.core.git.worktree import (
@@ -28,6 +29,7 @@ from vibe.core.git.worktree import (
     PreparedWorktree,
     RetainedRepositoryMapping,
     WorktreeProgressCallback,
+    WorktreeRepository,
 )
 from vibe.core.paths import dedup_paths
 from vibe.core.session.worktrees import (
@@ -134,6 +136,7 @@ class SessionWorktrees:
     async def raise_behind(
         self,
         session_id: str,
+        session_dir: Path | None,
         move: MoveSession,
         requested: SessionOptions,
         started_in: SessionOptions,
@@ -151,7 +154,7 @@ class SessionWorktrees:
         cwd = _base_cwd(resolution.options)
         announced = False
         try:
-            self.hold(cwd, session_id, resolution.pending_hold)
+            self.hold(cwd, session_id, resolution.pending_hold, session_dir)
             # Announced before the move, not after it: a client waiting out the
             # preparation (the CLI's pre-TUI gate) can proceed the moment the
             # worktree exists, while the context rebuild that retargets the
@@ -206,6 +209,29 @@ class SessionWorktrees:
         return ManagedWorktree.at(cwd) is not None
 
     @staticmethod
+    def relocation_target(requested: str, previous_cwd: Path) -> tuple[Path, bool]:
+        """Resolve a move and report whether it transfers a managed-worktree hold."""
+        target = Path(requested).expanduser().resolve()
+        changes_worktree = WorktreeLifecycle.root(target) != WorktreeLifecycle.root(
+            previous_cwd
+        )
+        return target, changes_worktree
+
+    @staticmethod
+    def relocation_checkout(previous_cwd: Path, target: Path) -> Path | None:
+        """Return the counterpart checkout containing an allowed destination."""
+        try:
+            with WorktreeRepository.open(previous_cwd) as repository:
+                for worktree in repository.linked():
+                    if worktree.path.resolve() == target:
+                        return worktree.root.resolve()
+                if repository.repository_counterpart == target:
+                    return repository.root.resolve()
+        except GitError:
+            return None
+        return None
+
+    @staticmethod
     def reject_input(options: SessionOptions) -> None:
         """Refuse a `worktree` on anything but a start.
 
@@ -229,9 +255,12 @@ class SessionWorktrees:
 
     @staticmethod
     def hold(
-        cwd: Path, session_id: str, pending_hold: PendingSessionHold | None = None
+        cwd: Path,
+        session_id: str,
+        pending_hold: PendingSessionHold | None = None,
+        session_dir: Path | None = None,
     ) -> None:
-        WorktreeLifecycle.hold(cwd, session_id, pending_hold)
+        WorktreeLifecycle.hold(cwd, session_id, pending_hold, session_dir)
 
     @staticmethod
     def root(cwd: Path) -> Path | None:
@@ -240,14 +269,11 @@ class SessionWorktrees:
     @staticmethod
     def release(cwd: Path, session_id: str) -> None:
         WorktreeLifecycle.release(cwd, session_id)
+        worktree_cleanup().schedule(cwd)
 
     @staticmethod
-    def cancel_reap(
-        cwd: Path, requester_id: str | None = None, request_id: str | None = None
-    ) -> None:
-        managed = ManagedWorktree.at(cwd)
-        if managed is not None:
-            managed.cancel_reap(requester_id=requester_id, request_id=request_id)
+    def schedule_reap(cwd: Path) -> None:
+        worktree_cleanup().schedule(cwd)
 
 
 def _requested(options: SessionOptions) -> WorktreeRequest | None:

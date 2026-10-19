@@ -183,11 +183,11 @@ async fn a_completed_store_with_a_theme_submits_it() {
 }
 
 #[tokio::test]
-async fn env_var_error_fails_the_run_with_pythons_exit_one_print() {
+async fn env_var_error_fails_the_run_with_exit_one_print() {
     let (client, _child) = spawn("fake_server_setup_env_var_error").await;
     let close = submit(&client).await;
     // Nothing was saved and nothing else was called: submit-choices never
-    // runs after an env-var error (Python exits 1 before it).
+    // runs after an env-var error (the run exits 1 before it).
     assert!(
         matches!(close, Some(Close::EnvVarError(ref name)) if name.is_empty()),
         "got {close:?}"

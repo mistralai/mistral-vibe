@@ -71,6 +71,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: QueueEvent) -> Op
             }
             if app.queue.take_started(&queue_item_id) {
                 consume_group(app, client, &server_message_id, &[]);
+                settle_completion(app);
                 return Some(session_id);
             }
             if app
@@ -174,7 +175,28 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: QueueEvent) -> Op
             accepted,
         } => super::steering::settled(app, client, &queue_item_id, accepted),
     }
+    settle_completion(app);
     None
+}
+
+pub(super) fn settle_completion(app: &mut App) {
+    let Some((queue_item_id, _)) = &app.session.deferred_completion else {
+        return;
+    };
+    if app.queue.promotion_pending(queue_item_id) {
+        return;
+    }
+    let (_, context) = app.session.deferred_completion.take().unwrap();
+    if !app.queue.is_empty() || !matches!(app.session.status, Status::Ready) {
+        return;
+    }
+    if app.approval.open || app.question_app.open {
+        app.terminal_notifier
+            .remember_completion(context.program_state());
+    } else {
+        app.terminal_notifier
+            .notify(context, std::time::Instant::now());
+    }
 }
 
 fn show_replacement_error(app: &mut App) {
@@ -225,8 +247,8 @@ pub(super) fn consume_group(
 }
 
 /// Deliver the prompts committed to a consumed queue item: they ran with the
-/// turn, so only their queued styling clears and their mentions are reported
-/// (Python `_report_prompt`). Unsent ones are left to the replace that owns them.
+/// turn, so only their queued styling clears and their mentions are
+/// reported. Unsent ones are left to the replace that owns them.
 pub(super) fn retire_group(app: &mut App, server_message_id: &str) {
     let mut message_ids = Vec::new();
     while let Some(index) = app

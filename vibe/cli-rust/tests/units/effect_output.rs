@@ -37,7 +37,7 @@ fn todo_rows_bucket_statuses_in_widget_order() {
     assert_eq!(
         texts,
         ["☐ Run", "☐ File", "☑ Write", "☒ Port"],
-        "an unknown status is dropped, like Python's bucket filter"
+        "an unknown status is dropped"
     );
 }
 
@@ -108,7 +108,7 @@ fn generic_output_is_sanitized() {
 
 #[test]
 fn subagent_output_is_sanitized() {
-    // `TaskResult.response` comes from child `AssistantEvent.content`; Python `_yield_text` sanitizes it.
+    // `TaskResult.response` comes from child `AssistantEvent.content` and is sanitized.
     let ansi = json!({"response": "\x1b[31mdone\x1b[0m", "completed": true});
     assert_eq!(
         format(Some("subagent"), Some(&ansi)),
@@ -143,7 +143,7 @@ fn web_search_source_rows_carry_their_url() {
 
 #[test]
 fn web_search_single_source_has_no_sources_heading() {
-    // Python only titles the list when there is more than one source.
+    // The list is titled only when there is more than one source.
     let output = json!({
         "query": "zidane",
         "sources": [{"title": "Zidane", "url": "https://w.org/z"}],
@@ -189,7 +189,7 @@ fn web_search_query_and_titles_are_sanitized_to_one_row() {
 
 #[test]
 fn web_search_sources_only_link_http_urls() {
-    // Python `link_content` drops the click span for any other scheme.
+    // Any other scheme gets no click span.
     let output = json!({
         "query": "zidane",
         "sources": [
@@ -216,8 +216,8 @@ fn web_search_sources_only_link_http_urls() {
 
 #[test]
 fn web_search_answer_skips_empty_and_trims_trailing_newlines() {
-    // Python `if result.answer:` drops an empty answer; `_yield_text` strips
-    // the trailing newlines of the "answer: ..." string.
+    // An empty answer is dropped; the trailing newlines of the
+    // "answer: ..." string are stripped.
     let output = json!({
         "query": "zidane",
         "answer": "",
@@ -243,8 +243,8 @@ fn web_search_answer_skips_empty_and_trims_trailing_newlines() {
 }
 
 #[test]
-fn web_fetch_content_trims_outer_newlines_like_yield_text() {
-    // Python `_yield_text`: `clean_output(content.strip("\n"))`, dropped when empty.
+fn web_fetch_content_trims_outer_newlines() {
+    // Outer newlines are trimmed before `clean_output`; empty content is dropped.
     let padded = json!({"content": "\n\nThe body.\n\n"});
     assert_eq!(format(Some("web_fetch"), Some(&padded)), ["The body."]);
 

@@ -1,4 +1,4 @@
-//! The what's-new gate's Python semantics over the shared `[update_cache]` section.
+//! The what's-new gate over the shared `[update_cache]` section.
 
 use std::sync::Mutex;
 
@@ -39,7 +39,7 @@ fn no_cache_shows_nothing_and_stamps_nothing() {
     let home = TempHome::new("missing");
 
     assert!(!whats_new_cache::should_show("1.2.3"));
-    // Python's gate never seeds the cache; its update checks do.
+    // The gate never seeds the cache; only update checks do.
     assert!(!home.cache_toml().contains("[update_cache]"));
 
     // A section that misses the required fields reads as no cache too.

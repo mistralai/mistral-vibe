@@ -23,9 +23,11 @@ from mistralai_vibe_local_harness.vibe import (
     ProviderCredentialResult,
     ProviderCredentialSnapshot,
 )
+from vibe.core.config.models import MissingAPIKeyError
 from vibe.core.types import Backend
 from vibe.observability.logging import logger
 from vibe.utils.api_keys import resolve_api_key_with_origin
+from vibe.utils.keyring import keyring_read_failure
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -91,19 +93,17 @@ class ProviderCredentialService:
         except ValueError as exc:
             return ProviderAuthRequired(reason="missing", provider="", message=str(exc))
 
-        if not provider.api_key_env_var and not _uses_vertex(provider):
+        if not provider.api_key_env_var and not provider.uses_vertex:
             return _snapshot(provider, None, {}, api_key_source=None)
 
         snapshot = await asyncio.to_thread(_resolve_snapshot, provider)
         if snapshot is None:
             env_var = provider.api_key_env_var or "MISTRAL_API_KEY"
+            error = MissingAPIKeyError(
+                env_var, provider.name, keyring_error=keyring_read_failure(env_var)
+            )
             return ProviderAuthRequired(
-                reason="missing",
-                provider=provider.name,
-                message=(
-                    f"Missing {env_var} environment variable "
-                    f"for {provider.name} provider"
-                ),
+                reason="missing", provider=provider.name, message=str(error)
             )
 
         async with self._lock:
@@ -138,7 +138,7 @@ class ProviderCredentialService:
             # expire between resolution and send.
             return
 
-        if _uses_vertex(provider):
+        if provider.uses_vertex:
             # Vertex mints its own tokens, so recovery is a fresh mint rather
             # than a new configuration. Clearing the shared credentials makes
             # the next resolution produce a different revision on its own,
@@ -163,21 +163,13 @@ def _active_provider(config: VibeConfigSchema) -> ProviderConfig:
     return config.get_provider_for_model(config.get_active_model())
 
 
-def _uses_vertex(provider: ProviderConfig) -> bool:
-    # ``MistralBackend`` ignores ``api_style`` entirely, so the backend choice
-    # decides first, exactly as ``create_backend`` does.
-    return (
-        provider.backend != Backend.MISTRAL and provider.api_style == "vertex-anthropic"
-    )
-
-
 def _resolve_snapshot(provider: ProviderConfig) -> ProviderCredentialSnapshot | None:
     """Resolve one credential for ``provider``, or ``None`` when none exists.
 
     Runs in a thread: key resolution touches the keyring and the filesystem,
     and the Vertex path performs a blocking token refresh.
     """
-    if _uses_vertex(provider):
+    if provider.uses_vertex:
         # Vertex ignores the configured key and mints a Google ADC token,
         # refreshed process-wide, so "no key configured" is never the answer
         # here — a failure to mint raises and becomes ``ProviderAuthRequired``.

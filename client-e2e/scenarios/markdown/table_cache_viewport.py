@@ -14,7 +14,7 @@ from e2e.app_server.scenario import Timeline
 capture_steps = {1, 2, 3, 5}
 env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 settle_per_key = True
-screen_contains = {"rust": ("Cache refresh confirmed after streaming update.",)}
+screen_contains = ("Cache refresh confirmed after streaming update.",)
 
 _PROMPT = "compare keybindings"
 _PRELUDE = "\n\n".join(

@@ -1,11 +1,11 @@
-//! Post-readiness MCP notices (Python `_show_post_init_notices_once`).
+//! Post-readiness MCP notices.
 
 use serde_json::Value;
 
 use crate::app::{App, ToastSeverity};
 use crate::mcp::{add_result, state_at};
 
-/// Seconds a discovery-failure toast stays up (Python `notify(timeout=10)`).
+/// Seconds a discovery-failure toast stays up.
 const DISCOVERY_TOAST_SECS: u64 = 10;
 
 /// Toast every failed discovery, then mount the OAuth-required notice.

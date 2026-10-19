@@ -5,8 +5,10 @@ Usage: python tests/smoke_binary.py <binary-dir>
 
 Tests:
   1. --version exits successfully
-  2. ACP initialize handshake returns expected agent info
-  3. (Linux) No ELF binaries require executable stack (GNU_STACK RWE)
+  2. The onboarding stylesheet is present in the bundle
+  3. --setup starts far enough to render the Textual onboarding wizard
+  4. ACP initialize handshake returns expected agent info
+  5. (Linux) No ELF binaries require executable stack (GNU_STACK RWE)
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, NoReturn
 
 from acp import (
@@ -105,6 +108,73 @@ def test_version(binary: Path) -> None:
             f"--version exited with code {result.returncode}\nstderr: {result.stderr}"
         )
     print(f"PASS: --version -> {result.stdout.strip()}")
+
+
+def test_bundled_onboarding_assets(binary_dir: Path) -> None:
+    if not any(binary_dir.rglob("setup/onboarding/onboarding.tcss")):
+        _fail("setup/onboarding/onboarding.tcss is missing from the bundle")
+    print("PASS: onboarding stylesheet bundled")
+
+
+def test_setup_renders_onboarding(binary: Path) -> None:
+    if platform.system() == "Windows":
+        # Windows does not provide the Unix pty module used to drive Textual here.
+        print("SKIP: --setup pty smoke test (Windows)")
+        return
+
+    import pty
+    import select
+
+    with tempfile.TemporaryDirectory() as tmp:
+        env = os.environ.copy()
+        env["VIBE_HOME"] = str(Path(tmp) / "home")
+        env["VIBE_TEST_DISABLE_KEYRING"] = "1"
+        env["TERM"] = env.get("TERM") or "xterm-256color"
+        env.pop("MISTRAL_API_KEY", None)
+        master_fd, slave_fd = pty.openpty()
+        proc = subprocess.Popen(
+            [str(binary), "--setup"],
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            env=env,
+            cwd=tmp,
+        )
+        os.close(slave_fd)
+
+        output = bytearray()
+        deadline = time.monotonic() + 30
+        try:
+            while time.monotonic() < deadline and proc.poll() is None:
+                readable, _, _ = select.select([master_fd], [], [], 0.2)
+                if not readable:
+                    continue
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if b"Traceback" in output or b"StylesheetError" in output:
+                    _fail(output.decode("utf-8", errors="replace"))
+                if b"Welcome" in output:
+                    print("PASS: --setup rendered the onboarding wizard")
+                    return
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            os.close(master_fd)
+
+    _fail(
+        "--setup did not render the onboarding wizard before timeout\n"
+        + output.decode("utf-8", errors="replace")[-2000:]
+    )
 
 
 async def test_acp_initialize(binary: Path) -> None:
@@ -216,7 +286,10 @@ def _has_executable_stack(filepath: Path) -> bool | None:
 
             # No GNU_STACK header → no executable stack requirement
             return False
-    except (OSError, struct.error):
+    # Keep the parenthesized form: the almalinux:8 smoke leg in
+    # .github/workflows/build-and-upload.yml runs this script with python3.11,
+    # which rejects the PEP 758 `except A, B:` syntax.
+    except (OSError, struct.error):  # fmt: skip
         return None
 
 
@@ -227,7 +300,7 @@ def test_no_executable_stack(binary_dir: Path) -> None:
     (SELinux enforcing on Fedora, RHEL, etc.). Symptom:
 
       [PYI-9483:ERROR] Failed to load Python shared library
-        '.../libpython3.12.so.1.0': cannot enable executable stack
+        '.../libpython3.14.so.1.0': cannot enable executable stack
         as shared object requires: Invalid argument
     """
     if platform.system() != "Linux":
@@ -276,7 +349,8 @@ def main() -> None:
         print(f"Usage: {sys.argv[0]} <binary-dir>")
         sys.exit(1)
 
-    binary_dir = Path(sys.argv[1])
+    # Absolute: some checks run the binary from a temporary working directory.
+    binary_dir = Path(sys.argv[1]).resolve()
     binary_name = "vibe-acp.exe" if platform.system() == "Windows" else "vibe-acp"
     binary = binary_dir / binary_name
 
@@ -289,6 +363,8 @@ def main() -> None:
     print(f"Testing binary: {binary}\n")
 
     test_version(binary)
+    test_bundled_onboarding_assets(binary_dir)
+    test_setup_renders_onboarding(binary)
     test_no_executable_stack(binary_dir)
     asyncio.run(test_acp_initialize(binary))
 

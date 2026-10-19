@@ -9,8 +9,10 @@ from typing import Any, Literal, cast
 from pydantic import JsonValue
 
 from mistralai_vibe_local_harness.protocol import (
+    RustAgentCompletionCandidateDiscardedObservation,
     RustAssistantMessageCommittedObservation,
     RustCompletedTurn,
+    RustCompletionDiscardCause,
     RustContextCompactedObservation,
     RustContextCompactionFailedObservation,
     RustFailedTurn,
@@ -406,17 +408,30 @@ class SessionProjector:
                 )
                 if not _replace_entry(entries, cast(str, entry["id"]), entry):
                     entries.append(entry)
+            elif isinstance(
+                observation, RustAgentCompletionCandidateDiscardedObservation
+            ):
+                # A hook retry discards a candidate mid-turn: settle its streamed
+                # entries now, not at the end of the turn.
+                entries = [
+                    _settled_provisional_entry(
+                        entry,
+                        observed_at,
+                        cause=_public_discard_cause(observation.cause),
+                    )
+                    if _is_provisional(entry)
+                    and _belongs_to_action(entry, observation.action_id)
+                    else entry
+                    for entry in entries
+                ]
             elif isinstance(observation, RustTurnCompletedObservation):
                 started_at = _started_at(latest_turn, observation.turn_id, observed_at)
                 # An open effect at a clean turn end never produced a result and
                 # is dropped. Provisional assistant output is not: the user has
-                # already watched it arrive, so it is settled in place. Every
-                # committed candidate has superseded its own provisional entries
-                # by now, so what survives here belongs to a completion the turn
-                # abandoned -- retried under a fresh action id, say, while the
-                # turn itself went on to finish cleanly. ``cause`` describes
-                # that content's fate rather than the turn's, and "failure" is
-                # the nearest of the three the lifecycle union allows.
+                # already watched it arrive, so it is settled in place. Committed
+                # and discarded candidates have settled their own entries by now,
+                # so this only catches a completion the turn left behind without
+                # either; "failure" describes that content's fate, not the turn's.
                 entries = [
                     entry
                     for entry in entries
@@ -441,6 +456,7 @@ class SessionProjector:
                     stop_reason=_completed_stop_reason(
                         observation, truncated=truncated_turn_id == observation.turn_id
                     ),
+                    skip_reason=_skip_reason(observation),
                 )
             elif isinstance(observation, RustTurnInterruptedObservation):
                 started_at = _started_at(latest_turn, observation.turn_id, observed_at)
@@ -1768,11 +1784,11 @@ def _is_open_effect(entry: JsonObject, turn_id: str) -> bool:
     )
 
 
+type PublicDiscardCause = Literal["failure", "steer", "interrupt", "retry"]
+
+
 def _settled_provisional_entry(
-    entry: JsonObject,
-    observed_at: int,
-    *,
-    cause: Literal["failure", "steer", "interrupt"],
+    entry: JsonObject, observed_at: int, *, cause: PublicDiscardCause
 ) -> JsonObject:
     updated = dict(entry)
     updated.update({
@@ -1781,6 +1797,21 @@ def _settled_provisional_entry(
         "outcome": {"type": "discarded", "cause": cause},
     })
     return cast(JsonObject, updated)
+
+
+def _public_discard_cause(cause: RustCompletionDiscardCause) -> PublicDiscardCause:
+    """The public lifecycle cause for a candidate the Core discarded.
+
+    The public union has no rejection or skip cause; those read as ``failure``,
+    the cause the turn-end settle already gives such content.
+    """
+    if cause.type == "interrupt":
+        return "interrupt"
+    if cause.type == "steer":
+        return "steer"
+    if cause.type == "retry":
+        return "retry"
+    return "failure"
 
 
 def _settled_open_effect_entry(
@@ -1817,15 +1848,15 @@ def _settled_open_effect_entry(
 def _effect_detail(action: RustToolCallAction) -> tuple[str, JsonObject]:
     if isinstance(action, RustRuntimeBuiltinToolCallAction):
         tool_name = action.call.name
-        if tool_name == "subagent.spawn":
+        if tool_name == "agents.spawn":
             arguments = (
                 action.call.arguments if isinstance(action.call.arguments, dict) else {}
             )
             agent_name = (
-                _str_argument(cast(JsonObject, arguments), "agentName") or "subagent"
+                _str_argument(cast(JsonObject, arguments), "name") or "subagent"
             )
             agent_type = (
-                _str_argument(cast(JsonObject, arguments), "agentType") or "generic"
+                _str_argument(cast(JsonObject, arguments), "config_name") or "generic"
             )
             message = _str_argument(cast(JsonObject, arguments), "message") or ""
             return (
@@ -1952,6 +1983,18 @@ def _completed_stop_reason(
     if truncated:
         return "length"
     return None
+
+
+def _skip_reason(observation: RustTurnCompletedObservation) -> str | None:
+    # A skipped Turn commits no assistant entry, so its output, the hook's
+    # reason, is the only record of why it produced no answer.
+    if observation.stop_reason != "skipped":
+        return None
+    return "".join(
+        part.text
+        for part in observation.output
+        if isinstance(part, RustTextContentBlock)
+    )
 
 
 def _started_at(latest_turn: object, turn_id: str, fallback: int) -> int:

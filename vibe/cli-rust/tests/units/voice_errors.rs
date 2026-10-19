@@ -88,7 +88,7 @@ fn a_transcript_suppresses_empty_recording_diagnostics() {
 }
 
 #[test]
-fn transcription_errors_have_the_python_prefix_and_settle_recording() {
+fn transcription_errors_have_the_failure_prefix_and_settle_recording() {
     let mut app = App::default();
     app.voice.transcribe_state = TranscribeState::Flushing;
 

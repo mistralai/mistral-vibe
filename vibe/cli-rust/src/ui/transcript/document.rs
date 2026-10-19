@@ -17,7 +17,7 @@ pub(crate) struct SelectionSlice {
     pub area: Rect,
     pub gutters: Vec<(u16, u16, u16)>,
     pub folds: Folds,
-    /// Sorted spacing rows (Textual margins) a copy skips.
+    /// Sorted spacing rows (block margins) a copy skips.
     pub margins: Vec<u16>,
 }
 
@@ -39,7 +39,7 @@ pub(crate) fn selection_slice(app: &App) -> Option<SelectionSlice> {
     // The child view's selection must extract the child's document: the
     // render swap is over by the time the overlay runs.
     let (transcript, cache) = crate::subagents::active_transcript(app);
-    let config = view.banner.view(&app.session.startup_config);
+    let config = view.banner.view(&app.session.startup_config, width);
     let banner = super::banner(app, config, width, transcript.is_empty());
     let layout = cache.layout(transcript.revision(), width)?;
     let spacer = view.queue_spacer;
@@ -160,15 +160,15 @@ pub(super) fn hang_cells(
     hangs: &mut Vec<(u16, u16, u16)>,
     area: Rect,
     entry_y: i32,
-    rendered: &entry::RenderedEntry,
+    (lines, folds): (&[Line<'static>], &[Option<Fold>]),
     prewrapped: bool,
 ) {
     let mut y = entry_y;
-    for (index, line) in rendered.lines().iter().enumerate() {
+    for (index, line) in lines.iter().enumerate() {
         if y >= i32::from(area.bottom()) {
             break;
         }
-        let fold = rendered.folds().get(index).copied().flatten();
+        let fold = folds.get(index).copied().flatten();
         if let Some(fold) = fold.filter(|fold| fold.hang > 0 && y >= i32::from(area.y)) {
             hangs.push((y as u16, area.x, area.x + fold.hang - 1));
         }
@@ -199,7 +199,7 @@ fn push_rows(
         if let Some(fold) = folds.get(index).copied().flatten() {
             rows.push((y, fold));
         }
-        // An unwrapped line takes the rows `Paragraph` paints, two for a whitespace-only one.
+        // An unwrapped line takes the rows `Paragraph` paints.
         let height = match prewrapped {
             true => 1,
             false => line_rows(line, width),

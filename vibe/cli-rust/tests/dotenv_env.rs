@@ -20,7 +20,7 @@ fn write_env(content: &str) -> tempfile::TempDir {
 fn the_load_records_exactly_the_keys_it_set() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     // A non-empty shell value wins over the file and is never recorded; an
-    // empty one lets the file through (Python `load_dotenv_values`).
+    // empty one lets the file through (as the server's `load_dotenv_values`).
     std::env::set_var("DOTENV_TEST_SHELL", "from-shell");
     std::env::set_var("DOTENV_TEST_EMPTY", "");
     let home = write_env(

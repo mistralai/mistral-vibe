@@ -1,4 +1,4 @@
-//! The rate-limit failure renders Python's friendly message, not the raw error text.
+//! The rate-limit failure renders a friendly message, not the raw error text.
 
 use serde_json::{json, Value};
 use vibe_rs::event_handler::rate_limit_message;

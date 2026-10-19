@@ -1,4 +1,4 @@
-//! The PyPI update gateway (Python `adapters/pypi_update_gateway.py`).
+//! The PyPI update gateway.
 
 use std::time::Duration;
 
@@ -14,13 +14,13 @@ const DEFAULT_BASE_URL: &str = "https://pypi.org";
 const TIMEOUT_SECONDS: u64 = 5;
 const ACCEPT_HEADER: &str = "application/vnd.pypi.simple.v1+json";
 
-/// Python `Update`: the gateway's answer.
+/// The gateway's answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Update {
     pub latest_version: String,
 }
 
-/// Python `UpdateGatewayCause`.
+/// Why an update check failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpdateGatewayCause {
     TooManyRequests,
@@ -32,7 +32,7 @@ pub enum UpdateGatewayCause {
     Unknown,
 }
 
-/// Python `DEFAULT_GATEWAY_MESSAGES`, keyed by cause.
+/// Default user messages, keyed by cause.
 pub fn default_gateway_message(cause: UpdateGatewayCause) -> &'static str {
     match cause {
         UpdateGatewayCause::TooManyRequests => "Rate limit exceeded while checking for updates.",
@@ -51,7 +51,7 @@ pub fn default_gateway_message(cause: UpdateGatewayCause) -> &'static str {
     }
 }
 
-/// Python `UpdateGatewayError`.
+/// A failed update check: its cause and an optional user message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateGatewayError {
     pub cause: UpdateGatewayCause,
@@ -69,7 +69,7 @@ impl UpdateGatewayError {
 
 /// The package manager whose answer an update check (or a cache entry)
 /// belongs to. Detection follows the install: a uv tool asks uv, a brew
-/// install asks brew, and anything else polls PyPI like Python.
+/// install asks brew, and anything else polls PyPI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpdateSource {
     /// The PyPI Simple API gateway.
@@ -91,7 +91,7 @@ impl UpdateSource {
     }
 }
 
-/// Python `UpdateGateway`: fetch the latest available release. `source` is
+/// Fetch the latest available release. `source` is
 /// the manager the implementing gateway asks, stamped on every cache write so
 /// a later reader can reject an answer a different install's manager gave.
 pub trait UpdateGateway {
@@ -99,23 +99,21 @@ pub trait UpdateGateway {
         &self,
     ) -> impl std::future::Future<Output = Result<Option<Update>, UpdateGatewayError>>;
 
-    /// The manager this gateway consults; the default matches Python, whose
-    /// only gateway is the PyPI Simple API.
+    /// The manager this gateway consults; the default is the PyPI Simple API.
     fn source(&self) -> UpdateSource {
         UpdateSource::Pypi
     }
 }
 
-/// Python `build_ssl_context` (ADR 0015): the one client builder for every
-/// Vibe-owned HTTPS request, under the given trust store and the caller's
-/// timeout. Redirects stay off (Python's httpx default).
+/// The one client builder for every Vibe-owned HTTPS request (ADR 0015), under
+/// the given trust store and the caller's timeout. Redirects stay off.
 pub fn build_http_client_for(
     trust: TlsTrustStore,
     timeout: Duration,
 ) -> Result<reqwest::Client, reqwest::Error> {
     let builder = reqwest::Client::builder()
         .timeout(timeout)
-        // Python's httpx client does not follow redirects.
+        // Redirects are not followed.
         .redirect(reqwest::redirect::Policy::none());
     apply_tls_trust_for(builder, trust).build()
 }
@@ -144,7 +142,7 @@ pub fn wizard_http_client(
     build_http_client_for(trust, timeout)
 }
 
-/// Python `PyPIUpdateGateway` over the PyPI Simple API.
+/// The update gateway over the PyPI Simple API.
 pub struct PyPIUpdateGateway {
     project_name: String,
     base_url: String,
@@ -155,7 +153,7 @@ impl PyPIUpdateGateway {
         Self::with_base_url(project_name, DEFAULT_BASE_URL)
     }
 
-    /// Python's `base_url` constructor parameter. Production checks always
+    /// The index base URL. Production checks always
     /// target PyPI; only tests point this elsewhere.
     pub fn with_base_url(project_name: &str, base_url: &str) -> Self {
         Self {
@@ -199,7 +197,7 @@ impl UpdateGateway for PyPIUpdateGateway {
 /// The production check. The manager is decided by the running install:
 /// uv's own resolution — the user's index, pinned `exclude-newer`, per-package
 /// rules — governs a uv tool, brew's formula metadata governs a brew
-/// install, and the rest poll the PyPI Simple API like Python.
+/// install, and the rest poll the PyPI Simple API.
 pub enum UpdateCheckGateway {
     UvOracle(super::uv_oracle::UvOracleGateway),
     Brew(super::brew_oracle::BrewOracleGateway),
@@ -220,8 +218,7 @@ impl UpdateCheckGateway {
 
 /// The manager this process's install was made with, mirroring the gateway
 /// choice: a uv tool receipt names uv, an executable under brew's prefix
-/// names brew, and everything else reads as PyPI. Python's CLI always polls
-/// PyPI, so its source is the constant `Pypi`.
+/// names brew, and everything else reads as PyPI.
 pub async fn install_source() -> UpdateSource {
     if super::uv_oracle::is_uv_managed().await {
         UpdateSource::Uv
@@ -250,7 +247,7 @@ impl UpdateGateway for UpdateCheckGateway {
     }
 }
 
-/// Python `_STATUS_CAUSES`: 404/403/429 map to their own causes.
+/// 404/403/429 map to their own causes.
 fn status_cause(status: u16) -> Option<UpdateGatewayCause> {
     match status {
         404 => Some(UpdateGatewayCause::NotFound),
@@ -260,7 +257,7 @@ fn status_cause(status: u16) -> Option<UpdateGatewayCause> {
     }
 }
 
-/// Python `fetch_update`'s body: the highest listed version that also has a
+/// The highest listed version that also has a
 /// non-yanked file. Unparsable versions and filenames are skipped.
 pub fn parse_response(data: &Value) -> Option<Update> {
     let versions = data
@@ -274,7 +271,7 @@ pub fn parse_response(data: &Value) -> Option<Update> {
                 .collect::<Vec<Pep440Version>>()
         })
         .unwrap_or_default();
-    // Python: `sorted(valid_versions, reverse=True)` — stable, highest first.
+    // Stable sort, highest first.
     let mut valid_versions = versions;
     valid_versions.sort_by(|left, right| right.cmp(left));
 
@@ -296,7 +293,7 @@ fn non_yanked_versions(data: &Value) -> Vec<Pep440Version> {
         .map(|files| {
             files
                 .iter()
-                // Python skips non-dict entries and yanked files.
+                // Skip non-object entries and yanked files.
                 .filter(|file| file.as_object().is_some())
                 .filter(|file| file.get("yanked").and_then(Value::as_bool) != Some(true))
                 .filter_map(|file| file.get("filename").and_then(Value::as_str))
@@ -307,9 +304,9 @@ fn non_yanked_versions(data: &Value) -> Vec<Pep440Version> {
     files
 }
 
-/// Python `_parse_filename_version`: the wheel's second `-`-separated part,
-/// else the sdist's last one, else unparsable. Full PEP 440, like Python's
-/// `parse_wheel_filename` / `parse_sdist_filename`.
+/// The wheel's second `-`-separated part, else the sdist's last one, else
+/// unparsable. Full PEP 440, like `packaging`'s `parse_wheel_filename` /
+/// `parse_sdist_filename`.
 fn parse_filename_version(filename: &str) -> Option<Pep440Version> {
     if let Some(stem) = filename.strip_suffix(".whl") {
         let mut parts = stem.split('-');

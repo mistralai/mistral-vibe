@@ -137,7 +137,7 @@ class WebFetch(
     @final
     async def run(
         self, args: WebFetchArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | WebFetchResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | WebFetchResult]:
         self._validate_args(args)
 
         url = self._normalize_url(args.url)

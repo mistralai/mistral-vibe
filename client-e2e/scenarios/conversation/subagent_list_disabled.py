@@ -15,7 +15,7 @@ _TASK = "find the grouping code"
 # `show_subagent_status_list: false` hides the whole feature.
 handshake = {"runtime/read": {"runtime": {"config": {"showSubagentStatusList": False}}}}
 
-screen_excludes = {"rust": ("Main conversation", "Explore (Explore 1)")}
+screen_excludes = ("Main conversation", "Explore (Explore 1)")
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

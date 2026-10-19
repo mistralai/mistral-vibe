@@ -38,19 +38,37 @@ impl ToolContracts {
                 output_schema: Some(contract.output_schema),
             })
             .collect::<Vec<_>>();
+        runtime.push(RuntimeContract {
+            name: RuntimeBuiltinToolName::SelfWait,
+            input_schema: crate::core::features::model_wait::runtime_input_schema(
+                config.settings.tools.max_wait_ms,
+            ),
+            output_schema: Some(crate::core::features::model_wait::output_schema()),
+        });
         runtime.extend(
-            assembly::non_filesystem_runtime_builtin_tools()
-                .into_iter()
-                .map(|tool| {
-                    let ToolTarget::RuntimeBuiltin { name } = tool.target else {
-                        unreachable!("resolved Runtime built-ins contain a provided tool")
-                    };
-                    RuntimeContract {
-                        name,
-                        input_schema: tool.descriptor.input_schema,
-                        output_schema: tool.descriptor.output_schema,
-                    }
-                }),
+            assembly::non_filesystem_runtime_builtin_tools(
+                config.settings.tools.programmatic.max_sleep_ms,
+            )
+            .into_iter()
+            .map(|tool| {
+                let ToolTarget::RuntimeBuiltin { name } = tool.target else {
+                    unreachable!("resolved Runtime built-ins contain a provided tool")
+                };
+                RuntimeContract {
+                    name,
+                    input_schema: tool.descriptor.input_schema,
+                    output_schema: tool.descriptor.output_schema,
+                }
+            }),
+        );
+        // These contracts only settle persisted Actions. They install no executable routes,
+        // and current catalog schemas must not reinterpret a previously accepted result.
+        runtime.extend(
+            RuntimeBuiltinToolName::DEPRECATED.map(|name| RuntimeContract {
+                name,
+                input_schema: Value::Bool(true),
+                output_schema: Some(Value::Bool(true)),
+            }),
         );
         let provided = config
             .tool_groups()
@@ -75,6 +93,17 @@ impl ToolContracts {
                 "pre-tool hook arguments do not satisfy the original tool schema: {error}"
             ))
         })?;
+        let arguments = match &original.call {
+            ExternalTool::RuntimeBuiltin {
+                name: RuntimeBuiltinToolName::SelfWait,
+                arguments: original_arguments,
+                ..
+            } => crate::core::features::model_wait::clamp_hook_arguments(
+                original_arguments,
+                arguments,
+            )?,
+            _ => arguments,
+        };
         Ok(ExternalToolCall {
             action_id: original.action_id.clone(),
             call_id: original.call_id.clone(),

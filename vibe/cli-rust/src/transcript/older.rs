@@ -5,7 +5,7 @@ use serde_json::Value;
 use super::{entry_id, Transcript};
 use crate::server::PublicSessionState;
 
-/// Where `session/history/list` resumes paging backward (Python `history_before_cursor`).
+/// Where `session/history/list` resumes paging backward (the server's `history_before_cursor`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HistoryCursor {
     pub session_id: String,
@@ -46,6 +46,8 @@ impl Transcript {
                 page.insert(raw, true);
             }
         }
+        // A running compaction blocks its turn, so it is always among the newest rows.
+        page.settle_compactions(None);
         let added = page.entries.len();
         // An empty page cannot move the cursor, so paging ends there.
         self.history_before_cursor = next.filter(|_| added > 0).map(|before| HistoryCursor {

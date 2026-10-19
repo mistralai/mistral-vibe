@@ -3,9 +3,14 @@
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use vibe_rs::app::App;
-use vibe_rs::question_input::handle_mouse;
 use vibe_rs::selection::Region;
 use vibe_rs::server::{QuestionChoice, UserQuestion};
+
+/// Route one mouse event through the question app with a stub app-server client.
+fn handle_mouse(app: &mut App, event: crossterm::event::MouseEvent) {
+    let client = std::sync::Arc::new(vibe_rs::server::Client::stub());
+    vibe_rs::question_input::handle_mouse(app, &client, event);
+}
 
 /// The box-content region the question draw publishes, as the render would.
 fn question_region(x: u16, y: u16, width: u16, height: u16) -> Region {
@@ -54,7 +59,7 @@ fn app_with_hide_other_question() -> App {
 #[test]
 fn a_hide_other_drag_from_a_non_option_row_selects() {
     let mut app = app_with_hide_other_question();
-    app.question_app.option_rows = vec![(7, 0), (8, 1)];
+    crate::question_app::set_rows(&mut app, &[(7, 0), (8, 1)]);
     app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
@@ -74,13 +79,13 @@ fn a_hide_other_drag_from_a_non_option_row_selects() {
         app.selection.region.as_ref().map(|sel| sel.pending_copy),
         Some(true)
     );
-    assert_eq!(app.question_app.selected_option, 0);
+    assert_eq!(app.question_app.list.selected(), 0);
 }
 
 #[test]
 fn a_hide_other_release_on_a_non_option_row_never_clicks() {
     let mut app = app_with_hide_other_question();
-    app.question_app.option_rows = vec![(7, 0), (8, 1)];
+    crate::question_app::set_rows(&mut app, &[(7, 0), (8, 1)]);
     app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
@@ -90,5 +95,5 @@ fn a_hide_other_release_on_a_non_option_row_never_clicks() {
     handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 3, 6));
 
     assert!(app.selection.region.is_none());
-    assert_eq!(app.question_app.selected_option, 0);
+    assert_eq!(app.question_app.list.selected(), 0);
 }

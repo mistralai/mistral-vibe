@@ -2,20 +2,17 @@
 
 ## Decision
 
-The Rust `vibe-rs` binary is a delivery surface for Vibe, parallel to the
-Python Textual CLI under [0002](0002-core-engine-and-delivery-surfaces.md). It is
-a thin client over the Python `vibe-app-server` ([0009](0009-app-server-boundary.md)),
-connected by newline-delimited JSON-RPC 2.0 on stdio. It never imports Python
-internals or duplicates the agent runtime.
+The Rust `vibe-rs` binary is Vibe's terminal UI, a delivery surface under
+[0002](0002-core-engine-and-delivery-surfaces.md); the `vibe` command always
+runs it. It is a thin client over `vibe-app-server`
+([0009](0009-app-server-boundary.md)), connected by newline-delimited JSON-RPC
+2.0 on stdio. It never imports Python internals or duplicates the agent runtime.
 
 The application follows a strict unidirectional `Action -> reduce(&mut AppStore)
 -> Vec<Effect>` loop. The reducer is pure: no I/O, no Ratatui, no Crossterm, no
 raw JSON. One `vibe-rs` single crate holds the binary. Dependencies point one
 way: `main -> app -> { server, application, ui, startup }`. The `application`
 package imports nothing from `ui` and no terminal library types.
-
-This boundary is independent of [0011](0011-unified-harness-backend.md): the Rust
-client targets the app-server protocol, not a specific session backend.
 
 ## Rationale
 

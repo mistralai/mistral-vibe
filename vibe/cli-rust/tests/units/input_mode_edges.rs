@@ -76,6 +76,21 @@ fn modified_backspace_at_the_start_also_leaves_the_mode() {
 }
 
 #[test]
+fn shift_backspace_on_an_empty_shell_input_returns_to_prompt_mode() {
+    let mut app = App::default();
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    app.chat_input.mode = InputMode::Bash;
+
+    let shift_backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::SHIFT);
+    input::handle_key(&mut app, &stub(), &tx, shift_backspace);
+
+    assert_eq!(
+        (app.chat_input.mode, app.chat_input.input.as_str()),
+        (InputMode::Prompt, "")
+    );
+}
+
+#[test]
 fn a_literal_leading_skill_keeps_its_skill_classification() {
     let skills = vec![("review-pr".to_owned(), "Review the PR".to_owned())];
 

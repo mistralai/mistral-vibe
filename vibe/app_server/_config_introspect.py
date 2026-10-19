@@ -35,17 +35,9 @@ _SECRET_KEYS = frozenset({"headers", "extra_headers", "env", "args"})
 _MCP_SERVERS_KEY = "mcp_servers"
 _MCP_COMMAND_KEY = "command"
 
-# Internal fields populated at runtime (not by the user) that should never be
-# rendered in the settings UI.
-HIDDEN_SETTINGS: frozenset[str] = frozenset({
-    "managed_shell_tools_enabled",
-    "routed_default_model",
-    "routed_model_config",
-    "smart_approve_available",
-    "smart_approve_default",
-    "routed_extra_models",
-    "tools",
-})
+# Internal fields never rendered in the settings UI: those a runtime layer
+# populates, plus tools.
+HIDDEN_SETTINGS: frozenset[str] = VibeConfigSchema.RUNTIME_INJECTED_FIELDS | {"tools"}
 
 POPULAR_SETTINGS: frozenset[str] = frozenset({
     "active_model",

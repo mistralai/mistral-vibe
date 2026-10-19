@@ -147,7 +147,7 @@ def _settled_todo_contents(state: PublicSessionState) -> list[str]:
 
 
 async def _todo_host(tmp_path: Path) -> SessionBackendHost:
-    process = HarnessProcess(HarnessFilesManager(sources=()), experimental_harness=True)
+    process = HarnessProcess(HarnessFilesManager(sources=()))
     options = SessionOptions(cwd=str(tmp_path), auto_approve=True)
     context = await process.build_unified_session_context(options)
     context = replace(context, storage_root=str(tmp_path / "sessions"))

@@ -1,4 +1,4 @@
-//! The wizard's `setup/*` RPC calls (Python app-server `_setup.py`): the
+//! The wizard's `setup/*` RPC calls (app-server `_setup.py`): the
 //! client's ONLY persistence channel — `status` seeds the wizard,
 //! `store-credential` saves the key, `submit-choices` lands the provider,
 //! base URLs, and theme. No local fallback exists when these are absent
@@ -29,8 +29,7 @@ pub struct ProviderView {
 }
 
 /// `setup/status`'s params: the wizard names the provider the failed
-/// session used (Python resolves it against the full effective config);
-/// absent means the server's own active provider.
+/// session used; absent means the server's own active provider.
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusParams<'a> {
@@ -56,7 +55,7 @@ pub struct SetupStatus {
     pub enable_system_trust_store: bool,
 }
 
-/// `setup/store-credential`'s outcome, the Python key-persist contract
+/// `setup/store-credential`'s outcome, the server's key-persist contract
 /// (`SetupStoreCredentialResponse`: the `outcome` tag plus `detail`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
@@ -65,14 +64,14 @@ pub enum StoreOutcome {
     /// env carries it — the reused child's session authenticates.
     Completed,
     /// The derived env var name is empty or invalid; nothing was saved
-    /// (Python `env_var_error` — exit 1). `detail` carries the env var name.
+    /// (`env_var_error` — exit 1). `detail` carries the env var name.
     EnvVarError {
         #[serde(default)]
         detail: String,
     },
     /// Neither the keyring nor the `.env` fallback could store it, so the
-    /// key lives only in the server process env for this run (Python
-    /// `save_error` — warning, then continue). `detail` carries the error.
+    /// key lives only in the server process env for this run
+    /// (`save_error` — warning, then continue). `detail` carries the error.
     SaveError {
         #[serde(default)]
         detail: String,
@@ -85,8 +84,8 @@ pub enum StoreOutcome {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum SubmitOutcome {
     Completed,
-    /// A provider/URL/theme field failed to persist (Python
-    /// `provider_config_error` — warning, then continue).
+    /// A provider/URL/theme field failed to persist
+    /// (`provider_config_error` — warning, then continue).
     ProviderConfigError {
         #[serde(default)]
         failures: Vec<String>,

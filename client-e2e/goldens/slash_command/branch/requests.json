@@ -1,0 +1,22 @@
+[
+ {
+  "method": "session/fork",
+  "params": {
+   "attach": false,
+   "entryId": null,
+   "sourceSessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.slash_command_used",
+   "properties": {
+    "command": "branch",
+    "command_type": "builtin"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

@@ -10,8 +10,20 @@ use crate::core::wire::tool::ToolCall;
 pub(crate) fn direct_tool_execution_from_resolved_tools(
     tools: ToolContext<'_>,
     call: &ToolCall,
+    determinism: crate::core::step_protocol::DeterminismContext,
 ) -> Result<(ToolExecutionState, Action), CoreError> {
-    let tool = tools.resolve_direct_call(call)?;
+    let mut tool = tools.resolve_direct_call(call)?;
+    if let crate::core::tools::external::ExternalTool::RuntimeBuiltin {
+        name: crate::core::tools::external::RuntimeBuiltinToolName::SelfWait,
+        arguments,
+        ..
+    } = &mut tool
+    {
+        *arguments = crate::core::features::model_wait::runtime_arguments(
+            arguments.take(),
+            determinism.time_unix_ms,
+        )?;
+    }
     let external_call = ExternalToolCall {
         action_id: effect_id_for_operation(ToolOrigin::TopLevel, &call.id),
         call_id: call.id.clone(),

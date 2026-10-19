@@ -23,15 +23,17 @@ timeline: Timeline = ["/status\r"]
 
 request_methods = {"providerAuth/read"}
 
-screen_contains = {
-    "rust": (
-        "Steps: 42",
-        "Session Prompt Tokens: 1.23M (1,234,567)",
-        "including 801k (800,987) cached",
-        "Session Completion Tokens: 45.7k (45,678)",
-        "Session Total LLM Tokens: 1.28M (1,280,245)",
-        "Last Turn Tokens: 98.8k (98,765)",
-        "including 12.3k (12,345) cached",
-        "12.3k/600k tokens (2%)",
-    )
-}
+# HOME is pinned so the `~` abbreviation of the credential source label
+# stays deterministic; the fixture names an env file under it.
+env = {"HOME": "/home/e2e-user"}
+
+screen_contains = (
+    "Steps: 42",
+    "Session Prompt Tokens: 1.23M (1,234,567)",
+    "including 801k (800,987) cached",
+    "Session Completion Tokens: 45.7k (45,678)",
+    "Session Total LLM Tokens: 1.28M (1,280,245)",
+    "Last Turn Tokens: 98.8k (98,765)",
+    "including 12.3k (12,345) cached",
+    "12.3k/600k tokens (2%)",
+)

@@ -219,7 +219,7 @@ class GitBash(
 
     async def run(
         self, args: GitBashArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | CapturedShellResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | CapturedShellResult]:
         requested_timeout = (
             float(args.timeout) if args.timeout is not None else args.timeout_seconds
         )
@@ -289,7 +289,7 @@ class GitBash(
                 stderr=stderr,
                 exit_code=proc.returncode or 0,
             )
-        except (ToolError, asyncio.CancelledError):
+        except ToolError, asyncio.CancelledError:
             raise
         except (ManagedShellError, ManagedShellBackendError) as exc:
             raise ToolError(str(exc)) from exc

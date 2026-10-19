@@ -149,18 +149,24 @@ class VibeCodeProjectClient:
             ) from e
 
     async def create_project(
-        self, *, name: str, repo_url: str, default_branch: str
+        self,
+        *,
+        name: str,
+        repo_url: str | None = None,
+        default_branch: str | None = None,
     ) -> VibeCodeProject:
+        if (repo_url is None) is not (default_branch is None):
+            raise ValueError("A project repository needs both URL and default branch")
+        repositories = (
+            [{"repoUrl": repo_url, "defaultBranch": default_branch}]
+            if repo_url is not None
+            else []
+        )
         try:
             response = await self._http_client.post(
                 f"{self._base_url}/api/v1/code/projects",
                 headers=self._headers(),
-                json={
-                    "name": name,
-                    "repositories": [
-                        {"repoUrl": repo_url, "defaultBranch": default_branch}
-                    ],
-                },
+                json={"name": name, "repositories": repositories},
             )
         except httpx.RequestError as e:
             raise VibeCodeProjectApiError(

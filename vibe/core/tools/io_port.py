@@ -38,9 +38,13 @@ class ToolIOPort(Protocol):
 
     async def read_lines(
         self, path: Path, *, start_line: int, limit: int, max_bytes: int
-    ) -> BoundedReadResult: ...
+    ) -> BoundedReadResult:
+        r"""Read lines as the model sees them, keeping any ``\r``."""
+        ...
 
-    async def read_text(self, path: Path) -> ReadSafeResult: ...
+    async def read_text(self, path: Path) -> ReadSafeResult:
+        r"""Read the whole file with ``\n`` line endings, for editing."""
+        ...
 
     async def write_text(
         self,

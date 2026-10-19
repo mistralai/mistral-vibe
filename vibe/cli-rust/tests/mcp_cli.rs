@@ -2,10 +2,10 @@
 
 use clap::{error::ErrorKind, CommandFactory, Parser};
 use vibe_rs::cli::{Cli, CliCommand};
-use vibe_rs::mcp::add_args::{parse_add_args, AddArgs};
-use vibe_rs::mcp_command::McpCommand;
+use vibe_rs::mcp::add_args::parse_add_args;
+use vibe_rs::mcp_command::{add_args::McpAddArgs, McpCommand};
 
-fn add_args(args: &[&str]) -> AddArgs {
+fn add_args(args: &[&str]) -> McpAddArgs {
     let cli = Cli::try_parse_from(
         ["vibe", "mcp", "add"]
             .into_iter()
@@ -18,7 +18,7 @@ fn add_args(args: &[&str]) -> AddArgs {
     else {
         panic!("expected MCP add");
     };
-    args
+    *args
 }
 
 #[test]
@@ -30,11 +30,11 @@ fn cli_definition_is_consistent() {
 fn add_defaults_match_slash_command() {
     let args = add_args(&["https://example.com/mcp"]);
     let slash = parse_add_args("https://example.com/mcp").unwrap();
-    assert_eq!(args.url, slash.url);
+    assert_eq!(args.target, slash.url);
     assert_eq!(args.name, slash.name);
     assert_eq!(args.scopes, slash.scopes);
     assert_eq!(args.transport, slash.transport);
-    assert_eq!(args.login, slash.login);
+    assert_eq!(!args.no_login, slash.login);
     assert_eq!(args.allow_insecure_http, slash.allow_insecure_http);
 }
 
@@ -51,11 +51,11 @@ fn add_flags_preserve_argv_boundaries() {
         "--no-login",
         "--allow-insecure-http",
     ]);
-    assert_eq!(args.url, "http://lan.test/mcp");
+    assert_eq!(args.target, "http://lan.test/mcp");
     assert_eq!(args.name.as_deref(), Some("my server"));
     assert_eq!(args.scopes, ["read write", "admin"]);
     assert_eq!(args.transport, "http");
-    assert!(!args.login);
+    assert!(args.no_login);
     assert!(args.allow_insecure_http);
 }
 
@@ -114,5 +114,5 @@ fn interactive_and_headless_prompts_are_not_subcommands() {
     assert_eq!(cli.initial_prompt.as_deref(), Some("mcp add a server"));
     let cli = Cli::try_parse_from(["vibe", "-p", "mcp"]).unwrap();
     assert!(cli.command.is_none());
-    assert_eq!(cli.resolve_prompt(None).as_deref(), Some("mcp"));
+    assert_eq!(cli.resolve_prompt(None).unwrap(), "mcp");
 }

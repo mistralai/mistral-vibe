@@ -67,6 +67,7 @@ pub(super) async fn open_external_editor(
     }
     lent.end()?;
     app.terminal_notifier.invalidate_title();
+    app.terminal_notifier.invalidate_program_status();
     Ok(false)
 }
 

@@ -22,10 +22,13 @@ from typing import Annotated, Any, Literal, Self, cast
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     JsonValue,
+    SerializerFunctionWrapHandler,
     TypeAdapter,
+    WrapSerializer,
     field_validator,
     model_validator,
 )
@@ -56,6 +59,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustResourceLinkContentBlock,
     RustSessionTransition,
     RustSettingsChange,
+    RustSystemInstructionsChange,
     RustTextContentBlock,
     parse_apply_result,
 )
@@ -92,11 +96,12 @@ STORE_FORMAT = "mistral.vibe.unified-session-store/v1"
 # 7: checkpoint configuration baselines and recorded transition shapes;
 # 8: pruned request and result bodies on any settled Action but a process, and
 #    pooled capability catalogs.
+# 9: atomic session relocation and system-instruction baselines.
 # An additive field needs no bump: an older reader keeps what it cannot
 # interpret and writes it back. Bump only for a change an older reader must not
 # attempt, which is the one thing this number is allowed to mean.
 # Downgrading after a newer build writes the store is unsupported.
-STORE_FORMAT_MINOR = 8
+STORE_FORMAT_MINOR = 9
 # Sealing a chunk once its contents pass this size makes a chunk's identity a
 # function of the list prefix alone, so appending leaves every sealed chunk
 # byte-identical and only the open tail is rewritten.
@@ -143,6 +148,65 @@ type Timestamp = Annotated[
             r"[0-9]{2}\.[0-9]{3}Z$"
         )
     ),
+]
+
+# Settings stored before program time limits existed lack them; they read back
+# with the limits current builds configure. Settings are stored as baselines, as
+# journaled settings changes, and as reserved command parameters, and every one
+# of those reads goes through `_fill_program_time_limits`.
+_PROGRAM_TIME_LIMIT_DEFAULTS = {"max_elapsed_ms": 60_000, "max_sleep_ms": 30_000}
+
+
+def _fill_program_time_limits(value: object) -> object:
+    if not isinstance(value, dict):
+        return value
+    tools = value.get("tools")
+    programmatic = tools.get("programmatic") if isinstance(tools, dict) else None
+    if not isinstance(tools, dict) or not isinstance(programmatic, dict):
+        return value
+    missing = {
+        name: limit
+        for name, limit in _PROGRAM_TIME_LIMIT_DEFAULTS.items()
+        if name not in programmatic
+    }
+    if not missing:
+        return value
+    return {**value, "tools": {**tools, "programmatic": {**programmatic, **missing}}}
+
+
+type StoredHarnessSettings = Annotated[
+    RustHarnessSettings, BeforeValidator(_fill_program_time_limits)
+]
+
+
+def parse_stored_settings(value: JsonValue) -> RustHarnessSettings:
+    """Read settings that a reserved command persisted as its parameters."""
+    return RustHarnessSettings.model_validate(_fill_program_time_limits(value))
+
+
+def _fill_journaled_settings_changes(value: object) -> object:
+    if not isinstance(value, dict):
+        return value
+    command = value.get("command")
+    if not isinstance(command, dict) or command.get("type") != "reconfigure":
+        return value
+    changes = command.get("changes")
+    if not isinstance(changes, list):
+        return value
+    filled = [_fill_settings_change(change) for change in changes]
+    return {**value, "command": {**command, "changes": filled}}
+
+
+def _fill_settings_change(change: object) -> object:
+    if not isinstance(change, dict) or change.get("type") != "settings":
+        return change
+    if "value" not in change:
+        return change
+    return {**change, "value": _fill_program_time_limits(change["value"])}
+
+
+type StoredHarnessInput = Annotated[
+    RustHarnessInput, BeforeValidator(_fill_journaled_settings_changes)
 ]
 
 
@@ -551,8 +615,19 @@ class SessionPin(StrEnum):
     REASONING_EFFORT = "reasoning_effort"
 
 
+class ExternalImportMetadataV1(_StoredModel):
+    """Source identity for a session imported from another coding harness."""
+
+    harness: str
+    session_id: str
+    source_cwd: str | None = None
+
+
 class SessionMetadataV1(_StoredModel):
     cwd: str | None
+    # The first cwd remains a discovery key after relocation. Older generations
+    # have no field, so the first move promotes their current cwd into it.
+    origin_cwd: str | None = None
     # The concrete model alias pinned to the session; see ``SessionPin``.
     active_model: str | None = None
     # The running mode (agent profile name) the session is in. Backward-compatible:
@@ -564,6 +639,7 @@ class SessionMetadataV1(_StoredModel):
     subagent_spawn_key: str | None = None
     subagent_template_digest: str | None = None
     subagent_policy_ceiling_digest: str | None = None
+    external_import: ExternalImportMetadataV1 | None = None
     # Per-session hook bindings, re-supplied to the Core on every restore so the journal
     # replay matches the transitions the bindings originally produced. Handlers are
     # Runtime code and are attached from the Host registry by binding ID, not stored here.
@@ -575,6 +651,12 @@ class SessionMetadataV1(_StoredModel):
     def pin_values(self) -> dict[str, str | None]:
         """The stored pins as constructor kwargs, so propagation copies them as a set."""
         return {pin.value: getattr(self, pin.value) for pin in SessionPin}
+
+    def relocated_to(self, cwd: str) -> SessionMetadataV1:
+        """Return metadata for a move while retaining the first known cwd."""
+        return self.model_copy(
+            update={"cwd": cwd, "origin_cwd": self.origin_cwd or self.cwd}
+        )
 
 
 class _RuntimeStateBase(_StoredModel):
@@ -668,6 +750,12 @@ class RuntimeStateV3(_RuntimeStateBase):
     # accepted-input cursor and hands it back on restore. Older generations predate the
     # field and load as zero, which is the fresh sequence they were written against.
     core_last_input_id: int = Field(default=0, ge=0, le=_MAX_SAFE_JSON_INTEGER)
+    core_task_id: str | None = Field(default=None, min_length=1)
+    """The task ID of the session's current Core. ``None`` means the session ID.
+
+    A context replacement moves Core to a fresh task ID, and every restore must
+    rebuild Core under it, or its Action IDs could repeat the kept entries'.
+    """
     core_capabilities: RustHarnessCapabilitySet | None = None
     """The capability set Core held when this generation's checkpoint was taken.
 
@@ -677,7 +765,7 @@ class RuntimeStateV3(_RuntimeStateBase):
     is how a session comes back on capabilities Core never had. Generations
     written before this field have none and keep the older assumption.
     """
-    core_settings: RustHarnessSettings | None = None
+    core_settings: StoredHarnessSettings | None = None
     """The settings Core held when this generation's checkpoint was taken.
 
     Recorded for the reason the capability set is: Core consults its settings to
@@ -686,6 +774,8 @@ class RuntimeStateV3(_RuntimeStateBase):
     """
     core_plugins: list[RustPluginContextDefinition] | None = None
     """The plugin contexts Core held when this generation's checkpoint was taken."""
+    core_system_instructions: str | None = None
+    """The system instructions Core held when this generation was checkpointed."""
 
     pending_transition: RustSessionTransition | None = None
     subagents: SubagentRuntimeState | None = None
@@ -743,12 +833,63 @@ class RuntimeStateV3(_RuntimeStateBase):
         return self.pending_transition is None and super().quiescent
 
 
+def _load_stored_public_state(value: object) -> object:
+    if isinstance(value, PublicSessionState):
+        return value
+    return PublicSessionState.model_validate(value, extra="allow")
+
+
+def _dump_stored_public_state(
+    state: PublicSessionState, handler: SerializerFunctionWrapHandler
+) -> object:
+    return _with_unknown_fields(state, handler(state))
+
+
+def _with_unknown_fields(value: object, dumped: JsonValue) -> JsonValue:
+    """Merge the unknown fields every nested model loaded with back into ``dumped``.
+
+    The Session Protocol models reject unknown fields, so their serializer never
+    emits the ones a lenient load kept; this walk restores them at every depth.
+    """
+    if isinstance(value, BaseModel) and isinstance(dumped, dict):
+        merged: dict[str, JsonValue] = dict(dumped)
+        for name, field in type(value).model_fields.items():
+            for key in (field.serialization_alias, name):
+                if key is not None and key in merged:
+                    merged[key] = _with_unknown_fields(
+                        getattr(value, name), merged[key]
+                    )
+                    break
+        return {**(value.model_extra or {}), **merged}
+    if (
+        isinstance(value, list | tuple)
+        and isinstance(dumped, list)
+        and len(value) == len(dumped)
+    ):
+        return [
+            _with_unknown_fields(item, item_dumped)
+            for item, item_dumped in zip(value, dumped, strict=True)
+        ]
+    return dumped
+
+
+# The Session Protocol snapshot as the store persists it. Hosts receive the
+# snapshot through the strict ``PublicSessionState``; the store reads it
+# leniently and writes back the fields a newer build added at any depth, so an
+# additive Session Protocol field never makes an older reader refuse a session.
+StoredPublicSessionState = Annotated[
+    PublicSessionState,
+    BeforeValidator(_load_stored_public_state),
+    WrapSerializer(_dump_stored_public_state),
+]
+
+
 class ProjectionStateV1(_StoredModel):
     projection_state_version: Literal[1] = 1
     session_id: str
     snapshot_sequence: int = Field(ge=0)
     watermark: int = Field(ge=0)
-    snapshot: PublicSessionState
+    snapshot: StoredPublicSessionState
 
 
 class AppendEntryOp(_StoredModel):
@@ -789,7 +930,7 @@ class SetEnvelopeOp(_StoredModel):
     """
 
     op: Literal["set_envelope"] = "set_envelope"
-    state: PublicSessionState
+    state: StoredPublicSessionState
 
 
 class SetHistoryEntriesOp(_StoredModel):
@@ -1108,11 +1249,11 @@ def shape_divergence(
 
 
 class CoreInputPayloadV1(_StoredModel):
-    input: RustHarnessInput
+    input: StoredHarnessInput
     transition_sha256: Sha256
     replay_transition_sha256: Sha256 | None = None
     checkpoint_capabilities: RustHarnessCapabilitySet | None = None
-    checkpoint_settings: RustHarnessSettings | None = None
+    checkpoint_settings: StoredHarnessSettings | None = None
     """Settings in force when this generation's first input was applied.
 
     Recorded beside the capability baseline because the Core consults both to
@@ -1122,6 +1263,9 @@ class CoreInputPayloadV1(_StoredModel):
 
     checkpoint_plugins: list[RustPluginContextDefinition] | None = None
     """Plugin contexts in force when this generation's first input was applied."""
+
+    checkpoint_system_instructions: str | None = None
+    """System instructions in force when the first input was applied."""
 
     transition_shape: TransitionShapeV1 | None = None
     """The decision this input produced, for diagnosing a replay that diverges."""
@@ -1192,10 +1336,17 @@ class ReceiptFailedPayloadV1(_StoredModel):
 
 class ProjectionAdvancedPayloadV1(_StoredModel):
     watermark: int = Field(ge=0)
-    snapshot: PublicSessionState
+    snapshot: StoredPublicSessionState
 
 
 class ProjectionDeltaPayloadV1(_StoredModel):
+    watermark: int = Field(ge=0)
+    delta: ProjectionDelta
+
+
+class SessionRelocatedPayloadV1(_StoredModel):
+    metadata: SessionMetadataV1
+    plugin_lock: PluginLockV1
     watermark: int = Field(ge=0)
     delta: ProjectionDelta
 
@@ -1272,6 +1423,11 @@ class ProjectionDeltaRecordV1(_JournalRecordBase):
     payload: ProjectionDeltaPayloadV1
 
 
+class SessionRelocatedRecordV1(_JournalRecordBase):
+    type: Literal["session_relocated"] = "session_relocated"
+    payload: SessionRelocatedPayloadV1
+
+
 JournalRecordV1 = Annotated[
     CommandReservedRecordV1
     | CoreInputRecordV1
@@ -1285,7 +1441,8 @@ JournalRecordV1 = Annotated[
     | ReceiptSucceededRecordV1
     | ReceiptFailedRecordV1
     | ProjectionAdvancedRecordV1
-    | ProjectionDeltaRecordV1,
+    | ProjectionDeltaRecordV1
+    | SessionRelocatedRecordV1,
     Field(discriminator="type"),
 ]
 
@@ -1304,6 +1461,7 @@ _PAYLOAD_TYPES: dict[str, type[_StoredModel]] = {
     "receipt_failed": ReceiptFailedPayloadV1,
     "projection_advanced": ProjectionAdvancedPayloadV1,
     "projection_delta": ProjectionDeltaPayloadV1,
+    "session_relocated": SessionRelocatedPayloadV1,
 }
 
 
@@ -1439,6 +1597,14 @@ class StoredSession:
             return self.runtime_state.core_plugins
         return payload.checkpoint_plugins
 
+    @property
+    def checkpoint_system_instructions(self) -> str | None:
+        """System instructions recorded at the start of this generation."""
+        payload = self._checkpoint_payload
+        if payload is None:
+            return self.runtime_state.core_system_instructions
+        return payload.checkpoint_system_instructions
+
     def replay_config(self, config: RustHarnessConfig) -> RustHarnessConfig:
         """Restate the configuration this generation's journal was written under.
 
@@ -1450,12 +1616,16 @@ class StoredSession:
         offer.
         """
         pinned: dict[str, Any] = {}
+        if self.runtime_state.core_task_id is not None:
+            pinned["task_id"] = self.runtime_state.core_task_id
         if self.checkpoint_capabilities is not None:
             pinned["capabilities"] = self.checkpoint_capabilities
         if self.checkpoint_settings is not None:
             pinned["settings"] = self.checkpoint_settings
         if self.checkpoint_plugins is not None:
             pinned["plugins"] = list(self.checkpoint_plugins)
+        if self.checkpoint_system_instructions is not None:
+            pinned["system_instructions"] = self.checkpoint_system_instructions
         return config.model_copy(update=pinned, deep=True) if pinned else config
 
     def replayed_capabilities(
@@ -1497,6 +1667,8 @@ class StoredSession:
                         updates["settings"] = value
                     case RustPluginsChange(value=value):
                         updates["plugins"] = list(value)
+                    case RustSystemInstructionsChange(value=value):
+                        updates["system_instructions"] = value
         return replayed.model_copy(update=updates, deep=True) if updates else replayed
 
     def truncated_at(self, sequence: int) -> StoredSession:
@@ -2309,6 +2481,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
                 "core_capabilities": replayed.capabilities,
                 "core_settings": replayed.settings,
                 "core_plugins": list(replayed.plugins),
+                "core_system_instructions": replayed.system_instructions,
             }
         )
         projection_state = _record_recovery_in_history(
@@ -2696,6 +2869,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
         checkpoint_capabilities: RustHarnessCapabilitySet | None = None,
         checkpoint_settings: RustHarnessSettings | None = None,
         checkpoint_plugins: Sequence[RustPluginContextDefinition] | None = None,
+        checkpoint_system_instructions: str | None = None,
     ) -> CoreInputRecordV1:
         stored = self.load()
         for existing in reversed(stored.journal):
@@ -2710,6 +2884,9 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
                 checkpoint_capabilities=existing.payload.checkpoint_capabilities,
                 checkpoint_settings=existing.payload.checkpoint_settings,
                 checkpoint_plugins=existing.payload.checkpoint_plugins,
+                checkpoint_system_instructions=(
+                    existing.payload.checkpoint_system_instructions
+                ),
                 # Taken from the record rather than recomputed, like the
                 # baselines above: a record written before shapes were stored has
                 # none, and recomputing one here would make every retry against
@@ -2736,6 +2913,9 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
                 list(checkpoint_plugins)
                 if opens_generation and checkpoint_plugins is not None
                 else None
+            ),
+            checkpoint_system_instructions=(
+                checkpoint_system_instructions if opens_generation else None
             ),
             transition_shape=transition_shape(transition),
         )
@@ -3094,6 +3274,27 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             ProjectionDeltaPayloadV1(watermark=watermark, delta=delta),
         )
         if not isinstance(record, ProjectionDeltaRecordV1):
+            raise TypeError("journal record parser returned the wrong type")
+        return record
+
+    def relocate_session(
+        self,
+        metadata: SessionMetadataV1,
+        plugin_lock: PluginLockV1,
+        watermark: int,
+        delta: ProjectionDelta,
+    ) -> SessionRelocatedRecordV1:
+        """Atomically update location, plugin lock, and public checkpoint."""
+        record = self.append_record(
+            "session_relocated",
+            SessionRelocatedPayloadV1(
+                metadata=metadata,
+                plugin_lock=plugin_lock,
+                watermark=watermark,
+                delta=delta,
+            ),
+        )
+        if not isinstance(record, SessionRelocatedRecordV1):
             raise TypeError("journal record parser returned the wrong type")
         return record
 
@@ -3644,6 +3845,7 @@ def _apply_journal(  # noqa: PLR0912, PLR0914, PLR0915 - one branch per journal 
         item.process_id: item for item in runtime.submitted_process_notifications
     }
     children = {item.session_id: item for item in runtime.children}
+    session_metadata = runtime.session_metadata
     current_projection = projection
     for record in records:
         match record:
@@ -3701,7 +3903,12 @@ def _apply_journal(  # noqa: PLR0912, PLR0914, PLR0915 - one branch per journal 
                         idempotency_key=payload.lease_id,
                     )
                 action_name = _action_name(payload.request)
-                if payload.kind == "child" and action_name == "subagent.spawn":
+                if payload.kind == "child" and action_name in {
+                    "agents.spawn",
+                    # Deprecated: pre-rename spelling of `agents.spawn`, kept
+                    # only for sessions persisted before the rename.
+                    "subagent.spawn",
+                }:
                     children[payload.action_id] = ChildDependencyV1(
                         session_id=payload.action_id, stateful=True, state="running"
                     )
@@ -3822,6 +4029,22 @@ def _apply_journal(  # noqa: PLR0912, PLR0914, PLR0915 - one branch per journal 
                         ),
                     }
                 )
+            case SessionRelocatedRecordV1(payload=payload):
+                if payload.watermark < current_projection.watermark:
+                    raise ValueError("projection watermark moved backwards")
+                session_metadata = payload.metadata
+                runtime = runtime.model_copy(
+                    update={"plugin_lock": payload.plugin_lock}
+                )
+                current_projection = current_projection.model_copy(
+                    update={
+                        "snapshot_sequence": record.sequence,
+                        "watermark": payload.watermark,
+                        "snapshot": apply_projection_delta(
+                            current_projection.snapshot, payload.delta
+                        ),
+                    }
+                )
             case CoreInputRecordV1():
                 pass
     sequence = records[-1].sequence if records else runtime.snapshot_sequence
@@ -3834,6 +4057,7 @@ def _apply_journal(  # noqa: PLR0912, PLR0914, PLR0915 - one branch per journal 
         runtime.model_copy(
             update={
                 "snapshot_sequence": sequence,
+                "session_metadata": session_metadata,
                 "command_receipts": sorted(
                     receipts.values(), key=lambda item: item.client_command_id
                 ),
@@ -4657,6 +4881,7 @@ __all__ = [
     "CallbackResolvedPayloadV1",
     "CommandReservation",
     "CommittedHistoryV1",
+    "ExternalImportMetadataV1",
     "GenerationManifestV1",
     "HarnessStoreCapacityError",
     "ImportProvenanceV1",
@@ -4702,6 +4927,7 @@ __all__ = [
     "committed_history",
     "compute_projection_delta",
     "empty_runtime_state",
+    "parse_stored_settings",
     "sha256_json",
     "transition_sha256",
 ]

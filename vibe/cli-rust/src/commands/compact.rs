@@ -11,8 +11,8 @@ use crate::app::{App, Status};
 use crate::server::{method, Client};
 use crate::transcript::local;
 
-/// Start compaction. Does nothing while a turn is generating (Python
-/// `_agent_job_active` guard) or if there is no conversation history.
+/// Start compaction. Does nothing while a turn is generating or if there is
+/// no conversation history.
 pub fn start_compact(app: &mut App, client: &Arc<Client>, value: &str) {
     if matches!(app.session.status, Status::Generating { .. }) {
         local::add_command_error(
@@ -23,7 +23,7 @@ pub fn start_compact(app: &mut App, client: &Arc<Client>, value: &str) {
         return;
     }
     // The /compact echo above is local; only server rows count as history
-    // (Python checks `app_server.history`, which has no command echo in it).
+    // (the server history has no command echo in it).
     if app.view.transcript.lines().all(|entry| entry.local) {
         local::add_command_error(
             &mut app.view.transcript,
@@ -74,12 +74,12 @@ pub fn start_compact(app: &mut App, client: &Arc<Client>, value: &str) {
     });
 }
 
-/// Settle the compaction state on the main thread (Python `session/compacted`).
+/// Settle the compaction state on the main thread (on `session/compacted`).
 pub fn settle_compact(app: &mut App) {
     app.compacting = false;
 }
 
-/// Settle and adopt the session a compaction handed off to (Python `replace_state`).
+/// Settle and adopt the session a compaction handed off to.
 pub fn apply_compacted(
     app: &mut App,
     session_id: String,
@@ -87,7 +87,7 @@ pub fn apply_compacted(
 ) {
     settle_compact(app);
     app.set_session_id(session_id);
-    // The replacement session owns its own child sessions (Python `replace_state`).
+    // The replacement session owns its own child sessions.
     app.subagents.seed_snapshot(child_sessions);
     crate::subagents::refresh(app);
 }
@@ -117,14 +117,14 @@ pub fn compacted_handoff(
         })
 }
 
-/// Apply a manual `session/compact` response (Python `_run_compact` success path).
+/// Apply a successful manual `session/compact` response.
 pub fn apply_manual_compacted(
     app: &mut App,
     state: crate::server::PublicSessionState,
     status_id: &str,
 ) {
     apply_compacted(app, state.session.id, state.child_sessions);
-    // Python `clear_server_queue`: dropped prompts lose their rows too.
+    // The server queue is cleared: dropped prompts lose their rows too.
     let ids: Vec<String> = app
         .queue
         .items

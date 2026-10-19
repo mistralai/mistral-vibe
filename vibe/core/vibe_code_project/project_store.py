@@ -124,7 +124,7 @@ class VibeProjectsStore:
                 data = tomllib.load(file)
         except FileNotFoundError:
             return {"version": 1, "projects": []}
-        except (OSError, tomllib.TOMLDecodeError):
+        except OSError, tomllib.TOMLDecodeError:
             logger.debug(
                 "Failed to read Vibe projects file %s", self._path, exc_info=True
             )

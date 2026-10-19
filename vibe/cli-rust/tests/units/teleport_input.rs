@@ -9,7 +9,7 @@ use vibe_rs::teleport;
 
 use crate::teleport_support::{event, stub};
 
-// Intentional divergence: Python keeps `value[1:]` verbatim, Rust trims the target.
+// The target after `&` is trimmed.
 #[test]
 fn ampersand_input_is_a_teleport_with_a_trimmed_prompt() {
     assert_eq!(
@@ -87,7 +87,7 @@ fn every_event_kind_parses_with_its_operation_id() {
 }
 
 #[test]
-fn push_question_matches_python_wording() {
+fn push_question_wording() {
     let single = teleport::push_question(1, false);
     let question = &single.questions[0];
     assert_eq!(

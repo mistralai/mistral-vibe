@@ -1,5 +1,4 @@
-//! Onboarding screen routing and input caret semantics (Python
-//! `setup/onboarding/__init__.py` and its Textual `Input` widgets).
+//! Onboarding screen routing and input caret semantics.
 
 #[allow(dead_code)]
 #[path = "../onboarding_common/keys.rs"]
@@ -162,7 +161,7 @@ fn esc_on_browser_sign_in_restores_the_launch_context() {
 
 #[test]
 fn the_manual_key_path_keeps_the_attempted_domain() {
-    // Python `action_manual`: switching to the API key screen cancels the
+    // Switching to the API key screen manually cancels the
     // attempt but keeps the configured domain — the pasted key is for that
     // deployment, so no restore.
     let mut state = OnboardingState {

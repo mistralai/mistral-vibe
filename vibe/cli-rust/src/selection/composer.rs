@@ -5,7 +5,7 @@ use crate::chat_input;
 use crate::selection::Granularity;
 use crate::utils::input_edit;
 
-/// True when `at` is anywhere inside the chat input box (Python `ChatInputContainer`).
+/// True when `at` is anywhere inside the chat input box.
 pub fn in_input(app: &App, at: (u16, u16)) -> bool {
     let area = app.view.input_area;
     at.0 >= area.x && at.0 < area.right() && at.1 > area.y && at.1 < area.bottom()
@@ -39,8 +39,7 @@ fn clamped_offset(app: &App, at: (u16, u16)) -> usize {
     layout.offset_at(row, column).min(text.len())
 }
 
-/// Press at `offset`: park the caret there, then widen to the click granularity
-/// (Python `ChatTextArea._on_mouse_down`).
+/// Press at `offset`: park the caret there, then widen to the click granularity.
 pub(super) fn press(app: &mut App, offset: usize) {
     app.chat_input.scroll = None;
     app.chat_input.sync_mentions();
@@ -62,8 +61,7 @@ pub(super) fn press(app: &mut App, offset: usize) {
     crate::completion_manager::refresh(app);
 }
 
-/// Extend to `at`, snapping both ends outwards for a word or paragraph drag
-/// (Python `_snap_word_drag` / `_snap_paragraph_drag`).
+/// Extend to `at`, snapping both ends outwards for a word or paragraph drag.
 pub(super) fn drag(app: &mut App, at: (u16, u16)) {
     let head = clamped_offset(app, at);
     let Some(anchor) = app.selection.composer_anchor else {
@@ -96,7 +94,7 @@ pub(super) fn drag(app: &mut App, at: (u16, u16)) {
     app.chat_input.cursor = end;
 }
 
-/// Collapse the selection to the caret and end a composer drag (Python `ChatTextArea.on_blur`).
+/// Collapse the selection to the caret and end a composer drag (on blur).
 pub fn blur_composer(app: &mut App) {
     app.chat_input.anchor = None;
     app.selection.composer_anchor = None;

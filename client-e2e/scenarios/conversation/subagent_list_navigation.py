@@ -12,13 +12,11 @@ from e2e.app_server.scenario import Timeline
 _PROMPT = "delegate the investigation"
 _TASK = "find the grouping code"
 
-screen_contains = {
-    "rust": (
-        "Main conversation",
-        "Explore (Explore 1) [running] · 2.5k tokens",
-        "› Main conversation",
-    )
-}
+screen_contains = (
+    "Main conversation",
+    "Explore (Explore 1) [running] · 2.5k tokens",
+    "› Main conversation",
+)
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

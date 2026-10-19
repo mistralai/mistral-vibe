@@ -33,15 +33,23 @@ from vibe.core.config._defaults import (
 )
 from vibe.core.paths import SESSION_LOG_DIR
 from vibe.core.types import Backend
+from vibe.utils.platform import is_windows
 
 logger = logging.getLogger(__name__)
 
 
 class MissingAPIKeyError(RuntimeError):
-    def __init__(self, env_key: str, provider_name: str) -> None:
-        super().__init__(
-            f"Missing {env_key} environment variable for {provider_name} provider"
-        )
+    def __init__(
+        self, env_key: str, provider_name: str, *, keyring_error: str | None = None
+    ) -> None:
+        message = f"Missing {env_key} environment variable for {provider_name} provider"
+        if keyring_error:
+            message = (
+                f"Can't read {env_key} from the system keyring for {provider_name} "
+                f"provider ({keyring_error}). Approve the keyring prompt or set "
+                f"the {env_key} environment variable"
+            )
+        super().__init__(message)
         self.env_key = env_key
         self.provider_name = provider_name
 
@@ -107,8 +115,8 @@ class SessionLoggingConfig(BaseSettings):
     session_prefix: str = "session"
     enabled: bool = True
     # Background LLM-generated session titles (shown in --resume and the
-    # terminal tab) for CLI and Desktop clients. False falls back to the
-    # first-message preview.
+    # terminal tab) for CLI, Desktop, and ACP (VS Code extension) clients.
+    # False falls back to the first-message preview.
     generate_titles: bool = True
 
     @field_validator("save_dir", mode="before")
@@ -179,6 +187,15 @@ class ProviderConfig(BaseModel):
             and bool(self.browser_auth_base_url)
             and bool(self.browser_auth_api_base_url)
         )
+
+    @property
+    def uses_vertex(self) -> bool:
+        """Whether this provider authenticates through Google ADC.
+
+        ``MistralBackend`` ignores ``api_style`` entirely, so the backend
+        choice decides first, exactly as ``create_backend`` does.
+        """
+        return self.backend != Backend.MISTRAL and self.api_style == "vertex-anthropic"
 
 
 class TranscribeClient(StrEnum):
@@ -434,11 +451,23 @@ class MCPStdio(_MCPBase):
 
     def argv(self) -> list[str]:
         base = (
-            shlex.split(self.command)
+            _split_command(self.command)
             if isinstance(self.command, str)
             else list(self.command or [])
         )
         return [*base, *self.args] if self.args else base
+
+
+def _split_command(command: str) -> list[str]:
+    if not is_windows():
+        return shlex.split(command)
+    # Backslash is the Windows path separator, not an escape: keep it literal and
+    # let quotes alone group a path that contains spaces.
+    lexer = shlex.shlex(command, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    lexer.escape = ""
+    return list(lexer)
 
 
 MCPServer = Annotated[

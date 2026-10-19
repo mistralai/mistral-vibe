@@ -8,6 +8,7 @@ use ratatui::layout::Rect;
 use ratatui::Terminal;
 use vibe_rs::app::App;
 use vibe_rs::input::handle_priority_key;
+use vibe_rs::message_queue::QueueItem;
 use vibe_rs::quit_manager::QuitConfirmKey;
 use vibe_rs::server::Client;
 use vibe_rs::ui::bottom_bar;
@@ -24,6 +25,35 @@ fn only_the_arming_key_confirms_quit() {
     assert_eq!(press(&mut app, 'd'), Some(false));
     assert!(app.quit.is_confirmed(QuitConfirmKey::CtrlD));
     assert_eq!(press(&mut app, 'd'), Some(true));
+}
+
+#[test]
+fn ctrl_d_with_queued_prompts_warns_they_will_be_discarded() {
+    let mut app = App::default();
+    for id in ["q1", "q2"] {
+        app.queue.items.push(QueueItem {
+            queue_item_id: Some(id.into()),
+            message_id: id.into(),
+            server_message_id: id.into(),
+            text: "queued".into(),
+            images: Vec::new(),
+            mentions: None,
+            sent: true,
+            ever_sent: true,
+            revision: 1,
+            replacing: false,
+        });
+    }
+    assert_eq!(press(&mut app, 'd'), Some(false));
+    assert_eq!(app.queue.len(), 2, "arming the quit keeps the queue");
+    let width = 120;
+    let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
+    terminal
+        .draw(|frame| bottom_bar::draw(&mut app, frame, Rect::new(0, 0, width, 1)))
+        .expect("draw");
+    let buffer = terminal.backend().buffer();
+    let row: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
+    assert!(row.starts_with("Press Ctrl+D again to quit (2 queued messages will be discarded)"));
 }
 
 #[test]

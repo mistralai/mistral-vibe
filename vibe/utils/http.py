@@ -39,7 +39,7 @@ def build_ssl_context() -> ssl.SSLContext:
     if ssl_cert_file or ssl_cert_dir:
         try:
             ctx.load_verify_locations(cafile=ssl_cert_file, capath=ssl_cert_dir)
-        except (OSError, ssl.SSLError):
+        except OSError, ssl.SSLError:
             from vibe.observability.logging import logger
 
             logger.warning(
@@ -47,6 +47,21 @@ def build_ssl_context() -> ssl.SSLContext:
                 ssl_cert_file,
                 ssl_cert_dir,
             )
+        else:
+            if not _use_system_trust_store:
+                # The Certifi context validates chains with strict RFC 5280
+                # checks (VERIFY_X509_STRICT, the default since Python 3.13);
+                # the truststore context does not, so only warn on this path.
+                from vibe.observability.logging import logger
+
+                logger.warning(
+                    "Loaded custom SSL certificates (SSL_CERT_FILE=%s SSL_CERT_DIR=%s); "
+                    "certificate chains are validated with strict RFC 5280 checks, "
+                    "so a private CA missing SKID/AKID or KeyUsage extensions will "
+                    "be rejected",
+                    ssl_cert_file,
+                    ssl_cert_dir,
+                )
     return ctx
 
 

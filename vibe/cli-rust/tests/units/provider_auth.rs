@@ -123,3 +123,161 @@ fn successful_read_appends_the_section() {
     assert!(text.starts_with("## Agent Statistics\n## Model & Provider"));
     assert!(text.contains("- **Model**: Claude Sonnet"));
 }
+
+/// A `$VIBE_HOME/.env` path under the test process's real home, so the `~`
+/// abbreviation is exercised without assuming a fixed home directory.
+fn home_env_file_path() -> String {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .expect("HOME or USERPROFILE is set");
+    format!("{home}/.vibe/.env")
+}
+
+fn auth_view(auth_kind: &str, sources: serde_json::Value) -> serde_json::Value {
+    let mut view = view(
+        "Claude Sonnet",
+        "anthropic",
+        Some("https://api.anthropic.com/v1"),
+    );
+    view["authKind"] = json!(auth_kind);
+    view["apiKeyEnvVar"] = json!("ANTHROPIC_API_KEY");
+    view["envFilePath"] = json!(home_env_file_path());
+    view["sources"] = sources;
+    view
+}
+
+fn source(kind: &str, state: &str) -> serde_json::Value {
+    json!({"kind": kind, "state": state})
+}
+
+#[test]
+fn single_in_use_source_renders_one_credential_line() {
+    let text = render_provider_auth_section(&auth_view(
+        "api_key",
+        json!([source("os_keyring", "in_use")]),
+    ));
+    assert!(
+        text.contains("- **Credential (ANTHROPIC\\_API\\_KEY)**: OS keyring"),
+        "{text}"
+    );
+}
+
+#[test]
+fn multiple_sources_render_a_precedence_list() {
+    let text = render_provider_auth_section(&auth_view(
+        "api_key",
+        json!([
+            source("process_env", "in_use"),
+            source("vibe_home_env_file", "available"),
+            source("os_keyring", "available"),
+        ]),
+    ));
+    assert!(
+        text.contains(
+            "- **Credential (ANTHROPIC\\_API\\_KEY)**:\n  1. Process environment · currently in use\n  2. ~/\\.vibe/\\.env\n  3. OS keyring"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn unavailable_source_keeps_its_marker() {
+    let text = render_provider_auth_section(&auth_view(
+        "api_key",
+        json!([
+            source("process_env", "in_use"),
+            source("vibe_home_env_file", "unavailable"),
+        ]),
+    ));
+    assert!(
+        text.contains("  2. ~/\\.vibe/\\.env · unavailable"),
+        "{text}"
+    );
+}
+
+#[test]
+fn single_unavailable_source_renders_as_a_one_entry_list() {
+    let text = render_provider_auth_section(&auth_view(
+        "api_key",
+        json!([source("os_keyring", "unavailable")]),
+    ));
+    assert!(text.contains("  1. OS keyring · unavailable"), "{text}");
+}
+
+#[test]
+fn unknown_source_kind_renders_literally() {
+    // The server may grow a source kind this client does not know; the raw
+    // value is shown rather than dropped or mislabeled.
+    let text = render_provider_auth_section(&auth_view(
+        "api_key",
+        json!([source("mystery_source", "available")]),
+    ));
+    assert!(
+        text.contains("- **Credential (ANTHROPIC\\_API\\_KEY)**:\n  1. mystery\\_source"),
+        "{text}"
+    );
+}
+
+#[test]
+fn no_source_available() {
+    let text = render_provider_auth_section(&auth_view("api_key", json!([])));
+    assert!(
+        text.contains("- **Credential (ANTHROPIC\\_API\\_KEY)**: no source available"),
+        "{text}"
+    );
+}
+
+#[test]
+fn none_auth_omits_the_credential_line() {
+    let mut view = view("Devstral", "llamacpp", Some("http://127.0.0.1:8080/v1"));
+    view["authKind"] = json!("none");
+    let text = render_provider_auth_section(&view);
+    assert!(!text.contains("Credential"), "{text}");
+}
+
+#[test]
+fn missing_auth_kind_omits_the_credential_line() {
+    // An older server's view carries no `authKind`; the section degrades to
+    // the increment-1 shape rather than guessing a source list.
+    let text = render_provider_auth_section(&view("Claude Sonnet", "anthropic", None));
+    assert!(!text.contains("Credential"), "{text}");
+}
+
+#[test]
+fn google_adc_resolved_on_request() {
+    let mut view = view("Claude Vertex", "vertex", None);
+    view["authKind"] = json!("google_adc");
+    let text = render_provider_auth_section(&view);
+    assert!(
+        text.contains(
+            "- **Credential**: Google Application Default Credentials · resolved on request"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn env_file_path_outside_home_renders_the_absolute_path() {
+    let mut view = auth_view("api_key", json!([source("vibe_home_env_file", "in_use")]));
+    view["envFilePath"] = json!("/etc/vibe/.env");
+    let text = render_provider_auth_section(&view);
+    assert!(
+        text.contains("- **Credential (ANTHROPIC\\_API\\_KEY)**: /etc/vibe/\\.env"),
+        "{text}"
+    );
+}
+
+#[test]
+fn env_file_path_renders_literally() {
+    // `VIBE_HOME` is user-controlled: markdown punctuation in the path must
+    // reach the screen as those characters, not as injected structure.
+    let mut view = auth_view("api_key", json!([source("vibe_home_env_file", "in_use")]));
+    view["envFilePath"] = json!("/tmp/[x](https://evil)/.env");
+    let text = render_provider_auth_section(&view);
+    assert!(
+        text.contains(
+            "- **Credential (ANTHROPIC\\_API\\_KEY)**: /tmp/\\[x\\](https\\://evil)/\\.env"
+        ),
+        "{text}"
+    );
+}

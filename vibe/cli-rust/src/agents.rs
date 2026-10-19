@@ -9,23 +9,22 @@ use crate::app::{App, Status};
 use crate::server::{method, AgentSafety, AgentSummary, AgentSwitchParams, AgentType, Client};
 use crate::utils::startup_cache::StartupConfig;
 
-/// Delay before the switch spinner replaces the prompt marker (Python
-/// `MODE_SWITCH_SPINNER_DELAY`).
+/// Delay before the switch spinner replaces the prompt marker.
 pub const MODE_SWITCH_SPINNER_DELAY: Duration = Duration::from_millis(500);
 
-/// Prompt spinner frames while a switch is slow (Python `BrailleSpinner.FRAMES`).
+/// Braille prompt spinner frames while a switch is slow.
 const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// A settled `session/agent/update`, applied on the main thread.
 pub struct Event {
-    /// The agent this round-trip asked for (Python `_drain_agent_switches`'s `applied`).
+    /// The agent this round-trip asked for.
     pub target: String,
     /// The runtime snapshot the switch returned, or `None` when it failed.
     pub runtime: Option<Value>,
 }
 
 /// Seed the agents the UI paints and cycles before the app server answers,
-/// from the startup projection (Python has no equivalent: it paints on ready).
+/// from the startup projection.
 pub fn show_startup_agents(app: &mut App, config: &StartupConfig) {
     app.agents.all = config.agents.clone();
     // First-frame seed only: later snapshots must not reset the live agent.
@@ -47,9 +46,9 @@ pub fn show_startup_agents(app: &mut App, config: &StartupConfig) {
         .unwrap_or_default();
 }
 
-/// Refresh the agent snapshot from a runtime value (`{runtime: {...}}`), like
-/// Python's `ClientSessionState.apply_runtime`. A pending switch keeps the agent
-/// it painted: a snapshot that predates it must not repaint the previous one.
+/// Refresh the agent snapshot from a runtime value (`{runtime: {...}}`). A pending
+/// switch keeps the agent it painted: a snapshot that predates it must not repaint
+/// the previous one.
 pub fn apply_runtime(app: &mut App, response: &Value) {
     let Some(runtime) = response.get("runtime") else {
         return;
@@ -81,13 +80,13 @@ pub fn apply_runtime(app: &mut App, response: &Value) {
 }
 
 /// Whether every tool call is auto-approved for the agent being painted
-/// (Python `runtime.bypass_tool_permissions`, predicted while switching).
+/// (`runtime.bypass_tool_permissions`, predicted while switching).
 pub fn bypass_tool_permissions(app: &App) -> bool {
     app.agents.force_bypass_tool_permissions || displayed(app).safety == AgentSafety::Yolo
 }
 
-/// The agent the chat input paints: the optimistic target of a switch in flight,
-/// else the server's active one (Python repaints the widgets before the RPC).
+/// The agent the chat input paints: the optimistic target of a switch in flight
+/// (painted before the RPC answers), else the server's active one.
 pub fn displayed(app: &App) -> &AgentSummary {
     app.agents
         .desired
@@ -97,7 +96,7 @@ pub fn displayed(app: &App) -> &AgentSummary {
 }
 
 /// Chat input label: the lowercased display name, marked when every tool call is
-/// auto-approved (Python `_indicator_agent_name`).
+/// auto-approved.
 pub fn indicator_agent_name(agent: &AgentSummary, bypass_tool_permissions: bool) -> String {
     let name = agent.display_name.to_lowercase();
     if bypass_tool_permissions && agent.safety != AgentSafety::Yolo {
@@ -106,7 +105,7 @@ pub fn indicator_agent_name(agent: &AgentSummary, bypass_tool_permissions: bool)
     name
 }
 
-/// Safety driving the chat input border (Python `_indicator_safety`).
+/// Safety driving the chat input border.
 pub fn indicator_safety(agent: &AgentSummary, bypass_tool_permissions: bool) -> AgentSafety {
     if bypass_tool_permissions {
         AgentSafety::Yolo
@@ -122,16 +121,18 @@ pub fn spinner_glyph(app: &App) -> Option<char> {
         .then(|| SPINNER_FRAMES[app.agents.frame % SPINNER_FRAMES.len()])
 }
 
-/// True while a switch is in flight; the chat input then refuses to submit
-/// (Python `ChatInputBody.on_chat_text_area_submitted`).
+/// True while a switch is in flight; the chat input then refuses to submit.
 pub fn switching(app: &App) -> bool {
     app.agents.switch_active
 }
 
-/// Shift+Tab: paint the next primary agent at once and ask the server to switch
-/// (Python `action_cycle_mode` -> `_request_next_agent`). Presses coalesce: a
-/// switch already in flight cycles from the pending target, not the active one.
+/// Shift+Tab: paint the next primary agent at once and ask the server to switch.
+/// Presses coalesce: a switch already in flight cycles from the pending target,
+/// not the active one.
 pub fn cycle(app: &mut App, client: &Arc<Client>) {
+    if app.agents.installing {
+        return;
+    }
     let base = app
         .agents
         .desired
@@ -165,8 +166,8 @@ fn send_desired(app: &mut App, client: &Arc<Client>) {
     switch(app, client, target);
 }
 
-/// Name of the primary agent after `current`, wrapping at the end (Python
-/// `ClientSessionState.next_agent`); subagents never cycle.
+/// Name of the primary agent after `current`, wrapping at the end; subagents
+/// never cycle.
 fn next_agent(app: &App, current: &str) -> Option<String> {
     let primary: Vec<&AgentSummary> = app
         .agents
@@ -179,8 +180,7 @@ fn next_agent(app: &App, current: &str) -> Option<String> {
     primary.get(next).map(|agent| agent.name.clone())
 }
 
-/// Issue one `session/agent/update` and arm the delayed prompt spinner (Python
-/// `_switch_to_agent`).
+/// Issue one `session/agent/update` and arm the delayed prompt spinner.
 fn switch(app: &mut App, client: &Arc<Client>, agent_name: String) {
     let Some(session_id) = app.session.session_id.clone() else {
         app.agents.switch_active = false;
@@ -209,11 +209,11 @@ fn switch(app: &mut App, client: &Arc<Client>, agent_name: String) {
 }
 
 /// Apply a settled switch: adopt the server's runtime, then chase the last
-/// Shift+Tab that landed meanwhile (Python `_drain_agent_switches`).
+/// Shift+Tab that landed meanwhile.
 pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
     // Settling first lets this runtime repaint the label; a chased switch keeps
     // painting its own target. A failed switch clears it, so the label falls
-    // back to the server's agent (Python's `finally: _refresh_profile_widgets`).
+    // back to the server's agent.
     app.agents.desired = app
         .agents
         .desired
@@ -229,7 +229,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
     app.commit_finished();
 }
 
-/// The armed spinner is due: replace the prompt marker (Python `_show_switch_spinner`).
+/// The armed spinner is due: replace the prompt marker.
 pub fn show_switch_spinner(app: &mut App) {
     app.agents.spinner_at = None;
     app.agents.switching_indicator = app.agents.switch_active;

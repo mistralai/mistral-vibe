@@ -276,9 +276,7 @@ class TestSessionTrustScopes:
             assert scope.is_trusted(tmp_path / "first" / "blocked") is False
         assert TrustedFoldersManager().is_trusted(tmp_path / "temporary") is None
 
-    def test_child_and_moved_file_managers_keep_their_channel_scope(
-        self, tmp_path: Path
-    ) -> None:
+    def test_child_file_manager_keeps_its_channel_scope(self, tmp_path: Path) -> None:
         from vibe.core.config.harness_files import HarnessFilesManager
 
         persisted = TrustedFoldersManager()
@@ -288,13 +286,11 @@ class TestSessionTrustScopes:
         peer = persisted.for_session()
         parent.trust_store.trust_for_session(tmp_path)
         child = parent.for_session(tmp_path / "child")
-        moved = parent.moved_to(tmp_path / "worktree")
 
-        for manager in (child, moved):
-            assert manager.cwd is not None
-            assert manager.trust_store.is_trusted(manager.cwd) is True
+        assert child.cwd is not None
+        assert child.trust_store.is_trusted(child.cwd) is True
         child.trust_store.trust_for_session(tmp_path / "child")
-        moved.trust_store.revoke_session_trust(tmp_path)
+        child.trust_store.revoke_session_trust(tmp_path)
         assert parent.trust_store.is_trusted(tmp_path) is None
         assert child.trust_store.is_trusted(tmp_path / "child") is True
         assert peer.is_trusted(tmp_path / "child") is None

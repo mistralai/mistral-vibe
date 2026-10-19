@@ -163,7 +163,12 @@ async def resolve_session_plugins(
     resolution = await asyncio.to_thread(
         _resolve_installed, harness_files, config_orchestrator, builtin_plugin_roots
     )
-    materialized = await _materialize(resolution, plugin_mcp, connector_registry)
+    materialized = await _materialize(
+        resolution,
+        plugin_mcp,
+        connector_registry,
+        enable_mcp=_mcp_enabled(config_orchestrator),
+    )
     return SessionPlugins(
         materialized=materialized,
         snapshot=build_snapshot(materialized),
@@ -201,18 +206,30 @@ def installed_plugin_scopes(plugins: SessionPlugins) -> dict[str, SkillScope]:
     }
 
 
+def _mcp_enabled(orchestrator: ConfigOrchestrator[VibeConfigSchema] | None) -> bool:
+    """Whether the admin left MCP on. No config to read means the default, on."""
+    return orchestrator is None or orchestrator.config.enable_mcp
+
+
 async def _materialize(
     resolution: ResolvedPluginSet,
     plugin_mcp: PluginMCPCatalog | None,
     connector_registry: ConnectorRegistry | None,
+    *,
+    enable_mcp: bool,
 ) -> MaterializedPluginSet:
     from vibe.core.plugins import RegistryConnectorCatalog
 
     # Before materialization, which is where the declared servers are connected.
+    # With ``enable_mcp`` off the declarations are bound as an empty set rather
+    # than skipped: skipping would leave a previous bind armed and connected,
+    # and withholding the discovery is what keeps this pass off the network.
     if plugin_mcp is not None:
-        await plugin_mcp.bind(resolution.mcp_servers)
+        await plugin_mcp.bind(resolution.mcp_servers if enable_mcp else [])
     materializer = PluginMaterializer(
-        mcp_discovery=None if plugin_mcp is None else plugin_mcp.discovery(),
+        mcp_discovery=(
+            None if plugin_mcp is None or not enable_mcp else plugin_mcp.discovery()
+        ),
         connector_catalog=(
             None
             if connector_registry is None
@@ -422,7 +439,10 @@ class UnifiedPluginProvider:
             self._resolve, session_id, plugins.checkouts
         )
         materialized = await _materialize(
-            resolution, self._plugin_mcp, self._connector_registry
+            resolution,
+            self._plugin_mcp,
+            self._connector_registry,
+            enable_mcp=_mcp_enabled(self._config_orchestrator),
         )
         derived = build_snapshot(materialized)
         published = _pinned_snapshot(plugins.snapshot)

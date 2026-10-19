@@ -1,4 +1,4 @@
-//! Mutation responses apply their `runtime` like Python's `if response.runtime is not None`.
+//! Mutation responses apply their `runtime` only when they carry one.
 
 use std::sync::Arc;
 

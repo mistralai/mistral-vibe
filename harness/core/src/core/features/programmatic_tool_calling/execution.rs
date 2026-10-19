@@ -9,9 +9,9 @@ use crate::core::features::permissions::{GrantKey, PermissionResolution};
 use crate::core::features::programmatic_tool_calling::code_mode::{
     self, CodeResult, EvaluationOutcome, EvaluationRequest,
 };
-use crate::core::features::programmatic_tool_calling::model::PartialEvaluation;
 use crate::core::features::programmatic_tool_calling::model::ToolKind;
 use crate::core::features::programmatic_tool_calling::model::ToolState;
+use crate::core::features::programmatic_tool_calling::model::{PartialEvaluation, ProgramBudget};
 use crate::core::features::programmatic_tool_calling::state::{
     PendingProgramHook, PendingProgramOperation, ProgramContinuation, ProgramExecution,
     resolve_tool_state,
@@ -52,6 +52,7 @@ pub(super) fn start_program_execution(
                 tool_state: Vec::new(),
             },
             round: 0,
+            started_at_unix_ms: Some(determinism.time_unix_ms),
         },
         determinism,
         accepted_results,
@@ -186,15 +187,23 @@ fn evaluate_program_round(
     let ProgramContinuation {
         partial_evaluation,
         round,
+        started_at_unix_ms,
     } = continuation;
+    let started_at_unix_ms = started_at_unix_ms.unwrap_or(determinism.time_unix_ms);
     let execution_id = typescript_execution_id(context.message_count(), &call.id, round);
+    let replay_only_tools = crate::core::features::subagents::rejected_tools();
     match code_mode::evaluate(EvaluationRequest {
         partial_evaluation: &partial_evaluation,
         tools: context.descriptors(),
+        replay_only_tools: &replay_only_tools,
         execution_id: &execution_id,
         determinism,
         max_program_effects: context.settings().max_effects,
         max_program_operations: context.settings().max_operations,
+        budget: ProgramBudget {
+            budget_ms: context.settings().max_elapsed_ms,
+            elapsed_ms: determinism.time_unix_ms.saturating_sub(started_at_unix_ms),
+        },
     })
     .map_err(CoreError::invariant)?
     {
@@ -275,11 +284,20 @@ fn evaluate_program_round(
             }
             accepted_results.extend(permission_denials);
             if pending_operations.is_empty() {
-                let continuation = ProgramContinuation::after_round(partial_evaluation, round)?;
+                let continuation = ProgramContinuation::after_round(
+                    partial_evaluation,
+                    round,
+                    Some(started_at_unix_ms),
+                )?;
                 return Ok(ControlFlow::Continue(continuation));
             }
 
-            let execution = ProgramExecution::new(partial_evaluation, pending_operations, round);
+            let execution = ProgramExecution::new(
+                partial_evaluation,
+                pending_operations,
+                round,
+                started_at_unix_ms,
+            );
             let pending_actions = execution.pending_actions(context.turn_id());
             Ok(ControlFlow::Break((
                 ProgramOutcome::Pending(execution),
@@ -294,6 +312,7 @@ fn evaluate_program_round(
         } => {
             let result = completed_program_tool_result(
                 context.descriptors(),
+                &partial_evaluation.code,
                 stdout.as_deref(),
                 stderr.as_deref(),
                 &tool_state,
@@ -305,7 +324,14 @@ fn evaluate_program_round(
             )))
         }
         EvaluationOutcome::Error { error } => {
-            let result = failed_program_tool_result(context.descriptors(), None, None, &[], error)?;
+            let result = failed_program_tool_result(
+                context.descriptors(),
+                &partial_evaluation.code,
+                None,
+                None,
+                &[],
+                error,
+            )?;
             Ok(ControlFlow::Break((
                 ProgramOutcome::Completed(Box::new(CompletedProgramResult { result })),
                 Vec::new(),
@@ -316,6 +342,7 @@ fn evaluate_program_round(
 
 fn completed_program_tool_result(
     descriptors: &[TypeScriptTool],
+    source: &str,
     stdout: Option<&str>,
     stderr: Option<&str>,
     tool_state: &[ToolState],
@@ -337,7 +364,7 @@ fn completed_program_tool_result(
                     .map_err(|error| CoreError::invariant(error.to_string()))?,
             );
             content.extend(program_logs(stdout, stderr));
-            content.extend(retained_program_content(descriptors, tool_state));
+            content.extend(retained_program_content(descriptors, source, tool_state));
             Ok(ToolResult::Success {
                 content,
                 structured_content: StructuredContent::present(value),
@@ -345,13 +372,14 @@ fn completed_program_tool_result(
             })
         }
         CodeResult::Error { error } => {
-            failed_program_tool_result(descriptors, stdout, stderr, tool_state, error)
+            failed_program_tool_result(descriptors, source, stdout, stderr, tool_state, error)
         }
     }
 }
 
 fn failed_program_tool_result(
     descriptors: &[TypeScriptTool],
+    source: &str,
     stdout: Option<&str>,
     stderr: Option<&str>,
     tool_state: &[ToolState],
@@ -372,7 +400,7 @@ fn failed_program_tool_result(
         serde_json::to_string(&error).map_err(|error| CoreError::invariant(error.to_string()))?
     ));
     content.extend(program_logs(stdout, stderr));
-    content.extend(retained_program_content(descriptors, tool_state));
+    content.extend(retained_program_content(descriptors, source, tool_state));
     Ok(ToolResult::Failure {
         content,
         structured_content: StructuredContent::Absent,
@@ -406,6 +434,7 @@ fn program_logs(stdout: Option<&str>, stderr: Option<&str>) -> Vec<ContentBlock>
 
 fn retained_program_content(
     descriptors: &[TypeScriptTool],
+    source: &str,
     tool_state: &[ToolState],
 ) -> Vec<ContentBlock> {
     retained_program_content_with_name(tool_state, |runtime_name| {
@@ -413,6 +442,10 @@ fn retained_program_content(
             .iter()
             .find(|descriptor| descriptor.name == runtime_name)
             .map(|descriptor| descriptor.programmatic_name.display_name())
+            .or_else(|| {
+                crate::core::features::subagents::recorded_program_name(runtime_name, source)
+                    .map(|name| name.display_name())
+            })
             .unwrap_or_else(|| format!("tools.{runtime_name}"))
     })
 }
@@ -462,6 +495,39 @@ fn retained_program_content_with_name(
 }
 
 impl ProgramExecution {
+    /// The result for an approved operation that must not start because the
+    /// elapsed budget ran out while its approval was pending.
+    pub(crate) fn expired_approval_result(
+        &self,
+        context: ProgramContext<'_>,
+        determinism: DeterminismContext,
+    ) -> Option<ToolResult> {
+        let budget =
+            self.peek_budget_at(determinism.time_unix_ms, context.settings().max_elapsed_ms);
+        budget.exhausted().then(|| expired_operation_result(budget))
+    }
+
+    fn within_result_limits(
+        &self,
+        call: &ExternalToolCall,
+        result: ToolResult,
+        awaiting_post_hook: bool,
+    ) -> ToolResult {
+        let result = within_nested_result_limit(result);
+        if self.held_result_bytes(call, &result, awaiting_post_hook) <= code_mode::MAX_SOURCE_BYTES
+        {
+            return result;
+        }
+        let limit_mib = code_mode::MAX_SOURCE_BYTES / (1024 * 1024);
+        result_too_large(
+            "program_results_too_large",
+            format!(
+                "The tool ran, but run_typescript cannot hold its result: together with the results this program already holds it exceeds the {limit_mib} MiB limit for one program. Return only the fields needed from each result, make fewer tool calls in each run_typescript block, or split the work across multiple run_typescript calls."
+            ),
+            code_mode::MAX_SOURCE_BYTES,
+        )
+    }
+
     fn tool_result_disposition(
         &self,
         context: ProgramContext<'_>,
@@ -483,6 +549,7 @@ impl ProgramExecution {
         &self,
         context: ProgramContext<'_>,
         input: ProgramInput,
+        budget: ProgramBudget,
     ) -> Result<ClassifiedProgramInput, CoreError> {
         match input {
             ProgramInput::ToolResult { action_id, result } => {
@@ -491,7 +558,14 @@ impl ProgramExecution {
                     .ok_or_else(|| {
                         CoreError::invariant("pending program tool operation was not found")
                     })?;
-                let result = within_nested_result_limit(result);
+                let result = match &disposition {
+                    ProgramToolResultDisposition::Commit { call } => {
+                        self.within_result_limits(call, result, false)
+                    }
+                    ProgramToolResultDisposition::AwaitPostHook { call, .. } => {
+                        self.within_result_limits(call, result, true)
+                    }
+                };
                 Ok(match disposition {
                     ProgramToolResultDisposition::Commit { call } => ClassifiedProgramInput {
                         accepted_result: Some(accepted_program_result(&call, result.clone())),
@@ -529,6 +603,13 @@ impl ProgramExecution {
                             effective_arguments,
                         }),
                     ) => {
+                        if budget.exhausted() {
+                            return Ok(ClassifiedProgramInput::resume_after_hook(
+                                action_id,
+                                original,
+                                expired_operation_result(budget),
+                            ));
+                        }
                         let effective_call =
                             context.effective_call(original, effective_arguments)?;
                         Ok(match context.permission_resolution(&effective_call) {
@@ -573,7 +654,7 @@ impl ProgramExecution {
                     ) => Ok(ClassifiedProgramInput::resume_after_hook(
                         action_id,
                         call,
-                        within_nested_result_limit(tool_result),
+                        self.within_result_limits(call, tool_result, false),
                     )),
                     (Some(PendingProgramHook::Pre(_)), _) => Err(CoreError::invalid_command(
                         "pre-tool hook requires a pre_tool_call result",
@@ -617,10 +698,11 @@ impl ProgramExecution {
         input: ProgramInput,
         determinism: DeterminismContext,
     ) -> Result<ProgramTransition, CoreError> {
+        let budget = self.budget_at(determinism.time_unix_ms, context.settings().max_elapsed_ms);
         let ClassifiedProgramInput {
             accepted_result,
             transition,
-        } = self.classify_input(context, input)?;
+        } = self.classify_input(context, input, budget)?;
         let mut accepted_results = Vec::from_iter(accepted_result);
         let advance = match transition {
             ProgramInputTransition::ResumeApproval { action_id, result } => self.resume(
@@ -780,32 +862,39 @@ const NESTED_RESULT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 /// within its size limit, and V8 already runs out of memory replaying values
 /// of that size.
 ///
-/// This deliberately bounds one result only. It does not count results the
-/// program already holds, and it does not cover direct calls or results the
-/// Runtime journals before Core sees them. Passing large results by reference
+/// This deliberately bounds one result only; `within_result_limits` also bounds
+/// their sum. Neither covers direct calls or results the Runtime journals
+/// before Core sees them. Passing large results by reference
 /// is the intended complete solution.
 fn within_nested_result_limit(result: ToolResult) -> ToolResult {
     if serialized_len(&result) <= NESTED_RESULT_LIMIT_BYTES {
         return result;
     }
     let limit_mib = NESTED_RESULT_LIMIT_BYTES / (1024 * 1024);
-    let message = format!(
-        "The tool ran, but its result is too large to return to run_typescript: it exceeds the {limit_mib} MiB limit. Request a smaller result by filtering, paginating, or narrowing the query, or split the work across multiple run_typescript calls."
-    );
+    result_too_large(
+        "tool_result_too_large",
+        format!(
+            "The tool ran, but its result is too large to return to run_typescript: it exceeds the {limit_mib} MiB limit. Request a smaller result by filtering, paginating, or narrowing the query, or split the work across multiple run_typescript calls."
+        ),
+        NESTED_RESULT_LIMIT_BYTES,
+    )
+}
+
+fn result_too_large(code: &str, message: String, limit_bytes: usize) -> ToolResult {
     ToolResult::Failure {
         content: text_content(message.clone()),
         structured_content: StructuredContent::default(),
         meta: None,
         error: ProtocolError {
-            code: "tool_result_too_large".to_string(),
+            code: code.to_string(),
             message,
             retryable: false,
-            details: json!({ "limit_bytes": NESTED_RESULT_LIMIT_BYTES }),
+            details: json!({ "limit_bytes": limit_bytes }),
         },
     }
 }
 
-fn serialized_len(result: &ToolResult) -> usize {
+pub(super) fn serialized_len(value: &impl serde::Serialize) -> usize {
     struct ByteCounter(usize);
     impl std::io::Write for ByteCounter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -817,8 +906,24 @@ fn serialized_len(result: &ToolResult) -> usize {
         }
     }
     let mut counter = ByteCounter(0);
-    serde_json::to_writer(&mut counter, result).expect("validated tool results serialize");
+    serde_json::to_writer(&mut counter, value).expect("program state serializes");
     counter.0
+}
+
+fn expired_operation_result(budget: ProgramBudget) -> ToolResult {
+    ToolResult::Failure {
+        content: text_content(
+            "Program operation was not started because its elapsed-time budget was exhausted.",
+        ),
+        structured_content: StructuredContent::Absent,
+        meta: None,
+        error: ProtocolError {
+            code: "ProgramBudgetExceeded".to_string(),
+            message: "run_typescript exceeded its elapsed-time budget.".to_string(),
+            retryable: false,
+            details: json!({"budget_ms": budget.budget_ms, "elapsed_ms": budget.elapsed_ms}),
+        },
+    }
 }
 
 fn resume_program_execution(
@@ -1274,6 +1379,38 @@ mod tests {
     /// *Assert*: Retained rich content follows source-program order rather than completion order.
     ///
     #[test]
+    fn restored_retired_subagent_call_is_captioned_with_the_program_spelling() {
+        // Prepare
+        let image = ContentBlock::image("aW1hZ2U=", "image/png");
+        let tool_state = vec![ToolState::Resolved {
+            kind: ToolKind::External,
+            id: "program:tool:0".to_string(),
+            function: crate::core::features::programmatic_tool_calling::model::ToolFunction {
+                name: "agent_spawn".to_string(),
+                arguments: json!({}),
+            },
+            result: json!({}),
+            content: vec![image.clone()],
+        }];
+
+        // Do
+        let content = retained_program_content(
+            &[],
+            "async function main() { return await tools.subagent.spawn({}); }",
+            &tool_state,
+        );
+
+        // Assert
+        assert_eq!(
+            content,
+            vec![
+                ContentBlock::text("Additional content from `tools.subagent.spawn` (call 1):"),
+                image,
+            ]
+        );
+    }
+
+    #[test]
     fn parallel_rich_content_preserves_program_order() {
         // Prepare
         let first = advance_llm(
@@ -1586,43 +1723,6 @@ mod tests {
         assert_eq!(message_role(&message.message), Role::Tool);
         assert!(!message_text(message).contains("InvalidToolCall"));
         assert!(message_text(message).contains("must define async function main"));
-    }
-
-    #[test]
-    fn invalid_programmatic_tool_arguments_return_an_error_and_continue_the_turn() {
-        let step = advance_llm(
-            started(),
-            assistant_tool(
-                "run_typescript",
-                json!({
-                    "code": "async function main() { return tools.subagent.spawn({ agentName: 'researcher', description: 'Investigate' }); }"
-                }),
-            ),
-        );
-
-        assert!(matches!(step.effect, Some(Action::Completion { .. })));
-        let message = step.state.context.messages().last().unwrap();
-        assert_eq!(message_role(&message.message), Role::Tool);
-        assert!(message_text(message).contains("jsonSchemaArgumentValidationError"));
-        assert!(message_text(message).contains("message"));
-    }
-
-    #[test]
-    fn subagent_tools_use_the_runtime_subagent_route() {
-        let step = advance_llm(
-            started(),
-            assistant_tool(
-                "run_typescript",
-                json!({"code": "async function main() { return tools.subagent.spawn({agentName: 'researcher', message: 'Investigate'}); }"}),
-            ),
-        );
-
-        assert!(matches!(
-            step.effect,
-            Some(Action::RuntimeBuiltinTool { call, .. })
-                if call.name
-                    == crate::core::tools::external::RuntimeBuiltinToolName::SubagentSpawn
-        ));
     }
 
     #[test]

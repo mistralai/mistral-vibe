@@ -15,5 +15,5 @@ handshake = mcp_handshake([
 
 timeline: Timeline = ["/mcp broken\r"]
 
-screen_contains = {"rust": ("hint: install the server binary",)}
-screen_excludes = {"rust": ("foundhint",)}
+screen_contains = ("hint: install the server binary",)
+screen_excludes = ("foundhint",)

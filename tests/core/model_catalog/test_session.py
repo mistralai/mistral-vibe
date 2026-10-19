@@ -15,6 +15,7 @@ from vibe.core.model_catalog import (
 )
 from vibe.core.model_catalog._constants import build_model_catalog_url
 import vibe.core.model_catalog.session as session_module
+from vibe.core.model_catalog.wait import model_catalog_failed
 import vibe.core.telemetry.send as telemetry_send
 
 _TEST_API_BASE = "https://api.mistral.ai/v1"
@@ -65,6 +66,8 @@ async def test_refresh_is_gated_on_a_mistral_credential(
     )
 
     assert await refresh_model_catalog(_config(flag=True)) is None
+    # Nothing was attempted: a credential added later must still be waited for.
+    assert model_catalog_failed() is False
 
 
 @pytest.mark.asyncio
@@ -88,6 +91,7 @@ async def test_refresh_fetches_with_the_mistral_credential(
     assert route.calls.last.request.headers["Authorization"] == "Bearer test-key"
     assert catalog is not None
     assert catalog.models[0].id == "mistral-medium-3.5"
+    assert model_catalog_failed() is False
 
 
 @pytest.mark.asyncio
@@ -104,6 +108,7 @@ async def test_refresh_returns_none_when_the_endpoint_is_down(
     )
 
     assert await refresh_model_catalog(_config(flag=True)) is None
+    assert model_catalog_failed() is True
 
 
 @pytest.mark.asyncio

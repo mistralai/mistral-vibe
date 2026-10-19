@@ -1,4 +1,4 @@
-//! Narration playback on the default output device (Python `audio_player`).
+//! Narration playback on the default output device.
 
 #[cfg(feature = "voice")]
 mod output;
@@ -11,7 +11,7 @@ pub use output::{check_available, play};
 /// Whether this build can play audio at all (cpal ships with `voice`).
 pub const SUPPORTED: bool = cfg!(feature = "voice");
 
-/// A narration failure named after Python's exception, for `vibe.read_aloud.ended`.
+/// A narration failure with an exception-style type name, for `vibe.read_aloud.ended`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioError {
     pub error_type: &'static str,
@@ -40,7 +40,7 @@ impl AudioError {
         }
     }
 
-    /// Python's `wave.Error` and `binascii.Error` both report as `Error`.
+    /// Decode failures report the generic `Error` type.
     pub fn decode(message: String) -> Self {
         Self {
             error_type: "Error",

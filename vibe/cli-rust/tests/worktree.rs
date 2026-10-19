@@ -86,9 +86,8 @@ fn no_flag_yields_no_request() {
 }
 
 #[test]
-fn empty_name_is_falsy_like_python() {
-    // Python gates on `if args.worktree:` and `bool(args.trust or
-    // args.worktree)`, so --worktree "" means no worktree and no trust.
+fn empty_name_is_falsy() {
+    // --worktree "" means no worktree and no trust.
     let cli = Cli::parse_from(["vibe", "--worktree", ""]);
     assert_eq!(cli.worktree_request(None), None);
     let config = cli
@@ -120,7 +119,7 @@ fn interactive_worktree_grants_trust_and_rides_agent_config() {
             name: "demo".into()
         })
     );
-    // The wire field is skipped when unset, as in Python `WorktreeInput | None`.
+    // The wire field is skipped when unset (the server's optional `WorktreeInput`).
     let bare = Cli::parse_from(["vibe"])
         .interactive_agent_config(Some("/work".into()), None)
         .unwrap();
@@ -131,7 +130,7 @@ fn interactive_worktree_grants_trust_and_rides_agent_config() {
 
 #[test]
 fn interactive_bare_worktree_uses_the_initial_prompt() {
-    // clap (like Python argparse) greedily takes the token after --worktree as
+    // clap greedily takes the token after --worktree as
     // its NAME, so the prompt must precede the bare flag.
     let cli = Cli::parse_from(["vibe", "say hi", "--worktree"]);
     let auto = cli.interactive_initial_prompt(None);
@@ -188,7 +187,7 @@ fn headless_named_worktree_grants_trust() {
 
 #[test]
 fn worktree_combines_with_continue_and_resume() {
-    // Python prepares the worktree first and scopes the resume to it, so the
+    // The worktree is prepared first and the resume scoped to it, so the
     // combination parses; the handshake sequences it after the settle.
     assert!(Cli::try_parse_from(["vibe", "--worktree", "demo", "-c"]).is_ok());
     assert!(Cli::try_parse_from(["vibe", "--worktree", "demo", "--resume", "s1"]).is_ok());
@@ -205,7 +204,7 @@ fn resume_params_strip_the_worktree_field() {
     // The server rejects `worktree` on resume, so the rebind omits it.
     assert!(params["agentConfig"].get("worktree").is_none());
     assert_eq!(params["agentConfig"]["trustWorkspace"], true);
-    // Trust survives, as in Python's SessionOptions.
+    // Trust survives.
     let plain = Cli::parse_from(["vibe"])
         .interactive_agent_config(Some("/work".into()), None)
         .unwrap();
@@ -214,7 +213,7 @@ fn resume_params_strip_the_worktree_field() {
 }
 
 #[test]
-fn worktree_input_wire_shapes_match_python_models() {
+fn worktree_input_wire_shapes_match_server_models() {
     let create = serde_json::to_value(WorktreeInput::Create {
         branch: "b".into(),
         name: "n".into(),
@@ -422,7 +421,7 @@ fn track_state_without_a_worktree_keeps_the_client_cwd() {
     let mut app = App::default();
     track(&mut app, demo_worktree(true));
     // A page miss never moves the cwd and never drops the tracked worktree:
-    // the client's cwd follows only the worktree move, like Python's chdir.
+    // the client's cwd follows only the worktree move.
     let state = state_with(Vec::new(), Some("/plain/session"));
     track_state(&mut app, &state);
     assert_eq!(app.session.cwd.as_deref(), Some("/wt/demo"));
@@ -517,9 +516,9 @@ fn worktree_remove_response_parses_leniently() {
 }
 
 #[test]
-fn yes_answers_match_python() {
+fn yes_answers() {
     use vibe_rs::worktree_exit::is_yes;
-    // The caller trims and lowercases, like Python's input().strip().lower().
+    // The caller trims and lowercases.
     for answer in ["y", "yes", "remove"] {
         assert!(is_yes(answer, false), "{answer}");
     }
@@ -558,7 +557,7 @@ fn forced_progress_line_waits_for_the_removal_it_announces() {
 }
 
 #[test]
-fn outcome_lines_render_python_wording() {
+fn outcome_lines_wording() {
     use vibe_rs::worktree_exit::{outcome_lines, removal_reason, DIM, YELLOW};
     let info = demo_worktree(true);
     let lines = outcome_lines(
@@ -570,7 +569,7 @@ fn outcome_lines_render_python_wording() {
         .unwrap(),
     );
     assert_eq!(lines, [(DIM, "Removed worktree: /wt/demo".to_owned())]);
-    // A kept attached branch names the branch, like Python.
+    // A kept attached branch names the branch.
     let lines = outcome_lines(
         &info,
         &serde_json::from_value(json!({"outcome": "removed", "branchDeleted": false})).unwrap(),
@@ -593,7 +592,7 @@ fn outcome_lines_render_python_wording() {
             "Keeping worktree /wt/demo: in use by other session(s)".to_owned()
         )]
     );
-    // The additive holder count says how many, like Python.
+    // The additive holder count says how many.
     let lines = outcome_lines(
         &info,
         &serde_json::from_value(json!({"outcome": "kept_in_use", "holders": 2})).unwrap(),
@@ -730,7 +729,7 @@ fn failed_message_reads_the_pushed_failure_entry() {
     assert_eq!(
         failed_message(&failed),
         Some("boom".to_owned()),
-        "the gate prints the underlying error, like Python's `Error: ...`"
+        "the gate prints the underlying error as `Error: ...`"
     );
     // A completed effect or a foreign kind is not a failure.
     let completed = json!({
@@ -852,7 +851,7 @@ fn a_snapshot_refines_the_cwd_to_the_session_directory() {
 }
 
 /// A pushed preparation failure fails the absorb with the server's message,
-/// like Python's `Error: ...` exit 1.
+/// printed as `Error: ...` with exit 1.
 #[tokio::test]
 async fn a_late_failure_entry_fails_the_absorb() {
     use std::time::Duration;

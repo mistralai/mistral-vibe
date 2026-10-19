@@ -8,7 +8,6 @@ from e2e.app_server.scenario import Timeline
 handshake = project_handshake()
 request_methods = METHODS
 env = {"SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 expected_clipboard = "Vibe Code project"
 capture_steps = {1, 2, 3}
 _CLICK = "\x1b[<0;8;22M\x1b[<0;8;22m"

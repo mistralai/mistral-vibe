@@ -454,6 +454,21 @@ def test_load_cached_whoami_returns_none_when_stale() -> None:
     assert load_cached_whoami("secret") is None
 
 
+def test_load_cached_whoami_ignores_entries_from_an_older_format() -> None:
+    from vibe.setup.auth.whoami import _whoami_cache_key
+
+    store_cached_whoami(
+        "secret", WhoAmIResult(plan_type=AccountPlanKind.CHAT, plan_name="TEAM")
+    )
+
+    path = WHOAMI_CACHE_FILE.path
+    entries = json.loads(path.read_text())
+    del entries[_whoami_cache_key("secret")]["format"]
+    path.write_text(json.dumps(entries))
+
+    assert load_cached_whoami("secret") is None
+
+
 def test_load_cached_whoami_fails_open_on_corrupt_file() -> None:
     path = WHOAMI_CACHE_FILE.path
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -25,6 +25,7 @@ use std::fmt;
 /// here would duplicate state that cannot disagree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CoreError {
+    QueueFull,
     InvalidState {
         state: crate::core::step_protocol::CommandState,
     },
@@ -82,6 +83,7 @@ impl CoreError {
     /// Session Protocol wire message is unchanged.
     pub(crate) fn detail(&self) -> &str {
         match self {
+            Self::QueueFull => "pending notification capacity is full",
             Self::InvalidState { .. } => "command is invalid in the current session state",
             Self::InvalidCorrelation { .. } => "command does not correlate with a pending action",
             Self::InvalidCommand { detail }

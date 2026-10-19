@@ -8,10 +8,10 @@ from textual.containers import Center, Vertical
 from textual.timer import Timer
 from textual.widgets import Static
 
-from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
-from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.setup.onboarding.base import OnboardingScreen
 from vibe.setup.onboarding.gradient_text import GRADIENT_COLORS, gradient_markup
+from vibe.setup.onboarding.shortcut_hints import shortcut, shortcut_hint
+from vibe.setup.onboarding.widgets.no_markup_static import NoMarkupStatic
 
 WELCOME_PREFIX = "Welcome to "
 WELCOME_HIGHLIGHT = "Mistral Vibe"

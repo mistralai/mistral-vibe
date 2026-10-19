@@ -336,33 +336,19 @@ pub(crate) fn format_tool_function_declaration(document: &SearchDocument, index:
         integration_name,
         function_lookup_name,
         tool_reference,
-        tool_description,
         declaration,
         ..
     } = document
     else {
         return String::new();
     };
-    let description = tool_description
-        .trim()
-        .lines()
-        .map(|line| {
-            if line.trim().is_empty() {
-                "//".to_string()
-            } else {
-                format!("// {}", line.trim())
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    // The declaration already carries the tool description as JSDoc on the function.
     format!(
         r#"```ts
 // Result {}.
 // connector: {integration_name}
 // function: {function_lookup_name}
 // tool: {tool_reference}
-// description:
-{description}
 
 {}
 ```"#,

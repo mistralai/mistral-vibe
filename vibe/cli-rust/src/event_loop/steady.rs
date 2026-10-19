@@ -12,7 +12,7 @@ use super::deadlines::{
 use super::external_editor::open_external_editor;
 use super::handoff::TerminalHandoff;
 use super::helpers::{apply_command, redraw_frame, replay_marker};
-use super::keys::{handle_input_event, InputOutcome, LoopState};
+use super::keys::{handle_input_batch, next_input, LoopState};
 use super::notifications::{absorb_notification, surface_server_close};
 use super::suspend::suspend_once;
 use super::{EventLoop, LoopExit, REDRAW_INTERVAL};
@@ -118,20 +118,28 @@ impl EventLoop {
                         // Slow draws must leave time for input and newer session replies.
                         redraw_tick.reset();
                     }
+                    // The draw records telemetry too (selection autocopy), still queued here.
+                    let telemetry_queued = self.app.session.session_id.is_some()
+                        && !sources.telemetry.is_empty();
                     replay_marker(
                         &self.app,
+                        &self.client,
                         &mut state,
                         replaying,
                         settle_busy,
                         animating,
                         mounting,
                         indexing,
+                        telemetry_queued,
                     );
                     state.redraw_pending = animating || mounting;
                     state.real_event_pending &= mounting || animating;
                     continue;
                 }
                 _ = frame.tick() => {
+                    if self.app.terminal_notifier.presentation_changed() {
+                        crate::terminal_notifier::flush(&mut self.app);
+                    }
                     let changed = !replaying
                         && !self.app.session.startup_config.disable_welcome_banner_animation
                         && self.app.view.banner.tick(std::time::Instant::now());
@@ -197,8 +205,8 @@ impl EventLoop {
                 }
                 Some(event) = sources.ready.recv() => {
                     // The missing-key verdict is a typed loop exit (the
-                    // wizard is a pre-session surface, Python `run_onboarding`
-                    // parity): the loop unwinds and the entrypoint reruns the
+                    // wizard is a pre-session surface): the loop unwinds and
+                    // the entrypoint reruns the
                     // wizard against a fresh child, seeded for the provider
                     // the verdict names.
                     if let crate::startup::StartupEvent::MissingApiKey { provider, env_key } =
@@ -218,6 +226,9 @@ impl EventLoop {
                         // Keys typed at the chat frame must not answer a gate
                         // the user has not seen yet.
                         while input.try_recv().is_ok() {}
+                        state.deferred_input = None;
+                        // The drain may have dropped a resize.
+                        let _ = crate::terminal::sync_pixel_reports();
                     }
                     state.redraw_pending = true;
                     state.real_event_pending = true;
@@ -232,14 +243,15 @@ impl EventLoop {
                     }
                 }
                 Some(notification) = sources.notifications.recv(), if deferred_notification.is_none() => {
-                    absorb_notification(
+                    let real = absorb_notification(
                         &mut self.app,
                         &self.client,
                         sources,
                         notification,
                         &mut deferred_notification,
                     );
-                    if settle_busy {
+                    // A drain sentinel only wakes the marker check; re-arming it would emit a stale marker.
+                    if settle_busy && real {
                         state.idle_marker_emitted = false;
                     }
                     state.redraw_pending = true;
@@ -272,7 +284,7 @@ impl EventLoop {
                     state.redraw_pending = true;
                 }
                 _ = tokio::time::sleep_until(subagent_refresh_deadline(&self.app)), if self.app.subagents.refresh_at.is_some() => {
-                    // Python's drain: one fetch per 50ms window, even while updates stream.
+                    // One fetch per 50ms window, even while updates stream.
                     crate::subagents::start_refresh(&mut self.app, &self.client);
                     state.redraw_pending = true;
                 }
@@ -300,6 +312,15 @@ impl EventLoop {
                 }
                 Some(event) = sources.log_level.recv() => {
                     crate::log_level_picker::apply_event(&mut self.app, event);
+                    state.redraw_pending = true;
+                    state.real_event_pending = true;
+                }
+                Some(event) = sources.debug_console.recv() => {
+                    // Only a page load claims a busy slot; a poll leaves the app idle.
+                    if matches!(&event, crate::debug_console::Event::Page { .. }) {
+                        self.app.commit_finished();
+                    }
+                    crate::debug_console::apply_event(&mut self.app, &self.client, event);
                     state.redraw_pending = true;
                     state.real_event_pending = true;
                 }
@@ -378,16 +399,18 @@ impl EventLoop {
                     state.redraw_pending = true;
                     state.real_event_pending = true;
                 }
-                event = input.recv() => match handle_input_event(
+                event = next_input(input, &mut state.deferred_input) => match handle_input_batch(
                     &mut self.app,
                     &self.client,
                     &self.config_tx,
+                    input,
                     event,
                     replaying,
+                    &mut state,
                 ) {
-                    InputOutcome::Exit => return Ok(LoopExit::Quit),
-                    outcome => {
-                        if state.apply_input(outcome) {
+                    None => return Ok(LoopExit::Quit),
+                    Some(reset_blink) => {
+                        if reset_blink {
                             blink.reset();
                         }
                     }

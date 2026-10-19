@@ -101,7 +101,7 @@ async def test_loop_preview_is_clean_live_stored_listed_and_resumed(
         )
     )
     connection = await connect_backend_contract_host(
-        True, session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(), capabilities=ClientCapabilities()
     )
     session = await connection.host.open_session()
     try:
@@ -117,7 +117,7 @@ async def test_loop_preview_is_clean_live_stored_listed_and_resumed(
         await session.close()
 
     passive = await connect_backend_contract_host(
-        True, session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(), capabilities=ClientCapabilities()
     )
     try:
         listed = await passive.host.list_sessions()

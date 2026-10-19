@@ -18,16 +18,16 @@ const MAX_CACHED_SKILLS: usize = 256;
 pub const MAX_AGE_SECONDS: i64 = 7 * 24 * 3600;
 /// Caches larger than this are ignored before parsing.
 const MAX_FILE_BYTES: usize = 1024 * 1024;
-/// Agent a fresh install starts on (Python `VibeConfig.default_agent`).
+/// Agent a fresh install starts on (the config's `default_agent` default).
 const DEFAULT_AGENT: &str = "accept-edits";
 
 /// Cycleable builtins in discovery order, used until the server's snapshot
-/// lands (Python `BUILTIN_AGENTS` minus the subagents).
+/// lands (the builtin agents minus the subagents).
 fn builtin_agents() -> Vec<AgentSummary> {
     [
         ("ask", "Ask", AgentSafety::Neutral),
-        ("plan", "Plan", AgentSafety::Safe),
         (DEFAULT_AGENT, "Accept Edits", AgentSafety::Destructive),
+        ("smart-approve", "Smart Approve", AgentSafety::Smart),
         ("auto-approve", "Auto Approve", AgentSafety::Yolo),
     ]
     .into_iter()
@@ -82,25 +82,18 @@ pub struct StartupConfig {
     pub cursor_blink: bool,
     pub active_model: String,
     pub active_model_display_name: String,
-    /// Python `config.images_supported`: model vision or a backend image describer.
+    /// Whether images are supported: model vision or a backend image describer.
     pub images_supported: bool,
-    pub models_count: usize,
     /// Configured default used to choose the startup label from `agents`.
     pub default_agent: String,
     /// The cycleable agents, so Shift+Tab works before the snapshot lands.
     pub agents: Vec<AgentSummary>,
     /// Bounded user-invocable skill metadata for `/` completion before readiness.
     pub skills: Vec<(String, String)>,
-    pub skills_count: usize,
-    pub hooks_count: usize,
-    pub connectors_connected: usize,
-    pub connectors_total: usize,
-    pub mcp_servers_enabled: usize,
-    pub mcp_servers_total: usize,
     pub context_window: u64,
-    /// Whether the narrator requests turn summaries (Python `narrator_enabled`).
+    /// Whether the narrator requests turn summaries.
     pub narrator_enabled: bool,
-    /// Whether update checks run (Python `enable_update_checks`). Additive:
+    /// Whether update checks run (`enable_update_checks`). Additive:
     /// entries from before this field default to checking.
     #[serde(default = "default_enable_update_checks")]
     pub enable_update_checks: bool,
@@ -124,16 +117,9 @@ impl Default for StartupConfig {
             active_model: String::new(),
             active_model_display_name: String::new(),
             images_supported: false,
-            models_count: 0,
             default_agent: DEFAULT_AGENT.into(),
             agents: builtin_agents(),
             skills: Vec::new(),
-            skills_count: 0,
-            hooks_count: 0,
-            connectors_connected: 0,
-            connectors_total: 0,
-            mcp_servers_enabled: 0,
-            mcp_servers_total: 0,
             context_window: 0,
             narrator_enabled: false,
             enable_update_checks: true,
@@ -221,16 +207,6 @@ impl StartupConfig {
         let model = config.get("activeModel")?;
         let model_name = model.get("displayName")?.as_str()?;
         let thinking = model.get("thinking")?.as_str()?;
-        let sources = runtime.pointer("/mcp/sources").and_then(Value::as_array);
-        let mcp_servers = sources
-            .into_iter()
-            .flatten()
-            .filter(|source| source.get("kind").and_then(Value::as_str) == Some("server"));
-        let (mcp_servers_enabled, mcp_servers_total) =
-            mcp_servers.fold((0, 0), |(enabled, total), source| {
-                let disabled = source.get("status").and_then(Value::as_str) == Some("disabled");
-                (enabled + usize::from(!disabled), total + 1)
-            });
         Some(Self {
             schema_version: SCHEMA_VERSION,
             server_version: server_version.to_owned(),
@@ -255,10 +231,6 @@ impl StartupConfig {
                 .or_else(|| model.get("supportsImages"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
-            models_count: config
-                .get("models")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len),
             default_agent: config
                 .get("defaultAgent")
                 .and_then(Value::as_str)
@@ -275,26 +247,6 @@ impl StartupConfig {
                 })
                 .unwrap_or_else(builtin_agents),
             skills: cached_skills(response),
-            skills_count: runtime
-                .get("skills")
-                .and_then(Value::as_array)
-                .map_or(0, |skills| {
-                    skills
-                        .iter()
-                        .filter(|skill| {
-                            skill.get("source").and_then(Value::as_str) != Some("builtin")
-                        })
-                        .count()
-                }),
-            hooks_count: usize_at(runtime, "/hooksCount"),
-            connectors_connected: usize_at(runtime, "/connectors/connected"),
-            connectors_total: runtime
-                .pointer("/connectors/total")
-                .and_then(Value::as_u64)
-                .and_then(|value| usize::try_from(value).ok())
-                .unwrap_or(0),
-            mcp_servers_enabled,
-            mcp_servers_total,
             context_window: runtime
                 .get("contextWindow")
                 .and_then(Value::as_u64)
@@ -313,14 +265,6 @@ impl StartupConfig {
                 .unwrap_or(false),
         })
     }
-}
-
-fn usize_at(value: &Value, pointer: &str) -> usize {
-    value
-        .pointer(pointer)
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(0)
 }
 
 fn cache_file() -> Option<PathBuf> {

@@ -1,8 +1,8 @@
 //! The crossterm-to-editing boundary: map a key to a chat input `Action`.
 //!
 //! This is the only module that reads crossterm key events for editing, so the
-//! `input_edit` domain stays backend-agnostic. Bindings mirror Textual's
-//! TextArea plus vibe's Alt-word aliases.
+//! `input_edit` domain stays backend-agnostic. Bindings follow common
+//! text-area conventions plus vibe's Alt-word aliases.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -21,12 +21,12 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
     // Ctrl or Alt turns caret/delete keys into their word-wise variant.
     let word = ctrl || alt;
     match k.code {
-        // Newline insert: Textual binds `shift+enter,ctrl+j`. In raw mode crossterm
+        // Newline insert: `shift+enter` or `ctrl+j`. In raw mode crossterm
         // delivers Ctrl+J (byte \n) as Ctrl+'j'; Shift+Enter only reaches us on
         // terminals that report it distinctly (plain Enter stays a submit).
         KeyCode::Char('j') if ctrl && !alt => Some(Action::Insert('\n')),
         KeyCode::Enter if shift => Some(Action::Insert('\n')),
-        // Ctrl+letter is a shortcut, never literal text (Textual line-editing
+        // Ctrl+letter is a shortcut, never literal text (line-editing
         // bindings); Ctrl+C / Ctrl+D are intercepted before we get here.
         KeyCode::Char('a') if ctrl && !alt => Some(Action::CursorLineStart),
         KeyCode::Char('e') if ctrl && !alt => Some(Action::CursorLineEnd),
@@ -36,8 +36,8 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
         KeyCode::Char('w') if ctrl && !alt => Some(Action::DeleteWordLeft),
         // Alt+b / Alt+f: emacs word nav. macOS terminals (Terminal.app, iTerm
         // "natural editing") send Option+Left/Right as ESC-b / ESC-f, which
-        // crossterm decodes as Alt+'b' / Alt+'f'. Textual maps the same bytes to
-        // Ctrl+Left / Ctrl+Right (see its _ansi_sequences), so mirror that.
+        // crossterm decodes as Alt+'b' / Alt+'f'; treat them as
+        // Ctrl+Left / Ctrl+Right.
         KeyCode::Char('b') if alt && !ctrl => Some(Action::CursorWordLeft),
         KeyCode::Char('f') if alt && !ctrl => Some(Action::CursorWordRight),
         KeyCode::Char(c) if (k.modifiers - KeyModifiers::SHIFT).is_empty() => {
@@ -48,8 +48,8 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
         KeyCode::Backspace => Some(Action::DeleteLeft),
         KeyCode::Delete if word => Some(Action::DeleteWordRight),
         KeyCode::Delete => Some(Action::DeleteRight),
-        // Shift extends a selection; Shift+Ctrl/Alt extends by word (Textual
-        // `cursor_*(select=True)`). Shift+Up/Down are left unmapped so the app
+        // Shift extends a selection; Shift+Ctrl/Alt extends by word.
+        // Shift+Up/Down are left unmapped so the app
         // handles them as scroll.
         KeyCode::Left if command && shift => Some(Action::SelectLineStart),
         KeyCode::Right if command && shift => Some(Action::SelectLineEnd),
@@ -74,7 +74,7 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
     }
 }
 
-/// Super bindings mirror Textual; Ctrl bindings are reserved for job control on Unix.
+/// Super bindings always apply; Ctrl bindings are reserved for job control on Unix.
 pub fn history_action_for(key: &KeyEvent, can_suspend: bool) -> Option<Action> {
     let modifiers = key.modifiers;
     if modifiers != KeyModifiers::SUPER && (can_suspend || modifiers != KeyModifiers::CONTROL) {

@@ -7,10 +7,24 @@ use crate::core::error::CoreError;
 pub(crate) struct Settings {
     pub max_effects: u32,
     pub max_operations: u32,
+    pub max_elapsed_ms: u64,
+    pub max_sleep_ms: u64,
 }
 
 impl Settings {
     pub(crate) fn validate(&self) -> Result<(), CoreError> {
+        if self.max_sleep_ms == 0 {
+            return Err(CoreError::invalid_configuration(
+                "settings.tools.programmatic.max_sleep_ms",
+                "settings.tools.programmatic.max_sleep_ms must be greater than zero",
+            ));
+        }
+        if self.max_elapsed_ms == 0 {
+            return Err(CoreError::invalid_configuration(
+                "settings.tools.programmatic.max_elapsed_ms",
+                "settings.tools.programmatic.max_elapsed_ms must be greater than zero",
+            ));
+        }
         if self.max_effects == 0 {
             return Err(CoreError::invalid_configuration(
                 "settings.tools.programmatic.max_effects",

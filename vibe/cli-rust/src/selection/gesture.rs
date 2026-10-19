@@ -1,16 +1,16 @@
-//! Multi-click chain tracking, Python `_update_click_chain`.
+//! Multi-click chain tracking.
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-/// Python `App.CLICK_CHAIN_TIME_THRESHOLD`: how long a click chain stays alive.
+/// How long a click chain stays alive.
 const CLICK_CHAIN_TIME_THRESHOLD: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK: u8 = 2;
 const TRIPLE_CLICK: u8 = 3;
 
 /// Replay drives presses at machine speed, so a wall-clock window would make the
 /// chain depend on load. The harness holds it open and relies on the same-cell
-/// test alone; mirrors `_click_chain_threshold` in the Python client.
+/// test alone.
 fn threshold() -> Duration {
     static THRESHOLD: OnceLock<Duration> = OnceLock::new();
     *THRESHOLD.get_or_init(|| match std::env::var_os("VIBE_REPLAY_FIXTURE") {
@@ -19,7 +19,7 @@ fn threshold() -> Duration {
     })
 }
 
-/// How much text one press selects (Python `SelectGranularity`).
+/// How much text one press selects.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Granularity {
     #[default]
@@ -60,8 +60,7 @@ impl ClickChain {
         }
     }
 
-    /// A completed drag ends the chain so the next click starts a fresh one
-    /// (Python `_on_mouse_up`: `if self._dragged`).
+    /// A completed drag ends the chain so the next click starts a fresh one.
     pub fn release(&mut self, dragged: bool) {
         if dragged {
             *self = Self::default();

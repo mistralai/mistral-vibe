@@ -20,4 +20,4 @@ request_methods = METHODS
 
 timeline: Timeline = ["/reload-plugins\r"]
 
-screen_contains = {"rust": ("Plugins reloaded", "no longer installed")}
+screen_contains = ("Plugins reloaded", "no longer installed")

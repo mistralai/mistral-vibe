@@ -24,7 +24,7 @@ pub const STALE_PROJECT_MESSAGE: &str =
 const SAVED_PROJECT_STALE: &str = "saved_project_stale";
 const SESSION_CHANGED: &str = "Teleport was cancelled because the session changed";
 
-/// One running `vibeCode/teleport/start` operation (Python's `_teleport` worker).
+/// One running `vibeCode/teleport/start` operation.
 pub struct Operation {
     pub operation_id: String,
     pub session_id: String,
@@ -36,12 +36,12 @@ pub struct Operation {
     pub cancelling: bool,
 }
 
-/// `/teleport` (Python `_teleport_command`): arguments are ignored.
+/// `/teleport`: arguments are ignored.
 pub fn command(app: &mut App, client: &Arc<Client>) {
     crate::vibe_code_project::teleport::open(app, client, None);
 }
 
-/// `&<prompt>` and `--teleport` (Python `_handle_teleport_command`).
+/// `&<prompt>` and `--teleport`.
 pub fn submit(app: &mut App, client: &Arc<Client>, target: String) {
     let id = new_message_id();
     if target.is_empty() {
@@ -53,7 +53,7 @@ pub fn submit(app: &mut App, client: &Arc<Client>, target: String) {
     crate::vibe_code_project::teleport::open(app, client, prompt);
 }
 
-/// Python `_teleport`: mount the status row and the spinner, then start.
+/// Mount the status row and the spinner, then start.
 pub fn begin(
     app: &mut App,
     client: &Arc<Client>,
@@ -94,7 +94,7 @@ pub fn loading_since(app: &App) -> Option<Instant> {
         .map(|op| op.started_at)
 }
 
-/// Reduce one `vibeCode/teleport/event` (Python `_handle_teleport_event`).
+/// Reduce one `vibeCode/teleport/event`.
 pub fn on_event(app: &mut App, client: &Arc<Client>, params: &Value) {
     let Some((operation_id, event)) = parse_event(params) else {
         return;
@@ -131,7 +131,7 @@ pub fn on_event(app: &mut App, client: &Arc<Client>, params: &Value) {
     local::teleport::set_teleport_status(&mut app.view.transcript, &id, status);
 }
 
-/// The push-approval question (Python `_ask_push_approval`).
+/// The push-approval question.
 pub fn push_question(count: u64, branch_not_pushed: bool) -> UserQuestionRequest {
     let question = if branch_not_pushed {
         "Your branch doesn't exist on remote. Push to continue?".to_owned()
@@ -155,7 +155,7 @@ pub fn push_question(count: u64, branch_not_pushed: bool) -> UserQuestionRequest
     }
 }
 
-/// Decline the push while a callback question owns the input box (Python raises).
+/// Decline the push while a callback question owns the input box.
 fn ask_push_approval(app: &mut App, client: &Arc<Client>, count: u64, branch_not_pushed: bool) {
     if crate::question_app::callback_active(app) {
         let declined = UserQuestionResult {
@@ -201,7 +201,7 @@ pub fn interrupt(app: &mut App, client: &Arc<Client>) {
     }
 }
 
-/// A replaced session drops its teleport (Python `VibeCodeResource.reset`).
+/// A replaced session drops its teleport.
 pub fn reset(app: &mut App) {
     let Some(op) = end(app) else {
         return;
@@ -279,7 +279,7 @@ fn end(app: &mut App) -> Option<Operation> {
     Some(op)
 }
 
-/// Python `_handle_teleport_failure`: recover a stale saved link or show the error.
+/// Recover a stale saved link or show the error.
 fn fail(app: &mut App, client: &Arc<Client>, failure: Failure) {
     let Some(op) = end(app) else {
         return;

@@ -101,13 +101,32 @@ def normalize_newlines(text: str) -> tuple[str, str]:
     return text.replace("\r\n", "\n").replace("\r", "\n"), newline
 
 
+def normalize_edit_strings(old: str, new: str) -> tuple[str, str]:
+    r"""Return an edit's old and new text with ``\n`` line endings.
+
+    A trailing lone ``\r`` is the first half of a CRLF copied from a
+    ``read_file`` line. On ``old`` it becomes ``\n``, so the text still only
+    matches at the end of a line, and ``new`` then ends with ``\n`` too, so the
+    replacement keeps that line break. On ``new`` alone it is dropped, unless
+    ``old`` ends a line.
+    """
+    old_ends_with_cr = old.endswith("\r")
+    old = normalize_newlines(old)[0]
+    if not old.endswith("\n"):
+        new = new.removesuffix("\r")
+    new = normalize_newlines(new)[0]
+    if old_ends_with_cr and not new.endswith("\n"):
+        new += "\n"
+    return old, new
+
+
 def _decode(
     raw: bytes, *, raise_on_error: bool, preferred: str | None
 ) -> tuple[str, str]:
     for encoding in _get_candidate_encodings(raw, preferred):
         try:
             return raw.decode(encoding), encoding
-        except (LookupError, UnicodeDecodeError, ValueError):
+        except LookupError, UnicodeDecodeError, ValueError:
             pass
     errors = "strict" if raise_on_error else "replace"
     return raw.decode("utf-8", errors=errors), "utf-8"
@@ -149,7 +168,7 @@ def encode_safe(text: str, *, encoding: str = "utf-8", newline: str = "\n") -> b
     body = text if newline == "\n" else text.replace("\n", newline)
     try:
         return body.encode(encoding)
-    except (LookupError, UnicodeError):
+    except LookupError, UnicodeError:
         return body.encode("utf-8")
 
 
@@ -166,10 +185,23 @@ async def read_safe_async(
     return decode_safe(raw, raise_on_error=raise_on_error)
 
 
+def split_lines_verbatim(text: str) -> list[str]:
+    r"""Split ``text`` on ``\n`` only, keeping any ``\r`` inside its line.
+
+    A CRLF line keeps its trailing ``\r``, so the caller sees the file's line
+    endings as shell commands show them.
+    """
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 class BoundedReadResult(NamedTuple):
     r"""A bounded slice of a file's lines plus truncation metadata.
 
-    ``lines`` are decoded and ``\n``-normalized, without trailing newlines.
+    ``lines`` are decoded, without trailing newlines. They are
+    ``\n``-normalized unless the read kept carriage returns.
     ``total_lines`` is ``None`` when the read stopped early at the line or byte
     budget (the true total is unknown without scanning the rest of the file);
     otherwise it is the number of lines in the file. ``was_truncated`` is true
@@ -182,14 +214,21 @@ class BoundedReadResult(NamedTuple):
 
 
 def read_lines_safe(
-    path: Path, *, start_line: int = 1, limit: int, max_bytes: int
+    path: Path,
+    *,
+    start_line: int = 1,
+    limit: int,
+    max_bytes: int,
+    keep_carriage_returns: bool = False,
 ) -> BoundedReadResult:
     r"""Read up to ``limit`` lines from ``start_line`` (1-indexed) bounded by bytes.
 
     Streams the file line-by-line in binary and stops once ``limit`` lines or
     ``max_bytes`` of selected content have been collected, so large files are
-    never loaded whole. The collected bytes are decoded once via
-    :func:`decode_safe`, which also normalizes ``\r\n``/``\r`` to ``\n``.
+    never loaded whole. The collected bytes are decoded once with the
+    :func:`decode_safe` fallback chain, and ``\r\n``/``\r`` are normalized to
+    ``\n`` unless ``keep_carriage_returns`` is set, in which case they are
+    split by :func:`split_lines_verbatim`.
     """
     raw_lines: list[bytes] = []
     bytes_read = 0
@@ -214,16 +253,31 @@ def read_lines_safe(
             was_truncated = False
 
     total_lines = None if was_truncated else line_number
-    lines = decode_safe(b"".join(raw_lines)).text.splitlines()
+    raw = b"".join(raw_lines)
+    if keep_carriage_returns:
+        text, _encoding = _decode(raw, raise_on_error=False, preferred=None)
+        lines = split_lines_verbatim(text)
+    else:
+        lines = decode_safe(raw).text.splitlines()
     return BoundedReadResult(lines, total_lines, was_truncated)
 
 
 async def read_lines_safe_async(
-    path: Path, *, start_line: int = 1, limit: int, max_bytes: int
+    path: Path,
+    *,
+    start_line: int = 1,
+    limit: int,
+    max_bytes: int,
+    keep_carriage_returns: bool = False,
 ) -> BoundedReadResult:
     """Async :func:`read_lines_safe` (runs the blocking read in a thread)."""
     return await asyncio.to_thread(
-        read_lines_safe, path, start_line=start_line, limit=limit, max_bytes=max_bytes
+        read_lines_safe,
+        path,
+        start_line=start_line,
+        limit=limit,
+        max_bytes=max_bytes,
+        keep_carriage_returns=keep_carriage_returns,
     )
 
 

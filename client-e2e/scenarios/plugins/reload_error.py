@@ -15,5 +15,5 @@ request_methods = METHODS
 
 timeline: Timeline = ["/reload-plugins\r"]
 
-screen_contains = {"rust": ("Failed to reload plugins: Plugin rescan failed",)}
-screen_excludes = {"rust": ("Plugins reloaded",)}
+screen_contains = ("Failed to reload plugins: Plugin rescan failed",)
+screen_excludes = ("Plugins reloaded",)

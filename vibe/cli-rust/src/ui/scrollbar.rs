@@ -1,4 +1,4 @@
-//! Vertical scrollbars ported from Textual's `ScrollBarRender`.
+//! Vertical scrollbars with eighth-block thumb edges.
 
 mod state;
 

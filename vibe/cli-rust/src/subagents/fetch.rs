@@ -1,4 +1,4 @@
-//! Child history fetch pipeline (Python `_refresh_subagent_transcript`).
+//! Child history fetch pipeline.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -12,7 +12,7 @@ use crate::server::{method, Client};
 use super::child::{Event, HISTORY_PAGE_LIMIT, HISTORY_RESUME_TAIL_MESSAGES};
 use super::transcripts::entry_id;
 
-/// Fetch one child's history (Python `_refresh_subagent_transcript`).
+/// Fetch one child's history.
 pub fn fetch_history(
     client: Arc<Client>,
     session_id: String,
@@ -86,7 +86,7 @@ async fn fetch(
     Ok((history, complete))
 }
 
-/// Python `needs_complete_history` evaluated against the cached snapshot.
+/// Whether the complete history must be read, judged against the cached snapshot.
 pub fn needs_complete(known_ids: &HashSet<String>, cached_complete: bool, tail: &[Value]) -> bool {
     if !cached_complete {
         return true;

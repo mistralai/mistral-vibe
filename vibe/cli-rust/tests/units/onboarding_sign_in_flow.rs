@@ -1,5 +1,4 @@
-//! Sign-in URL validation (Python
-//! `setup/auth/http_browser_sign_in_gateway.py::_validate_url_against_base_url`).
+//! Sign-in URL validation against a configured base.
 
 use vibe_rs::setup::auth::sign_in_gateway::SignInErrorCode;
 use vibe_rs::setup::auth::sign_in_url::validate_url;
@@ -90,8 +89,8 @@ fn dot_dot_traversal_is_rejected() {
         start_failed()
     )
     .is_err());
-    // A traversal that normalizes back under the base is allowed, matching
-    // Python's post-normpath comparison.
+    // A traversal that normalizes back under the base is allowed: the
+    // comparison runs after normalization.
     assert!(validate_url(
         "https://console.example.com/vibe/sub/../poll",
         "https://console.example.com/vibe",

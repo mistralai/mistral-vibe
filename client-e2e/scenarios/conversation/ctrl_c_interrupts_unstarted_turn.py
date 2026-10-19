@@ -19,5 +19,5 @@ timeline: Timeline = [
     {"release": 3},
 ]
 
-screen_contains = {"rust": ("Interrupted",)}
-screen_excludes = {"rust": ("Esc/Ctrl+C to interrupt",)}
+screen_contains = ("Interrupted",)
+screen_excludes = ("Esc/Ctrl+C to interrupt",)

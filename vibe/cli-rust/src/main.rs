@@ -1,4 +1,4 @@
-//! vibe-rs: a render-perf PoC TUI for Vibe over the app-server JSON-RPC protocol.
+//! vibe-rs: the Vibe TUI over the app-server JSON-RPC protocol.
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -11,6 +11,7 @@ use vibe_rs::cli::{rewrite_update_argv, workdir_to_string, Cli};
 use vibe_rs::headless;
 use vibe_rs::headless_prompt;
 use vibe_rs::observability::logging;
+use vibe_rs::run_export::RunOutcome;
 use vibe_rs::startup::{launch_from_env, StartupEvent, StartupRecorder};
 use vibe_rs::update_flow;
 use vibe_rs::worktree_gate;
@@ -22,9 +23,7 @@ async fn main() -> std::process::ExitCode {
         Ok(code) => code,
         Err(error) => {
             session_exit::print_error(&error.to_string());
-            vibe_rs::rollout::print_fallback_hint();
-            // Python flushes in a `finally` on every exit path, after the
-            // error itself is reported.
+            // Flush on every exit path, after the error itself is reported.
             observability::sentry::flush();
             std::process::ExitCode::from(1)
         }
@@ -32,75 +31,124 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run() -> Result<std::process::ExitCode> {
-    vibe_rs::rollout::install_panic_hint();
     vibe_rs::clipboard::set_sink(Arc::new(vibe_rs::clipboard::SystemClipboard));
     let mut timings = StartupRecorder::new();
     timings.record("process_entry");
     // clap's parse_from treats the first element as the program name, so hand
     // it the whole argv — the rewrite looks at the element after the program.
-    let cli = Cli::parse_from(rewrite_update_argv(std::env::args_os().collect()));
+    // A bad argument is a usage error, exit 1: 2 means an infrastructure
+    // failure in headless mode. Help and version keep clap's exit.
+    let mut cli = match Cli::try_parse_from(rewrite_update_argv(std::env::args_os().collect())) {
+        Ok(cli) => cli,
+        Err(error) if error.use_stderr() => {
+            let _ = error.print();
+            std::process::exit(1);
+        }
+        Err(error) => error.exit(),
+    };
     let invocation_cwd = std::env::current_dir().ok();
-    let startup_resume = cli.startup_resume();
-    let cwd = cli.change_workdir().unwrap_or_else(|error| {
-        eprintln!("{error:#}");
+    // Resolve the headless paths right after parse, before --workdir changes
+    // directory, so relative paths name what the caller meant.
+    if let Some(cwd) = invocation_cwd.as_deref() {
+        cli.resolve_headless_paths(cwd);
+    }
+    // Reject a --time-limit that is not positive and finite at parse time;
+    // it would otherwise panic in Duration::from_secs_f64.
+    if let Some(message) = vibe_rs::headless_run::invalid_time_limit(cli.time_limit) {
+        eprintln!("Error: {message}");
         std::process::exit(1);
-    });
+    }
+    // Built as soon as the arguments are parsed, so every later failure can
+    // leave an export and the time limit counts from process start.
+    let headless = vibe_rs::headless_run::HeadlessRun::for_cli(&cli);
+    // `--agent-socket` usage errors, before `--workdir` is looked at.
+    if let Some(message) = vibe_rs::agent_socket::usage_error(&cli, cfg!(windows)) {
+        if let Some(run) = &headless {
+            return Ok(run.fail(RunOutcome::UsageError, &message).into());
+        }
+        eprintln!("Error: {message}");
+        std::process::exit(1);
+    }
+    let startup_resume = cli.startup_resume();
+    let cwd = match cli.change_workdir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            // A usage error leaves an export in headless mode and exits 1
+            // otherwise.
+            if let Some(run) = &headless {
+                return Ok(run.fail(RunOutcome::UsageError, &format!("{error}")).into());
+            }
+            eprintln!("{error:#}");
+            std::process::exit(1);
+        }
+    };
+    // Validate `--add-dir` paths before the run starts: a path that is not
+    // a directory is a usage error.
+    if let Some(run) = &headless {
+        if let Err(message) = cli.validate_add_dirs() {
+            return Ok(run.fail(RunOutcome::UsageError, &message).into());
+        }
+    }
     let cwd_text = workdir_to_string(&cwd)?;
-    let launch = launch_from_env(invocation_cwd.as_deref().unwrap_or(&cwd));
+    let mut launch = launch_from_env(invocation_cwd.as_deref().unwrap_or(&cwd));
+    if let Some(path) = &cli.agent_socket {
+        let path = vibe_rs::agent_socket::server_path(
+            path,
+            invocation_cwd.as_deref(),
+            launch.cwd.as_deref(),
+        );
+        launch
+            .args
+            .extend(vibe_rs::agent_socket::app_server_args(&path));
+    }
     let cwd = Some(cwd);
     timings.record("cli_parsed");
     logging::init_file_logging(logging::log_file().as_deref());
     observability::sentry::install_panic_hook();
 
-    // Load ~/.vibe/.env into the client's own environment (Python
-    // `load_dotenv_values`, `cli.py:92`). The app-server child loads the file
-    // itself: the dotenv-set keys are stripped from its env in
-    // `Client::spawn`, so python-dotenv — not this parser — decides them.
+    // Load ~/.vibe/.env into the client's own environment. The app-server
+    // child loads the file itself: the dotenv-set keys are stripped from its
+    // env in `Client::spawn`, so python-dotenv — not this parser — decides them.
     vibe_rs::credentials::dotenv::load_dotenv_values();
 
     if let Some(vibe_rs::cli::CliCommand::Mcp { command }) = &cli.command {
         return Ok(vibe_rs::mcp_command::run(command, launch).await);
     }
 
-    // Python `run_cli`: the forced check runs after the workdir switch and
+    // The forced check runs after the workdir switch and
     // before anything interactive (and without the pre-ready Sentry init).
     if cli.check_upgrade {
         return Ok(update_flow::run_check_upgrade().await);
     }
 
-    // Python reads piped stdin once, before choosing interactive vs headless, so
+    // Piped stdin is read once, before choosing interactive vs headless, so
     // `echo hi | vibe` feeds the TUI initial prompt while /dev/tty (which
     // crossterm reads for events) keeps terminal input interactive.
     let stdin_prompt = headless_prompt::read_stdin_prompt().await;
 
     // Headless (programmatic) mode: no TUI, no terminal init.
     if cli.is_headless() {
+        let headless = headless.expect("a headless run is built for -p/--prompt-file");
+        // A missing prompt fails the run, export included.
         let options = match cli.headless_options(stdin_prompt) {
-            Some(opts) => opts,
-            None => {
-                eprintln!("Error: No prompt provided for programmatic mode");
-                std::process::exit(1);
+            Ok(opts) => opts,
+            Err(message) => {
+                return Ok(headless.fail(RunOutcome::UsageError, &message).into());
             }
         };
         // `change_workdir` already resolved and chdir'd; re-resolving here would
         // reinterpret relative `--workdir` values against the new directory.
         observability::sentry::init_sentry(false, true, [].into());
-        // Python prints the worktree lines in programmatic mode too
-        // (`_enter_worktree` runs before the mode split); "Using worktree"
+        // The worktree lines print in programmatic mode too; "Using worktree"
         // follows inside `headless::run`, once the settle lands.
         worktree_gate::print_preparing(options.worktree.as_ref());
-        let result = headless::run(options, Some(cwd_text), launch).await;
+        // headless::run writes the export (if --output-dir is set) and returns
+        // the outcome's exit code. Returning rather than exiting inside the
+        // run lets the client drop kill the app-server's process group and
+        // the Sentry flush below run.
+        let exit_code = headless::run(options, Some(cwd_text), launch, headless).await;
         observability::sentry::flush();
-        // Python cli.py prints `ProgrammaticLimitError` bare on stderr, exit 1; handling it
-        // after `run` returns keeps session/stop and the kill_on_drop teardown in the path.
-        if let Err(err) = &result {
-            if err.downcast_ref::<headless::LimitError>().is_some() {
-                eprintln!("{err}");
-                std::process::exit(1);
-            }
-        }
-        // Headless success is a plain exit 0; errors take `run`'s Err path.
-        return result.map(|()| std::process::ExitCode::SUCCESS);
+        return Ok(exit_code);
     }
 
     // No local config read exists here, so the `enableTelemetry` gate is
@@ -114,8 +162,8 @@ async fn run() -> Result<std::process::ExitCode> {
     // Resolve the shared session flags before the TUI owns the terminal, so an
     // invalid `--add-dir` fails with a readable error instead of a crash later.
     // Bare `--worktree` names the worktree from the initial prompt (positional
-    // or piped stdin), which is already read at this point. Python skips the
-    // worktree preparation for `--setup`: the wizard runs and the process
+    // or piped stdin), which is already read at this point. `--setup` skips
+    // the worktree preparation: the wizard runs and the process
     // exits, so there is no session to move into a worktree.
     let worktree_request = if cli.setup {
         None
@@ -124,6 +172,8 @@ async fn run() -> Result<std::process::ExitCode> {
     };
     let interactive_agent_config =
         cli.interactive_agent_config(Some(cwd_text.clone()), worktree_request)?;
+    // After argument errors; before anything spawns or draws.
+    terminal::require_interactive_terminal();
 
     let cached_startup_config = utils::startup_cache::StartupConfig::load();
     let show_unready_config = cached_startup_config.is_none();
@@ -131,9 +181,9 @@ async fn run() -> Result<std::process::ExitCode> {
     let resolved_auto = vibe_rs::theme_detection::resolve_auto_theme();
     ui::theme::prepare_active(&startup_config.theme, resolved_auto);
 
-    // Python prepares the worktree before the TUI exists (`_enter_worktree`):
-    // parity means waiting the server's preparation out right here, with the
-    // same two stderr lines, and letting the terminal start only once the
+    // The worktree is prepared before the TUI exists: wait the server's
+    // preparation out right here, with its two stderr lines, and let the
+    // terminal start only once the
     // session has moved. The preparation itself stays server-side (ADR 0016);
     // this only sequences the startup around it.
     let worktree_run = interactive_agent_config.worktree.is_some();
@@ -158,8 +208,8 @@ async fn run() -> Result<std::process::ExitCode> {
         {
             Ok(start) => Some(start),
             Err(error) => {
-                // Python's top level turns this window's KeyboardInterrupt
-                // into a dim `Bye!` and exit 0; the child is dropped (and its
+                // An interrupt in this window becomes a dim `Bye!` and
+                // exit 0; the child is dropped (and its
                 // process group killed) inside `early_start`.
                 if error
                     .downcast_ref::<worktree_gate::PrepInterrupt>()
@@ -174,9 +224,8 @@ async fn run() -> Result<std::process::ExitCode> {
         },
         None => None,
     };
-    // Python `entrypoint.py` enters the worktree before `run_cli` shows the
-    // startup update prompt; parity means the dialog runs after the settle
-    // and before the terminal is taken over. A non-worktree run settles
+    // The startup update prompt runs after the worktree settle and before
+    // the terminal is taken over. A non-worktree run settles
     // nothing, so its prompt timing is unchanged.
     update_flow::maybe_run_startup_update_prompt(
         &startup_config,
@@ -188,11 +237,12 @@ async fn run() -> Result<std::process::ExitCode> {
         Some(signals) => signals,
         None => vibe_rs::server::signal::install().context("install signal handlers")?,
     };
+    vibe_rs::mouse::pixels::probe();
     let (mut terminal, mut terminal_guard) = terminal::init()?;
     timings.record("terminal_ready");
 
-    // Python chdirs the whole process into the worktree, so its `@`
-    // completions follow the move; the gate's settle is that same moment, and
+    // `@` completions follow the move into the worktree: the gate's settle
+    // is that moment, and
     // the index watches the worktree from the first frame. A settle that
     // never came (deadline, old server) keeps watching the startup cwd.
     let index_root = early
@@ -207,16 +257,17 @@ async fn run() -> Result<std::process::ExitCode> {
     let (files, file_changes) = utils::file_index::FileIndex::start(index_root);
     let cached_tokens = (0, startup_config.context_window);
     let mut app = App::default();
-    // Hold the positional prompt until startup converges (Python `_initial_prompt`).
-    // Python falls back to piped stdin: `initial_prompt or stdin_prompt`, where an
-    // empty positional (`vibe ""`) is falsy and yields to the piped prompt.
+    app.terminal_notifier
+        .enable_program_reports(vibe_rs::program_status::supported());
+    // Hold the positional prompt until startup converges. An empty positional
+    // (`vibe ""`) yields to the piped prompt.
     app.session.initial_prompt = cli.interactive_initial_prompt(stdin_prompt);
     app.session.teleport_on_start = cli.teleport;
-    // Python keeps one `_session_options` for the process and resends it on every resume.
+    // One agent config for the process, resent on every resume.
     app.session.agent_config = interactive_agent_config.clone();
     app.chat_input.history = utils::history_manager::HistoryManager::load();
     let history_flush = app.chat_input.history.flush_handle();
-    // `--setup` runs workspace-less like Python's (whose wizard exits before
+    // `--setup` runs workspace-less (the wizard exits before
     // any server session exists), and no session is ever opened, so the
     // trust gate never fires for it either.
     app.session.cwd = Some(cwd_text.clone());
@@ -228,13 +279,14 @@ async fn run() -> Result<std::process::ExitCode> {
     app.session.startup_config = startup_config;
     app.session.tokens = cached_tokens;
     app.subagents.main_tokens = cached_tokens;
-    // Python `require_api_key_or_onboarding` meets ADR 0016's draw-first
+    // The API key requirement meets ADR 0016's draw-first
     // rule: a keyed launch goes straight to the session handshake, and only
     // a keyless one asks the pre-session `setup/status` — whose missing-key
     // answer opens the wizard on the SAME child (one child per round,
     // server-owned key persistence). A worktree run's verdict sits in the
     // replay buffer; the wizard round it opens spawns its own child.
     let (mut input, input_reader) = vibe_rs::terminal_events::spawn();
+    app.terminal_notifier.program_status_detection = input_reader.program_status.clone();
     // `--setup` never renders the chat frame: the wizard owns the first
     // paint and holds every choice behind the overlapped boot's welcome
     // gate, then prints and exits without a session, so the run ends here.
@@ -295,8 +347,8 @@ async fn run() -> Result<std::process::ExitCode> {
                 )
             }
             None if !keyed => {
-                // Python `require_api_key_or_onboarding`: a keyless run's
-                // wizard paints instantly (Python's needs no server); the
+                // A keyless run's wizard paints instantly (it needs no
+                // server); the
                 // boot overlaps behind the welcome screen, and the round
                 // hands the same booted child back for the handshake's
                 // retry on it (below).
@@ -448,10 +500,10 @@ async fn run() -> Result<std::process::ExitCode> {
     }
     // A fatal error takes the red `Error:` path in `main` with exit code 1;
     // a clean quit already printed the resume block inside the event loop,
-    // before the worktree cleanup, matching Python's exit ordering.
+    // before the worktree cleanup.
     result?;
-    // Python prints the resume block in the `try` and flushes in the
-    // `finally`, so the summary is never delayed by the bounded flush.
+    // Flush after the resume block, so the summary is never delayed by the
+    // bounded flush.
     observability::sentry::flush();
     Ok(std::process::ExitCode::SUCCESS)
 }

@@ -1,7 +1,7 @@
 //! Test doubles for `Client`, with no app-server behind them.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -59,6 +59,9 @@ impl Client {
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             deny_callbacks: Arc::new(AtomicBool::new(false)),
             active_session: Arc::new(Mutex::new(None)),
+            replay_drained: AtomicU64::new(0),
+            unsent_telemetry: AtomicU64::new(0),
+            server_pid: AtomicU32::new(0),
         }
     }
 }

@@ -19,7 +19,6 @@ env = {
 handshake = {"callback/result": {"accepted": True}}
 capture_startup = False
 capture_steps = {1, 2}
-clipboard_clients = {"rust"}
 clipboard_contains = ("Bright violet machines",)
 
 _SENTENCE = "Bright violet machines hum quietly in the northern hall."
@@ -33,7 +32,7 @@ _QUESTIONS = [
     }
 ]
 
-_DRAG = "\x1b[<0;3;15M\x1b[<32;119;15M\x1b[<0;119;15m"
+_DRAG = "\x1b[<0;3;11M\x1b[<32;119;11M\x1b[<0;119;11m"
 
 timeline: Timeline = [
     "pick a color\r",

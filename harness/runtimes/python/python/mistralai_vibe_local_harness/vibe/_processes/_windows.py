@@ -20,6 +20,13 @@ from mistralai_vibe_local_harness.vibe._processes._backend import (
 )
 
 _POWERSHELL_SHELLS = ("pwsh.exe", "powershell.exe")
+# Windows PowerShell writes redirected output and decodes native command output
+# in the console's OEM code page, and pipes text to native commands as ASCII.
+# Callers decode output as UTF-8, so switch both directions before the command.
+_POWERSHELL_UTF8_PRELUDE = (
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+    "$OutputEncoding = [Console]::OutputEncoding; "
+)
 
 
 class WindowsTerminal:
@@ -140,6 +147,27 @@ class WindowsTerminalBackend:
                 return resolved
         raise TerminalBackendError("no PowerShell shell found")
 
+    def command_argv(self, shell: str, command: str, *, interactive: bool) -> list[str]:
+        """Return the argv that runs ``command`` once in ``shell``.
+
+        PowerShell bypasses the execution policy so ``.ps1`` command shims such as
+        ``npm.ps1`` run, and a non-interactive command fails on a prompt instead of
+        waiting for input that never comes.
+        """
+        if self.command_environment == "git_bash":
+            return [shell, "-c", command]
+        prompt_flags = [] if interactive else ["-NonInteractive"]
+        return [
+            shell,
+            "-NoLogo",
+            "-NoProfile",
+            *prompt_flags,
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            _POWERSHELL_UTF8_PRELUDE + command,
+        ]
+
     def start_terminal(
         self, *, shell: str | None, command: str, cwd: Path, env: dict[str, str]
     ) -> WindowsTerminal:
@@ -147,11 +175,7 @@ class WindowsTerminalBackend:
             raise TerminalBackendError("no shell was resolved")
         winpty = importlib.import_module("winpty")
         enums = importlib.import_module("winpty.enums")
-        argv = (
-            [shell, "-c", command]
-            if self.command_environment == "git_bash"
-            else [shell, "-NoLogo", "-NoProfile", "-Command", command]
-        )
+        argv = self.command_argv(shell, command, interactive=True)
         environment = "\0".join(f"{key}={value}" for key, value in env.items()) + "\0"
         for backend_name, backend_value in (
             ("ConPTY", enums.Backend.ConPTY),

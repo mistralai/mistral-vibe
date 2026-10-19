@@ -1,5 +1,5 @@
 //! The custom-domain screen: input handling, live validation, and the
-//! Mistral-default reset (Python `CustomDomainScreen`).
+//! Mistral-default reset.
 
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -18,8 +18,8 @@ pub(super) fn handle_custom_domain(state: &mut OnboardingState, key: KeyEvent) -
             state.screen = Screen::SignInTarget;
             None
         }
-        // Python moves focus between the two inputs with Textual's Tab,
-        // which wraps: the last input focuses the first again. Shift+Tab
+        // Tab moves focus between the two inputs and wraps: the last input
+        // focuses the first again. Shift+Tab
         // arrives as BackTab, so one arm covers both.
         KeyCode::Tab | KeyCode::BackTab => {
             state.custom_domain_focus = (state.custom_domain_focus + 1) % 2;
@@ -68,10 +68,9 @@ pub(super) fn handle_custom_domain(state: &mut OnboardingState, key: KeyEvent) -
     }
 }
 
-/// Reset the custom-domain inputs to the configured seeds (Python
-/// `CustomDomainScreen._reset_input`, run on every mount and resume): the
-/// domain, and only a distinct split-horizon API base. Python reads the
-/// launch snapshot here, so a domain the wizard configured and then backed
+/// Reset the custom-domain inputs to the configured seeds (on every mount and
+/// resume): the domain, and only a distinct split-horizon API base. This reads
+/// the launch snapshot, so a domain the wizard configured and then backed
 /// out of never pre-fills. Unconfigured fields reset to empty, both
 /// validations drop to `None` so a seeded screen shows no feedback and no
 /// colored borders, and focus returns to the domain.
@@ -90,7 +89,7 @@ pub(super) fn reset_custom_domain_inputs(state: &mut OnboardingState) {
 
 pub(super) fn validate_custom_domain_input(state: &mut OnboardingState) {
     // The edited (focused) input owns the feedback row; switching focus
-    // never re-renders it (Python's feedback is change-driven).
+    // never re-renders it (feedback is change-driven).
     state.custom_domain_feedback = state.custom_domain_focus;
     let value = state.custom_domain.value.trim().to_owned();
     state.custom_domain.validation = if value.is_empty() {
@@ -118,7 +117,7 @@ pub(super) fn validate_custom_domain_input(state: &mut OnboardingState) {
     };
 }
 
-/// Reset to the default Mistral domain (Python `apply_mistral_default_domain`):
+/// Reset to the default Mistral domain:
 /// the provider URLs, the rewrite flag, and the account/vibe bases — all
 /// rebuilt from the same defaults `default_provider()` uses, so the wizard
 /// and the config layer cannot drift.

@@ -1,4 +1,4 @@
-//! Resampling PCM reader feeding the output device (Python `_playback_generator`).
+//! Resampling PCM reader feeding the output device.
 
 use super::wav::Pcm;
 

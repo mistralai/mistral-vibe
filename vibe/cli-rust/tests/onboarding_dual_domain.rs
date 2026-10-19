@@ -90,7 +90,7 @@ fn enter_with_both_fields_derives_the_split_horizon_pair() {
     type_into(&mut state, &mock.api.url());
     let action = screens::handle_key(&mut state, enter());
 
-    // The Enter composition (Python `resolve_browser_auth_urls`): both
+    // The Enter composition: both
     // browser-auth URLs, the cross-origin rewrite flag, the account base
     // moved onto the API origin, and the flow handed to the sign-in screen.
     assert!(matches!(action, Some(Action::StartBrowserSignIn)));

@@ -50,11 +50,9 @@ async def test_a_sandboxed_session_reads_the_same_workspace_context_through_its_
     """
     # Prepare
     sandbox = RecordingSandbox(project)
-    host_process = HarnessProcess(
-        HarnessFilesManager(sources=("user", "project")), experimental_harness=True
-    )
+    host_process = HarnessProcess(HarnessFilesManager(sources=("user", "project")))
     monkeypatch.setenv("VIBE_ENABLE_BACKGROUND_PROCESSES", "true")
-    sandbox_process = HarnessProcess(experimental_harness=True, sandbox=sandbox)
+    sandbox_process = HarnessProcess(sandbox=sandbox)
 
     # Do
     host = (
@@ -106,10 +104,8 @@ async def test_a_sandboxed_session_in_a_subdirectory_reads_docs_up_to_its_worksp
     # Prepare
     monkeypatch.setattr(trusted_folders_manager, "find_trust_root", lambda _: project)
     sandbox = RecordingSandbox(project)
-    host_process = HarnessProcess(
-        HarnessFilesManager(sources=("user", "project")), experimental_harness=True
-    )
-    sandbox_process = HarnessProcess(experimental_harness=True, sandbox=sandbox)
+    host_process = HarnessProcess(HarnessFilesManager(sources=("user", "project")))
+    sandbox_process = HarnessProcess(sandbox=sandbox)
     subdirectory = str(project / "sub")
 
     # Do
@@ -145,9 +141,7 @@ async def test_a_sandboxed_session_without_git_says_so_like_the_host(
     # Prepare
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
-    process = HarnessProcess(
-        experimental_harness=True, sandbox=RecordingSandbox(tmp_path)
-    )
+    process = HarnessProcess(sandbox=RecordingSandbox(tmp_path))
 
     # Do
     derived = (await process.build_unified_session_context(SessionOptions())).derive(

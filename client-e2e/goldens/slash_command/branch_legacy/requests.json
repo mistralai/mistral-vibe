@@ -1,0 +1,34 @@
+[
+ {
+  "method": "session/fork",
+  "params": {
+   "attach": false,
+   "entryId": null,
+   "sourceSessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.slash_command_used",
+   "properties": {
+    "command": "branch",
+    "command_type": "builtin"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.session_branched",
+   "properties": {
+    "new_session_id": "22222222-0000-4000-8000-000000000002",
+    "source_session_id": "00000000-0000-4000-8000-000000000001"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

@@ -25,7 +25,7 @@ class DiskFilesystem:
     def read_bytes(self, path: str) -> bytes | None:
         try:
             return Path(path).read_bytes()
-        except (FileNotFoundError, NotADirectoryError):
+        except FileNotFoundError, NotADirectoryError:
             return None
 
     def write_bytes(self, path: str, data: bytes) -> None:

@@ -1,5 +1,5 @@
 //! Rewind bottom-app: a bordered box with the message preview, the numbered
-//! options of the current step, and a hint. Mirrors Python's `RewindApp`.
+//! options of the current step, and a hint.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -11,7 +11,7 @@ use crate::app::App;
 use crate::hints::{self, action, key, Hint};
 use crate::rewind::{options, Step};
 
-/// Preview characters kept in the title (Python `_title_text`).
+/// Preview characters kept in the title.
 const PREVIEW_LIMIT: usize = 80;
 const TITLE_PREFIX: &str = "Rewind to: ";
 
@@ -60,7 +60,7 @@ fn draw_box(f: &mut Frame, area: Rect, rows: &[Row]) {
     }
 }
 
-/// Every content row, in Textual compose order: title, gap, options, gap, hint.
+/// Every content row, in order: title, gap, options, gap, hint.
 fn rows(app: &App) -> Vec<Row> {
     let title = Style::default()
         .fg(theme::primary())
@@ -84,7 +84,7 @@ fn rows(app: &App) -> Vec<Row> {
         .collect();
     rows.push(Vec::new());
     for (index, label) in options(app).iter().enumerate() {
-        let style = if index == app.rewind.selected {
+        let style = if index == app.rewind.list.selected() {
             list_cursor::style()
         } else {
             Style::default().fg(theme::foreground())

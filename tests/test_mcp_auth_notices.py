@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock, Mock
 
 from acp.schema import AgentMessageChunk
 import pytest
@@ -16,8 +15,6 @@ from vibe.app_server.models import (
     MCPSourceSummary,
     MCPState,
 )
-from vibe.cli.textual_ui.app import VibeApp
-from vibe.cli.textual_ui.widgets.messages import UserCommandMessage
 
 
 def _public_mcp(
@@ -42,77 +39,6 @@ def _public_mcp(
         ),
         discovery_errors=errors or {},
     )
-
-
-@pytest.mark.asyncio
-async def test_tui_mcp_auth_notice_uses_status_for_uncached_oauth() -> None:
-    mount = AsyncMock()
-    app = cast(
-        VibeApp,
-        SimpleNamespace(
-            app_server=SimpleNamespace(
-                resources=SimpleNamespace(
-                    runtime=SimpleNamespace(mcp=_public_mcp("sentry"))
-                )
-            ),
-            _mount_and_scroll=mount,
-        ),
-    )
-
-    await VibeApp._show_mcp_auth_required_notice(app)
-
-    mount.assert_awaited_once()
-    args = mount.await_args
-    assert args is not None
-    message = args.args[0]
-    assert isinstance(message, UserCommandMessage)
-    assert "sentry" in message._content
-
-
-@pytest.mark.asyncio
-async def test_tui_mcp_auth_notice_skips_disabled_servers() -> None:
-    mount = AsyncMock()
-    app = cast(
-        VibeApp,
-        SimpleNamespace(
-            app_server=SimpleNamespace(
-                resources=SimpleNamespace(
-                    runtime=SimpleNamespace(mcp=_public_mcp("sentry", disabled=True))
-                )
-            ),
-            _mount_and_scroll=mount,
-        ),
-    )
-
-    await VibeApp._show_mcp_auth_required_notice(app)
-
-    mount.assert_not_awaited()
-
-
-def test_tui_mcp_discovery_failures_surface_errors() -> None:
-    notify = Mock()
-    app = cast(
-        VibeApp,
-        SimpleNamespace(
-            app_server=SimpleNamespace(
-                resources=SimpleNamespace(
-                    runtime=SimpleNamespace(
-                        mcp=_public_mcp(
-                            errors={"fail-http": "down", "broken": "no binary"}
-                        )
-                    )
-                )
-            ),
-            notify=notify,
-        ),
-    )
-
-    VibeApp._show_mcp_discovery_failures(app)
-
-    assert [call.args[0] for call in notify.call_args_list] == [
-        "MCP server 'broken' failed to connect: no binary",
-        "MCP server 'fail-http' failed to connect: down",
-    ]
 
 
 @pytest.mark.asyncio

@@ -18,8 +18,10 @@ handshake = {
     },
 }
 request_methods = {"telemetry/record"}
-screen_contains = {
-    "rust": ("Voice mode disabled.", "Voice mode: Off", "Narrator (experimental): Off")
-}
-screen_excludes = {"rust": ("Voice capture is not available",)}
+screen_contains = (
+    "Voice mode disabled.",
+    "Voice mode: Off",
+    "Narrator (experimental): Off",
+)
+screen_excludes = ("Voice capture is not available",)
 timeline: Timeline = ["/voice\r", "\rj ", "\x1b", "\x12", "/voice\r"]

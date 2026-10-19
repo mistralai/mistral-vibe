@@ -20,12 +20,7 @@ handshake = {"callback/result": {"accepted": True}}
 # released callback onward.
 capture_startup = False
 capture_steps = {1, 2, 3, 4, 5}
-screen_contains = {
-    "rust": ("SQLite Enterprise", "with WAL"),
-    "python": ("SQLite Enterprise",),
-}
-# Python's single-line `Input` keeps only the first pasted line.
-screen_excludes = {"python": ("with WAL",)}
+screen_contains = ("SQLite Enterprise", "with WAL")
 
 _DOWN = "\x1b[B"
 

@@ -22,14 +22,8 @@ pub(crate) struct PendingCompaction {
 
 #[derive(Clone, Debug, PartialEq)]
 enum CompactionContinuation {
-    InTurn {
-        turn_id: String,
-        iterations: u32,
-        context_keys: Vec<String>,
-    },
-    BetweenTurns {
-        trigger: CompactionTrigger,
-    },
+    InTurn { turn_id: String, iterations: u32 },
+    BetweenTurns { trigger: CompactionTrigger },
 }
 
 impl PendingCompaction {
@@ -37,7 +31,6 @@ impl PendingCompaction {
         compaction_id: String,
         turn_id: String,
         iterations: u32,
-        context_keys: Vec<String>,
         projection: CompactionProjection,
     ) -> Self {
         Self::from_parts(
@@ -45,7 +38,6 @@ impl PendingCompaction {
             CompactionContinuation::InTurn {
                 turn_id,
                 iterations,
-                context_keys,
             },
             projection,
         )
@@ -101,15 +93,9 @@ impl PendingCompaction {
             CompactionContinuation::InTurn {
                 turn_id,
                 iterations,
-                ..
             } => Some((turn_id, *iterations)),
             CompactionContinuation::BetweenTurns { .. } => None,
         }
-    }
-
-    /// Keys of the current pre-LLM hook result that the replacement leaves room for.
-    pub(crate) fn context_keys(&self) -> &[String] {
-        self.continuation.context_keys()
     }
 
     pub(crate) fn between_turns_trigger(&self) -> Option<CompactionTrigger> {
@@ -142,13 +128,6 @@ fn compaction_action_id(compaction_id: &str, projection_attempt: u32) -> String 
 }
 
 impl CompactionContinuation {
-    fn context_keys(&self) -> &[String] {
-        match self {
-            Self::InTurn { context_keys, .. } => context_keys,
-            Self::BetweenTurns { .. } => &[],
-        }
-    }
-
     fn into_resolution(self, outcome: Outcome) -> CompactionResolution {
         match self {
             Self::InTurn { .. } => CompactionResolution::ContinueTurn { outcome },
@@ -194,7 +173,6 @@ pub(crate) fn finish_compaction(
         context.messages(),
         pending.projection().messages(),
         &candidate,
-        pending.context_keys(),
         tools,
         replacement_budget,
     )?;
@@ -325,22 +303,15 @@ fn fail_compaction_attempt(
 }
 
 pub(crate) enum CompactionRequest<'a> {
-    Automatic {
-        turn_id: &'a str,
-        iterations: u32,
-        context_keys: &'a [String],
-    },
-    Manual {
-        extra_instructions: &'a str,
-    },
+    Automatic { turn_id: &'a str, iterations: u32 },
+    Manual { extra_instructions: &'a str },
 }
 
 impl<'a> CompactionRequest<'a> {
-    pub(crate) fn automatic(turn_id: &'a str, iterations: u32, context_keys: &'a [String]) -> Self {
+    pub(crate) fn automatic(turn_id: &'a str, iterations: u32) -> Self {
         Self::Automatic {
             turn_id,
             iterations,
-            context_keys,
         }
     }
 
@@ -362,12 +333,10 @@ pub(crate) fn start_compaction(
         CompactionRequest::Automatic {
             turn_id,
             iterations,
-            context_keys,
         } => (
             CompactionContinuation::InTurn {
                 turn_id: turn_id.to_string(),
                 iterations,
-                context_keys: context_keys.to_vec(),
             },
             "",
         ),
@@ -401,7 +370,6 @@ pub(crate) fn start_compaction(
     if !minimum_replacement_fits(
         context.messages(),
         replacement_system,
-        continuation.context_keys(),
         tools,
         budgets.replacement,
     )? {

@@ -7,7 +7,6 @@ from typing import final
 import anyio
 from pydantic import BaseModel, Field
 
-from vibe.core.checkpoints import FileSnapshot
 from vibe.core.scratchpad import is_scratchpad_display_path
 from vibe.core.tools.base import (
     BaseTool,
@@ -95,9 +94,6 @@ class WriteFile(
     def get_status_text(cls) -> str:
         return "Writing file"
 
-    def get_file_snapshot(self, args: WriteFileArgs) -> FileSnapshot | None:
-        return self.get_file_snapshot_for_path(args.file_path)
-
     def resolve_permission(self, args: WriteFileArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
             args.file_path,
@@ -113,7 +109,7 @@ class WriteFile(
     @final
     async def run(
         self, args: WriteFileArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | WriteFileResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | WriteFileResult]:
         file_path, content_bytes = self._prepare_and_validate_path(args)
 
         await self._write_file(
@@ -155,8 +151,10 @@ class WriteFile(
             if tool_io is not None and tool_io.supports_write:
                 await tool_io.write_text(file_path, args.content)
                 return
+            # Written as given: text mode would turn a copied CRLF into CR CR LF
+            # on Windows.
             async with await anyio.Path(file_path).open(
-                mode="x", encoding="utf-8"
+                mode="x", encoding="utf-8", newline=""
             ) as f:
                 await f.write(args.content)
         except FileExistsError as e:

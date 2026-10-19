@@ -44,6 +44,7 @@ pub struct UiChannels {
     voice: mpsc::Receiver<VoiceEvent>,
     subagents: mpsc::Receiver<crate::subagents::Event>,
     older_history: mpsc::Receiver<crate::older_history::Event>,
+    debug_console: mpsc::Receiver<crate::debug_console::Event>,
     telemetry: mpsc::Receiver<TelemetryEvent>,
 }
 
@@ -103,6 +104,9 @@ pub fn connect(app: &mut App) -> UiChannels {
     // Older history pages, one in flight, applied on the main thread.
     let (older_history_tx, older_history) = mpsc::channel::<crate::older_history::Event>(1);
     app.older_history.tx = Some(older_history_tx);
+    // Debug-console page and poll answers, applied on the main thread.
+    let (debug_console_tx, debug_console) = mpsc::channel::<crate::debug_console::Event>(8);
+    app.debug_console.tx = Some(debug_console_tx);
     // Analytics queued by the reducer, sent by the event loop.
     let (telemetry_tx, telemetry) = mpsc::channel::<TelemetryEvent>(TELEMETRY_CHANNEL_CAP);
     app.telemetry_tx = Some(telemetry_tx);
@@ -128,6 +132,7 @@ pub fn connect(app: &mut App) -> UiChannels {
         voice,
         subagents,
         older_history,
+        debug_console,
         telemetry,
     }
 }
@@ -164,6 +169,7 @@ impl UiChannels {
             voice: self.voice,
             subagents: self.subagents,
             older_history: self.older_history,
+            debug_console: self.debug_console,
             telemetry: self.telemetry,
             files,
         }

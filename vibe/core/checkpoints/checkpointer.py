@@ -97,6 +97,24 @@ class Checkpointer:
                 self._insert_local_before_mark(self._open.mark, path, projection, pre)
         self._open.mark.pre[path] = pre
 
+    def replace_open_pre_edit(self, path: str, pre: FileState) -> None:
+        """Refine a pre-edit state already recorded for the open turn.
+
+        The unified adapter's effect log reconstructs a first touch's pre-edit
+        state incrementally (see ``RewindFileSnapshots``): each newly observed
+        edit effect of the same turn can make the reconstruction exact, so the
+        provisional record is replaced. This is the same turn's own record,
+        so the between-turn manual-edit detection in ``record_pre_edit`` must
+        not run for it.
+        """
+        if self._open is None:
+            raise TurnStateError("replace_open_pre_edit requires an open turn")
+        if path not in self._open.mark.pre:
+            raise TurnStateError(
+                f"replace_open_pre_edit has no recorded pre for {path}"
+            )
+        self._open.mark.pre[path] = pre
+
     def _insert_local_before_mark(
         self, mark: _TurnMark, path: str, before: FileState, after: FileState
     ) -> None:
@@ -205,16 +223,29 @@ class Checkpointer:
 
     # -- Read model ------------------------------------------------------------
 
-    def view(self, current: dict[str, FileState] | None = None) -> History:
+    def view(
+        self,
+        current: dict[str, FileState] | None = None,
+        *,
+        carried_pre: dict[str, FileState] | None = None,
+    ) -> History:
         """A :class:`History` over the log for reads. While a turn is open, each
         drifted path in ``current`` is folded in as a provisional edit so the
         in-flight change renders before it is sealed.
+
+        ``carried_pre`` supplies turn-start states the recorder is holding back
+        (deferred until a write names its exact replaced text or the turn
+        seals): a path drifted since such a state — a shell command's write,
+        which records no file effect — folds in as a provisional edit of the
+        open turn.
         """
         if self._open is None or not current:
             return History(self._events)
         provisional: list[_Event] = []
         for i, (path, cur) in enumerate(current.items()):
             pre = self._open.mark.pre.get(path)
+            if pre is None and carried_pre is not None:
+                pre = carried_pre.get(path)
             if pre is None or pre == cur:
                 continue
             provisional.append(

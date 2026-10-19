@@ -19,7 +19,6 @@ env = {
 handshake = {"callback/result": {"accepted": True}}
 capture_startup = False
 capture_steps = {1, 2, 3}
-clipboard_clients = {"rust"}
 # The drag starts on the question title and ends on the first option's label,
 # so the copy crosses the prefix cells without ever including them.
 clipboard_contains = (
@@ -27,7 +26,7 @@ clipboard_contains = (
     "Solarized - Warm muted tones",
 )
 clipboard_excludes = ("1.", "›")
-screen_contains = {"rust": ("1. Solarized",)}
+screen_contains = ("1. Solarized",)
 
 _QUESTIONS = [
     {

@@ -9,7 +9,7 @@ use ratatui::Frame;
 use crate::setup::wizard::{OnboardingInput, ValidationState};
 use crate::ui::theme;
 
-/// The input-card border for a validation state (Python `.invalid`, `.warning`).
+/// The input-card border for a validation state.
 pub(super) fn validation_border(validation: &ValidationState) -> Color {
     match validation {
         ValidationState::Valid => theme::success(),
@@ -43,8 +43,8 @@ pub(super) fn draw_validation_feedback(
     }
 }
 
-/// A feedback message wraps to the panel's content width (Python's Textual
-/// labels wrap); the panel row grew to the wrapped line count for it.
+/// A feedback message wraps to the panel's content width; the panel row
+/// grew to the wrapped line count for it.
 fn draw_wrapped(
     f: &mut Frame,
     x: u16,
@@ -64,7 +64,7 @@ fn draw_wrapped(
 
 /// One labeled input card: a solid border, its title, the value or the
 /// placeholder, and the cursor when the card is focused. `secure` masks the
-/// value (Python `Input(password=True)`), so the caret covers a bullet.
+/// value, so the caret covers a bullet.
 pub(super) fn draw_input_card(
     f: &mut Frame,
     area: Rect,
@@ -76,8 +76,7 @@ pub(super) fn draw_input_card(
 ) {
     f.render_widget(Clear, area);
     // `Clear` resets cells to the terminal default; the wizard screen is
-    // theme-painted, so repaint the theme background like the other overlays
-    // (Python's Textual Input renders on `$background`).
+    // theme-painted, so repaint the theme background like the other overlays.
     f.buffer_mut()
         .set_style(area, Style::default().bg(theme::background()));
     let border = validation_border(&input.validation);

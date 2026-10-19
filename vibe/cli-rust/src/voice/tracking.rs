@@ -1,4 +1,4 @@
-//! Per-recording analytics bookkeeping (Python `VoiceManager._tracking`).
+//! Per-recording analytics bookkeeping.
 
 use std::collections::BTreeMap;
 use std::time::Instant;

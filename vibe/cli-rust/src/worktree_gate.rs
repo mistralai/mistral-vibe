@@ -1,8 +1,7 @@
-//! The pre-TUI worktree wait, Python `_enter_worktree` parity: the Python CLI
-//! prepares the worktree before the TUI exists, so the Rust client also holds
-//! the terminal back until the app-server has raised its worktree, with the
-//! same two stderr lines. The prep itself stays server-side (ADR 0016); the
-//! client only waits for the server's settle or failure signal.
+//! The pre-TUI worktree wait: the worktree is ready before the TUI exists, so
+//! the client holds the terminal back until the app-server has raised it,
+//! printing two stderr lines. The prep itself stays server-side (ADR 0016);
+//! the client only waits for the server's settle or failure signal.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,7 +23,7 @@ use crate::startup::{handshake, StartupEvent};
 /// whenever it does land.
 pub const SETTLE_WAIT: Duration = Duration::from_secs(120);
 
-/// Python `_enter_worktree`'s first line, printed before the TUI exists:
+/// The first worktree line, printed before the TUI exists:
 /// `Preparing worktree 'NAME'...`, or `Preparing worktree...` for the bare
 /// flag whose name the server picks.
 pub fn print_preparing(worktree: Option<&WorktreeInput>) {
@@ -32,15 +31,15 @@ pub fn print_preparing(worktree: Option<&WorktreeInput>) {
         return;
     };
     let requested = match worktree {
-        // Python `f" {args.worktree!r}"`: a plain filename reprs in single
-        // quotes; the validator upstream rejects anything exotic.
+        // The name prints in single quotes; the validator upstream rejects
+        // anything that would need escaping.
         WorktreeInput::Create { name, .. } => format!(" '{name}'"),
         _ => String::new(),
     };
     crate::worktree_exit::print_dim(&format!("Preparing worktree{requested}..."));
 }
 
-/// Python `_enter_worktree`'s second line: `Using worktree: <path>`, where
+/// The second worktree line: `Using worktree: <path>`, where
 /// the path is the session cwd the move produced (worktree root plus the
 /// subdirectory the CLI was launched from).
 pub fn print_using(cwd: &str) {
@@ -117,7 +116,7 @@ pub struct Settled {
 /// Absorb the notification stream until the requested worktree settles, fails,
 /// or the bound passes. The interactive pre-TUI wait replays `Waited` into the
 /// app and forwards the stream; the headless one feeds it to the turn pump.
-/// `Err` carries the message Python would print as `Error: ...` with exit 1.
+/// `Err` carries the message printed as `Error: ...` with exit 1.
 pub async fn absorb_until_settled(
     notifications: &mut mpsc::Receiver<Notification>,
     deadline: Instant,
@@ -165,8 +164,8 @@ pub struct EarlyWorktreeStart {
     pub startup: Vec<StartupEvent>,
 }
 
-/// The Ctrl-C-during-prep marker: `main` renders Python's top-level
-/// `KeyboardInterrupt` handling (dim `Bye!`, exit 0) instead of `Error:`.
+/// The Ctrl-C-during-prep marker: `main` prints a dim `Bye!` and exits 0
+/// instead of `Error:`.
 #[derive(Debug)]
 pub struct PrepInterrupt;
 
@@ -179,7 +178,7 @@ impl std::fmt::Display for PrepInterrupt {
 impl std::error::Error for PrepInterrupt {}
 
 /// Spawn the app-server pre-TUI and hold the terminal back until the worktree
-/// run's `Ready`, Python's `_enter_worktree` block: the handshake owns the
+/// run's `Ready`: the handshake owns the
 /// settle wait and the worktree-scoped resume, and its `Ready` is not sent
 /// until the worktree settled (or the settle bound passed) and the resume
 /// rebind finished, so the terminal starts on the finished state. A signal
@@ -236,8 +235,8 @@ pub async fn early_start(
         };
         match event {
             Some(StartupEvent::Failed(message)) => {
-                // Python prints `Error: {message}` on stdout and exits 1; the
-                // caller's Err path does exactly that, dropping the child.
+                // The caller's Err path prints `Error: {message}` on stdout and
+                // exits 1, dropping the child.
                 return Err(anyhow::Error::msg(message));
             }
             Some(StartupEvent::Ready(ready)) => {
@@ -261,7 +260,7 @@ pub async fn early_start(
                     break;
                 }
                 // A config error or any other non-recoverable end: surface
-                // the message and exit like Python (`Error: ...`, exit 1).
+                // the message and exit (`Error: ...`, exit 1).
                 if let Some(message) = startup.iter().find_map(|e| match e {
                     StartupEvent::ConfigError(m) => Some(m),
                     _ => None,

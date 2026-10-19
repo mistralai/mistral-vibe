@@ -1,4 +1,4 @@
-//! Connector auth bottom-app state (Python `ConnectorAuthApp`).
+//! Connector auth bottom-app state.
 
 mod rows;
 
@@ -14,7 +14,7 @@ use crate::server::{method, Client};
 
 pub use rows::{detail, help_text, rows};
 
-/// Seconds the copy toast stays up (Python `copy_text_to_clipboard` timeout).
+/// Seconds the copy toast stays up.
 const COPY_TOAST_SECS: u64 = 2;
 /// Native-copy hint appended when the clipboard write is unverified.
 const NATIVE_COPY_HINT: &str = "if paste fails, hold Shift (Option in iTerm2, Fn in Terminal.app) \
@@ -35,7 +35,7 @@ pub enum Event {
     },
 }
 
-/// The three selectable options, in Python's order.
+/// The three selectable options, in display order.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum OptionId {
     Open,
@@ -77,7 +77,7 @@ pub fn open(app: &mut App, client: &Arc<Client>, connector_name: String) {
     fetch_auth_url(app, client);
 }
 
-/// Esc, and the refresh that discovered tools (Python `ConnectorAuthClosed`).
+/// Close the app: Esc, and the refresh that discovered tools.
 pub fn close(app: &mut App, client: &Arc<Client>, refreshed: bool) {
     let connector_name = if refreshed {
         app.connector_auth.connector_name.clone()
@@ -86,8 +86,8 @@ pub fn close(app: &mut App, client: &Arc<Client>, refreshed: bool) {
     };
     app.connector_auth.open = false;
     app.connector_auth.generation += 1;
-    // Python only refreshes the banner here, then re-opens the browser; the
-    // connector was already re-discovered by `connectors/refresh`.
+    // Only re-open the browser here: the connector was already re-discovered
+    // by `connectors/refresh`.
     crate::mcp::reopen(app, client, false, connector_name);
 }
 
@@ -115,7 +115,7 @@ fn fetch_auth_url(app: &mut App, client: &Arc<Client>) {
     });
 }
 
-/// `R`: re-discover the connector's tools (Python `action_refresh`).
+/// `R`: re-discover the connector's tools.
 pub fn refresh(app: &mut App, client: &Arc<Client>) {
     app.connector_auth.status_message = Some("Refreshing connector...".to_owned());
     let generation = app.connector_auth.generation;
@@ -159,7 +159,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             Event::AuthUrl { url, .. } => {
                 app.connector_auth.auth_url = url;
                 app.connector_auth.fetched = true;
-                app.connector_auth.selected = 0;
+                app.connector_auth.list.select(0);
             }
             Event::Refreshed {
                 tool_count,
@@ -191,10 +191,10 @@ fn on_connector_refreshed(app: &mut App, client: &Arc<Client>, tool_count: u64) 
 /// Move the highlight, wrapping at the ends.
 pub fn navigate(app: &mut App, down: bool) {
     let count = rows(app).iter().filter(|row| row.selectable()).count();
-    app.connector_auth.selected = crate::list_nav::wrap(app.connector_auth.selected, count, down);
+    app.connector_auth.list.step(down, count, true, |_| true);
 }
 
-/// Enter on the highlighted option (Python `on_option_list_option_selected`).
+/// Enter on the highlighted option.
 pub fn select(app: &mut App) {
     match selected_id(app) {
         Some(OptionId::Open) => open_browser(app),
@@ -204,39 +204,6 @@ pub fn select(app: &mut App) {
     }
 }
 
-/// Mouse press: highlight the option under the cursor (Textual `OptionList`).
-pub fn press(app: &mut App, at: (u16, u16)) {
-    if let Some(index) = action_at(app, at) {
-        app.connector_auth.selected = index;
-    }
-}
-
-/// Mouse release: a click on the highlighted option activates it, like Enter.
-pub fn release(app: &mut App, at: (u16, u16)) {
-    if action_at(app, at) == Some(app.connector_auth.selected) {
-        select(app);
-    }
-}
-
-/// The action option under a screen cell, from the last render's geometry.
-fn action_at(app: &App, at: (u16, u16)) -> Option<usize> {
-    let area = app.connector_auth.list_area;
-    let inside = at.0 >= area.x && at.0 < area.right() && at.1 >= area.y && at.1 < area.bottom();
-    if !inside {
-        return None;
-    }
-    let line = (at.1 - area.y) as usize;
-    let rows = rows(app);
-    if !rows.get(line).is_some_and(Row::selectable) {
-        return None;
-    }
-    rows.iter()
-        .take(line + 1)
-        .filter(|row| row.selectable())
-        .count()
-        .checked_sub(1)
-}
-
 fn selected_id(app: &App) -> Option<OptionId> {
     rows(app)
         .into_iter()
@@ -244,7 +211,7 @@ fn selected_id(app: &App) -> Option<OptionId> {
             Row::Action { id, .. } => Some(id),
             _ => None,
         })
-        .nth(app.connector_auth.selected)
+        .nth(app.connector_auth.list.selected())
 }
 
 fn open_browser(app: &mut App) {

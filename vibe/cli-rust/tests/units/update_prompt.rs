@@ -71,7 +71,7 @@ fn navigation_is_ignored_while_updating() {
 }
 
 #[test]
-fn key_mapping_mirrors_the_python_bindings() {
+fn key_mapping_covers_the_dialog_bindings() {
     let mut state = dialog(UpdatePromptMode::Startup);
     // Left/right move.
     assert_eq!(

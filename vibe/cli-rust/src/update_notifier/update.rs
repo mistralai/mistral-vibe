@@ -1,4 +1,4 @@
-//! The update use-case (Python `update_notifier/update.py`).
+//! The update use-case: check, cache, prompt state, and the upgrade run.
 
 use std::process::Stdio;
 
@@ -11,36 +11,35 @@ use super::gateway::{
 };
 use super::version::parse_version;
 
-/// Python `UPDATE_CACHE_TTL_SECONDS`: how long a stored check stays fresh.
+/// How long a stored check stays fresh.
 pub const UPDATE_CACHE_TTL_SECONDS: i64 = 24 * 60 * 60;
 
-/// Python `UPDATE_COMMANDS`, run in order by `do_update`.
+/// The upgrade commands, run in order by `do_update`.
 const UPDATE_COMMANDS: [&str; 2] = ["uv tool upgrade mistral-vibe", "brew upgrade mistral-vibe"];
 
 /// The package the evidence words must name, so another line of the captured
 /// output cannot pose as an upgrade.
 const PROJECT_PACKAGE: &str = "mistral-vibe";
 
-/// Python `UpdateAvailability`.
+/// A newer version the gateway or the cache reports.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateAvailability {
     pub latest_version: String,
     pub should_notify: bool,
 }
 
-/// Python `UpdateError`: a failed check with its user-facing message. The
-/// update cache's write failures are never surfaced — Python's
-/// `FileSystemCacheStore.write_section` swallows the write's `OSError`, so
-/// a read-only or malformed `cache.toml` degrades to "no cache" on both
-/// clients instead of failing the check.
+/// A failed check with its user-facing message. The update cache's write
+/// failures are never surfaced: the cache store swallows the write's error,
+/// so a read-only or malformed `cache.toml` degrades to "no cache" instead
+/// of failing the check.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateError {
     pub message: String,
 }
 
 /// One update command's run: exit status plus the captured stdout/stderr,
-/// relayed to the user after the dialog (Python discards the output, so its
-/// "was updated" line can claim an upgrade a no-op exit code never performed).
+/// relayed to the user after the dialog (so a "was updated" line never claims
+/// an upgrade a no-op exit code never performed).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateCommandOutcome {
     pub command: String,
@@ -48,7 +47,7 @@ pub struct UpdateCommandOutcome {
     pub output: String,
 }
 
-/// Python `_describe_gateway_error`.
+/// The user-facing message for a gateway failure.
 fn describe_gateway_error(error: &UpdateGatewayError) -> String {
     error
         .user_message
@@ -56,12 +55,12 @@ fn describe_gateway_error(error: &UpdateGatewayError) -> String {
         .unwrap_or_else(|| default_gateway_message(error.cause).to_owned())
 }
 
-/// Python `_is_cache_fresh`.
+/// Whether the stored check is younger than the TTL.
 fn is_cache_fresh(cache: &UpdateCache, now: i64) -> bool {
     cache.stored_at_timestamp > now - UPDATE_CACHE_TTL_SECONDS
 }
 
-/// Python `_get_cached_update_if_any`: a fresh cached newer version, without
+/// A fresh cached newer version, without
 /// re-notifying. Callers have already checked the entry's manager against
 /// their own (`entry_source_trusted`), so an answer another install's check
 /// wrote never reaches this.
@@ -90,21 +89,20 @@ pub fn entry_source_trusted(entry_source: Option<&str>, source: UpdateSource) ->
 
 /// The manager whose answer this entry is, when the tag still belongs to it:
 /// `stored_at_timestamp` is rewritten together with `latest_version` by every
-/// writer, and a writer that does not know the tag (Python's key-merge
-/// write) voids the pairing rather than let a stale tag speak for its own
-/// answer. An unpaired tag reads as a legacy entry.
+/// writer, and a writer that does not know the tag (an older version's
+/// key-merge write) voids the pairing rather than let a stale tag speak for
+/// its own answer. An unpaired tag reads as a legacy entry.
 pub fn entry_answer_source(cache: &UpdateCache) -> Option<&str> {
     (cache.source_stored_at == Some(cache.stored_at_timestamp))
         .then_some(cache.source.as_deref())
         .flatten()
 }
 
-/// Python `_write_update_cache`: read-modify-write that keeps the seen and
-/// dismissed fields. Divergence: the entry is stamped with the manager that
-/// performed the check, replacing whatever install wrote the previous one.
-/// A write that cannot persist is logged, never surfaced: Python's
-/// `FileSystemCacheStore.write_section` swallows the write's `OSError`, so
-/// the check's answer survives a read-only or malformed `cache.toml`.
+/// Read-modify-write that keeps the seen and dismissed fields. The entry is
+/// stamped with the manager that performed the check, replacing whatever
+/// install wrote the previous one. A write that cannot persist is logged,
+/// never surfaced, so the check's answer survives a read-only or malformed
+/// `cache.toml`.
 fn write_update_cache<R: UpdateCacheRepository>(
     repository: &R,
     version: &str,
@@ -129,7 +127,7 @@ fn write_update_cache<R: UpdateCacheRepository>(
     }
 }
 
-/// Python `get_update_if_available`. A non-forced check answers from a fresh
+/// A non-forced check answers from a fresh
 /// cache without contacting the gateway; every contacted outcome rewrites the
 /// cache, and a write that cannot persist only costs the caching, not the
 /// answer.
@@ -186,7 +184,7 @@ pub async fn get_update_if_available<G: UpdateGateway, R: UpdateCacheRepository>
     }))
 }
 
-/// Python `get_pending_update_from_cache`: the cached newer version the user
+/// The cached newer version the user
 /// has not dismissed yet, with the manager that wrote it. Callers gate the
 /// answer on `entry_source_trusted` with their own install's manager — the
 /// startup prompt defers that check until a pending update exists at all, so
@@ -248,9 +246,8 @@ fn revision_base(version: &str) -> Option<&str> {
     revision.bytes().all(|b| b.is_ascii_digit()).then_some(base)
 }
 
-/// Python `mark_update_as_dismissed`: a no-op without a stored cache. Python
-/// lets the write's `OSError` raise into the caller, where `_show_update_prompt`
-/// logs it; this is the only production caller, so the log lives here.
+/// A no-op without a stored cache. A write that cannot persist is logged
+/// here, since this is the only production caller.
 pub fn mark_update_as_dismissed<R: UpdateCacheRepository>(repository: &R, version: &str) {
     if let Err(err) = repository.modify(&mut |cache| {
         cache.map(|cache| UpdateCache {
@@ -262,10 +259,9 @@ pub fn mark_update_as_dismissed<R: UpdateCacheRepository>(repository: &R, versio
     }
 }
 
-/// Python `do_update`: run each update command through the shell, stdin
-/// detached and output captured for the evidence match and the result line.
-/// A shell that cannot spawn is logged and skipped rather than aborting the
-/// loop, unlike Python's `create_subprocess_shell`, which raises. Once
+/// Run each update command through the shell, stdin detached and output
+/// captured for the evidence match and the result line. A shell that cannot
+/// spawn is logged and skipped rather than aborting the loop. Once
 /// `terminate` is set, the running command is asked to stop gently and the
 /// remaining ones are skipped.
 pub async fn do_update(
@@ -436,8 +432,8 @@ pub fn plain_output_env(command: &mut Command) -> &mut Command {
 /// One `sh -c` (or `cmd /C` on Windows) run with a detached stdin and its
 /// stdout/stderr captured for the post-dialog relay. The pipes are drained
 /// concurrently so a chatty manager cannot fill them and deadlock the wait.
-/// `kill_on_drop` mirrors Python's CancelledError handling: abandoning the
-/// wait kills the child instead of orphaning it. `HOMEBREW_NO_AUTO_UPDATE`
+/// `kill_on_drop` makes abandoning the
+/// wait kill the child instead of orphaning it. `HOMEBREW_NO_AUTO_UPDATE`
 /// keeps brew's tap auto-update out of the dialog: it costs seconds of wait
 /// and its `Updated N taps` line is not evidence of an upgrade. When
 /// `terminate` is set mid-run, the child is asked to stop gently first (see
@@ -589,14 +585,14 @@ async fn read_pipe<P: tokio::io::AsyncRead + Unpin>(
 const TERMINATED_PIPE_DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How long a terminated command has to exit on its own before the hard
-/// kill. Python `_terminate` waits 2 seconds.
+/// kill.
 const TERMINATE_GRACE_SECONDS: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Python `_terminate`: a SIGKILLed package manager can leave the tool
+/// A SIGKILLed package manager can leave the tool
 /// environment half-installed, so the child is asked to stop gently first —
 /// SIGTERM on Unix, where uv and brew shut down cleanly — and the hard kill
-/// only follows once the grace window runs out. On Windows Python's
-/// `terminate()` is TerminateProcess, so the kill is immediate there.
+/// only follows once the grace window runs out. On Windows the kill is
+/// immediate (TerminateProcess).
 async fn terminate_child(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     {

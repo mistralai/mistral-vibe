@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
-
-from pydantic import JsonValue
 
 from vibe.app_server._config_paths import ACTIVE_MODEL_PATH, model_thinking_path
 from vibe.app_server._config_write import config_write_ops_to_patches
@@ -14,14 +11,6 @@ from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.patch import AddOperationPatch, RemoveOperationPatch
 from vibe.core.config.vibe_schema import VibeConfigSchema
-
-
-def stored_session_active_model(config: Mapping[str, JsonValue] | None) -> str | None:
-    """Return a concrete model alias from a session config snapshot."""
-    if config is None:
-        return None
-    active_model = config.get("active_model")
-    return active_model if isinstance(active_model, str) and active_model else None
 
 
 def active_model_override_write_requested(ops: Sequence[ConfigWriteOpWire]) -> bool:
@@ -153,9 +142,10 @@ async def set_session_reasoning_effort_override(
 ) -> list[BaseException]:
     """Scope the active model's level to the session.
 
-    Through the same translation a ``config/write`` uses, so a model that no
-    durable layer declares is materialized with its identity fields rather than
-    left as an entry holding one field, which is not a valid model on its own.
+    Through the same translation a ``config/write`` uses: a model that no
+    durable layer declares is materialized with its identity fields, except
+    one the catalog or GrowthBook layer defines, which keeps a settings-only
+    entry.
     """
     alias = orchestrator.config.get_active_model().alias
     if not model_thinking_is_session_writable(orchestrator, alias):
@@ -171,13 +161,6 @@ async def set_session_reasoning_effort_override(
     operations = config_write_ops_to_patches(
         orchestrator.config,
         ops,
-        durable_model_aliases=await orchestrator.durable_model_aliases(),
+        sparse_override_model_aliases=await orchestrator.sparse_override_model_aliases(),
     )
     return await orchestrator.apply_patch(operations, reason=reason)
-
-
-def config_active_model(metadata: Mapping[str, Any]) -> str | None:
-    raw_config = metadata.get("config")
-    if not isinstance(raw_config, dict):
-        return None
-    return stored_session_active_model(raw_config)

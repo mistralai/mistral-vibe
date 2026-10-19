@@ -37,6 +37,14 @@ def _parse_stop_info(reason: str | None, raw: Any) -> StopInfo | None:
     return StopInfo.model_validate({"reason": reason, **details})
 
 
+def _text_blocks(text: str | None) -> list[dict[str, Any]]:
+    # The Messages API rejects a text block holding only whitespace with HTTP
+    # 400, and a history that contains one fails every later request.
+    if text is None or not text.strip():
+        return []
+    return [{"type": "text", "text": text}]
+
+
 REASONING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 # With thinking on, the Messages API refuses a lower ``top_p`` than this.
 THINKING_MIN_TOP_P = 0.95
@@ -73,7 +81,8 @@ class AnthropicMapper:
                         )
                     converted.append({"role": "user", "content": user_content or ""})
                 case Role.assistant:
-                    converted.append(self._convert_assistant_message(msg))
+                    if assistant := self._convert_assistant_message(msg):
+                        converted.append(assistant)
                 case Role.tool:
                     self._append_tool_result(converted, msg)
 
@@ -82,18 +91,27 @@ class AnthropicMapper:
     def _sanitize_tool_call_id(self, tool_id: str | None) -> str:
         return re.sub(r"[^a-zA-Z0-9_-]", "_", tool_id or "")
 
-    def _convert_assistant_message(self, msg: LLMMessage) -> dict[str, Any]:
+    def _convert_assistant_message(self, msg: LLMMessage) -> dict[str, Any] | None:
+        """Convert an assistant message, or return ``None`` when nothing is left to send.
+
+        A reply without output still occupies a turn in the history. The API
+        rejects it as empty content, and the consecutive user messages left when
+        it is omitted are accepted as one user turn. Only assistant messages are
+        omitted: dropping a user message could end the request on an assistant
+        message, which the API treats as a prefill, or make two replies adjacent.
+        """
         content: list[dict[str, Any]] = [
             block
             for block in msg.reasoning_payloads or []
             if block.get("type") in REASONING_BLOCK_TYPES
         ]
-        if msg.content:
-            content.append({"type": "text", "text": msg.content})
+        content.extend(_text_blocks(msg.content))
         if msg.tool_calls:
             for tc in msg.tool_calls:
                 content.append(self._convert_tool_call(tc))
-        return {"role": "assistant", "content": content if content else ""}
+        if not content:
+            return None
+        return {"role": "assistant", "content": content}
 
     def _convert_tool_call(self, tc: ToolCall) -> dict[str, Any]:
         # Redundant with ``tool_call_wire_arguments`` on the replay path, but kept: a

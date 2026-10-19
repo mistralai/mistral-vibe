@@ -7,7 +7,7 @@ use crate::app::App;
 use crate::hints::{self, action, key};
 use crate::question_app::{current_question, is_other_selected, is_submit_selected};
 
-/// `  1. ` / `  1. [x] ` (Python `_format_option_prefix`); the cursor is the row's bar.
+/// `  1. ` / `  1. [x] `; the cursor is the row's bar.
 pub(super) fn option_prefix(index: usize, multi: bool, selected: bool) -> String {
     let number = index + 1;
     if multi {

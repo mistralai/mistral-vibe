@@ -65,7 +65,7 @@ fn reopen_racing_an_open_browser_shows_the_list_instead_of_another_login() {
     assert!(!app.mcp_oauth.open);
     assert!(app.mcp.open);
     assert_eq!(app.mcp.viewing_name, None);
-    assert!(rows::awaits_auth(&app.mcp.state.sources[0]));
+    assert!(rows::awaits_auth(&app.mcp.state, &app.mcp.state.sources[0]));
 }
 
 #[test]

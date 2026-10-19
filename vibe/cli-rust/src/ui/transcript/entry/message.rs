@@ -66,6 +66,7 @@ pub(super) fn render(
             &mut lines,
             &message_text(message),
             entry.entry.in_progress(),
+            false,
             pulse_frame,
         ),
         _ => {
@@ -141,7 +142,7 @@ pub(super) fn push_command_result(
     }
 }
 
-/// Python `.agent-statistics`: emphasis is secondary text, muted instead of italic.
+/// Statistics text: emphasis is secondary text, muted instead of italic.
 fn mute_emphasis(line: &mut Line<'static>) {
     for span in &mut line.spans {
         if span.style.add_modifier.contains(Modifier::ITALIC) {
@@ -155,7 +156,7 @@ fn mute_emphasis(line: &mut Line<'static>) {
 
 fn push_command_error(lines: &mut LinkedLines, text: &str, width: u16) {
     let style = theme::text(theme::error()).add_modifier(Modifier::BOLD);
-    // Python `ErrorMessage.compose`: sanitize, prefix, wrap the whole content.
+    // Sanitize, prefix, wrap the whole content.
     let content = format!("Error: {}", clean::clean_output(text));
     let rows = fold::wrap_hard(&content, inset_body_width(width) as usize);
     let last = rows.len().saturating_sub(1);
@@ -167,9 +168,9 @@ fn push_command_error(lines: &mut LinkedLines, text: &str, width: u16) {
     }
 }
 
-/// Python `UserMessage(severity=...)`: a heavy left border in the severity
-/// color, the content colored the same, one blank row above (the wrapper's
-/// `margin-top: 1`), no prompt char and no separator.
+/// A user message with a severity: a heavy left border in the severity color,
+/// the content colored the same, one blank row above, no prompt char and no
+/// separator.
 fn push_subagent_severity(
     lines: &mut LinkedLines,
     text: &str,

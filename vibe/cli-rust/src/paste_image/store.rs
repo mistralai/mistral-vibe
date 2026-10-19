@@ -1,4 +1,4 @@
-//! Python-compatible storage for pasted clipboard images.
+//! Storage for pasted clipboard images.
 
 use std::fs;
 use std::io;
@@ -10,7 +10,7 @@ use crate::utils::datetime;
 const PASTED_IMAGES_DIR: &str = "vibe-pasted-images";
 const MAX_SAME_SECOND_COLLISIONS: usize = 1000;
 
-/// Write `$TMPDIR/vibe-pasted-images/clipboard-<local timestamp>.png`, like Python.
+/// Write `$TMPDIR/vibe-pasted-images/clipboard-<local timestamp>.png`.
 pub fn write_clipboard_image(data: &[u8]) -> io::Result<PathBuf> {
     let dir = std::env::temp_dir().join(PASTED_IMAGES_DIR);
     fs::create_dir_all(&dir)?;
@@ -19,7 +19,7 @@ pub fn write_clipboard_image(data: &[u8]) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// First free `clipboard-<timestamp>[-N].png`; Python falls back to the base name.
+/// First free `clipboard-<timestamp>[-N].png`, else the base name.
 pub fn clipboard_image_path(
     dir: &Path,
     timestamp: &str,

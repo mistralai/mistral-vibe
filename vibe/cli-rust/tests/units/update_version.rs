@@ -1,4 +1,4 @@
-//! Version parsing and ordering parity with Python's gateway and `_parse_version`.
+//! PEP 440 version parsing and ordering for the update gateway.
 
 use vibe_rs::update_notifier::pep440::parse_pep440_version;
 use vibe_rs::update_notifier::version::parse_version;
@@ -26,9 +26,8 @@ fn missing_trailing_segments_pad_with_zero() {
     assert!(parse_version("2.26").unwrap() > parse_version("2.25.9").unwrap());
 }
 
-/// Python `test_replaces_hyphens_with_plus_signs_in_latest_version_to_conform_with_PEP_440`:
-/// the use-case's `-`-to-`+` hack keeps `1.6.1-jetbrains` parsable — and, like
-/// Python, the resulting local version outranks the bare release.
+/// The `-`-to-`+` rewrite keeps `1.6.1-jetbrains` parsable, and the resulting
+/// local version outranks the bare release.
 #[test]
 fn replaces_hyphens_with_plus_signs_in_latest_version_to_conform_with_pep_440() {
     assert!(parse_version("1.6.1-jetbrains").unwrap() > parse_version("1.6.1").unwrap());
@@ -38,7 +37,7 @@ fn replaces_hyphens_with_plus_signs_in_latest_version_to_conform_with_pep_440() 
     assert!(parse_version("2.25.6-rc1").unwrap() < parse_version("2.26.0").unwrap());
 }
 
-/// Python `packaging.Version`: explicit build metadata is a local version,
+/// `packaging.Version`: explicit build metadata is a local version,
 /// which outranks the bare release instead of being ignored.
 #[test]
 fn explicit_build_metadata_sorts_above_the_release() {
@@ -70,7 +69,7 @@ fn canonical_str_joins_segments_with_dots() {
     assert_eq!(parse_version("2.0.0").unwrap().as_str(), "2.0.0");
 }
 
-/// Python `packaging.Version`: a prerelease sorts below its release.
+/// `packaging.Version`: a prerelease sorts below its release.
 #[test]
 fn prereleases_sort_below_their_release() {
     assert!(parse_pep440_version("2.26.0-rc1").unwrap() < parse_pep440_version("2.26.0").unwrap());
@@ -93,7 +92,7 @@ fn prereleases_sort_below_their_release() {
     assert!(parse_pep440_version("2.26.0rc1").unwrap() > parse_pep440_version("2.25.9").unwrap());
 }
 
-/// Python `packaging.Version`: post releases parse and sort above the release.
+/// `packaging.Version`: post releases parse and sort above the release.
 #[test]
 fn post_releases_parse_and_sort_above_the_release() {
     assert!(
@@ -159,7 +158,7 @@ fn local_segments_sort_above_the_bare_release() {
     );
 }
 
-/// Python `str(Version)`: the gateway emits the normalized form.
+/// `str(Version)`: the gateway emits the normalized form.
 #[test]
 fn pep440_str_is_the_normalized_form() {
     for (raw, normalized) in [
@@ -209,10 +208,10 @@ fn pep440_invalid_inputs_parse_as_none() {
     }
 }
 
-/// Cross-check of parsing and `str()` normalization against Python
+/// Cross-check of parsing and `str()` normalization against
 /// `packaging.version.Version`, entry by entry.
 #[test]
-fn pep440_matches_python_ground_truth() {
+fn pep440_matches_packaging_ground_truth() {
     for (raw, expected) in [
         ("2.26.0-rc1", Some("2.26.0rc1")),
         ("2.26.0rc1", Some("2.26.0rc1")),
@@ -280,9 +279,9 @@ fn pep440_matches_python_ground_truth() {
     }
 }
 
-/// Python `sorted(valid_versions, reverse=True)`: stable, highest first.
+/// Stable sort, highest first.
 #[test]
-fn pep440_descending_sort_matches_python() {
+fn pep440_descending_sort_is_stable_highest_first() {
     let raw = [
         "1.0.dev1",
         "1.0a1",

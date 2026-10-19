@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import os
 from pathlib import Path
+import re
+import shlex
 from typing import Annotated, Literal, Self, cast
 
 from pydantic import (
@@ -143,12 +145,14 @@ class _SearchReplaceResult(_SourceModel):
 
 class _SearchReplacePreview(_SourceModel):
     old_start_line: int = Field(ge=1)
+    new_start_line: int | None = None
     old_lines: list[str]
     new_lines: list[str]
 
 
 class _SearchReplaceAnnotations(_SourceModel):
     blocks: list[_SearchReplacePreview] = Field(min_length=1)
+    previous_content: str | None = None
 
 
 class _WriteFileAnnotations(_SourceModel):
@@ -196,6 +200,19 @@ class _WebFetchResult(_SourceModel):
     content: str = ""
     content_type: str = ""
     was_truncated: bool = False
+
+
+class _ConnectorWebSearchCard(_SourceModel):
+    # The web search connector answers with result cards keyed by the opaque
+    # reference id the model cites them under; display rows follow `rank`.
+    url: str
+    title: str
+    rank: int = 0
+
+
+class _ConnectorOpenUrlPage(_SourceModel):
+    url: str
+    content: str = ""
 
 
 class _GrepArguments(_SourceModel):
@@ -425,7 +442,7 @@ def _project_effect(
     elif isinstance(state, CompletedEffectState):
         try:
             state = projected.project_result(state)
-        except (TypeError, ValueError, ValidationError):
+        except TypeError, ValueError, ValidationError:
             return entry
     return entry.model_copy(update={"detail": projected.detail, "state": state})
 
@@ -480,7 +497,7 @@ def _project_call(
             return path_projector(detail, display_roots)
         if projector is not None:
             return projector(detail)
-    except (TypeError, ValueError, ValidationError):
+    except TypeError, ValueError, ValidationError:
         return None
     label = _TOOL_LABELS.get(detail.tool_name)
     if label is not None:
@@ -608,11 +625,13 @@ def _project_search_replace(
             occurrences=[
                 FileEditEffectOccurrence(
                     start_line=block.old_start_line,
+                    new_start_line=block.new_start_line,
                     old_text="".join(block.old_lines),
                     new_text="".join(block.new_lines),
                 )
                 for block in annotations.blocks
             ],
+            previous_content=annotations.previous_content,
         )
         display = EffectResultDisplay(
             success=True,
@@ -625,8 +644,333 @@ def _project_search_replace(
     return _ProjectedCall(detail=semantic, project_result=project_result)
 
 
-def _project_shell(detail: GenericEffectDetail) -> _ProjectedCall:
+@dataclass(frozen=True)
+class _ShellGrep:
+    """A bash command that is a plain grep/rg invocation worth rendering as a search."""
+
+    pattern: str
+    path: str
+
+
+# The harness dropped the grep tool on purpose: the agent greps through bash,
+# but a plain `grep`/`rg` call is still worth the search UI. The shell projector
+# recognizes unambiguous invocations and renders them as a file search;
+# anything ambiguous (pipes, redirects, compound commands, unknown flags, output
+# without line numbers or path prefixes) keeps the plain shell display.
+_SHELL_OPERATOR_CHARS = frozenset("&|;<>")
+# Flags that are safe in both grep and rg and keep the `path:line:content`
+# output shape. `-s` means --no-messages in grep and --case-sensitive in rg;
+# `-I` means ignore-binary in grep and --no-messages in rg; both are safe.
+# Context flags (-A/-B/-C and --context/--after-context/--before-context) and
+# invert-match (-v/--invert-match) are rejected on purpose: they print
+# non-matching lines, which would parse as matches and inflate the count.
+_GREP_SHORT_FLAGS = frozenset("niwEFPI")
+_GREP_GREP_ONLY_SHORT_FLAGS = frozenset("asG")
+_GREP_SHORT_VALUE_FLAGS = frozenset("me")
+_GREP_LONG_FLAGS = frozenset({
+    "recursive",
+    "line-number",
+    "ignore-case",
+    "word-regexp",
+    "extended-regexp",
+    "fixed-strings",
+    "text",
+    "no-messages",
+    "basic-regexp",
+    "perl-regexp",
+    "pcre2",
+})
+_GREP_RG_ONLY_LONG_FLAGS = frozenset({
+    "no-ignore",
+    "hidden",
+    "no-heading",
+    "unrestricted",
+    "follow",
+    "no-require-git",
+    "with-filename",
+    "vimgrep",
+})
+_GREP_LONG_VALUE_FLAGS = frozenset({"include", "exclude", "max-count"})
+_GREP_RG_ONLY_LONG_VALUE_FLAGS = frozenset({
+    "glob",
+    "max-depth",
+    "max-filesize",
+    "ignore-file",
+})
+
+_GREP_MATCH_LINE = re.compile(r"^(?P<path>.+?):(?P<line>[1-9]\d*):(?P<text>.*)$")
+_GREP_BINARY_LINE = re.compile(r"^Binary file (?P<path>.+?) matches$")
+_GREP_MAX_PARSED_MATCHES = 200
+
+
+def _split_shell(command: str) -> list[str] | None:
+    """Tokenize a shell command, or None when it is not a plain single command."""
+    if "\n" in command or "`" in command or "$(" in command:
+        return None
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    if any(
+        token and all(character in _SHELL_OPERATOR_CHARS for character in token)
+        for token in tokens
+    ):
+        return None
+    return tokens
+
+
+@dataclass
+class _GrepParseState:
+    pattern: str | None = None
+    paths: list[str] = field(default_factory=list)
+    line_numbers: bool = False
+    prefixes_path: bool = False
+
+
+def _parse_grep_long_flag(
+    token: str, is_rg: bool, state: _GrepParseState, index: int
+) -> int | None:
+    """Consume a `--flag[=value]` token; returns the next index or None."""
+    name, has_value, _ = token[2:].partition("=")
+    value_flags = _GREP_LONG_VALUE_FLAGS
+    plain_flags = _GREP_LONG_FLAGS
+    if is_rg:
+        value_flags |= _GREP_RG_ONLY_LONG_VALUE_FLAGS
+        plain_flags |= _GREP_RG_ONLY_LONG_FLAGS
+    if name in value_flags:
+        return index if has_value else index + 1
+    if name in plain_flags:
+        if name in {"line-number", "vimgrep"}:
+            state.line_numbers = True
+        if name == "with-filename":
+            state.prefixes_path = True
+        return index
+    return None
+
+
+def _parse_grep_short_flags(
+    token: str, is_rg: bool, state: _GrepParseState, tokens: list[str], index: int
+) -> int | None:
+    """Consume a `-abc` token; returns the next index or None."""
+    chars = token[1:]
+    position = 0
+    while position < len(chars):
+        flag = chars[position]
+        position += 1
+        if flag in _GREP_SHORT_VALUE_FLAGS:
+            if position < len(chars):
+                value = chars[position:]
+                position = len(chars)
+            else:
+                if index >= len(tokens):
+                    return None
+                value = tokens[index]
+                index += 1
+            if flag == "e":
+                if state.pattern is not None:
+                    return None
+                state.pattern = value
+            continue
+        if flag in _GREP_SHORT_FLAGS:
+            if flag == "n":
+                state.line_numbers = True
+            continue
+        if flag == "H":
+            state.prefixes_path = True
+            continue
+        if flag == "r":
+            # grep's -r is recursive and implies the path prefix. rg is
+            # recursive by default and its -r is --replace (it takes a
+            # value), so an rg invocation using it is not a plain search.
+            if is_rg:
+                return None
+            state.prefixes_path = True
+            continue
+        if not is_rg and flag in _GREP_GREP_ONLY_SHORT_FLAGS:
+            continue
+        return None
+    return index
+
+
+def _parse_grep_invocation(command: str) -> _ShellGrep | None:
+    """Recognize a plain `grep`/`rg <flags> <pattern> <path>` command.
+
+    Conservative on purpose: only invocations whose output is guaranteed to be
+    `path:line:content` lines are recognized. The harness pipes stdout, so both
+    tools need `-n`/`--line-number` for line numbers. A path prefix needs
+    `-r`/`-H` for grep, while rg prints it for directory searches (`-H`/
+    `--with-filename` for a single file target). Unknown flags, context flags,
+    invert-match, rg's `-r` (`--replace`), multiple `-e` patterns, and missing
+    paths all fall back to the plain shell display.
+    """
+    tokens = _split_shell(command)
+    if not tokens:
+        return None
+    program = Path(tokens[0]).name
+    if program not in {"grep", "rg"}:
+        return None
+    is_rg = program == "rg"
+    state = _parse_grep_tokens(tokens, is_rg)
+    if (
+        state is None
+        or not state.pattern
+        or not state.paths
+        or not state.line_numbers
+        or not state.prefixes_path
+    ):
+        return None
+    return _ShellGrep(
+        pattern=state.pattern, path=state.paths[0] if len(state.paths) == 1 else "."
+    )
+
+
+def _rg_prefixes_path(paths: list[str]) -> bool:
+    """Whether piped rg prints the path prefix for these targets by itself.
+
+    rg prints the prefix for directory searches and multiple targets; a
+    single file target needs -H/--with-filename.
+    """
+    return len(paths) > 1 or paths[0] in {".", ".."} or paths[0].endswith("/")
+
+
+def _parse_grep_tokens(tokens: list[str], is_rg: bool) -> _GrepParseState | None:
+    # The harness runs commands with piped stdout, so rg's TTY defaults (line
+    # numbers, path prefixes) are off: both tools must ask for them explicitly.
+    state = _GrepParseState()
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if token.startswith("--"):
+            index = _parse_grep_long_flag(token, is_rg, state, index)
+            if index is None:
+                return None
+            continue
+        if token.startswith("-") and token != "-":
+            index = _parse_grep_short_flags(token, is_rg, state, tokens, index)
+            if index is None:
+                return None
+            continue
+        if token == "-":
+            return None
+        if state.pattern is None:
+            state.pattern = token
+        else:
+            state.paths.append(token)
+    if (
+        is_rg
+        and not state.prefixes_path
+        and state.paths
+        and _rg_prefixes_path(state.paths)
+    ):
+        state.prefixes_path = True
+    return state
+
+
+def _parse_grep_stdout(stdout: str) -> tuple[list[FileSearchEffectMatch], bool]:
+    """Parse `path:line:content` match lines; returns the matches and a capped flag."""
+    matches: list[FileSearchEffectMatch] = []
+    truncated = False
+    for line in stdout.splitlines():
+        if len(matches) >= _GREP_MAX_PARSED_MATCHES:
+            truncated = True
+            break
+        found = _GREP_MATCH_LINE.match(line)
+        if found is not None:
+            matches.append(
+                FileSearchEffectMatch(
+                    path=found.group("path").removeprefix("./"),
+                    line=int(found.group("line")),
+                )
+            )
+            continue
+        binary = _GREP_BINARY_LINE.match(line)
+        if binary is not None:
+            matches.append(
+                FileSearchEffectMatch(path=binary.group("path").removeprefix("./"))
+            )
+    return matches, truncated
+
+
+def _project_shell_grep(
+    grep: _ShellGrep, display_roots: Sequence[Path]
+) -> _ProjectedCall:
+    pattern = grep.pattern
+    message = f"'{pattern}'"
+    searched = Path(os.path.normpath(grep.path))
+    if grep.path != "." and searched not in display_roots[:1]:
+        message += f" in {_display_path(grep.path, display_roots)}"
+    semantic = FileSearchEffectDetail(
+        tool_name="grep",
+        input=FileSearchEffectInput(pattern=pattern, path=grep.path),
+        display=EffectCallDisplay(
+            summary=f"Grepping {message}",
+            verb="Searching",
+            message=message,
+            settled_verb="Searched",
+            settled_message=message,
+            status_text="Searching files",
+        ),
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        try:
+            result = _ShellResult.model_validate(envelope.structured_content)
+            transcript = ShellEffectOutput(
+                stdout=result.stdout,
+                stderr=result.stderr,
+                output=result.output,
+                truncated=result.was_truncated,
+            ).transcript
+            # grep/rg exit 1 means "no matches", not an error.
+            is_error = result.returncode not in {0, 1}
+            was_truncated = result.was_truncated
+        except ValidationError:
+            result = None
+            transcript = str(envelope.structured_content.get("error", ""))
+            is_error = True
+            was_truncated = False
+        stdout = result.stdout if result is not None else ""
+        parsed, capped = _parse_grep_stdout(stdout)
+        if (
+            result is not None
+            and result.returncode == 0
+            and stdout.strip()
+            and not parsed
+        ):
+            # The output shape did not match (e.g. a RIPGREP_CONFIG_PATH
+            # override): fall back to the raw shell entry instead of
+            # reporting "0 matches" for a search that did match.
+            raise ValueError(f"unparseable grep output for {grep.pattern!r}")
+        output = FileSearchEffectOutput(
+            matches=stdout,
+            match_count=len(parsed),
+            was_truncated=was_truncated or capped,
+            parsed_matches=parsed,
+        )
+        count = len(parsed)
+        word = "match" if count == 1 else "matches"
+        display = EffectResultDisplay(
+            success=not is_error,
+            verb="Searched",
+            message=f"{pattern} ({count} {word})",
+            suffix="(truncated)" if output.was_truncated else "",
+        )
+        return _completed_state(state, output, display, output_text=transcript)
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _project_shell(
+    detail: GenericEffectDetail, display_roots: Sequence[Path]
+) -> _ProjectedCall:
     arguments = _ShellArguments.model_validate(detail.input)
+    grep = _parse_grep_invocation(arguments.command)
+    if grep is not None:
+        return _project_shell_grep(grep, display_roots)
     semantic = ShellEffectDetail(
         tool_name=detail.tool_name,
         input=ShellEffectInput(command=arguments.command),
@@ -973,6 +1317,83 @@ def _project_web_fetch(detail: GenericEffectDetail) -> _ProjectedCall:
             verb="Fetched",
             message=f"{result.url} ({content_len:,} chars, {content_type})",
             suffix="(truncated)" if result.was_truncated else "",
+        )
+        return _completed_state(state, output, display)
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _project_connector_web_search(detail: GenericEffectDetail) -> _ProjectedCall:
+    arguments = _WebSearchArguments.model_validate(detail.input)
+    query = arguments.query
+    semantic = WebSearchEffectDetail(
+        tool_name=detail.tool_name,
+        input=WebSearchEffectInput(query=query),
+        display=EffectCallDisplay(
+            summary=f"Searching the web: {query!r}",
+            verb="Searching",
+            message=f"the web: {query!r}",
+            settled_verb="Searched",
+            settled_message=f"the web: {query!r}",
+            status_text="Searching the web",
+        ),
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        cards = [
+            _ConnectorWebSearchCard.model_validate(card)
+            for card in envelope.structured_content.values()
+        ]
+        sources = [
+            WebSearchEffectSource(title=card.title, url=card.url)
+            for card in sorted(cards, key=lambda card: card.rank)
+        ]
+        # The connector answers with cards, not a synthesized answer; the model
+        # reads the cards, so there is no answer text to carry over.
+        output = WebSearchEffectOutput(query=query, answer="", sources=sources)
+        source_count = len(sources)
+        plural = "" if source_count == 1 else "s"
+        display = EffectResultDisplay(
+            success=True,
+            verb="Searched",
+            message=f"{query!r} ({source_count} source{plural})",
+        )
+        return _completed_state(state, output, display)
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _project_connector_open_url(detail: GenericEffectDetail) -> _ProjectedCall:
+    arguments = _WebFetchArguments.model_validate(detail.input)
+    url = arguments.url
+    parsed = _url_domain(url)
+    display_message = parsed
+    if arguments.timeout is not None:
+        display_message += f" (timeout {arguments.timeout}s)"
+    semantic = WebFetchEffectDetail(
+        tool_name=detail.tool_name,
+        input=WebFetchEffectInput(url=url, timeout=arguments.timeout),
+        display=EffectCallDisplay(
+            summary=f"Fetching: {display_message}",
+            verb="Fetching",
+            message=display_message,
+            settled_verb="Fetched",
+            settled_message=display_message,
+            status_text="Fetching URL",
+        ),
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        page = _ConnectorOpenUrlPage.model_validate(envelope.structured_content)
+        # The connector page carries no media type or truncation flag.
+        output = WebFetchEffectOutput(
+            url=page.url, content=page.content, content_type="", was_truncated=False
+        )
+        content_len = len(page.content)
+        display = EffectResultDisplay(
+            success=True, verb="Fetched", message=f"{page.url} ({content_len:,} chars)"
         )
         return _completed_state(state, output, display)
 
@@ -1389,6 +1810,14 @@ _TOOL_LABELS: dict[str, _ToolLabel] = {
     # ── Built-in harness tools ──────────────────────────────────────────
     "ui.ask_user_question": _ToolLabel("Asking", "a question", "Asked"),
     "self.sleep": _ToolLabel("Sleeping", "", "Slept"),
+    "self.wait": _ToolLabel("Waiting", "for input", "Waited"),
+    "agents.list_configs": _ToolLabel("Listing", "subagent configs", "Listed"),
+    "agents.list": _ToolLabel("Listing", "subagents", "Listed"),
+    "agents.send_message": _ToolLabel("Sending", "a message to a subagent", "Sent"),
+    "agents.interrupt": _ToolLabel("Interrupting", "a subagent", "Interrupted"),
+    # Deprecated: pre-rename "subagent.*" spellings, kept only so persisted
+    # sessions keep their labels. Use the "agents.*" keys above; "wait" and
+    # "stop" were retired ("stop" without a replacement).
     "subagent.list": _ToolLabel("Listing", "subagents", "Listed"),
     "subagent.wait": _ToolLabel("Waiting", "for a subagent", "Waited"),
     "subagent.send_message": _ToolLabel("Sending", "a message to a subagent", "Sent"),
@@ -1703,11 +2132,11 @@ _PATH_PROJECTORS: dict[
     "search_replace": _project_search_replace,
     "file_system.search_replace": _project_search_replace,
     "grep": _project_grep,
+    "bash": _project_shell,
+    "file_system.bash": _project_shell,
 }
 
 _CALL_PROJECTORS: dict[str, Callable[[GenericEffectDetail], _ProjectedCall]] = {
-    "bash": _project_shell,
-    "file_system.bash": _project_shell,
     "skill.read": _project_skill,
     "process.start": _project_process_start,
     "process.stop": _project_process_stop,
@@ -1715,6 +2144,8 @@ _CALL_PROJECTORS: dict[str, Callable[[GenericEffectDetail], _ProjectedCall]] = {
     "process.list": _project_process_list,
     "process.write": _project_process_write,
     "ui.ask_user_question": _project_ask_user_question,
+    "connector_web_search.web_search": _project_connector_web_search,
+    "connector_web_search.open_url": _project_connector_open_url,
     "web_search": _project_web_search,
     "web_fetch": _project_web_fetch,
     "todo": _project_todo,
@@ -1733,6 +2164,8 @@ _TOOL_CATEGORIES: dict[str, UnifiedToolCategory] = {
     "bash": "shell",
     "file_system.bash": "shell",
     "skill.read": "skill",
+    "connector_web_search.web_search": "web_search",
+    "connector_web_search.open_url": "web_fetch",
     "web_search": "web_search",
     "web_fetch": "web_fetch",
     "grep": "file_search",

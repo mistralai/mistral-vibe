@@ -6,7 +6,11 @@ use std::time::{Duration, Instant};
 use crossterm::event::Event;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::key_burst::KeyBurst;
+use crate::mouse::pixels;
+use crate::program_status::detection::Detection;
 use crate::terminal_input_filter::TerminalInputFilter;
+use crate::terminal_read;
 
 const CHANNEL_CAP: usize = 256;
 /// Bounds how late the reader notices a pause, a closed channel, or an expired report.
@@ -16,6 +20,7 @@ const FULL_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 /// Pauses terminal reading while a foreground child, such as an editor, owns the terminal.
 pub struct Reader {
     pauses: std_mpsc::Sender<Pause>,
+    pub program_status: Detection,
 }
 
 struct Pause {
@@ -43,22 +48,41 @@ impl Reader {
 pub fn spawn() -> (mpsc::Receiver<Event>, Reader) {
     let (tx, rx) = mpsc::channel(CHANNEL_CAP);
     let (pauses_tx, pauses) = std_mpsc::channel();
-    std::thread::spawn(move || read_terminal(&tx, &pauses));
-    (rx, Reader { pauses: pauses_tx })
+    let program_status = Detection::default();
+    let deadline = program_status.query();
+    let detection = program_status.clone();
+    std::thread::spawn(move || read_terminal(&tx, &pauses, detection, deadline));
+    (
+        rx,
+        Reader {
+            pauses: pauses_tx,
+            program_status,
+        },
+    )
 }
 
 /// Forward terminal events until the receiver closes or input ends.
-fn read_terminal(tx: &mpsc::Sender<Event>, pauses: &std_mpsc::Receiver<Pause>) {
+fn read_terminal(
+    tx: &mpsc::Sender<Event>,
+    pauses: &std_mpsc::Receiver<Pause>,
+    detection: Detection,
+    deadline: Option<Instant>,
+) {
     let mut filter = TerminalInputFilter::default();
+    let mut bursts = KeyBurst::default();
+    let mut coalesce = pixels::Coalesce::default();
     while !tx.is_closed() {
         if let Ok(pause) = pauses.try_recv() {
             serve(pause);
             continue;
         }
-        let mut pending = match crossterm::event::poll(POLL_INTERVAL) {
+        let timeout = bursts.deadline().map_or(POLL_INTERVAL, |deadline| {
+            deadline.saturating_duration_since(Instant::now())
+        });
+        let mut pending = match crossterm::event::poll(timeout) {
             // Leave the event queued for whoever reads the terminal after the TUI.
             Ok(true) if tx.is_closed() => return,
-            Ok(true) => match crossterm::event::read() {
+            Ok(true) => match terminal_read::read() {
                 Ok(event) => filter.push(event),
                 Err(error) => {
                     tracing::warn!(%error, "terminal event read failed");
@@ -71,8 +95,17 @@ fn read_terminal(tx: &mpsc::Sender<Event>, pauses: &std_mpsc::Receiver<Pause>) {
                 return;
             }
         };
-        pending.extend(filter.flush_expired(Instant::now()));
+        detection.observe(&mut filter, deadline);
+        let now = Instant::now();
+        pending.extend(filter.flush_expired(now));
+        // Windows consoles never bracket pastes: they arrive as raw key presses.
+        if cfg!(windows) {
+            pending = bursts.push(pending, now);
+        }
         for event in pending {
+            if !coalesce.keep(pixels::grid(), &event) {
+                continue;
+            }
             if !deliver(tx, pauses, event) {
                 return;
             }

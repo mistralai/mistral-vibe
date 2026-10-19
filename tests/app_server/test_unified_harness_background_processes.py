@@ -119,7 +119,7 @@ async def test_vibe_enables_background_processes_for_every_host_shell_profile(
     monkeypatch.setattr(
         "vibe.app_server._runtime._command_environment_mode", lambda: profile
     )
-    process = HarnessProcess(HarnessFilesManager(sources=()), experimental_harness=True)
+    process = HarnessProcess(HarnessFilesManager(sources=()))
 
     # Do
     context = await process.build_unified_session_context(
@@ -357,7 +357,7 @@ async def test_vibe_host_shutdown_stops_a_running_background_process(
 async def _process_host(
     tmp_path: Path, *, auto_approve: bool
 ) -> tuple[SessionBackendHost, Path]:
-    process = HarnessProcess(HarnessFilesManager(sources=()), experimental_harness=True)
+    process = HarnessProcess(HarnessFilesManager(sources=()))
     options = SessionOptions(cwd=str(tmp_path), auto_approve=auto_approve)
     context = await process.build_unified_session_context(options)
     storage_root = tmp_path / "sessions"

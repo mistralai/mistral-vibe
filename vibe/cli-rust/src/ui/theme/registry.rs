@@ -1,4 +1,4 @@
-//! Textual's built-in theme registry, resolved to concrete cell colors.
+//! Built-in theme registry, resolved to concrete cell colors.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -8,7 +8,7 @@ use ratatui::style::Color;
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub name: &'static str,
-    /// Light vs dark; selects the picker marker's ANSI-mapped green, matching Textual.
+    /// Light vs dark; selects the picker marker's ANSI-mapped green.
     pub dark: bool,
     pub background: Color,
     pub foreground: Color,
@@ -19,8 +19,8 @@ pub struct Theme {
     pub warning: Color,
     pub error: Color,
     pub success: Color,
-    /// `$text-success` / `$text-error` / the selection background: Textual
-    /// composites these itself, and no `blend` reproduces them exactly.
+    /// `$text-success` / `$text-error` / the selection background: precomposited,
+    /// since no `blend` reproduces them exactly.
     pub text_success: Color,
     pub text_error: Color,
     pub surface: Color,
@@ -47,9 +47,8 @@ const R: Color = Color::Reset;
 /// The picker's virtual first option; resolves to a concrete theme at render.
 pub const AUTO_NAME: &str = "auto";
 
-/// Every built-in theme, ordered exactly as Textual's `sorted_theme_names()`
-/// (light A→Z then dark A→Z). Values are generated from `ColorSystem.generate()`
-/// so a switched theme renders cell-for-cell with the Python CLI.
+/// Every built-in theme, ordered light A→Z then dark A→Z. Values are generated
+/// from Textual's `ColorSystem.generate()`, where these themes come from.
 #[rustfmt::skip]
 pub const ALL: &[Theme] = &[
     Theme { name: "ansi-light", dark: false, background: R, foreground: R, primary: Color::Blue, accent: Color::Magenta, secondary: Color::Cyan, warning: Color::LightRed, error: Color::Red, success: Color::Green, text_success: Color::Green, text_error: Color::Red, surface: R, popup_border: R, selection_bg: Color::Cyan, input_selection_bg: Color::Cyan, block_cursor_bg: Color::Blue, block_cursor_fg: Color::White, input_cursor_bg: Color::Reset, scrollbar: Color::LightBlue, scrollbar_bg: Color::Gray, panel_lighten_1: Color::Gray },
@@ -85,7 +84,7 @@ pub fn active() -> &'static Theme {
     &ALL[ACTIVE.load(Ordering::Relaxed).min(ALL.len() - 1)]
 }
 
-/// Textual's `$ansi-background`: black for dark and ANSI white for light.
+/// `$ansi-background`: black for dark and ANSI white for light.
 pub fn ansi_background() -> Color {
     if active().dark {
         Color::Black
@@ -94,7 +93,7 @@ pub fn ansi_background() -> Color {
     }
 }
 
-/// Textual's `$screen-selection-foreground`.
+/// `$screen-selection-foreground`.
 pub fn selection_fg() -> Color {
     match (active().background == Color::Reset, active().dark) {
         (true, true) => Color::Black,
@@ -103,7 +102,7 @@ pub fn selection_fg() -> Color {
     }
 }
 
-/// Textual's `$panel-lighten-1`, used by toast backgrounds.
+/// `$panel-lighten-1`, used by toast backgrounds.
 pub fn toast_background() -> Color {
     active().panel_lighten_1
 }

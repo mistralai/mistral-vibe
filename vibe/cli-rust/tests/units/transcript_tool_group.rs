@@ -1,4 +1,4 @@
-//! Live tool-group tail semantics (Python `ToolGroup` finalize lifecycle).
+//! Live tool-group tail semantics (finalize lifecycle).
 
 use serde_json::json;
 use vibe_rs::server::PublicSessionState;
@@ -59,7 +59,7 @@ fn agent_change(id: &str) -> serde_json::Value {
         "id": id,
         "type": "checkpoint",
         "kind": "agent_change",
-        "details": {"agent": "plan"},
+        "details": {"agent": "ask"},
     })
 }
 
@@ -76,7 +76,7 @@ fn live(entries: &[serde_json::Value]) -> Transcript {
     transcript
 }
 
-/// The same history mounted by a rebuild (Python `build_history_widgets`).
+/// The same history mounted by a rebuild.
 fn rebuilt(entries: &[serde_json::Value]) -> Transcript {
     let state = json!({
         "eventId": 0,
@@ -100,15 +100,15 @@ fn running(transcript: &Transcript) -> bool {
 
 #[test]
 fn trailing_group_keeps_running_after_a_successful_turn() {
-    // A successful turn is a no-op for the live tail (Python
-    // `_finalize_turn_ui` never finalizes the group), so it keeps spinning.
+    // A successful turn is a no-op for the live tail (the turn end never
+    // finalizes the group), so it keeps spinning.
     let tail = live(&[effect("e1", "completed"), effect("e2", "completed")]);
     assert!(running(&tail));
 }
 
 #[test]
 fn trailing_group_settles_on_a_failed_or_interrupted_turn() {
-    // Python `stop_current_tool_call` finalizes the open group on turn error.
+    // A turn error finalizes the open group.
     let mut tail = live(&[effect("e1", "completed"), effect("e2", "completed")]);
     tail.finalize_tool_group();
     assert!(!running(&tail));
@@ -116,8 +116,8 @@ fn trailing_group_settles_on_a_failed_or_interrupted_turn() {
 
 #[test]
 fn trailing_group_settles_on_a_later_non_groupable_entry() {
-    // Python `_handle_entry_added` finalizes the group when the new entry
-    // cannot join it, and a groupable entry afterwards opens the next one.
+    // A new entry that cannot join the group finalizes it, and a groupable
+    // entry afterwards opens the next one.
     let closed = live(&[
         effect("e1", "completed"),
         effect("e2", "completed"),
@@ -138,7 +138,7 @@ fn trailing_group_settles_on_a_later_non_groupable_entry() {
 #[test]
 fn trailing_group_settles_on_a_rebuild() {
     // A persisted history ending on tool calls (CLI killed mid-turn) must
-    // settle on resume, like Python's post-loop `current_group.finalize()`.
+    // settle on resume, as a rebuild finalizes the trailing group.
     let history = [effect("e1", "completed"), effect("e2", "completed")];
     assert!(running(&live(&history)));
     assert!(!running(&rebuilt(&history)));

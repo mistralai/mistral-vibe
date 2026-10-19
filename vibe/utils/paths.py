@@ -51,6 +51,20 @@ def normalize_windows_path(raw: str) -> str:
     return f"{match[1].upper()}:{suffix}"
 
 
+def to_git_bash_path(raw: str) -> str:
+    """Spell a drive-qualified Windows path (``C:\\Users``) as ``/c/Users``.
+
+    Paths without both a drive letter and a root, such as UNC shares or
+    drive-relative ``C:file``, are returned unchanged.
+    """
+    path = PureWindowsPath(raw)
+    if not path.root or not re.fullmatch(r"[A-Za-z]:", path.drive):
+        return raw
+
+    suffix = "/".join(path.parts[1:])
+    return f"/{path.drive[0].lower()}/{suffix}"
+
+
 def target_pure_path(raw: str) -> PurePath:
     """Read a path by the target platform's rules; ``Path`` follows the host's."""
     return PureWindowsPath(raw) if is_windows() else PurePosixPath(raw)
@@ -112,6 +126,6 @@ def is_dangerous_directory(path: Path | str = ".") -> tuple[bool, str]:
         try:
             if path == dangerous_path:
                 return True, f"You are in the {description}"
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
     return False, ""

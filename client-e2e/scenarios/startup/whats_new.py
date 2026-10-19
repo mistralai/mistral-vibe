@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 import tempfile
 
-from e2e.app_server.config import E2E_DIR, MINIMAL_HOME_CONFIG
+from e2e.app_server.config import MINIMAL_HOME_CONFIG, WHATS_NEW_FIXTURE
 from e2e.app_server.scenario import Action, Timeline
 
 # The harness's isolated home is fresh, so the what's-new gate never trips;
@@ -30,16 +30,16 @@ env = {
     # The shipped whats_new.md changes every release, which would churn this
     # golden; the clients render the frozen fixture body instead. The path
     # must be absolute: the client runs with cwd=VIBE_DIR, not the scenario's.
-    "VIBE_WHATS_NEW_FILE": os.fspath(E2E_DIR / "fixtures" / "whats_new.fixture"),
+    "VIBE_WHATS_NEW_FILE": os.fspath(WHATS_NEW_FIXTURE),
 }
 
-screen_contains = {"rust": ("What's new in v9.9.9-fixture",)}
+screen_contains = ("What's new in v9.9.9-fixture",)
 
 _URI = "vscode:extension/mistralai.mistral-vibe-code"
-expected_actions = {"rust": [Action("open_url", _URI)]}
+expected_actions = [Action("open_url", _URI)]
 
 # The fixture's `VS Code extension` link spans one-based columns 13-29 on its bullet row.
-_CLICK = "\x1b[<0;16;14M\x1b[<0;16;14m"
+_CLICK = "\x1b[<0;16;10M\x1b[<0;16;10m"
 
 # The banner mounts after startup; the capture after typing settles it.
 capture_startup = False

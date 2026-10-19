@@ -6,6 +6,7 @@ use crate::core::hooks::{HookToolKey, HookToolTarget};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum RuntimeBuiltinToolName {
+    SelfWait,
     SelfSleep,
     FileSystemReadFile,
     FileSystemWriteFile,
@@ -17,17 +18,40 @@ pub(crate) enum RuntimeBuiltinToolName {
     ProcessWrite,
     ProcessList,
     ProcessStop,
+    SubagentListConfigs,
     SubagentList,
     SubagentSpawn,
+    /// Deprecated: `subagent.wait` is replay-only; use the standalone `wait` tool.
     SubagentWait,
     SubagentSendMessage,
     SubagentInterrupt,
+    /// Deprecated: `subagent.stop` is replay-only and has no replacement.
     SubagentStop,
+    /// Deprecated: `subagent.list` is replay-only; use `agents.list`.
+    DeprecatedSubagentList,
+    /// Deprecated: `subagent.spawn` is replay-only; use `agents.spawn`.
+    DeprecatedSubagentSpawn,
+    /// Deprecated: `subagent.send_message` is replay-only; use `agents.send_message`.
+    DeprecatedSubagentSendMessage,
+    /// Deprecated: `subagent.interrupt` is replay-only; use `agents.interrupt`.
+    DeprecatedSubagentInterrupt,
 }
 
 impl RuntimeBuiltinToolName {
+    /// Deprecated: retired names that restore from older Sessions and fail
+    /// without executing; their replacements are the `agents.*` tools.
+    pub(crate) const DEPRECATED: [Self; 6] = [
+        Self::DeprecatedSubagentList,
+        Self::DeprecatedSubagentSpawn,
+        Self::DeprecatedSubagentSendMessage,
+        Self::DeprecatedSubagentInterrupt,
+        Self::SubagentWait,
+        Self::SubagentStop,
+    ];
+
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::SelfWait => "self.wait",
             Self::SelfSleep => "self.sleep",
             Self::FileSystemReadFile => "file_system.read_file",
             Self::FileSystemWriteFile => "file_system.write_file",
@@ -39,17 +63,23 @@ impl RuntimeBuiltinToolName {
             Self::ProcessWrite => "process.write",
             Self::ProcessList => "process.list",
             Self::ProcessStop => "process.stop",
-            Self::SubagentList => "subagent.list",
-            Self::SubagentSpawn => "subagent.spawn",
+            Self::SubagentListConfigs => "agents.list_configs",
+            Self::SubagentList => "agents.list",
+            Self::SubagentSpawn => "agents.spawn",
             Self::SubagentWait => "subagent.wait",
-            Self::SubagentSendMessage => "subagent.send_message",
-            Self::SubagentInterrupt => "subagent.interrupt",
+            Self::SubagentSendMessage => "agents.send_message",
+            Self::SubagentInterrupt => "agents.interrupt",
             Self::SubagentStop => "subagent.stop",
+            Self::DeprecatedSubagentList => "subagent.list",
+            Self::DeprecatedSubagentSpawn => "subagent.spawn",
+            Self::DeprecatedSubagentSendMessage => "subagent.send_message",
+            Self::DeprecatedSubagentInterrupt => "subagent.interrupt",
         }
     }
 
     fn from_str(value: &str) -> Option<Self> {
         match value {
+            "self.wait" => Some(Self::SelfWait),
             "self.sleep" => Some(Self::SelfSleep),
             "file_system.read_file" => Some(Self::FileSystemReadFile),
             "file_system.write_file" => Some(Self::FileSystemWriteFile),
@@ -61,12 +91,17 @@ impl RuntimeBuiltinToolName {
             "process.write" => Some(Self::ProcessWrite),
             "process.list" => Some(Self::ProcessList),
             "process.stop" => Some(Self::ProcessStop),
-            "subagent.list" => Some(Self::SubagentList),
-            "subagent.spawn" => Some(Self::SubagentSpawn),
+            "agents.list_configs" => Some(Self::SubagentListConfigs),
+            "agents.list" => Some(Self::SubagentList),
+            "agents.spawn" => Some(Self::SubagentSpawn),
             "subagent.wait" => Some(Self::SubagentWait),
-            "subagent.send_message" => Some(Self::SubagentSendMessage),
-            "subagent.interrupt" => Some(Self::SubagentInterrupt),
+            "agents.send_message" => Some(Self::SubagentSendMessage),
+            "agents.interrupt" => Some(Self::SubagentInterrupt),
             "subagent.stop" => Some(Self::SubagentStop),
+            "subagent.list" => Some(Self::DeprecatedSubagentList),
+            "subagent.spawn" => Some(Self::DeprecatedSubagentSpawn),
+            "subagent.send_message" => Some(Self::DeprecatedSubagentSendMessage),
+            "subagent.interrupt" => Some(Self::DeprecatedSubagentInterrupt),
             _ => None,
         }
     }
@@ -77,6 +112,7 @@ impl RuntimeBuiltinToolName {
 
     fn direct_model_name(self, invocation_name: &str) -> Option<String> {
         match self {
+            Self::SelfWait => Some("wait".to_string()),
             Self::FileSystemReadFile => Some("read_file".to_string()),
             Self::FileSystemWriteFile => Some("write_file".to_string()),
             Self::FileSystemSearchReplace => Some("edit".to_string()),
@@ -89,16 +125,22 @@ impl RuntimeBuiltinToolName {
             | Self::ProcessList
             | Self::ProcessStop
             | Self::SubagentList
+            | Self::SubagentListConfigs
             | Self::SubagentSpawn
             | Self::SubagentWait
             | Self::SubagentSendMessage
             | Self::SubagentInterrupt
-            | Self::SubagentStop => None,
+            | Self::SubagentStop
+            | Self::DeprecatedSubagentList
+            | Self::DeprecatedSubagentSpawn
+            | Self::DeprecatedSubagentSendMessage
+            | Self::DeprecatedSubagentInterrupt => None,
         }
     }
 
     fn programmatic_runtime_name(self, invocation_name: &str) -> Option<String> {
         match self {
+            Self::SelfWait => None,
             Self::SelfSleep => Some("sleep".to_string()),
             Self::FileSystemReadFile => Some("read_file".to_string()),
             Self::FileSystemWriteFile => Some("write_file".to_string()),
@@ -110,18 +152,23 @@ impl RuntimeBuiltinToolName {
             Self::ProcessWrite => Some("process_write".to_string()),
             Self::ProcessList => Some("process_list".to_string()),
             Self::ProcessStop => Some("process_stop".to_string()),
-            Self::SubagentList => Some("agent_list".to_string()),
-            Self::SubagentSpawn => Some("agent_spawn".to_string()),
+            Self::SubagentList => Some("agents_list".to_string()),
+            Self::SubagentListConfigs => Some("agents_list_configs".to_string()),
+            Self::SubagentSpawn => Some("agents_spawn".to_string()),
             Self::SubagentWait => Some("agent_wait".to_string()),
-            Self::SubagentSendMessage => Some("agent_message".to_string()),
-            Self::SubagentInterrupt => Some("agent_interrupt".to_string()),
+            Self::SubagentSendMessage => Some("agents_send_message".to_string()),
+            Self::SubagentInterrupt => Some("agents_interrupt".to_string()),
             Self::SubagentStop => Some("agent_stop".to_string()),
+            Self::DeprecatedSubagentList => Some("agent_list".to_string()),
+            Self::DeprecatedSubagentSpawn => Some("agent_spawn".to_string()),
+            Self::DeprecatedSubagentSendMessage => Some("agent_message".to_string()),
+            Self::DeprecatedSubagentInterrupt => Some("agent_interrupt".to_string()),
         }
     }
 
     fn hook_tool_key(self) -> HookToolKey {
         let target = match self {
-            Self::SelfSleep => HookToolTarget::SelfTool,
+            Self::SelfSleep | Self::SelfWait => HookToolTarget::SelfTool,
             Self::FileSystemReadFile
             | Self::FileSystemWriteFile
             | Self::FileSystemSearchReplace
@@ -133,11 +180,16 @@ impl RuntimeBuiltinToolName {
             | Self::ProcessList
             | Self::ProcessStop => HookToolTarget::Process,
             Self::SubagentList
+            | Self::SubagentListConfigs
             | Self::SubagentSpawn
             | Self::SubagentWait
             | Self::SubagentSendMessage
             | Self::SubagentInterrupt
-            | Self::SubagentStop => HookToolTarget::Subagent,
+            | Self::SubagentStop
+            | Self::DeprecatedSubagentList
+            | Self::DeprecatedSubagentSpawn
+            | Self::DeprecatedSubagentSendMessage
+            | Self::DeprecatedSubagentInterrupt => HookToolTarget::Subagent,
         };
         HookToolKey {
             target,

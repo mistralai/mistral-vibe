@@ -1,4 +1,4 @@
-//! Effect (tool call) wire types: Python `PublicEffectEntry` and its results.
+//! Effect (tool call) wire types: the server's `PublicEffectEntry` and its results.
 
 use std::sync::OnceLock;
 
@@ -23,7 +23,7 @@ pub struct EffectEntry {
 }
 
 impl EffectEntry {
-    /// Settled `state.display`, else the in-progress `detail.display` (Python order).
+    /// Settled `state.display`, else the in-progress `detail.display`.
     pub fn display(&self) -> Option<&EffectDisplay> {
         self.state
             .as_ref()
@@ -41,7 +41,7 @@ impl EffectEntry {
             .and_then(|state| state.status.as_deref())
     }
 
-    /// Header verb, message, and suffix, following the Textual effect state mapping.
+    /// Header verb, message, and suffix for the effect's state.
     pub fn summary(&self) -> (&str, &str, &str) {
         if let Some((verb, message, suffix)) = self.connector_header() {
             return (verb, message.as_str(), suffix);
@@ -98,10 +98,14 @@ impl EffectEntry {
                 .detail
                 .as_ref()
                 .and_then(|detail| detail.tool_name.as_deref())
-                .is_some_and(|name| name.starts_with("subagent."))
+                .is_some_and(|name| {
+                    // Deprecated: `subagent.` is the pre-rename prefix of
+                    // `agents.`, kept only for persisted sessions.
+                    name.starts_with("agents.") || name.starts_with("subagent.")
+                })
     }
 
-    /// Result body lines shown on expand, following Python `_render_result_collapsible`.
+    /// Result body lines shown on expand.
     pub fn body(&self) -> Vec<BodyLine> {
         let lines = match self.status() {
             Some("failed") => format!("Error: {}", clean_output(self.error_message()))
@@ -140,7 +144,7 @@ impl EffectEntry {
         self.kind() != Some("user_question")
     }
 
-    /// Python `_effect_is_terminal`: the state carries a settled verdict.
+    /// The state carries a settled verdict.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.status(),
@@ -148,7 +152,7 @@ impl EffectEntry {
         )
     }
 
-    /// Python `has_body`: whether the folded result section has anything to
+    /// Whether the folded result section has anything to
     /// unfold; a running call mounts no result section yet.
     pub fn has_body(&self) -> bool {
         if !self.is_terminal() {
@@ -170,7 +174,7 @@ impl EffectEntry {
             .unwrap_or("")
     }
 
-    /// Python `display.warnings`: the settled result display's warnings.
+    /// `display.warnings`: the settled result display's warnings.
     pub fn warnings(&self) -> &[String] {
         self.state
             .as_ref()
@@ -178,8 +182,8 @@ impl EffectEntry {
             .map_or(&[], |display| display.warnings.as_slice())
     }
 
-    /// The warnings a result widget paints above its body: Python's Read and
-    /// Edit widgets render them with the output, Grep's ahead of its null guard.
+    /// The warnings a result paints above its body: Read and Edit render them
+    /// with the output, Grep ahead of its null guard.
     pub fn result_warnings(&self) -> &[String] {
         if !matches!(self.kind(), Some("file_read" | "file_edit" | "file_search")) {
             return &[];
@@ -201,7 +205,7 @@ impl EffectEntry {
             .map_or("", |display| display.status_text.as_str())
     }
 
-    /// The settled `edit` output, parsed as Python's `FileEditEffectOutput`.
+    /// The settled `edit` output, parsed as the server's `FileEditEffectOutput`.
     pub fn file_edit_output(&self) -> Option<FileEditEffectOutput> {
         if self.kind() != Some("file_edit") {
             return None;
@@ -217,7 +221,7 @@ impl EffectEntry {
         self.output().map(todo_rows)
     }
 
-    /// The effect's call category (Python `ToolEffectKind`); web connectors read as built-ins.
+    /// The effect's call category (the server's `ToolEffectKind`); web connectors read as built-ins.
     pub fn kind(&self) -> Option<&str> {
         connector_web::kind(self.tool_name()).or(self.detail_kind())
     }
@@ -235,7 +239,7 @@ impl EffectEntry {
             .and_then(|detail| detail.tool_name.as_deref())
     }
 
-    /// The call's structured input (Python `EffectDetail.input`), parsed by
+    /// The call's structured input (the wire `detail.input`), parsed by
     /// the kind-specific consumers (e.g. `worktree::WorktreeInfo`).
     pub fn input(&self) -> Option<&Value> {
         self.detail.as_ref()?.input.as_ref()
@@ -283,7 +287,7 @@ pub struct EffectSide {
     pub kind: Option<String>,
     #[serde(default)]
     pub tool_name: Option<String>,
-    /// The call's structured input (Python `EffectDetail.input`).
+    /// The call's structured input (the wire `detail.input`).
     #[serde(default)]
     pub input: Option<Value>,
 }
@@ -306,7 +310,7 @@ pub struct EffectState {
     pub reason: Option<String>,
 }
 
-/// Python `PublicError`: the message behind a failed effect's `Error:` body.
+/// The server's `PublicError`: the message behind a failed effect's `Error:` body.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EffectError {

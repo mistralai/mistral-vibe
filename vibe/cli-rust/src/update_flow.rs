@@ -1,4 +1,4 @@
-//! The startup update flows (Python `cli.py` `run_cli`'s update paths).
+//! The startup update flows.
 
 use crate::observability;
 use crate::ui;
@@ -6,10 +6,9 @@ use crate::update_notifier;
 use crate::update_prompt;
 use crate::utils;
 
-/// Python `_run_check_upgrade` (cli.py): forced PyPI check, then the outcome
-/// line or the update dialog in `CheckUpgrade` mode. Python reads the theme
-/// from live config; the cached startup config is this client's only source
-/// before the app-server is up.
+/// Forced PyPI check, then the outcome line or the update dialog in
+/// `CheckUpgrade` mode. The theme comes from the cached startup config, this
+/// client's only source before the app-server is up.
 pub async fn run_check_upgrade() -> std::process::ExitCode {
     use update_notifier::cache::FileSystemUpdateCacheRepository;
     use update_notifier::gateway::{UpdateCheckGateway, UpdateGateway};
@@ -28,9 +27,9 @@ pub async fn run_check_upgrade() -> std::process::ExitCode {
     let update = match get_update_if_available(&gateway, current, &repository, now, true).await {
         Ok(update) => update,
         Err(error) => {
-            // Python `_run_check_upgrade` prints the failed check and exits 1.
+            // A failed check prints and exits 1.
             // A cache that cannot be written never lands here: the write's
-            // failure is logged inside, like Python's swallowed `OSError`.
+            // failure is logged inside.
             println!(
                 "{} {}",
                 color_span(
@@ -97,6 +96,7 @@ pub async fn run_check_upgrade() -> std::process::ExitCode {
         );
         return std::process::ExitCode::SUCCESS;
     }
+    crate::terminal::require_interactive_terminal();
     let state = UpdatePromptState::new(
         current,
         &availability.latest_version,
@@ -118,9 +118,9 @@ fn prepare_theme_from_startup_cache() -> utils::startup_cache::StartupConfig {
     config
 }
 
-/// Python `_maybe_run_startup_update_prompt` (cli.py): show the Startup-mode
+/// Show the Startup-mode
 /// dialog for a cached pending update, dismissing it when the user continues.
-/// Divergence: Python gates on live config; this client has no local config
+/// The client has no local config
 /// read before the app-server is up, so the gate is the previous run's cached
 /// `enable_update_checks` (default true on a first run). On a worktree run
 /// the app-server is spawned already; a dialog that exits must kill its

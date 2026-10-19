@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 import json
 from pathlib import Path
 import tomllib
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import tomli_w
@@ -151,7 +153,7 @@ async def _build_adapter(
         UnifiedSessionSettings,
     )
 
-    process = HarnessProcess(experimental_harness=True)
+    process = HarnessProcess()
     built = await process.build_unified_session_context(
         SessionOptions(cwd=str(tmp_path))
     )
@@ -358,9 +360,9 @@ async def test_unified_resolved_variants_carry_to_the_next_session_through_the_c
     )
     await adapter.initialize_experiments(_launch_context())
 
-    reopened = await HarnessProcess(
-        experimental_harness=True
-    ).build_unified_session_context(SessionOptions(cwd=str(tmp_path)))
+    reopened = await HarnessProcess().build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path))
+    )
 
     assert _ROUTED_ALIAS in reopened.config_orchestrator.config.available_models()
 
@@ -442,3 +444,364 @@ def test_the_unified_experiment_sink_persists_nothing() -> None:
     # bind it to the Protocol and let the type checker hold that edge.
     sink: ExperimentStateSink = _NULL_EXPERIMENT_SINK
     assert asyncio.run(sink.persist_experiments(_extra_models_response())) is None
+
+
+def _runnable_catalog(model_id: str) -> Any:
+    from vibe.core.model_catalog import parse_model_catalog_response
+
+    return parse_model_catalog_response({
+        "models": [
+            {
+                "id": model_id,
+                "label": model_id,
+                "capabilities": {"function_calling": True},
+            }
+        ]
+    })
+
+
+async def _adapter_fetching(
+    tmp_path: Path, session: _RecordingSession, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, AsyncMock]:
+    import vibe.app_server._unified_harness_backend_adapter as adapter_module
+
+    monkeypatch.setattr(
+        adapter_module,
+        "fetch_and_cache_model_catalog",
+        AsyncMock(return_value=_runnable_catalog("fetched-model")),
+    )
+    adapter, _client = await _build_adapter(
+        tmp_path, response=None, session=session, monkeypatch=monkeypatch
+    )
+    announced = AsyncMock()
+    monkeypatch.setattr(adapter, "_announce_runtime", announced)
+    monkeypatch.setattr(adapter, "wait_announced", AsyncMock())
+    return adapter, announced
+
+
+@pytest.mark.asyncio
+async def test_unified_fetched_catalog_reaches_the_live_model_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    session = _RecordingSession()
+    adapter, announced = await _adapter_fetching(tmp_path, session, monkeypatch)
+
+    await adapter._fetch_model_catalog()
+
+    assert "fetched-model" in _model_aliases(adapter)
+    assert session.applied, "the derivation was never pushed into the live session"
+    announced.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unified_catalog_fetched_mid_turn_waits_for_the_next_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    session = _RecordingSession(active_turn_id="turn-1")
+    adapter, announced = await _adapter_fetching(tmp_path, session, monkeypatch)
+
+    await adapter._fetch_model_catalog()
+    mid_turn_aliases = _model_aliases(adapter)
+    session.active_turn_id = None
+    await adapter._settle_configuration()
+
+    assert "fetched-model" not in mid_turn_aliases
+    assert len(session.applied) == 1
+    assert "fetched-model" in _model_aliases(adapter)
+
+
+@pytest.mark.asyncio
+async def test_unified_fetch_returning_the_same_catalog_announces_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    session = _RecordingSession()
+    adapter, announced = await _adapter_fetching(tmp_path, session, monkeypatch)
+    await adapter._fetch_model_catalog()
+
+    await adapter._fetch_model_catalog()
+
+    assert len(session.applied) == 1
+    announced.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unified_pin_on_a_catalog_alias_selects_the_fetched_model(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    import vibe.app_server._unified_harness_backend_adapter as adapter_module
+    from vibe.core.model_catalog import parse_model_catalog_response
+
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["active_model"] = "fetched-old"
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+    catalog = parse_model_catalog_response({
+        "models": [
+            {
+                "id": "fetched-model",
+                "label": "Fetched",
+                "aliases": ["fetched-old"],
+                "capabilities": {"function_calling": True},
+            }
+        ]
+    })
+    monkeypatch.setattr(
+        adapter_module, "fetch_and_cache_model_catalog", AsyncMock(return_value=catalog)
+    )
+    adapter, _client = await _build_adapter(
+        tmp_path, response=None, session=_RecordingSession(), monkeypatch=monkeypatch
+    )
+    monkeypatch.setattr(adapter, "_announce_runtime", AsyncMock())
+    monkeypatch.setattr(adapter, "wait_announced", AsyncMock())
+
+    await adapter._fetch_model_catalog()
+
+    resolved = adapter._context.config_orchestrator.config
+    assert resolved.active_model == "fetched-model"
+    assert resolved.get_active_model().alias == "fetched-model"
+
+
+def _write_user_config(config_dir: Path, **fields: object) -> None:
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config.update({"experimental_enable_model_catalog": True, **fields})
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_unified_readiness_waits_for_the_catalog_an_unpinned_session_needs(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    import vibe.app_server._unified_harness_backend_adapter as adapter_module
+
+    _write_user_config(config_dir, active_model="")
+    released = asyncio.Event()
+
+    async def _slow_fetch(_config: object) -> object:
+        await released.wait()
+        return _runnable_catalog("fetched-model")
+
+    monkeypatch.setattr(adapter_module, "fetch_and_cache_model_catalog", _slow_fetch)
+    adapter, _client = await _build_adapter(
+        tmp_path, response=None, session=_RecordingSession(), monkeypatch=monkeypatch
+    )
+    monkeypatch.setattr(adapter, "_announce_runtime", AsyncMock())
+    monkeypatch.setattr(adapter, "wait_announced", AsyncMock())
+
+    adapter._start_model_catalog_fetch()
+    read = await adapter.dispatch_extension("session/ready/read", {})
+    waiter = asyncio.create_task(adapter.dispatch_extension("session/ready/wait", {}))
+    await asyncio.sleep(0)
+
+    assert read.response.ready is False
+    assert not waiter.done()
+    released.set()
+    result = await waiter
+    assert result.response.ready is True
+    assert "fetched-model" in _model_aliases(adapter)
+    read_after = await adapter.dispatch_extension("session/ready/read", {})
+    assert read_after.response.ready is True
+
+
+@pytest.mark.asyncio
+async def test_unified_readiness_skips_the_catalog_for_a_locally_defined_pin(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    import vibe.app_server._unified_harness_backend_adapter as adapter_module
+
+    _write_user_config(config_dir)  # the test config pins a built-in model
+    released = asyncio.Event()
+
+    async def _slow_fetch(_config: object) -> object:
+        await released.wait()
+        return None
+
+    monkeypatch.setattr(adapter_module, "fetch_and_cache_model_catalog", _slow_fetch)
+    adapter, _client = await _build_adapter(
+        tmp_path, response=None, session=_RecordingSession(), monkeypatch=monkeypatch
+    )
+
+    adapter._start_model_catalog_fetch()
+    read = await adapter.dispatch_extension("session/ready/read", {})
+
+    assert read.response.ready is True
+    released.set()
+    task = adapter._model_catalog_task
+    assert task is not None
+    await task
+
+
+@pytest.mark.asyncio
+async def test_unified_sessions_stop_waiting_once_a_catalog_fetch_failed(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    import vibe.core.model_catalog.session as session_module
+    import vibe.core.telemetry.send as telemetry_send
+
+    class _UnreachableClient:
+        @classmethod
+        def from_provider(cls, _provider: object) -> _UnreachableClient:
+            return cls()
+
+        async def fetch(self, _api_key: str) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            pass
+
+    _write_user_config(config_dir, active_model="")
+    monkeypatch.setattr(session_module, "ModelCatalogClient", _UnreachableClient)
+    monkeypatch.setattr(
+        telemetry_send,
+        "get_mistral_provider_and_api_key",
+        lambda _config: (MagicMock(), "test-key"),
+    )
+    first, _client = await _build_adapter(
+        tmp_path, response=None, session=_RecordingSession(), monkeypatch=monkeypatch
+    )
+    first._start_model_catalog_fetch()
+    assert first._model_catalog_wait is not None
+    await first.dispatch_extension("session/ready/wait", {})
+
+    second, _client = await _build_adapter(
+        tmp_path, response=None, session=_RecordingSession(), monkeypatch=monkeypatch
+    )
+    second._start_model_catalog_fetch()
+    cleared = _replacement_adapter(first)
+    cleared._start_model_catalog_fetch()
+
+    assert second._model_catalog_wait is None
+    assert cleared._model_catalog_wait is None
+    read = await second.dispatch_extension("session/ready/read", {})
+    assert read.response.ready is True
+    for adapter in (second, cleared):
+        task = adapter._model_catalog_task
+        assert task is not None
+        await task
+
+
+def _replacement_adapter(source: Any) -> Any:
+    """An adapter over *source*'s context, as ``/clear`` builds one."""
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+
+    context = source._context
+    return UnifiedHarnessBackendAdapter(
+        cast(Any, _RecordingSession()),
+        context,
+        context.derive(UnifiedSessionSettings()),
+    )
+
+
+@pytest.mark.asyncio
+async def test_unified_a_restored_pin_only_the_catalog_defines_runs_once_ready(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._session_model import set_session_active_model_override
+    import vibe.app_server._unified_harness_backend_adapter as adapter_module
+
+    _write_user_config(config_dir)  # pinned to a built-in model: no wait alone
+    released = asyncio.Event()
+
+    async def _slow_fetch(_config: object) -> object:
+        await released.wait()
+        return _runnable_catalog("fetched-model")
+
+    monkeypatch.setattr(adapter_module, "fetch_and_cache_model_catalog", _slow_fetch)
+    adapter, _client = await _build_adapter(
+        tmp_path, response=None, session=_RecordingSession(), monkeypatch=monkeypatch
+    )
+    monkeypatch.setattr(adapter, "_announce_runtime", AsyncMock())
+    monkeypatch.setattr(adapter, "wait_announced", AsyncMock())
+    orchestrator = adapter._context.config_orchestrator
+    # What a reopened session does with the model it was left on.
+    assert not await set_session_active_model_override(
+        orchestrator, "fetched-model", reason="restore"
+    )
+
+    adapter._start_model_catalog_fetch()
+    read = await adapter.dispatch_extension("session/ready/read", {})
+    waiter = asyncio.create_task(adapter.dispatch_extension("session/ready/wait", {}))
+    await asyncio.sleep(0)
+
+    assert read.response.ready is False
+    assert not waiter.done()
+    released.set()
+    await waiter
+    assert orchestrator.config.get_active_model().alias == "fetched-model"
+
+
+@pytest.mark.asyncio
+async def test_unified_sessions_stop_waiting_once_a_fetch_outlasts_the_cap(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    import vibe.app_server._unified_harness_backend_adapter as adapter_module
+    import vibe.core.model_catalog.wait as wait_module
+
+    _write_user_config(config_dir, active_model="")
+    released = asyncio.Event()
+
+    async def _stuck_fetch(_config: object) -> None:
+        await released.wait()
+
+    monkeypatch.setattr(adapter_module, "fetch_and_cache_model_catalog", _stuck_fetch)
+    monkeypatch.setattr(wait_module, "MODEL_CATALOG_WAIT_CAP_SECONDS", 0.05)
+    first, _client = await _build_adapter(
+        tmp_path, response=None, session=_RecordingSession(), monkeypatch=monkeypatch
+    )
+    first._start_model_catalog_fetch()
+
+    result = await asyncio.wait_for(
+        first.dispatch_extension("session/ready/wait", {}), timeout=2
+    )
+
+    assert result.response.ready is True
+    second, _client = await _build_adapter(
+        tmp_path, response=None, session=_RecordingSession(), monkeypatch=monkeypatch
+    )
+    second._start_model_catalog_fetch()
+    cleared = _replacement_adapter(first)
+    cleared._start_model_catalog_fetch()
+    assert second._model_catalog_wait is None
+    assert cleared._model_catalog_wait is None
+    released.set()
+    for adapter in (first, second, cleared):
+        task = adapter._model_catalog_task
+        assert task is not None
+        await task
+
+
+@pytest.mark.asyncio
+async def test_unified_no_mistral_credential_means_no_wait(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    import vibe.core.telemetry.send as telemetry_send
+
+    _write_user_config(config_dir, active_model="")
+    monkeypatch.setattr(
+        telemetry_send, "get_mistral_provider_and_api_key", lambda _config: None
+    )
+    adapter, _client = await _build_adapter(
+        tmp_path, response=None, session=_RecordingSession(), monkeypatch=monkeypatch
+    )
+
+    adapter._start_model_catalog_fetch()
+
+    assert adapter._model_catalog_wait is None
+    read = await adapter.dispatch_extension("session/ready/read", {})
+    assert read.response.ready is True
+    task = adapter._model_catalog_task
+    assert task is not None
+    await task

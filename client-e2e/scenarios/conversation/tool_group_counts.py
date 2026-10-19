@@ -20,9 +20,7 @@ _LONG_COMMAND = "echo three && " + " && ".join(
     f"test -f src/module_{i:02d}.py" for i in range(8)
 )
 
-screen_contains = {
-    "rust": ("⏷ Loaded 1 skill, read 2 files, ran 3 …", "⏷ Ran git status")
-}
+screen_contains = ("⏷ Loaded 1 skill, read 2 files, ran 3 …", "⏷ Ran git status")
 
 # Round one folds into a counted group; round two's lone call stays ungrouped.
 timeline: Timeline = [

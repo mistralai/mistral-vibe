@@ -12,4 +12,4 @@ handshake = mcp_handshake([
 
 timeline: Timeline = ["/mcp gmail\r"]
 
-screen_contains = {"rust": ("Connector: Gmail", "send_email")}
+screen_contains = ("Connector: Gmail", "send_email")

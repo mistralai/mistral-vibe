@@ -1,5 +1,4 @@
 //! `/retry`: re-enqueue a turn that continues an interrupted model response.
-//! Mirrors Python's `_retry` + `build_retry_prompt` + `_RetryPresentation`.
 
 use std::sync::Arc;
 
@@ -11,11 +10,11 @@ use super::submission::{new_message_id, start_injected_turn};
 use crate::app::{App, QueuedPrompt, Status};
 use crate::server::Client;
 
-/// Python `_MAX_INCOMPLETE_STREAM_RETRIES`: silent continuations before the
+/// Silent continuations before the
 /// failure surfaces as a manual `/retry` offer.
 pub const MAX_INCOMPLETE_STREAM_RETRIES: u32 = 2;
 
-/// Python `_RetryPresentation`: the interrupted answer row plus the rows that
+/// The interrupted answer row plus the rows that
 /// vanish when the retried turn's first entry lands.
 pub struct RetryPresentation {
     pub assistant_id: Option<String>,
@@ -33,8 +32,8 @@ pub struct RetryContinuation {
 }
 
 /// Continue an interrupted model response, optionally with extra instructions.
-/// Does nothing while a turn is generating (Python `_agent_job_active` guard)
-/// or if the last turn was not interrupted (Python `begin_retry` guard).
+/// Does nothing while a turn is generating or if the last turn was not
+/// interrupted.
 pub fn start_retry(app: &mut App, client: &Arc<Client>, cmd_args: &str) {
     if matches!(app.session.status, Status::Generating { .. }) {
         return;
@@ -46,9 +45,9 @@ pub fn start_retry(app: &mut App, client: &Arc<Client>, cmd_args: &str) {
         return;
     };
     app.session.can_retry = false;
-    // A manual retry re-opens the incomplete-stream budget (Python `_handle_turn`).
+    // A manual retry re-opens the incomplete-stream budget.
     app.session.incomplete_stream_retries = 0;
-    // Python marks busy before the injected turn lands; mirror it so nothing races the retry.
+    // Mark busy before the injected turn lands so nothing races the retry.
     app.set_status(Status::Generating {
         since: std::time::Instant::now(),
     });
@@ -69,7 +68,7 @@ pub fn start_retry(app: &mut App, client: &Arc<Client>, cmd_args: &str) {
     });
 }
 
-/// Python `offer_retry`: capture the interrupted answer and arm the presentation.
+/// Capture the interrupted answer and arm the presentation.
 /// `transient` is the error row mounted for the failure, if any. A later failure
 /// keeps the captured answer and appends its error row.
 pub fn offer(app: &mut App, transient: Option<String>) {
@@ -92,7 +91,7 @@ pub fn offer(app: &mut App, transient: Option<String>) {
     app.session.retry_presentation = Some(presentation);
 }
 
-/// Python `begin_retry`: the `/retry` echo becomes transient and the
+/// The `/retry` echo becomes transient and the
 /// presentation activates; no presentation leaves the echo mounted.
 pub fn begin(app: &mut App, echo_id: String) {
     if let Some(presentation) = &mut app.session.retry_presentation {
@@ -101,7 +100,7 @@ pub fn begin(app: &mut App, echo_id: String) {
     }
 }
 
-/// Python `cancel_retry_presentation`: drop the presentation, rows stay mounted.
+/// Drop the presentation, rows stay mounted.
 pub fn cancel(app: &mut App) {
     app.session.retry_presentation = None;
     app.session.turn_assistant_id = None;
@@ -132,12 +131,11 @@ fn entry_id(params: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Python `_handle_entry_added`'s retry dispatch: a user entry always cancels
+/// The retry dispatch of an added entry: a user entry always cancels
 /// the offer, and only the retried turn's first entry consumes the
 /// presentation — removing the transient rows, and continuing the interrupted
 /// answer when the entry is an assistant message. An inactive offer (armed by
-/// a failure, before the user runs `/retry`) survives non-user entries
-/// (Python `_resolve_retry_presentation` returns unless `active`).
+/// a failure, before the user runs `/retry`) survives non-user entries.
 pub fn on_entry_added(app: &mut App, params: &Value) {
     let Some(presentation) = app.session.retry_presentation.as_ref() else {
         return;
@@ -157,7 +155,6 @@ pub fn on_entry_added(app: &mut App, params: &Value) {
     }
 }
 
-/// Python `_resolve_retry_presentation`.
 fn resolve(
     app: &mut App,
     presentation: &RetryPresentation,
@@ -187,12 +184,10 @@ fn resolve(
     });
 }
 
-/// Track the turn's latest assistant row (Python `_turn_assistant_message`),
+/// Track the turn's latest assistant row,
 /// which the next failure's presentation captures. A continuation's hidden
 /// entry keeps pointing at the merged row it feeds. A user entry starts a new
-/// turn, so the previous turn's assistant row is no longer its target
-/// (Python's user-entry arm calls `cancel_retry_presentation`, which also
-/// clears `_turn_assistant_message`).
+/// turn, so the previous turn's assistant row is no longer its target.
 pub fn track_turn_assistant(app: &mut App, params: &Value) {
     match entry_kind(params) {
         EntryKind::User => {
@@ -212,7 +207,7 @@ pub fn track_turn_assistant(app: &mut App, params: &Value) {
     app.session.turn_assistant_id = Some(tracked);
 }
 
-/// Python `_auto_retry_incomplete_stream`: a truncated stream silently
+/// A truncated stream silently
 /// continues while the budget lasts and the server queue is idle; the failure
 /// surfaces as a manual `/retry` offer only once the budget is spent.
 pub fn auto_continue_incomplete_stream(
@@ -250,7 +245,7 @@ pub fn auto_continue_incomplete_stream(
     app.set_status(Status::Generating {
         since: std::time::Instant::now(),
     });
-    // Python opens the retry turn with the Retrying label (`_handle_turn`).
+    // The retry turn opens with the Retrying label.
     app.view
         .loading
         .set_label(crate::ui::loading::RETRYING_LOADING_STATUS);

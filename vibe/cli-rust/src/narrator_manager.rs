@@ -22,7 +22,7 @@ pub struct Speech {
     task: AbortHandle,
 }
 
-/// Python `ReadAloudTrackingState`.
+/// Read-aloud telemetry bookkeeping for the current narration.
 #[derive(Default)]
 pub struct ReadAloudTracking {
     pub session_id: String,
@@ -54,12 +54,12 @@ impl ReadAloudTracking {
     }
 }
 
-/// The TTS settings, refreshed with every runtime snapshot (Python `sync`).
+/// The TTS settings, refreshed with every runtime snapshot.
 pub fn apply_runtime(app: &mut App, runtime: &Value) {
     app.narrator.speech_config = SpeechConfig::from_runtime(runtime);
 }
 
-/// Python `_on_read_aloud_requested`.
+/// Record a narration request.
 pub fn on_read_aloud_requested(app: &mut App) {
     app.narrator.tracking.reset();
     telemetry::record(
@@ -72,7 +72,7 @@ pub fn on_read_aloud_requested(app: &mut App) {
     );
 }
 
-/// Python `_on_read_aloud_ended`.
+/// Record how a narration ended.
 pub fn on_read_aloud_ended(app: &App, status: &str, error_type: Option<&str>) {
     telemetry::record(
         app,
@@ -87,7 +87,7 @@ pub fn on_read_aloud_ended(app: &App, status: &str, error_type: Option<&str>) {
     );
 }
 
-/// Python `_on_turn_summary`'s speak branch; the row reads `summarizing` until audio starts.
+/// Speak a turn summary; the row reads `summarizing` until audio starts.
 pub fn speak(app: &mut App, text: String) {
     stop(app);
     let (Some(cfg), Some(tx), Some(session_id)) = (
@@ -122,7 +122,7 @@ pub fn speak(app: &mut App, text: String) {
     });
 }
 
-/// Python `_speak_summary`, checking the device before paying for the TTS request.
+/// Synthesize and play the summary, checking the device before paying for the TTS request.
 async fn speak_summary(
     cfg: &SpeechConfig,
     session_id: &str,
@@ -146,7 +146,7 @@ async fn speak_summary(
     done.await.unwrap_or(Ok(()))
 }
 
-/// Python `cancel`'s playback half: stop the clip and orphan its pending events.
+/// The playback half of a cancel: stop the clip and orphan its pending events.
 pub fn stop(app: &mut App) {
     if let Some(speech) = app.narrator.speech.take() {
         speech.stop.store(true, Ordering::Relaxed);
@@ -154,7 +154,7 @@ pub fn stop(app: &mut App) {
     }
 }
 
-/// Python `_speak_summary` and `_on_playback_finished` state changes; stopped clips are ignored.
+/// Speaking and playback-finished state changes; stopped clips are ignored.
 pub fn apply_event(app: &mut App, event: Event) {
     let current = |app: &App, id: u64| app.narrator.speech.as_ref().is_some_and(|s| s.id == id);
     match event {

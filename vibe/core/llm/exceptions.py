@@ -292,5 +292,5 @@ class BackendErrorBuilder:
             data = json.loads(body_text)
             error_model = ErrorResponse.model_validate(data)
             return error_model.primary_message
-        except (json.JSONDecodeError, ValidationError):
+        except json.JSONDecodeError, ValidationError:
             return None

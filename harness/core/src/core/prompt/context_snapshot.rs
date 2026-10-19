@@ -28,10 +28,11 @@ fn canonical_config() -> HarnessConfig {
         "settings": {
             "turn": { "max_iterations": 42 },
             "context": {
-                "compaction": { "mode": "automatic", "token_threshold": 120000 }
+                "compaction": { "mode": "automatic", "token_threshold": 120000 },
+                "notifications": { "pending_count": 1000, "pending_bytes": 1048576, "recent_ids": 1000 }
             },
             "tools": {
-                "programmatic": { "max_effects": 64, "max_operations": 512 },
+                "programmatic": { "max_effects": 64, "max_operations": 512, "max_elapsed_ms": 60000, "max_sleep_ms": 30000 },
                 "large_output": { "mode": "disabled" },
                 "subagents": { "mode": "enabled" },
                 "background_processes": { "mode": "enabled" },

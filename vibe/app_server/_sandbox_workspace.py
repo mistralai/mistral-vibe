@@ -99,9 +99,9 @@ async def sandbox_git_status(
         for result in (branch, log):
             if isinstance(result, BaseException):
                 raise result
-        remote_branches = None if isinstance(remote, BaseException) else remote
+        has_origin_master = isinstance(remote, str) and bool(remote.strip())
         assert isinstance(branch, str) and isinstance(log, str)
-        return format_git_context(branch.strip(), remote_branches, log)
+        return format_git_context(branch.strip(), has_origin_master, log)
     except TimeoutError:
         return GIT_TIMEOUT_MESSAGE
     except _GitCommandFailedError:

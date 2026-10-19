@@ -24,13 +24,13 @@ use crate::core::ProgrammaticToolSettings;
 #[cfg(test)]
 use crate::core::SubagentMode;
 #[cfg(test)]
-use crate::core::config::ContextSettings;
-#[cfg(test)]
 use crate::core::config::HarnessSettings;
 #[cfg(test)]
 use crate::core::config::ToolSettings;
 #[cfg(test)]
 use crate::core::config::TurnSettings;
+#[cfg(test)]
+use crate::core::config::{ContextSettings, ImageTokenCost};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct SessionHandle(u64);
@@ -193,14 +193,24 @@ mod tests {
                 context: ContextSettings {
                     compaction: CompactionPolicy::Disabled,
                     image_delivery: ImageDeliverySettings::default(),
+                    notifications: crate::core::config::NotificationSettings {
+                        pending_count: 1000,
+                        pending_bytes: 1024 * 1024,
+                        recent_ids: 1000,
+                    },
+                    image_token_cost: ImageTokenCost::SerializedBytes,
                 },
                 tools: ToolSettings {
+                    max_wait_ms: 3_600_000,
+                    model_wait: Default::default(),
                     programmatic: ProgrammaticToolSettings {
                         max_effects: 128,
                         max_operations: 1024,
+                        max_elapsed_ms: 60_000,
+                        max_sleep_ms: 30_000,
                     },
                     large_output: crate::core::LargeOutputPolicy::Disabled,
-                    subagents: SubagentMode::Enabled,
+                    subagents: SubagentMode::enabled(),
                     background_processes: BackgroundProcessMode::Disabled,
                     command_environment: CommandEnvironment::Unix,
                     permissions: None,

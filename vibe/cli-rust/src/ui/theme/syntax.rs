@@ -1,11 +1,11 @@
-//! Syntax-highlight palette: TextMate scopes to Textual's `HighlightTheme` token styles.
+//! Syntax-highlight palette: TextMate scopes to pygments-style token styles.
 
 use ratatui::style::{Color, Modifier, Style};
 use syntect::parsing::Scope;
 
 use crate::ui::theme;
 
-/// The pygments token types Textual's highlight themes give a style to.
+/// The pygments token types the highlight themes give a style to.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Tok {
     Comment,
@@ -71,7 +71,7 @@ const SCOPES: &[(&str, Tok)] = &[
     // tags it `Literal.String.Doc`.
     ("comment.block.documentation", Tok::StrDoc),
     // Rust's grammar suffixes its scopes with `.rust`; pygments' rust lexer
-    // emits plain `Literal.String` for its strings, which Textual's ANSI theme
+    // emits plain `Literal.String` for its strings, which the ANSI theme
     // maps to the misspelled `ansi_greenb` (unstyled), and treats format
     // placeholders as string content, not constants.
     ("string.quoted.double.rust", Tok::Str),
@@ -131,7 +131,7 @@ pub(crate) fn token(scopes: &[Scope], text: &str) -> Option<Tok> {
         ) {
             return Some(Tok::NameBuiltin);
         }
-        // Pygments leaves Rust string contents unstyled in Textual's ANSI
+        // Pygments leaves Rust string contents unstyled in the ANSI
         // palette, including interpolation punctuation.
         if scope_names.iter().any(|scope| scope.starts_with("string.")) {
             return Some(Tok::Name);
@@ -193,7 +193,7 @@ pub(crate) fn token(scopes: &[Scope], text: &str) -> Option<Tok> {
     generic_name.then_some(Tok::Name)
 }
 
-/// Textual paints unstyled fence text with `$text`.
+/// Unstyled fence text paints with `$text`.
 pub(crate) fn plain() -> Style {
     Style::default().fg(theme::code_plain())
 }
@@ -208,7 +208,7 @@ pub(crate) fn style(tok: Tok) -> Style {
 
 /// `ANSIDarkHighlightTheme` / `ANSILightHighlightTheme`. Entries whose color
 /// name is misspelled upstream (`ansi_greenb`, `ansi_yelllow`, `ansi_blow`)
-/// fail to parse in Textual and leave the text unstyled, so they map to `Name`.
+/// fail to parse and leave the text unstyled, so they map to `Name`.
 fn ansi(tok: Tok) -> Style {
     let light = !theme::is_dark();
     match tok {
@@ -232,7 +232,7 @@ fn ansi(tok: Tok) -> Style {
     }
 }
 
-/// `HighlightTheme`, whose `$text-*` variables Textual tints from the theme.
+/// `HighlightTheme`, whose `$text-*` variables are tinted from the theme.
 fn truecolor(tok: Tok) -> Style {
     match tok {
         Tok::Comment => fg(theme::blend(

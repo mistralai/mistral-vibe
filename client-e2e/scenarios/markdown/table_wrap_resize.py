@@ -5,15 +5,13 @@ from __future__ import annotations
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
 from e2e.app_server.scenario import Timeline, resize
 
-screen_contains = {
-    "rust": (
-        "│ Table   │ Long table cell text wraps",
-        "│ cells   │ instead of disappearing",
-        "│         │ beyond the viewport",
-        "│ aligned and every word",
-        "└─────────┴───────────────────────────────┴────────────────────────┘",
-    )
-}
+screen_contains = (
+    "│ Table   │ Long table cell text wraps",
+    "│ cells   │ instead of disappearing",
+    "│         │ beyond the viewport",
+    "│ aligned and every word",
+    "└─────────┴───────────────────────────────┴────────────────────────┘",
+)
 
 _PROMPT = "compare table wrapping"
 _ANSWER = "\n".join([

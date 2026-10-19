@@ -50,6 +50,7 @@ _REGEX_PREFIX = "re:"
 # against the native catalogue, and a new builtin fails that test until someone writes
 # down what the model calls it.
 _BUILTIN_MODEL_NAMES: dict[str, tuple[str, ...]] = {
+    "self.wait": ("wait",),
     "self.sleep": ("sleep",),
     "file_system.read_file": ("read_file",),
     "file_system.write_file": ("write_file",),
@@ -61,6 +62,13 @@ _BUILTIN_MODEL_NAMES: dict[str, tuple[str, ...]] = {
     "process.write": ("process_write",),
     "process.list": ("process_list",),
     "process.stop": ("process_stop",),
+    "agents.list_configs": ("agents_list_configs",),
+    "agents.list": ("agents_list",),
+    "agents.spawn": ("agents_spawn",),
+    "agents.send_message": ("agents_send_message",),
+    "agents.interrupt": ("agents_interrupt",),
+    # Deprecated: retired `subagent.*` spellings, kept only so hooks still match
+    # replayed calls. Use the `agents.*` entries above.
     "subagent.list": ("agent_list",),
     "subagent.spawn": ("agent_spawn",),
     "subagent.wait": ("agent_wait",),

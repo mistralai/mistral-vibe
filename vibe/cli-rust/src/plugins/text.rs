@@ -1,4 +1,4 @@
-//! Pure `/plugins` and `/reload-plugins` text (Python `widgets/plugins_app.py` helpers).
+//! Pure `/plugins` and `/reload-plugins` text.
 
 use std::collections::BTreeMap;
 
@@ -9,7 +9,7 @@ const DIGEST_WIDTH: usize = 8;
 pub const UNKNOWN: &str = "—";
 pub const NOTHING_CHANGED: &str = "Plugins reloaded. Nothing changed.";
 
-/// One plugin whose pinned content digest moved across a reload (Python `PluginCatalogChange`).
+/// One plugin whose pinned content digest moved across a reload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
     pub name: String,
@@ -17,7 +17,7 @@ pub struct Change {
     pub after: Option<String>,
 }
 
-/// Compare two catalogues on content digest, by name (Python `_plugin_changes`).
+/// Compare two catalogues on content digest, by name.
 pub fn changes(before: &PluginCatalogState, after: &PluginCatalogState) -> Vec<Change> {
     let digests = |state: &PluginCatalogState| -> BTreeMap<String, Option<String>> {
         state
@@ -44,7 +44,7 @@ pub fn changes(before: &PluginCatalogState, after: &PluginCatalogState) -> Vec<C
         .collect()
 }
 
-/// What a reload moved, by digest, rather than that it ran (Python `plugin_reload_report`).
+/// What a reload moved, by digest, rather than that it ran.
 pub fn reload_report(changes: &[Change], state: &PluginCatalogState) -> String {
     if changes.is_empty() {
         return NOTHING_CHANGED.to_owned();
@@ -94,7 +94,7 @@ pub fn matches(entry: &PluginCatalogEntry, query: &str) -> bool {
             .contains(query)
 }
 
-/// The detail view's lines (Python `_detail_lines`).
+/// The detail view's lines.
 pub fn detail_lines(entry: &PluginCatalogEntry) -> Vec<String> {
     let mut lines = vec![
         format!("  Author: {}", or_unknown(entry.author.as_deref())),

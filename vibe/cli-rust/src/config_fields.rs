@@ -35,21 +35,25 @@ impl ConfigField {
     }
 }
 
+#[derive(Default)]
 pub struct Loaded {
     pub fields: Vec<ConfigField>,
     pub targets: Vec<String>,
+    /// Why the read failed; the fields on screen then stay.
+    pub error: Option<String>,
 }
 
 pub fn parse(result: &Value) -> Loaded {
     let Some(wires) = result.get("fields").and_then(Value::as_array) else {
         return Loaded {
-            fields: Vec::new(),
-            targets: Vec::new(),
+            error: Some("unexpected config/fields/read response".into()),
+            ..Loaded::default()
         };
     };
     Loaded {
         fields: wires.iter().map(field).collect(),
         targets: strings(result.get("targets")),
+        error: None,
     }
 }
 

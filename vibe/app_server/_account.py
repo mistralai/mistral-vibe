@@ -13,7 +13,7 @@ from vibe.app_server.models import (
     AccountStatus,
     AccountView,
 )
-from vibe.core.config import VibeConfigSchema
+from vibe.core.config import DEFAULT_VIBE_BASE_URL, VibeConfigSchema
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.telemetry.send import get_mistral_provider_and_api_key
 from vibe.core.types import Backend
@@ -59,6 +59,10 @@ _KEY_SCOPES = {
     AccountPlanKind.MISTRAL_CODE: "codestral",
 }
 _KEY_PREVIEW_CHARS = 10
+_UPGRADE_PLANS_URL = (
+    "https://admin.mistral.ai/subscriptions/upgrade/plans"
+    "?return_to=https%3A%2F%2Fchat.mistral.ai"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,7 +284,7 @@ class AccountController:
                 if not self._agent_loop.config.is_active_model_mistral()
                 else AccountView(
                     status=AccountStatus.UNAUTHORIZED,
-                    plan_offer=upgrade,
+                    plan_offer=_upgrade_offer(vibe_base_url),
                     rate_limit_action=upgrade,
                     teleport_action=upgrade,
                 )
@@ -323,7 +327,7 @@ class AccountController:
         if plan.prompt_switching_to_pro_plan:
             plan_offer = switch_key
         elif plan.offers_upgrade:
-            plan_offer = upgrade
+            plan_offer = _upgrade_offer(vibe_base_url)
 
         teleport_eligible = plan.kind is not AccountPlanKind.MISTRAL_CODE
         return tenant_update, AccountView(
@@ -346,3 +350,10 @@ def _account_action(kind: AccountActionKind, vibe_base_url: str) -> AccountActio
     return AccountAction(
         kind=kind, url=f"{vibe_base_url.rstrip('/')}/code/extensions?focus=key"
     )
+
+
+def _upgrade_offer(vibe_base_url: str) -> AccountAction:
+    # The plans page only sells Mistral's own Vibe: tenants keep their key page.
+    if vibe_base_url.rstrip("/") != DEFAULT_VIBE_BASE_URL:
+        return _account_action(AccountActionKind.UPGRADE_TO_PRO, vibe_base_url)
+    return AccountAction(kind=AccountActionKind.UPGRADE_TO_PRO, url=_UPGRADE_PLANS_URL)

@@ -6,7 +6,6 @@ from e2e.app_server.events import assistant_msg, turn_completed, turn_started, u
 from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 expected_clipboard = """\
 fn main() {
     let value = 1;
@@ -18,7 +17,7 @@ fn main() {
 
 _PROMPT = "show indented code"
 _ANSWER = f"```\n{expected_clipboard}\n```"
-_SELECT_CODE = "\x1b[<0;3;15M\x1b[<32;119;21M\x1b[<0;119;21m"
+_SELECT_CODE = "\x1b[<0;3;11M\x1b[<32;119;17M\x1b[<0;119;17m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

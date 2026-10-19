@@ -104,7 +104,7 @@ fn round_trip_preserves_other_sections_and_keys() {
 }
 
 #[test]
-fn set_merges_optional_keys_like_python() {
+fn set_merges_optional_keys() {
     let _guard = ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -165,7 +165,7 @@ fn missing_file_or_section_reads_as_none() {
     let _home = TempHome::new("missing");
     assert_eq!(get(), None);
 
-    // Python's read_section is falsy for an empty section, so the legacy
+    // An empty section reads as missing, so the legacy
     // JSON fallback still applies; without it the cache stays None.
 }
 
@@ -234,7 +234,7 @@ fn empty_section_still_falls_back_to_legacy_json() {
     )
     .unwrap();
 
-    // Python's read_section is falsy for an empty section, so the legacy
+    // An empty section reads as missing, so the legacy
     // migration fires through it.
     assert_eq!(get(), Some(cache("2.0.0", 99)));
 }
@@ -276,8 +276,7 @@ fn a_write_that_cannot_persist_reports_the_failure() {
     .is_err());
 
     // The whole-file write is skipped instead of dropping the unparsed
-    // content; Python instead rewrites from an empty parse (documented
-    // divergence, shared with the existing single-key writes).
+    // content (shared with the existing single-key writes).
     assert_eq!(home.cache_toml(), broken);
 }
 
@@ -323,7 +322,7 @@ fn modify_returning_none_writes_nothing() {
     let seeded = "[update_cache]\nlatest_version = \"1.0.0\"\nstored_at_timestamp = 5\n";
     home.write_cache_toml(seeded);
 
-    // Python's mark-as-dismissed no-ops without a cache: the closure sees
+    // Mark-as-dismissed no-ops without a cache: the closure sees
     // the stored one here, returns None, and the file stays untouched.
     modify(&mut |current| {
         assert_eq!(current, Some(cache("1.0.0", 5)));
@@ -348,7 +347,7 @@ fn modify_migrates_legacy_json_even_without_a_change() {
     .unwrap();
 
     // A get-equivalent read migrates the legacy file even when the caller
-    // makes no further change, like Python's `_read_section`.
+    // makes no further change.
     modify(&mut |current| {
         assert_eq!(current, Some(cache("2.0.0", 99)));
         None
@@ -371,7 +370,7 @@ fn invalid_legacy_json_reads_as_none() {
     assert_eq!(get(), None);
 
     // A JSON payload whose required fields are invalid parses to None, but the
-    // migration write still happened, mirroring Python's `_read_section`.
+    // migration write still happened.
     std::fs::write(
         home.0.join("update_cache.json"),
         r#"{"latest_version": null}"#,

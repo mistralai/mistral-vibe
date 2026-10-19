@@ -23,6 +23,7 @@ from tests.stubs.local_sandbox import (
     RecordingSandbox,
     ScriptedModel,
     build_trusted_project,
+    run_turn,
 )
 from vibe.app_server._sandbox_skills import SKILLS_DIRNAME, SandboxSkills
 from vibe.app_server.local import (
@@ -31,9 +32,6 @@ from vibe.app_server.local import (
     LocalHarnessOptions,
 )
 from vibe.app_server.protocol import ClientCapabilities, ClientInfo, SessionOptions
-from vibe.app_server.run_export import RunLimits, RunOutcome
-from vibe.cli.headless_run import StopRequests
-from vibe.cli.programmatic import run_headless
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.skills.models import SkillInfo
 
@@ -78,7 +76,6 @@ def _options(sandbox: RecordingSandbox) -> LocalHarnessOptions:
         session_options=SessionOptions(
             agent=BuiltinAgentName.AUTO_APPROVE, headless=True
         ),
-        experimental_harness=True,
         sandbox=sandbox,
     )
 
@@ -91,14 +88,9 @@ async def _run_skill(
     monkeypatch.setattr(EXECUTE_COMPLETION, model)
     sandbox = RecordingSandbox(project)
     host = LocalHarnessHost()
-    report = await run_headless(
-        harness_options=_options(sandbox),
-        prompt=_TASK,
-        stop=StopRequests(RunLimits()),
-        harness_host=host,
-    )
+    stop = await run_turn(host, _options(sandbox), _TASK)
     await host.close()
-    assert report.result.outcome is RunOutcome.FINISHED, report.result.error
+    assert stop is None
     return sandbox, model.final_input(_TASK)
 
 

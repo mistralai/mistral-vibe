@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from vibe.core.config import SessionLoggingConfig
-from vibe.core.session import last_session_pointer
 from vibe.core.session.saved_sessions import (
     delete_saved_session,
     relocate_saved_session,
@@ -323,53 +322,10 @@ class TestDeleteSavedSession:
         assert other_dir.exists()
 
     @pytest.mark.asyncio
-    async def test_clears_matching_last_session_pointers(
-        self, session_config: SessionLoggingConfig
-    ) -> None:
-        target_dir = write_saved_session(
-            session_config,
-            "20240101_120000",
-            "ffffffff",
-            {"session_id": "ffffffff-6666", "title": "Target"},
-        )
-        pointer_dir = (
-            Path(session_config.save_dir) / last_session_pointer.POINTER_DIR_NAME
-        )
-        pointer_dir.mkdir()
-        matching_pointer = pointer_dir / "ttys001"
-        other_pointer = pointer_dir / "ttys002"
-        matching_pointer.write_text("ffffffff-6666\n", encoding="utf-8")
-        other_pointer.write_text("other-session\n", encoding="utf-8")
-
-        await delete_saved_session("ffffffff-6666", session_config)
-
-        assert not target_dir.exists()
-        assert not matching_pointer.exists()
-        assert other_pointer.read_text(encoding="utf-8") == "other-session\n"
-
-    @pytest.mark.asyncio
     async def test_succeeds_for_missing_saved_session(
         self, session_config: SessionLoggingConfig
     ) -> None:
         await delete_saved_session("missing-session", session_config)
-
-    @pytest.mark.asyncio
-    async def test_clears_stale_last_session_pointer_for_missing_saved_session(
-        self, session_config: SessionLoggingConfig
-    ) -> None:
-        pointer_dir = (
-            Path(session_config.save_dir) / last_session_pointer.POINTER_DIR_NAME
-        )
-        pointer_dir.mkdir()
-        matching_pointer = pointer_dir / "ttys001"
-        other_pointer = pointer_dir / "ttys002"
-        matching_pointer.write_text("missing-session\n", encoding="utf-8")
-        other_pointer.write_text("other-session\n", encoding="utf-8")
-
-        await delete_saved_session("missing-session", session_config)
-
-        assert not matching_pointer.exists()
-        assert other_pointer.read_text(encoding="utf-8") == "other-session\n"
 
     @pytest.mark.asyncio
     async def test_requires_exact_saved_session_id_before_deleting(

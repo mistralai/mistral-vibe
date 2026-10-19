@@ -65,8 +65,8 @@ fn resume_picker_ignores_wheel_while_loading() {
         mouse::route(&mut app, event(MouseEventKind::ScrollDown, 5, 5)),
         None
     );
-    assert_eq!(app.resume_picker.scroll, 0);
-    assert!(!app.resume_picker.free_scroll);
+    assert_eq!(app.resume_picker.list.scroll(), 0);
+    assert!(!app.resume_picker.list.free_scroll());
 }
 
 #[test]
@@ -110,6 +110,7 @@ fn starting_a_new_gesture_clears_remote_project_press_state() {
     let mut app = App::default();
     let area = Rect::new(0, 0, 20, 10);
     mouse::register_region(&mut app, area, MouseTarget::RemoteProject);
+    app.vibe_code_project.list.layout_rows(10, area);
     assert_eq!(
         mouse::route(
             &mut app,
@@ -117,7 +118,7 @@ fn starting_a_new_gesture_clears_remote_project_press_state() {
         ),
         Some(MouseTarget::RemoteProject)
     );
-    app.vibe_code_project.pressed = Some(5);
+    app.vibe_code_project.list.press((5, 5));
 
     assert_eq!(
         mouse::route(
@@ -126,7 +127,7 @@ fn starting_a_new_gesture_clears_remote_project_press_state() {
         ),
         Some(MouseTarget::RemoteProject)
     );
-    assert_eq!(app.vibe_code_project.pressed, None);
+    assert_eq!(app.vibe_code_project.list.release((5, 5)), None);
 }
 
 #[test]
@@ -220,6 +221,22 @@ fn remote_project_reuses_double_and_triple_click_selection() {
         .region
         .as_ref()
         .is_some_and(|selection| selection.pending_copy));
+}
+
+#[test]
+fn the_auth_app_owns_the_padding_beside_its_options() {
+    let mut app = App::default();
+    app.mcp_oauth.open = true;
+    app.mcp_oauth.auth_url = Some("https://auth".into());
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal.draw(|frame| app.draw(frame)).expect("draw");
+
+    let row = app.mcp_oauth.list.rows_of(0).next().unwrap();
+    assert_eq!(
+        mouse::target_at(&app, (row.x - 1, row.y)),
+        Some(MouseTarget::McpOAuth)
+    );
 }
 
 fn event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {

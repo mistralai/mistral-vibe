@@ -25,16 +25,15 @@ from tests.stubs.local_sandbox import (
     RecordingSandbox,
     ScriptedModel,
     build_trusted_project,
+    run_turn,
 )
 from vibe.app_server.local import (
     ClientDescriptor,
     LocalHarnessHost,
     LocalHarnessOptions,
 )
+from vibe.app_server.models import TurnStop
 from vibe.app_server.protocol import ClientCapabilities, ClientInfo, SessionOptions
-from vibe.app_server.run_export import RunLimits, RunOutcome
-from vibe.cli.headless_run import StopRequests
-from vibe.cli.programmatic import run_headless
 from vibe.core.agents.models import BuiltinAgentName
 
 pytestmark = [
@@ -144,23 +143,16 @@ def _options(workspace: Path, sandbox: RecordingSandbox | None) -> LocalHarnessO
             trust_workspace=sandbox is None,
             headless=True,
         ),
-        experimental_harness=True,
         sandbox=sandbox,
     )
 
 
-async def _run(workspace: Path, sandbox: RecordingSandbox | None) -> RunOutcome:
+async def _run(workspace: Path, sandbox: RecordingSandbox | None) -> TurnStop | None:
     host = LocalHarnessHost()
     try:
-        report = await run_headless(
-            harness_options=_options(workspace, sandbox),
-            prompt=_PROCESS_TASK,
-            stop=StopRequests(RunLimits()),
-            harness_host=host,
-        )
+        return await run_turn(host, _options(workspace, sandbox), _PROCESS_TASK)
     finally:
         await host.close()
-    return report.result.outcome
 
 
 def _tool_messages(model: ScriptedModel) -> list[dict[str, Any]]:
@@ -222,8 +214,8 @@ async def test_background_processes_answer_the_model_alike_on_the_host_and_in_a_
     sandbox_messages = _tool_messages(scripted)
 
     # Assert
-    assert host_outcome is RunOutcome.FINISHED
-    assert sandbox_outcome is RunOutcome.FINISHED
+    assert host_outcome is None
+    assert sandbox_outcome is None
     host_text = _comparable(host_workspace, host_messages)
     [host_result] = host_messages
     assert host_result["outcome"] == "success", host_text

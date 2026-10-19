@@ -164,7 +164,7 @@ class AppServerClient:
             message["result"] = protocol_value(result)
         await self._transport.send(message)
 
-    async def incoming(self) -> AsyncGenerator[ServerMessage, None]:
+    async def incoming(self) -> AsyncGenerator[ServerMessage]:
         while True:
             if self._incoming.empty() and self._incoming_closed.is_set():
                 if self._incoming_error is not None:

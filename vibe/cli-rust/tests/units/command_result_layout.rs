@@ -1,10 +1,10 @@
-//! Command-result markdown layout: headings carry no margins (Python parity).
+//! Command-result markdown layout: headings carry no margins.
 
 use vibe_rs::ui::markdown::command_result;
 
 #[test]
 fn headings_sit_directly_against_their_content() {
-    // Python ground truth (measured): the stats heading is tight against its
+    // Measured layout: the stats heading is tight against its
     // list, one blank separates the sections, and the second heading is tight
     // against its list too.
     let text = "## Agent Statistics\n\n- **Steps**: 0\n\n## Model & Provider\n\n- **Model**: x";
@@ -31,8 +31,8 @@ fn headings_sit_directly_against_their_content() {
 
 #[test]
 fn assistant_headings_keep_their_margins() {
-    // The tcss rule is scoped to command messages: assistant bodies keep
-    // Textual's heading margins.
+    // The no-margin rule is scoped to command messages: assistant bodies keep
+    // their heading margins.
     let text = "## One\n\npara";
     let assistant = vibe_rs::ui::markdown::render(text, 80);
     let command = command_result(text, 80);
@@ -41,9 +41,9 @@ fn assistant_headings_keep_their_margins() {
 
 #[test]
 fn the_first_block_sits_directly_against_the_second() {
-    // Python ground truth (measured): the first-child tcss rule strips the
-    // first block's whole margin, so a paragraph-first body renders its first
-    // two blocks tight, then one blank before the next block.
+    // Measured layout: the first block's whole margin is stripped, so a
+    // paragraph-first body renders its first two blocks tight, then one blank
+    // before the next block.
     let text = "Cleared 3 messages.\n\nSession saved for resume.\n\n- **Keep**: history";
     let body: Vec<String> = command_result(text, 80)
         .iter()

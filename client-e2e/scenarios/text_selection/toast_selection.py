@@ -6,10 +6,9 @@ from e2e.app_server.events import assistant_msg, turn_started, user_msg
 from e2e.app_server.scenario import Timeline
 
 env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
-clipboard_clients = {"rust"}
 # The drag comes last, so it owns the final clipboard payload.
 expected_clipboard = "Slash"
-screen_contains = {"rust": ("Slash commands cannot be queued",)}
+screen_contains = ("Slash commands cannot be queued",)
 
 # The first toast text row is terminal row 32, running from column 62. SGR
 # coordinates are 1-based; column 68 sits inside "commands". The drag starts on

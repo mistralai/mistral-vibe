@@ -85,6 +85,45 @@ fn matching_falls_back_to_fuzzy_when_the_prefix_has_no_children() {
     assert_eq!(matching(&index, "docs/", 10), Vec::<String>::new());
 }
 
+fn nested_tree() -> BTreeMap<String, bool> {
+    paths(&[
+        ("src", true),
+        ("src/main.py", false),
+        ("src/utils", true),
+        ("src/utils/config.py", false),
+        ("src/utils/error_handling.py", false),
+        ("src/utils/logger.py", false),
+        ("vibe", true),
+        ("vibe/acp", true),
+        ("vibe/acp/agent.py", false),
+        ("vibe/acp/entrypoint.py", false),
+    ])
+}
+
+#[test]
+fn a_path_query_matches_a_file_by_subsequence() {
+    let found = matching(&nested_tree(), "src/utils/handling", 10);
+    assert_eq!(found, vec!["@src/utils/error_handling.py"]);
+}
+
+#[test]
+fn a_path_query_matches_word_boundary_initials() {
+    let found = matching(&nested_tree(), "src/utils/eh", 10);
+    assert!(
+        found.contains(&"@src/utils/error_handling.py".to_owned()),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn a_partial_path_starting_mid_path_finds_the_nested_file() {
+    let found = matching(&nested_tree(), "acp/entry", 10);
+    assert_eq!(
+        found.first().map(String::as_str),
+        Some("@vibe/acp/entrypoint.py")
+    );
+}
+
 #[test]
 fn matching_ties_break_alphabetically() {
     let index = paths(&[("z.rs", false), ("a.rs", false)]);

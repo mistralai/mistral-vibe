@@ -28,6 +28,8 @@ pub(crate) struct LoopState {
     pub(crate) real_event_pending: bool,
     pub(crate) idle_marker_emitted: bool,
     pub(crate) marker_held: bool,
+    /// The input a pointer burst stopped at, handled before any newer input.
+    pub(crate) deferred_input: Option<Event>,
 }
 
 impl LoopState {
@@ -37,6 +39,7 @@ impl LoopState {
             real_event_pending: false,
             idle_marker_emitted: false,
             marker_held: false,
+            deferred_input: None,
         }
     }
 
@@ -70,7 +73,75 @@ impl LoopState {
     }
 }
 
-pub(super) fn handle_input_event(
+/// Queued reports one pointer burst may fold into a single frame.
+const MAX_POINTER_BATCH: usize = 64;
+
+/// The next input: the one a pointer burst stopped at, else the terminal's next event.
+pub(super) async fn next_input(
+    input: &mut mpsc::Receiver<Event>,
+    deferred: &mut Option<Event>,
+) -> Option<Event> {
+    match deferred.take() {
+        Some(event) => Some(event),
+        None => input.recv().await,
+    }
+}
+
+/// Handle `event` and the pointer reports queued behind it in one frame; `None` exits, else the blink reset.
+pub(super) fn handle_input_batch(
+    app: &mut App,
+    client: &Arc<Client>,
+    config_tx: &mpsc::Sender<config::Loaded>,
+    input: &mut mpsc::Receiver<Event>,
+    mut event: Option<Event>,
+    replaying: bool,
+    state: &mut LoopState,
+) -> Option<bool> {
+    let mut reset_blink = false;
+    let mut handled = 0;
+    loop {
+        let burst = event.as_ref().is_some_and(is_pointer_burst);
+        match handle_input_event(app, client, config_tx, event, replaying) {
+            InputOutcome::Exit => return None,
+            outcome => reset_blink |= state.apply_input(outcome),
+        }
+        handled += 1;
+        if !burst || handled == MAX_POINTER_BATCH {
+            return Some(reset_blink);
+        }
+        let Some(next) = burst_next(input, &mut state.deferred_input) else {
+            return Some(reset_blink);
+        };
+        event = Some(next);
+    }
+}
+
+/// The next queued pointer report of a burst; any other queued input is deferred instead.
+fn burst_next(input: &mut mpsc::Receiver<Event>, deferred: &mut Option<Event>) -> Option<Event> {
+    let next = input.try_recv().ok()?;
+    if is_pointer_burst(&next) {
+        return Some(next);
+    }
+    *deferred = Some(next);
+    None
+}
+
+fn is_pointer_burst(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Mouse(mouse) if matches!(
+            mouse.kind,
+            MouseEventKind::Moved
+                | MouseEventKind::Drag(_)
+                | MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        )
+    )
+}
+
+fn handle_input_event(
     app: &mut App,
     client: &Arc<Client>,
     config_tx: &mpsc::Sender<config::Loaded>,
@@ -109,28 +180,30 @@ pub(super) fn handle_input_event(
         Some(Event::Paste(text)) => {
             drop_box_selection(app);
             match app.focus() {
-                // These surfaces take no text input; the paste is dropped.
-                Focus::Trust | Focus::Approval | Focus::VoiceApp => {}
-                Focus::Question => crate::question_input::handle_paste(app, text),
-                Focus::ProxySetup => crate::proxy_setup::paste(app, &text),
-                Focus::Config => config::handle_paste(app, text),
-                Focus::VibeCodeProject => crate::vibe_code_project::input::paste(app, &text),
-                Focus::Mcp => crate::mcp::search::paste(app, &text),
-                Focus::Plugins => crate::plugins::paste(app, &text),
-                Focus::ResumePicker
+                // These surfaces take no text input and hide the composer; the paste is dropped.
+                Focus::Trust
+                | Focus::Approval
+                | Focus::VoiceApp
+                | Focus::ResumePicker
                 | Focus::McpOAuth
                 | Focus::ConnectorAuth
                 | Focus::Rewind
                 | Focus::ThemePicker
                 | Focus::ModelPicker
                 | Focus::LogLevelPicker
-                | Focus::ThinkingPicker
-                | Focus::SubagentList
-                | Focus::Composer => input::handle_paste(app, text),
+                | Focus::ThinkingPicker => {}
+                Focus::Question => crate::question_input::handle_paste(app, text),
+                Focus::ProxySetup => crate::proxy_setup::paste(app, &text),
+                Focus::Config => config::handle_paste(app, text),
+                Focus::VibeCodeProject => crate::vibe_code_project::input::paste(app, &text),
+                Focus::Mcp => crate::mcp::search::paste(app, &text),
+                Focus::Plugins => crate::plugins::paste(app, &text),
+                Focus::SubagentList | Focus::Composer => input::handle_paste(app, text),
             }
             InputOutcome::Activity { reset_blink: false }
         }
         Some(Event::Resize(_, _)) => {
+            let _ = crate::terminal::sync_pixel_reports();
             crate::config_edit::resized(app);
             InputOutcome::Activity { reset_blink: false }
         }
@@ -203,3 +276,6 @@ fn dispatch_key(
     }
     false
 }
+
+#[cfg(test)]
+mod tests;

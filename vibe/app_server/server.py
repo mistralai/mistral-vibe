@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum, auto
 import os
@@ -16,6 +16,7 @@ from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not
 from vibe.app_server._execution import cancel_tasks
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._identity import IdentityGateway
+from vibe.app_server._imports import ImportsService
 from vibe.app_server._model import ProtocolModel, validate_wire
 from vibe.app_server._session_backend_port import (
     SessionBackend,
@@ -34,9 +35,11 @@ from vibe.app_server._session_backend_port import (
     SessionBackendHostHistoryList,
     SessionBackendHostLeaseWatch,
     SessionBackendHostPin,
+    SessionBackendHostRelocate,
     SessionBackendHostSeenState,
     SessionBackendNotificationSink,
     SessionBackendOpenCallbacks,
+    SessionBackendQueuedTurnEditing,
     SessionBackendQueuedTurnSteering,
     SessionBackendResult,
     SessionBackendRewindForkHost,
@@ -56,7 +59,6 @@ from vibe.app_server.protocol import (
     SERVER_METHODS,
     AgentInstallParams,
     AgentSwitchParams,
-    AppServerResponseError,
     CallbackCallParams,
     CallbackCallResponse,
     CallbackResultError,
@@ -70,6 +72,10 @@ from vibe.app_server.protocol import (
     EventBatch,
     EventNotificationParams,
     EventsReadParams,
+    ImportDiscoveryParams,
+    ImportJobReadParams,
+    ImportJobStartParams,
+    ImportJobUpdatedParams,
     InitializeParams,
     InitializeResponse,
     InvalidParamsData,
@@ -100,6 +106,7 @@ from vibe.app_server.protocol import (
     SessionPinParams,
     SessionReadParams,
     SessionReadResponse,
+    SessionRelocateParams,
     SessionResumeParams,
     SessionResumeResponse,
     SessionRewindParams,
@@ -111,6 +118,10 @@ from vibe.app_server.protocol import (
     TransportKind,
     TurnEnqueueParams,
     TurnInterruptParams,
+    TurnQueueEditAbandonParams,
+    TurnQueueEditCancelParams,
+    TurnQueueEditSaveParams,
+    TurnQueueEditStartParams,
     TurnQueueReadParams,
     TurnQueueRemoveParams,
     TurnQueueReplaceParams,
@@ -177,6 +188,10 @@ _SESSION_BACKEND_METHODS = frozenset({
     "session/context/inject",
     "session/settings/update",
     "session/turn/enqueue",
+    "session/turn/queue/edit/abandon",
+    "session/turn/queue/edit/cancel",
+    "session/turn/queue/edit/save",
+    "session/turn/queue/edit/start",
     "session/turn/queue/read",
     "session/turn/queue/remove",
     "session/turn/queue/replace",
@@ -195,21 +210,10 @@ class CallbackDelivery:
     answered: bool = False
 
 
-@dataclass(slots=True)
-class PendingClientRequest:
-    response_type: type[ProtocolModel]
-    future: asyncio.Future[ProtocolModel]
-
-
 @dataclass(frozen=True, slots=True)
 class PendingNotification:
     method: str
     params: ProtocolModel
-
-
-def _consume_task_result(task: asyncio.Task[object]) -> None:
-    if not task.cancelled():
-        task.exception()
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,21 +236,19 @@ class AppServer:
         mcp_catalog_service: MCPCatalogService | None = None,
         connector_catalog_service: ConnectorCatalogService | None = None,
         plugin_catalog_service: PluginCatalogService | None = None,
+        imports_service: ImportsService | None = None,
     ) -> None:
         self._root: SessionBackend | None = None
         self._host_handler = host_handler or HostRequestHandler(
             HarnessFilesManager(sources=("user", "project"))
         )
         self._transport: JsonRpcTransport | None = transport
-        self._transport_kind: TransportKind = transport_kind
         self._initialization = InitializationState.UNINITIALIZED
         self._client_info: ClientInfo | None = None
         self._client_capabilities = ClientCapabilities()
         self._next_request_id = 1
         self._event_watermarks: dict[str, int] = {}
         self._callback_requests: dict[int, CallbackDelivery] = {}
-        self._client_requests: dict[int, PendingClientRequest] = {}
-        self._abandoned_client_request_ids: set[int] = set()
         self._request_tasks: set[asyncio.Task[None]] = set()
         self._leases = SessionLeaseSubscription(self._send_notification)
         self._backend_event_task: asyncio.Task[None] | None = None
@@ -268,6 +270,7 @@ class AppServer:
         self._mcp_catalog_service = mcp_catalog_service
         self._connector_catalog_service = connector_catalog_service
         self._plugin_catalog_service = plugin_catalog_service
+        self._imports_service = imports_service
         self._session_backend_host = session_backend_host_factory(self)
         if self._session_backend_host is None:
             raise TypeError(
@@ -278,6 +281,13 @@ class AppServer:
         if self._root is None:
             raise RuntimeError("No app-server session runtime is active")
         return self._root
+
+    def _require_imports(self) -> ImportsService:
+        if self._imports_service is None:
+            raise RequestFailure(
+                ProtocolErrorCode.NOT_IMPLEMENTED, "Imports are not configured"
+            )
+        return self._imports_service
 
     async def _activate_backend(
         self, backend: SessionBackend, history_limit: int
@@ -493,7 +503,6 @@ class AppServer:
             self._pending_notifications.clear()
             self._connection_attached = False
             self._attaching = False
-            self._reject_pending_client_requests(RuntimeError("App server closed"))
             transport = self._transport
             if transport is not None:
                 try:
@@ -522,7 +531,11 @@ class AppServer:
         if self._closed:
             return
         errors = await self._stop_request_tasks(asyncio.current_task())
-        self._reject_pending_client_requests(RuntimeError("Client disconnected"))
+        if isinstance(self._root, SessionBackendQueuedTurnEditing):
+            try:
+                await self._root.abandon_active_queued_turn_edit()
+            except BaseException as exc:
+                errors.append(exc)
         self._callback_requests.clear()
         self._pending_notifications.clear()
         self._connection_attached = False
@@ -569,13 +582,6 @@ class AppServer:
         if backend_events is not None and backend_events is not current:
             tasks.append(backend_events)
         return await cancel_tasks(tasks, label="app-server request")
-
-    def _reject_pending_client_requests(self, error: Exception) -> None:
-        for pending in self._client_requests.values():
-            if not pending.future.done():
-                pending.future.set_exception(error)
-        self._client_requests.clear()
-        self._abandoned_client_request_ids.clear()
 
     def _request_finished(self, task: asyncio.Task[None]) -> None:
         self._request_tasks.discard(task)
@@ -733,6 +739,19 @@ class AppServer:
             raise method_not_found(method)
         if method == "events/read":
             return self._events_read(raw_params)
+        if method == "imports/discover":
+            validate_wire(ImportDiscoveryParams, raw_params)
+            return await self._require_imports().discover()
+        if method == "imports/start":
+            params = validate_wire(ImportJobStartParams, raw_params)
+            return await self._require_imports().start(
+                params.harnesses, notify=self._route_notification
+            )
+        if method == "imports/read":
+            params = validate_wire(ImportJobReadParams, raw_params)
+            return await self._require_imports().read(
+                params.after_event_id, params.wait_ms
+            )
         if self._mcp_catalog_service is not None and self._mcp_catalog_service.handles(
             method
         ):
@@ -763,8 +782,6 @@ class AppServer:
             "workspace/git/worktrees/limit/update",
             "workspace/git/worktrees/list",
             "workspace/git/worktrees/prune",
-            "workspace/git/worktrees/reap",
-            "workspace/git/worktrees/reap/cancel",
             "workspace/git/worktrees/remove",
             "workspace/trust/status",
             "workspace/trust/untrustedConfig",
@@ -924,12 +941,12 @@ class AppServer:
     ) -> DispatchResult | None:
         if method in {"session/list", "session/read", "config/read"}:
             return await self._dispatch_backend_host_read(method, raw_params)
-        if method == "session/rename":
-            params = validate_wire(SessionTitleUpdateParams, raw_params)
-            response = await self._session_backend_host.rename(params)
-            if self._root is not None and self._root.session_id == params.session_id:
-                await self._flush_backend_events(self._root)
-            return DispatchResult(response)
+        if method in {"session/rename", "session/relocate"}:
+            result = await self._dispatch_backend_host_session_update(
+                method, raw_params
+            )
+            if result is not None:
+                return result
         if method in {"session/pin", "session/archive", "session/markAsSeen"}:
             return await self._dispatch_backend_host_metadata(method, raw_params)
         if method == "session/fork":
@@ -954,6 +971,28 @@ class AppServer:
         if handoff := await self._dispatch_backend_host_handoff(method, raw_params):
             return handoff
         return await self._dispatch_backend_host_lifecycle(method, raw_params)
+
+    async def _dispatch_backend_host_session_update(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> DispatchResult | None:
+        if method == "session/rename":
+            params = validate_wire(SessionTitleUpdateParams, raw_params)
+            response = await self._session_backend_host.rename(params)
+            if self._root is not None and self._root.session_id == params.session_id:
+                await self._flush_backend_events(self._root)
+            return DispatchResult(response)
+        if not isinstance(self._session_backend_host, SessionBackendHostRelocate):
+            return None
+        params = validate_wire(SessionRelocateParams, raw_params)
+        attached = (
+            self._root
+            if self._root is not None and self._root.session_id == params.session_id
+            else None
+        )
+        response = await self._session_backend_host.relocate(params, attached)
+        if attached is not None:
+            await self._flush_backend_events(attached)
+        return DispatchResult(response)
 
     async def _read_stored_session_config(
         self, raw_params: dict[str, Any]
@@ -1223,6 +1262,15 @@ class AppServer:
             result = await root.replace_queued_turn(
                 validate_wire(TurnQueueReplaceParams, raw_params)
             )
+        elif method in {
+            "session/turn/queue/edit/start",
+            "session/turn/queue/edit/save",
+            "session/turn/queue/edit/cancel",
+            "session/turn/queue/edit/abandon",
+        }:
+            result = await AppServer._dispatch_backend_queued_edit(
+                root, method, raw_params
+            )
         elif method == "session/turn/queue/steer":
             if not isinstance(root, SessionBackendQueuedTurnSteering):
                 raise RequestFailure(
@@ -1251,6 +1299,31 @@ class AppServer:
             after_response=result.after_response,
             on_response_abandoned=result.on_response_abandoned,
             runtime_updated=result.runtime_updated,
+        )
+
+    @staticmethod
+    async def _dispatch_backend_queued_edit(
+        root: SessionBackend, method: str, raw_params: dict[str, Any]
+    ) -> SessionBackendResult[Any]:
+        if not isinstance(root, SessionBackendQueuedTurnEditing):
+            raise RequestFailure(
+                ProtocolErrorCode.NOT_IMPLEMENTED,
+                "The selected session backend does not support queued editing",
+            )
+        if method == "session/turn/queue/edit/start":
+            return await root.start_queued_turn_edit(
+                validate_wire(TurnQueueEditStartParams, raw_params)
+            )
+        if method == "session/turn/queue/edit/save":
+            return await root.save_queued_turn_edit(
+                validate_wire(TurnQueueEditSaveParams, raw_params)
+            )
+        if method == "session/turn/queue/edit/abandon":
+            return await root.abandon_queued_turn_edit(
+                validate_wire(TurnQueueEditAbandonParams, raw_params)
+            )
+        return await root.cancel_queued_turn_edit(
+            validate_wire(TurnQueueEditCancelParams, raw_params)
         )
 
     async def _dispatch_backend_config(
@@ -1381,13 +1454,6 @@ class AppServer:
         request_id = response.id
         if not isinstance(request_id, int):
             raise JsonRpcProtocolError("Server request responses require integer IDs")
-        pending = self._client_requests.pop(request_id, None)
-        if pending is not None:
-            self._resolve_client_request(request_id, pending, response)
-            return
-        if request_id in self._abandoned_client_request_ids:
-            self._abandoned_client_request_ids.remove(request_id)
-            return
         callback_route = self._callback_requests.pop(request_id, None)
         if callback_route is None:
             raise JsonRpcProtocolError(
@@ -1409,25 +1475,6 @@ class AppServer:
                 session_id, callback_id, "Client did not accept callback delivery"
             )
 
-    def _resolve_client_request(
-        self,
-        request_id: int,
-        pending: PendingClientRequest,
-        response: JsonRpcErrorResponse | JsonRpcSuccessResponse,
-    ) -> None:
-        if pending.future.cancelled():
-            self._abandoned_client_request_ids.discard(request_id)
-            return
-        if isinstance(response, JsonRpcErrorResponse):
-            pending.future.set_exception(AppServerResponseError(response.error))
-            return
-        try:
-            result = validate_wire(pending.response_type, response.result)
-        except Exception as exc:
-            pending.future.set_exception(exc)
-        else:
-            pending.future.set_result(result)
-
     async def _notify(self, method: str, params: ProtocolModel) -> None:
         params = self._sequence_notification(params)
         root = self._root
@@ -1445,12 +1492,12 @@ class AppServer:
         if self._attaching:
             self._pending_notifications.append(PendingNotification(method, params))
             return
-        sessionless_auth_url = (
+        sessionless_notification = (
             self._root is None
             and self._initialization is InitializationState.INITIALIZED
-            and isinstance(params, MCPAuthUrlParams)
+            and isinstance(params, MCPAuthUrlParams | ImportJobUpdatedParams)
         )
-        if not self._connection_attached and not sessionless_auth_url:
+        if not self._connection_attached and not sessionless_notification:
             return
         await self._send_notification(method, params)
 
@@ -1498,41 +1545,6 @@ class AppServer:
                 return
         await self._deliver_callback(callback)
 
-    async def _request_client_result[ResultT: ProtocolModel](
-        self, method: str, params: ProtocolModel, response_type: type[ResultT]
-    ) -> ResultT:
-        request_id = self._next_request_id
-        self._next_request_id += 1
-        future: asyncio.Future[ProtocolModel] = (
-            asyncio.get_running_loop().create_future()
-        )
-        self._client_requests[request_id] = PendingClientRequest(
-            response_type=response_type, future=future
-        )
-        transport = self._transport
-        if transport is None or not self._connection_attached or self._attaching:
-            self._client_requests.pop(request_id, None)
-            raise RuntimeError("No app-server client is attached")
-        sent = False
-        try:
-            await transport.send({
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": method,
-                "params": params.model_dump(mode="json", by_alias=True),
-            })
-            sent = True
-            return cast(ResultT, await future)
-        except asyncio.CancelledError:
-            if sent and self._client_requests.pop(request_id, None) is not None:
-                self._abandoned_client_request_ids.add(request_id)
-            raise
-        except Exception:
-            self._disconnect_current_client()
-            raise
-        finally:
-            self._client_requests.pop(request_id, None)
-
     def _mark_callback_answered(self, callback_id: str) -> None:
         for delivery in self._callback_requests.values():
             if delivery.callback_id == callback_id:
@@ -1565,12 +1577,6 @@ class AppServer:
             data=cast(JsonValue, {"missingCallbackKinds": missing}),
         )
 
-    async def _record_child_notification(
-        self, method: str, params: ProtocolModel
-    ) -> None:
-        del method
-        self._sequence_notification(params)
-
     def client_info(self) -> ClientInfo:
         return self._initialized_client_info()
 
@@ -1580,17 +1586,11 @@ class AppServer:
     def current_session_id(self) -> str:
         return self._require_root().session_id
 
-    def event_watermark(self, session_id: str) -> int:
-        return self._event_watermark(session_id)
-
     def account_gateway(self) -> AccountGateway | None:
         return self._account_gateway
 
     def identity_gateway(self) -> IdentityGateway | None:
         return self._identity_gateway
-
-    def lifecycle_transition(self) -> AbstractAsyncContextManager[None]:
-        return self._lifecycle_transition()
 
     def task_finished(self, task: asyncio.Task[None]) -> None:
         self._request_finished(task)
@@ -1600,16 +1600,6 @@ class AppServer:
 
     async def publish_callback(self, callback: PublicCallbackEntry) -> None:
         await self._publish_callback(callback)
-
-    async def record_child_notification(
-        self, method: str, params: ProtocolModel
-    ) -> None:
-        await self._record_child_notification(method, params)
-
-    async def request_client_result[ResultT: ProtocolModel](
-        self, method: str, params: ProtocolModel, response_type: type[ResultT]
-    ) -> ResultT:
-        return await self._request_client_result(method, params, response_type)
 
     def _sequence_notification(self, params: ProtocolModel) -> ProtocolModel:
         if not isinstance(params, EventNotificationParams):

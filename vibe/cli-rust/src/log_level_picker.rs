@@ -1,4 +1,4 @@
-//! `/log-level` picker state. Mirrors Python's `LogLevelPickerApp`: one row per
+//! `/log-level` picker state: one row per
 //! level with two toggleable badges, `session` and `config`.
 
 use std::sync::Arc;
@@ -26,7 +26,7 @@ pub fn open(app: &mut App) {
         .session
         .clone()
         .unwrap_or_else(|| chain.effective.clone());
-    app.log_level_picker.selected = index_of(&highlighted);
+    app.log_level_picker.list.highlight(index_of(&highlighted));
     app.log_level_picker.session = chain.session.clone();
     app.log_level_picker.config = chain.config.clone();
     app.log_level_picker.chain = chain;
@@ -36,12 +36,27 @@ pub fn open(app: &mut App) {
 
 /// Move the highlight up/down by one, wrapping at the ends.
 pub fn navigate(app: &mut App, down: bool) {
-    let picker = &mut app.log_level_picker;
-    picker.selected = crate::list_nav::wrap(picker.selected, options().len(), down);
+    app.log_level_picker
+        .list
+        .step(down, options().len(), true, |_| true);
 }
 
 pub fn focus_badge(app: &mut App, badge: &'static str) {
     app.log_level_picker.focused_badge = badge;
+}
+
+/// A click on a painted badge focuses and toggles it; elsewhere it only highlights the row.
+pub fn click(app: &mut App, at: (u16, u16)) {
+    let Some(&(_, badge)) = app
+        .log_level_picker
+        .badges
+        .iter()
+        .find(|(area, _)| area.contains(at.into()))
+    else {
+        return;
+    };
+    focus_badge(app, badge);
+    toggle_badge(app);
 }
 
 /// Enter: set the focused badge to the highlighted level, or clear it if already there.
@@ -61,11 +76,15 @@ pub fn toggle_badge(app: &mut App) {
 }
 
 pub fn selected_level(app: &App) -> &'static str {
-    options()[app.log_level_picker.selected.min(options().len() - 1)]
+    options()[app
+        .log_level_picker
+        .list
+        .selected()
+        .min(options().len() - 1)]
 }
 
 /// The chain recomputed against the draft badges, so the `›` marker and the
-/// subtitle both move live while toggling (Python `_effective_level`).
+/// subtitle both move live while toggling.
 pub fn draft_chain(app: &App) -> LogLevelChain {
     let picker = &app.log_level_picker;
     let env = picker.chain.env.clone();
@@ -129,7 +148,7 @@ pub fn apply(app: &mut App, client: &Arc<Client>) {
     crate::ui::notice::show(app, &feedback(&previous, &chain, config_cleared), 4);
 }
 
-/// Python `on_log_level_picker_app_applied`: only report what actually moved.
+/// Only report what actually moved.
 fn feedback(previous: &LogLevelChain, chain: &LogLevelChain, config_cleared: bool) -> String {
     let mut parts: Vec<String> = Vec::new();
     match &chain.session {

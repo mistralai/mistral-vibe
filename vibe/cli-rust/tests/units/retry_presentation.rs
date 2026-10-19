@@ -1,4 +1,4 @@
-//! The retry presentation resolves only once active (Python `_RetryPresentation`).
+//! The retry presentation resolves only once active.
 
 use serde_json::{json, Value};
 use vibe_rs::app::App;
@@ -93,7 +93,7 @@ fn a_second_offer_keeps_the_captured_assistant_and_appends_the_new_error() {
     retry::begin(&mut app, "echo".into());
 
     // The retried turn fails before any entry lands: the original answer and
-    // the earlier rows must stay on the presentation (Python `offer_retry`).
+    // the earlier rows must stay on the presentation.
     app.view.transcript.add(&message_added(
         "err2",
         "command_error",

@@ -26,16 +26,10 @@ Do not create ADRs for one-off implementation choices, formatting rules, or beha
 
 Use one ADR when the decision is cohesive. Split ADRs when separate agents would need to read them for unrelated change areas.
 
-Existing ADR topics:
-
-- `0001` - architecture principles
-- `0002` - core engine and delivery surfaces
-- `0003` - event-driven agent loop
-- `0004` - typed permissioned tools
-- `0005` - layered configuration
-- `0006` - local sessions
-- `0007` - extension mechanisms
-- `0008` - feature instrumentation
+Use the Architecture Decisions table in `AGENTS.md` as the current topic
+index. Ownership lives in `0002`, feature-module rules in `0018`, and the
+client protocol boundary in `0009`. Keep implementation walkthroughs in
+`docs/reference/` and link them from the concise decision.
 
 ### 2. Determine the next number
 
@@ -43,7 +37,8 @@ Existing ADR topics:
 ls docs/adr/
 ```
 
-Use the next sequential number, zero-padded to 4 digits: `0009-my-decision.md`.
+Use the next sequential number, zero-padded to 4 digits: `NNNN-my-decision.md`.
+Do not reuse a number or rename an existing ADR solely to change its title.
 
 ### 3. Write the ADR
 
@@ -72,6 +67,11 @@ Mention a rejected alternative only when it helps explain the decision.
 ```
 
 Keep ADRs concise. Match the existing 20-50 line style. Do not add a status field.
+Give each rule one authoritative ADR; link to it rather than restating it.
+Decision states constraints, Agent Guidance gives their concrete application,
+and Flag To User When lists only topic-specific exceptions. Keep detailed
+implementation mechanics in reference pages. When merging decisions, preserve
+the old path with a short supersession notice and update the task index.
 
 ### 4. Register in AGENTS.md
 

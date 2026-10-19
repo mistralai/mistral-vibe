@@ -1,4 +1,4 @@
-//! The narrator status row in the loading area (Python `NarratorStatus`).
+//! The narrator status row in the loading area.
 
 use std::time::Duration;
 
@@ -11,11 +11,11 @@ use super::theme;
 use crate::app::App;
 use crate::turn_summary::NarratorState;
 
-/// Python `SHRINK_FRAMES`: the glyph shrinks until the clip starts playing.
+/// The glyph shrinks until the clip starts playing.
 pub const SHRINK_FRAMES: [char; 8] = ['█', '▇', '▆', '▅', '▄', '▃', '▂', '▁'];
-/// Python `BAR_FRAMES`: equalizer bars while the summary is spoken.
+/// Equalizer bars while the summary is spoken.
 pub const BAR_FRAMES: [&str; 6] = ["▂▅▇", "▃▆▅", "▅▃▇", "▇▂▅", "▅▇▃", "▃▅▆"];
-/// Python `ANIMATION_INTERVAL`.
+/// Delay between narrator animation frames.
 pub const ANIMATION_INTERVAL: Duration = Duration::from_millis(150);
 
 const KEY: &str = crate::hints::key::ESC_CTRL_C;
@@ -37,8 +37,8 @@ fn marker(app: &App) -> Option<(String, &'static str)> {
     }
 }
 
-/// The row's width, so the loading-area split can reserve it (Python sizes
-/// the `NarratorStatus` widget by its content).
+/// The row's width, sized by its content, so the loading-area split can
+/// reserve it.
 pub fn width(app: &App) -> u16 {
     marker(app).map_or(0, |(glyph, label)| {
         (glyph.chars().count() + label.len() + KEY.len() + STOP.len()) as u16
@@ -52,7 +52,7 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
     let Some((glyph, label)) = marker(app) else {
         return;
     };
-    // Same top padding as the loading spinner (Python `#loading-area`).
+    // Same top padding as the loading spinner.
     let content = Rect {
         y: area.y + 1,
         height: 1,

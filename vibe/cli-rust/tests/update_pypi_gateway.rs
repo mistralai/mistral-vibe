@@ -94,7 +94,7 @@ fn absent_versions_or_files_yield_no_update() {
 }
 
 #[test]
-fn default_messages_match_python_verbatim() {
+fn default_messages_match_verbatim() {
     let expected = |cause: UpdateGatewayCause| match cause {
         UpdateGatewayCause::TooManyRequests => "Rate limit exceeded while checking for updates.",
         UpdateGatewayCause::Forbidden => "Request was forbidden while checking for updates.",
@@ -123,9 +123,8 @@ fn default_messages_match_python_verbatim() {
     }
 }
 
-/// Python's `base_url` constructor parameter: the default targets PyPI, and
-/// only the constructor decides the gateway's URL — no env override, which
-/// Python does not have either.
+/// The `base_url` constructor parameter: the default targets PyPI, and
+/// only the constructor decides the gateway's URL — no env override.
 #[test]
 fn gateway_urls_come_from_the_base_url_parameter() {
     assert_eq!(
@@ -138,7 +137,7 @@ fn gateway_urls_come_from_the_base_url_parameter() {
     );
 }
 
-/// ADR 0015 / Python `configure_ssl_context`: the HTTP client's trust store
+/// ADR 0015: the HTTP client's trust store
 /// follows the effective `enable_system_trust_store`, and the client builds
 /// under both policies.
 #[test]

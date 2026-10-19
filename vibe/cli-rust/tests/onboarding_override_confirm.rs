@@ -1,5 +1,4 @@
-//! The Mistral-default override confirm on the sign-in target screen
-//! (Python `SignInTargetScreen.action_select`).
+//! The Mistral-default override confirm on the sign-in target screen.
 
 #[allow(dead_code)]
 #[path = "onboarding_common/keys.rs"]

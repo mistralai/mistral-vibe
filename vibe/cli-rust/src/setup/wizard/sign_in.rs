@@ -1,6 +1,6 @@
-//! Browser sign-in state folding (Python `BrowserSignInService`'s reducer):
-//! one sign-in event becomes wizard view state plus the actions it
-//! resolves to (a completed sign-in submits its key).
+//! Browser sign-in state folding: one sign-in event becomes wizard view
+//! state plus the actions it resolves to (a completed sign-in submits its
+//! key).
 
 use std::time::Instant;
 
@@ -36,7 +36,7 @@ pub fn sign_in_actions(state: &mut BrowserSignInState, event: SignInEvent) -> Ve
                     state.message = "Finishing setup...".into();
                 }
                 SignInStatus::Completed => {
-                    // Python's FINISH step: "Sign-in complete" for the dwell.
+                    // The finish step shows "Sign-in complete" for the dwell.
                     state.step = SignInStep::Finish;
                     state.variant = SignInVariant::Success;
                     state.message = "Sign-in complete".into();
@@ -49,7 +49,7 @@ pub fn sign_in_actions(state: &mut BrowserSignInState, event: SignInEvent) -> Ve
             state.variant = SignInVariant::Error;
             state.message = message;
             state.running = false;
-            // Python `_show_error`: keep the copy help when a URL exists.
+            // Keep the copy help when a URL exists.
             state.show_url_help = state.sign_in_url.is_some();
             Vec::new()
         }
@@ -73,10 +73,10 @@ pub struct BrowserSignInState {
     pub running: bool,
     pub sign_in_url: Option<String>,
     pub show_url_help: bool,
-    /// The copy key revealed the raw URL (Python `reveal_sign_in_url`).
+    /// The copy key revealed the raw URL.
     pub reveal_sign_in_url: bool,
     /// When the sign-in URL landed; the copy help appears 4s later unless the
-    /// copy key set `show_url_help` already (Python `SIGN_IN_URL_HELP_DELAY`).
+    /// copy key set `show_url_help` already.
     pub sign_in_started_at: Option<Instant>,
 }
 

@@ -1,11 +1,10 @@
-//! The brew-managed update oracle (Rust-only; Python polls public PyPI).
+//! The brew-managed update oracle.
 //!
 //! A brew install's deliverable latest is brew's own formula metadata — which
-//! can lag the PyPI release the Python CLI's gateway would advertise — so the
-//! check asks brew itself. The install is detected by the running executable
-//! living in `brew --cellar`, brew's own answer for where its formulae are
-//! installed, so a pip script that shares Homebrew's prefix is not a brew
-//! install.
+//! can lag the PyPI release — so the check asks brew itself. The install is
+//! detected by the running executable living in `brew --cellar`, brew's own
+//! answer for where its formulae are installed, so a pip script that shares
+//! Homebrew's prefix is not a brew install.
 
 use std::path::{Path, PathBuf};
 

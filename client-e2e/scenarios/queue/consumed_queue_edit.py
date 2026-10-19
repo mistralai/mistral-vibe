@@ -9,10 +9,7 @@ env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 
 _UP = "\x1b[A"
 
-screen_contains = {
-    "python": ("third", "second edited"),
-    "rust": ("third", "second edited"),
-}
+screen_contains = ("third", "second edited")
 settle_per_key = True
 capture_steps = {12}
 

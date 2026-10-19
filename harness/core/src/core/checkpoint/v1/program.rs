@@ -28,6 +28,9 @@ use super::tool::{
 pub(super) struct CheckpointProgramExecution {
     operations: Vec<CheckpointProgramOperation>,
     round: u32,
+    // Earlier V1 checkpoints establish their program start on the first resumed input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    started_at_unix_ms: Option<u64>,
 }
 
 impl CheckpointProgramExecution {
@@ -45,6 +48,7 @@ impl CheckpointProgramExecution {
         Ok(Self {
             operations,
             round: capture.round(),
+            started_at_unix_ms: capture.started_at_unix_ms(),
         })
     }
 
@@ -55,7 +59,7 @@ impl CheckpointProgramExecution {
             .into_iter()
             .map(CheckpointProgramOperation::restore)
             .collect::<Result<Vec<_>, _>>()?;
-        ProgramExecution::restore(source, operations, self.round)
+        ProgramExecution::restore(source, operations, self.round, self.started_at_unix_ms)
     }
 }
 

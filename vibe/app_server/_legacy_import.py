@@ -3,11 +3,9 @@
 A legacy session is a folder with a ``meta.json`` file and a ``messages.jsonl``
 transcript. The Unified runtime still lists those sessions in the picker,
 previews them, and imports one into a new Unified session on resume, but the
-legacy execution engine is being retired. This module is the one place the
-unified list, read, and import paths read legacy session files, so the
-retirement can delete the engine without touching user history. Legacy reads
-that belong to the legacy escape hatch itself (in ``_runtime.py``) and the
-pin/delete cleanup fallbacks stay where they are until that engine is deleted.
+legacy execution engine has been removed. This module is the one place the
+unified list, read, and import paths read legacy session files. Pin/delete
+cleanup fallbacks live outside this read-only importer.
 
 Everything here is read-only: the module never writes inside a legacy
 session folder, never constructs a legacy runtime object, and treats legacy
@@ -17,6 +15,8 @@ user-requested cleanup operations and deliberately live elsewhere.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vibe.app_server._history_projection import project_message_history
@@ -65,18 +65,41 @@ class LegacySessionStore:
 
     def __init__(self, config: VibeConfigSchema) -> None:
         self._config = config
+        self._session_dirs: dict[str, list[Path]] | None = None
 
     def list_sessions(self, cwd: str | None = None) -> list[PublicSession]:
-        """Every legacy session, projected as a row for the merged list.
+        """Every legacy session as a merged-list row, without previews.
 
-        Reading the transcript for a preview no caller will show is the
-        legacy half's dominant cost, and every consumer renders
-        ``title or preview``, so an untitled session reads its first user
-        message and a titled one reads nothing.
+        Previews read transcripts, so they are left to ``with_previews`` on
+        the page actually returned.
         """
         return [
             self._public_session(session)
             for session in list_local_resume_sessions(self._config, cwd)
+        ]
+
+    def with_previews(self, sessions: Sequence[PublicSession]) -> list[PublicSession]:
+        """Fill the preview of untitled legacy rows; every consumer renders
+        ``title or preview``, so titled rows read nothing.
+        """
+        untitled = [
+            session.id
+            for session in sessions
+            if session.harness == "legacy" and not session.title
+        ]
+        if not untitled:
+            return list(sessions)
+        # Scanned once per store so a cursor walk reads the save dir once.
+        if self._session_dirs is None:
+            self._session_dirs = SessionLoader.session_dirs_by_short_id(
+                self._config.session_logging
+            )
+        previews = SessionLoader.get_first_user_messages(untitled, self._session_dirs)
+        return [
+            session.model_copy(update={"preview": previews[session.id]})
+            if session.id in previews
+            else session
+            for session in sessions
         ]
 
     def read_session(self, params: SessionReadParams) -> SessionReadResponse | None:
@@ -94,7 +117,7 @@ class LegacySessionStore:
             return None
         try:
             messages, metadata_dict = SessionLoader.load_session(session_dir)
-        except (OSError, ValueError):
+        except OSError, ValueError:
             return None
         if not metadata_dict:
             return None
@@ -108,18 +131,20 @@ class LegacySessionStore:
         return SessionReadResponse(
             state=PublicSessionState(
                 event_id=0,
-                session=self._public_session(
-                    ResumeSessionInfo(
-                        session_id=session_id,
-                        cwd=metadata.environment.get("working_directory") or "",
-                        title=metadata.title,
-                        start_time=metadata.start_time,
-                        bumped_at=metadata.bumped_at,
-                        pinned_at=metadata.pinned_at,
-                        updated_at=metadata.start_time,
-                        parent_session_id=metadata.parent_session_id,
+                session=self.with_previews([
+                    self._public_session(
+                        ResumeSessionInfo(
+                            session_id=session_id,
+                            cwd=metadata.environment.get("working_directory") or "",
+                            title=metadata.title,
+                            start_time=metadata.start_time,
+                            bumped_at=metadata.bumped_at,
+                            pinned_at=metadata.pinned_at,
+                            updated_at=metadata.start_time,
+                            parent_session_id=metadata.parent_session_id,
+                        )
                     )
-                ),
+                ])[0],
                 history=history,
                 history_before_cursor=history[0].id if truncated and history else None,
                 turns=[],
@@ -201,13 +226,7 @@ class LegacySessionStore:
             root_session_id=None,
             parent_session_id=session.parent_session_id,
             title=session.title,
-            preview=(
-                ""
-                if session.title
-                else SessionLoader.get_first_user_message(
-                    session.session_id, self._config.session_logging
-                )
-            ),
+            preview="",
             status=IdleSessionStatus(),
             created_at=time_ms(session.start_time or session.updated_at),
             updated_at=time_ms(session.updated_at),

@@ -21,6 +21,7 @@ from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.mcp_servers import (
     MCPServerAddError,
+    MCPServerRemoveError,
     persist_oauth_mcp_server,
     persist_remote_mcp_server,
     persist_stdio_mcp_server,
@@ -538,3 +539,73 @@ def test_vibe_config_rejects_duplicate_mcp_server_names() -> None:
                 },
             ]
         })
+
+
+@pytest.mark.asyncio
+async def test_persist_oauth_mcp_server_blocked_when_mcp_disabled(
+    build_config: ConfigBuilder, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+) -> None:
+    orchestrator = load_orchestrator(build_config(enable_mcp=False))
+
+    with pytest.raises(MCPServerAddError, match="disabled by your administrator"):
+        await persist_oauth_mcp_server(orchestrator, url="https://mcp.example.com/mcp")
+
+
+@pytest.mark.asyncio
+async def test_persist_remote_mcp_server_blocked_when_mcp_disabled(
+    build_config: ConfigBuilder, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+) -> None:
+    orchestrator = load_orchestrator(build_config(enable_mcp=False))
+    server = MCPStreamableHttp(
+        name="docs", transport="streamable-http", url="https://mcp.example.com/mcp"
+    )
+
+    with pytest.raises(MCPServerAddError, match="disabled by your administrator"):
+        await persist_remote_mcp_server(orchestrator, server)
+
+
+@pytest.mark.asyncio
+async def test_persist_stdio_mcp_server_blocked_when_mcp_disabled(
+    build_config: ConfigBuilder, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+) -> None:
+    orchestrator = load_orchestrator(build_config(enable_mcp=False))
+    server = MCPStdio(
+        name="local", transport="stdio", command="python", args=["-m", "server"]
+    )
+
+    with pytest.raises(MCPServerAddError, match="disabled by your administrator"):
+        await persist_stdio_mcp_server(orchestrator, server)
+
+
+@pytest.mark.asyncio
+async def test_remove_mcp_server_blocked_when_mcp_disabled(
+    build_config: ConfigBuilder, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+) -> None:
+    orchestrator = load_orchestrator(
+        build_config(
+            enable_mcp=False,
+            mcp_servers=[
+                MCPStreamableHttp(
+                    name="linear",
+                    transport="streamable-http",
+                    url="https://mcp.linear.app/mcp",
+                )
+            ],
+        )
+    )
+
+    with pytest.raises(MCPServerRemoveError, match="disabled by your administrator"):
+        await remove_mcp_server(orchestrator, "linear")
+
+
+@pytest.mark.asyncio
+async def test_enable_mcp_default_allows_operations(
+    build_config: ConfigBuilder, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+) -> None:
+    """Default enable_mcp=True preserves existing behavior."""
+    result = await persist_oauth_mcp_server(
+        load_orchestrator(build_config()), url="https://mcp.example.com/mcp"
+    )
+
+    assert result.created is True
+    assert result.server.name == "example"

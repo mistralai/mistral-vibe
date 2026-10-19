@@ -7,10 +7,10 @@ from textual.app import App
 from textual.pilot import Pilot
 
 from tests.snapshots.snap_compare import SnapCompare
-from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.core.config import ProviderConfig
 from vibe.core.types import Backend
 from vibe.setup.onboarding.screens.api_key import ApiKeyScreen
+from vibe.setup.onboarding.widgets.petit_chat import PetitChat
 
 
 class StaticPetitChat(PetitChat):

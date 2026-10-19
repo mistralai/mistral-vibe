@@ -58,7 +58,7 @@ pub fn maybe_show(app: &mut App, client: &Arc<Client>, session_id: Option<String
         session_id: session_id.clone(),
         pending_user_messages: 1,
     };
-    // Python awaits this check inside turn handling, so its frame always lands
+    // This check runs inside turn handling, so its frame always lands
     // before a later event's requests (e.g. the silent incomplete-stream
     // retry's `turn/start`). Enqueue it here, not in spawn-poll order.
     let sent = client.send_now(

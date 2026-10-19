@@ -7,10 +7,7 @@ from e2e.app_server.scenario import Timeline
 
 env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 settle_per_key = True
-screen_contains = {
-    "python": ("No command provided after '!'",),
-    "rust": ("No command provided after '!'",),
-}
+screen_contains = ("No command provided after '!'",)
 
 timeline: Timeline = [
     "first\r",

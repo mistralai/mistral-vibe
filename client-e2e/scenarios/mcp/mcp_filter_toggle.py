@@ -16,5 +16,5 @@ request_methods = {"telemetry/record", "mcp/toggle"}
 
 timeline: Timeline = ["/mcp\r", "/fsy", "\x1b", "d", "\r", "\x1b"]
 
-screen_contains = {"rust": ("fsy", "filesystem", "disabled")}
-screen_excludes = {"rust": ("Available Connectors", "github", "broken")}
+screen_contains = ("fsy", "filesystem", "disabled")
+screen_excludes = ("Available Connectors", "github", "broken")

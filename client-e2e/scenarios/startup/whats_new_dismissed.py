@@ -28,7 +28,7 @@ env = {
     "VIBE_WHATS_NEW_FILE": os.fspath(E2E_DIR / "fixtures" / "whats_new.fixture"),
 }
 
-screen_excludes = {"rust": ("What's new in v9.9.9-fixture",)}
+screen_excludes = ("What's new in v9.9.9-fixture",)
 
 capture_startup = False
 timeline: Timeline = [

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -94,7 +95,7 @@ class SessionLoader:
                 return None
 
             messages = SessionLoader._parse_message_lines(read_safe(messages_path).text)
-        except (OSError, json.JSONDecodeError):
+        except OSError, json.JSONDecodeError:
             return None
 
         if not SessionLoader._log_is_loadable(messages, metadata):
@@ -288,13 +289,9 @@ class SessionLoader:
         return SessionLoader._clean_text(content)
 
     @staticmethod
-    def _latest_matching_session_dir(
-        session_id: str, config: SessionLoggingConfig
-    ) -> Path | None:
+    def _latest_session_dir(session_dirs: Iterable[Path]) -> Path | None:
         candidates: list[tuple[Path, float]] = []
-        for session_dir in SessionLoader._find_session_dirs_by_short_id(
-            session_id, config
-        ):
+        for session_dir in session_dirs:
             messages_path = session_dir / MESSAGES_FILENAME
             try:
                 candidates.append((session_dir, messages_path.stat().st_mtime))
@@ -315,7 +312,40 @@ class SessionLoader:
         length-capped so an untitled session's fallback label (resume picker, ACP
         session list) can't be blown up by a long first-message paste.
         """
-        session_path = SessionLoader._latest_matching_session_dir(session_id, config)
+        return SessionLoader._first_user_message(
+            SessionLoader._latest_session_dir(
+                SessionLoader._find_session_dirs_by_short_id(session_id, config)
+            )
+        )
+
+    @staticmethod
+    def session_dirs_by_short_id(config: SessionLoggingConfig) -> dict[str, list[Path]]:
+        dirs_by_short_id: dict[str, list[Path]] = {}
+        save_dir = Path(config.save_dir)
+        if not save_dir.exists():
+            return dirs_by_short_id
+        for session_dir in save_dir.glob(f"{config.session_prefix}_*"):
+            head, _, short_id = session_dir.name.rpartition("_")
+            if head.startswith(f"{config.session_prefix}_"):
+                dirs_by_short_id.setdefault(short_id, []).append(session_dir)
+        return dirs_by_short_id
+
+    @staticmethod
+    def get_first_user_messages(
+        session_ids: Iterable[str], dirs_by_short_id: Mapping[str, Iterable[Path]]
+    ) -> dict[str, str]:
+        """`get_first_user_message` for many sessions, without rescanning."""
+        return {
+            session_id: SessionLoader._first_user_message(
+                SessionLoader._latest_session_dir(
+                    dirs_by_short_id.get(shorten_session_id(session_id), [])
+                )
+            )
+            for session_id in session_ids
+        }
+
+    @staticmethod
+    def _first_user_message(session_path: Path | None) -> str:
         if not session_path:
             return "(session not found)"
 

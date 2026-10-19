@@ -1,8 +1,8 @@
 [package]
 name = "vibe-rs"
-version = "2.26.1"
+version = "3.0.0"
 edition = "2021"
-license = "Proprietary"
+license = "Apache-2.0"
 publish = false
 
 [lib]
@@ -26,9 +26,9 @@ shlex = "1"
 tokio = { version = "1", features = ["rt", "macros", "process", "io-util", "io-std", "sync", "time", "signal"] }
 futures = "0.3"
 ignore = "0.4"
-ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 # Native poll avoids the mio EOF spin; libc is required by Crossterm's wake path.
-crossterm = { version = "0.28", features = ["use-dev-tty", "libc"] }
+crossterm = { version = "0.29", features = ["use-dev-tty", "libc"] }
 pulldown-cmark = { version = "0.10", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -89,6 +89,8 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [profile.release]
@@ -98,3 +100,7 @@ debug = 1
 
 [profile.test]
 incremental = false
+
+# Crossterm parses an SGR-pixels edge report (pixel 0) as `0 - 1`: wrap like release instead of panicking.
+[profile.dev.package.crossterm]
+overflow-checks = false

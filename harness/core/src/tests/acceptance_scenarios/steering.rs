@@ -213,10 +213,10 @@ fn steering_while_tools_are_running_waits_for_the_complete_tool_batch() {
 ///
 /// *Prepare*: One completion is pending for an active turn.
 /// *Do*: Receive two steering messages with one notification between them, then restore and finish the retained completion.
-/// *Assert*: Core delivers steering in arrival order before the notification and emits one delivery Observation for each input.
+/// *Assert*: Core preserves admission order across sources and emits one delivery Observation for each input.
 ///
 #[test]
-fn multiple_steering_messages_keep_order_before_notifications() {
+fn steering_and_notifications_keep_their_shared_admission_order() {
     // Prepare
     let turn_id = "turn-multiple-steering";
     let mut runtime = SynchronousRuntime::new(config());
@@ -246,11 +246,11 @@ fn multiple_steering_messages_keep_order_before_notifications() {
                     "answer before both corrections",
                 ))
                 .observe(turn_steered(turn_id, "use the first correction"))
-                .observe(turn_steered(turn_id, "then use the second correction"))
                 .observe(notification_delivered(
                     turn_id,
                     observed_notification(&notification),
-                )),
+                ))
+                .observe(turn_steered(turn_id, "then use the second correction")),
         )
         .only_action();
     runtime.assert_last_model_message_update(
@@ -261,8 +261,8 @@ fn multiple_steering_messages_keep_order_before_notifications() {
             model_user_text("prepare the first answer"),
             model_assistant_text("answer before both corrections"),
             model_user_text("use the first correction"),
-            model_user_text("then use the second correction"),
             model_notifications(&[&notification]),
+            model_user_text("then use the second correction"),
         ],
     );
     runtime.finish_turn_with_text(
@@ -451,6 +451,106 @@ fn interrupting_a_running_tool_keeps_its_steering_after_the_interrupted_tool_mes
             model_user_text("stop running tests"),
             model_user_text("just add the logs"),
             model_user_text("act on what i just wrote"),
+        ],
+    );
+}
+
+/// *Prepare*: A V1 checkpoint has steering and a notification without an admission position.
+/// *Do*: Restore that earlier shape and finish the retained model completion.
+/// *Assert*: Earlier checkpoints retain their all-steering-before-notifications interpretation.
+#[test]
+fn earlier_checkpoint_without_notification_positions_preserves_its_input_order() {
+    // Prepare
+    let turn_id = "earlier-input-order";
+    let mut runtime = SynchronousRuntime::new(config());
+    let original = runtime.start_turn(turn_id, "start");
+    let notice = notification("retained-notice", "background evidence");
+    runtime.receive_notification(turn_id, &notice, &[&original]);
+    runtime.receive_steering(turn_id, "correction", &[&original]);
+    let mut checkpoint = runtime.checkpoint_value();
+    for entry in checkpoint["notifications"].as_array_mut().unwrap() {
+        entry.as_object_mut().unwrap().remove("preceding_steers");
+    }
+
+    // Do
+    runtime.restore_checkpoint_value(checkpoint, config());
+    let next = runtime
+        .apply(
+            text_completion(&original, "initial answer"),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(assistant_text_committed(
+                    turn_id,
+                    &original,
+                    "initial answer",
+                ))
+                .observe(turn_steered(turn_id, "correction"))
+                .observe(notification_delivered(
+                    turn_id,
+                    observed_notification(&notice),
+                )),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(
+        &next,
+        "replace",
+        &[
+            model_system(),
+            model_user_text("start"),
+            model_assistant_text("initial answer"),
+            model_user_text("correction"),
+            model_notifications(&[&notice]),
+        ],
+    );
+}
+
+///
+/// *Prepare*: A pre-LLM hook is running before the turn's first completion.
+/// *Do*: Steer before the hook returns, then let the hook continue.
+/// *Assert*: Core commits the steering when it dispatches the completion, so that
+/// completion already carries it.
+///
+#[test]
+fn steering_while_pre_llm_hook_is_running_reaches_the_next_completion() {
+    // Prepare
+    let turn_id = "turn-steer-pre-llm-hook";
+    let mut config = config();
+    crate::core::testing::add_always_hook(&mut config, HookPoint::PreLlmCall);
+    let mut runtime = SynchronousRuntime::new(config);
+    let pre_llm_hook = runtime
+        .apply(
+            user_message(turn_id, "first direction", "queue"),
+            running(turn_id)
+                .dispatch(hook_call(
+                    "pre_llm_call",
+                    &["test-hook-0-PreLlmCall"],
+                    Value::Null,
+                ))
+                .observe(turn_started(turn_id, "first direction")),
+        )
+        .only_action();
+
+    // Do
+    runtime.receive_steering(turn_id, "changed direction", &[&pre_llm_hook]);
+    let completion = runtime
+        .apply(
+            hook_completed(&pre_llm_hook, "pre_llm_call", json!({"type": "continue"})),
+            running(turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_steered(turn_id, "changed direction")),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(
+        &completion,
+        "replace",
+        &[
+            model_system(),
+            model_user_text("first direction"),
+            model_user_text("changed direction"),
         ],
     );
 }

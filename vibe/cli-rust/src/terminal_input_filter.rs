@@ -12,6 +12,7 @@ pub struct TerminalInputFilter {
     pending: Vec<Event>,
     payload: String,
     started: Option<Instant>,
+    program_status_reply: bool,
 }
 
 impl TerminalInputFilter {
@@ -34,6 +35,8 @@ impl TerminalInputFilter {
         }
 
         if is_osc_terminator(&event) {
+            // OSC 7501 revision 0.3: the reply starts with ?, future fields are ignored.
+            self.program_status_reply |= self.payload.starts_with("]7501;?");
             // Report or not, the buffered bytes are terminal noise, never input.
             self.clear();
             return Vec::new();
@@ -47,9 +50,13 @@ impl TerminalInputFilter {
             self.clear();
             return vec![event];
         };
+        if self.payload.starts_with("]7501;?") && self.pending.len() + 1 >= MAX_REPORT_EVENTS {
+            // Ignore future reply fields without growing the buffer or leaking them as keys.
+            return Vec::new();
+        }
         self.payload.push(character);
         let diverged =
-            self.pending.len() + 1 >= MAX_REPORT_EVENTS || !is_partial_color_report(&self.payload);
+            self.pending.len() + 1 >= MAX_REPORT_EVENTS || !is_partial_report(&self.payload);
         self.pending.push(event);
         if diverged {
             // The payload diverged from a report: the buffered bytes stay
@@ -70,6 +77,10 @@ impl TerminalInputFilter {
             self.clear();
         }
         Vec::new()
+    }
+
+    pub fn take_program_status_reply(&mut self) -> bool {
+        std::mem::take(&mut self.program_status_reply)
     }
 
     fn clear(&mut self) {
@@ -134,7 +145,11 @@ fn plain_character(event: &Event) -> Option<char> {
     }
 }
 
-fn is_partial_color_report(payload: &str) -> bool {
+fn is_partial_report(payload: &str) -> bool {
+    let reply = "]7501;?";
+    if reply.starts_with(payload) || payload.starts_with(reply) {
+        return true;
+    }
     let Some(payload) = payload.strip_prefix(']') else {
         return false;
     };

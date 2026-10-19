@@ -39,7 +39,7 @@ pub struct OlderHistory {
     loading: bool,
 }
 
-/// Python `_load_older_history_page` for the shown history, live or a `/resume` preview.
+/// Load the older history page for the shown history, live or a `/resume` preview.
 pub fn load_older_history_page(app: &mut App, client: &Arc<Client>) {
     // A saturated `u16` document height can no longer place older rows.
     if app.older_history.loading

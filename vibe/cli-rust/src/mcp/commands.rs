@@ -1,4 +1,4 @@
-//! `/mcp` subcommands (Python `mcp_commands.py` and `VibeApp._mcp_*`).
+//! `/mcp` subcommands.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -39,11 +39,13 @@ fn status(app: &mut App, client: &Arc<Client>, args: &str) {
     let client = client.clone();
     tokio::spawn(async move {
         let event = match client
-            .request(method::MCP_READ, json!({"sessionId": session_id}))
+            .request_err(method::MCP_READ, json!({"sessionId": session_id}))
             .await
         {
             Ok(value) => CommandEvent::Result(status_text(&value)),
-            Err(error) => CommandEvent::Error(format!("Failed to read MCP servers: {error}")),
+            Err(error) => {
+                CommandEvent::Error(format!("Failed to read MCP servers: {}", error.message))
+            }
         };
         send(&tx, &pending, event, false);
     });
@@ -90,14 +92,14 @@ fn login(app: &mut App, client: &Arc<Client>, alias: &str) {
 /// The `mcp/login` round-trip; the auth URL arrives as an `mcp/authUrl` notification.
 async fn login_event(client: &Arc<Client>, session_id: &str, alias: &str) -> CommandEvent {
     match client
-        .request(
+        .request_err(
             method::MCP_LOGIN,
             json!({"sessionId": session_id, "name": alias}),
         )
         .await
     {
         Ok(_) => CommandEvent::Result(format!("MCP server `{alias}` authenticated.")),
-        Err(error) => CommandEvent::Error(error.to_string()),
+        Err(error) => CommandEvent::Error(error.message),
     }
 }
 
@@ -116,14 +118,14 @@ fn logout(app: &mut App, client: &Arc<Client>, alias: &str) {
     let client = client.clone();
     tokio::spawn(async move {
         let event = match client
-            .request(
+            .request_err(
                 method::MCP_LOGOUT,
                 json!({"sessionId": session_id, "name": alias}),
             )
             .await
         {
             Ok(_) => CommandEvent::Result(format!("MCP server `{alias}` logged out.")),
-            Err(error) => CommandEvent::Error(error.to_string()),
+            Err(error) => CommandEvent::Error(error.message),
         };
         send(&tx, &pending, event, false);
     });
@@ -147,7 +149,7 @@ fn add(app: &mut App, client: &Arc<Client>, raw_args: &str) {
     let client = client.clone();
     tokio::spawn(async move {
         let result = client
-            .request(
+            .request_err(
                 method::MCP_ADD,
                 json!({
                     "sessionId": session_id,
@@ -162,7 +164,7 @@ fn add(app: &mut App, client: &Arc<Client>, raw_args: &str) {
         let added = match result {
             Ok(value) => value,
             Err(error) => {
-                send(&tx, &pending, CommandEvent::Error(error.to_string()), false);
+                send(&tx, &pending, CommandEvent::Error(error.message), false);
                 return;
             }
         };

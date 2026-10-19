@@ -1,4 +1,4 @@
-//! Warning/error toast overlay (Python Textual `Toast`).
+//! Warning/error toast overlay.
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -9,15 +9,15 @@ use super::{selection, theme};
 use crate::app::{App, ToastSeverity};
 use crate::selection::{fold, Fold, Folds, Region, RegionId};
 
-// Textual `Toast { width: 60 }` renders as 59 cells inside the ToastRack, docked
-// bottom-right with a 2-column right margin. Interior text is `width - border(1) -
+// A 60-wide toast renders as 59 cells, docked bottom-right with a 2-column
+// right margin. Interior text is `width - border(1) -
 // padding(1+1)`.
 const BOX_WIDTH: u16 = 59;
 const RIGHT_MARGIN: u16 = 2;
 const MIN_BOX_WIDTH: u16 = 10;
 
 /// Overlay the active toast stack right-aligned above `anchor.y`, newest at the
-/// bottom (Python `ToastRack`). Drops expired toasts and clamps to the width.
+/// bottom. Drops expired toasts and clamps to the width.
 pub fn draw(app: &mut App, f: &mut Frame, anchor: Rect) {
     let now = std::time::Instant::now();
     app.overlays
@@ -127,8 +127,8 @@ fn reconcile_selection(app: &mut App, f: &mut Frame) {
 
 /// The selectable region one toast's text rows form. Its rows are all text, so
 /// the region owns no chrome, and it keeps the cell under the pointer like the
-/// transcript: Python's `WordSelectScreen` owns selection for everything the
-/// screen paints, toasts included, so multi-click behaves the same on both.
+/// transcript: selection covers everything the screen paints, toasts
+/// included, so multi-click behaves the same on both.
 fn region(area: Rect) -> Region {
     Region {
         area,

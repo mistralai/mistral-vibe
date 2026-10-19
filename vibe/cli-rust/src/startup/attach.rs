@@ -9,7 +9,8 @@ use tokio::sync::mpsc;
 use super::Attach;
 use crate::cli::StartupResume;
 use crate::server::{
-    method, AgentConfig, Client, Notification, RpcError, SessionStartParams, HISTORY_LIMIT,
+    method, request_error::resume_failure_message, AgentConfig, Client, Notification, RpcError,
+    SessionStartParams, HISTORY_LIMIT,
 };
 use crate::startup::StartupEvent;
 use crate::worktree::WorktreeInfo;
@@ -93,19 +94,16 @@ pub(super) async fn rebind(
         };
         return Ok((started, attach));
     };
-    // Python sends the full `SessionOptions` on resume too, so flags survive the rebind.
+    // The full agent config rides on resume too, so flags survive the rebind.
     let params = resume_params(&id, agent_config);
     match state_of(client, method::SESSION_RESUME, params).await {
         Ok(state) => Ok((state, Attach::Resumed(id))),
         // The fresh session is already attached, so a failed resume keeps it.
-        Err(error) => Ok((
-            started,
-            Attach::Failed(format!("Failed to resume session: {error:#}")),
-        )),
+        Err(error) => Ok((started, Attach::Failed(resume_failure_message(&error)))),
     }
 }
 
-/// `session/resume` params; the flags ride along, as in Python `SessionOptions`.
+/// `session/resume` params; the flags ride along.
 /// The server rejects `worktree` outside `session/start` (the worktree already
 /// exists by then), so the rebind never re-requests it.
 pub fn resume_params(id: &str, agent_config: &AgentConfig) -> Value {
@@ -190,8 +188,7 @@ pub(super) async fn settle_worktree_session(
         }
     }
     let target = resume.target(continue_target);
-    // Python chdirs into the worktree before its resume lookups, so the
-    // rebind's agentConfig names the worktree directory, not the checkout
+    // The rebind's agentConfig names the worktree directory, not the checkout
     // the run started in; the settled cwd is that directory.
     let mut rebound_config = agent_config.clone();
     if let Some(settled) = settled.as_ref() {

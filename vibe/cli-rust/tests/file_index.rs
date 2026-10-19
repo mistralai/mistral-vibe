@@ -1,4 +1,4 @@
-//! Git-backed file index parity with Python FileIndexStore.rebuild.
+//! Git-backed file index listing.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -91,7 +91,7 @@ fn git_index_skips_stale_index_entries() {
 
     let entries = git_ls_files(&root).unwrap();
 
-    // Tracked on disk-in-the-index only: the path check drops it (Python path.exists()).
+    // Tracked on disk-in-the-index only: the path check drops it.
     assert!(entries.is_empty());
     cleanup(&root);
 }

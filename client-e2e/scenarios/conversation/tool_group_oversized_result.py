@@ -14,13 +14,11 @@ from e2e.app_server.scenario import Timeline
 
 _PROMPT = "summarize the readme"
 
-screen_contains = {
-    "rust": (
-        "⏷ Read 1 file, ran 1 command",
-        "⏷ Read README.md (truncated)",
-        "<truncated-output>",
-    )
-}
+screen_contains = (
+    "⏷ Read 1 file, ran 1 command",
+    "⏷ Read README.md (truncated)",
+    "<truncated-output>",
+)
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

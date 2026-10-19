@@ -1,4 +1,4 @@
-//! Python `ChatTextArea.on_blur`: losing focus collapses the composer selection.
+//! Losing focus collapses the composer selection.
 
 use vibe_rs::app::{App, Surface};
 use vibe_rs::selection::blur_composer;

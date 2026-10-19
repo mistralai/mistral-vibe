@@ -1,24 +1,45 @@
-//! Session titles and focus-aware terminal notifications, matching Textual.
+//! Session titles and focus-aware terminal notifications.
 
 use std::time::{Duration, Instant};
+
+use crate::program_status::{encode_report, ProgramState};
+
+mod lifecycle;
+pub use lifecycle::{action_required, program_state, take_program_report, take_title, title};
 
 #[derive(Clone, Copy)]
 pub enum NotificationContext {
     ActionRequired,
     Complete,
+    Failed,
 }
 
-#[derive(Default)]
-enum TabState {
-    #[default]
-    Idle,
-    Running,
-    Waiting,
+impl NotificationContext {
+    pub fn program_state(self) -> ProgramState {
+        match self {
+            Self::ActionRequired => {
+                ProgramState::Blocked(crate::program_status::BlockedKind::Permission)
+            }
+            Self::Complete => ProgramState::Done,
+            Self::Failed => ProgramState::Error,
+        }
+    }
+}
+
+pub enum Outcome {
+    Done,
+    Error(String),
 }
 
 pub struct TerminalNotifier {
+    pub program_status_detection: crate::program_status::detection::Detection,
+    protocol_presentation: bool,
     default_title: String,
-    state: TabState,
+    outcome: Option<Outcome>,
+    last_title: Option<String>,
+    report_enabled: bool,
+    last_report: Option<String>,
+    resend_report: bool,
     has_focus: bool,
     enabled: bool,
     title_enabled: bool,
@@ -31,8 +52,14 @@ pub struct TerminalNotifier {
 impl Default for TerminalNotifier {
     fn default() -> Self {
         Self {
+            program_status_detection: Default::default(),
+            protocol_presentation: false,
             default_title: "Vibe".to_owned(),
-            state: TabState::Idle,
+            outcome: None,
+            last_title: None,
+            report_enabled: false,
+            last_report: None,
+            resend_report: false,
             has_focus: true,
             enabled: false,
             title_enabled: false,
@@ -61,14 +88,9 @@ impl TerminalNotifier {
         }
     }
 
-    pub fn set_running(&mut self, active: bool) {
-        self.state = if active {
-            TabState::Running
-        } else {
-            TabState::Idle
-        };
+    pub fn clear_outcome(&mut self) {
+        self.outcome = None;
         self.bell_context = None;
-        self.dirty = true;
     }
 
     pub fn set_focus(&mut self, focused: bool) {
@@ -79,13 +101,74 @@ impl TerminalNotifier {
         self.dirty = true;
     }
 
-    pub fn notify(&mut self, context: NotificationContext, now: Instant) {
-        self.state = match context {
-            NotificationContext::ActionRequired => TabState::Waiting,
-            NotificationContext::Complete => TabState::Idle,
+    pub fn set_error_message(&mut self, message: &str) {
+        self.outcome = Some(Outcome::Error(
+            message
+                .lines()
+                .next()
+                .filter(|line| !line.is_empty())
+                .unwrap_or("Task failed")
+                .to_owned(),
+        ));
+    }
+
+    pub fn remember_completion(&mut self, state: ProgramState) {
+        match state {
+            ProgramState::Done => self.outcome = Some(Outcome::Done),
+            ProgramState::Error if !matches!(self.outcome, Some(Outcome::Error(_))) => {
+                self.set_error_message("Task failed");
+            }
+            ProgramState::Idle => self.clear_outcome(),
+            _ => {}
+        }
+    }
+
+    pub fn enable_program_reports(&mut self, enabled: bool) {
+        self.report_enabled = enabled;
+    }
+
+    pub fn take_program_report(
+        &mut self,
+        state: ProgramState,
+        blocked_message: &str,
+    ) -> Option<String> {
+        if !self.title_enabled || !self.report_enabled {
+            self.last_report.take()?;
+            return Some(encode_report(ProgramState::Idle, ""));
+        }
+        let message = match state {
+            ProgramState::Working | ProgramState::Done => &self.default_title,
+            ProgramState::Error => match &self.outcome {
+                Some(Outcome::Error(message)) => message.as_str(),
+                _ => "Task failed",
+            },
+            ProgramState::Blocked(_) => blocked_message,
+            ProgramState::Idle => "",
         };
+        let report = encode_report(state, message);
+        if !std::mem::take(&mut self.resend_report) && self.last_report.as_ref() == Some(&report) {
+            return None;
+        }
+        self.last_report = Some(report.clone());
+        Some(report)
+    }
+
+    pub fn invalidate_program_status(&mut self) {
+        self.resend_report = true;
+    }
+
+    pub fn take_shutdown_report(&mut self) -> Option<String> {
+        self.last_report
+            .take()
+            .map(|_| encode_report(ProgramState::Idle, ""))
+    }
+
+    pub fn notify(&mut self, context: NotificationContext, now: Instant) {
+        if !matches!(context, NotificationContext::ActionRequired) {
+            self.remember_completion(context.program_state());
+        }
         self.dirty = true;
-        if !self.enabled || self.has_focus {
+        if !self.enabled || self.has_focus || self.use_protocol_presentation() {
             return;
         }
         self.bell_context = Some(context);
@@ -98,18 +181,20 @@ impl TerminalNotifier {
         }
     }
 
-    pub fn title(&self) -> String {
-        let title = if let Some(context) = self.bell_context.filter(|_| !self.has_focus) {
+    pub fn title(&self, state: ProgramState) -> String {
+        let title = if self.use_protocol_presentation() {
+            self.default_title.clone()
+        } else if let Some(context) = self.bell_context.filter(|_| !self.has_focus) {
             let suffix = match context {
                 NotificationContext::ActionRequired => "Action Required",
-                NotificationContext::Complete => "Task Complete",
+                NotificationContext::Complete | NotificationContext::Failed => "Task Complete",
             };
             format!("{} - {suffix}", self.default_title)
         } else if self.title_enabled {
-            match self.state {
-                TabState::Running => format!(">> {}", self.default_title),
-                TabState::Waiting => format!("? {}", self.default_title),
-                TabState::Idle => self.default_title.clone(),
+            match state {
+                ProgramState::Working => format!(">> {}", self.default_title),
+                ProgramState::Blocked(_) => format!("? {}", self.default_title),
+                _ => self.default_title.clone(),
             }
         } else {
             self.default_title.clone()
@@ -121,12 +206,33 @@ impl TerminalNotifier {
         self.dirty = true;
     }
 
-    pub fn take_title(&mut self) -> Option<String> {
-        std::mem::take(&mut self.dirty).then(|| self.title())
+    pub fn take_title(&mut self, state: ProgramState) -> Option<String> {
+        let protocol = self.use_protocol_presentation();
+        self.dirty |= self.protocol_presentation != protocol;
+        if protocol && !self.protocol_presentation {
+            self.bell_context = None;
+            self.bell_pending = false;
+        }
+        self.protocol_presentation = protocol;
+        let title = self.title(state);
+        let dirty = std::mem::take(&mut self.dirty);
+        if !dirty && self.last_title.as_ref() == Some(&title) {
+            return None;
+        }
+        self.last_title = Some(title.clone());
+        Some(title)
+    }
+
+    pub fn presentation_changed(&self) -> bool {
+        self.protocol_presentation != self.use_protocol_presentation()
     }
 
     pub fn take_bell(&mut self) -> bool {
-        std::mem::take(&mut self.bell_pending)
+        std::mem::take(&mut self.bell_pending) && !self.use_protocol_presentation()
+    }
+
+    fn use_protocol_presentation(&self) -> bool {
+        self.report_enabled && self.title_enabled && self.program_status_detection.supported()
     }
 }
 
@@ -152,22 +258,12 @@ pub fn configure(app: &mut crate::app::App, runtime: &serde_json::Value) {
     );
 }
 
-pub fn action_required(app: &mut crate::app::App) {
-    app.terminal_notifier
-        .notify(NotificationContext::ActionRequired, Instant::now());
-}
-
-pub fn restore_running(app: &mut crate::app::App) {
-    let running = matches!(app.session.status, crate::app::Status::Generating { .. })
-        || app.session.shell_operation_id.is_some();
-    app.terminal_notifier.set_running(running);
-}
-
-pub fn flush(notifier: &mut TerminalNotifier) {
+pub fn flush(app: &mut crate::app::App) {
     use std::io::Write;
-    let bell = notifier.take_bell();
-    let title = notifier.take_title();
-    if !bell && title.is_none() {
+    let title = take_title(app);
+    let report = take_program_report(app);
+    let bell = app.terminal_notifier.take_bell();
+    if !bell && title.is_none() && report.is_none() {
         return;
     }
     let mut out = std::io::stdout();
@@ -177,5 +273,17 @@ pub fn flush(notifier: &mut TerminalNotifier) {
     if let Some(title) = title {
         let _ = crossterm::execute!(out, crossterm::terminal::SetTitle(title));
     }
+    if let Some(report) = report {
+        let _ = out.write_all(report.as_bytes());
+    }
     let _ = out.flush();
+}
+
+pub fn shutdown(notifier: &mut TerminalNotifier) {
+    use std::io::Write;
+    if let Some(report) = notifier.take_shutdown_report() {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(report.as_bytes());
+        let _ = out.flush();
+    }
 }

@@ -37,7 +37,7 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     }
 }
 
-/// Textual's `Input` keeps only the first line of a paste.
+/// A single-line input keeps only the first line of a paste.
 pub fn paste(app: &mut App, text: &str) {
     app.proxy_setup.free_scroll = false;
     let Some(field) = app.proxy_setup.focused_field() else {
@@ -48,7 +48,7 @@ pub fn paste(app: &mut App, text: &str) {
     }
 }
 
-/// The first line of pasted text, splitting like Python's `str.splitlines`.
+/// The first line of pasted text, splitting on any line boundary.
 fn first_line(text: &str) -> &str {
     const BREAKS: [char; 10] = [
         '\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}',
@@ -57,7 +57,7 @@ fn first_line(text: &str) -> &str {
     text.find(BREAKS).map_or(text, |end| &text[..end])
 }
 
-/// Ctrl+C copies the focused selection (Textual `Input.copy`); true while the visible app owns the key.
+/// Ctrl+C copies the focused selection; true while the visible app owns the key.
 pub fn copy_selection(app: &mut App, cut: bool) -> bool {
     if app.focus() != Focus::ProxySetup {
         return false;

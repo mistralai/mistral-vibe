@@ -5,6 +5,6 @@ from __future__ import annotations
 from e2e.app_server.scenario import Timeline
 
 capture_startup = False
-screen_contains = {"rust": ("status a",)}
-screen_excludes = {"rust": ("Display agent statistics",)}
+screen_contains = ("status a",)
+screen_excludes = ("Display agent statistics",)
 timeline: Timeline = ["/status", " ", "a"]

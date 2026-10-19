@@ -1,4 +1,4 @@
-//! The `--setup` exit surface: Python's post-wizard messages and the
+//! The `--setup` exit surface: the post-wizard messages and the
 //! session-less exit that reaps the child. No session is ever opened, so
 //! the trust gate never fires and nothing lands through `config/write`.
 
@@ -16,7 +16,7 @@ pub const SETUP_CANCELLED: &str = "Setup cancelled. See you next time!";
 pub const SETUP_COMPLETE: &str =
     "Setup complete 🎉. Run \"vibe\" to start using the Mistral Vibe CLI.";
 
-/// The completed-setup exit line: Python's `rich.print` highlights the quoted
+/// The completed-setup exit line highlights the quoted
 /// `\"vibe\"` in green and keeps the rest in the terminal default, dropping the
 /// color off-TTY and under NO_COLOR exactly like rich does.
 pub fn setup_complete_message() -> String {
@@ -32,7 +32,7 @@ pub fn setup_complete_message() -> String {
     }
 }
 
-/// Python `save_error`'s warning: the key lives in the server process env
+/// The `save_error` warning: the key lives in the server process env
 /// for this run only (the keyring and `.env` writes both failed).
 pub fn save_warning_message(error: &str) -> String {
     let path = crate::utils::paths::vibe_home()
@@ -45,7 +45,7 @@ pub fn save_warning_message(error: &str) -> String {
     )
 }
 
-/// Python `provider_config_error`'s exit message: the key was saved, but the
+/// The `provider_config_error` exit message: the key was saved, but the
 /// provider config write failed.
 pub fn provider_config_warning(error: &str) -> String {
     format!(
@@ -57,7 +57,7 @@ pub fn provider_config_warning(error: &str) -> String {
     )
 }
 
-/// Python `run_onboarding`'s `env_var_error` exit print: nothing was saved
+/// The `env_var_error` exit print: nothing was saved
 /// and the run exits 1. The failure line is yellow, the remedy dim.
 pub fn print_env_var_error(env_key: &str) {
     let enabled = std::io::stdout().is_terminal() && !crate::session_exit::no_color();
@@ -75,15 +75,15 @@ pub fn print_env_var_error(env_key: &str) {
     ));
 }
 
-/// The interactive paths' post-wizard warnings (Python prints both in
-/// every mode): the same warning lines as `--setup`, without the
+/// The interactive paths' post-wizard warnings (both print in every
+/// mode): the same warning lines as `--setup`, without the
 /// completion line — a clean wizard run stays silent.
 pub fn warnings_message(warnings: &[String]) -> Option<String> {
     (!warnings.is_empty()).then(|| warnings.concat())
 }
 
 /// Print the wizard's continue-anyway warnings on the real terminal before
-/// the TUI takes over, like Python's pre-TUI rprint: suspend the alternate
+/// the TUI takes over: suspend the alternate
 /// screen, print, re-enter, and clear so the next frame paints in full.
 pub fn print_pre_tui_warning(
     message: &str,
@@ -98,7 +98,7 @@ pub fn print_pre_tui_warning(
         let _ = out.flush();
     }
     guard.resume()?;
-    terminal.clear()?;
+    crate::terminal::repaint(terminal)?;
     Ok(())
 }
 
@@ -118,15 +118,15 @@ pub fn print_setup_failed(detail: &str) {
     print_setup_exit(format!("\nSetup failed: {detail}.\n"));
 }
 
-/// Print Python's post-wizard message after the alternate screen closes;
+/// Print the post-wizard message after the alternate screen closes;
 /// the terminal guard's later restore is idempotent.
 pub fn print_setup_exit(message: String) {
     ratatui::restore();
     println!("{message}");
 }
 
-/// Print the cancelled message in Python's `[yellow]`: rich keeps named ANSI
-/// colors at every depth, and drops them under NO_COLOR or off-TTY.
+/// Print the cancelled message in named ANSI yellow, kept at every color
+/// depth and dropped under NO_COLOR or off-TTY.
 pub fn print_setup_cancelled() {
     let yellow =
         crate::session_exit::color_span(std::io::stdout().is_terminal(), sgr::YELLOW, sgr::YELLOW)
@@ -138,9 +138,9 @@ pub fn print_setup_cancelled() {
     print_setup_exit(message);
 }
 
-/// The `--setup` exit line: Python's completion message, or the
+/// The `--setup` exit line: the completion message, or the
 /// save/provider warnings — the two continue-anyway outcomes replace the
-/// success line exactly like Python's exclusive match.
+/// success line.
 pub fn setup_exit_message(warnings: &[String]) -> String {
     warnings_message(warnings).unwrap_or_else(setup_complete_message)
 }

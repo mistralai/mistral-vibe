@@ -956,22 +956,37 @@ def test_a_server_that_aborts_on_a_tool_call_ends_the_run_as_aborted(
 @pytest.mark.parametrize(
     "streaming_mock_server", [_write_a_marker_then_finish], indirect=True
 )
-def test_a_server_that_aborts_the_handshake_ends_the_run_before_the_model(
+@pytest.mark.parametrize(
+    "method",
+    ["agent/initialize", "sandbox/execute", "sandbox/readFile", "git"],
+    ids=["handshake", "first-command", "agents-md-read", "git-context"],
+)
+def test_a_server_that_aborts_before_the_turn_ends_the_run_before_the_model(
     streaming_mock_server: StreamingMockServer,
     e2e_workdir: Path,
     socket_path: Path,
     tmp_path: Path,
+    method: str,
 ) -> None:
-    """*Prepare*: An agent server that answers the handshake with the abort
-    code.
+    """*Prepare*: An agent server that answers one request made before the
+    turn with the abort code: the handshake, the first sandbox command, the
+    read of the workspace's `AGENTS.md` as the session opens, or the git
+    command that reads its git context, whose failures the session swallows.
     *Do*: Run `vibe -p --agent-socket`.
-    *Assert*: Exit 4 with an `aborted` export carrying the server's message,
-    and the model is never called.
+    *Assert*: Exit 4 with an `aborted` export carrying the server's message;
+    no session opens, and the model is never called.
     """
     # Prepare
     output_dir = tmp_path / "out"
+    sandbox_dir = (tmp_path / "sandbox").resolve()
+    sandbox_dir.mkdir()
     server = FakeAgentServer(
-        socket_path, None, aborts={"agent/initialize": "No task to run"}
+        socket_path,
+        None if method == "agent/initialize" else sandbox_dir,
+        aborts={} if method == "git" else {method: "No task to run"},
+        aborts_on=(lambda command: command.startswith("git "))
+        if method == "git"
+        else None,
     )
 
     # Do
@@ -990,10 +1005,12 @@ def test_a_server_that_aborts_the_handshake_ends_the_run_before_the_model(
 
     # Assert
     assert result.returncode == 4, result.stderr
+    assert method == "git" or method in server.methods
     export = read_export(output_dir)
     assert export.outcome == "aborted"
     assert export.error is not None
     assert export.error.message == "No task to run"
+    assert export.session_id is None
     assert streaming_mock_server.requests == []
 
 

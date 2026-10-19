@@ -320,13 +320,13 @@ async def test_apply_persists_to_discovered_file(tmp_working_directory: Path) ->
     await layer.apply(
         ConfigPatch(
             ReplaceOperationPatch(path="/active_model", value="new"),
-            AddOperationPatch(path="/default_agent", value="plan"),
+            AddOperationPatch(path="/default_agent", value="ask"),
             fingerprint=fingerprint,
         )
     )
 
     with config_path.open("rb") as file:
-        assert tomllib.load(file) == {"active_model": "new", "default_agent": "plan"}
+        assert tomllib.load(file) == {"active_model": "new", "default_agent": "ask"}
         assert layer.fingerprint == create_file_fingerprint(file)
 
 

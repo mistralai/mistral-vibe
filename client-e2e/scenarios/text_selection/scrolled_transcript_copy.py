@@ -13,7 +13,6 @@ from e2e.app_server.scenario import Timeline
 
 # The promo sits above the entries; the overflow reserves a scrollbar column.
 env = {"TERM_PROGRAM": "vscode", "SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 
 _FIRST = "tell me a story"
 _STORY = "\n\n".join(f"Story paragraph number {index:02d}." for index in range(1, 16))

@@ -36,8 +36,6 @@ from vibe.app_server.protocol import (
     ConfigProxyReadResponse,
     ConfigProxyWriteParams,
     ConfigReloadParams,
-    ConfigSchemaReadParams,
-    ConfigSchemaReadResponse,
     ConfigWriteOpWire,
     ConfigWriteParams,
     ConfigWriteResponse,
@@ -113,13 +111,6 @@ class ConfigResource:
         previous = self.current
         self._state.apply_runtime(snapshot)
         self.publish_change(previous)
-
-    async def read_schema(self) -> ConfigSchemaReadResponse:
-        client = await self._connection.connect()
-        return validate_wire(
-            ConfigSchemaReadResponse,
-            await client.request("config/schema", ConfigSchemaReadParams()),
-        )
 
     async def read_effective(self) -> ConfigEffectiveReadResponse:
         client = await self._connection.connect()
@@ -427,10 +418,6 @@ class RuntimeResource:
     @property
     def bypass_tool_permissions(self) -> bool:
         return self._state.bypass_tool_permissions
-
-    @property
-    def experimental_harness(self) -> bool:
-        return self._state.experimental_harness
 
     @property
     def connectors(self) -> ConnectorCounts:

@@ -31,10 +31,16 @@ inject_dsn() {
   grep -q "^${placeholder} = \".*\"$" "${target_file}"
 }
 
-inject_dsn "_CLI_SENTRY_DSN" "${CLI_SENTRY_DSN:-}" "${require_sentry_dsn}"
 inject_dsn "_ACP_SENTRY_DSN" "${ACP_SENTRY_DSN:-}" "${require_sentry_dsn}"
 
-if [ -n "${CLI_SENTRY_DSN:-}" ]; then
+# The CLI DSN only goes to the Rust terminal UI.
+if [ -z "${CLI_SENTRY_DSN:-}" ]; then
+  if [ "${require_sentry_dsn}" = "true" ]; then
+    echo "CLI_SENTRY_DSN is required but its value is not set" >&2
+    exit 1
+  fi
+  echo "CLI_SENTRY_DSN value is not set; leaving the Rust terminal unchanged"
+else
   rust_target_file="vibe/cli-rust/src/observability/sentry.rs"
   placeholder='const CLI_SENTRY_DSN: Option<&str> = None;'
   if [ ! -f "${rust_target_file}" ] || ! grep -Fxq "${placeholder}" "${rust_target_file}"; then

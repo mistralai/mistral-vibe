@@ -80,7 +80,7 @@ fn pending_direct_pre_hook(
 }
 
 ///
-/// *Prepare*: Provided tool groups use a reserved namespace, a built-in direct name, or the same stable ID twice.
+/// *Prepare*: Provided tool groups use a reserved or retired namespace (including every namespace that holds replay-only functions), a built-in direct name, or the same stable ID twice.
 /// *Do*: Create a Harness session from each invalid configuration.
 /// *Assert*: Session creation rejects each collision with the exact configuration error.
 ///
@@ -95,8 +95,11 @@ fn provided_tool_name_collisions_reject_session_creation() {
             "exposure": exposure,
         })
     };
-    let reserved_configs =
-        crate::core::tools::resolved::RESERVED_TOOL_NAMESPACES.map(|namespace| {
+    let retired_namespaces = ["agent", "collaboration", "subagent"];
+    let reserved_configs = crate::core::tools::resolved::RESERVED_TOOL_NAMESPACES
+        .into_iter()
+        .chain(retired_namespaces)
+        .map(|namespace| {
             let mut config = config();
             config.settings.tools.background_processes = BackgroundProcessMode::Disabled;
             config.settings.tools.subagents = SubagentMode::Disabled;
@@ -106,7 +109,8 @@ fn provided_tool_name_collisions_reject_session_creation() {
             }]))
             .expect("reserved group remains structurally valid");
             config
-        });
+        })
+        .collect::<Vec<_>>();
     let mut duplicate_stable_id = config();
     duplicate_stable_id.capabilities.tool_groups = serde_json::from_value(json!([{
         "name": "calendar",
@@ -127,13 +131,16 @@ fn provided_tool_name_collisions_reject_session_creation() {
     .expect("duplicate direct tools remain structurally valid");
 
     // Do
-    let reserved_errors = reserved_configs.map(|config| {
-        let namespace = config.capabilities.tool_groups[0].name.clone();
-        let error = HarnessSession::create(config)
-            .err()
-            .expect("reserved namespace rejects session creation");
-        (namespace, error)
-    });
+    let reserved_errors = reserved_configs
+        .into_iter()
+        .map(|config| {
+            let namespace = config.capabilities.tool_groups[0].name.clone();
+            let error = HarnessSession::create(config)
+                .err()
+                .expect("reserved namespace rejects session creation");
+            (namespace, error)
+        })
+        .collect::<Vec<_>>();
     let duplicate_stable_error = HarnessSession::create(duplicate_stable_id)
         .err()
         .expect("duplicate stable ID rejects session creation");

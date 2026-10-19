@@ -1,4 +1,4 @@
-//! Voice settings in the bottom-app slot, matching Python's VoiceApp.
+//! Voice settings in the bottom-app slot.
 
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
@@ -39,7 +39,7 @@ fn lines(app: &App, width: u16) -> Vec<Line<'static>> {
     for (i, label) in LABELS.iter().enumerate() {
         let value = if app.voice_app.values[i] { "On" } else { "Off" };
         let text = format!("  {label}: {value}");
-        lines.push(match i == app.voice_app.selected {
+        lines.push(match i == app.voice_app.list.selected() {
             true => Line::styled(
                 list_cursor::padded(&text, usize::from(width)),
                 list_cursor::style(),

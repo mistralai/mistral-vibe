@@ -4,7 +4,7 @@ mod projection;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::config::ImageDeliveryMode;
+use crate::core::config::{ImageDeliveryMode, ImageTokenCost};
 use crate::core::error::CoreError;
 
 pub(in crate::core) use context::{
@@ -22,6 +22,7 @@ pub(in crate::core) use projection::{CompactionProjection, CompactionProjectionF
 pub(crate) struct CompactionBudget {
     pub token_threshold: Option<u64>,
     pub image_delivery: ImageDeliveryMode,
+    pub image_cost: ImageTokenCost,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

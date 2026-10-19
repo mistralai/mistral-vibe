@@ -27,9 +27,7 @@ handshake = {
 }
 
 capture_startup = False
-screen_contains = {
-    "rust": ("bash", "Read_file", "grep", "écrire", "One item per line.")
-}
+screen_contains = ("bash", "Read_file", "grep", "écrire", "One item per line.")
 timeline: Timeline = [
     "/config\r",
     "\r",

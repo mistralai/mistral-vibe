@@ -3,11 +3,6 @@ from __future__ import annotations
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
 from e2e.app_server.scenario import Timeline
 
-skip = (
-    "Python repaints the rewind highlight one step late: its selection worker is "
-    "not awaited before the frame settles, so ←/→ lag by one capture."
-)
-
 timeline: Timeline = [
     "hi\r",
     turn_started(),

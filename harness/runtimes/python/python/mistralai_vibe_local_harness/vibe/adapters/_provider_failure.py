@@ -84,6 +84,27 @@ class IncompleteProviderStream(RuntimeError):
     """A response stream that ended before the provider marked it finished."""
 
 
+class ProviderRefusal(RuntimeError):
+    """A response the model ended by declining the request.
+
+    The provider answers successfully, so nothing in the transport marks the
+    failure. Another attempt of the same request is declined again, and text the
+    model produced before declining is not an answer. ``category`` and
+    ``explanation`` are the provider's own, and either may be missing.
+    """
+
+    def __init__(self, *, category: str | None, explanation: str | None) -> None:
+        lead = "The model declined to respond to this request and stopped early."
+        if category:
+            lead += f" (category: {category})"
+        detail = explanation or (
+            "Try rephrasing your request or starting a new conversation."
+        )
+        super().__init__(f"{lead} {detail}")
+        self.category = category
+        self.explanation = explanation
+
+
 async def until_connection_lost[T](
     source: AsyncIterator[T], *, complete: Callable[[], bool]
 ) -> AsyncGenerator[T]:
@@ -250,6 +271,7 @@ __all__ = [
     "IncompleteProviderStream",
     "ProviderErrorResponse",
     "ProviderFailure",
+    "ProviderRefusal",
     "ProviderStreamError",
     "read_provider_failure",
     "until_connection_lost",

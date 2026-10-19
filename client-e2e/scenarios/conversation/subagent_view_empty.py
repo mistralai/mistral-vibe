@@ -29,15 +29,13 @@ request_methods = frozenset({"session/read"})
 # gradient so the idle capture cannot catch it mid-wipe on a slow host.
 env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 
-screen_contains = {
-    "rust": (
-        # The banner stays mounted while a child view is open.
-        "Mistral Vibe",
-        "Type /help",
-        "No transcript yet.",
-        "Viewing Explore 1 · read-only · Esc to return",
-    )
-}
+screen_contains = (
+    # The banner stays mounted while a child view is open.
+    "Mistral Vibe",
+    "Type /help",
+    "No transcript yet.",
+    "Viewing Explore 1 · read-only · Esc to return",
+)
 
 
 def _taskless_spawn(task: str) -> AppServerEvent:

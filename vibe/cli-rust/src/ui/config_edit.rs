@@ -20,9 +20,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let Some(edit) = app.config_screen.edit.as_mut() else {
         return;
     };
-    edit.choice_regions.clear();
     let values = config_edit::choices(&edit.field);
-    let selected = config_edit::choice_index(edit, &values);
     let choices: Vec<_> = values
         .iter()
         .map(|choice| config_edit::choice_label(&edit.field, choice))
@@ -80,7 +78,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         input(f, editor, edit);
         None
     } else {
-        draw_choices(f, editor, edit, &choices, selected)
+        draw_choices(f, editor, edit, &choices)
     };
     persistence::inspector(f, layout.side, &edit.field);
     f.render_widget(
@@ -140,8 +138,8 @@ fn input(f: &mut Frame, mut area: Rect, edit: &mut ConfigEdit) {
     f.render_widget(block, area);
     let cursor_style = theme::block_caret(Style::default());
     let layout = ComposerLayout::hard_wrapped(&edit.draft, edit.cursor, inner.width);
-    let offset = layout.viewport_top(edit.scroll.unwrap_or(0), usize::from(inner.height));
-    edit.scroll = Some(offset);
+    let offset = layout.viewport_top(edit.scroll, usize::from(inner.height));
+    edit.scroll = offset;
     let rows = layout
         .rows()
         .skip(offset)
@@ -188,7 +186,6 @@ fn draw_choices(
     area: Rect,
     edit: &mut ConfigEdit,
     choices: &[String],
-    selected: usize,
 ) -> Option<(Rect, usize, usize)> {
     let mut content = area.inner(Margin::new(1, 0));
     let visible = usize::from(area.height);
@@ -204,17 +201,14 @@ fn draw_choices(
         .iter()
         .map(|label| usize::from(height(label, content.width)))
         .collect();
-    let total: usize = heights.iter().sum();
-    let selected_start: usize = heights.iter().take(selected).sum();
-    let selected_height = heights.get(selected).copied().unwrap_or(1);
-    let offset = (selected_start + selected_height)
-        .saturating_sub(visible)
-        .min(selected_start);
-    let offset = edit
-        .scroll
-        .unwrap_or(offset)
-        .min(total.saturating_sub(visible));
-    edit.scroll = edit.scroll.map(|_| offset);
+    let lines: Vec<_> = heights
+        .iter()
+        .enumerate()
+        .flat_map(|(index, count)| std::iter::repeat_n(Some(index), *count))
+        .collect();
+    let total = lines.len();
+    let offset = edit.list.layout(&lines, content);
+    let selected = edit.list.selected();
     let mut row = 0;
     for (index, (label, count)) in choices.iter().zip(heights).enumerate() {
         let end = row + count;
@@ -240,7 +234,6 @@ fn draw_choices(
                     .style(style),
                 rect,
             );
-            edit.choice_regions.push((rect, index));
         }
         row = end;
         if row >= offset + visible {

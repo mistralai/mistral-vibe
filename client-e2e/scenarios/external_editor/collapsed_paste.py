@@ -17,7 +17,7 @@ env = {
 }
 
 capture_startup = False
-screen_contains = {"rust": ("summarize [Pasted 73 characters]",)}
-screen_excludes = {"rust": ("row 5",)}
+screen_contains = ("summarize [Pasted 73 characters]",)
+screen_excludes = ("row 5",)
 
 timeline: Timeline = [paste(_TEXT), _CTRL_G]

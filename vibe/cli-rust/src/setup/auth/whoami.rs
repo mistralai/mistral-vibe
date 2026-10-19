@@ -1,4 +1,4 @@
-//! Tenant-domain discovery (Python `vibe/setup/auth/whoami.py`): a custom
+//! Tenant-domain discovery: a custom
 //! console advertises the tenant's own API and chat hosts on `/api/vibe/whoami`
 //! and the wizard adopts them before writing provider URLs to config.
 
@@ -21,8 +21,7 @@ struct WhoAmI {
 
 /// Fetch `/whoami` and return `(provider, vibe_base_url)` updated with any
 /// tenant-advertised domains. Callers pass the current values; on any failure
-/// or when both fields are missing, the inputs come back unchanged (Python
-/// `resolve_tenant_domains`).
+/// or when both fields are missing, the inputs come back unchanged.
 pub async fn resolve_tenant_domains(
     provider: &ProviderView,
     console_base_url: &str,
@@ -49,7 +48,7 @@ pub async fn resolve_tenant_domains(
 }
 
 /// `GET {console_base_url}/api/vibe/whoami` with the bearer key; any failure
-/// degrades to `None` (Python `fetch_whoami`).
+/// degrades to `None`.
 async fn fetch(
     console_base_url: &str,
     api_key: &str,
@@ -77,7 +76,7 @@ async fn fetch(
     response.json().await.ok()
 }
 
-/// Python `_sanitize_tenant_url`: strict https, a host, no `..` in the path,
+/// Sanitize a tenant URL: strict https, a host, no `..` in the path,
 /// and trailing slashes stripped; anything else is rejected and logged (never
 /// the URL itself logged).
 pub fn sanitize_tenant_url(candidate: &str) -> Option<String> {
@@ -90,8 +89,8 @@ pub fn sanitize_tenant_url(candidate: &str) -> Option<String> {
         tracing::warn!("Rejecting tenant URL: expected https origin");
         return None;
     }
-    // Url::parse normalizes '..' in paths (unlike Python's urlparse), so
-    // check the raw string between host and query/fragment.
+    // Url::parse normalizes '..' in paths, so check the raw string between
+    // host and query/fragment.
     if let Some(scheme_end) = stripped.find("://").map(|i| i + 3) {
         let after_host = &stripped[scheme_end..];
         if let Some(path_start) = after_host.find('/') {

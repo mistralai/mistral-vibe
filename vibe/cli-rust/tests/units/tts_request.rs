@@ -1,4 +1,4 @@
-//! The speech request matches what Python's Mistral SDK sends for the narrator.
+//! The speech request matches what the Mistral SDK sends for the narrator.
 
 use serde_json::json;
 use vibe_rs::tts::{audio_request_metadata, decode_audio, status_error_type, SpeechConfig};
@@ -72,7 +72,7 @@ fn audio_data_decodes_from_base64() {
 }
 
 #[test]
-fn http_failures_report_the_python_sdk_exception_name() {
+fn http_failures_report_the_sdk_exception_name() {
     assert_eq!(status_error_type(422), "HTTPValidationError");
     assert_eq!(status_error_type(401), "SDKError");
     assert_eq!(status_error_type(500), "SDKError");

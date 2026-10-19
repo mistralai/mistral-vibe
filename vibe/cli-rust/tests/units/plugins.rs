@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use serde_json::{json, Value};
 use vibe_rs::app::App;
@@ -145,6 +145,28 @@ fn empty_or_missing_catalogues_never_open_the_browser() {
 }
 
 #[test]
+fn a_dropped_plugin_alone_still_opens_the_browser_to_show_it() {
+    let mut app = App::default();
+    let state = catalog(json!({"dropped": [{
+        "file": ".vibe/plugins/broken/plugin.json",
+        "message": "plugin name must be lowercase",
+    }]}));
+    plugins::apply_event(&mut app, Event::Read(Ok(Some(state))));
+    assert!(app.plugins.open);
+    assert_eq!(
+        rows::rows(&app.plugins),
+        [
+            Row::Note("No plugins in this session"),
+            Row::Blank,
+            Row::Heading("Not loaded"),
+            Row::Dim(
+                "  ! .vibe/plugins/broken/plugin.json — plugin name must be lowercase".to_owned()
+            ),
+        ]
+    );
+}
+
+#[test]
 fn keys_view_a_plugin_go_back_filter_and_close() {
     let client = Arc::new(Client::stub());
     let mut app = App::default();
@@ -163,7 +185,7 @@ fn keys_view_a_plugin_go_back_filter_and_close() {
         "Esc backs out of the detail first"
     );
     assert!(app.plugins.open);
-    assert_eq!(app.plugins.selected, 0);
+    assert_eq!(app.plugins.list.selected(), 0);
 
     plugins::handle_key(&mut app, &client, key(KeyCode::Char('/')));
     for ch in "bet".chars() {
@@ -203,10 +225,19 @@ fn clicking_a_plugin_while_filtering_leaves_the_filter_for_the_detail() {
     let state = catalog(json!({"plugins": [entry("alpha", "1"), entry("beta", "2")]}));
     plugins::apply_event(&mut app, Event::Read(Ok(Some(state))));
     app.plugins.filter.focused = true;
-    app.plugins.list_area = Rect::new(0, 0, 40, 2);
-    app.plugins.line_rows = vec![0, 1];
-    plugins::click(&mut app, (4, 1), false);
-    plugins::click(&mut app, (4, 1), true);
+    app.plugins.list.layout_rows(2, Rect::new(0, 0, 40, 2));
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        let event = MouseEvent {
+            kind,
+            column: 4,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        plugins::mouse(&mut app, event);
+    }
     assert_eq!(app.plugins.viewing.as_deref(), Some("beta"));
     assert!(!app.plugins.filter.focused);
     plugins::handle_key(&mut app, &Arc::new(Client::stub()), key(KeyCode::Esc));
@@ -239,7 +270,7 @@ async fn a_second_reload_waits_for_the_first_to_answer() {
 }
 
 #[test]
-fn list_keys_follow_textual_option_list() {
+fn list_keys_follow_option_list_navigation() {
     let client = Arc::new(Client::stub());
     let mut app = App::default();
     let names = ["a", "b", "c", "d"].map(|name| entry(name, name));
@@ -250,7 +281,7 @@ fn list_keys_follow_textual_option_list() {
     app.plugins.list_area = Rect::new(0, 0, 40, 2);
     let mut press = |code| {
         plugins::handle_key(&mut app, &client, key(code));
-        app.plugins.selected
+        app.plugins.list.selected()
     };
     assert_eq!(press(KeyCode::Up), 3, "up from the first wraps to the last");
     assert_eq!(
@@ -269,7 +300,7 @@ fn list_keys_follow_textual_option_list() {
 }
 
 #[tokio::test]
-async fn shortcuts_ignore_a_held_modifier_like_textual_bindings() {
+async fn shortcuts_ignore_a_held_modifier() {
     let client = Arc::new(Client::stub());
     let mut app = App::default();
     app.session.session_id = Some("session".into());
@@ -282,7 +313,7 @@ async fn shortcuts_ignore_a_held_modifier_like_textual_bindings() {
     plugins::handle_key(&mut app, &client, ctrl('j'));
     plugins::handle_key(&mut app, &client, ctrl('r'));
     plugins::handle_key(&mut app, &client, ctrl('/'));
-    assert_eq!(app.plugins.selected, 0);
+    assert_eq!(app.plugins.list.selected(), 0);
     assert!(!app.plugins.reloading);
     assert!(!app.plugins.filter.focused);
     let slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::SHIFT);

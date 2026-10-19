@@ -11,7 +11,7 @@ use super::{
 use crate::app::App;
 use crate::chat_input::Action;
 use crate::focus::Focus;
-use crate::selection::{self, Release};
+use crate::selection::{self, RegionId};
 use crate::server::Client;
 
 pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
@@ -103,8 +103,7 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
                 } else {
                     state.items.iter().rposition(|i| i.selectable())
                 };
-                state.selected = index.unwrap_or(0);
-                state.free_scroll = false;
+                state.list.select(index.unwrap_or(0));
                 return;
             }
             _ => {}
@@ -184,76 +183,67 @@ fn focused_field(state: &mut State) -> Option<&mut Field> {
     state.search_focused.then_some(&mut state.query)
 }
 
-pub fn wheel(app: &mut App, up: bool) {
-    let state = &mut app.vibe_code_project;
-    state.free_scroll = true;
-    state.scroll = if up {
-        state.scroll.saturating_sub(2)
-    } else {
-        state.scroll.saturating_add(2)
-    };
-}
-
+/// A press on a text field moves its caret; anything else is an option-list
+/// gesture, ignored while a request is pending.
 pub fn mouse(app: &mut App, client: &Arc<Client>, event: MouseEvent) {
     let at = (event.column, event.row);
-    let release = match event.kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            selection::press_owned(app, at, selection::RegionId::BottomApp);
-            None
-        }
-        MouseEventKind::Drag(MouseButton::Left) => {
-            selection::drag(app, at);
-            None
-        }
-        MouseEventKind::Up(MouseButton::Left) => Some(selection::release(app)),
-        _ => None,
+    let state = &app.vibe_code_project;
+    let field = match event.kind {
+        MouseEventKind::Down(MouseButton::Left) if !state.pending => field_at(state, at),
+        _ => state.dragged_field,
     };
-    let state = &mut app.vibe_code_project;
-    if state.pending {
+    if let Some(slot) = field {
+        field_mouse(app, event, slot);
         return;
     }
-    let at = at.into();
+    let click = crate::mouse::option_gesture(app, event, RegionId::BottomApp, |app| {
+        &mut app.vibe_code_project.list
+    });
+    let state = &mut app.vibe_code_project;
+    if state.pending {
+        state.list.cancel();
+        return;
+    }
+    if event.kind == MouseEventKind::Down(MouseButton::Left) && state.list.index_at(at).is_some() {
+        state.search_focused = false;
+    }
+    if click.is_some() {
+        super::select(app, client);
+    }
+}
+
+fn field_at(state: &State, at: (u16, u16)) -> Option<FieldSlot> {
+    if state.branch_area.contains(at.into()) {
+        Some(FieldSlot::Branch)
+    } else if state.search_area.contains(at.into()) {
+        Some(FieldSlot::Primary)
+    } else {
+        None
+    }
+}
+
+/// A gesture started on a text field focuses it and drags its caret.
+fn field_mouse(app: &mut App, event: MouseEvent, slot: FieldSlot) {
+    let at = (event.column, event.row);
+    let state = &mut app.vibe_code_project;
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            let slot = if state.branch_area.contains(at) {
-                Some(FieldSlot::Branch)
-            } else if state.search_area.contains(at) {
-                Some(FieldSlot::Primary)
-            } else {
-                None
-            };
-            if let Some(slot) = slot {
-                if let Some(create) = &mut state.create {
-                    create.branch_focused = slot == FieldSlot::Branch;
-                }
-                state.search_focused = true;
-                state.pressed = None;
-                state.dragged_field = Some(slot);
-                move_field_cursor(state, slot, event.column, true);
-            } else if let Some(index) = state.selectable_index_at((event.column, event.row)) {
-                state.selected = index;
-                state.search_focused = false;
-                state.pressed = Some(index);
-                state.dragged_field = None;
+            if let Some(create) = &mut state.create {
+                create.branch_focused = slot == FieldSlot::Branch;
             }
+            state.search_focused = true;
+            state.list.cancel();
+            state.dragged_field = Some(slot);
+            move_field_cursor(state, slot, event.column, true);
+            selection::press_owned(app, at, RegionId::BottomApp);
         }
         MouseEventKind::Drag(MouseButton::Left) => {
-            if let Some(slot) = state.dragged_field {
-                move_field_cursor(state, slot, event.column, false);
-            }
+            move_field_cursor(state, slot, event.column, false);
+            selection::drag(app, at);
         }
         MouseEventKind::Up(MouseButton::Left) => {
-            if state.dragged_field.take().is_some() {
-                return;
-            }
-            if matches!(release, Some(Release::Selected)) {
-                state.pressed = None;
-                return;
-            }
-            let index = state.selectable_index_at((event.column, event.row));
-            if state.pressed.take() == index && index.is_some() {
-                super::select(app, client);
-            }
+            state.dragged_field = None;
+            selection::release(app);
         }
         _ => {}
     }

@@ -87,6 +87,7 @@ fn interrupting_a_pending_completion_ends_the_turn() {
             "message_count": 2,
             "context_revision": 1,
             "tool_catalog_revision": 0,
+            "has_pending_model_input": false,
             "last_input_id": 2,
         })
     );
@@ -184,6 +185,7 @@ fn completion_failure_ends_the_turn() {
             "message_count": 2,
             "context_revision": 1,
             "tool_catalog_revision": 0,
+            "has_pending_model_input": false,
             "last_input_id": 2,
         })
     );

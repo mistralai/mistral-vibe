@@ -22,7 +22,7 @@ pub(super) fn starting(app: &App) -> Vec<Hint> {
 
 /// A running turn or shell command; queue actions need a reachable, empty input.
 pub(super) fn running(app: &App) -> Vec<Hint> {
-    // Ctrl+C cancels a queued prompt before interrupting (Python `LoadingWidget._format_hint`).
+    // Ctrl+C cancels a queued prompt before interrupting.
     if !message_queue::has_removable(app) {
         return vec![(key::ESC_CTRL_C, action::INTERRUPT)];
     }

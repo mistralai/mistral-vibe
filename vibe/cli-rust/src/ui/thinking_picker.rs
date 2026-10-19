@@ -1,6 +1,5 @@
 //! `/thinking` picker bottom-app: a bordered box with a title, the thinking-level
-//! option list (`›` on the current level), and a hint. Mirrors Python's
-//! `ThinkingPickerApp`.
+//! option list (`›` on the current level), and a hint.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -51,6 +50,11 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
     );
     let top = by + 2;
     let rows = app.thinking_picker.levels.len();
+    let visible = (rows as u16).min(h - 5);
+    let options = Rect::new(bx + 3, top, w.saturating_sub(6), visible);
+    app.thinking_picker.list.layout_rows(rows, options);
+    let list_area = Rect::new(bx + 1, top, w.saturating_sub(2), visible);
+    crate::mouse::register_region(app, list_area, crate::mouse::MouseTarget::ThinkingPicker);
     for (row, i) in (0..rows).enumerate() {
         draw_option(app, f, bx, top + row as u16, w, i);
     }
@@ -72,7 +76,7 @@ fn hints(app: &App) -> &'static [Hint] {
 }
 
 fn draw_option(app: &App, f: &mut Frame, bx: u16, y: u16, w: u16, i: usize) {
-    let is_hl = i == app.thinking_picker.selected;
+    let is_hl = i == app.thinking_picker.list.selected();
     let current = crate::thinking_picker::is_current(app, i);
     if is_hl {
         list_cursor::paint(f, Rect::new(bx + 3, y, w.saturating_sub(6), 1));

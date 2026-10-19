@@ -59,9 +59,19 @@ pub(crate) fn start_tool_batch(
         .iter()
         .map(|call| tool_execution_started(tools.turn_id, &call.id))
         .collect::<Vec<_>>();
+    let mixed_batch = calls.len() > 1;
     for call in calls {
-        let (execution, mut call_effects, call_observations) =
-            start_tool_execution(tools, call, determinism)?;
+        let (execution, mut call_effects, call_observations) = if mixed_batch && call.name == "wait"
+        {
+            completed_execution(
+                tools.turn_id,
+                call,
+                invalid_tool_call_result("Call wait alone.".to_string()),
+                Vec::new(),
+            )
+        } else {
+            start_tool_execution(tools, call, determinism)?
+        };
         executions.push(execution);
         effects.append(&mut call_effects);
         observations.extend(call_observations);
@@ -138,17 +148,18 @@ fn start_tool_execution(
             }
         };
     }
-    let (execution_state, action) = match direct_tool_execution_from_resolved_tools(tools, &call) {
-        Ok(resolved) => resolved,
-        Err(error) => {
-            return Ok(completed_execution(
-                tools.turn_id,
-                call,
-                invalid_tool_call_result(error.detail().to_string()),
-                Vec::new(),
-            ));
-        }
-    };
+    let (execution_state, action) =
+        match direct_tool_execution_from_resolved_tools(tools, &call, determinism) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return Ok(completed_execution(
+                    tools.turn_id,
+                    call,
+                    invalid_tool_call_result(error.detail().to_string()),
+                    Vec::new(),
+                ));
+            }
+        };
 
     let (execution_state, action) = match execution_state {
         ToolExecutionState::DirectPending {
@@ -606,15 +617,23 @@ pub(crate) fn finish_tool_batch_approval(
 
         let result = match resolution {
             Ok(ApprovalOutcome::Approve) => {
-                let action = external_tool_effect(tools, call)?;
-                program
-                    .approve_pending_approval(action_id)
-                    .expect("program approval was found before resolution");
+                // A grant that arrives after the elapsed budget ran out must
+                // not start the effect, as for a late pre-hook `Continue`.
+                if let Some(expired) = tools.with_program_context(|context| {
+                    program.expired_approval_result(context, determinism)
+                }) {
+                    expired
+                } else {
+                    let action = external_tool_effect(tools, call)?;
+                    program
+                        .approve_pending_approval(action_id)
+                        .expect("program approval was found before resolution");
 
-                return Ok(ToolBatchTransition {
-                    resolution: resolve_tool_batch(batch, vec![action]),
-                    observations: Vec::new(),
-                });
+                    return Ok(ToolBatchTransition {
+                        resolution: resolve_tool_batch(batch, vec![action]),
+                        observations: Vec::new(),
+                    });
+                }
             }
             Ok(ApprovalOutcome::Reject) => permission_denied_result(),
             Err(failure_reason) => approval_failed_result(failure_reason),

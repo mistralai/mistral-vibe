@@ -17,7 +17,11 @@ fn mount_whats_new(app: &mut App, id: &str) {
             "afterHistory": false,
         }
     }));
-    app.session.whats_new_id = Some(id.to_owned());
+    app.session.whats_new = Some(banners::WhatsNew {
+        id: id.to_owned(),
+        body: "body".to_owned(),
+        promo: false,
+    });
 }
 
 #[test]
@@ -28,7 +32,7 @@ fn dismiss_removes_the_mounted_body() {
     banners::dismiss_whats_new(&mut app);
 
     assert!(!app.view.transcript.contains("whats-new"));
-    assert!(app.session.whats_new_id.is_none());
+    assert!(app.session.whats_new.is_none());
 }
 
 #[test]

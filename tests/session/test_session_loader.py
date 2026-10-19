@@ -1108,6 +1108,28 @@ class TestSessionLoaderGetFirstUserMessage:
 
         assert result == "(session not found)"
 
+    def test_batch_matches_single_session_previews(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        create_test_session(
+            session_dir, "batch-01", [LLMMessage(role=Role.user, content="one")]
+        )
+        create_test_session(
+            session_dir, "batch-02", [LLMMessage(role=Role.user, content="two")]
+        )
+        session_ids = ["batch-01", "batch-02", "missing0"]
+
+        result = SessionLoader.get_first_user_messages(
+            session_ids, SessionLoader.session_dirs_by_short_id(session_config)
+        )
+
+        assert result == {
+            session_id: SessionLoader.get_first_user_message(session_id, session_config)
+            for session_id in session_ids
+        }
+        assert result["batch-02"] == "two"
+
     def test_returns_no_user_messages_fallback(
         self, session_config: SessionLoggingConfig, create_test_session
     ) -> None:

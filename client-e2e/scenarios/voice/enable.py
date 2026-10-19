@@ -18,5 +18,5 @@ handshake = {
     },
 }
 request_methods = {"telemetry/record"}
-screen_contains = {"rust": ("Voice mode enabled.",)}
+screen_contains = ("Voice mode enabled.",)
 timeline: Timeline = ["/voice\r", " ", "j\r", "\x1b"]

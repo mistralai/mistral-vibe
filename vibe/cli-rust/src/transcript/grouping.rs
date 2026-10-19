@@ -1,7 +1,9 @@
 //! Which entries render, and the summary of each packed tool group.
 
+use serde_json::Value;
+
 use super::StoredEntry;
-use crate::server::{HistoryEntry, NoticeDetail};
+use crate::server::{CheckpointEntry, HistoryEntry, NoticeDetail};
 
 pub(crate) const KEY_PREFIX: &str = "tool-group:";
 
@@ -73,10 +75,9 @@ pub fn effect_kind(entry: &HistoryEntry) -> Option<&str> {
 /// Whether the entry paints no transcript row: a callback (the approval panel
 /// is transient), a server notice that only drives side effects (`push_notice`
 /// in `ui/transcript/entry/notice.rs` is the dispatch this must mirror), a
-/// server checkpoint other than a compaction or model change, or an
-/// unrecognized type. Python mounts no widget for them either, so such rows
-/// must not break a run of tool calls into consecutive blocks: all calls
-/// between them collapse into one block.
+/// server checkpoint other than a painted compaction or model change, or an
+/// unrecognized type. Such rows must not break a run of tool calls into
+/// consecutive blocks: all calls between them collapse into one block.
 pub fn renders_nothing(entry: &HistoryEntry, local: bool) -> bool {
     if groups_with_tools(entry) {
         return false;
@@ -84,12 +85,27 @@ pub fn renders_nothing(entry: &HistoryEntry, local: bool) -> bool {
     match entry {
         HistoryEntry::Callback(_) | HistoryEntry::Unknown => true,
         HistoryEntry::Checkpoint(checkpoint) => {
-            !local && !matches!(checkpoint.kind.as_str(), "compaction" | "model_change")
+            !local && !(checkpoint.kind == "model_change" || paints_compaction(checkpoint))
         }
         // A fired loop paints on its prompt, so no server notice paints a row.
         HistoryEntry::Notice(_) => !local,
         _ => false,
     }
+}
+
+/// Whether a server checkpoint paints as a compaction row. `/compact` paints its
+/// own local row, so a manual compaction paints none, live or resumed.
+pub fn paints_compaction(checkpoint: &CheckpointEntry) -> bool {
+    checkpoint.kind == "compaction"
+        && checkpoint.details.get("trigger").and_then(Value::as_str) != Some("manual")
+}
+
+/// Whether a settled compaction checkpoint records a failed attempt.
+pub fn compaction_failed(checkpoint: &CheckpointEntry) -> bool {
+    checkpoint
+        .details
+        .get("error")
+        .is_some_and(|error| !error.is_null())
 }
 
 /// The kind a group counts an effect under: unknown or missing kinds share `tool`.
@@ -152,9 +168,8 @@ pub(super) fn is_hidden_hook_notice(entry: &HistoryEntry, prior: &[StoredEntry])
     }
 }
 
-/// Python mounts the pre-tool hook container before its tool call's anchor
-/// (`mount_callback(container, before=anchor)`), so the scoped notices render
-/// above the paired tool row: the entry id they insert ahead of, when it exists.
+/// The pre-tool hook notices render above the paired tool row: the entry id
+/// they insert ahead of, when it exists.
 pub(super) fn pre_tool_anchor(entry: &HistoryEntry) -> Option<String> {
     let HistoryEntry::Notice(notice) = entry else {
         return None;
@@ -169,7 +184,7 @@ pub(super) fn pre_tool_anchor(entry: &HistoryEntry) -> Option<String> {
     }
 }
 
-/// Python `_handle_hook_completed` mounts `HookSystemMessageLine` only when the
+/// A completed hook mounts its system message line only when the
 /// content and hook name are set and the `(scope, toolCallId)` container a
 /// `hook_run_started` opened is still registered.
 fn hook_line_mounts(detail: &NoticeDetail, prior: &[StoredEntry]) -> bool {
@@ -178,7 +193,7 @@ fn hook_line_mounts(detail: &NoticeDetail, prior: &[StoredEntry]) -> bool {
     content && name && container_open(detail, prior)
 }
 
-/// Python `_hook_container_key`: the post-agent run keys the whole turn, the
+/// The hook container key: the post-agent run keys the whole turn, the
 /// tool-scoped runs key on the tool call id.
 fn container_key(detail: &NoticeDetail) -> String {
     match detail.scope.as_deref() {

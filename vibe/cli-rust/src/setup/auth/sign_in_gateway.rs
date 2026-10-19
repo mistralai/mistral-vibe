@@ -1,4 +1,4 @@
-//! HTTP gateway for browser sign-in (Python `HttpBrowserSignInGateway`).
+//! HTTP gateway for browser sign-in.
 
 use std::time::Duration;
 
@@ -27,7 +27,7 @@ pub struct SignInProcess {
     pub process_id: String,
     pub sign_in_url: String,
     pub poll_url: String,
-    /// The server-side sign-in deadline (Python `expires_at`).
+    /// The server-side sign-in deadline.
     pub expires_at: time::OffsetDateTime,
 }
 
@@ -44,7 +44,7 @@ pub struct SignInGateway {
     browser_base_url: String,
     api_base_url: String,
     /// Split-horizon sign-in: sign-in URLs may legitimately live on another
-    /// origin than the console base (Python `allow_origin_rewrite`).
+    /// origin than the console base.
     allow_origin_rewrite: bool,
     client: reqwest::Client,
 }
@@ -110,7 +110,7 @@ impl SignInGateway {
             self.allow_origin_rewrite,
             SignInErrorCode::StartFailed,
         )?;
-        // Python `_parse_expires_at`: RFC 3339 with a Z suffix.
+        // RFC 3339 with a Z suffix.
         let expires_at = time::OffsetDateTime::parse(
             &payload.expires_at,
             &time::format_description::well_known::Rfc3339,

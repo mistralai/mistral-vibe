@@ -1,4 +1,4 @@
-//! Text-to-speech over the Mistral speech API (Python `MistralTTSClient`).
+//! Text-to-speech over the Mistral speech API.
 
 use std::time::Duration;
 
@@ -10,7 +10,7 @@ use crate::audio_player::AudioError;
 const TIMEOUT: Duration = Duration::from_secs(60);
 const SDK_ERROR: &str = "SDKError";
 
-/// Python `SpeechConfigView`, flattened to the fields the client sends.
+/// The server's `SpeechConfigView`, flattened to the fields the client sends.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpeechConfig {
     pub name: String,
@@ -44,7 +44,7 @@ impl SpeechConfig {
         format!("{}/v1/audio/speech", self.api_base.trim_end_matches('/'))
     }
 
-    /// The `SpeechRequest` body Python's `audio.speech.complete_async` sends.
+    /// The `SpeechRequest` body the Mistral SDK's `audio.speech.complete_async` sends.
     pub fn request_body(&self, text: &str, metadata: Value) -> Value {
         json!({
             "model": self.name,
@@ -57,7 +57,7 @@ impl SpeechConfig {
     }
 }
 
-/// Python `build_audio_request_metadata`, minus the fields the Rust client does not track.
+/// Audio request metadata, minus the fields this client does not track.
 pub fn audio_request_metadata(session_id: &str) -> Value {
     let os = match std::env::consts::OS {
         "macos" => "darwin",
@@ -72,7 +72,7 @@ pub fn audio_request_metadata(session_id: &str) -> Value {
     })
 }
 
-/// Python `MistralTTSClient.speak`: the decoded audio bytes.
+/// Synthesize `text`: the decoded audio bytes.
 pub async fn speak(
     cfg: &SpeechConfig,
     api_key: &str,
@@ -106,7 +106,7 @@ pub async fn speak(
     decode_audio(&body)
 }
 
-/// The httpx exception Python's SDK lets through for a failed request.
+/// The error type for a failed request, named after the Mistral SDK's httpx exceptions.
 fn request_error_type(error: &reqwest::Error) -> &'static str {
     if error.is_timeout() {
         "ReadTimeout"
@@ -117,7 +117,7 @@ fn request_error_type(error: &reqwest::Error) -> &'static str {
     }
 }
 
-/// Python's SDK raises `HTTPValidationError` on 422 and `SDKError` otherwise.
+/// The Mistral SDK error names: `HTTPValidationError` on 422 and `SDKError` otherwise.
 pub fn status_error_type(status: u16) -> &'static str {
     if status == 422 {
         "HTTPValidationError"
@@ -134,7 +134,7 @@ pub fn build_http_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("TTS client failed to build: {e}"))
 }
 
-/// The `SpeechResponse.audio_data` payload, base64-decoded (`binascii.Error` in Python).
+/// The `SpeechResponse.audio_data` payload, base64-decoded.
 pub fn decode_audio(body: &Value) -> Result<Vec<u8>, AudioError> {
     let data = body
         .get("audio_data")

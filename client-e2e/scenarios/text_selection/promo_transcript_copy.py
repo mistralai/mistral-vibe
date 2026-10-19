@@ -7,12 +7,11 @@ from e2e.app_server.scenario import Timeline
 
 # The promo needs a VS Code-family terminal; a fresh VIBE_HOME shows it once.
 env = {"TERM_PROGRAM": "vscode", "SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 
 _PROMPT = "say hello"
 _ANSWER = "Hello there."
 # Drag from the prompt's first letter to the end of the answer (1-based SGR).
-_SELECT = "\x1b[<0;3;13M\x1b[<32;120;16M\x1b[<0;120;16m"
+_SELECT = "\x1b[<0;3;9M\x1b[<32;120;12M\x1b[<0;120;12m"
 expected_clipboard = f"{_PROMPT}\n{_ANSWER}"
 
 timeline: Timeline = [

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Callable, MutableMapping
+from collections.abc import Callable, Mapping, MutableMapping
+from enum import StrEnum
 import json
 import os
 from pathlib import Path
 import tomllib
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, ClassVar, Self
 
 from dotenv import dotenv_values
 from pydantic import (
@@ -17,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.agents.models import REMOVED_BUILTIN_AGENTS, BuiltinAgentName
 from vibe.core.config._defaults import (
     AUTO_COMPACT_WINDOW_RATIO,
     DEFAULT_API_CONNECT_TIMEOUT,
@@ -40,6 +41,7 @@ from vibe.core.config._defaults import (
 # DEFAULT_LOG_LEVEL is not imported here to avoid a circular dependency
 # (vibe_schema.py imports from vibe.observability.logging). The constant
 # lives in vibe.config_values.
+from vibe.core.config._model_aliases import build_alias_index, warn_ignored_alias
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.models import (
@@ -81,6 +83,7 @@ from vibe.core.types import Backend
 from vibe.core.utils.matching import name_matches
 from vibe.observability.logging import logger
 from vibe.utils.api_keys import resolve_api_key
+from vibe.utils.keyring import keyring_read_failure
 
 # Every shell tool scopes a grant with ``build_session_pattern``, which appends
 # " *" to mean "any arguments". Allowlists are matched by prefix equality rather
@@ -97,6 +100,49 @@ def _strip_session_pattern_wildcard(pattern: str) -> str:
     return pattern
 
 
+class EnvValueOrigin(StrEnum):
+    """Where a value Vibe itself wrote into ``os.environ`` came from."""
+
+    VIBE_HOME_ENV_FILE = "vibe_home_env_file"
+    OS_KEYRING = "os_keyring"
+
+
+# The origin of every value Vibe itself wrote into ``os.environ``, keyed by
+# name. Process-global by design: the record answers "did this environment
+# value come from Vibe or from the parent shell?", which only the process
+# that performed the write can know. Read it through
+# :func:`env_value_origin`.
+_ENV_VALUE_ORIGINS: dict[str, tuple[EnvValueOrigin, str]] = {}
+
+
+def record_env_value_origin(env_key: str, value: str, origin: EnvValueOrigin) -> None:
+    """Record where a value Vibe wrote into the environment came from.
+
+    Writers are the ``.env`` loader and credential persistence (onboarding
+    mirrors a stored key into ``os.environ`` so the running process can use
+    it at once).
+    """
+    _ENV_VALUE_ORIGINS[env_key] = (origin, value)
+
+
+def forget_env_value_origin(env_key: str) -> None:
+    """Drop the record for ``env_key`` (the value was removed)."""
+    _ENV_VALUE_ORIGINS.pop(env_key, None)
+
+
+def env_value_origin(env_key: str) -> EnvValueOrigin | None:
+    """The recorded origin of ``env_key``'s value, or ``None``.
+
+    A record matches only while the environment still holds the exact value
+    that was written; anything else reads as the parent shell's.
+    """
+    recorded = _ENV_VALUE_ORIGINS.get(env_key)
+    if recorded is None:
+        return None
+    origin, value = recorded
+    return origin if os.environ.get(env_key) == value else None
+
+
 def load_dotenv_values(
     env_path: Path = GLOBAL_ENV_FILE.path,
     environ: MutableMapping[str, str] = os.environ,
@@ -106,6 +152,10 @@ def load_dotenv_values(
         return
 
     env_vars = dotenv_values(env_path)
+    # Only injections into the real process environment are recorded: a caller
+    # passing a private mapping (tests) did not change where this process's
+    # credentials come from.
+    record_injection = environ is os.environ
     for key, value in env_vars.items():
         if not value:
             continue
@@ -113,6 +163,8 @@ def load_dotenv_values(
             # An explicit non-empty process/shell value wins over the .env file.
             continue
         environ[key] = value
+        if record_injection:
+            record_env_value_origin(key, value, EnvValueOrigin.VIBE_HOME_ENV_FILE)
 
 
 DEFAULT_PROVIDERS = [
@@ -220,6 +272,32 @@ def _non_empty(items: list[Any]) -> list[Any]:
     return items
 
 
+def _without_orphan_model_overrides(
+    data: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Drop model overrides that no layer completes, and name them.
+
+    An entry that cannot validate on its own — missing ``name`` or
+    ``provider``, like ``[models.<id>]`` or a field-only write — overrides a
+    model defined elsewhere. When nothing defines that model (a retired
+    catalog model, an ended experiment, a typo) it cannot validate; it is
+    left out so the rest of the config still loads, and applies again if
+    the model returns.
+    """
+    models = data.get("models")
+    if not isinstance(models, Mapping):
+        return data, []
+    orphans = [
+        alias
+        for alias, payload in models.items()
+        if isinstance(payload, Mapping) and not {"name", "provider"} <= payload.keys()
+    ]
+    if not orphans:
+        return data, []
+    kept = {alias: payload for alias, payload in models.items() if alias not in orphans}
+    return {**data, "models": kept}, orphans
+
+
 def _suppress_unset_default(schema: dict[str, Any]) -> None:
     """Keep the unset sentinel out of the published config schema."""
     schema.pop("default", None)
@@ -254,7 +332,7 @@ def _coerce_routed_extra_models(v: Any) -> list[ModelConfig]:
     if isinstance(v, str):
         try:
             v = json.loads(v)
-        except (json.JSONDecodeError, TypeError):
+        except json.JSONDecodeError, TypeError:
             return []
     if not isinstance(v, list):
         return []
@@ -286,7 +364,24 @@ def _normalize_log_level(value: Any) -> Any:
 
 
 class VibeConfigSchema(ConfigSchema):
+    # Fields a runtime layer populates (model catalog, GrowthBook, managed
+    # shell), never the user's files. The settings UI hides them; declare a new
+    # one here, not in a second list.
+    RUNTIME_INJECTED_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "catalog_model_aliases",
+        "catalog_recommended_model",
+        "managed_shell_tools_enabled",
+        "routed_default_model",
+        "routed_model_config",
+        "routed_extra_models",
+        "smart_approve_available",
+        "smart_approve_default",
+    })
+
     _validation_warnings: list[str] = PrivateAttr(default_factory=list)
+    # The pin the fallback replaced, so validate_merged can skip the orphan
+    # notice for the same alias.
+    _missing_pin: str = PrivateAttr(default="")
 
     @property
     def validation_warnings(self) -> tuple[str, ...]:
@@ -294,7 +389,20 @@ class VibeConfigSchema(ConfigSchema):
 
     @classmethod
     def validate_merged(cls, data: dict[str, Any], *, origins: dict[str, str]) -> Self:
+        data, orphans = _without_orphan_model_overrides(data)
         config = super().validate_merged(data, origins=origins)
+        # The missing-pin warning already named a pinned orphan: one notice
+        # per model, not one per config value. Only the fallback's own alias
+        # is skipped — a pin that resolves through a catalog alias fires no
+        # fallback, and its orphaned override keeps its warning.
+        for alias in orphans:
+            if alias == config._missing_pin:
+                continue
+            message = (
+                f"Settings for model '{alias}' are ignored: no such model is available."
+            )
+            logger.warning("%s", message)
+            config._validation_warnings.append(message)
         # Model validators run before origins are assigned.
         if (
             config.origin_of("allowed_models") == AdminConfigLayer.NAME
@@ -327,6 +435,14 @@ class VibeConfigSchema(ConfigSchema):
         WithReplaceMerge(),
         BeforeValidator(_coerce_routed_model_config),
     ] = None
+    # Other names for catalog models (model ID -> names), populated at runtime
+    # by the model catalog layer: a pin on one of them selects that model.
+    catalog_model_aliases: Annotated[dict[str, list[str]], WithReplaceMerge()] = Field(
+        default_factory=dict
+    )
+    # The catalog's recommended model ID, populated at runtime by the model
+    # catalog layer: the default below a live GrowthBook routed default.
+    catalog_recommended_model: Annotated[str, WithReplaceMerge()] = ""
     # Extra models injected into the dropdown at runtime by the GrowthBook layer,
     # for exposure/rollout without changing the default. Unlike
     # ``routed_model_config``, these never influence ``resolve_default_model_alias``.
@@ -450,6 +566,7 @@ class VibeConfigSchema(ConfigSchema):
         default_factory=list, description="Preferred MCP server configuration entries."
     )
     enable_connectors: Annotated[bool, WithReplaceMerge()] = True
+    enable_mcp: Annotated[bool, WithReplaceMerge()] = True
     experimental_enable_document_library_connector: Annotated[
         bool, WithReplaceMerge()
     ] = Field(
@@ -501,7 +618,7 @@ class VibeConfigSchema(ConfigSchema):
         default=BuiltinAgentName.ACCEPT_EDITS,
         description=(
             "Agent profile to use when no --agent flag is passed. "
-            "Builtin: ask, plan, accept-edits, smart-approve, auto-approve. "
+            "Builtin: ask, accept-edits, smart-approve, auto-approve. "
             "Applies in both interactive and programmatic (-p/--prompt) mode."
         ),
     )
@@ -609,8 +726,16 @@ class VibeConfigSchema(ConfigSchema):
     autocopy_to_clipboard: Annotated[bool, WithReplaceMerge()] = True
     file_watcher_for_autocomplete: Annotated[bool, WithReplaceMerge()] = True
     ask_confirmation_on_exit: Annotated[bool, WithReplaceMerge()] = True
-    displayed_workdir: Annotated[str, WithReplaceMerge()] = ""
-    context_warnings: Annotated[bool, WithReplaceMerge()] = False
+    displayed_workdir: Annotated[str, WithReplaceMerge()] = Field(
+        default="",
+        deprecated="Ignored by Unified execution; remove this setting from your config.",
+        description="Deprecated: accepted for older configs, with no effect on Unified execution.",
+    )
+    context_warnings: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        deprecated="Ignored by Unified execution; remove this setting from your config.",
+        description="Deprecated: accepted for older configs, with no effect on Unified execution.",
+    )
     voice_mode_enabled: Annotated[bool, WithReplaceMerge()] = False
     narrator_enabled: Annotated[bool, WithReplaceMerge()] = False
     show_thinking_nodes: Annotated[bool, WithReplaceMerge()] = False
@@ -628,7 +753,11 @@ class VibeConfigSchema(ConfigSchema):
         description="Maximum number of recent managed worktrees kept locally.",
     )
     bypass_tool_permissions: Annotated[bool, WithReplaceMerge()] = False
-    raise_on_compaction_failure: Annotated[bool, WithReplaceMerge()] = False
+    raise_on_compaction_failure: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        deprecated="Ignored by Unified execution; remove this setting from your config.",
+        description="Deprecated: accepted for older configs, with no effect on Unified execution.",
+    )
     enable_telemetry: Annotated[bool, WithReplaceMerge()] = True
     system_prompt_id: Annotated[str, WithReplaceMerge()] = SystemPrompt.CLI
     managed_shell_tools_enabled: Annotated[bool, WithReplaceMerge()] = False
@@ -716,6 +845,8 @@ class VibeConfigSchema(ConfigSchema):
         available = self.available_models()
         if self.routed_default_model and self.routed_default_model in available:
             return self.routed_default_model
+        if self.catalog_recommended_model in available:
+            return self.catalog_recommended_model
         if DEFAULT_ACTIVE_MODEL_CONFIG.alias in available or not available:
             # If there are no available models, fallback to default
             return DEFAULT_ACTIVE_MODEL_CONFIG.alias
@@ -832,7 +963,11 @@ class VibeConfigSchema(ConfigSchema):
             return
         api_key_env = provider.api_key_env_var
         if api_key_env and not resolve_api_key(api_key_env):
-            raise MissingAPIKeyError(api_key_env, provider.name)
+            raise MissingAPIKeyError(
+                api_key_env,
+                provider.name,
+                keyring_error=keyring_read_failure(api_key_env),
+            )
 
     def get_mistral_provider(self) -> ProviderConfig | None:
         try:
@@ -1024,22 +1159,39 @@ class VibeConfigSchema(ConfigSchema):
         return self
 
     @model_validator(mode="after")
+    def _resolve_model_aliases(self) -> VibeConfigSchema:
+        index = build_alias_index(
+            {
+                model_id: aliases
+                for model_id, aliases in self.catalog_model_aliases.items()
+                if model_id in self.models
+            },
+            set(self.models),
+        )
+        for alias, reason in index.dropped.items():
+            warn_ignored_alias(alias, reason)
+        if target := index.targets.get(self.active_model):
+            object.__setattr__(self, "active_model", target)
+        return self
+
+    @model_validator(mode="after")
     def _apply_active_model_fallback(self) -> VibeConfigSchema:
         # The empty string is the "unpinned/default" sentinel: it is always valid
         # and resolves to a configured model at read time (get_active_model).
         if self.active_model and self.active_model not in self.models:
             unknown = self.active_model
             fallback = self.resolve_default_model_alias()
-            logger.warning(
-                "Active model '%s' is not in your configured models; "
-                "falling back to default model '%s'.",
-                unknown,
-                fallback,
+            fallback_model = self.models.get(fallback)
+            label = fallback_model.display_name if fallback_model else None
+            # States what was observed, never a cause: a retired catalog model,
+            # an unreachable catalog and a typo all look the same from here.
+            message = (
+                f"Model '{unknown}' is not available — running '{label or fallback}'. "
+                "Pick a model with /model to stop this notice."
             )
-            self._validation_warnings.append(
-                f"Active model '{unknown}' is not in your configured models "
-                f"— falling back to default model '{fallback}'."
-            )
+            logger.warning("%s", message)
+            self._validation_warnings.append(message)
+            object.__setattr__(self, "_missing_pin", unknown)
             object.__setattr__(self, "active_model", UNPINNED_ACTIVE_MODEL)
         return self
 
@@ -1074,6 +1226,17 @@ class VibeConfigSchema(ConfigSchema):
         self._validation_warnings.append(
             f"Active model '{self.active_model}' is excluded by allowed_models "
             f"— falling back to default model '{fallback}'."
+        )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_removed_default_agent(self) -> VibeConfigSchema:
+        if (replacement := REMOVED_BUILTIN_AGENTS.get(self.default_agent)) is None:
+            return self
+        self._validation_warnings.append(
+            f"Default agent '{self.default_agent}' is no longer built in — sessions "
+            f"start on '{replacement}' unless a custom agent is named "
+            f"'{self.default_agent}'. Set default_agent to another agent."
         )
         return self
 

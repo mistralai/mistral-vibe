@@ -96,7 +96,7 @@ class ShellResource:
 
     async def run(
         self, command: str, *, timeout_seconds: float | None = None
-    ) -> AsyncGenerator[ShellTimelineEvent, None]:
+    ) -> AsyncGenerator[ShellTimelineEvent]:
         client = await self._connection.connect()
         operation_id = str(uuid4())
         events = BoundedEventQueue[ShellTimelineEvent]()

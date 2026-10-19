@@ -1,4 +1,4 @@
-//! The `update` -> `--check-upgrade` argv rewrite (Python `parse_arguments`).
+//! The `update` -> `--check-upgrade` argv rewrite.
 
 use std::ffi::OsString;
 

@@ -70,20 +70,3 @@ fn escape_without_changes_writes_nothing() {
         0
     );
 }
-
-#[test]
-fn reopened_settings_show_the_saved_server_values() {
-    let mut app = App::default();
-
-    let runtime = json!({"runtime": {"config": {
-        "theme": "ansi-dark",
-        "activeModel": {"displayName": "devstral", "thinking": "off"},
-        "voiceModeEnabled": true,
-        "narratorEnabled": true,
-    }}});
-
-    vibe_rs::voice_app::apply_saved(&mut app, &runtime, false, false);
-    vibe_rs::voice_app::open(&mut app);
-
-    assert_eq!(app.voice_app.values, [true, true]);
-}

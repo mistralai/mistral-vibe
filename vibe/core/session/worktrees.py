@@ -322,17 +322,22 @@ class SessionWorktrees:
 
     @staticmethod
     def hold(
-        cwd: Path, session_id: str, pending_hold: PendingSessionHold | None = None
+        cwd: Path,
+        session_id: str,
+        pending_hold: PendingSessionHold | None = None,
+        session_dir: Path | None = None,
     ) -> None:
         """Mark the worktree a session is standing in as occupied.
 
         Retention pruning reads this marker before deleting a worktree. A session
         that never marks its own can lose its checkout. `at` answers None for a
         directory Vibe did not create, which is most of them, so this does
-        nothing outside one.
+        nothing outside one. A session with a `session_dir` also joins the
+        worktree, which is then reaped once every session that joined is
+        archived or deleted.
         """
         if managed := ManagedWorktree.at(cwd):
-            managed.hold(session_id, pending_hold)
+            managed.hold(session_id, pending_hold, session_dir)
         elif pending_hold is not None:
             pending_hold.release()
 

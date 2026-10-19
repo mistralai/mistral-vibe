@@ -1,4 +1,4 @@
-//! Client telemetry emission matches the Python emitters' once-per-action contract.
+//! Client telemetry emission follows a once-per-action contract.
 
 use std::sync::Arc;
 
@@ -264,7 +264,7 @@ async fn every_deny_key_records_reject_approval() {
     for (selected, code) in deny_keys {
         let key = KeyEvent::new(code, KeyModifiers::NONE);
         let (mut app, mut rx, mut answers) = app_with_open_approval();
-        app.approval.selected = selected;
+        app.approval.list.highlight(selected);
         let client = Arc::new(Client::stub());
         approval::handle_key(&mut app, &client, key);
         assert!(answers.recv().await.is_some(), "{key:?} sends the deny");

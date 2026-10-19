@@ -66,7 +66,9 @@ fn space_ticks_and_unticks_the_focused_option() {
 fn space_on_the_submit_row_does_not_submit() {
     let mut app = open_question(true);
     press(&mut app, KeyCode::Char(' '));
-    app.question_app.selected_option = submit_option_idx(&app).unwrap();
+    app.question_app
+        .list
+        .highlight(submit_option_idx(&app).unwrap());
 
     press(&mut app, KeyCode::Char(' '));
 
@@ -78,7 +80,9 @@ fn space_on_the_submit_row_does_not_submit() {
 #[test]
 fn space_types_into_the_focused_free_text_row() {
     let mut app = open_question(true);
-    app.question_app.selected_option = other_option_idx(&app).unwrap();
+    app.question_app
+        .list
+        .highlight(other_option_idx(&app).unwrap());
 
     for ch in "a b".chars() {
         press(&mut app, KeyCode::Char(ch));

@@ -363,6 +363,47 @@ class ProjectLinksController:
         )
         return self._link_dict(link, repo_root)
 
+    async def ensure_import_project(self, root_path: str, name: str) -> dict[str, Any]:
+        """Creates a Vibe project and local link unless this directory has one."""
+        inspection = await self.inspect_root(root_path)
+        saved_link = inspection["savedLink"]
+        root = inspection["root"]
+        if saved_link is not None and root is not None:
+            return {
+                "link": {
+                    "projectId": saved_link["projectId"],
+                    "projectName": saved_link["projectName"],
+                    "directoryPath": root["directoryPath"],
+                }
+            }
+
+        inspected = await self._resolve_inspection_root(root_path)
+        service = await self._build_service(inspected.path)
+        git = inspected.git
+        try:
+            if git is None or git.github_repo_url is None:
+                project = await service.create_import_project(name=name)
+            else:
+                default_branch = git.default_branch or git.current_branch
+                if default_branch is None:
+                    raise ProjectLinksInvalidRequest(
+                        "Could not determine the repository default branch."
+                    )
+                project = await service.create_import_project(
+                    name=name,
+                    repo_url=git.github_repo_url,
+                    default_branch=default_branch,
+                )
+        except VibeCodeProjectApiError as exc:
+            raise self._api_error(exc, "imports/project/create") from exc
+
+        return await self.save(
+            str(inspected.path),
+            project.project_id,
+            project.name,
+            git.github_repo_url if git is not None else None,
+        )
+
     async def link(
         self, root_path: str, project_id: str, project_name: str
     ) -> dict[str, Any]:

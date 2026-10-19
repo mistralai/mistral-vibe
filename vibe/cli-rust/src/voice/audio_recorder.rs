@@ -1,4 +1,4 @@
-//! Microphone capture via cpal (Python `AudioRecorder`, STREAM mode).
+//! Microphone capture via cpal, streamed.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;

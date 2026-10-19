@@ -174,7 +174,7 @@ class Skill(
 
     async def run(
         self, args: SkillArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | SkillResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | SkillResult]:
         if ctx is None or ctx.skill_manager is None:
             raise ToolError("Skill manager not available")
 

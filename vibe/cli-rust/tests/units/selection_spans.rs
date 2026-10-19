@@ -158,6 +158,18 @@ fn double_click_expands_an_exclusive_endpoint_to_the_word() {
 }
 
 #[test]
+fn a_double_click_drag_snaps_both_ends_to_whole_words() {
+    assert_eq!(
+        selected_as("hello world foo", 2, 8, Granularity::Word),
+        vec![(0, 0, 10)]
+    );
+    assert_eq!(
+        selected_as("hello world foo", 8, 2, Granularity::Word),
+        vec![(0, 0, 10)]
+    );
+}
+
+#[test]
 fn selection_drops_ui_padding_but_preserves_content_indentation() {
     assert_eq!(
         extracted(&[

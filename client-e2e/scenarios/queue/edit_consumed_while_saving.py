@@ -21,7 +21,7 @@ _promoted = turn_started()
 _promoted["params"]["turn"]["queueItemId"] = queued_turn(2)["id"]
 
 on_request = {_REPLACE: [_promoted, turn_queue_updated()]}
-screen_contains = {"python": ("second edited",), "rust": ("second edited",)}
+screen_contains = ("second edited",)
 capture_steps = {7}
 settle_per_key = True
 

@@ -55,9 +55,8 @@ fn a_blank_line_opening_the_content_is_kept() {
 fn unwrapped_whitespace_lines_count_every_row_paragraph_paints() {
     let folds = [None, None, None, Some(FOLD)];
     let (margins, folds) = rows(&["  ", "abc", "  ", "d"], &[0], &folds, false);
-    assert_eq!(margins, vec![10, 11]);
-    // Each whitespace line's second painted row folds into its first, so it copies as one line.
-    assert_eq!(folds, vec![11, 14, 15]);
+    assert_eq!(margins, vec![10]);
+    assert_eq!(folds, vec![13]);
 }
 
 #[test]

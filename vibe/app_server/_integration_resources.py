@@ -64,8 +64,6 @@ from vibe.app_server.protocol import (
     RuntimeSnapshot,
     SkillsCatalogParams,
     SkillsCatalogResponse,
-    SkillsConvertLocalParams,
-    SkillsConvertResponse,
     SkillsDetailParams,
     SkillsDetailResponse,
     SkillsImportParams,
@@ -293,20 +291,6 @@ class SkillsResource:
             ),
         )
 
-    async def convert_local(self, name: str, scope: str = "global") -> bool:
-        client = await self._connection.connect()
-        response = validate_wire(
-            SkillsConvertResponse,
-            await client.request(
-                "skills/convertLocal",
-                SkillsConvertLocalParams(
-                    session_id=self._state.session_id, name=name, scope=scope
-                ),
-            ),
-        )
-        self._state.apply_runtime(response.runtime)
-        return response.converted
-
 
 class MCPResource:
     def __init__(
@@ -344,6 +328,7 @@ class MCPResource:
             ]
             connector_error = exc.error.message
             manage_connectors_url = self._state.mcp.manage_connectors_url
+            private_connectors_hidden = self._state.mcp.private_connectors_hidden
         else:
             connectors = _connector_sources(connector_response)
             connector_error = (
@@ -352,6 +337,7 @@ class MCPResource:
                 else self._state.mcp.connector_error
             )
             manage_connectors_url = connector_response.manage_url
+            private_connectors_hidden = connector_response.private_connectors_hidden
 
         connector_names = {source.name for source in connectors}
         connector_discovery_errors = {
@@ -374,6 +360,7 @@ class MCPResource:
             },
             connector_error=connector_error,
             manage_connectors_url=manage_connectors_url,
+            private_connectors_hidden=private_connectors_hidden,
         )
         self._state.mcp = state
         return state
@@ -486,7 +473,7 @@ class MCPResource:
         self._state.apply_runtime(runtime)
         return runtime.mcp
 
-    async def login(self, name: str) -> AsyncGenerator[MCPAuthUrlParams, None]:
+    async def login(self, name: str) -> AsyncGenerator[MCPAuthUrlParams]:
         if name in self._login_events:
             raise RuntimeError(f"MCP login already in progress: {name}")
         client = await self._connection.connect()
@@ -743,7 +730,7 @@ class VibeCodeResource:
 
     async def teleport(
         self, prompt: str | None, *, project_id: str
-    ) -> AsyncGenerator[TeleportEvent, None]:
+    ) -> AsyncGenerator[TeleportEvent]:
         picker_id = self._require_picker_id()
         client = await self._connection.connect()
         operation_id = str(uuid4())

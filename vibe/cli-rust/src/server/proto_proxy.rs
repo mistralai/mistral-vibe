@@ -10,7 +10,7 @@ pub struct ConfigProxyReadResponse {
     pub settings: ProxySettingsView,
 }
 
-/// Python `ProxySettingsView`; `descriptions` keeps the server's variable order.
+/// The server's `ProxySettingsView`; `descriptions` keeps the server's variable order.
 #[derive(Debug, Deserialize)]
 pub struct ProxySettingsView {
     #[serde(default)]

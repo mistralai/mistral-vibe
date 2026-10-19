@@ -186,7 +186,7 @@ class AudioRecorder:
             else:
                 self._push_sentinel()
 
-    async def audio_stream(self) -> AsyncGenerator[bytes, None]:
+    async def audio_stream(self) -> AsyncGenerator[bytes]:
         queue = self._audio_queue
         if not queue:
             return
@@ -202,7 +202,7 @@ class AudioRecorder:
             if audio_queue_drained:
                 audio_queue_drained.set()
 
-    def _capture_generator(self) -> Generator[None, bytes | array.array, None]:
+    def _capture_generator(self) -> Generator[None, bytes | array.array]:
         """Generator that receives captured audio data from miniaudio.
 
         miniaudio sends ``array.array`` objects; we convert to ``bytes``

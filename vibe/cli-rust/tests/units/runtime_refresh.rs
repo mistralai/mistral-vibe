@@ -48,8 +48,8 @@ fn runtime_refresh_does_not_reset_the_painted_agent_to_the_default() {
     app.set_status(Status::Ready);
     app.agents.active = agent("ask");
     let config = StartupConfig {
-        default_agent: "plan".into(),
-        agents: vec![agent("ask"), agent("plan")],
+        default_agent: "auto-approve".into(),
+        agents: vec![agent("ask"), agent("auto-approve")],
         ..Default::default()
     };
 

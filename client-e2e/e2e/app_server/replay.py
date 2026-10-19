@@ -154,7 +154,9 @@ def _derive_runtime_responses(
     """Answer every runtime-mutating method from the session's runtime snapshot."""
     runtime = responses["runtime/read"]["runtime"]
     derived: dict[str, Any] = {
-        "config/reload": {"runtime": runtime, "strippedHistoryImages": 0},
+        "config/reload": {"runtime": deepcopy(runtime), "strippedHistoryImages": 0},
+        # A saved model pick answers with the runtime it produced, applied at once.
+        "config/model/write": {"runtime": deepcopy(runtime), "status": "applied"},
         "session/compact": {
             "summary": "Compacted summary.",
             "state": deepcopy(responses["session/read"]["state"]),

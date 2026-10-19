@@ -5,4 +5,4 @@ from __future__ import annotations
 from e2e.app_server.scenario import Timeline
 
 timeline: Timeline = ["/loo"]
-screen_contains = {"rust": ("/loop [schedule] [prompt]",)}
+screen_contains = ("/loop [schedule] [prompt]",)

@@ -6,7 +6,6 @@ from typing import final
 
 from pydantic import BaseModel, Field, JsonValue, PrivateAttr
 
-from vibe.core.checkpoints import FileSnapshot
 from vibe.core.scratchpad import is_scratchpad_display_path
 from vibe.core.tools.base import (
     BaseTool,
@@ -31,6 +30,7 @@ from vibe.utils.io import (
     ReadSafeResult,
     atomic_replace,
     file_write_lock,
+    normalize_edit_strings,
     read_safe_async,
 )
 from vibe.utils.text import line_contexts
@@ -96,9 +96,6 @@ class Edit(
             workspace=self.workspace,
             scratchpad_dir=self.scratchpad_dir,
         )
-
-    def get_file_snapshot(self, args: EditArgs) -> FileSnapshot | None:
-        return self.get_file_snapshot_for_path(args.file_path)
 
     @classmethod
     def format_call_display(cls, args: EditArgs) -> ToolCallDisplay:
@@ -171,21 +168,26 @@ class Edit(
     @final
     async def run(
         self, args: EditArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | EditResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | EditResult]:
         file_path = self._validate_args(args)
         tool_io = ctx.tool_io if ctx is not None else None
+        # The file is matched with \n line endings and written back with its
+        # own, so either form the model copies (read_file shows CRLF) matches.
+        old_string, new_string = normalize_edit_strings(
+            args.old_string, args.new_string
+        )
 
         try:
             async with file_write_lock(file_path):
                 result = await self._read_file(file_path, tool_io)
                 original = result.text
 
-                if args.old_string not in original:
+                if old_string not in original:
                     raise ToolError(
                         f"String to replace not found in file.\n"
                         f"String: {args.old_string}"
                     )
-                occurrences = original.count(args.old_string)
+                occurrences = original.count(old_string)
                 if occurrences > 1 and not args.replace_all:
                     raise ToolError(
                         f"Found {occurrences} matches of the string to replace, "
@@ -195,12 +197,12 @@ class Edit(
                         f"instance.\nString: {args.old_string}"
                     )
 
-                contexts = line_contexts(original, args.old_string)
+                contexts = line_contexts(original, old_string)
                 if not args.replace_all:
                     contexts = contexts[:1]
 
                 modified = self._apply_edit(
-                    original, args.old_string, args.new_string, args.replace_all
+                    original, old_string, new_string, args.replace_all
                 )
 
                 if modified != original:
@@ -227,15 +229,11 @@ class Edit(
         result = EditResult(
             file=str(file_path),
             message=message,
-            old_string=args.old_string,
-            new_string=args.new_string,
+            old_string=old_string,
+            new_string=new_string,
         )
         result._ui_occurrences = [
-            (
-                start,
-                prefix + args.old_string + suffix,
-                prefix + args.new_string + suffix,
-            )
+            (start, prefix + old_string + suffix, prefix + new_string + suffix)
             for start, prefix, suffix in contexts
         ]
         yield result
@@ -246,12 +244,15 @@ class Edit(
         if not file_path_str:
             raise ToolError("File path cannot be empty")
 
-        if not args.old_string:
+        if not args.old_string.removesuffix("\r"):
             raise ToolError(
                 "old_string cannot be empty. Use write_file to create new files."
             )
 
-        if args.old_string == args.new_string:
+        old_string, new_string = normalize_edit_strings(
+            args.old_string, args.new_string
+        )
+        if old_string == new_string:
             raise ToolError(
                 "No changes to make — old_string and new_string are identical"
             )

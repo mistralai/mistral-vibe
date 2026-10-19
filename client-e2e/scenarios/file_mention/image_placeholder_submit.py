@@ -36,7 +36,7 @@ handshake = {
 
 capture_startup = False
 capture_steps = {0, 1}
-screen_contains = {"rust": (_PROMPT, "attached image: [Image #1]", "A screenshot.")}
+screen_contains = (_PROMPT, "attached image: [Image #1]", "A screenshot.")
 
 timeline: Timeline = [
     paste(_PASTED),

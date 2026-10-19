@@ -1,4 +1,4 @@
-//! `$VIBE_HOME/.env` parsing (Python `load_dotenv_values` + python-dotenv).
+//! `$VIBE_HOME/.env` parsing with python-dotenv semantics, as the server reads it.
 
 use vibe_rs::credentials::dotenv::parse;
 
@@ -37,7 +37,7 @@ fn broken_lines_are_dropped_like_python_dotenv() {
 
 #[test]
 fn empty_env_values_do_not_block_the_file_value() {
-    // Python `load_dotenv_values` lets a non-empty .env value through
+    // The server's `load_dotenv_values` lets a non-empty .env value through
     // when the shell exported the variable empty.
     let parsed = parse("A=\nB=  \nC=set\n");
     assert_eq!(parsed, vec![("C".to_owned(), "set".to_owned())]);

@@ -3,10 +3,27 @@
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use vibe_rs::app::App;
-use vibe_rs::question_app::{move_down, reconcile_scroll, visible_option_rows, Viewport};
-use vibe_rs::question_input::handle_mouse;
+use vibe_rs::question_app::{move_down, OtherField};
 use vibe_rs::selection::Region;
 use vibe_rs::server::{QuestionChoice, UserQuestion};
+
+/// Route one mouse event through the question app with a stub app-server client.
+fn handle_mouse(app: &mut App, event: crossterm::event::MouseEvent) {
+    let client = std::sync::Arc::new(vibe_rs::server::Client::stub());
+    vibe_rs::question_input::handle_mouse(app, &client, event);
+}
+
+/// Lay out the question's option rows at screen rows, as the render would.
+pub(crate) fn set_rows(app: &mut App, rows: &[(u16, usize)]) {
+    let height = rows.iter().map(|(row, _)| row + 1).max().unwrap_or(0);
+    let mut lines = vec![None; usize::from(height)];
+    for (row, option) in rows {
+        lines[usize::from(*row)] = Some(*option);
+    }
+    app.question_app
+        .list
+        .layout(&lines, Rect::new(0, 0, 80, height));
+}
 
 /// The box-content region the question draw publishes, as the render would.
 fn question_region(x: u16, y: u16, width: u16, height: u16) -> Region {
@@ -74,62 +91,22 @@ fn app_with_multi_select_question() -> App {
 }
 
 #[test]
-fn detached_scroll_is_clamped_to_the_last_viewport() {
-    let viewport = Viewport {
-        offset: u16::MAX,
-        detached: true,
-    };
-
-    assert_eq!(reconcile_scroll(viewport, 0, &[], 30, 10), 20);
-}
-
-#[test]
-fn keyboard_navigation_reveals_every_row_of_a_wrapped_option() {
-    let option_rows = [(2, 0), (8, 1), (9, 1), (10, 1), (12, 2)];
-
-    assert_eq!(
-        reconcile_scroll(Viewport::default(), 1, &option_rows, 20, 5),
-        6
-    );
-}
-
-#[test]
-fn oversized_selected_option_anchors_at_its_first_row() {
-    let option_rows = [(5, 1), (6, 1), (7, 1), (8, 1), (9, 1), (10, 1)];
-
-    assert_eq!(
-        reconcile_scroll(Viewport::default(), 1, &option_rows, 20, 3),
-        5
-    );
-}
-
-#[test]
-fn hit_map_skips_rows_above_the_viewport_without_underflow() {
-    let option_rows = [(1, 0), (10, 1), (11, 1), (12, 2)];
-
-    assert_eq!(
-        visible_option_rows(&option_rows, 20, 10, 2),
-        vec![(21, 1), (22, 1)]
-    );
-}
-
-#[test]
 fn keyboard_navigation_reattaches_the_viewport() {
     let mut app = app_with_question();
-    app.question_app.viewport.detach_at(8);
+    app.question_app.list.detach_at(8);
 
     move_down(&mut app);
 
-    assert_eq!(app.question_app.selected_option, 1);
-    assert!(!app.question_app.viewport.detached);
+    assert_eq!(app.question_app.list.selected(), 1);
+    assert!(!app.question_app.list.free_scroll());
 }
 
 #[test]
 fn clicking_a_wrapped_row_keeps_the_viewport_detached() {
     let mut app = app_with_question();
     app.question_app.other_texts.insert(0, "custom".into());
-    app.question_app.viewport.detach_at(8);
-    app.question_app.option_rows = vec![(7, 1)];
+    app.question_app.list.detach_at(8);
+    set_rows(&mut app, &[(7, 1)]);
     app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
@@ -138,15 +115,15 @@ fn clicking_a_wrapped_row_keeps_the_viewport_detached() {
     );
     handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 3, 7));
 
-    assert_eq!(app.question_app.selected_option, 1);
+    assert_eq!(app.question_app.list.selected(), 1);
     assert_eq!(app.question_app.other_cursor, "custom".len());
-    assert!(app.question_app.viewport.detached);
+    assert!(app.question_app.list.free_scroll());
 }
 
 #[test]
 fn a_drag_from_an_option_row_selects_instead_of_clicking() {
     let mut app = app_with_question();
-    app.question_app.option_rows = vec![(7, 1)];
+    set_rows(&mut app, &[(7, 1)]);
     app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
@@ -166,13 +143,13 @@ fn a_drag_from_an_option_row_selects_instead_of_clicking() {
         app.selection.region.as_ref().map(|sel| sel.pending_copy),
         Some(true)
     );
-    assert_eq!(app.question_app.selected_option, 0);
+    assert_eq!(app.question_app.list.selected(), 0);
 }
 
 #[test]
 fn a_press_on_the_border_never_selects_or_clicks() {
     let mut app = app_with_question();
-    app.question_app.option_rows = vec![(7, 1)];
+    set_rows(&mut app, &[(7, 1)]);
     app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
@@ -189,13 +166,13 @@ fn a_press_on_the_border_never_selects_or_clicks() {
     );
 
     assert!(app.selection.region.is_none());
-    assert_eq!(app.question_app.selected_option, 0);
+    assert_eq!(app.question_app.list.selected(), 0);
 }
 
 #[test]
-fn a_multi_select_click_ticks_the_clicked_row_on_release() {
+fn one_click_ticks_a_multi_select_option() {
     let mut app = app_with_multi_select_question();
-    app.question_app.option_rows = vec![(7, 0), (8, 1)];
+    set_rows(&mut app, &[(7, 0), (8, 1)]);
     app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
@@ -204,14 +181,33 @@ fn a_multi_select_click_ticks_the_clicked_row_on_release() {
     );
     handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 3, 8));
 
-    assert_eq!(app.question_app.selected_option, 1);
+    assert_eq!(app.question_app.list.selected(), 1);
     assert!(app.question_app.multi_selections[&0].contains(&1));
 }
 
 #[test]
-fn every_click_of_a_double_click_acts_like_python_on_click() {
+fn one_click_answers_a_single_select_option() {
+    let mut app = app_with_question();
+    app.question_app
+        .questions
+        .push(app.question_app.questions[0].clone());
+    set_rows(&mut app, &[(7, 0), (8, 1)]);
+    app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
+
+    handle_mouse(
+        &mut app,
+        mouse(MouseEventKind::Down(MouseButton::Left), 3, 8),
+    );
+    handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 3, 8));
+
+    assert_eq!(app.question_app.answers[&0].0, "Second");
+    assert_eq!(app.question_app.current_question_idx, 1);
+}
+
+#[test]
+fn a_double_click_on_an_option_toggles_twice_without_selecting_a_word() {
     let mut app = app_with_multi_select_question();
-    app.question_app.option_rows = vec![(7, 0), (8, 1)];
+    set_rows(&mut app, &[(7, 0), (8, 1)]);
     app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     for _ in 0..2 {
@@ -223,12 +219,13 @@ fn every_click_of_a_double_click_acts_like_python_on_click() {
     }
 
     assert!(!app.question_app.multi_selections[&0].contains(&1));
+    assert!(app.selection.region.is_none());
 }
 
 #[test]
 fn a_jittered_round_trip_still_clicks() {
     let mut app = app_with_question();
-    app.question_app.option_rows = vec![(7, 0), (8, 1)];
+    set_rows(&mut app, &[(7, 0), (8, 1)]);
     app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
@@ -245,14 +242,14 @@ fn a_jittered_round_trip_still_clicks() {
     );
     handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 3, 8));
 
-    assert_eq!(app.question_app.selected_option, 1);
+    assert_eq!(app.question_app.list.selected(), 1);
 }
 
 #[test]
-fn the_free_text_row_owns_its_mouse_like_python_input() {
+fn the_free_text_row_owns_its_mouse() {
     let mut app = app_with_question();
     app.question_app.other_texts.insert(0, "draft".into());
-    app.question_app.option_rows = vec![(7, 0), (8, 1), (9, 2)];
+    set_rows(&mut app, &[(7, 0), (8, 1), (9, 2)]);
     app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
 
     handle_mouse(
@@ -266,6 +263,35 @@ fn the_free_text_row_owns_its_mouse_like_python_input() {
     handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 3, 9));
 
     assert!(app.selection.region.is_none());
-    assert_eq!(app.question_app.selected_option, 2);
+    assert_eq!(app.question_app.list.selected(), 2);
     assert_eq!(app.question_app.other_cursor, "draft".len());
+}
+
+#[test]
+fn a_click_on_the_focused_free_text_row_never_answers() {
+    for mut app in [app_with_question(), app_with_multi_select_question()] {
+        app.question_app.other_texts.insert(0, "draft".into());
+        app.question_app
+            .multi_selections
+            .entry(0)
+            .or_default()
+            .insert(2);
+        set_rows(&mut app, &[(7, 0), (8, 1), (9, 2)]);
+        app.question_app.list.select(2);
+        app.question_app.other_field = Some(OtherField {
+            x: 2,
+            y: 9,
+            text_width: 40,
+        });
+        app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
+
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 3, 9),
+        );
+        handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 3, 9));
+
+        assert!(app.question_app.answers.is_empty());
+        assert!(app.question_app.multi_selections[&0].contains(&2));
+    }
 }

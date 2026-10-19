@@ -6,7 +6,6 @@ from e2e.app_server.events import assistant_msg, turn_completed, turn_started, u
 from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 expected_clipboard = "ong table cell text wraps instead of disappearing"
 
 _PROMPT = "select within a table cell"
@@ -18,7 +17,7 @@ _ANSWER = "\n".join([
         "the viewport | Neighboring content must stay outside the selection |"
     ),
 ])
-_DRAG = "\x1b[<0;20;18M\x1b[<32;100;18M\x1b[<0;100;18m"
+_DRAG = "\x1b[<0;20;14M\x1b[<32;100;14M\x1b[<0;100;14m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

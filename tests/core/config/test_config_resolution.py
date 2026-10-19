@@ -1742,10 +1742,7 @@ class TestActiveModelValidation:
 
         assert cfg.active_model == ""
         assert cfg.get_active_model().alias == cfg.resolve_default_model_alias()
-        assert (
-            "Active model 'does-not-exist' is not in your configured models"
-            in caplog.text
-        )
+        assert "Model 'does-not-exist' is not available" in caplog.text
         assert len(cfg.validation_warnings) == 1
         assert "does-not-exist" in cfg.validation_warnings[0]
 

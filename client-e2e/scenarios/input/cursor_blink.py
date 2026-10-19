@@ -17,4 +17,4 @@ timeline: Timeline = [
     "\x1b[I\x1b[27u\x1b[27u\x1b[27u/reload\r",
 ]
 
-screen_contains = {"rust": ("Configuration reloaded",)}
+screen_contains = ("Configuration reloaded",)

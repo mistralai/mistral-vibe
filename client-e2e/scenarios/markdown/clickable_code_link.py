@@ -9,13 +9,10 @@ _PROMPT = "link the tokio select docs"
 _URL = "https://docs.rs/tokio/latest/tokio/macro.select.html"
 _ANSWER = f"See [Official Tokio `select!` documentation](<{_URL}>)."
 
-expected_actions = {
-    "rust": [Action("open_url", _URL)],
-    "python": [Action("open_url", _URL)],
-}
+expected_actions = [Action("open_url", _URL)]
 
 # `select!` spans one-based columns 22-28 on the answer row.
-_ROW, _COL = 15, 24
+_ROW, _COL = 11, 24
 _CLICK = f"\x1b[<0;{_COL};{_ROW}M\x1b[<0;{_COL};{_ROW}m"
 
 timeline: Timeline = [

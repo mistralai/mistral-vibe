@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from e2e.app_server.scenario import Timeline
 
-screen_contains = {"rust": ("one", "Xtwo", "threeY")}
+screen_contains = ("one", "Xtwo", "threeY")
 
 _CMD_RIGHT = "\x1b[1;9C"  # Super+Right in the kitty keyboard protocol
 

@@ -24,7 +24,9 @@ fn app_with_answer(answer: &str, cursor: usize) -> App {
         multi_select: false,
         hide_other: false,
     });
-    app.question_app.selected_option = other_option_idx(&app).unwrap();
+    app.question_app
+        .list
+        .highlight(other_option_idx(&app).unwrap());
     app.question_app.other_texts.insert(0, answer.into());
     app.question_app.other_cursor = cursor;
     app.question_app.other_field = Some(FIELD);
@@ -46,7 +48,8 @@ fn click(app: &mut App, column: u16, row: u16) {
             row,
             modifiers: KeyModifiers::NONE,
         };
-        handle_mouse(app, event);
+        let client = std::sync::Arc::new(vibe_rs::server::Client::stub());
+        handle_mouse(app, &client, event);
     }
 }
 
@@ -83,14 +86,14 @@ fn esc_falls_through_to_the_question_app() {
 #[test]
 fn editing_the_field_reattaches_a_scrolled_away_viewport() {
     let mut app = app_with_answer("ab", 2);
-    app.question_app.viewport.detach_at(9);
+    app.question_app.list.detach_at(9);
 
     assert!(handle_other_key(
         &mut app,
         key(KeyCode::Char('c'), KeyModifiers::NONE)
     ));
 
-    assert!(!app.question_app.viewport.detached);
+    assert!(!app.question_app.list.free_scroll());
 }
 
 #[test]
@@ -163,19 +166,19 @@ fn up_from_the_end_of_the_answer_leaves_the_field() {
 #[test]
 fn a_click_on_the_field_parks_the_caret_under_the_pointer() {
     let mut app = app_with_answer("hello\nworld", 0);
-    app.question_app.selected_option = 0;
-    app.question_app.option_rows = vec![(9, 0), (10, 1), (11, 1)];
+    app.question_app.list.highlight(0);
+    crate::question_app::set_rows(&mut app, &[(9, 0), (10, 1), (11, 1)]);
 
     click(&mut app, FIELD.x + 2, 11);
 
-    assert_eq!(app.question_app.selected_option, 1);
+    assert_eq!(app.question_app.list.selected(), 1);
     assert_eq!(app.question_app.other_cursor, "hello\nwo".len());
 }
 
 #[test]
 fn a_click_past_the_line_end_parks_the_caret_at_that_end() {
     let mut app = app_with_answer("hello\nworld", 0);
-    app.question_app.option_rows = vec![(10, 1), (11, 1)];
+    crate::question_app::set_rows(&mut app, &[(10, 1), (11, 1)]);
 
     click(&mut app, FIELD.x + 30, 10);
 
@@ -183,9 +186,46 @@ fn a_click_past_the_line_end_parks_the_caret_at_that_end() {
 }
 
 #[test]
+fn a_click_on_the_prefix_toggles_a_typed_answer_in_multi_select() {
+    let mut app = app_with_answer("draft", 2);
+    app.question_app.questions[0].multi_select = true;
+    let other_idx = other_option_idx(&app).unwrap();
+    app.question_app
+        .multi_selections
+        .entry(0)
+        .or_default()
+        .insert(other_idx);
+    crate::question_app::set_rows(&mut app, &[(10, other_idx)]);
+    let ticked = |app: &App| app.question_app.multi_selections[&0].contains(&other_idx);
+
+    click(&mut app, FIELD.x - 1, 10);
+    assert!(!ticked(&app));
+    assert_eq!(app.question_app.other_cursor, 2);
+
+    click(&mut app, FIELD.x - 1, 10);
+    assert!(ticked(&app));
+
+    click(&mut app, FIELD.x + 1, 10);
+    assert!(ticked(&app));
+    assert_eq!(app.question_app.other_cursor, 1);
+}
+
+#[test]
+fn a_click_on_the_prefix_never_answers_a_single_select_question() {
+    let mut app = app_with_answer("draft", 2);
+    let other_idx = other_option_idx(&app).unwrap();
+    crate::question_app::set_rows(&mut app, &[(10, other_idx)]);
+
+    click(&mut app, FIELD.x - 1, 10);
+
+    assert!(app.question_app.answers.is_empty());
+    assert_eq!(app.question_app.other_cursor, 2);
+}
+
+#[test]
 fn a_click_on_a_scrolled_field_maps_to_the_hidden_rows_offset() {
     let mut app = app_with_answer("a\nb\nc\nd", 0);
-    app.question_app.option_rows = vec![(10, 1), (11, 1)];
+    crate::question_app::set_rows(&mut app, &[(10, 1), (11, 1)]);
     app.question_app.other_field = Some(OtherField { y: 8, ..FIELD });
 
     click(&mut app, FIELD.x, 11);

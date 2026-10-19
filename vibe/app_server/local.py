@@ -101,8 +101,6 @@ class LocalHarnessHost:
     def _process_for(self, options: LocalHarnessOptions) -> HarnessProcess:
         if self._process is None or self._process_options is None:
             self._process = HarnessProcess(
-                experimental_harness=options.experimental_harness,
-                legacy_harness=options.legacy_harness,
                 shared=self._shared,
                 sandbox=options.sandbox,
                 client_tools=options.client_tools,
@@ -111,13 +109,6 @@ class LocalHarnessHost:
             self._process_options = options
             return self._process
         started = self._process_options
-        if (
-            started.experimental_harness != options.experimental_harness
-            or started.legacy_harness != options.legacy_harness
-        ):
-            raise RuntimeError(
-                "A LocalHarnessHost cannot mix legacy and Unified Harness backends"
-            )
         if (
             options.sandbox is not started.sandbox
             or options.client_tools is not started.client_tools

@@ -65,17 +65,18 @@ pub fn draw(
 ) -> Rect {
     let detail = detail_lines(&view.detail, area.width);
     let height = box_height(view.rows.len(), detail.len());
-    let mut list_area = Rect::default();
+    let mut options = Rect::default();
     let kind = if target == crate::mouse::MouseTarget::McpOAuth {
         super::bottom_app::Kind::McpOAuth
     } else {
         super::bottom_app::Kind::ConnectorAuth
     };
     super::bottom_app::draw(app, f, area, height, kind, |app, f, area| {
-        list_area = draw_box(f, area, view, &detail);
+        let list_area;
+        (list_area, options) = draw_box(f, area, view, &detail);
         crate::mouse::register_region(app, list_area, target);
     });
-    list_area
+    options
 }
 
 /// Total box height: 2 borders + title + blank + options + the detail static
@@ -117,9 +118,23 @@ fn fold(line: Vec<Span>, width: usize) -> Vec<Vec<Span>> {
         .collect()
 }
 
-fn draw_box(f: &mut Frame, area: Rect, view: &View, detail: &[Vec<Span>]) -> Rect {
+/// The selectable option on each list line, counted among selectable rows.
+pub fn option_lines(rows: &[Row]) -> Vec<Option<usize>> {
+    let mut next = 0;
+    rows.iter()
+        .map(|row| {
+            row.selectable.then(|| {
+                next += 1;
+                next - 1
+            })
+        })
+        .collect()
+}
+
+/// Returns the mouse capture rect (inside the border) and the option-bar rect.
+fn draw_box(f: &mut Frame, area: Rect, view: &View, detail: &[Vec<Span>]) -> (Rect, Rect) {
     if area.height < 5 {
-        return Rect::default();
+        return (Rect::default(), Rect::default());
     }
     f.render_widget(Clear, area);
     f.buffer_mut()
@@ -167,11 +182,10 @@ fn draw_box(f: &mut Frame, area: Rect, view: &View, detail: &[Vec<Span>]) -> Rec
         &view.help,
         theme::muted_style().bg(theme::background()),
     );
-    Rect::new(
-        area.x + 1,
-        top,
-        area.width.saturating_sub(2),
-        view.rows.len() as u16,
+    let rows = view.rows.len() as u16;
+    (
+        Rect::new(area.x + 1, top, area.width.saturating_sub(2), rows),
+        Rect::new(area.x + 3, top, area.width.saturating_sub(GUTTER), rows),
     )
 }
 
@@ -197,8 +211,7 @@ fn draw_spans(f: &mut Frame, x: u16, y: u16, spans: &[Span], style: Style) {
     for (text, key) in spans {
         // `shortcut()` is `b not dim $primary`, so a key drops the muted dim.
         let style = if *key {
-            style
-                .fg(theme::primary())
+            super::list_cursor::accent(style, theme::primary())
                 .add_modifier(Modifier::BOLD)
                 .remove_modifier(Modifier::DIM)
         } else {

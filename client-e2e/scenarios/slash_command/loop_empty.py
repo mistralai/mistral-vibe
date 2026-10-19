@@ -26,5 +26,5 @@ timeline: Timeline = [
     assistant_msg("I will check your scheduled tasks."),
     turn_completed(),
 ]
-screen_contains = {"rust": ("/LOOP LS", "I will check your scheduled tasks.")}
-screen_excludes = {"rust": ("No scheduled loops.", "Usage:", "not implemented")}
+screen_contains = ("/LOOP LS", "I will check your scheduled tasks.")
+screen_excludes = ("No scheduled loops.", "Usage:", "not implemented")

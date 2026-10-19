@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 import copy
 from enum import StrEnum, auto
 from pathlib import Path
@@ -21,15 +21,11 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
-    PrivateAttr,
-    computed_field,
     model_validator,
 )
 
 from vibe.core.experiments.models import EvalResponse
-from vibe.core.tools.models import RequiredPermission
 from vibe.user_content import UserDisplayContent, UserResource
-from vibe.utils.pricing import session_token_cost
 from vibe.utils.tool_presentation import ToolCallPresentation, ToolResultPresentation
 
 
@@ -46,118 +42,6 @@ class ScheduledLoop(BaseModel):
 class Backend(StrEnum):
     MISTRAL = auto()
     GENERIC = auto()
-
-
-class AgentStats(BaseModel):
-    steps: int = 0
-    session_prompt_tokens: int = 0
-    session_completion_tokens: int = 0
-    session_cached_tokens: int = 0
-    tool_calls_agreed: int = 0
-    tool_calls_rejected: int = 0
-    tool_calls_hook_denied: int = 0
-    tool_calls_failed: int = 0
-    tool_calls_succeeded: int = 0
-
-    context_tokens: int = 0
-
-    last_turn_prompt_tokens: int = 0
-    last_turn_completion_tokens: int = 0
-    last_turn_cached_tokens: int = 0
-    last_turn_duration: float = 0.0
-    tokens_per_second: float = 0.0
-
-    input_price_per_million: float = 0.0
-    output_price_per_million: float = 0.0
-    cached_input_price_per_million: float | None = None
-
-    _listeners: dict[str, Callable[[AgentStats], None]] = PrivateAttr(
-        default_factory=dict
-    )
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        super().__setattr__(name, value)
-        if name in self._listeners:
-            self._listeners[name](self)
-
-    def trigger_listeners(self) -> None:
-        for listener in self._listeners.values():
-            listener(self)
-
-    def add_listener(
-        self, attr_name: str, listener: Callable[[AgentStats], None]
-    ) -> None:
-        self._listeners[attr_name] = listener
-
-    @staticmethod
-    def create_fresh(previous: AgentStats) -> AgentStats:
-        fresh = AgentStats()
-        fresh._listeners = previous._listeners.copy()
-        return fresh
-
-    @computed_field
-    @property
-    def session_total_llm_tokens(self) -> int:
-        return self.session_prompt_tokens + self.session_completion_tokens
-
-    @computed_field
-    @property
-    def last_turn_total_tokens(self) -> int:
-        return self.last_turn_prompt_tokens + self.last_turn_completion_tokens
-
-    @computed_field
-    @property
-    def session_cost(self) -> float:
-        """Total session cost in dollars from token usage and pricing.
-
-        If the model changes mid-session, this uses current pricing for all tokens.
-        """
-        return session_token_cost(
-            prompt_tokens=self.session_prompt_tokens,
-            completion_tokens=self.session_completion_tokens,
-            cached_tokens=self.session_cached_tokens,
-            input_price_per_million=self.input_price_per_million,
-            output_price_per_million=self.output_price_per_million,
-            cached_input_price_per_million=self.cached_input_price_per_million,
-        )
-
-    def update_pricing(
-        self,
-        input_price: float,
-        output_price: float,
-        cached_input_price: float | None = None,
-    ) -> None:
-        """Update pricing info when model changes.
-
-        NOTE: session_cost will be recalculated using new pricing for all
-        accumulated tokens. This is a known approximation when models change.
-        This should not be a big issue, pricing is only used for max_price which is in
-        programmatic mode, so user should not update models there.
-        """
-        self.input_price_per_million = input_price
-        self.output_price_per_million = output_price
-        self.cached_input_price_per_million = cached_input_price
-
-    def reset_context_state(self) -> None:
-        """Reset context-related fields while preserving cumulative session stats.
-
-        Used after config reload or similar operations where the context
-        changes but we want to preserve session totals.
-        """
-        self.context_tokens = 0
-        self.last_turn_prompt_tokens = 0
-        self.last_turn_completion_tokens = 0
-        self.last_turn_cached_tokens = 0
-        self.last_turn_duration = 0.0
-        self.tokens_per_second = 0.0
-
-
-class SessionInfo(BaseModel):
-    session_id: str
-    start_time: str
-    message_count: int
-    stats: AgentStats
-    save_dir: str
 
 
 class ChildSessionLink(BaseModel):
@@ -217,8 +101,9 @@ class SessionMetadata(BaseModel):
     # re-resolved from the user-scoped whoami/identity cache on every session, so
     # resuming never reports a stale plan.
     experiments: EvalResponse | None = None
-    # Session-scoped config snapshot. New sessions pin ``active_model`` to its
-    # resolved alias before their first user turn; older snapshots remain valid.
+    # Session-scoped config snapshot. New sessions record ``active_model``
+    # (the resolved alias) and ``model_name`` (the provider model name) before
+    # their first user turn; older snapshots remain valid.
     config: dict[str, JsonValue] | None = None
     import_provenance: dict[str, JsonValue] | None = None
     created_worktree: WorktreeContext | None = None
@@ -588,27 +473,6 @@ class WaitingForInputEvent(BaseEvent):
     predefined_answers: list[str] | None = None
 
 
-class RequestEvent(BaseEvent):
-    request_id: str
-
-
-class ApprovalRequestEvent(RequestEvent):
-    tool_name: str
-    tool_args: BaseModel
-    tool_call_id: str
-    required_permissions: list[RequiredPermission] | None = None
-
-
-class UserInputRequestEvent(RequestEvent):
-    args: BaseModel
-    tool_call_id: str
-
-
-class TokenUsageUpdatedEvent(BaseEvent):
-    stats: AgentStats
-    context_window: int
-
-
 class CompactStartEvent(BaseEvent):
     current_context_tokens: int
     threshold: int
@@ -630,41 +494,15 @@ class CompactEndEvent(BaseEvent):
     tool_call_id: str
 
 
-class PlanReviewRequestedEvent(BaseEvent):
-    file_path: Path
-
-
-class PlanReviewEndedEvent(BaseEvent):
-    pass
-
-
 class AgentProfileChangedEvent(BaseEvent):
     """Emitted when the active agent profile changes during a turn."""
 
     agent_name: str
 
 
-class ContextClearedEvent(BaseEvent):
-    """Emitted after the context is cleared on plan accept."""
-
-    plan_file_path: Path | None = None
-
-
 class SessionTitleUpdatedEvent(BaseEvent):
     title: str
     session_id: str
-
-
-class BackgroundWorkEvent(BaseEvent):
-    work_id: str
-    kind: Literal["session_title"]
-    phase: Literal["started", "finished"]
-    session_id: str
-
-
-type SwitchAgentCallback = Callable[[str], Awaitable[None]]
-
-type ClearContextCallback = Callable[[], Awaitable[None]]
 
 
 class MessageList(Sequence[LLMMessage]):

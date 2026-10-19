@@ -8,10 +8,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Center, Horizontal, Vertical
 
-from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
-from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
-from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.setup.onboarding.base import OnboardingScreen
+from vibe.setup.onboarding.shortcut_hints import shortcut, shortcut_hint
+from vibe.setup.onboarding.widgets.no_markup_static import NoMarkupStatic
+from vibe.setup.onboarding.widgets.petit_chat import PetitChat
 
 OPTION_MISTRAL = 0
 OPTION_OTHER = 1

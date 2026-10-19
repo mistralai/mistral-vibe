@@ -1,6 +1,6 @@
 //! `ask_user_question` bottom-app: a bordered box with optional question tabs, the
 //! title, the option rows, a free-text row, an optional submit row, an optional
-//! footer note and a hint. Mirrors Python's `QuestionApp` and its TCSS.
+//! footer note and a hint.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -12,17 +12,14 @@ use super::question_other::{self, other_rows};
 use super::question_rows::{help_row, option_prefix, submit_row};
 use super::theme;
 use crate::app::App;
-use crate::question_app::{
-    current_question, other_option_idx, reconcile_scroll, submit_option_idx, visible_option_rows,
-    OtherField,
-};
+use crate::question_app::{current_question, other_option_idx, submit_option_idx, OtherField};
 use crate::selection::fold;
 
-/// Textual's `max-height: 70vh` on `#question-app`.
+/// The box takes at most 70% of the screen height.
 const MAX_HEIGHT_RATIO: (u16, u16) = (7, 10);
 
-/// The `(row offset, option index)` hit map of the selectable rows.
-type OptionRows = Vec<(u16, usize)>;
+/// The option on each content row, `None` for the rest.
+type OptionRows = Vec<Option<usize>>;
 /// The `(row offset, column, width)` chrome cells: option prefixes and scroll arrows.
 type ChromeRows = Vec<(u16, u16, u16)>;
 /// The `(row offset, gap)` of every row continuing a wrapped line.
@@ -49,17 +46,8 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let box_height = total_rows.saturating_add(2).min(max_height);
     let visible_rows = box_height.saturating_sub(2);
     let draw = |app: &mut App, f: &mut Frame, area: Rect| {
-        let scroll = reconcile_scroll(
-            app.question_app.viewport,
-            app.question_app.selected_option,
-            &option_rows,
-            total_rows,
-            visible_rows,
-        );
-        app.question_app.viewport.offset = scroll;
-        app.question_app.option_rows =
-            visible_option_rows(&option_rows, area.y, scroll, visible_rows);
         let content = super::bottom_app::content(area);
+        let scroll = app.question_app.list.layout(&option_rows, content) as u16;
         app.question_app.other_field = other_field(app, &option_rows, content, scroll, text_width);
         app.view.bottom_app_selection_chrome = chrome_gaps(&chrome, content, scroll, visible_rows);
         app.view.bottom_app_selection_folds = visible_folds(&folds, content, scroll, visible_rows);
@@ -77,18 +65,17 @@ fn other_field(
     text_width: Option<u16>,
 ) -> Option<OtherField> {
     let other_idx = other_option_idx(app)?;
-    let &(row, _) = option_rows.iter().find(|(_, idx)| *idx == other_idx)?;
+    let row = option_rows.iter().position(|idx| *idx == Some(other_idx))?;
     let top = i32::try_from(app.question_app.other_scroll).unwrap_or(i32::MAX);
     Some(OtherField {
         x: content.right().saturating_sub(text_width?),
-        y: i32::from(content.y) + i32::from(row) - i32::from(scroll) - top,
+        y: i32::from(content.y) + i32::try_from(row).unwrap_or(i32::MAX) - i32::from(scroll) - top,
         text_width: text_width?,
     })
 }
 
 /// Every content row of the box, in Textual compose order with its margins, the
-/// `(row offset, option index)` hit map of the selectable rows, the
-/// `(row offset, column, width)` chrome of the prefixes and scroll arrows, and the folds.
+/// option on each row, selection chrome, and folds.
 fn rows(app: &App, width: usize) -> (Vec<Row>, OptionRows, ChromeRows, FoldRows) {
     let state = &app.question_app;
     let question = current_question(app);
@@ -107,7 +94,7 @@ fn rows(app: &App, width: usize) -> (Vec<Row>, OptionRows, ChromeRows, FoldRows)
     rows.push(Vec::new());
 
     for (index, option) in question.options.iter().enumerate() {
-        let focused = index == state.selected_option;
+        let focused = index == state.list.selected();
         let mut text = option_prefix(
             index,
             question.multi_select,
@@ -120,11 +107,13 @@ fn rows(app: &App, width: usize) -> (Vec<Row>, OptionRows, ChromeRows, FoldRows)
             text.push_str(&option.description);
         }
         let start = rows.len() as u16;
+        option_rows.resize(rows.len(), None);
         chrome.push((start, 0, prefix_width));
         push_wrapped(&mut rows, &mut folds, &text, option_style(focused), width);
-        option_rows.extend((start..rows.len() as u16).map(|row| (row, index)));
+        option_rows.resize(rows.len(), Some(index));
     }
     if let Some(other_idx) = other_option_idx(app) {
+        option_rows.resize(rows.len(), None);
         for (row, arrow, gap) in other_rows(app, other_idx, width) {
             let at = rows.len() as u16;
             chrome.push((at, 0, row[0].0.chars().count() as u16));
@@ -134,14 +123,15 @@ fn rows(app: &App, width: usize) -> (Vec<Row>, OptionRows, ChromeRows, FoldRows)
             if let Some(gap) = gap {
                 folds.push((at, gap));
             }
-            option_rows.push((at, other_idx));
+            option_rows.push(Some(other_idx));
             rows.push(row);
         }
     }
     if let Some(submit_idx) = submit_option_idx(app) {
         rows.push(Vec::new());
-        option_rows.push((rows.len() as u16, submit_idx));
+        option_rows.resize(rows.len(), None);
         rows.push(submit_row(app));
+        option_rows.resize(rows.len(), Some(submit_idx));
     }
     if let Some(note) = &state.footer_note {
         rows.push(Vec::new());
@@ -149,10 +139,11 @@ fn rows(app: &App, width: usize) -> (Vec<Row>, OptionRows, ChromeRows, FoldRows)
     }
     rows.push(Vec::new());
     rows.push(help_row(app));
+    option_rows.resize(rows.len(), None);
     (rows, option_rows, chrome, folds)
 }
 
-/// Push `text` word-wrapped to `width`, one row per line, as a Textual `Static` does.
+/// Push `text` word-wrapped to `width`, one row per line.
 fn push_wrapped(rows: &mut Vec<Row>, folds: &mut FoldRows, text: &str, style: Style, width: usize) {
     for (line, gap) in fold::wrap_hard(text, width) {
         if let Some(gap) = gap {
@@ -179,7 +170,7 @@ fn option_style(focused: bool) -> Style {
     }
 }
 
-/// ` DB ✓   [Framework]` (Python `_update_tabs`).
+/// The question tabs, e.g. ` DB ✓   [Framework]`.
 fn tabs(app: &App) -> String {
     app.question_app
         .questions

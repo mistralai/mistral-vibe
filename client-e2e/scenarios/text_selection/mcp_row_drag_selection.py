@@ -13,10 +13,9 @@ _SOURCES = [
 handshake = mcp_handshake(_SOURCES)
 env = {"SSH_TTY": "/dev/pts/0"}
 capture_steps = {1}
-clipboard_clients = {"rust"}
 expected_clipboard = "filesystem"
-screen_contains = {"rust": ("Local MCP Servers", "Available Connectors")}
-screen_excludes = {"rust": ("The alpha tool",)}
+screen_contains = ("Local MCP Servers", "Available Connectors")
+screen_excludes = ("The alpha tool",)
 
 # Drag across the "filesystem" server name (1-based SGR coordinates).
 _DRAG = "\x1b[<0;6;34M\x1b[<32;15;34M\x1b[<0;15;34m"

@@ -1,4 +1,4 @@
-//! One cached child transcript and its view strings (Python `_Transcript`).
+//! One cached child transcript and its view strings.
 
 use std::time::Duration;
 
@@ -7,10 +7,10 @@ use serde_json::Value;
 use crate::transcript::Transcript;
 
 pub const MAX_CACHED_SUBAGENT_TRANSCRIPTS: usize = 5;
-/// Python `HISTORY_RESUME_TAIL_MESSAGES` (`windowing/state.py`).
+/// Messages the first backward history read fetches for a child transcript.
 pub const HISTORY_RESUME_TAIL_MESSAGES: u64 = 20;
 pub const HISTORY_PAGE_LIMIT: u64 = 500;
-/// Python drains transcript refreshes on a 50 ms debounce.
+/// Transcript refreshes drain on a 50 ms debounce.
 pub const REFRESH_DEBOUNCE: Duration = Duration::from_millis(50);
 
 pub const LOADING_PLACEHOLDER: &str = "Loading subagent transcript…";
@@ -20,7 +20,7 @@ pub const ERROR_PLACEHOLDER: &str =
 pub const READ_ONLY_MESSAGE: &str = "You can't interact with a subagent directly. Return to Main conversation and ask the main agent to stop it.";
 pub const READY_MESSAGE: &str = "This subagent is ready for a new instruction. Return to Main conversation and ask the main agent to give it a new goal or stop it.";
 
-/// Python `UserMessageSeverity` for locally appended child-transcript messages.
+/// Severity of locally appended child-transcript messages.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Info,
@@ -46,7 +46,7 @@ pub enum Event {
     },
 }
 
-/// One cached child transcript (Python `_Transcript`).
+/// One cached child transcript.
 pub struct ChildTranscript {
     pub transcript: Transcript,
     /// The child's own render cache; swapped in with the transcript so the

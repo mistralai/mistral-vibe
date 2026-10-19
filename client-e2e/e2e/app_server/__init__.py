@@ -1,1 +1,1 @@
-"""App-server-specific adapters for client parity tests."""
+"""App-server-specific adapters for client end-to-end tests."""

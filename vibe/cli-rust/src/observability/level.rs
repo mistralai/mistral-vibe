@@ -26,7 +26,7 @@ static STATE: Mutex<LogLevelState> = Mutex::new(LogLevelState {
 });
 static EFFECTIVE: AtomicU8 = AtomicU8::new(30);
 
-/// Python's numeric levels, so ordering and CRITICAL-silences-everything match.
+/// Standard numeric levels, so ordering holds and CRITICAL silences everything.
 pub fn severity(level: &str) -> u8 {
     match level {
         "DEBUG" => 10,

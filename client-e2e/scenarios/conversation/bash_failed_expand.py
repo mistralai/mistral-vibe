@@ -13,10 +13,10 @@ from e2e.app_server.scenario import Timeline
 
 _PROMPT = "run a failing command"
 # The lone shell call stays ungrouped, so its own header row unfolds the output.
-_EXPAND_RESULT = "\x1b[<0;1;15M\x1b[<0;1;15m"
+_EXPAND_RESULT = "\x1b[<0;1;11M\x1b[<0;1;11m"
 _ERROR = "Command exited with status 1"
 
-screen_contains = {"python": (f"Error: {_ERROR}",), "rust": (f"Error: {_ERROR}",)}
+screen_contains = (f"Error: {_ERROR}",)
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

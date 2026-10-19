@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import auto
 from pathlib import Path
-from typing import Any, Literal, Self, assert_never
+from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -41,9 +41,6 @@ class HookProtocol(StrEnum):
     VIBE = auto()
     CLAUDE_CODE = auto()
     KIMI_CODE = auto()
-
-
-ToolStatus = Literal["success", "failure", "cancelled"]
 
 
 _DEFAULT_HOOK_TIMEOUT = 60.0
@@ -128,161 +125,10 @@ class HookConfigResult(BaseModel):
 # --- Subprocess execution ---
 
 
-class HookSessionContext(BaseModel):
-    """Shared session fields passed to every hook invocation."""
-
-    session_id: str
-    transcript_path: str
-    cwd: str
-    parent_session_id: str | None = None
-
-
-class PostAgentInvocation(HookSessionContext):
-    hook_event_name: Literal[HookType.POST_AGENT] = HookType.POST_AGENT
-
-
-class PreToolInvocation(HookSessionContext):
-    hook_event_name: Literal[HookType.PRE_TOOL] = HookType.PRE_TOOL
-    tool_name: str
-    tool_call_id: str
-    tool_input: dict[str, Any]
-
-
-class PostToolInvocation(HookSessionContext):
-    hook_event_name: Literal[HookType.POST_TOOL] = HookType.POST_TOOL
-    tool_name: str
-    tool_call_id: str
-    tool_input: dict[str, Any]
-    tool_status: ToolStatus
-    tool_output: dict[str, Any] | None
-    tool_output_text: str
-    tool_error: str | None
-    duration_ms: float
-
-
-HookInvocation = PostAgentInvocation | PreToolInvocation | PostToolInvocation
-
-
-def build_invocation(
-    hook_type: HookType,
-    ctx: HookSessionContext,
-    *,
-    tool_name: str | None = None,
-    tool_call_id: str | None = None,
-    tool_input: dict[str, Any] | None = None,
-    tool_status: ToolStatus | None = None,
-    tool_output: dict[str, Any] | None = None,
-    tool_output_text: str = "",
-    tool_error: str | None = None,
-    duration_ms: float = 0.0,
-) -> HookInvocation:
-    """Build the right HookInvocation subclass for *hook_type*."""
-    base = ctx.model_dump()
-    match hook_type:
-        case HookType.POST_AGENT:
-            return PostAgentInvocation(**base)
-        case HookType.PRE_TOOL:
-            if tool_name is None or tool_call_id is None:
-                raise ValueError(
-                    "tool_name and tool_call_id are required for pre_tool hooks"
-                )
-            return PreToolInvocation(
-                **base,
-                tool_name=tool_name,
-                tool_call_id=tool_call_id,
-                tool_input=tool_input or {},
-            )
-        case HookType.POST_TOOL:
-            if tool_name is None or tool_call_id is None or tool_status is None:
-                raise ValueError(
-                    "tool_name, tool_call_id, and tool_status are required"
-                    " for post_tool hooks"
-                )
-            return PostToolInvocation(
-                **base,
-                tool_name=tool_name,
-                tool_call_id=tool_call_id,
-                tool_input=tool_input or {},
-                tool_status=tool_status,
-                tool_output=tool_output,
-                tool_output_text=tool_output_text,
-                tool_error=tool_error,
-                duration_ms=duration_ms,
-            )
-        case _:
-            assert_never(hook_type)
-
-
-class HookExecutionResult(BaseModel):
-    hook_name: str
-    exit_code: int | None
-    stdout: str
-    stderr: str
-    timed_out: bool
-
-
 # --- Structured stdout response (exit 0 + JSON) ---
 
 
-class HookSpecificOutput(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    # pre_tool only.
-    tool_input: dict[str, Any] | None = None
-    # post_tool only.
-    additional_context: str | None = None
-
-
-class HookStructuredResponse(BaseModel):
-    """The hook spec is "exit 0 + JSON object on stdout". ``decision:
-    "deny"`` has per-type effect (denial / text replacement / retry
-    injection). Unknown fields at any level are tolerated.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    decision: Literal["allow", "deny"] = "allow"
-    reason: str | None = None
-    system_message: str | None = None
-    hook_specific_output: HookSpecificOutput = Field(default_factory=HookSpecificOutput)
-
-
 # --- Decision values (consumed by the agent loop) ---
-
-
-class HookUserMessage(BaseModel):
-    """post_agent deny: ``content`` is injected as a retry user
-    message.
-    """
-
-    content: str
-
-
-class HookToolDenial(BaseModel):
-    """pre_tool deny: ``content`` becomes the tool error returned to
-    the LLM.
-    """
-
-    hook_name: str
-    content: str
-
-
-class HookToolInputRewrite(BaseModel):
-    """pre_tool: one per rewriting hook in the chain. The agent loop
-    validates each as it arrives — the first invalid rewrite aborts the
-    chain and synthesizes a denial.
-    """
-
-    hook_name: str
-    tool_input: dict[str, Any]
-
-
-class HookTextReplacement(BaseModel):
-    """post_tool: ``text`` is the cumulative LLM-bound output after the
-    handler applied its replacement or append.
-    """
-
-    text: str
 
 
 # --- Transcript / UI events (BaseEvent) ---

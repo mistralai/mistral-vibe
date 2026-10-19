@@ -16,6 +16,7 @@ from typing import TypedDict
 
 from pydantic import JsonValue
 
+from vibe.app_server._effect_output_cap import capped_effect_entry
 from vibe.app_server._shell import restored_shell_effect_state, shell_effect_detail
 from vibe.app_server._time import now_ms
 from vibe.app_server._tool_projection import (
@@ -103,7 +104,7 @@ def project_message_history(
             effect_indices,
             child_sessions,
         )
-    return entries
+    return [capped_effect_entry(entry) for entry in entries]
 
 
 def _project_stored_message(

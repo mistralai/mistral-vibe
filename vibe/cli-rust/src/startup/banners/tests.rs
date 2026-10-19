@@ -35,7 +35,7 @@ fn an_empty_dir_list_never_warns() {
 }
 
 #[test]
-fn whats_new_body_env_override_mirrors_python_none_cases() {
+fn whats_new_body_env_override_none_cases() {
     let dir = std::env::temp_dir().join(format!("vibe-rs-whatsnew-body-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -61,4 +61,89 @@ fn whats_new_body_env_override_mirrors_python_none_cases() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn whats_new_app(body: &str, promo: bool) -> App {
+    let whats_new = WhatsNew {
+        id: "whats-new".to_owned(),
+        body: body.to_owned(),
+        promo,
+    };
+    let mut app = App::default();
+    local::add_whats_new(
+        &mut app.view.transcript,
+        &whats_new.id,
+        &whats_new.text(None),
+        false,
+    );
+    app.session.whats_new = Some(whats_new);
+    app
+}
+
+fn whats_new_text(app: &App) -> &str {
+    app.view
+        .transcript
+        .entry_raw("whats-new")
+        .and_then(|entry| entry.pointer("/content/0/text"))
+        .and_then(Value::as_str)
+        .unwrap()
+}
+
+fn offer(kind: &str) -> Value {
+    json!({"planOffer": {"kind": kind, "url": "https://example.test/key"}})
+}
+
+#[test]
+fn plan_offer_goes_above_the_promo_suffix() {
+    let mut app = whats_new_app("# New", true);
+    assert_eq!(
+        whats_new_text(&app),
+        format!("# New{}", promo_whats_new_suffix())
+    );
+
+    show_plan_offer(&mut app, &offer("switch_api_key"));
+
+    assert_eq!(
+        whats_new_text(&app),
+        format!(
+            "# New\n\n### Switch to your [Vibe Pro API key](https://example.test/key){}",
+            promo_whats_new_suffix()
+        )
+    );
+}
+
+#[test]
+fn a_later_offer_replaces_the_earlier_one() {
+    let mut app = whats_new_app("# New", false);
+
+    show_plan_offer(&mut app, &offer("switch_api_key"));
+    show_plan_offer(&mut app, &offer("upgrade_to_pro"));
+
+    assert_eq!(
+        whats_new_text(&app),
+        "# New\n\n### Unlock more with Vibe - [Upgrade to Vibe Pro](https://example.test/key)"
+    );
+}
+
+#[test]
+fn plan_offer_cta_needs_a_url_and_defaults_to_upgrade() {
+    assert_eq!(
+        plan_offer_cta(&json!({"planOffer": {"kind": "switch_api_key"}})),
+        None
+    );
+    assert_eq!(
+        plan_offer_cta(&json!({"planOffer": {"kind": "future_kind", "url": "u"}})).as_deref(),
+        Some("### Unlock more with Vibe - [Upgrade to Vibe Pro](u)")
+    );
+}
+
+#[test]
+fn no_offer_or_no_whats_new_leaves_the_transcript_alone() {
+    let mut app = whats_new_app("# New", false);
+    show_plan_offer(&mut app, &json!({"planOffer": null}));
+    assert_eq!(whats_new_text(&app), "# New");
+
+    let mut app = App::default();
+    show_plan_offer(&mut app, &offer("upgrade_to_pro"));
+    assert_eq!(app.view.transcript.entry_count(), 0);
 }

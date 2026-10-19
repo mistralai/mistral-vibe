@@ -1,8 +1,11 @@
 //! Paint-ordered mouse routing with gesture capture.
 
 mod dispatch;
+mod option_gesture;
+pub mod pixels;
 mod scrollbar;
 
+pub use option_gesture::option_gesture;
 pub use scrollbar::{drag_scroll, register_scrollbar, scrollbar_tracks};
 
 pub use dispatch::toggle_effect_at;
@@ -17,14 +20,15 @@ use crate::app::App;
 use crate::selection;
 use crate::server::Client;
 use crate::{
-    approval, completion_manager, config, log_level_picker, mcp, model_picker, resume_picker,
-    theme_picker,
+    approval, completion_manager, config, log_level_picker, model_picker, resume_picker,
+    theme_picker, thinking_picker,
 };
 use dispatch::dispatch;
+pub(crate) use dispatch::option_list;
 
-/// Lines a shift+arrow keypress scrolls the transcript (Python `scroll_relative(y=±5)`).
+/// Lines a shift+arrow keypress scrolls the transcript.
 pub const KEY_SCROLL_STEP: u16 = 5;
-/// Lines one wheel notch scrolls (Textual's `scroll_sensitivity_y`).
+/// Lines one wheel notch scrolls.
 pub(crate) const MOUSE_SCROLL_STEP: u16 = 2;
 
 /// A behavior attached to a painted rectangle during the latest render.
@@ -40,6 +44,7 @@ pub enum MouseTarget {
     Loading,
     ThemePicker,
     ModelPicker,
+    ThinkingPicker,
     LogLevelPicker,
     ResumePicker,
     RemoteProject,
@@ -49,6 +54,7 @@ pub enum MouseTarget {
     Plugins,
     McpOAuth,
     ConnectorAuth,
+    DebugConsole,
     Config,
     ConfigEditor,
     Trust,
@@ -132,13 +138,19 @@ pub fn handle(
     config_tx: &mpsc::Sender<config::Loaded>,
     event: MouseEvent,
 ) {
-    if let Some(target) = route(app, event) {
+    let (event, row) = pixels::to_cells(event);
+    if let Some(target) = route_at(app, event, row) {
         dispatch(app, client, config_tx, target, event);
     }
 }
 
-/// Resolve ownership and apply gestures handled entirely by the router.
+/// Route a cell-precise event.
 pub fn route(app: &mut App, event: MouseEvent) -> Option<MouseTarget> {
+    route_at(app, event, f64::from(event.row))
+}
+
+/// Resolve ownership and apply router-only gestures; `row` is the pointer row in fractional cells.
+pub fn route_at(app: &mut App, event: MouseEvent, row: f64) -> Option<MouseTarget> {
     let at = (event.column, event.row);
     if event.kind == MouseEventKind::Moved {
         app.view.mouse_position = Some(at);
@@ -150,7 +162,7 @@ pub fn route(app: &mut App, event: MouseEvent) -> Option<MouseTarget> {
         MouseEventKind::Down(MouseButton::Left) => {
             cancel_capture(app);
             if scrollbar::contains_track(app, at) {
-                if scrollbar::begin(app, at) {
+                if scrollbar::begin(app, at, row) {
                     app.view.mouse.capture = Some(Capture::Scrollbar);
                 } else if scrollbar::begin_track(app, at) {
                     app.view.mouse.capture = Some(Capture::ScrollbarTrack);
@@ -163,7 +175,7 @@ pub fn route(app: &mut App, event: MouseEvent) -> Option<MouseTarget> {
         }
         MouseEventKind::Drag(MouseButton::Left) => match app.view.mouse.capture {
             Some(Capture::Scrollbar) => {
-                scrollbar::drag(app, event.row);
+                scrollbar::drag(app, row);
                 None
             }
             Some(Capture::ScrollbarTrack) => {
@@ -181,7 +193,7 @@ pub fn route(app: &mut App, event: MouseEvent) -> Option<MouseTarget> {
             Some(Capture::Target(target)) => Some(target),
             None => None,
         },
-        // Python `on_mouse_move`/`on_leave`: the hover marker follows the mouse
+        // The hover marker follows the mouse
         // and clears once it leaves the list.
         _ => {
             let target = target_at(app, at);
@@ -213,18 +225,28 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         selection::clear_region(app, selection::RegionId::BottomApp);
     }
     match target {
+        // The console's wheel scrolls its log and may load older pages, which
+        // needs the client: dispatch (not this client-free router) runs it.
+        MouseTarget::DebugConsole => return false,
         MouseTarget::Transcript => scroll_chat(app, up, MOUSE_SCROLL_STEP),
         MouseTarget::Composer => scroll_input(app, up),
         MouseTarget::Completion => completion_manager::wheel(app, !up, MOUSE_SCROLL_STEP as usize),
         MouseTarget::ThemePicker => theme_picker::navigate(app, !up),
         MouseTarget::ModelPicker => model_picker::navigate(app, !up),
+        MouseTarget::ThinkingPicker => thinking_picker::navigate(app, !up),
         MouseTarget::LogLevelPicker => log_level_picker::navigate(app, !up),
         MouseTarget::ResumePicker => resume_picker::wheel(app, !up),
-        MouseTarget::Mcp => mcp::wheel(app, !up),
+        MouseTarget::Mcp
+        | MouseTarget::RemoteProject
+        | MouseTarget::Config
+        | MouseTarget::SubagentList
+        | MouseTarget::Question => {
+            if let Some(list) = option_list(app, target) {
+                list.wheel(!up, MOUSE_SCROLL_STEP as usize);
+            }
+        }
         MouseTarget::Plugins => crate::plugins::wheel(app, !up),
-        MouseTarget::RemoteProject => crate::vibe_code_project::input::wheel(app, up),
         MouseTarget::ProxySetup => app.proxy_setup.wheel(up, MOUSE_SCROLL_STEP as usize),
-        MouseTarget::Config => config::wheel(app, if up { -2 } else { 2 }),
         MouseTarget::ConfigEditor => crate::config_edit::wheel(app, if up { -1 } else { 1 }),
         MouseTarget::Trust => crate::trust_folders::wheel(app, up),
         MouseTarget::TodoSidebar => {
@@ -235,11 +257,7 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
                 scroll.saturating_add(MOUSE_SCROLL_STEP as usize)
             };
         }
-        MouseTarget::SubagentList => {
-            crate::subagents::list::wheel(app, !up, MOUSE_SCROLL_STEP as usize)
-        }
-        MouseTarget::Approval => approval::handle_mouse(app, event),
-        MouseTarget::Question => crate::question_input::wheel(app, up),
+        MouseTarget::Approval => approval::wheel(app, !up),
         // The wizard's own regions never reach the loop: the wizard is a
         // pre-session surface with its own mouse handling.
         MouseTarget::Blocked
@@ -261,7 +279,7 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
 pub(crate) fn cancel_capture(app: &mut App) {
     if let Some(Capture::Target(target)) = app.view.mouse.capture.take() {
         if target == MouseTarget::RemoteProject {
-            app.vibe_code_project.pressed = None;
+            app.vibe_code_project.list.cancel();
             app.vibe_code_project.dragged_field = None;
         }
         if matches!(
@@ -279,6 +297,7 @@ pub(crate) fn cancel_capture(app: &mut App) {
                 | MouseTarget::ProxySetup
                 | MouseTarget::ThemePicker
                 | MouseTarget::ModelPicker
+                | MouseTarget::ThinkingPicker
                 | MouseTarget::LogLevelPicker
                 | MouseTarget::ResumePicker
                 | MouseTarget::Mcp

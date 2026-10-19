@@ -1,6 +1,5 @@
 //! The update cache repository: `[update_cache]` in `cache.toml` plus the
-//! legacy `update_cache.json` migration
-//! (Python `adapters/filesystem_update_cache_repository.py`).
+//! legacy `update_cache.json` migration.
 
 use serde_json::Value;
 
@@ -12,13 +11,13 @@ const LEGACY_FILE: &str = "update_cache.json";
 const LEGACY_WHATS_NEW_SECTION: &str = "whats_new";
 const LEGACY_SEEN_KEY: &str = "seen_version";
 
-/// Python `UpdateCache`: what the last update check learned. `source` is the
+/// What the last update check learned. `source` is the
 /// package manager that gave `latest_version` — a reader whose own install
 /// answers to a different manager must not treat that version as available.
 /// `source_stored_at` binds the tag to the write it belongs to: a writer that
-/// updates the entry without knowing the tag (Python's key-merge write) voids
-/// the pairing with a sentinel, so only a tag written with the stored
-/// timestamp counts.
+/// updates the entry without knowing the tag (an older version's key-merge
+/// write) voids the pairing with a sentinel, so only a tag written with the
+/// stored timestamp counts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateCache {
     pub latest_version: String,
@@ -29,9 +28,9 @@ pub struct UpdateCache {
     pub source_stored_at: Option<i64>,
 }
 
-/// Python `UpdateCacheRepository`: the persisted update cache's get/set.
-/// `set` and `modify` carry Python's `OSError` from a write that cannot
-/// persist, so a forced check can report it instead of exiting 0.
+/// The persisted update cache's get/set. `set` and `modify` carry the I/O
+/// error from a write that cannot persist, so a forced check can report it
+/// instead of exiting 0.
 pub trait UpdateCacheRepository {
     fn get(&self) -> Option<UpdateCache>;
     fn set(&self, cache: &UpdateCache) -> std::io::Result<()>;
@@ -59,7 +58,7 @@ impl UpdateCacheRepository for FileSystemUpdateCacheRepository {
         }
         let json = read_legacy_json()?;
         if json.is_object() {
-            // Python migrates every non-null key; only the known str/int fields
+            // The legacy file may hold any non-null key; only the known str/int fields
             // have a TOML representation, so the rest are dropped here.
             let _ = cache_store::write_section(SECTION, &legacy_entries(&json));
         }
@@ -174,8 +173,8 @@ fn set_entries(cache: &UpdateCache) -> Vec<(&'static str, cache_store::SectionVa
     entries
 }
 
-/// Python `read_section` returns a falsy dict for an absent or empty section,
-/// which is what routes `_read_section` to the legacy JSON.
+/// An absent or empty section counts as missing, which routes the read to
+/// the legacy JSON.
 fn nonempty_section() -> Option<toml_edit::Table> {
     cache_store::read_section(SECTION).filter(|table| !table.is_empty())
 }
@@ -217,7 +216,7 @@ fn legacy_entries(json: &Value) -> Vec<(&'static str, cache_store::SectionValue)
     .collect()
 }
 
-/// Python `_parse`: a missing or wrongly typed `latest_version` or
+/// A missing or wrongly typed `latest_version` or
 /// `stored_at_timestamp` invalidates the whole cache; optional fields only
 /// need to be strings to count. A `source` from a newer writer is kept, and a
 /// missing one reads as a legacy PyPI-checked entry.

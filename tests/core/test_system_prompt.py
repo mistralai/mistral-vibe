@@ -2,20 +2,16 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import signal
 import subprocess
-from types import MappingProxyType
-from unittest.mock import MagicMock
+import sys
 
 import pytest
 
+from vibe.core import system_prompt
 from vibe.core.config import ProjectContextConfig
-from vibe.core.skills.manager import SkillManager
-from vibe.core.skills.models import SkillInfo
-from vibe.core.system_prompt import (
-    ProjectContextProvider,
-    _get_available_skills_section,
-    get_agents_md_section,
-)
+from vibe.core.system_prompt import ProjectContextProvider, get_agents_md_section
+from vibe.utils.platform import WindowsShell, WindowsShellKind
 
 
 def test_project_local_git_is_not_executed_automatically(
@@ -42,6 +38,51 @@ def test_project_local_git_is_not_executed_automatically(
     assert "No trusted Git executable" in status
 
 
+@pytest.mark.parametrize(
+    ("shell_kind", "expects_git_bash_path"),
+    [(WindowsShellKind.BASH, True), (WindowsShellKind.CMD, False)],
+)
+def test_full_context_adds_git_bash_path_when_shell_is_git_bash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shell_kind: WindowsShellKind,
+    expects_git_bash_path: bool,
+) -> None:
+    monkeypatch.setattr(system_prompt, "is_windows", lambda: True)
+    monkeypatch.setattr(
+        system_prompt,
+        "resolve_windows_shell",
+        lambda: WindowsShell(shell_kind, "C:\\Program Files\\Git\\bin\\bash.exe"),
+    )
+    provider = ProjectContextProvider(ProjectContextConfig(), root_path=tmp_path)
+    provider.root_path = Path("C:\\Users\\acmedev\\repo")
+    monkeypatch.setattr(provider, "get_git_status", lambda: "")
+
+    context = provider.get_full_context()
+
+    assert "Absolute path: C:\\Users\\acmedev\\repo" in context
+    assert (
+        "Git Bash path (use this form in shell commands): /c/Users/acmedev/repo"
+        in context
+    ) is expects_git_bash_path
+
+
+def test_full_context_omits_git_bash_path_for_unc_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(system_prompt, "is_windows", lambda: True)
+    monkeypatch.setattr(
+        system_prompt,
+        "resolve_windows_shell",
+        lambda: WindowsShell(WindowsShellKind.BASH, "bash.exe"),
+    )
+    provider = ProjectContextProvider(ProjectContextConfig(), root_path=tmp_path)
+    provider.root_path = Path("\\\\server\\share\\repo")
+    monkeypatch.setattr(provider, "get_git_status", lambda: "")
+
+    assert "Git Bash path" not in provider.get_full_context()
+
+
 def test_fetch_git_context_does_not_inspect_worktree_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -54,8 +95,13 @@ def test_fetch_git_context_does_not_inspect_worktree_status(
         calls.append(args)
         output = {
             ("branch", "--show-current"): "feature\n",
-            ("branch", "-r"): "  origin/master\n",
-            ("log", "--oneline", "-5", "--decorate"): "abc123 message\n",
+            (
+                "for-each-ref",
+                "--count=1",
+                "--format=%(refname:short)",
+                "refs/remotes/origin/master",
+            ): "origin/master\n",
+            ("log", "--oneline", "--no-decorate", "-5"): "abc123 message\n",
         }[tuple(args)]
         return subprocess.CompletedProcess(args, 0, stdout=output)
 
@@ -68,6 +114,109 @@ def test_fetch_git_context_does_not_inspect_worktree_status(
     assert "Main branch (you will usually use this for PRs): master" in context
     assert "abc123 message" in context
     assert "Status:" not in context
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_git_status_keeps_full_commit_messages_without_decorations(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "feature")
+    _git(repo, "config", "log.decorate", "short")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "feat(scope): add thing (#12)")
+    _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+
+    status = ProjectContextProvider(
+        ProjectContextConfig(), root_path=repo
+    ).get_git_status()
+
+    assert "Current branch: feature" in status
+    assert "Main branch (you will usually use this for PRs): master" in status
+    assert "feat(scope): add thing (#12)" in status
+    assert "HEAD ->" not in status
+
+
+def test_git_status_main_branch_ignores_refs_only_prefixed_by_master(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "feature")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "init")
+    _git(repo, "update-ref", "refs/remotes/origin/master-old", "HEAD")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+    status = ProjectContextProvider(
+        ProjectContextConfig(), root_path=repo
+    ).get_git_status()
+
+    assert "Main branch (you will usually use this for PRs): main" in status
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fake git shell script is POSIX-only")
+def test_run_git_timeout_returns_while_a_git_child_holds_the_output_pipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    child_pid = tmp_path / "child.pid"
+    fake_git = tmp_path / "trusted-bin" / "git"
+    fake_git.parent.mkdir()
+    fake_git.write_text(f'#!/bin/sh\nsleep 30 &\necho $! > "{child_pid}"\nsleep 30\n')
+    fake_git.chmod(0o755)
+    monkeypatch.setenv("GIT_PYTHON_GIT_EXECUTABLE", str(fake_git))
+    provider = ProjectContextProvider(ProjectContextConfig(), root_path=project)
+
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            provider._run_git(["log"], timeout=0.5)
+    finally:
+        if child_pid.exists():
+            os.kill(int(child_pid.read_text()), signal.SIGKILL)
+
+
+def test_kill_process_tree_runs_system_taskkill_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(system_prompt, "is_windows", lambda: True)
+    monkeypatch.setenv("SystemRoot", "C:\\Windows")
+    taskkill_calls: list[list[str]] = []
+
+    def record_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        taskkill_calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", record_run)
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    system_prompt._kill_process_tree(process)
+
+    assert taskkill_calls == [
+        [
+            str(Path("C:\\Windows") / "System32" / "taskkill.exe"),
+            "/PID",
+            str(process.pid),
+            "/T",
+            "/F",
+        ]
+    ]
+    assert process.returncode is not None
 
 
 @pytest.mark.skipif(os.name == "nt", reason="fake git shell script is POSIX-only")
@@ -205,46 +354,3 @@ def test_get_agents_md_section_renders_given_project_instructions_alone() -> Non
     assert "## Project instructions\n\nInstructions for this project:" in section
     assert "## User instructions" not in section
     assert get_agents_md_section("", [], project_instructions=" \n ") is None
-
-
-def test_available_skills_excludes_skills_not_invocable_by_model() -> None:
-    manager = MagicMock(spec=SkillManager)
-    manager.available_skills = MappingProxyType({
-        "automatic": SkillInfo(
-            name="automatic", description="Visible description", prompt="Visible body"
-        ),
-        "explicit-only": SkillInfo(
-            name="explicit-only",
-            description="Hidden description",
-            prompt="Hidden body",
-            model_invocable=False,
-        ),
-    })
-
-    section = _get_available_skills_section(manager)
-
-    assert "automatic" in section
-    assert "Visible description" in section
-    assert "explicit-only" not in section
-    assert "Hidden description" not in section
-    assert "When a user message is exactly `/skill-name`" in section
-
-
-def test_available_skills_keeps_slash_instructions_for_explicit_only_skills() -> None:
-    manager = MagicMock(spec=SkillManager)
-    manager.available_skills = MappingProxyType({
-        "explicit-only": SkillInfo(
-            name="explicit-only",
-            description="Hidden description",
-            prompt="Hidden body",
-            model_invocable=False,
-        )
-    })
-
-    section = _get_available_skills_section(manager)
-
-    assert section.startswith("# Available Skills")
-    assert "When a user message is exactly `/skill-name`" in section
-    assert "explicit-only" not in section
-    assert "Hidden description" not in section
-    assert "<available_skills>" not in section

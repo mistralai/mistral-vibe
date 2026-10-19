@@ -1,4 +1,4 @@
-//! Markdown heading levels and Textual-compatible modifiers.
+//! Markdown heading levels and their style modifiers.
 
 use pulldown_cmark::HeadingLevel;
 use ratatui::style::Modifier;

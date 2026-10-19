@@ -56,7 +56,7 @@ class FakeAudioRecorder:
     def cancel(self) -> None:
         self._recording = False
 
-    async def audio_stream(self) -> AsyncGenerator[bytes, None]:
+    async def audio_stream(self) -> AsyncGenerator[bytes]:
         for chunk in self._stream_chunks:
             yield chunk
 

@@ -7,6 +7,7 @@ from e2e.app_server.scenario import Timeline
 
 # No `toggled` catalog: the server answers every toggle with the unchanged state.
 handshake = mcp_handshake(sample_sources())
+settle_per_key = True
 
 _DOWN = "\x1b[B"
 

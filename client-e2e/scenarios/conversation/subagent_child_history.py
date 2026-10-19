@@ -26,15 +26,12 @@ def child_user_msg(text: str) -> dict:
     return event
 
 
-screen_contains = {"rust": ("Read 3 files, ran 1 subagent, called 1 tool", _RESULT)}
-screen_excludes = {
-    "rust": (
-        f"> {_TASK}",
-        "> Runtime notification:",
-        "Subagent explore-1 completed turn 1.",
-    )
-}
-skip_terminal_parity = "The Python client rejects child-session history notifications."
+screen_contains = ("Read 3 files, ran 1 subagent, called 1 tool", _RESULT)
+screen_excludes = (
+    f"> {_TASK}",
+    "> Runtime notification:",
+    "Subagent explore-1 completed turn 1.",
+)
 
 timeline: Timeline = [
     f"{_PROMPT}\r",
@@ -50,6 +47,6 @@ timeline: Timeline = [
     read_file("during-two.txt", "   1→two", num_lines=1),
     assistant_msg("Done."),
     turn_completed(),
-    "\x1b[<0;1;15M\x1b[<0;1;15m",
-    "\x1b[<0;5;17M\x1b[<0;5;17m",
+    "\x1b[<0;1;11M\x1b[<0;1;11m",
+    "\x1b[<0;5;13M\x1b[<0;5;13m",
 ]

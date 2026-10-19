@@ -159,6 +159,15 @@ class HarnessTurnQueueItemNotFoundError(HarnessSessionError):
         )
 
 
+class HarnessTurnQueueEditConflictError(HarnessSessionError):
+    def __init__(self, queue_item_id: str) -> None:
+        super().__init__(
+            "turn_queue_edit_conflict",
+            f"Queued turn cannot change while an edit is active: {queue_item_id}",
+            details={"queue_item_id": queue_item_id},
+        )
+
+
 class HarnessTurnQueuePendingError(HarnessSessionError):
     def __init__(self) -> None:
         super().__init__(
@@ -291,6 +300,7 @@ __all__ = [
     "HarnessSessionNotFoundError",
     "HarnessStaleTurnError",
     "HarnessTurnConflictError",
+    "HarnessTurnQueueEditConflictError",
     "HarnessTurnQueueFullError",
     "HarnessTurnQueueIdempotencyConflictError",
     "HarnessTurnQueueItemNotFoundError",

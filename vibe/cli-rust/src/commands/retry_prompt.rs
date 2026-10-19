@@ -1,9 +1,9 @@
-//! The `/retry` continuation prompt (Python `build_retry_prompt`).
+//! The `/retry` continuation prompt.
 
 /// The tag wrapping the retry instruction so the server treats it as internal.
 const VIBE_WARNING_TAG: &str = "vibe_warning";
 
-/// Build the retry prompt (Python `build_retry_prompt`): a `vibe_warning`-tagged
+/// Build the retry prompt: a `vibe_warning`-tagged
 /// instruction to continue where the model stopped, plus optional user guidance.
 pub fn build_retry_prompt(additional_instructions: &str) -> String {
     let mut message = "The previous model stream ended before reaching its end. \

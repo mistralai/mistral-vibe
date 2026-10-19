@@ -8,7 +8,7 @@ from e2e.app_server.scenario import Timeline
 capture_startup = False
 capture_steps = {2}
 settle_per_key = True
-screen_contains = {"rust": ("Directory received.",)}
+screen_contains = ("Directory received.",)
 
 timeline: Timeline = [
     "@client-e2e/fixtures",

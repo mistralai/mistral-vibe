@@ -6,7 +6,6 @@ from e2e.app_server.events import assistant_msg, turn_completed, turn_started, u
 from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 clipboard_contains = ("line 01.", "line 25.")
 clipboard_excludes = ("line 27.",)
 

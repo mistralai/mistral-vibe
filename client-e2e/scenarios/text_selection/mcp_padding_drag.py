@@ -12,8 +12,8 @@ _SOURCES = [
 
 handshake = mcp_handshake(_SOURCES)
 capture_steps = {1}
-screen_contains = {"rust": ("Local MCP Servers", "Available Connectors")}
-screen_excludes = {"rust": ("The alpha tool",)}
+screen_contains = ("Local MCP Servers", "Available Connectors")
+screen_excludes = ("The alpha tool",)
 
 # Press on the padding column left of "filesystem" and drag along the row (1-based SGR coordinates).
 _DRAG = "\x1b[<0;2;34M\x1b[<32;20;34M\x1b[<0;20;34m"

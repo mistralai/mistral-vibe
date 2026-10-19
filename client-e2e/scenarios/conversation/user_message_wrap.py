@@ -9,8 +9,8 @@ _WORDS = " ".join(f"word{index:02d}" for index in range(1, 31))
 _TOKEN = "x" * 150
 _PROMPT = f"{_WORDS}\nshort line\n{_TOKEN}"
 
-screen_contains = {"rust": ("\n  word18 word19", "\n  " + "x" * 32)}
-screen_excludes = {"rust": ("\nword18", "\nxxx")}
+screen_contains = ("\n  word18 word19", "\n  " + "x" * 32)
+screen_excludes = ("\nword18", "\nxxx")
 
 timeline: Timeline = [
     paste(_PROMPT),

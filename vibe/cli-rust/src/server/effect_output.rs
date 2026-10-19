@@ -1,4 +1,4 @@
-//! Result-body formatting for settled effects (Python result widgets' compose).
+//! Result-body formatting for settled effects.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -6,7 +6,7 @@ use serde_json::Value;
 use super::web_output::{trimmed_text, web_search_lines};
 use crate::utils::clean::clean_output;
 
-/// Python `FileEditEffectOutput`: the whole-line occurrences the diff view renders.
+/// The server's `FileEditEffectOutput`: the whole-line occurrences the diff view renders.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileEditEffectOutput {
@@ -33,7 +33,7 @@ pub struct FileEditEffectOccurrence {
     pub new_text: String,
 }
 
-/// Marker a web-search source row opens with (Python `"  • "`).
+/// Marker a web-search source row opens with.
 pub const SOURCE_BULLET: &str = "  • ";
 
 /// One result body line and the URL it opens (a web-search source).
@@ -66,7 +66,7 @@ impl From<String> for BodyLine {
     }
 }
 
-/// Python `TodoResultWidget`: one rendered todo row and its status bucket.
+/// One rendered todo row and its status bucket.
 pub struct TodoRow<'a> {
     pub status: &'a str,
     pub text: String,
@@ -85,17 +85,17 @@ pub fn format_effect_output(kind: Option<&str>, output: Option<&Value>) -> Vec<B
         // Rendered as a diff, so there is no text body.
         Some("file_edit") => Vec::new(),
         Some("file_write") => cleaned_text(output, "content"),
-        // Python `ScratchpadResultWidget`: a note's text, else one file name per row.
+        // A note's text, else one file name per row.
         Some("scratchpad") => match cleaned_text(output, "content") {
             content if content.is_empty() => scratchpad_files(output),
             content => content,
         },
-        // Python renders this through `_yield_text`, which trims then sanitizes.
+        // Trimmed, then sanitized.
         Some("web_fetch") => trimmed_text(output, "content"),
         Some("file_search") => cleaned_text(output, "matches"),
         Some("shell") => shell_lines(output),
         Some("web_search") => return web_search_lines(output),
-        // Python's `AskUserQuestionResultWidget` composes nothing: the answer is
+        // Nothing to show: the answer is
         // already on the call line, so the raw result must never be dumped.
         Some("user_question") => Vec::new(),
         Some("subagent") => python_json_lines(Some(output)),
@@ -122,7 +122,7 @@ fn scratchpad_files(output: &Value) -> Vec<String> {
     lines(&clean_output(&names.join("\n")))
 }
 
-/// Python `BashResultWidget`: an output with nothing to show keeps the body
+/// An output with nothing to show keeps the body
 /// mountable through the `(no content)` fallback line.
 fn shell_lines(output: &Value) -> Vec<String> {
     let transcript = shell_transcript(output);
@@ -133,7 +133,7 @@ fn shell_lines(output: &Value) -> Vec<String> {
     lines
 }
 
-/// Python `ShellEffectOutput.transcript`: the arrival-ordered `output` when set,
+/// The arrival-ordered `output` when set,
 /// else `stdout`/`stderr` joined without fabricating a line.
 fn shell_transcript(output: &Value) -> String {
     let raw = |key: &str| output.get(key).and_then(Value::as_str).unwrap_or("");
@@ -147,7 +147,7 @@ fn shell_transcript(output: &Value) -> String {
     format!("{stdout}{stderr}")
 }
 
-/// Python `TodoResultWidget`: todos bucketed by status in a fixed order, one
+/// Todos bucketed by status in a fixed order, one
 /// `{icon} {content}` row each; an empty list renders `No todos`.
 pub fn todo_rows(output: &Value) -> Vec<TodoRow<'_>> {
     let Some(todos) = output
@@ -190,8 +190,7 @@ fn cleaned_text(output: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Python `_format_generic_result` then `_yield_text`: format the payload,
-/// sanitize, split.
+/// Format the payload, sanitize, split.
 fn json_lines(value: &Value) -> Vec<String> {
     let formatted = match value {
         Value::String(text) => text.clone(),
@@ -206,7 +205,7 @@ fn json_lines(value: &Value) -> Vec<String> {
     lines(&clean_output(&formatted))
 }
 
-/// Python generic subagent widget: format fields, then `_yield_text`.
+/// Subagent result fields, each value formatted like a Python repr, then sanitized.
 pub(super) fn python_json_lines(output: Option<&Value>) -> Vec<String> {
     let Some(output) = output else {
         return Vec::new();

@@ -155,6 +155,39 @@ def test_build_field_wires_keeps_admin_lock_for_global_compaction_threshold(
     ]
 
 
+def test_build_field_wires_edits_the_user_model_own_compaction_threshold(
+    make_config: Callable[..., VibeConfigSchema],
+) -> None:
+    config = make_config(
+        active_model="custom",
+        auto_compact_threshold=50_000,
+        models=[
+            ModelConfig(
+                name="custom",
+                provider="mistral",
+                alias="custom",
+                auto_compact_threshold=200_000,
+            )
+        ],
+    )
+    wires = build_field_wires(
+        config,
+        {
+            "auto_compact_threshold": [
+                ConfigLayerValueWire(layer="user-toml", value=50_000)
+            ],
+            "/models/custom/auto_compact_threshold": [
+                ConfigLayerValueWire(layer="user-toml", value=200_000)
+            ],
+        },
+    )
+
+    threshold = next(wire for wire in wires if wire.name == "auto_compact_threshold")
+    assert threshold.value == 200_000
+    assert threshold.path == "/models/custom/auto_compact_threshold"
+    assert threshold.origin == "user-toml"
+
+
 @pytest.mark.asyncio
 async def test_collect_layer_values_groups_fields_by_priority(tmp_path) -> None:
     missing = UserConfigLayer(path=tmp_path / "missing.toml", name="missing")

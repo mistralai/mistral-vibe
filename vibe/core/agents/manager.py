@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from vibe.core.agents.diagnostics import excluded_agent_message
 from vibe.core.agents.models import (
     BUILTIN_AGENTS,
+    REMOVED_BUILTIN_AGENTS,
     AgentProfile,
     AgentType,
     BuiltinAgentName,
@@ -46,6 +47,7 @@ class AgentManager:
                 " ".join(str(p) for p in self._registry.search_paths),
             )
 
+        initial_agent = self._replace_removed_default_agent(initial_agent)
         profile = self.available_agents.get(initial_agent)
         if profile is None and initial_agent == BuiltinAgentName.SMART_APPROVE:
             # Explicitly asking for smart-approve (--smart-approve / --agent) is a
@@ -69,13 +71,20 @@ class AgentManager:
         self.active_profile = profile
         self._install_profile(profile)
 
-    def rebind(self, harness_files: HarnessFilesManager) -> None:
-        """Rediscover agents from a different working directory.
-
-        The active profile is left installed. It was resolved before the move
-        and stays valid whether or not the destination also defines it.
-        """
-        self._registry.rediscover(harness_files)
+    def _replace_removed_default_agent(self, name: str) -> str:
+        replacement = REMOVED_BUILTIN_AGENTS.get(name)
+        if (
+            replacement is None
+            or name != self.config.default_agent
+            or name in self._discovered
+        ):
+            return name
+        logger.warning(
+            "default_agent '%s' is no longer a builtin agent; starting on '%s'",
+            name,
+            replacement,
+        )
+        return replacement
 
     @property
     def _discovered(self) -> dict[str, AgentProfile]:
@@ -116,11 +125,6 @@ class AgentManager:
         self.active_profile = self.get_agent(name)
         self._install_profile(self.active_profile)
 
-    def preview_config(self, name: str) -> VibeConfigSchema:
-        candidate = self._orchestrator.copy()
-        apply_profile_overrides(candidate, self.get_agent(name).overrides)
-        return candidate.config
-
     def _install_profile(self, profile: AgentProfile) -> None:
         apply_profile_overrides(self._orchestrator, profile.overrides)
 
@@ -146,7 +150,6 @@ class AgentManager:
     def get_agent_order(self) -> list[str]:
         builtin_order: list[str] = [
             BuiltinAgentName.ASK,
-            BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,
             BuiltinAgentName.SMART_APPROVE,
             BuiltinAgentName.AUTO_APPROVE,

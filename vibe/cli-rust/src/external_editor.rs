@@ -1,4 +1,4 @@
-//! Edit the composer text in `$VISUAL` / `$EDITOR` (Python `ExternalEditor`).
+//! Edit the composer text in `$VISUAL` / `$EDITOR`.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -29,7 +29,7 @@ pub fn get_editor(visual: Option<String>, editor: Option<String>) -> String {
         .unwrap_or_else(|| DEFAULT_EDITOR.to_owned())
 }
 
-/// The editor command split like a shell (Python `shlex.split`), then the file.
+/// The editor command split like a shell, then the file.
 pub fn command(editor: &str, path: &Path) -> Vec<OsString> {
     let parts = shlex::split(editor).unwrap_or_else(|| vec![editor.to_owned()]);
     let mut argv: Vec<OsString> = parts.into_iter().map(OsString::from).collect();

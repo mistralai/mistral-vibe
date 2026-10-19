@@ -1,5 +1,5 @@
 //! Slash commands submitted during `Status::Starting` are deferred and replayed
-//! once `apply_ready` settles, matching Python's `_session_ready.wait()` gate.
+//! once `apply_ready` settles.
 
 use std::sync::Arc;
 
@@ -123,8 +123,7 @@ async fn flush_pending_executes_deferred_help() {
 
 /// Side-channel commands (e.g. `/help`) are deferred during `Starting` too —
 /// the gate covers every slash command, not just the non-side-channel ones,
-/// matching Python's `_dispatch_idle_input` which awaits `_session_ready`
-/// before classification.
+/// and holds them before classification.
 #[tokio::test]
 async fn side_channel_command_during_starting_is_deferred() {
     let mut app = App::default();
@@ -138,64 +137,6 @@ async fn side_channel_command_during_starting_is_deferred() {
     assert_eq!(app.pending_commands.len(), 1);
     assert_eq!(app.pending_commands[0], "/help");
     assert!(app.chat_input.input.is_empty(), "input should be cleared");
-}
-
-/// `apply_startup_event(StartupEvent::Ready)` drives `flush_pending` end to
-/// end: a command deferred earlier is replayed once the Ready event lands, so
-/// the `event_handler` → `submission::flush_pending` wiring is exercised, not
-/// just the isolated function.
-#[tokio::test]
-async fn apply_ready_event_drives_flush_pending() {
-    use vibe_rs::event_handler::apply_startup_event;
-    use vibe_rs::startup::{Attach, ConfigRead, Ready, StartupEvent};
-    use vibe_rs::utils::startup_cache::StartupConfig;
-
-    let mut app = App::default();
-    app.session.status = Status::Starting;
-    app.pending_commands.push("/help".to_owned());
-    let before = app.view.transcript.revision();
-
-    // `submit` needs the channel for the deferred-push path; here the command is
-    // already pending, so only the Ready event's flush matters. A command_tx is
-    // not required for `/help` (no RPC), but the session id must be set so the
-    // reducer does not bail out of `apply_ready`.
-    let (command_tx, _command_rx) = mpsc::channel::<CommandEvent>(8);
-    app.command_tx = Some(command_tx);
-    app.session.session_id = Some("rs-test".to_owned());
-
-    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
-
-    let ready = Ready {
-        startup_cache: StartupConfig::default(),
-        config: ConfigRead::default(),
-        state: serde_json::json!({
-            "eventId": 0,
-            "session": {"id": "rs-test"},
-        }),
-        attach: Attach::Started,
-        runtime: serde_json::json!({"runtime": {}}),
-        is_cold_start: true,
-        settled: None,
-        prepared: None,
-        absorbed: Vec::new(),
-    };
-    apply_startup_event(
-        &mut app,
-        &client,
-        &config_tx,
-        StartupEvent::Ready(Box::new(ready)),
-    );
-
-    assert!(matches!(app.session.status, Status::Ready));
-    assert!(
-        app.pending_commands.is_empty(),
-        "Ready event should flush pending commands"
-    );
-    assert!(
-        app.view.transcript.revision() > before,
-        "deferred /help should have added transcript entries via the Ready event"
-    );
 }
 
 /// A deferred RPC command replayed against a stub client fails gracefully: the

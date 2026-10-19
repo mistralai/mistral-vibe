@@ -6,7 +6,6 @@ from e2e.app_server.events import assistant_msg, turn_completed, turn_started, u
 from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 expected_clipboard = (
     "Long table cell text wraps instead of disappearing beyond the viewport"
 )
@@ -20,7 +19,7 @@ _ANSWER = "\n".join([
         "the viewport | Resizing keeps borders aligned and every word visible |"
     ),
 ])
-_CLICK = "\x1b[<0;20;18M\x1b[<0;20;18m"
+_CLICK = "\x1b[<0;20;14M\x1b[<0;20;14m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

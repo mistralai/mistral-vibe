@@ -75,10 +75,18 @@ impl CheckpointV1 {
             CompactionBudget {
                 token_threshold: state.config.settings.context.compaction.token_threshold(),
                 image_delivery: state.config.settings.context.image_delivery.compaction,
+                image_cost: state.config.settings.context.image_token_cost,
             },
         )?;
         state.last_finished_turn_id = self.last_finished_turn_id;
-        state.notifications = self.notifications.restore()?;
+        state.notifications = self.notifications.restore(
+            state
+                .active()
+                .map_or(0, |active| active.pending_steer.len()),
+        )?;
+        state
+            .notifications
+            .retain_recent(state.config.settings.context.notifications.recent_ids);
         validate_restored_state(&state)?;
         Ok(state)
     }

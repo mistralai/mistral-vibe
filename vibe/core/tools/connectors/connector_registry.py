@@ -154,7 +154,7 @@ def _read_bootstrap_cache_entries() -> dict[str, Any]:
     try:
         with CONNECTOR_BOOTSTRAP_CACHE_FILE.path.open(encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -167,7 +167,7 @@ def _write_bootstrap_cache_entries(entries: dict[str, Any]) -> None:
         with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(entries, f, separators=(",", ":"))
         os.replace(tmp_path, cache_path)
-    except (OSError, TypeError):
+    except OSError, TypeError:
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:
@@ -388,7 +388,7 @@ def create_connector_proxy_tool_class(
 
         async def run(
             self, args: _OpenArgs, ctx: InvokeContext | None = None
-        ) -> AsyncGenerator[ToolStreamEvent | MCPToolResult, None]:
+        ) -> AsyncGenerator[ToolStreamEvent | MCPToolResult]:
             url = f"{self._base_url}/v1/connectors-gateway/{self._connector_id}/mcp"
             headers = {"Authorization": f"Bearer {self._api_key}"}
             payload = args.model_dump(exclude_none=True)
@@ -489,19 +489,6 @@ class ConnectorRegistry:
         self._host_catalog_entries = catalog_entries
         if catalog_entries is not None:
             self._accept_catalog(catalog_entries)
-
-    def clone_configuration(self) -> ConnectorRegistry:
-        return ConnectorRegistry(
-            api_key=self._api_key,
-            server_url=self._server_url,
-            catalog_entries=self._host_catalog_entries,
-            builtins=self._builtins,
-        )
-
-    def reconfigure(self, entries: tuple[ConnectorCatalogEntry, ...]) -> None:
-        self._host_managed = True
-        self._host_catalog_entries = entries
-        self._accept_catalog(entries)
 
     def _accept_catalog(self, entries: tuple[ConnectorCatalogEntry, ...]) -> None:
         cache: dict[str, dict[str, type[BaseTool]]] = {}
@@ -756,124 +743,6 @@ class ConnectorRegistry:
 
     def get_auth_action(self, alias: str) -> ConnectorAuthAction:
         return self._connector_auth_action.get(alias, ConnectorAuthAction.NONE)
-
-    def get_connector_id(self, alias: str) -> str | None:
-        """Return the API connector ID for a given alias, or None."""
-        return self._alias_to_id.get(alias)
-
-    async def refresh_connector_async(self, alias: str) -> dict[str, type[BaseTool]]:
-        """Re-fetch tools for a single connector by alias.
-
-        Calls the bootstrap endpoint and extracts the matching connector.
-        Updates the internal cache for that connector only. Returns
-        the new tool map (empty dict on failure).
-        """
-        connector_id = self._alias_to_id.get(alias)
-        if connector_id is None:
-            return {}
-        if self._host_managed:
-            return dict((self._cache or {}).get(connector_id, {}))
-
-        tools_map: dict[str, type[BaseTool]] | None = None
-        fresh_auth_action: ConnectorAuthAction | None = None
-        fresh_error: str | None = None
-        found = False
-        fetch_ok = False
-        try:
-            data = await self._fetch_bootstrap()
-            fetch_ok = True
-            self._write_cached_bootstrap(data)
-            for connector in data.get("connectors") or []:
-                if str(connector.get("id")) != connector_id:
-                    continue
-
-                found = True
-                name = connector.get("name") or connector_id
-                fresh_auth_action = ConnectorAuthAction.from_payload(
-                    connector.get("auth_action")
-                )
-                if bootstrap_errors := connector.get("bootstrap_errors"):
-                    fresh_error = _format_connector_bootstrap_errors(bootstrap_errors)
-                status = connector.get("status") or {}
-                if not status.get("is_ready", False):
-                    break
-
-                tools_map = self._build_tools_for_connector(
-                    connector_id=connector_id,
-                    alias=alias,
-                    name=name,
-                    raw_tools=connector.get("tools") or [],
-                )
-                break
-        except Exception:
-            logger.debug("Failed to refresh connector %s", alias)
-
-        if self._cache is None:
-            self._cache = {}
-
-        if fetch_ok and not found:
-            self._drop_connector(alias, connector_id)
-            return {}
-
-        if fresh_auth_action is not None:
-            self._connector_auth_action[alias] = fresh_auth_action
-
-        if fetch_ok and found:
-            if fresh_error is not None:
-                self._connector_errors[alias] = fresh_error
-            else:
-                self._connector_errors.pop(alias, None)
-
-        if tools_map is None:
-            self._cache.pop(connector_id, None)
-            self._connector_connected[alias] = False
-            return {}
-
-        self._cache[connector_id] = tools_map
-        self._connector_connected[alias] = bool(tools_map)
-        return tools_map
-
-    def _drop_connector(self, alias: str, connector_id: str) -> None:
-        if self._cache is not None:
-            self._cache.pop(connector_id, None)
-        self._connector_connected.pop(alias, None)
-        self._connector_auth_action.pop(alias, None)
-        self._connector_errors.pop(alias, None)
-        self._alias_to_id.pop(alias, None)
-        if alias in self._connector_names:
-            self._connector_names.remove(alias)
-
-    async def get_auth_url(self, alias: str) -> str | None:
-        """Return the OAuth authorization URL for a connector, or None.
-
-        Returns None when the connector does not support OAuth or the
-        alias is unknown.
-        """
-        connector_id = self._alias_to_id.get(alias)
-        if connector_id is None:
-            return None
-        try:
-            http_client = VibeAsyncHTTPClient(
-                verify=build_ssl_context(), follow_redirects=True
-            )
-            try:
-                from mistralai.client import Mistral
-
-                sdk_client = Mistral(
-                    api_key=self._api_key,
-                    server_url=self._server_url,
-                    async_client=http_client,
-                )
-                async with sdk_client as client:
-                    result = await client.beta.connectors.get_auth_url_async(
-                        connector_id_or_name=connector_id
-                    )
-                return result.auth_url
-            finally:
-                await http_client.aclose()
-        except Exception:
-            logger.debug("Failed to get auth URL for connector %s", alias)
-            return None
 
     def clear(self) -> None:
         if self._host_catalog_entries is not None:

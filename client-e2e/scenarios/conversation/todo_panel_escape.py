@@ -28,5 +28,5 @@ timeline: Timeline = [
 ]
 
 # The first Esc only undocks the panel: the turn keeps running.
-screen_contains = {"rust": ("Esc/Ctrl+C to interrupt",)}
-screen_excludes = {"rust": ("Todos · 1/3 done", "Interrupted")}
+screen_contains = ("Esc/Ctrl+C to interrupt",)
+screen_excludes = ("Todos · 1/3 done", "Interrupted")

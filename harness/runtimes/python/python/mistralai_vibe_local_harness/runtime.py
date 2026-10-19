@@ -9,8 +9,10 @@ from typing import Annotated, Literal
 
 from pydantic import Field, JsonValue
 
+from mistralai_vibe_local_harness._deprecated_tools import deprecated_tool_failure
 from mistralai_vibe_local_harness._native import HarnessSession
 from mistralai_vibe_local_harness.protocol import (
+    DEPRECATED_RUNTIME_BUILTIN_TOOL_NAMES,
     RUNTIME_BUILTIN_TOOL_NAMES,
     RustAcceptCandidate,
     RustAcceptedApplyResult,
@@ -217,7 +219,11 @@ class InMemoryHarnessRuntime:
         )
         self._model_handler = model_handler
         expected_builtins = set(RUNTIME_BUILTIN_TOOL_NAMES)
-        missing = expected_builtins - runtime_builtin_handlers.keys()
+        missing = (
+            expected_builtins
+            - DEPRECATED_RUNTIME_BUILTIN_TOOL_NAMES
+            - runtime_builtin_handlers.keys()
+        )
         if missing:
             raise ValueError(
                 "Harness Runtime does not implement built-ins: "
@@ -346,6 +352,11 @@ class InMemoryHarnessRuntime:
         if isinstance(
             action, RustRuntimeBuiltinToolCallAction | RustProvidedToolCallAction
         ):
+            if (
+                isinstance(action, RustRuntimeBuiltinToolCallAction)
+                and action.call.name in DEPRECATED_RUNTIME_BUILTIN_TOOL_NAMES
+            ):
+                return self._apply(deprecated_tool_failure(action))
             try:
                 if isinstance(action, RustRuntimeBuiltinToolCallAction):
                     result = await _resolve_tool(

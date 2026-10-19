@@ -1,4 +1,4 @@
-//! Post-exit summary and failure line (Python `cli/session_exit.py`).
+//! Post-exit summary and failure line.
 
 use std::io::IsTerminal;
 use std::io::Write;
@@ -12,20 +12,21 @@ use crate::resume_picker;
 use crate::server::{method, Client, TokenUsage};
 use crate::utils::text::thousands;
 
-/// Bound on the quit-time `session/log/read`: Python answers from cached state,
-/// so a hung server must not stall the exit; a timeout just drops the summary.
+/// Bound on the quit-time `session/log/read`: a hung server must not stall the
+/// exit; a timeout just drops the summary.
 const EXIT_READ_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Python `SessionExitSummary`: the persisted session and the usage since attach.
+/// The persisted session and the usage since attach.
 pub struct SessionExitSummary {
     pub session_id: Option<String>,
     pub usage: TokenUsage,
 }
 
+use crate::ui::theme::color_system::advertises_truecolor;
 use crate::ui::theme::fixed::sgr::{ORANGE_16, ORANGE_256, RED};
 const RESET: &str = "\x1b[0m";
 
-/// Token usage the app currently projects (Python `_current_usage`).
+/// Token usage the app currently projects.
 pub fn current_usage(app: &App) -> TokenUsage {
     let input_tokens = app.session.stats.session_prompt_tokens;
     let output_tokens = app.session.stats.session_completion_tokens;
@@ -36,7 +37,7 @@ pub fn current_usage(app: &App) -> TokenUsage {
     }
 }
 
-/// Python `usage_since_baseline`: per-component clamp at zero.
+/// Usage since the baseline: per-component clamp at zero.
 pub fn usage_since_baseline(current: TokenUsage, baseline: TokenUsage) -> TokenUsage {
     let input_tokens = current.input_tokens.saturating_sub(baseline.input_tokens);
     let output_tokens = current.output_tokens.saturating_sub(baseline.output_tokens);
@@ -47,7 +48,7 @@ pub fn usage_since_baseline(current: TokenUsage, baseline: TokenUsage) -> TokenU
     }
 }
 
-/// Python `format_session_usage` (plain labels, thousands separators).
+/// The session usage line (plain labels, thousands separators).
 pub fn format_session_usage(usage: TokenUsage) -> String {
     format!(
         "Total tokens used this session: input={} output={} (total={})",
@@ -57,7 +58,7 @@ pub fn format_session_usage(usage: TokenUsage) -> String {
     )
 }
 
-/// Python `print_session_resume_message` as one block: nothing at all without a
+/// The resume message as one block: nothing at all without a
 /// persisted session id, otherwise the usage line and the two resume lines.
 pub fn session_resume_message(
     summary: Option<&SessionExitSummary>,
@@ -91,8 +92,8 @@ pub fn session_resume_message(
     text
 }
 
-/// Print the resume block on the restored terminal (Python prints it only
-/// after the TUI exits, so plain stdout reaches the TTY).
+/// Print the resume block on the restored terminal, only after the TUI exits,
+/// so plain stdout reaches the TTY.
 pub fn print_session_resume_message(summary: Option<&SessionExitSummary>) {
     let text = session_resume_message(summary, orange_span(std::io::stdout().is_terminal()));
     if text.is_empty() {
@@ -103,8 +104,7 @@ pub fn print_session_resume_message(summary: Option<&SessionExitSummary>) {
     let _ = stdout.flush();
 }
 
-/// Python's fatal `AppServerResponseError` line: red `Error:` prefix on stdout
-/// (rich's `Console` defaults to `sys.stdout`).
+/// The fatal app-server error line: red `Error:` prefix on stdout.
 pub fn print_error(message: &str) {
     // Under NO_COLOR rich drops the red entirely, unlike the kept-bold orange.
     let red = if no_color() {
@@ -122,7 +122,7 @@ pub fn print_error(message: &str) {
     );
 }
 
-/// Python `AppServerSession.exit_summary`: the id only while the session log is
+/// The exit summary: the id only while the session log is
 /// enabled and persisted; the usage is the delta since the session attached.
 pub async fn exit_summary(app: &App, client: &Arc<Client>) -> SessionExitSummary {
     let current = current_usage(app);
@@ -186,11 +186,7 @@ pub(crate) fn color_span(
     if !is_tty || dumb_term() {
         return None;
     }
-    let colorterm = std::env::var("COLORTERM")
-        .unwrap_or_default()
-        .trim()
-        .to_lowercase();
-    if colorterm == "truecolor" || colorterm == "24bit" {
+    if advertises_truecolor(std::env::var("COLORTERM").ok().as_deref()) {
         return Some(deep);
     }
     let term = std::env::var("TERM")

@@ -6,7 +6,6 @@ from e2e.app_server.events import assistant_msg, turn_completed, turn_started, u
 from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 expected_clipboard = "ong ta"
 
 _PROMPT = "select part of a table cell"
@@ -19,7 +18,7 @@ _ANSWER = "\n".join([
         "across several rendered rows for selection coverage | Neighboring content |"
     ),
 ])
-_DRAG = "\x1b[<0;18;18M\x1b[<32;23;18M\x1b[<0;23;18m"
+_DRAG = "\x1b[<0;18;14M\x1b[<32;23;14M\x1b[<0;23;14m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

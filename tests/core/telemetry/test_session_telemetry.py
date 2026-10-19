@@ -39,7 +39,10 @@ def test_records_use_the_active_model(telemetry_events: list[dict[str, Any]]) ->
     # A model switch is reflected in every subsequent event.
     service.set_model("m2")
     service.record_subagent_tool_call_finished(
-        operation="spawn", outcome="success", profile_source="generic"
+        operation="spawn",
+        outcome="success",
+        profile_source="generic",
+        caller_agent_path="/root",
     )
 
     events = [

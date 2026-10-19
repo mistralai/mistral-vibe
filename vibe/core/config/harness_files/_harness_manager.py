@@ -55,19 +55,6 @@ class HarnessFilesManager:
             _session_root=here if here in listed else None,
         )
 
-    def moved_to(self, cwd: Path) -> HarnessFilesManager:
-        """The manager for a session that has moved to *cwd*.
-
-        Unlike :meth:`for_session`, which merges, the directory being left stops
-        being a workspace root and the arrival takes its place. A sequence of
-        moves therefore never widens the set. Roots added for other reasons,
-        such as ``--add-dir`` entries, are kept, including the one the session
-        is sitting in. Only the position a move recorded is replaced, so
-        leaving a directory cannot revoke a root the user opened.
-        """
-        arriving = cwd.resolve()
-        return replace(self, cwd=arriving, _session_root=arriving)
-
     @property
     def _effective_cwd(self) -> Path:
         return self.cwd or Path.cwd()
@@ -224,7 +211,7 @@ class HarnessFilesManager:
         try:
             stripped = read_safe(path).text.strip()
             return stripped if stripped else ""
-        except (FileNotFoundError, OSError):
+        except FileNotFoundError, OSError:
             return ""
 
     def _collect_agents_md(
@@ -249,7 +236,7 @@ class HarnessFilesManager:
                 stripped = read_safe(path).text.strip()
                 if stripped:
                     docs.append((current, stripped))
-            except (FileNotFoundError, OSError):
+            except FileNotFoundError, OSError:
                 pass
             if current == stop:
                 break
@@ -270,7 +257,7 @@ class HarnessFilesManager:
         """
         try:
             resolved = file_path.resolve()
-        except (ValueError, OSError):
+        except ValueError, OSError:
             return []
         for root in self.project_roots:
             if resolved.is_relative_to(root):

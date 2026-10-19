@@ -13,7 +13,6 @@ import pytest
 
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
-    ansi_tolerant_pattern,
     poll_until,
     send_ctrl_c_until_quit_confirmation,
     strip_ansi,
@@ -65,7 +64,7 @@ def _saved_session_has_usage(
     for projection_path in session_root.glob("*/generations/*/projection-state.json"):
         try:
             state = json.loads(read_safe(projection_path).text)
-        except (OSError, json.JSONDecodeError):
+        except OSError, json.JSONDecodeError:
             continue
 
         usage = (state.get("snapshot") or {}).get("session", {}).get("tokenUsage")
@@ -109,7 +108,7 @@ def _finish_turn(
         expected_count=expected_request_count,
         timeout=10,
     )
-    child.expect(ansi_tolerant_pattern(expected_reply), timeout=10)
+    wait_for_rendered_text(child, captured, expected_reply, timeout=10)
 
     start = time.monotonic()
     last_change = start

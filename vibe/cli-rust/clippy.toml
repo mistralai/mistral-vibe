@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "crossterm::event::read", reason = "use `terminal_read::read`, which normalizes events for the platform" },
+]

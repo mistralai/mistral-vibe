@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Generator
-import importlib
 import json
-import os
 from pathlib import Path
-import sys
 import threading
-from types import ModuleType
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -35,32 +30,6 @@ from vibe.core.teleport.types import (
 )
 from vibe.core.vibe_code_project import VibeProjectsStore
 from vibe.utils.http import VibeAsyncHTTPClient
-
-
-@pytest.fixture(autouse=True)
-def _restore_reimported_agent_loop_modules() -> Generator[None]:
-    module_prefixes = ("vibe.core.agent_loop", "git", "vibe.core.teleport")
-    originals: dict[str, ModuleType] = {
-        name: module
-        for name, module in sys.modules.items()
-        if any(name.startswith(prefix) for prefix in module_prefixes)
-    }
-    yield
-    for name in [
-        name
-        for name in sys.modules
-        if any(name.startswith(prefix) for prefix in module_prefixes)
-    ]:
-        if name not in originals:
-            del sys.modules[name]
-    sys.modules.update(originals)
-
-
-def _reimport_agent_loop() -> Any:
-    to_clear = ("vibe.core.agent_loop", "git", "vibe.core.teleport")
-    for k in [k for k in sys.modules if any(k.startswith(m) for m in to_clear)]:
-        del sys.modules[k]
-    return importlib.import_module("vibe.core.agent_loop._loop")
 
 
 def _make_service(tmp_path: Path, **kwargs: Any) -> TeleportService:
@@ -468,28 +437,3 @@ class TestTeleportServiceContextManager:
             assert service._client is not None
             assert service._nuage_client_instance is not None
         assert service._client is None
-
-
-class TestTeleportAvailability:
-    def test_teleport_available_is_false_when_git_not_installed(self) -> None:
-        with patch.dict(os.environ, {"GIT_PYTHON_GIT_EXECUTABLE": "/nonexistent/git"}):
-            agent_loop = _reimport_agent_loop()
-            assert agent_loop._TELEPORT_AVAILABLE is False
-
-    def test_teleport_service_raises_error_when_git_not_available(self) -> None:
-        with patch.dict(os.environ, {"GIT_PYTHON_GIT_EXECUTABLE": "/nonexistent/git"}):
-            agent_loop = _reimport_agent_loop()
-            with pytest.raises(agent_loop.TeleportError, match="git to be installed"):
-                agent_loop.AgentLoop.teleport_service.fget(
-                    MagicMock(_teleport_service=None)
-                )
-
-    def test_teleport_available_is_true_when_git_installed(
-        self, tmp_path: Path
-    ) -> None:
-        fake_git = tmp_path / "git"
-        fake_git.write_text("#!/bin/sh\necho 'git version 2.0.0'")
-        fake_git.chmod(0o755)
-        with patch.dict(os.environ, {"GIT_PYTHON_GIT_EXECUTABLE": str(fake_git)}):
-            agent_loop = _reimport_agent_loop()
-            assert agent_loop._TELEPORT_AVAILABLE is True

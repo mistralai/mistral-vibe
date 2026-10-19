@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
 
 import httpx
 from mistralai.client.models import (
@@ -13,15 +12,12 @@ from mistralai.client.models import (
 import pytest
 import respx
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from tests.conftest import build_test_vibe_config
 from tests.constants import CHAT_COMPLETIONS_PATH
-from tests.mock.utils import mock_llm_chunk
-from tests.stubs.fake_backend import FakeBackend
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
 from vibe.core.llm.backend.generic import GenericBackend, OpenAIAdapter
 from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper, ParsedContent
-from vibe.core.llm.format import APIToolFormatHandler
-from vibe.core.types import AssistantEvent, LLMMessage, ReasoningEvent, Role
+from vibe.core.types import LLMMessage, Role
 from vibe.user_content import UserDisplayContent
 
 
@@ -257,85 +253,6 @@ class TestGenericBackendReasoningContent:
             assert results[0].message.content == ""
             assert results[1].message.content == "Answer"
             assert results[1].message.reasoning_content is None
-
-
-class TestAPIToolFormatHandlerReasoningContent:
-    def test_process_api_response_message_preserves_reasoning_payloads_for_history(
-        self,
-    ):
-        handler = APIToolFormatHandler()
-
-        mock_message = MagicMock()
-        mock_message.role = "assistant"
-        mock_message.content = "The answer is 42."
-        mock_message.reasoning_content = "Let me think..."
-        mock_message.reasoning_payloads = [
-            {"type": "reasoning", "encrypted_content": "enc:abc"}
-        ]
-        mock_message.tool_calls = None
-
-        result = handler.process_api_response_message(mock_message)
-
-        assert result.content == "The answer is 42."
-        assert result.reasoning_content == "Let me think..."
-        assert result.reasoning_payloads == [
-            {"type": "reasoning", "encrypted_content": "enc:abc"}
-        ]
-
-    def test_process_api_response_message_handles_missing_reasoning_content(self):
-        handler = APIToolFormatHandler()
-
-        mock_message = MagicMock(spec=["role", "content", "tool_calls"])
-        mock_message.role = "assistant"
-        mock_message.content = "Hello"
-        mock_message.tool_calls = None
-
-        result = handler.process_api_response_message(mock_message)
-
-        assert result.content == "Hello"
-        assert result.reasoning_content is None
-        assert result.reasoning_payloads is None
-
-
-class TestAgentLoopStreamingReasoningEvents:
-    @pytest.mark.asyncio
-    async def test_streaming_accumulates_reasoning_in_message(self):
-        backend = FakeBackend([
-            mock_llm_chunk(content="", reasoning_content="First thought. "),
-            mock_llm_chunk(content="", reasoning_content="Second thought."),
-            mock_llm_chunk(content="Final answer."),
-        ])
-        agent = build_test_agent_loop(
-            config=make_config(), backend=backend, enable_streaming=True
-        )
-
-        [_ async for _ in agent.act("Think and answer")]
-
-        assistant_msg = next(m for m in agent.messages if m.role == Role.assistant)
-        assert assistant_msg.reasoning_content == "First thought. Second thought."
-        assert assistant_msg.content == "Final answer."
-
-    @pytest.mark.asyncio
-    async def test_streaming_content_only_no_reasoning(self):
-        backend = FakeBackend([
-            mock_llm_chunk(content="Hello "),
-            mock_llm_chunk(content="world!"),
-        ])
-        agent = build_test_agent_loop(
-            config=make_config(), backend=backend, enable_streaming=True
-        )
-
-        events = [event async for event in agent.act("Say hello")]
-
-        reasoning_events = [e for e in events if isinstance(e, ReasoningEvent)]
-        assert len(reasoning_events) == 0
-
-        assistant_events = [e for e in events if isinstance(e, AssistantEvent)]
-        assert len(assistant_events) == 2
-
-        assistant_msg = next(m for m in agent.messages if m.role == Role.assistant)
-        assert assistant_msg.reasoning_content is None
-        assert assistant_msg.content == "Hello world!"
 
 
 class TestLLMMessageReasoningContent:

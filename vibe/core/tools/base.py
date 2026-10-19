@@ -22,7 +22,6 @@ from typing import (
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from vibe.core.checkpoints import FileSnapshot, FileState
 from vibe.core.config.harness_files import (
     HarnessFilesManager,
     get_harness_files_manager,
@@ -35,7 +34,6 @@ from vibe.core.tools.models import (
 from vibe.core.tools.terminal_runtime import TerminalRuntime
 from vibe.core.types import ToolStreamEvent
 from vibe.core.workspace import Workspace
-from vibe.observability.logging import logger
 from vibe.utils.io import read_safe
 
 if TYPE_CHECKING:
@@ -50,11 +48,7 @@ if TYPE_CHECKING:
     from vibe.core.tools.mcp_sampling import MCPSamplingHandler
     from vibe.core.tools.models import RequiredPermission
     from vibe.core.tools.permissions import PermissionContext, PermissionStore
-    from vibe.core.types import (
-        ApprovalResponse,
-        ClearContextCallback,
-        SwitchAgentCallback,
-    )
+    from vibe.core.types import ApprovalResponse
 
 ARGS_COUNT = 4
 
@@ -84,9 +78,6 @@ class InvokeContext:
     sampling_callback: MCPSamplingHandler | None = field(default=None)
     session_dir: Path | None = field(default=None)
     launch_context: LaunchContext | None = field(default=None)
-    plan_file_path: Path | None = field(default=None)
-    switch_agent_callback: SwitchAgentCallback | None = field(default=None)
-    request_clear_context_callback: ClearContextCallback | None = field(default=None)
     skill_manager: SkillManager | None = field(default=None)
     is_skill_loaded: Callable[[str], bool] | None = field(default=None)
     scratchpad_dir: Path | None = field(default=None)
@@ -106,27 +97,6 @@ class ToolError(Exception):
     def __init__(self, message: str, *, model_detail: str | None = None) -> None:
         super().__init__(f"{message}\n\n{model_detail}" if model_detail else message)
         self.display = message
-
-
-class CancellableToolResult(BaseModel):
-    cancelled: bool = Field(
-        default=False,
-        description="True if the user cancelled the tool without completing it.",
-    )
-
-
-class ToolInfo(BaseModel):
-    """Information about a tool.
-
-    Attributes:
-        name: The name of the tool.
-        description: A brief description of what the tool does.
-        parameters: A dictionary of parameters required by the tool.
-    """
-
-    name: str
-    description: str
-    parameters: dict[str, Any]
 
 
 class BaseToolConfig(BaseModel):
@@ -212,7 +182,7 @@ class BaseTool[
     @abstractmethod
     async def run(
         self, args: ToolArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | ToolResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | ToolResult]:
         """Invoke the tool with the given arguments."""
         raise NotImplementedError  # pragma: no cover
         yield  # type: ignore[misc]
@@ -233,7 +203,7 @@ class BaseTool[
             prompt_path = cls.prompt_path or prompt_dir / f"{class_path.stem}.md"
 
             return read_safe(prompt_path).text
-        except (FileNotFoundError, TypeError, OSError):
+        except FileNotFoundError, TypeError, OSError:
             pass
 
         return None
@@ -250,7 +220,7 @@ class BaseTool[
 
     async def invoke(
         self, ctx: InvokeContext | None = None, **raw: Any
-    ) -> AsyncGenerator[ToolStreamEvent | ToolResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | ToolResult]:
         """Validate arguments and run the tool."""
         try:
             args_model, _ = self._get_tool_args_results()
@@ -309,7 +279,7 @@ class BaseTool[
                 continue
             try:
                 return base_class._get_tool_config_class()
-            except (TypeError, AttributeError):
+            except TypeError, AttributeError:
                 continue
 
         raise TypeError(
@@ -332,7 +302,7 @@ class BaseTool[
                 continue
             try:
                 return base_class._get_tool_state_class()
-            except (TypeError, AttributeError):
+            except TypeError, AttributeError:
                 continue
 
         raise TypeError(
@@ -451,37 +421,5 @@ class BaseTool[
             level (ALWAYS/NEVER/ASK), or None to fall through to config permission.
 
         Override in subclasses for domain-specific rules (e.g. workdir checks).
-        """
-        return None
-
-    def get_file_snapshot(self, args: ToolArgs) -> FileSnapshot | None:
-        """Return a snapshot of the file this tool is about to modify.
-
-        Called before ``run()`` so the checkpoint system can capture
-        the file's state *before* the tool writes to it.
-        Override in tools that modify files on disk.
-        """
-        return None
-
-    def get_file_snapshot_for_path(self, path: str) -> FileSnapshot:
-        file_path = Path(path).expanduser()
-        if not file_path.is_absolute():
-            file_path = self.cwd / file_path
-        file_path = file_path.resolve()
-        try:
-            content: bytes | None = file_path.read_bytes()
-        except FileNotFoundError:
-            content = None
-        except Exception:
-            logger.warning("Failed to read file for tool snapshot: %s", file_path)
-            content = None
-        return FileSnapshot(path=str(file_path), state=FileState(content))
-
-    def get_result_extra(self, result: ToolResult) -> str | None:
-        """Optional extra context appended to the result text sent to the LLM.
-
-        Override in subclasses to inject contextual information alongside
-        tool results (e.g. directory-level instructions discovered during
-        file reads).  The default returns ``None`` (no annotation).
         """
         return None

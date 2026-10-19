@@ -49,8 +49,8 @@ _MESSAGE["params"]["entry"]["userDisplayContent"] = {
 
 capture_startup = False
 capture_steps = {2, 4, 5}
-screen_contains = {"rust": ("> summarize [Pasted 74 characters]",)}
-screen_excludes = {"rust": ("row 5",)}
+screen_contains = ("> summarize [Pasted 74 characters]",)
+screen_excludes = ("row 5",)
 # The restored placeholder is a mention: copying it copies the text it stands for.
 expected_clipboard = _SENT
 

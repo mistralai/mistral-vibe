@@ -11,12 +11,10 @@ from vibe.core.agents._migration import (
     LEGACY_BASE_DISABLED_KEY,
     migrate_agent_profile_config,
 )
-from vibe.core.paths import PLANS_DIR
 
 
 class BuiltinAgentName(StrEnum):
     ASK = "ask"
-    PLAN = "plan"
     ACCEPT_EDITS = "accept-edits"
     SMART_APPROVE = "smart-approve"
     AUTO_APPROVE = "auto-approve"
@@ -60,30 +58,11 @@ class AgentProfile:
         )
 
 
-def _plan_overrides() -> dict[str, Any]:
-    plans_pattern = str(PLANS_DIR.path / "*")
-    return {
-        "tools": {
-            "write_file": {"permission": "never", "allowlist": [plans_pattern]},
-            "edit": {"permission": "never", "allowlist": [plans_pattern]},
-            "read_file": {"allowlist": [plans_pattern]},
-        }
-    }
-
-
 ASK = AgentProfile(
     BuiltinAgentName.ASK,
     "Ask",
     "Requires approval for tool executions",
     AgentSafety.NEUTRAL,
-    overrides={"disabled_tools": ["exit_plan_mode"]},
-)
-PLAN = AgentProfile(
-    BuiltinAgentName.PLAN,
-    "Plan",
-    "Read-only agent for exploration and planning",
-    AgentSafety.SAFE,
-    overrides=_plan_overrides(),
 )
 ACCEPT_EDITS = AgentProfile(
     BuiltinAgentName.ACCEPT_EDITS,
@@ -91,11 +70,10 @@ ACCEPT_EDITS = AgentProfile(
     "Auto-approves file edits only",
     AgentSafety.DESTRUCTIVE,
     overrides={
-        "disabled_tools": ["exit_plan_mode"],
         "tools": {
             "write_file": {"permission": "always"},
             "edit": {"permission": "always"},
-        },
+        }
     },
 )
 AUTO_APPROVE = AgentProfile(
@@ -103,7 +81,7 @@ AUTO_APPROVE = AgentProfile(
     "Auto Approve",
     "Auto-approves all tool executions",
     AgentSafety.YOLO,
-    overrides={"bypass_tool_permissions": True, "disabled_tools": ["exit_plan_mode"]},
+    overrides={"bypass_tool_permissions": True},
 )
 SMART_APPROVE = AgentProfile(
     BuiltinAgentName.SMART_APPROVE,
@@ -113,7 +91,6 @@ SMART_APPROVE = AgentProfile(
     # No static permission overrides: a model classifier gates each call via the
     # runtime "classify" tool mode (Unified Harness only). The runtime derives that
     # gate from the active agent; see build_unified_session_context / _rust_tool_modes.
-    overrides={"disabled_tools": ["exit_plan_mode"]},
 )
 
 EXPLORE = AgentProfile(
@@ -165,16 +142,19 @@ LEAN = AgentProfile(
             "thinking": "off",
         },
         "tools": {"bash": {"default_timeout": 1200}},
-        "disabled_tools": ["exit_plan_mode"],
     },
 )
 
 BUILTIN_AGENTS: dict[str, AgentProfile] = {
     BuiltinAgentName.ASK: ASK,
-    BuiltinAgentName.PLAN: PLAN,
     BuiltinAgentName.ACCEPT_EDITS: ACCEPT_EDITS,
     BuiltinAgentName.SMART_APPROVE: SMART_APPROVE,
     BuiltinAgentName.AUTO_APPROVE: AUTO_APPROVE,
     BuiltinAgentName.EXPLORE: EXPLORE,
     BuiltinAgentName.LEAN: LEAN,
 }
+
+# Builtin agents dropped from the product, mapped to the agent a config that still
+# names one as `default_agent` starts on. Plan was read-only: ask runs no tool
+# without approval, so the fallback grants no permission the user did not have.
+REMOVED_BUILTIN_AGENTS: dict[str, str] = {"plan": BuiltinAgentName.ASK}

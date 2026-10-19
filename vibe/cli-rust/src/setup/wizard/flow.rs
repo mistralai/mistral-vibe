@@ -1,4 +1,4 @@
-//! The onboarding wizard as its own pre-engine loop (Python `run_onboarding`):
+//! The onboarding wizard as its own pre-engine loop:
 //! the app-server has no session yet — the wizard's writes talk `setup/*`
 //! on the booted connection, which `--setup` boots behind the welcome
 //! screen's gate. The app only lends its view (banner animation, mouse
@@ -27,8 +27,7 @@ use crate::setup::auth::browser_sign_in::SignInHandle;
 /// writes talk `setup/*` on the booted connection; `--setup` boots it
 /// behind the welcome screen, seeding the wizard when it lands (the gate
 /// holds the theme transition until it does). Returns how the wizard
-/// closed (`Cancelled` also covers the shutdown signal, like Python's
-/// KeyboardInterrupt exit).
+/// closed (`Cancelled` also covers the shutdown signal).
 pub async fn run_wizard(
     terminal: &mut crate::terminal::Tui,
     app: &mut App,
@@ -52,7 +51,7 @@ pub async fn run_wizard(
     wizard.boot_pending = client.is_none();
     let mut welcome_tick = tick(std::time::Duration::from_millis(40));
     let mut redraw_tick = tick(REDRAW_INTERVAL);
-    // Python's onboarding `PetitChat` animates on every screen that shows it.
+    // The onboarding petit chat animates on every screen that shows it.
     let mut chat_tick = tick(crate::ui::banner::petit_chat::FRAME_INTERVAL);
     let mut sign_in_rx: Option<SignInHandle> = None;
     loop {
@@ -95,6 +94,9 @@ pub async fn run_wizard(
                 }
             }
             Some(event) = input.recv() => {
+                if matches!(event, Event::Resize(..)) {
+                    let _ = crate::terminal::sync_pixel_reports();
+                }
                 if replaying
                     && matches!(
                         event,
@@ -105,13 +107,14 @@ pub async fn run_wizard(
                     let held = matches!(event, Event::Key(key) if key.code == KeyCode::F(HOLD_KEY));
                     state.apply_input(InputOutcome::Marker(held));
                 } else if let Event::Mouse(mouse) = event {
-                    // Python's wizard ignores pointer movement entirely: a
-                    // move neither repaints nor tracks hover.
+                    let (mouse, row) = crate::mouse::pixels::to_cells(mouse);
+                    // The wizard ignores pointer movement entirely: a move
+                    // neither repaints nor tracks hover.
                     if mouse.kind != crossterm::event::MouseEventKind::Moved {
                         // The wizard runs before the app-server, so mouse
                         // events route through the region map but dispatch
                         // to the wizard's own client-free handlers.
-                        if let Some(target) = crate::mouse::route(app, mouse) {
+                        if let Some(target) = crate::mouse::route_at(app, mouse, row) {
                             mouse::handle_mouse(app, wizard, mouse, target);
                         }
                         // A preview-scrollbar drag writes its live position
@@ -132,8 +135,7 @@ pub async fn run_wizard(
                         state.apply_input(InputOutcome::Activity { reset_blink: down });
                     }
                 } else if let Event::Paste(text) = event {
-                    // Python's Textual inputs paste; the wizard's inputs are
-                    // the same single-line edit model.
+                    // Paste goes to the focused single-line input.
                     screens::paste(wizard, &text);
                     state.apply_input(InputOutcome::Activity { reset_blink: false });
                 } else if let Some(close) =
@@ -235,7 +237,7 @@ fn draw(
         })
     })??;
     crate::pointer::sync(app);
-    crate::terminal_notifier::flush(&mut app.terminal_notifier);
+    crate::terminal_notifier::flush(app);
     Ok(())
 }
 

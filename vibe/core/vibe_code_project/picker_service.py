@@ -34,7 +34,11 @@ class VibeCodeProjectPageFetcher(Protocol):
     ) -> VibeCodeProjectPage: ...
 
     async def create_project(
-        self, *, name: str, repo_url: str, default_branch: str
+        self,
+        *,
+        name: str,
+        repo_url: str | None = None,
+        default_branch: str | None = None,
     ) -> VibeCodeProject: ...
 
 
@@ -230,6 +234,20 @@ class VibeCodeProjectPickerService:
             project=project,
         )
 
+    async def create_import_project(
+        self,
+        *,
+        name: str,
+        repo_url: str | None = None,
+        default_branch: str | None = None,
+    ) -> VibeCodeProject:
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise VibeCodeProjectApiError("Project name cannot be empty.")
+        return await self._create_project(
+            name=normalized_name, repo_url=repo_url, default_branch=default_branch
+        )
+
     def save_project_link(
         self, *, context: ProjectPickerContext, project_id: str, project_name: str
     ) -> RemoteProjectLink:
@@ -406,7 +424,7 @@ class VibeCodeProjectPickerService:
         )
 
     async def _create_project(
-        self, *, name: str, repo_url: str, default_branch: str
+        self, *, name: str, repo_url: str | None, default_branch: str | None
     ) -> VibeCodeProject:
         return await self._with_client(
             lambda client: client.create_project(

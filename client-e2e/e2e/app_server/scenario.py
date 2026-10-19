@@ -79,18 +79,17 @@ class Scenario:
     on_request: Mapping[str, list[AppServerEvent]] = field(default_factory=dict)
     """Events the server would emit while answering a request, by method."""
     request_methods: frozenset[str] = frozenset()
-    """Additional client requests this scenario compares for parity."""
-    expected_actions: Mapping[str, list[Action]] = field(default_factory=dict)
+    """Additional client requests this scenario pins in its golden."""
+    expected_actions: list[Action] | None = None
     expected_clipboard: str | None = None
     expected_titles: tuple[str, ...] | None = None
     clipboard_contains: tuple[str, ...] = ()
     clipboard_excludes: tuple[str, ...] = ()
-    clipboard_clients: frozenset[str] | None = None
-    screen_contains: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
-    screen_excludes: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
-    screen_rows: Mapping[str, Mapping[int, str]] = field(default_factory=dict)
-    screen_cursor: Mapping[str, tuple[int, int]] = field(default_factory=dict)
-    """Expected final terminal cursor ``(row, column)`` per client."""
+    screen_contains: tuple[str, ...] = ()
+    screen_excludes: tuple[str, ...] = ()
+    screen_rows: Mapping[int, str] = field(default_factory=dict)
+    screen_cursor: tuple[int, int] | None = None
+    """Expected final terminal cursor ``(row, column)``."""
     skip_reason: str | None = None
     capture_startup: bool = True
     capture_steps: set[int] | None = None
@@ -177,20 +176,15 @@ def _build_scenario(module: ModuleType, name: str, origin: str) -> Scenario:
         handshake=getattr(module, "handshake", {}),
         on_request=getattr(module, "on_request", {}),
         request_methods=frozenset(getattr(module, "request_methods", ())),
-        expected_actions=getattr(module, "expected_actions", {}),
+        expected_actions=getattr(module, "expected_actions", None),
         expected_clipboard=getattr(module, "expected_clipboard", None),
         expected_titles=getattr(module, "expected_titles", None),
         clipboard_contains=tuple(getattr(module, "clipboard_contains", ())),
         clipboard_excludes=tuple(getattr(module, "clipboard_excludes", ())),
-        clipboard_clients=(
-            frozenset(clients)
-            if (clients := getattr(module, "clipboard_clients", None)) is not None
-            else None
-        ),
-        screen_contains=getattr(module, "screen_contains", {}),
-        screen_excludes=getattr(module, "screen_excludes", {}),
+        screen_contains=_texts(module, "screen_contains"),
+        screen_excludes=_texts(module, "screen_excludes"),
         screen_rows=getattr(module, "screen_rows", {}),
-        screen_cursor=getattr(module, "screen_cursor", {}),
+        screen_cursor=getattr(module, "screen_cursor", None),
         skip_reason=getattr(module, "skip", None),
         capture_startup=getattr(module, "capture_startup", True),
         capture_steps=getattr(module, "capture_steps", None),
@@ -204,6 +198,13 @@ def _build_scenario(module: ModuleType, name: str, origin: str) -> Scenario:
         headless_stderr=getattr(module, "headless_stderr", None),
         headless_requests=tuple(getattr(module, "headless_requests", ())),
     )
+
+
+def _texts(module: ModuleType, name: str) -> tuple[str, ...]:
+    texts = getattr(module, name, ())
+    if isinstance(texts, str) or not all(isinstance(text, str) for text in texts):
+        raise TypeError(f"{module.__name__}.{name} must be a sequence of strings")
+    return tuple(texts)
 
 
 def _split_timeline(timeline: Timeline) -> list[Step]:

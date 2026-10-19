@@ -49,3 +49,16 @@ repos:
             __snapshots__/.*\.svg$|
             client-e2e/goldens/.*\.svg$
           )
+
+  # The Buildkite vibe-rust-cli-tests step gates `vibe/cli-rust` on
+  # `make lint_test`; run the same gate at commit time. This config runs from
+  # both the dashboard checkout root and the standalone vibe repo root, so
+  # pick the Makefile location accordingly.
+  - repo: local
+    hooks:
+      - id: cli-rust-lint
+        name: cli-rust fmt check + clippy (same as CI)
+        language: system
+        entry: sh -c 'if [ -f vibe/Makefile ]; then make -C vibe lint_test; else make lint_test; fi'
+        pass_filenames: false
+        files: ^(vibe/)?vibe/cli-rust/

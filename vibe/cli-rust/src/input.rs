@@ -16,9 +16,9 @@ use crate::server::Client;
 use crate::utils::input_edit;
 use crate::{
     agents, chat_input, clipboard, completion_manager, config, config_write, connector_auth,
-    feedback, keymap, log_level_picker, mcp, mcp_oauth, message_queue, model_picker, paste_files,
-    paste_image, paste_path, question_input, rewind, subagents, theme_picker, thinking_picker,
-    turn_summary, voice,
+    debug_console, feedback, keymap, log_level_picker, mcp, mcp_oauth, message_queue, model_picker,
+    paste_files, paste_image, paste_path, question_input, rewind, subagents, theme_picker,
+    thinking_picker, turn_summary, voice,
 };
 
 fn is_ctrl_c(key: &KeyEvent) -> bool {
@@ -28,13 +28,26 @@ fn is_ctrl_c(key: &KeyEvent) -> bool {
         && key.code == KeyCode::Char('c')
 }
 
-/// Ctrl+R toggles voice recording (Python voice keybinding).
+/// Ctrl+R toggles voice recording.
 fn is_ctrl_r(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r')
 }
 
 fn is_ctrl_d(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d')
+}
+
+/// Ctrl+\ toggles the debug console. A legacy terminal sends it as byte 0x1c,
+/// which crossterm decodes as Ctrl+'4';
+/// the Kitty protocol reports the backslash itself. The '4' arm is the only
+/// reading of the legacy byte, but crossterm attaches no provenance to it, so
+/// a real Ctrl+4 on a Kitty terminal toggles the console too (it has no other
+/// binding).
+fn is_ctrl_backslash(key: &KeyEvent) -> bool {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    matches!(key.code, KeyCode::Char('\\') | KeyCode::Char('4'))
 }
 
 #[cfg(unix)]
@@ -49,7 +62,7 @@ pub fn request_suspend(_: &mut App, _: &KeyEvent) -> bool {
     false
 }
 
-/// Copy: Ctrl+Y on Unix, Ctrl+Shift+C or Command+C everywhere.
+/// Copy: Ctrl+Y on Unix, Ctrl+Shift+C (either letter case) or Command+C everywhere.
 fn is_copy_key(key: &KeyEvent) -> bool {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let command = key.modifiers.contains(KeyModifiers::SUPER);
@@ -57,7 +70,7 @@ fn is_copy_key(key: &KeyEvent) -> bool {
     (command && key.code == KeyCode::Char('c'))
         || (ctrl
             && ((cfg!(unix) && key.code == KeyCode::Char('y') && !shift)
-                || (key.code == KeyCode::Char('c') && shift)))
+                || (matches!(key.code, KeyCode::Char('c' | 'C')) && shift)))
 }
 
 /// The cached text of an active mouse selection (region or bottom bar),
@@ -145,6 +158,10 @@ pub fn handle_priority_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) -
     if handle_copy_key(app, &key) {
         return Some(false);
     }
+    if is_ctrl_backslash(&key) {
+        debug_console::toggle(app, client);
+        return Some(false);
+    }
     if key.modifiers.contains(KeyModifiers::SHIFT) {
         match key.code {
             KeyCode::Up => scroll_chat(app, true, KEY_SCROLL_STEP),
@@ -156,7 +173,7 @@ pub fn handle_priority_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) -
     None
 }
 
-/// Cut the selection or current line: Ctrl+X (Textual TextArea `cut`).
+/// Cut the selection or current line: Ctrl+X.
 fn is_cut_key(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('x')
 }
@@ -211,9 +228,8 @@ fn handle_key_inner(
         return exit;
     }
     app.chat_input.normalize_positions();
-    // The subagent list owns navigation and selection while focused (Python
-    // `SubagentList`); other keys fall through, and the unfocused composer
-    // never edits (Python's TextArea ignores keys without focus).
+    // The subagent list owns navigation and selection while focused; other
+    // keys fall through, and the unfocused composer never edits.
     if app.subagents.list.focused {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let plain = key.modifiers.is_empty();
@@ -238,9 +254,9 @@ fn handle_key_inner(
             _ => return false,
         }
     }
-    // Reaching here the chat input owns the key (Textual `ChatTextArea._on_key`).
+    // Reaching here the chat input owns the key.
     app.chat_input.last_keystroke = Some(std::time::Instant::now());
-    // Ctrl+R toggles voice recording (Python `_handle_voice_key`).
+    // Ctrl+R toggles voice recording.
     if is_ctrl_r(&key) && app.voice.mode_enabled {
         app.toggle_recording();
         return false;
@@ -253,6 +269,21 @@ fn handle_key_inner(
             app.stop_recording();
         }
         return false;
+    }
+    // The debug console never takes focus, so while it is visible the plain
+    // navigation keys scroll its log instead of driving the composer (a
+    // deliberate divergence); the queue selection
+    // and editing modes and the completion popup still own them. A terminal
+    // too narrow or too short for the dock hides the panel while it stays
+    // open, and a hidden console must not take the keys.
+    if app.debug_console.visible
+        && app.queue.selected.is_none()
+        && !completion_manager::is_open(app)
+    {
+        if let Some(intent) = debug_console::scroll_for_key(&key) {
+            debug_console::scroll(app, client, intent);
+            return false;
+        }
     }
     if is_todo_key(&key) {
         app.todo_sidebar.open = !app.todo_sidebar.open;
@@ -369,7 +400,7 @@ fn handle_key_inner(
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        // Python `_try_interrupt` checks the subagent view first.
+        // The subagent view is checked first.
         KeyCode::Esc if app.subagents.viewed_subagent_id.is_some() => {
             app.overlays.last_escape = None;
             subagents::show_main_chat(app, true);
@@ -385,15 +416,15 @@ fn handle_key_inner(
         }
         // Only a docked panel owns Esc; a dropped column must not swallow the interrupt.
         KeyCode::Esc if app.todo_sidebar.close() => {}
-        // Escape while generating interrupts the turn (Python `_interrupt_turn`).
+        // Escape while generating interrupts the turn.
         KeyCode::Esc if matches!(app.session.status, Status::Generating { .. }) => {
             submission::interrupt_turn(app, client);
             app.overlays.last_escape = Some(std::time::Instant::now());
         }
-        // An active narrator stops without arming the double-escape (Python `_try_interrupt_no_job_steps`).
+        // An active narrator stops without arming the double-escape.
         KeyCode::Esc if turn_summary::cancel(app) => {}
         KeyCode::Esc => handle_escape(app, client),
-        // Ctrl+O toggles every tool group and result body (Python `toggle_tool`).
+        // Ctrl+O toggles every tool group and result body.
         KeyCode::Char('o') if ctrl => app.toggle_tools(),
         KeyCode::Up if shift => scroll_chat(app, true, KEY_SCROLL_STEP),
         KeyCode::Down if shift => scroll_chat(app, false, KEY_SCROLL_STEP),
@@ -404,7 +435,7 @@ fn handle_key_inner(
         KeyCode::PageUp if key.modifiers.is_empty() => move_cursor_page(app, false),
         KeyCode::PageDown if key.modifiers.is_empty() => move_cursor_page(app, true),
         // Up/Down move the caret within a multi-line chat input; at the top/bottom
-        // they recall input history (Textual's `_handle_history_{up,down}`).
+        // they recall input history.
         KeyCode::Up => {
             app.chat_input.scroll = None;
             let (target, moved_row) = crate::ui::chat_input::vertical_cursor(app, false);
@@ -422,8 +453,8 @@ fn handle_key_inner(
             let (target, moved_row) = crate::ui::chat_input::vertical_cursor(app, true);
             let history = handle_history_down(app, !moved_row);
             if !history {
-                // Python `NavigateBelow`: focus the subagent list at the Main
-                // row when the caret is on the last wrapped line.
+                // Focus the subagent list at the Main row when the caret is on the last
+                // wrapped line.
                 if !moved_row && subagents::focus_first(app) {
                     return false;
                 }
@@ -443,11 +474,9 @@ fn handle_key_inner(
         KeyCode::Enter
             if completion_manager::active_is_mention(app) && completion_manager::accept(app) => {}
         // A slash completion accepts the highlighted entry (completing e.g.
-        // `/them` to `/theme`) and runs it in the same Enter, like Python's
-        // SlashCommandController returning SUBMIT. With no popup open, accept is
-        // a no-op and the typed text is dispatched as-is.
-        // An agent switch in flight swallows the submit (Python
-        // `ChatInputBody.on_chat_text_area_submitted` returns while switching).
+        // `/them` to `/theme`) and runs it in the same Enter. With no popup open,
+        // accept is a no-op and the typed text is dispatched as-is.
+        // An agent switch in flight swallows the submit.
         KeyCode::Enter if agents::switching(app) => {}
         KeyCode::Enter => {
             if completion_manager::accept(app) {
@@ -466,14 +495,10 @@ fn handle_key_inner(
 }
 
 /// Escape with nothing to interrupt: a second one inside `DOUBLE_ESC_DELAY`
-/// clears a non-empty input, else it enters rewind mode (Python
-/// `_handle_input_double_escape`).
+/// clears a non-empty input, else it enters rewind mode.
 fn handle_escape(app: &mut App, client: &Arc<Client>) {
     let now = std::time::Instant::now();
-    let doubled = app
-        .overlays
-        .last_escape
-        .is_some_and(|at| now.duration_since(at) < rewind::DOUBLE_ESC_DELAY);
+    let doubled = rewind::is_double_escape(app.overlays.last_escape, now);
     app.overlays.last_escape = if doubled { None } else { Some(now) };
     if !doubled {
         return;
@@ -511,11 +536,10 @@ pub fn handle_theme_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
 }
 
 /// Commit the highlighted theme: apply it (a debounced preview may still be
-/// pending), close the picker and persist it via `config/write`, mirroring
-/// Python's `ThemeSelected`.
+/// pending), close the picker and persist it via `config/write`.
 /// The written runtime comes back on the response; re-apply its theme so the UI
 /// reflects the server's config exactly, as Python does.
-fn select_theme(app: &mut App, client: &Arc<Client>) {
+pub(crate) fn select_theme(app: &mut App, client: &Arc<Client>) {
     let theme = theme_picker::selected_name(app).to_string();
     let Some(session_id) = app.session.session_id.clone() else {
         theme_picker::cancel(app);
@@ -544,9 +568,7 @@ fn select_theme(app: &mut App, client: &Arc<Client>) {
     });
 }
 
-/// The `/mcp` browser owns keys while open (Python `MCPApp.BINDINGS`).
-/// The log-level picker owns keys while open. Esc applies rather than cancels,
-/// matching Python's `Binding("escape", "apply")`.
+/// The log-level picker owns keys while open. Esc applies rather than cancels.
 pub fn handle_log_level_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => log_level_picker::apply(app, client),
@@ -581,7 +603,7 @@ pub fn handle_mcp_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     }
 }
 
-/// The connector auth app owns keys while open (Python `ConnectorAuthApp.BINDINGS`).
+/// The connector auth app owns keys while open.
 pub fn handle_connector_auth_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => connector_auth::close(app, client, false),
@@ -593,7 +615,7 @@ pub fn handle_connector_auth_key(app: &mut App, client: &Arc<Client>, key: KeyEv
     }
 }
 
-/// The MCP OAuth app owns keys while open (Python `MCPOAuthApp.BINDINGS`).
+/// The MCP OAuth app owns keys while open.
 pub fn handle_mcp_oauth_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => mcp_oauth::close(app, client),
@@ -607,7 +629,7 @@ pub fn handle_mcp_oauth_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) 
 
 /// The `/model` picker owns keys: arrows/jk navigate, Enter saves to config,
 /// `s` keeps the pick for this session only, Esc cancels.
-/// Unlike the theme picker, navigation does not live-preview (Python `ModelPickerApp`).
+/// Unlike the theme picker, navigation does not live-preview.
 pub fn handle_model_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => model_picker::cancel(app),
@@ -648,8 +670,8 @@ pub(crate) async fn deliver<T>(tx: Option<mpsc::Sender<T>>, event: T, pending: &
 }
 
 /// Up-arrow: intercept for history when the caret is on the first visual row (or
-/// still on a freshly loaded entry). Ports Textual's `_handle_history_up`; returns
-/// true when handled, false to let the caller move the caret up a row instead.
+/// still on a freshly loaded entry). Returns true when handled, false to let
+/// the caller move the caret up a row instead.
 fn handle_history_up(app: &mut App, on_first_row: bool) -> bool {
     let loaded_unmoved =
         app.chat_input.cursor_pos_after_load.is_some() && !app.chat_input.cursor_moved_since_load;
@@ -671,7 +693,7 @@ fn handle_history_up(app: &mut App, on_first_row: bool) -> bool {
 }
 
 /// Down-arrow: intercept for history only while on a loaded entry (unmoved, or on
-/// the last visual row). Ports Textual's `_handle_history_down`.
+/// the last visual row).
 fn handle_history_down(app: &mut App, on_last_row: bool) -> bool {
     let on_loaded = app.chat_input.cursor_pos_after_load.is_some();
     let intercept = on_loaded && (!app.chat_input.cursor_moved_since_load || on_last_row);
@@ -717,7 +739,7 @@ fn recall_next(app: &mut App) {
 }
 
 /// Load a recalled entry: place the caret at the end of its first line and record
-/// the loaded-entry state (Textual's `_load_history_entry`).
+/// the loaded-entry state.
 fn load_history_entry(app: &mut App, entry: String) {
     crate::long_paste::load_collapsed(app, entry);
     crate::composer_paths::rewrite_image_paths(&mut app.chat_input);
@@ -758,7 +780,7 @@ pub(crate) fn reset_history_state(app: &mut App) {
 
 /// Insert a bracketed paste at the cursor as one edit, normalizing CRs; a later
 /// existence probe may turn a pasted path list into mentions as a second edit. A
-/// paste replaces the active selection, like Textual.
+/// paste replaces the active selection.
 pub fn handle_paste(app: &mut App, text: String) {
     if composer_hidden(app) {
         return;
@@ -777,8 +799,8 @@ pub fn handle_paste(app: &mut App, text: String) {
     }
 }
 
-// Deliberate divergence from Python: the hidden composer takes no paste
-// while the list is focused or a child view is open.
+// The hidden composer takes no paste while the list is focused or a child
+// view is open.
 pub(crate) fn composer_hidden(app: &App) -> bool {
     app.subagents.list.focused || app.subagents.viewed_subagent_id.is_some()
 }
@@ -842,14 +864,14 @@ fn handle_paste_inner(app: &mut App, text: &str) -> Option<(usize, String, Vec<S
     })
 }
 
-/// Ctrl+C ladder (Python `action_interrupt_or_quit`); returns true to exit.
+/// Ctrl+C ladder; returns true to exit.
 fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
-    // Python checks the subagent view before touching the input or the queue.
+    // The subagent view is checked before touching the input or the queue.
     if let Some(viewed) = app.subagents.viewed_subagent_id.clone() {
         if app.quit.is_confirmed(QuitConfirmKey::CtrlC) {
             return true;
         }
-        // Python appends a read-only error message instead of quitting.
+        // A read-only error message is appended instead of quitting.
         subagents::append_read_only_message(app, &viewed);
         request_quit_confirmation(app, QuitConfirmKey::CtrlC);
         return false;
@@ -872,7 +894,7 @@ fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
         );
         return false;
     }
-    // Python `_try_interrupt_bottom_app_escape`: reject the approval or cancel the question.
+    // Reject the approval or cancel the question.
     let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
     if app.approval.open {
         crate::approval::handle_key(app, client, esc);
@@ -882,7 +904,7 @@ fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
         question_input::handle_key(app, client, esc);
         return false;
     }
-    // An active narrator stops first; Python's ladder runs it before the queue step.
+    // An active narrator stops first, before the queue step.
     if turn_summary::cancel(app) {
         return false;
     }
@@ -890,7 +912,7 @@ fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
     if message_queue::pop_last(app, client) {
         return false;
     }
-    // Running jobs the loading hint offers to interrupt (Python `_try_interrupt_running_job`).
+    // Running jobs the loading hint offers to interrupt.
     if app.session.shell_operation_id.is_some() {
         crate::commands::shell::interrupt(app, client);
         return false;
@@ -907,8 +929,8 @@ fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
     false
 }
 
-/// Ctrl+D (Python `action_delete_right_or_quit`); returns true to exit. Deletes right
-/// in the main-view input, else quits (on a second press if confirmation is on).
+/// Ctrl+D; returns true to exit. Deletes right in the main-view input, else
+/// quits (on a second press if confirmation is on).
 fn handle_ctrl_d(app: &mut App) -> bool {
     if app.subagents.viewed_subagent_id.is_none() && !app.chat_input.full_text().is_empty() {
         app.chat_input.normalize_positions();

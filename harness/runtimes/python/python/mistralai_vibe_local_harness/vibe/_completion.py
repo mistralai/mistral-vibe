@@ -40,6 +40,7 @@ from mistralai_vibe_local_harness.vibe.adapters._correlation import (
 )
 from mistralai_vibe_local_harness.vibe.adapters._provider_failure import (
     ProviderFailure,
+    ProviderRefusal,
     read_provider_failure,
 )
 from mistralai_vibe_local_harness.vibe.adapters.generic import (
@@ -291,15 +292,20 @@ async def execute_completion(
             raise ValueError(f"Unsupported completion backend: {config.backend}")
     except Exception as exc:
         elapsed_s = time.perf_counter() - started
+        if isinstance(exc, ProviderRefusal) and emitter is not None:
+            # Text streamed before a refusal is not an answer. Withdraw it, as a
+            # retry does, instead of letting the failed turn settle it.
+            await emitter.restart()
         rejection = credential_rejection(read_provider_failure(exc))
         if rejection is None:
-            return _logged_failure(
-                action,
-                _stream_failed_event(
+            failure = (
+                _refusal_event(action, exc, provider=config.provider, route=route)
+                if isinstance(exc, ProviderRefusal)
+                else _stream_failed_event(
                     action, exc, provider=config.provider, route=route
-                ),
-                elapsed_s=elapsed_s,
+                )
             )
+            return _logged_failure(action, failure, elapsed_s=elapsed_s)
         # Tell the credential's owner what the borrower observed, so the
         # material just refused is not re-sent on the next turn.
         await config.credentials.reject(
@@ -489,6 +495,31 @@ def _stream_failed_event(
             message=read_provider_failure(exc).message,
             retryable=False,
             details=_failure_details(action, provider, route, exc),
+        ),
+    )
+
+
+def _refusal_event(
+    action: RustLLMCallAction,
+    refusal: ProviderRefusal,
+    *,
+    provider: str,
+    route: LocalModelRoute,
+) -> RustCompletionFailedEvent:
+    """Fail the call rather than accept an answer the model declined to give.
+
+    Accepting it would make the declined turn part of the conversation that
+    every later request repeats.
+    """
+    details = _failure_details(action, provider, route, refusal)
+    if refusal.category is not None:
+        details["category"] = refusal.category
+    if refusal.explanation is not None:
+        details["explanation"] = refusal.explanation
+    return RustCompletionFailedEvent(
+        action_id=action.action_id,
+        error=RustProtocolError(
+            code="model_refused", message=str(refusal), retryable=False, details=details
         ),
     )
 

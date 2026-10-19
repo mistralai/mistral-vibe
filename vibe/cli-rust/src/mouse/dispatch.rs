@@ -5,14 +5,19 @@ use std::sync::Arc;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc;
 
-use super::MouseTarget;
+use super::{option_gesture, MouseTarget};
 use crate::app::App;
 use crate::config;
-use crate::selection::{self, Release};
+use crate::config_write::Scope;
+use crate::option_list::{Click, MultiAction, OptionList, OptionView, SingleAction};
+use crate::selection::{self, RegionId, Release};
 use crate::server::Client;
 use crate::transcript::grouping::KEY_PREFIX;
 use crate::utils::scroll::ScrollAnchor;
-use crate::{connector_auth, external_url, mcp, mcp_oauth, question_input};
+use crate::{
+    approval, connector_auth, external_url, mcp, mcp_oauth, model_picker, question_input,
+    resume_picker, thinking_picker,
+};
 
 pub(super) fn dispatch(
     app: &mut App,
@@ -26,36 +31,85 @@ pub(super) fn dispatch(
         MouseTarget::Toast => toast_event(app, event),
         MouseTarget::BottomBar => bottom_bar_event(app, event),
         MouseTarget::Loading => loading_event(app, event),
-        MouseTarget::Question => question_input::handle_mouse(app, event),
+        MouseTarget::Question => question_input::handle_mouse(app, client, event),
         MouseTarget::RemoteProject => crate::vibe_code_project::input::mouse(app, client, event),
-        MouseTarget::Mcp => bottom_app_event(app, event, mcp::press, mcp::release),
-        MouseTarget::Plugins => bottom_app_event(
-            app,
-            event,
-            |app, at| crate::plugins::click(app, at, false),
-            |app, at| crate::plugins::click(app, at, true),
-        ),
-        MouseTarget::McpOAuth => bottom_app_event(app, event, mcp_oauth::press, mcp_oauth::release),
+        MouseTarget::Approval => approval::handle_mouse(app, client, event),
+        MouseTarget::Mcp => mcp::mouse(app, event),
+        MouseTarget::Plugins => crate::plugins::mouse(app, event),
+        MouseTarget::McpOAuth => {
+            if picked(app, event, |app| &mut app.mcp_oauth.list) {
+                mcp_oauth::select(app);
+            }
+        }
         MouseTarget::ConnectorAuth => {
-            bottom_app_event(app, event, connector_auth::press, connector_auth::release)
+            if picked(app, event, |app| &mut app.connector_auth.list) {
+                connector_auth::select(app);
+            }
         }
-        MouseTarget::ProxySetup => {
-            bottom_app_event(app, event, crate::proxy_setup::press, |_, _| {})
+        MouseTarget::ModelPicker => {
+            if confirmed(app, event, |app| &mut app.model_picker.list) {
+                model_picker::select(app, client, Scope::Saved);
+            }
         }
-        MouseTarget::BottomApp
-        | MouseTarget::Approval
-        | MouseTarget::ThemePicker
-        | MouseTarget::ModelPicker
-        | MouseTarget::LogLevelPicker
-        | MouseTarget::ResumePicker => bottom_app_event(app, event, |_, _| {}, |_, _| {}),
+        MouseTarget::ThemePicker => {
+            if picked(app, event, |app| &mut app.theme_picker.list) {
+                crate::input::select_theme(app, client);
+            }
+        }
+        MouseTarget::ThinkingPicker => {
+            if confirmed(app, event, |app| &mut app.thinking_picker.list) {
+                let scope = thinking_picker::enter_scope(app);
+                thinking_picker::select(app, client, scope);
+            }
+        }
+        MouseTarget::ResumePicker => {
+            let click = option_gesture(app, event, RegionId::BottomApp, |app| {
+                &mut app.resume_picker.list
+            });
+            if let Some(click) = click {
+                resume_picker::click(app, client, click);
+            }
+        }
+        MouseTarget::ProxySetup => bottom_app_event(app, event, |app, event| {
+            if event.kind == MouseEventKind::Down(MouseButton::Left) {
+                crate::proxy_setup::press(app, (event.column, event.row));
+            }
+        }),
+        MouseTarget::LogLevelPicker => {
+            if picked(app, event, |app| &mut app.log_level_picker.list) {
+                crate::log_level_picker::click(app, (event.column, event.row));
+            }
+        }
+        MouseTarget::BottomApp => bottom_app_event(app, event, |_, _| {}),
         MouseTarget::Trust => crate::trust_folders::handle_mouse(app, event),
-        // The pinned todo line opens the full plan, like Python's row click.
+        // A click on the pinned todo line opens the full plan.
         MouseTarget::TodoRow => {
             if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
                 app.todo_sidebar.open = true;
             }
         }
         MouseTarget::TodoSidebar => {}
+        // The console log body: the wheel scrolls it (loading older pages at
+        // the top) and a click copies the log line. The
+        // router keeps the pressed target wherever the pointer is released,
+        // and `entry_at` matches on the row alone, so the body gates.
+        MouseTarget::DebugConsole => {
+            if !app
+                .debug_console
+                .body_area
+                .contains((event.column, event.row).into())
+            {
+                return;
+            }
+            match event.kind {
+                MouseEventKind::ScrollUp => crate::debug_console::wheel(app, client, true),
+                MouseEventKind::ScrollDown => crate::debug_console::wheel(app, client, false),
+                MouseEventKind::Up(MouseButton::Left) => {
+                    crate::debug_console::copy_entry_at(app, event.row)
+                }
+                _ => {}
+            }
+        }
         MouseTarget::SubagentList => subagent_list_event(app, event),
         MouseTarget::Config | MouseTarget::ConfigEditor => {
             config::handle_mouse(app, client, config_tx, event)
@@ -71,81 +125,89 @@ pub(super) fn dispatch(
     }
 }
 
-/// A bottom-app box: a drag selects its text, and a release on the pressed
-/// cell that selected nothing runs the box's click, so a drag never activates an option.
-fn bottom_app_event(
+/// The scrollable option list a mouse target shows, if any.
+pub(crate) fn option_list(app: &mut App, target: MouseTarget) -> Option<&mut dyn OptionView> {
+    Some(match target {
+        MouseTarget::ThemePicker => &mut app.theme_picker.list,
+        MouseTarget::ModelPicker => &mut app.model_picker.list,
+        MouseTarget::ThinkingPicker => &mut app.thinking_picker.list,
+        MouseTarget::LogLevelPicker => &mut app.log_level_picker.list,
+        MouseTarget::ResumePicker => &mut app.resume_picker.list,
+        MouseTarget::RemoteProject => &mut app.vibe_code_project.list,
+        MouseTarget::Mcp => &mut app.mcp.list,
+        MouseTarget::Plugins => &mut app.plugins.list,
+        MouseTarget::Config => &mut app.config_screen.list,
+        MouseTarget::ConfigEditor => &mut app.config_screen.edit.as_mut()?.list,
+        MouseTarget::Question => &mut app.question_app.list,
+        MouseTarget::SubagentList => &mut app.subagents.list.options,
+        _ => return None,
+    })
+}
+
+/// A completed click on an option of a single-action bottom-app list.
+fn picked(
     app: &mut App,
     event: MouseEvent,
-    press: fn(&mut App, (u16, u16)),
-    release: fn(&mut App, (u16, u16)),
-) {
+    list: fn(&mut App) -> &mut OptionList<SingleAction>,
+) -> bool {
+    option_gesture(app, event, RegionId::BottomApp, list).is_some()
+}
+
+/// A click on the highlighted option of a multi-action bottom-app list.
+fn confirmed(
+    app: &mut App,
+    event: MouseEvent,
+    list: fn(&mut App) -> &mut OptionList<MultiAction>,
+) -> bool {
+    let click = option_gesture(app, event, RegionId::BottomApp, list);
+    matches!(click, Some(Click::Confirm(_)))
+}
+
+/// Drags select text; a press, and a release on the pressed cell, also click.
+fn bottom_app_event(app: &mut App, event: MouseEvent, click: impl FnOnce(&mut App, MouseEvent)) {
     let at = (event.column, event.row);
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            press(app, at);
-            selection::press_owned(app, at, selection::RegionId::BottomApp);
+            click(app, event);
+            selection::press_owned(app, at, RegionId::BottomApp);
         }
         MouseEventKind::Drag(MouseButton::Left) => selection::drag(app, at),
         MouseEventKind::Up(MouseButton::Left) => {
             let same_cell = app.selection.press == Some(at);
             let selected = matches!(selection::release(app), Release::Selected);
             if same_cell && !selected {
-                release(app, at);
+                click(app, event);
             }
         }
         _ => {}
     }
 }
 
-/// The subagent list: hover moves the marker, a click highlights then selects
-/// (Python `on_mouse_move` + OptionList click).
+/// The subagent list: hover moves the marker and a click selects the row.
 fn subagent_list_event(app: &mut App, event: MouseEvent) {
-    let at = (event.column, event.row);
-    let Some(index) = app
+    let index = app
         .subagents
         .list
-        .row_areas
-        .iter()
-        .find(|(area, _)| {
-            at.0 >= area.x && at.0 < area.right() && at.1 >= area.y && at.1 < area.bottom()
-        })
-        .map(|(_, index)| *index)
-    else {
-        if event.kind == MouseEventKind::Moved {
-            app.subagents.list.mouse_session_id = None;
-        }
-        return;
-    };
-    let session_id = if index == 0 {
-        None
-    } else {
-        app.subagents
-            .list
-            .rows
-            .get(index - 1)
-            .map(|row| row.id.clone())
-    };
+        .options
+        .index_at((event.column, event.row));
     match event.kind {
         MouseEventKind::Moved => {
-            app.subagents.list.mouse_session_id =
-                Some(session_id.unwrap_or_else(|| crate::subagents::MAIN_SESSION_ID.to_owned()));
+            app.subagents.list.mouse_session_id = index.map(|index| {
+                crate::subagents::list::session_id_at(app, index)
+                    .unwrap_or_else(|| crate::subagents::MAIN_SESSION_ID.to_owned())
+            });
         }
-        MouseEventKind::Down(MouseButton::Left) => {
+        MouseEventKind::Down(MouseButton::Left) if index.is_some() => {
             app.subagents.list.mouse_session_id = None;
-            app.subagents.list.highlighted = index;
             app.subagents.list.focused = true;
-            app.subagents.list.press_row = Some(index);
             app.set_app_focus(false);
             crate::selection::blur_composer(app);
         }
-        // A click is press then release on the same option (Textual OptionList).
-        MouseEventKind::Up(MouseButton::Left) => {
-            let pressed = app.subagents.list.press_row.take();
-            if pressed == Some(index) {
-                crate::subagents::select(app, session_id);
-            }
-        }
         _ => {}
+    }
+    if let Some(index) = app.subagents.list.options.mouse(event) {
+        let session_id = crate::subagents::list::session_id_at(app, index);
+        crate::subagents::select(app, session_id);
     }
 }
 
@@ -196,12 +258,12 @@ fn selection_event(app: &mut App, target: MouseTarget, event: MouseEvent) {
     let at = (event.column, event.row);
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            // Python keeps the input box enabled while the list is focused, so
-            // clicking the composer hands it focus (Textual widget click).
+            // The input box stays enabled while the list is focused, so
+            // clicking the composer hands it focus.
             if target == MouseTarget::Composer && app.subagents.list.focused {
                 crate::subagents::focus_input(app);
             }
-            // Python keeps the inline notice across a transcript mouse-down
+            // The inline notice survives a transcript mouse-down
             // (it clears only via its own timeout or a queue-mode event).
             app.selection.had_selection_at_press =
                 app.selection.region.is_some() || app.selection.bottom_bar.is_some();
@@ -249,7 +311,7 @@ pub fn toggle_effect_at(app: &mut App, row: u16) {
     else {
         return;
     };
-    // Python `_click_is_passive`: with a selection showing, only the header row toggles.
+    // With a selection showing, only the header row toggles.
     if app.selection.had_selection_at_press && header != Some(row) {
         return;
     }

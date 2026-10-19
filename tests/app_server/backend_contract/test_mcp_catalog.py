@@ -12,7 +12,6 @@ import pytest
 import tomli_w
 
 from tests.app_server.backend_contract.conftest import BackendContractConnection
-from vibe.app_server._legacy_session_backend import LegacySessionBackend
 from vibe.app_server._mcp_auth import MCPAuthenticationService
 from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server._session_backend_port import (
@@ -97,9 +96,8 @@ def backend_contract_mcp_configuration(config_dir: Path, tmp_path: Path) -> None
     config_path.write_text(tomli_w.dumps(config), encoding="utf-8")
 
 
-def _backend_class(experimental_harness: bool) -> BackendWithMCPClass:
-    if not experimental_harness:
-        return LegacySessionBackend
+def _backend_class() -> BackendWithMCPClass:
+
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedHarnessBackendAdapter,
     )
@@ -202,9 +200,9 @@ async def test_mcp_catalog_read_refresh_toggle_remove_and_compatibility_aliases(
 
 @pytest.mark.asyncio
 async def test_mcp_catalog_add_login_logout_aliases_and_notification_order(
-    experimental_harness: bool, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    backend_type = _backend_class(experimental_harness)
+    backend_type = _backend_class()
 
     async def keep_current_state(
         backend: BackendWithMCP, *args: object, **kwargs: object
@@ -232,7 +230,7 @@ async def test_mcp_catalog_add_login_logout_aliases_and_notification_order(
     monkeypatch.setattr(backend_type, "suspend_mcp", keep_current_state)
     monkeypatch.setattr(MCPAuthenticationService, "login", login)
     monkeypatch.setattr(MCPAuthenticationService, "logout", logout)
-    connection = await _connect_recording_client(experimental_harness)
+    connection = await _connect_recording_client()
     session_id: str | None = None
     try:
         started = SessionStartResponse.model_validate(
@@ -308,9 +306,9 @@ async def test_mcp_catalog_add_login_logout_aliases_and_notification_order(
 
 @pytest.mark.asyncio
 async def test_mcp_catalog_auth_required_is_deduplicated_across_backend_events(
-    experimental_harness: bool, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    backend_type = _backend_class(experimental_harness)
+    backend_type = _backend_class()
     original_subscribe = backend_type.subscribe
 
     async def subscribe_twice(
@@ -329,7 +327,7 @@ async def test_mcp_catalog_auth_required_is_deduplicated_across_backend_events(
         )
 
     monkeypatch.setattr(backend_type, "subscribe", subscribe_twice)
-    connection = await _connect_recording_client(experimental_harness)
+    connection = await _connect_recording_client()
     session_id: str | None = None
     try:
         started = SessionStartResponse.model_validate(
@@ -410,16 +408,11 @@ async def test_mcp_login_for_disabled_source_performs_no_runtime_authorization(
 
 @pytest.mark.asyncio
 async def test_sessionless_mcp_mutations_do_not_build_a_session_runtime_and_bootstrap(
-    experimental_harness: bool, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    process = HarnessProcess(
-        experimental_harness=experimental_harness,
-        legacy_harness=not experimental_harness,
-    )
+    process = HarnessProcess()
     build_calls = 0
-    build_name = (
-        "build_unified_session_context" if experimental_harness else "open_root"
-    )
+    build_name = "build_unified_session_context"
     original_build = getattr(process, build_name)
 
     async def tracked_build(*args: object, **kwargs: object):
@@ -445,7 +438,7 @@ async def test_sessionless_mcp_mutations_do_not_build_a_session_runtime_and_boot
     monkeypatch.setattr(process, build_name, tracked_build)
     monkeypatch.setattr(MCPAuthenticationService, "login", login)
     monkeypatch.setattr(MCPAuthenticationService, "logout", logout)
-    connection = await _connect_recording_client(experimental_harness, process=process)
+    connection = await _connect_recording_client(process=process)
     session_id: str | None = None
     try:
         added = MCPAddResponse.model_validate(
@@ -566,11 +559,10 @@ async def test_sessionless_mcp_mutation_conflicts_with_an_active_session(
 async def test_mcp_convergence_failure_preserves_safe_public_state(
     backend_contract_connection: BackendContractConnection,
     backend_contract_session: AppServerSession,
-    experimental_harness: bool,
     monkeypatch: pytest.MonkeyPatch,
     change: str,
 ) -> None:
-    backend_type = _backend_class(experimental_harness)
+    backend_type = _backend_class()
 
     async def fail_convergence(*args: object, **kwargs: object):
         del args, kwargs
@@ -658,19 +650,16 @@ class _RecordingConnection:
                 await self.client.request(
                     "session/stop", SessionStopParams(session_id=session_id)
                 )
-            except (AppServerResponseError, RuntimeError):
+            except AppServerResponseError, RuntimeError:
                 pass
         await self.client.close()
         await self.process.close()
 
 
 async def _connect_recording_client(
-    experimental_harness: bool, *, process: HarnessProcess | None = None
+    *, process: HarnessProcess | None = None
 ) -> _RecordingConnection:
-    effective_process = process or HarnessProcess(
-        experimental_harness=experimental_harness,
-        legacy_harness=not experimental_harness,
-    )
+    effective_process = process or HarnessProcess()
     client_transport, server_transport = memory_transport_pair()
     recording = _RecordingTransport(cast(JsonRpcTransport, client_transport))
     harness = await create_harness_server(

@@ -31,9 +31,9 @@ timeline: Timeline = [
     write_file("greet.py", _CONTENT),
     assistant_msg("Done."),
     turn_completed(),
-    _click(15),
-    _click(16),
-    _click(21),
-    _click(16),
+    _click(11),
+    _click(12),
     _click(17),
+    _click(12),
+    _click(13),
 ]

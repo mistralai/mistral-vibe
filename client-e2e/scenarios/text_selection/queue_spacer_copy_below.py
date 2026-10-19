@@ -6,7 +6,6 @@ from e2e.app_server.events import assistant_msg, turn_started, user_msg
 from e2e.app_server.scenario import Timeline
 
 env = {"VIBE_REPLAY_SETTLE_BUSY": "1", "SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 expected_clipboard = "» Queued\nsecond"
 
 # Drag from a blank row above the queue down to the queued prompt pinned at the bottom.

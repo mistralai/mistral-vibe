@@ -34,15 +34,9 @@ handshake = {
     }
 }
 
-screen_contains = {
-    "python": ("└ attached image: diagram.png",),
-    "rust": ("└ attached image: diagram.png",),
-}
-expected_actions = {
-    "python": [Action("open_url", f"file://{_PATH}")],
-    "rust": [Action("open_url", f"file://{_PATH}")],
-}
-_CLICK_ATTACHMENT = "\x1b[<0;21;13M\x1b[<0;21;13m"
+screen_contains = ("└ attached image: diagram.png",)
+expected_actions = [Action("open_url", f"file://{_PATH}")]
+_CLICK_ATTACHMENT = "\x1b[<0;21;9M\x1b[<0;21;9m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

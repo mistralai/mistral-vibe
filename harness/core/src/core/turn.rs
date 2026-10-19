@@ -21,9 +21,9 @@ use crate::core::features::compaction::{
     CompactionResolution, CompactionStartResolution, PendingCompaction, fail_compaction,
     finish_compaction, start_compaction,
 };
-use crate::core::features::notifications::notification_message;
+use crate::core::features::notifications::notification_messages;
 use crate::core::features::permissions::{ApprovalFailureReason, ApprovalOutcome};
-use crate::core::hooks::{HookPoint, HookResult, KeyedContextMessage};
+use crate::core::hooks::{HookCall, HookPoint, HookResult};
 use crate::core::model_input_budget::estimate_model_input_tokens;
 use crate::core::state::hook_binding_ids;
 use crate::core::state::{
@@ -218,6 +218,7 @@ fn finish_pending_completion(
                 CompactionBudget {
                     token_threshold,
                     image_delivery: state.config.settings.context.image_delivery.agent,
+                    image_cost: state.config.settings.context.image_token_cost,
                 },
             )?;
             apply_compaction_attempt_resolution(state, resolution)
@@ -246,8 +247,8 @@ fn apply_compaction_resolution(
 ) -> Result<Outcome, CoreError> {
     match resolution {
         CompactionResolution::ContinueTurn { outcome } => {
-            // Compaction just ran, so resume the agent completion. Its pre-LLM
-            // hook runs again, and the dispatch seam checks the threshold.
+            // Compaction just ran, so resume with an agent completion without
+            // checking the automatic threshold again.
             state.mark_model_input_ready()?;
             let action = continue_after_compaction(state)?;
             Ok(outcome.after(outcome_for_action(state, action)?))
@@ -399,6 +400,7 @@ fn model_input_reaches_compaction_threshold(state: &HarnessState) -> Result<bool
         state.context.messages(),
         state.resolved_tools.top_level_tools(),
         state.config.settings.context.image_delivery.agent,
+        state.config.settings.context.image_token_cost,
     )?;
     let reported = state.last_reported_context_tokens.unwrap_or(0);
     Ok(estimate.max(reported) >= token_threshold)
@@ -408,7 +410,6 @@ fn start_automatic_compaction(
     state: &mut HarnessState,
     turn_id: &str,
     iterations: u32,
-    context_keys: &[String],
 ) -> Result<CompactionStartResolution, CoreError> {
     let task_id = state.config.task_id.clone();
     let generated_system = state.generated_system_message();
@@ -419,16 +420,18 @@ fn start_automatic_compaction(
         &mut state.compaction_count,
         generated_system,
         &task_id,
-        CompactionRequest::automatic(turn_id, iterations, context_keys),
+        CompactionRequest::automatic(turn_id, iterations),
         &tools,
         CompactionBudgets {
             request: CompactionBudget {
                 token_threshold,
                 image_delivery: state.config.settings.context.image_delivery.compaction,
+                image_cost: state.config.settings.context.image_token_cost,
             },
             replacement: CompactionBudget {
                 token_threshold,
                 image_delivery: state.config.settings.context.image_delivery.agent,
+                image_cost: state.config.settings.context.image_token_cost,
             },
         },
     )
@@ -494,10 +497,12 @@ fn start_manual_compaction(
             request: CompactionBudget {
                 token_threshold,
                 image_delivery: state.config.settings.context.image_delivery.compaction,
+                image_cost: state.config.settings.context.image_token_cost,
             },
             replacement: CompactionBudget {
                 token_threshold,
                 image_delivery: state.config.settings.context.image_delivery.agent,
+                image_cost: state.config.settings.context.image_token_cost,
             },
         },
     )? {
@@ -536,9 +541,35 @@ fn apply_lifecycle_hook_resolution(
     determinism: crate::core::step_protocol::DeterminismContext,
 ) -> Result<Outcome, CoreError> {
     match resolution {
-        HookResolution::RestoreTurn { suspended } => {
-            restore_suspended_turn(state, suspended);
-            Ok(Outcome::quiet())
+        HookResolution::PreAgentSkip {
+            turn_id,
+            content,
+            reason,
+        } => {
+            let mut outcome = Outcome::quiet();
+            outcome.observe(Observation::TurnStarted { turn_id, content });
+            Ok(outcome.after(finish_completed_turn(
+                state,
+                reason,
+                Some(TurnStopReason::Skipped),
+            )?))
+        }
+        HookResolution::PreAgentFailed {
+            turn_id,
+            content,
+            error,
+        } => {
+            let mut outcome = Outcome::quiet();
+            outcome.observe(Observation::TurnStarted { turn_id, content });
+            let completed_turn_id = state.finish_turn(TurnOutcome::Failed {
+                error: error.clone(),
+            })?;
+            outcome.observe(Observation::TurnFailed {
+                turn_id: completed_turn_id.clone(),
+                error: error.clone(),
+            });
+            outcome.complete_turn(completed_turn_id, TurnOutcome::Failed { error });
+            Ok(outcome)
         }
         HookResolution::CommitPreAgentTurn {
             suspended,
@@ -589,22 +620,14 @@ fn apply_completion_transition(
 ) -> Result<Outcome, CoreError> {
     match transition.resolution {
         CompletionResolution::Wait(wait) => {
-            let CompletionWait::LifecycleHook(pending) = *wait;
-            let action =
-                install_active_phase(state, ActivePhase::AwaitingHook { pending: *pending })?;
+            let phase = match *wait {
+                CompletionWait::Completion(plan) => active_phase_for_agent_completion(plan),
+                CompletionWait::LifecycleHook(pending) => {
+                    ActivePhase::AwaitingHook { pending: *pending }
+                }
+            };
+            let action = install_active_phase(state, phase)?;
             outcome_for_action(state, action)
-        }
-        CompletionResolution::ContinueWithContext {
-            context_messages,
-            plan,
-        } => {
-            let context_keys: Vec<String> = context_messages
-                .iter()
-                .map(|message| message.key.clone())
-                .collect();
-            deliver_keyed_context(state, context_messages);
-            let action = install_active_phase(state, active_phase_for_agent_completion(plan))?;
-            outcome_for_agent_dispatch(state, action, &context_keys)
         }
         CompletionResolution::Retry {
             action_id,
@@ -624,19 +647,6 @@ fn apply_completion_transition(
         }
         CompletionResolution::Finish(finish) => apply_completion_finish(state, finish),
         CompletionResolution::Accept(accepted) => apply_accepted_completion(state, accepted),
-    }
-}
-
-/// Appends each keyed hook context whose content changed since its latest delivery.
-fn deliver_keyed_context(state: &mut HarnessState, context_messages: Vec<KeyedContextMessage>) {
-    for KeyedContextMessage { key, content } in context_messages {
-        let message = Message::user(content);
-        if state.context.latest_keyed_message(&key) == Some(&message) {
-            continue;
-        }
-        state
-            .context
-            .push(StoredMessage::keyed_injection(key, message));
     }
 }
 
@@ -851,17 +861,6 @@ fn content_to_user_message(content: Vec<ContentBlock>) -> Result<Message, CoreEr
 }
 
 fn outcome_for_action(state: &mut HarnessState, action: Action) -> Result<Outcome, CoreError> {
-    outcome_for_agent_dispatch(state, action, &[])
-}
-
-/// Dispatches an agent completion after its late model input, or the automatic
-/// compaction that the model input reaches. `context_keys` names the entries of
-/// the current pre-LLM hook result.
-fn outcome_for_agent_dispatch(
-    state: &mut HarnessState,
-    action: Action,
-    context_keys: &[String],
-) -> Result<Outcome, CoreError> {
     let delivers_model_input = matches!(
         &action,
         Action::Completion {
@@ -869,24 +868,61 @@ fn outcome_for_agent_dispatch(
             ..
         }
     );
-    if !delivers_model_input {
+    let precedes_agent_provider_call = delivers_model_input
+        || matches!(
+            &action,
+            Action::Hook {
+                call: HookCall::PreLlmCall,
+                ..
+            }
+        );
+    if !precedes_agent_provider_call {
         return Ok(Outcome::action(action));
     }
-    let mut outcome = Outcome::quiet();
-    let (turn_id, ready, steering) = {
-        let active = state.require_active_mut()?;
-        (
-            active.turn_id.clone(),
-            active.take_model_input_ready(),
-            active.take_pending_steer(),
-        )
-    };
-    if !ready {
-        if !steering.is_empty() {
-            state.require_active_mut()?.pending_steer = steering;
-        }
+    let outcome = if delivers_model_input {
+        commit_pending_model_input(state)?
     } else {
-        for message in &steering {
+        Outcome::quiet()
+    };
+    Ok(outcome.after(preflight_agent_action(state, action)?))
+}
+
+fn commit_pending_model_input(state: &mut HarnessState) -> Result<Outcome, CoreError> {
+    let active = state.require_active_mut()?;
+    if !active.take_model_input_ready() {
+        return Ok(Outcome::quiet());
+    }
+    let turn_id = active.turn_id.clone();
+    let steering = active.take_pending_steer();
+    let steering_count = steering.len();
+    let mut steering = steering.into_iter();
+    let mut notifications = state
+        .notifications
+        .take_ready(state.config.settings.context.notifications.recent_ids)
+        .into_iter()
+        .peekable();
+    let mut outcome = Outcome::quiet();
+    for position in 0..=steering_count {
+        let mut group = Vec::new();
+        while notifications
+            .peek()
+            .is_some_and(|entry| entry.preceding_steers.min(steering_count) <= position)
+        {
+            group.push(
+                notifications
+                    .next()
+                    .expect("notification was inspected")
+                    .notification,
+            );
+        }
+        state.context.extend(notification_messages(&group)?);
+        for notification in group {
+            outcome.observe(Observation::NotificationDelivered {
+                turn_id: turn_id.clone(),
+                notification,
+            });
+        }
+        if let Some(message) = steering.next() {
             let Message::User { content } = &message.message else {
                 return Err(CoreError::invariant(
                     "pending steering must contain visible user messages",
@@ -896,35 +932,20 @@ fn outcome_for_agent_dispatch(
                 turn_id: turn_id.clone(),
                 content: content.clone(),
             });
-        }
-        state.context.extend(steering);
-
-        let notifications = state.notifications.take_ready();
-        if let Some(message) = notification_message(&notifications) {
             state.context.push(message);
         }
-        for notification in notifications {
-            outcome.observe(Observation::NotificationDelivered {
-                turn_id: turn_id.clone(),
-                notification,
-            });
-        }
     }
-    Ok(outcome.after(preflight_agent_action(state, action, context_keys)?))
+    Ok(outcome)
 }
 
-fn preflight_agent_action(
-    state: &mut HarnessState,
-    action: Action,
-    context_keys: &[String],
-) -> Result<Outcome, CoreError> {
+fn preflight_agent_action(state: &mut HarnessState, action: Action) -> Result<Outcome, CoreError> {
     if !model_input_reaches_compaction_threshold(state)? {
         return Ok(Outcome::action(action));
     }
     let active = state.require_active()?;
     let turn_id = active.turn_id.clone();
     let iterations = active.iterations;
-    match start_automatic_compaction(state, &turn_id, iterations, context_keys)? {
+    match start_automatic_compaction(state, &turn_id, iterations)? {
         CompactionStartResolution::Pending(pending) => {
             let action = install_active_phase(state, ActivePhase::AwaitingCompaction { pending })?;
             Ok(Outcome::action(action))
@@ -1026,6 +1047,22 @@ fn commit_turn(
         content,
     });
     state.ensure_system_prompt();
+    // Inputs retained while idle precede the command that starts this Turn.
+    state.notifications.mark_ready();
+    let pending = state
+        .notifications
+        .take_ready(state.config.settings.context.notifications.recent_ids);
+    let notifications = pending
+        .into_iter()
+        .map(|entry| entry.notification)
+        .collect::<Vec<_>>();
+    state.context.extend(notification_messages(&notifications)?);
+    for notification in notifications {
+        outcome.observe(Observation::NotificationDelivered {
+            turn_id: turn_id.clone(),
+            notification,
+        });
+    }
     state.context.extend(turn_messages);
     let phase = next_completion(state)?;
     state.turn = TurnState::Active(ActiveTurn {
@@ -1313,6 +1350,42 @@ mod tests {
 
         assert!(matches!(next.effect, Some(Action::Completion { .. })));
         assert_eq!(next.state.active_turn_id(), Some("turn-2"));
+    }
+
+    /// A queue command can arrive while the pre-agent hook is pending; the
+    /// skip completes its turn and must start the queued turn, not drop it.
+    #[test]
+    fn a_pre_agent_skip_starts_the_queued_follow_up() {
+        let mut config = config();
+        add_always_hook(&mut config, HookPoint::PreAgentTurn);
+        let state = started_with(config);
+        let hook_action_id = awaiting_action_id(&state);
+
+        let queued = advance(
+            state,
+            user_message_for("turn-2", "queued work", UserMessageMode::Queue),
+        )
+        .unwrap();
+        assert_eq!(awaiting_action_id(&queued.state), hook_action_id);
+        assert_eq!(queued_messages(&queued.state).len(), 1);
+
+        let skipped = advance(
+            queued.state,
+            HarnessCommand::HookCompleted {
+                action_id: hook_action_id,
+                result: HookResult::PreAgentTurn(PreAgentTurnOutput::Skip {
+                    reason: vec![ContentBlock::text("disabled by policy".to_string())],
+                }),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            skipped.output(),
+            Some(vec![ContentBlock::text("disabled by policy".to_string())])
+        );
+        assert_eq!(skipped.state.active_turn_id(), Some("turn-2"));
+        assert!(queued_messages(&skipped.state).is_empty());
     }
 
     #[test]

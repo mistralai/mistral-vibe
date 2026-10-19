@@ -1,4 +1,4 @@
-//! The workspace-trust gate (Python `trust_folder_dialog.tcss`).
+//! The workspace-trust gate.
 
 use ratatui::layout::Rect;
 use ratatui::widgets::{Block, Borders};

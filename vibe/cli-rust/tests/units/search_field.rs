@@ -107,7 +107,7 @@ fn config_navigates_with_j_k_and_searches_after_slash() {
     send(&mut app, KeyCode::Char('j'));
     send(&mut app, KeyCode::Char('j'));
     send(&mut app, KeyCode::Char('k'));
-    assert_eq!(app.config_screen.selected, 1);
+    assert_eq!(app.config_screen.list.selected(), 1);
     assert_eq!(app.config_screen.search.query, "", "j/k do not type");
 
     send(&mut app, KeyCode::Char('/'));

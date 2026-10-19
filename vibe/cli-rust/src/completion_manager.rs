@@ -29,7 +29,7 @@ pub fn input_changed(app: &mut App) {
     refresh(app);
 }
 
-/// Close the popup after history recall (Python `_navigating_history`): a recalled slash/`@` entry must not reopen the menu, so the next Up/Down keeps recalling; it reopens on the next real edit.
+/// Close the popup after history recall: a recalled slash/`@` entry must not reopen the menu, so the next Up/Down keeps recalling; it reopens on the next real edit.
 pub fn reset_for_recall(app: &mut App) {
     app.completion.dismissed = true;
     app.completion.entries.clear();
@@ -50,8 +50,8 @@ pub fn refresh(app: &mut App) {
         Some(ActiveCompletion::Skill { start, end }) => skill_entries(app, start, end),
         None => Vec::new(),
     };
-    // Python keeps the highlighted item only across re-renders that leave the
-    // list identical (path_completion `_update_suggestions`); a caret move that
+    // The highlighted item survives only re-renders that leave the
+    // list identical; a caret move that
     // lands on another token rebuilds a different list and restarts at the top.
     if entries != app.completion.entries {
         app.completion.selected = 0;
@@ -207,8 +207,7 @@ fn skill_mention_start(app: &App) -> Option<usize> {
     (mentionable && !command_word && mention).then_some(start)
 }
 
-/// `/help` and `/config` outrank equal matches (Python `_PROMOTED_BOOSTS`,
-/// scaled like `fuzzy::score`, which is 20x the Python score).
+/// `/help` and `/config` outrank equal matches, on the `fuzzy::score` scale.
 fn boost(label: &str) -> i64 {
     match label {
         "/help" => 40,
@@ -218,9 +217,9 @@ fn boost(label: &str) -> i64 {
 }
 
 /// Matching commands, best score first; ties keep the alphabetical entry order
-/// (Python `CommandCompleter._fuzzy_filter`, a stable sort on the score).
+/// (a stable sort on the score).
 fn slash_entries(app: &App) -> Vec<CompletionEntry> {
-    // Python completes on the word up to the caret, not the whole word.
+    // Complete on the word up to the caret, not the whole word.
     let input = &app.chat_input.input;
     let end = crate::chat_input::clamp_offset(input, app.chat_input.cursor);
     let query = input[..end].to_lowercase();

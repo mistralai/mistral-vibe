@@ -10,7 +10,7 @@ _CTRL_G = "\x07"
 env = {"VISUAL": "sh -c 'printf discarded > \"$1\"; exit 1' editor"}
 
 capture_startup = False
-screen_contains = {"rust": ("keep my draft",)}
-screen_excludes = {"rust": ("discarded",)}
+screen_contains = ("keep my draft",)
+screen_excludes = ("discarded",)
 
 timeline: Timeline = ["keep my draft", _CTRL_G]

@@ -209,13 +209,14 @@ pub(super) fn render(
             entry.local,
             entry.group.is_some(),
         ),
-        // Server-owned compaction is represented by `compact_status`; only
-        // client-owned checkpoints render independently.
-        H::Checkpoint(checkpoint) if entry.local => push_checkpoint(
+        H::Checkpoint(checkpoint) => push_checkpoint(
             &mut content,
-            checkpoint.message.as_deref().unwrap_or(&checkpoint.kind),
+            checkpoint,
+            entry.local,
+            in_progress,
+            pulse_frame,
         ),
-        H::Message(_) | H::Checkpoint(_) | H::Unknown => {}
+        H::Message(_) | H::Unknown => {}
     }
     if let Some(group) = &entry.group {
         prefix_group_body(&mut content, group.last);

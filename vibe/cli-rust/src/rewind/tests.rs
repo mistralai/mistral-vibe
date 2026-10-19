@@ -27,11 +27,11 @@ fn navigation_wraps_around_the_current_step() {
     let mut app = App::default();
     selected(&mut app, true);
     navigate(&mut app, true);
-    assert_eq!(app.rewind.selected, 1);
+    assert_eq!(app.rewind.list.selected(), 1);
     navigate(&mut app, true);
-    assert_eq!(app.rewind.selected, 0);
+    assert_eq!(app.rewind.list.selected(), 0);
     navigate(&mut app, false);
-    assert_eq!(app.rewind.selected, 1);
+    assert_eq!(app.rewind.list.selected(), 1);
 }
 
 #[test]
@@ -40,12 +40,12 @@ fn a_new_selection_reopens_on_the_action_step() {
     selected(&mut app, true);
     app.rewind.step = Step::Persistence;
     app.rewind.restore_files = true;
-    app.rewind.selected = 1;
+    app.rewind.list.highlight(1);
     selected(&mut app, true);
     assert!(app.rewind.open);
     assert_eq!(app.rewind.step, Step::Action);
     assert!(!app.rewind.restore_files);
-    assert_eq!(app.rewind.selected, 0);
+    assert_eq!(app.rewind.list.selected(), 0);
     assert_eq!(app.view.scroll_to_entry, Some(0));
 }
 

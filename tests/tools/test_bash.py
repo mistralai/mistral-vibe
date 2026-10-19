@@ -16,7 +16,10 @@ from vibe.core.tools.builtins._shell_command_policy import (
     analyze_shell_command_policy,
     has_option_guardrails,
 )
-from vibe.core.tools.builtins._shell_permission_analysis import analyze_shell_command
+from vibe.core.tools.builtins._shell_permission_analysis import (
+    analyze_shell_command,
+    redirect_writes,
+)
 import vibe.core.tools.builtins.bash as bash_module
 from vibe.core.tools.builtins.bash import (
     Bash,
@@ -1799,6 +1802,35 @@ def _resolve_default_shell_permission(
         config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
     )
     return tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+
+@pytest.mark.parametrize(
+    "command_template",
+    [
+        "cat x#y {outside}",
+        "ls x#y {outside}",
+        "find . -name x#y -o -delete",
+        r"cat x\ #y {outside}",
+        r"cat \"x {outside} \"",
+        r"cat \'x {outside} \'",
+    ],
+)
+def test_legacy_bash_guardrail_sees_the_tokens_git_bash_runs(
+    command_template, tmp_path, monkeypatch
+):
+    # On Windows, legacy bash only judges commands when Git Bash runs them.
+    monkeypatch.setattr(bash_module, "uses_posix_shell", lambda: True)
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside" / "secret.txt"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+
+    permission = _resolve_default_shell_permission(
+        "legacy", command_template.format(outside=outside.as_posix())
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
 
 
 @pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
@@ -3735,3 +3767,135 @@ def test_experimental_bash_standalone_denylisted_with_redirect_not_denied(comman
     assert result.permission is not ToolPermission.NEVER, (
         f"Command with redirect should not be denied: {command!r}"
     )
+
+
+_AGENT = "/Users/me/Library/LaunchAgents/x.plist"
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (f"cat tools/plist.tmpl <workspace>{_AGENT}", ((_AGENT, _AGENT),)),
+        (
+            'echo x > "/Users/me/my notes.txt"',
+            (('"/Users/me/my notes.txt"', "/Users/me/my notes.txt"),),
+        ),
+        ("echo x > '/Users/me/$x'", (("'/Users/me/$x'", "/Users/me/$x"),)),
+        ("make >/dev/null 2> /tmp/err.log", (("/tmp/err.log", "/tmp/err.log"),)),
+        ("echo x >&/var/log/both.log", (("/var/log/both.log", "/var/log/both.log"),)),
+        ("cat <<EOF > /etc/motd\nhi\nEOF", (("/etc/motd", "/etc/motd"),)),
+        (
+            "echo $(echo x > /a/inner) > /a/outer",
+            (("/a/inner", "/a/inner"), ("/a/outer", "/a/outer")),
+        ),
+        ("echo x > /a/out; echo y >> /a/out", (("/a/out", "/a/out"),)),
+        # Only the word after the operator is opened; the rest are arguments.
+        ("echo x > /tmp/a /etc/passwd", (("/tmp/a", "/tmp/a"),)),
+        # From a root, but only the shell can read the spelling.
+        ("echo x > /tmp/$NAME.log", (("/tmp/$NAME.log", None),)),
+        ("echo x > /var/*.log", (("/var/*.log", None),)),
+        ('echo x > /tmp/"a b"', (('/tmp/"a b"', None),)),
+        ("echo x > $'/Users/me/x'", (("$'/Users/me/x'", None),)),
+        ("echo x > $'\\x2fetc/x'", (("$'\\x2fetc/x'", None),)),
+        ("echo x > \\/etc/x", (("\\/etc/x", None),)),
+        # Neither from a root nor relative: only the shell knows where it lands.
+        # zsh expands an unquoted ``=cmd`` to the command's path.
+        ("echo x > =git", (("=git", None),)),
+        ("echo x > >(tee /etc/passwd)", ((">(tee /etc/passwd)", None),)),
+        ("echo x > *.log", (("*.log", None),)),
+        # Relative, ``~`` or expansion-led: moved by what the command sets.
+        ("make > build.log 2>&1", ()),
+        ("echo x >> ~/.zshrc", ()),
+        ("echo x > $OUT/y", ()),
+        ('echo x > "$HOME/y"', ()),
+        ("echo x > out_$(date).log", ()),
+        ("echo x > '=git'", ()),
+        # A POSIX shell reads a drive spelling as a relative path.
+        ("echo x > C:/Users/me/x.ps1", ()),
+        # Reads, streams and descriptors open no file to keep.
+        ("cat < /etc/passwd", ()),
+        ("echo x >&2; echo y >&-", ()),
+        ("echo x > /dev/stderr 2>/dev/null", ()),
+    ],
+)
+def test_redirect_writes_place_only_plainly_spelled_targets_from_a_root(
+    command, expected
+):
+    """A target from a root is placed where the shell can only read it one way.
+    Relative, ``~`` and expansion-led targets, reads, streams and descriptor
+    operations are not listed; every other target is listed unplaced.
+    """
+    writes = redirect_writes(command)
+
+    assert tuple((write.spelling, write.path) for write in writes) == expected
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # Bash joins the lines and opens ``/Users/me/.ssh/authorized_keys``.
+        (
+            "echo x > /Users/me/.ssh/authori\\\nzed_keys",
+            (("/Users/me/.ssh/authori", None),),
+        ),
+        # Bash opens ``/work/space/../../etc/x``.
+        ("echo x > /work/space/\\\n../../etc/x", (("/work/space/", None),)),
+        # Relative too: the parse says nothing certain about any target.
+        ("make \\\n  > build.log", (("build.log", None),)),
+        ("exec 3<> /etc/hosts", (("/etc/hosts", None),)),
+        # A ``$(...)`` inside double quotes is code, continued lines and all.
+        (
+            'echo "$(echo x > /etc/y \\\n z)" > /tmp/q',
+            (("/etc/y", None), ("/tmp/q", None)),
+        ),
+    ],
+)
+def test_no_write_is_placed_in_a_command_not_read_as_the_shell_reads_it(
+    command, expected
+):
+    """After a line continuation in code or a syntax error, the grammar's words
+    are not the shell's, so every write the command makes is listed unplaced.
+    """
+    writes = redirect_writes(command)
+
+    assert tuple((write.spelling, write.path) for write in writes) == expected
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("cat > Dockerfile <<'EOF'\nRUN a \\\n  b\nEOF", ()),
+        ("cat > /tmp/x <<EOF\nline \\\nmore\nEOF", (("/tmp/x", "/tmp/x"),)),
+        ("echo 'a\\\nb' > /tmp/q", (("/tmp/q", "/tmp/q"),)),
+        ("pytest \\\n  -x 2>&1 | tail", ()),
+        ("# note \\\nmake > /tmp/out.log", (("/tmp/out.log", "/tmp/out.log"),)),
+        ('echo "a\\\nb" > /tmp/x', (("/tmp/x", "/tmp/x"),)),
+    ],
+)
+def test_a_continued_line_in_data_or_without_a_write_places_as_usual(command, expected):
+    """A backslash-newline in a heredoc body, quoted text or a comment joins no
+    words of code, and a command that writes no file has nothing to place.
+    """
+    writes = redirect_writes(command)
+
+    assert tuple((write.spelling, write.path) for write in writes) == expected
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("echo x > C:/Users/me/x.ps1", (("C:/Users/me/x.ps1", "C:/Users/me/x.ps1"),)),
+        (
+            "echo x > 'C:\\Users\\me\\x.ps1'",
+            (("'C:\\Users\\me\\x.ps1'", "C:\\Users\\me\\x.ps1"),),
+        ),
+        ("echo x > /c/Users/me/x.ps1", (("/c/Users/me/x.ps1", "/c/Users/me/x.ps1"),)),
+        # Unquoted, Git Bash reads the backslashes as escapes: ``C:Usersmex.ps1``.
+        ("echo x > C:\\Users\\me\\x.ps1", (("C:\\Users\\me\\x.ps1", None),)),
+    ],
+)
+def test_git_bash_also_writes_from_drive_roots(command, expected):
+    """Git Bash opens a drive spelling from that drive's root."""
+    writes = redirect_writes(command, drive_paths=True)
+
+    assert tuple((write.spelling, write.path) for write in writes) == expected

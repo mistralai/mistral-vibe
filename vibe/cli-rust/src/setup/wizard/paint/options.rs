@@ -1,4 +1,4 @@
-//! The shared option-list body (Python `AuthMethodScreen`, `SignInTargetScreen`):
+//! The shared option-list body of the auth-method and sign-in-target screens:
 //! bordered cards with a badge, an "or" divider, a selection marker, and the
 //! navigation hints.
 
@@ -12,7 +12,7 @@ use crate::app::App;
 use crate::hints;
 use crate::ui::theme;
 
-/// Deliberate divergence from Python's "Cancel": Esc goes back one screen everywhere except the welcome screen.
+/// Esc goes back one screen everywhere except the welcome screen.
 const OPTION_HINTS: &[hints::Hint] = &[hints::NAVIGATE, hints::SELECT, hints::BACK];
 
 pub(super) struct Opt {
@@ -47,9 +47,8 @@ pub(super) const TARGET_OPTS: [Opt; 2] = [
 ];
 
 /// Draw a centered option list with title, subtitle, bordered cards, markers,
-/// and an optional warning line under the cards (Python
-/// `#sign-in-target-warning`). The panel only grows when the warning is
-/// armed; without it, both option screens share one rhythm.
+/// and an optional warning line under the cards. The panel only grows when
+/// the warning is armed; without it, both option screens share one rhythm.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw(
     app: &mut App,
@@ -121,7 +120,7 @@ fn wrapped_warning(domain: &str, width: u16) -> Vec<String> {
 }
 
 /// The cards: one 4-row card per option with an "or" divider between them,
-/// stacked inside the row's `area` (Python `.auth-method`).
+/// stacked inside the row's `area`.
 pub(super) fn draw_option_cards(
     f: &mut Frame,
     area: Rect,

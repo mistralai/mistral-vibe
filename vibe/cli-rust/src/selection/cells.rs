@@ -4,7 +4,7 @@ use ratatui::buffer::Buffer;
 
 use crate::utils::input_edit::is_word;
 
-/// True when the cell holds a `\w` char (Python's word-boundary regex).
+/// True when the cell holds a `\w` char (a word character).
 pub fn is_word_cell(buf: &Buffer, x: u16, y: u16) -> bool {
     buf.cell((x, y))
         .and_then(|cell| cell.symbol().chars().next())
@@ -27,7 +27,7 @@ pub fn word_start(buf: &Buffer, mut x0: u16, min: u16, y: u16) -> u16 {
 }
 
 /// Widen the right endpoint to the end of its word, never past `max`; a non-word
-/// cell stays put (Python `_snap_endpoint` only extends from inside a word).
+/// cell stays put (only a word endpoint extends).
 pub fn word_end(buf: &Buffer, mut x1: u16, max: u16, y: u16) -> u16 {
     if is_word_cell(buf, x1, y) {
         while x1 < max && is_word_cell(buf, x1 + 1, y) {

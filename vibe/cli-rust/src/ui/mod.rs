@@ -13,10 +13,12 @@ pub mod config;
 pub mod config_edit;
 mod config_options;
 pub mod connector_auth;
+pub mod debug_console;
 pub mod feedback_bar;
 pub mod highlight;
 pub(crate) mod hint_line;
 pub(crate) mod list_cursor;
+mod list_hover;
 pub mod list_scroll;
 pub mod loading;
 pub mod log_level_picker;
@@ -63,20 +65,24 @@ use ratatui::Frame;
 use crate::app::App;
 use crate::focus::Focus;
 
-/// Lay out the screen and draw every component. Constraints mirror the Python
+/// Lay out the screen and draw every component.
 pub fn draw(app: &mut App, f: &mut Frame) {
     app.chat_input.sync_mentions();
     let area = f.area();
     draw_active_screen(app, f, area);
+    list_hover::paint(app, f);
     // The toast stack is a top-level overlay so warnings show on every screen,
-    // not just the base chat (Python `ToastRack` floats over the whole app).
+    // not just the base chat.
     toast::draw(app, f, toast_anchor(app, area));
 }
 
-/// Anchor the toast stack above the input box when it exists, else near the
-/// bottom of the frame so startup warnings on modal screens stay visible.
+/// Anchor the toast stack above the bottom-app box while one replaces the
+/// input box, else above the input box, else near the bottom of the frame so
+/// startup warnings on modal screens stay visible.
 fn toast_anchor(app: &App, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
-    if app.view.input_area.height > 0 {
+    if let Some((_, box_area)) = app.view.bottom_app {
+        box_area
+    } else if app.view.input_area.height > 0 {
         app.view.input_area
     } else if app.subagents.list.area.height > 0 {
         // A child view hides the input box; the list sits where it was.
@@ -94,13 +100,18 @@ fn draw_active_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect)
         trust_folders::draw(app, f, area);
         return;
     }
-    // Docked, not an overlay: reserving the column first lets bottom-apps reflow into the rest.
+    // Docked, not an overlay: reserving the columns first lets bottom-apps reflow into the rest.
     let (main, sidebar) = todo::split(app, area);
     app.todo_sidebar.visible = sidebar.is_some();
+    let (main, console) = debug_console::split(app, main);
+    app.debug_console.visible = console.is_some();
     draw_session_screen(app, f, main);
     if let Some(sidebar) = sidebar {
         f.buffer_mut().set_style(sidebar, theme::screen_style());
         todo::draw_sidebar(app, f, sidebar);
+    }
+    if let Some(panel) = console {
+        debug_console::draw(app, f, panel);
     }
 }
 
@@ -151,7 +162,7 @@ fn draw_base(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
     // The shared slash-command/file popup sits above the input box.
     completion_popup::reconcile_scroll(app, area.width);
     let popup_height = completion_popup::popup_height(app, area.width);
-    // Python `set_subagent_view`: the input box is hidden while a child is viewed.
+    // The input box is hidden while a child is viewed.
     let input_height = if app.subagents.viewed_subagent_id.is_some() {
         0
     } else {
@@ -169,9 +180,8 @@ fn draw_base(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
     .split(area);
 
     app.view.input_area = chunks[4];
-    // A child view swaps the rendered transcript (Python hides the messages
-    // area and mounts the child's transcript in the same scroll region). The
-    // render cache and the last measured height belong to the transcript:
+    // A child view swaps the rendered transcript in the same scroll region.
+    // The render cache and the last measured height belong to the transcript:
     // their revision streams are independent, so both must follow the swap.
     let viewed_child = app.subagents.viewed_subagent_id.clone();
     let mut swapped = false;
@@ -230,14 +240,14 @@ fn draw_base(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
     selection::loading_region(app, f, chunks[1]);
 }
 
-/// Python's `#loading-area` row, mounted on every screen that keeps it: the
+/// The loading-area row, mounted on every screen that keeps it: the
 /// narrator status, the loading spinner, the inline notice and the feedback
 /// bar, laid out left to right.
 pub(crate) fn draw_loading_area(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
     let notice_width = notice::width(app);
     let feedback_width = feedback_bar::width(app);
-    // Python's `#loading-area` lays the narrator row out before the loading
-    // spinner; zero width while idle keeps the split identical to before.
+    // The narrator row is laid out before the loading spinner; zero width
+    // while idle keeps the split identical to before.
     let loading_chunks = Layout::horizontal([
         Constraint::Length(narrator::width(app)),
         Constraint::Fill(1),

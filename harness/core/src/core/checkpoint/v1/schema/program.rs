@@ -6,6 +6,8 @@ use crate::core::tools::external::{ExternalTool, RuntimeBuiltinToolName};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 pub(in crate::core::checkpoint::v1) enum CheckpointRuntimeBuiltinToolName {
+    #[serde(rename = "self.wait")]
+    SelfWait,
     #[serde(rename = "self.sleep")]
     SelfSleep,
     #[serde(rename = "file_system.read_file")]
@@ -28,6 +30,8 @@ pub(in crate::core::checkpoint::v1) enum CheckpointRuntimeBuiltinToolName {
     ProcessList,
     #[serde(rename = "process.stop")]
     ProcessStop,
+    #[serde(rename = "agents.list_configs")]
+    SubagentListConfigs,
     #[serde(rename = "subagent.list")]
     SubagentList,
     #[serde(rename = "subagent.spawn")]
@@ -45,6 +49,7 @@ pub(in crate::core::checkpoint::v1) enum CheckpointRuntimeBuiltinToolName {
 impl CheckpointRuntimeBuiltinToolName {
     fn capture(name: &RuntimeBuiltinToolName) -> Self {
         match name {
+            RuntimeBuiltinToolName::SelfWait => Self::SelfWait,
             RuntimeBuiltinToolName::SelfSleep => Self::SelfSleep,
             RuntimeBuiltinToolName::FileSystemReadFile => Self::FileSystemReadFile,
             RuntimeBuiltinToolName::FileSystemWriteFile => Self::FileSystemWriteFile,
@@ -56,17 +61,23 @@ impl CheckpointRuntimeBuiltinToolName {
             RuntimeBuiltinToolName::ProcessWrite => Self::ProcessWrite,
             RuntimeBuiltinToolName::ProcessList => Self::ProcessList,
             RuntimeBuiltinToolName::ProcessStop => Self::ProcessStop,
-            RuntimeBuiltinToolName::SubagentList => Self::SubagentList,
-            RuntimeBuiltinToolName::SubagentSpawn => Self::SubagentSpawn,
+            RuntimeBuiltinToolName::SubagentListConfigs => Self::SubagentListConfigs,
+            RuntimeBuiltinToolName::SubagentList
+            | RuntimeBuiltinToolName::DeprecatedSubagentList => Self::SubagentList,
+            RuntimeBuiltinToolName::SubagentSpawn
+            | RuntimeBuiltinToolName::DeprecatedSubagentSpawn => Self::SubagentSpawn,
             RuntimeBuiltinToolName::SubagentWait => Self::SubagentWait,
-            RuntimeBuiltinToolName::SubagentSendMessage => Self::SubagentSendMessage,
-            RuntimeBuiltinToolName::SubagentInterrupt => Self::SubagentInterrupt,
+            RuntimeBuiltinToolName::SubagentSendMessage
+            | RuntimeBuiltinToolName::DeprecatedSubagentSendMessage => Self::SubagentSendMessage,
+            RuntimeBuiltinToolName::SubagentInterrupt
+            | RuntimeBuiltinToolName::DeprecatedSubagentInterrupt => Self::SubagentInterrupt,
             RuntimeBuiltinToolName::SubagentStop => Self::SubagentStop,
         }
     }
 
-    fn restore(self) -> RuntimeBuiltinToolName {
+    fn restore(self, invocation_name: &str) -> RuntimeBuiltinToolName {
         match self {
+            Self::SelfWait => RuntimeBuiltinToolName::SelfWait,
             Self::SelfSleep => RuntimeBuiltinToolName::SelfSleep,
             Self::FileSystemReadFile => RuntimeBuiltinToolName::FileSystemReadFile,
             Self::FileSystemWriteFile => RuntimeBuiltinToolName::FileSystemWriteFile,
@@ -78,9 +89,22 @@ impl CheckpointRuntimeBuiltinToolName {
             Self::ProcessWrite => RuntimeBuiltinToolName::ProcessWrite,
             Self::ProcessList => RuntimeBuiltinToolName::ProcessList,
             Self::ProcessStop => RuntimeBuiltinToolName::ProcessStop,
+            Self::SubagentListConfigs => RuntimeBuiltinToolName::SubagentListConfigs,
+            Self::SubagentList if invocation_name == "agent_list" => {
+                RuntimeBuiltinToolName::DeprecatedSubagentList
+            }
+            Self::SubagentSpawn if invocation_name == "agent_spawn" => {
+                RuntimeBuiltinToolName::DeprecatedSubagentSpawn
+            }
             Self::SubagentList => RuntimeBuiltinToolName::SubagentList,
             Self::SubagentSpawn => RuntimeBuiltinToolName::SubagentSpawn,
             Self::SubagentWait => RuntimeBuiltinToolName::SubagentWait,
+            Self::SubagentSendMessage if invocation_name == "agent_message" => {
+                RuntimeBuiltinToolName::DeprecatedSubagentSendMessage
+            }
+            Self::SubagentInterrupt if invocation_name == "agent_interrupt" => {
+                RuntimeBuiltinToolName::DeprecatedSubagentInterrupt
+            }
             Self::SubagentSendMessage => RuntimeBuiltinToolName::SubagentSendMessage,
             Self::SubagentInterrupt => RuntimeBuiltinToolName::SubagentInterrupt,
             Self::SubagentStop => RuntimeBuiltinToolName::SubagentStop,
@@ -126,7 +150,7 @@ impl CheckpointExternalTool {
     pub(in crate::core::checkpoint::v1) fn restore(self, invocation_name: String) -> ExternalTool {
         match self {
             Self::RuntimeBuiltin { name, arguments } => ExternalTool::RuntimeBuiltin {
-                name: name.restore(),
+                name: name.restore(&invocation_name),
                 invocation_name,
                 arguments,
             },

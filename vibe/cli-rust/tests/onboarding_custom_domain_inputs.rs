@@ -1,5 +1,5 @@
 //! Custom-domain input behavior: seeding, re-entry reset, paste, and the
-//! change-driven feedback row (Python `CustomDomainScreen`).
+//! change-driven feedback row.
 
 #[allow(dead_code)]
 #[path = "onboarding_common/keys.rs"]
@@ -49,7 +49,7 @@ fn entering_the_screen_seeds_the_configured_inputs() {
         state.custom_domain_api.value,
         "https://api.connector.example/api"
     );
-    // Python suppresses feedback for seeded values: no validation state, no
+    // Seeded values get no feedback: no validation state, no
     // colored borders, no submit hint.
     assert!(matches!(
         state.custom_domain.validation,
@@ -70,7 +70,7 @@ fn re_entering_resets_stale_typed_values_to_the_seed() {
     state.custom_domain.value = "my.example".into();
     state.custom_domain.cursor = 9;
     state.custom_domain.validation = ValidationState::Valid;
-    // Esc back to the target, then re-enter (Python re-runs `_reset_input`).
+    // Esc back to the target, then re-enter: the inputs reset.
     screens::handle_key(&mut state, key(KeyCode::Esc));
     assert_eq!(state.screen, Screen::SignInTarget);
     open_custom_domain(&mut state);
@@ -139,12 +139,12 @@ fn tab_switches_focus_without_owning_the_feedback_row() {
     assert_eq!(state.custom_domain_focus, 0);
     assert_eq!(state.custom_domain_feedback, 0);
 
-    // Tab moves the caret but never re-renders the feedback (Python's
-    // feedback is change-driven), so the submit hint stays.
+    // Tab moves the caret but never re-renders the feedback (feedback is
+    // change-driven), so the submit hint stays.
     screens::handle_key(&mut state, key(KeyCode::Tab));
     assert_eq!(state.custom_domain_focus, 1);
     assert_eq!(state.custom_domain_feedback, 0);
-    // Tab wraps: the last input focuses the first again (Textual focus_next).
+    // Tab wraps: the last input focuses the first again.
     screens::handle_key(&mut state, key(KeyCode::Tab));
     assert_eq!(state.custom_domain_focus, 0);
     assert!(matches!(

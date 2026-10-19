@@ -28,8 +28,11 @@ from vibe.core.git.worktree import (
     WorktreeRepository,
 )
 from vibe.core.git.worktree.record import (
+    HOLDERS_DIR_NAME,
+    REMOVING_HOLDER,
     WorktreeClaim,
     WorktreeRecord,
+    WorktreeRecordError,
     managed_bucket_name,
 )
 import vibe.core.git.worktree.repository as worktree_module
@@ -1322,7 +1325,7 @@ def test_concurrent_restore_keeps_the_completed_claim(
     _claim(repo, worktree.name).finish_starting()
 
 
-def test_prune_keeps_a_worktree_when_restore_starts_during_snapshot(
+def test_prune_excludes_restore_during_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _init_repo(tmp_path / "repo")
@@ -1332,16 +1335,16 @@ def test_prune_keeps_a_worktree_when_restore_starts_during_snapshot(
     snapshot = PreparedWorktree.snapshot
 
     def start_restore_during_snapshot(prepared: PreparedWorktree) -> str:
-        claim.mark_starting()
+        with pytest.raises(WorktreeRecordError, match="being removed"):
+            claim.mark_starting()
         return snapshot(prepared)
 
     monkeypatch.setattr(PreparedWorktree, "snapshot", start_restore_during_snapshot)
 
-    assert ManagedWorktree.prune(limit=0) == 0
-    assert worktree.root.is_dir()
-    assert claim.read() is not None
-    assert claim.read_recovery() is None
-    claim.finish_starting()
+    assert ManagedWorktree.prune(limit=0) == 1
+    assert not worktree.root.exists()
+    assert claim.read() is None
+    assert claim.read_recovery() is not None
 
 
 def test_restore_waits_for_in_flight_prune(
@@ -1520,7 +1523,7 @@ def test_prune_applies_the_limit_across_repositories(tmp_path: Path) -> None:
     assert newest.root.is_dir()
 
 
-def test_release_keeps_a_worktree_claimed_while_it_was_inspected(
+def test_release_refuses_a_new_holder_while_inspecting_for_removal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _init_repo(tmp_path)
@@ -1529,65 +1532,189 @@ def test_release_keeps_a_worktree_claimed_while_it_was_inspected(
     inspect = PreparedWorktree.inspect_for_cleanup
 
     def join_during_inspection(prepared: Any) -> Any:
-        # A second session in another process lands between the holder check
-        # and the removal.
-        _hold(worktree.root, "session-b")
+        with pytest.raises(WorktreeError, match="being removed"):
+            _hold(worktree.root, "session-b")
         return inspect(prepared)
 
     monkeypatch.setattr(PreparedWorktree, "inspect_for_cleanup", join_during_inspection)
 
     release = _release(worktree.root, "session-a")
 
-    assert release.outcome is WorktreeReleaseOutcome.KEPT_IN_USE
-    assert worktree.root.is_dir()
-    assert worktree.branch in (head.name for head in repo.heads)
+    assert release.outcome is WorktreeReleaseOutcome.REMOVED
+    assert not worktree.root.exists()
+    assert worktree.branch not in (head.name for head in repo.heads)
 
 
-def test_reap_snapshots_a_clean_worktree_before_removal(tmp_path: Path) -> None:
-    """*Prepare*: A finished, clean managed worktree.
-    *Do*: Reap that exact worktree.
-    *Assert*: Its complete Git state remains reachable from the hidden snapshot ref.
+def _join(cwd: Path, session_dir: Path) -> None:
+    """A session that worked in the worktree and has since closed."""
+    managed = ManagedWorktree.at(cwd)
+    assert managed is not None
+    managed.hold(session_dir.name, session_dir=session_dir)
+    managed.release_holder(session_dir.name)
+
+
+def _trash_entries() -> list[Path]:
+    trash = WorktreeClaim.trash_root()
+    return list(trash.iterdir()) if trash.is_dir() else []
+
+
+def test_a_worktree_is_reaped_once_every_session_that_worked_in_it_is_finished(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: Two sessions worked in one worktree; only one is archived.
+    *Do*: Reap it, then archive the second session and reap again.
+    *Assert*: It is kept until both are finished, then its state is saved and
+    the worktree, its branch and its trash are gone.
     """
     # Prepare
     repo = _init_repo(tmp_path)
-    worktree = _prepare_auto(tmp_path, suggested_name="archived-session")
+    worktree = _prepare_auto(tmp_path, suggested_name="shared")
+    first, second = tmp_path / "session-a", tmp_path / "session-b"
+    _join(worktree.root, first)
+    _join(worktree.root, second)
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    finished = {first}
+
+    # Do
+    kept = managed.reap_if_finished(finished.__contains__)
+
+    # Assert
+    assert kept is None
+    assert worktree.root.is_dir()
+
+    # Do
+    finished.add(second)
+    release = managed.reap_if_finished(finished.__contains__)
+
+    # Assert
+    assert release is not None
+    assert release.outcome is WorktreeReleaseOutcome.REMOVED
+    assert release.snapshot_ref == f"{SNAPSHOT_REF_PREFIX}/{worktree.name}"
+    saved = repo.commit(release.snapshot_ref)
+    assert saved.tree["file.txt"].data_stream.read() == b"hello\n"
+    assert not worktree.root.exists()
+    assert worktree.branch not in (head.name for head in repo.heads)
+    assert str(worktree.root) not in repo.git.worktree("list")
+    assert _trash_entries() == []
+    assert managed.claim.read() is None
+
+
+def test_a_worktree_no_session_worked_in_is_not_reaped(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="never-joined")
     _finish_starts(worktree)
     managed = ManagedWorktree.at(worktree.root)
     assert managed is not None
 
-    # Do
-    release = managed.reap()
+    assert managed.reap_if_finished(lambda _dir: True) is None
+    assert worktree.root.is_dir()
 
-    # Assert
+
+def _request_removal_like_an_older_version(managed: ManagedWorktree) -> None:
+    record = managed.claim.read()
+    assert record is not None
+    managed.claim.write(record.model_copy(update={"reap_requested": True}))
+
+
+def test_a_removal_an_older_version_requested_is_honoured(tmp_path: Path) -> None:
+    """*Prepare*: A worktree an older Vibe asked to remove before upgrading,
+    which records no sessions.
+    *Do*: Reap it.
+    *Assert*: It is removed, as the older version would have.
+    """
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="older-request")
+    _finish_starts(worktree)
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    _request_removal_like_an_older_version(managed)
+
+    release = managed.reap_if_finished(lambda _dir: False)
+
+    assert release is not None
     assert release.outcome is WorktreeReleaseOutcome.REMOVED
-    assert release.snapshot_ref == f"{SNAPSHOT_REF_PREFIX}/{worktree.name}"
-    assert not worktree.root.exists()
-    saved = repo.commit(release.snapshot_ref)
-    assert saved.tree["file.txt"].data_stream.read() == b"hello\n"
+    assert ManagedWorktree.joined() == ()
+
+
+def test_a_session_resuming_withdraws_an_older_versions_request(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="resumed")
+    _finish_starts(worktree)
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    _request_removal_like_an_older_version(managed)
+
+    _join(worktree.root, tmp_path / "session-a")
+
+    assert managed.reap_if_finished(lambda _dir: False) is None
+    assert worktree.root.is_dir()
+
+
+def test_a_session_joins_a_worktree_once(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="joined")
+    session_dir = tmp_path / "session-a"
+
+    _join(worktree.root, session_dir)
+    _join(worktree.root, session_dir)
+
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    record = managed.claim.read()
+    assert record is not None
+    assert record.session_dirs == {session_dir}
+    assert ManagedWorktree.joined() == (managed,)
+
+
+def test_a_failed_join_leaves_the_worktree_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A start left marked, or a hold left taken, would keep the worktree
+    from ever being pruned.
+    """
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="join-fails")
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    assert managed.claim.is_starting()
+
+    def fail(_self: ManagedWorktree, _session_dir: Path) -> None:
+        raise OSError("record unwritable")
+
+    monkeypatch.setattr(ManagedWorktree, "_join", fail)
+
+    with pytest.raises(OSError, match="record unwritable"):
+        managed.hold("session-a", session_dir=tmp_path / "session-a")
+
+    assert not managed.claim.is_starting()
+    assert managed.holders() == frozenset()
 
 
 def test_reap_keeps_a_held_worktree(tmp_path: Path) -> None:
-    """*Prepare*: A managed worktree held by a running session.
-    *Do*: Request targeted reaping.
-    *Assert*: The worktree remains until its holder is released.
+    """*Prepare*: An archived session still running in its worktree.
+    *Do*: Reap it, then release the session and reap again.
+    *Assert*: It is kept while held and removed once released.
     """
     # Prepare
     _init_repo(tmp_path)
     worktree = _prepare_auto(tmp_path, suggested_name="running-session")
-    _hold(worktree.root, "session-a")
+    session_dir = tmp_path / "session-a"
     managed = ManagedWorktree.at(worktree.root)
     assert managed is not None
+    managed.hold("session-a", session_dir=session_dir)
 
     # Do
-    release = managed.reap()
+    release = managed.reap_if_finished(lambda _dir: True)
 
     # Assert
+    assert release is not None
     assert release.outcome is WorktreeReleaseOutcome.KEPT_IN_USE
     assert worktree.root.is_dir()
 
     # Do
     managed.release_holder("session-a")
-    completed = managed.reap_if_requested()
+    completed = managed.reap_if_finished(lambda _dir: True)
 
     # Assert
     assert completed is not None
@@ -1595,155 +1722,377 @@ def test_reap_keeps_a_held_worktree(tmp_path: Path) -> None:
     assert not worktree.root.exists()
 
 
-def test_cancel_reap_keeps_the_worktree_after_its_holder_exits(tmp_path: Path) -> None:
-    """*Prepare*: A held worktree with a pending reap request.
-    *Do*: Cancel the request before releasing its holder.
-    *Assert*: Holder release does not snapshot or remove the worktree.
-    """
-    # Prepare
-    _init_repo(tmp_path)
-    worktree = _prepare_auto(tmp_path, suggested_name="restored-session")
-    _hold(worktree.root, "session-a")
-    managed = ManagedWorktree.at(worktree.root)
-    assert managed is not None
-    assert managed.reap().outcome is WorktreeReleaseOutcome.KEPT_IN_USE
-
-    # Do
-    managed.cancel_reap()
-    managed.release_holder("session-a")
-
-    # Assert
-    assert managed.reap_if_requested() is None
-    assert worktree.root.is_dir()
-
-
-def test_cancelled_reap_request_cannot_be_reactivated_by_delayed_work(
-    tmp_path: Path,
-) -> None:
-    """*Prepare*: An unarchive cancels an identified reap before it starts.
-    *Do*: The delayed archive request reaches the worktree afterwards.
-    *Assert*: The cancelled request cannot restore the pending reap or remove it.
-    """
-    # Prepare
-    _init_repo(tmp_path)
-    worktree = _prepare_auto(tmp_path, suggested_name="cancelled-before-reap")
-    _finish_starts(worktree)
-    managed = ManagedWorktree.at(worktree.root)
-    assert managed is not None
-    managed.cancel_reap(requester_id="session-a", request_id="request-a")
-
-    # Do
-    release = managed.reap(requester_id="session-a", request_id="request-a")
-
-    # Assert
-    assert release.outcome is WorktreeReleaseOutcome.KEPT_CANCELLED
-    record = managed.claim.read()
-    assert record is not None
-    assert record.reap_requested is False
-    assert worktree.root.is_dir()
-
-
-def test_cancel_reap_without_a_persisted_request_is_a_noop(tmp_path: Path) -> None:
-    """An unarchive can predate cleanup and therefore have no reap to cancel."""
-    _init_repo(tmp_path)
-    worktree = _prepare_auto(tmp_path, suggested_name="archived-before-cleanup")
-    _finish_starts(worktree)
-    managed = ManagedWorktree.at(worktree.root)
-    assert managed is not None
-    before = managed.claim.read()
-
-    managed.cancel_reap(requester_id="session-a")
-
-    assert managed.claim.read() == before
-    assert worktree.root.is_dir()
-
-
-def test_cancel_reap_preserves_another_sessions_request(tmp_path: Path) -> None:
-    """*Prepare*: Two archived sessions request one held worktree's removal.
-    *Do*: Restore one session and cancel only its request.
-    *Assert*: The other archived session keeps the persisted reap active.
-    """
-    # Prepare
-    _init_repo(tmp_path)
-    worktree = _prepare_auto(tmp_path, suggested_name="shared-archive")
-    _hold(worktree.root, "holder")
-    managed = ManagedWorktree.at(worktree.root)
-    assert managed is not None
-    assert (
-        managed.reap(requester_id="session-a", request_id="request-a").outcome
-        is WorktreeReleaseOutcome.KEPT_IN_USE
-    )
-    assert (
-        managed.reap(requester_id="session-b", request_id="request-b").outcome
-        is WorktreeReleaseOutcome.KEPT_IN_USE
-    )
-
-    # Do
-    managed.cancel_reap(requester_id="session-a", request_id="request-a")
-
-    # Assert
-    record = managed.claim.read()
-    assert record is not None
-    assert record.reap_requested is True
-    assert record.reap_requests == {"session-b": "request-b"}
-
-
-def test_cancel_during_reap_snapshot_keeps_the_worktree(
+def test_a_session_unarchived_during_the_snapshot_keeps_the_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """*Prepare*: A reap is snapshotting an unheld managed worktree.
-    *Do*: Unarchive cancels that request before removal.
-    *Assert*: The final persisted-state check keeps the restored worktree.
+    """*Prepare*: An archived session's worktree whose reap is snapshotting.
+    *Do*: The session is unarchived during the snapshot.
+    *Assert*: The check before the move sees it and keeps the worktree whole.
     """
     # Prepare
     _init_repo(tmp_path)
-    worktree = _prepare_auto(tmp_path, suggested_name="cancel-during-snapshot")
-    _finish_starts(worktree)
+    worktree = _prepare_auto(tmp_path, suggested_name="unarchived")
+    session_dir = tmp_path / "session-a"
+    _join(worktree.root, session_dir)
     managed = ManagedWorktree.at(worktree.root)
     assert managed is not None
+    archived = {session_dir}
     snapshot = PreparedWorktree.snapshot
 
-    def cancel_after_snapshot(prepared: PreparedWorktree) -> str:
-        snapshot_ref = snapshot(prepared)
-        managed.cancel_reap(requester_id="session-a", request_id="request-a")
-        return snapshot_ref
+    def unarchive_during_snapshot(prepared: PreparedWorktree) -> str:
+        archived.clear()
+        return snapshot(prepared)
 
-    monkeypatch.setattr(PreparedWorktree, "snapshot", cancel_after_snapshot)
+    monkeypatch.setattr(PreparedWorktree, "snapshot", unarchive_during_snapshot)
 
     # Do
-    release = managed.reap(requester_id="session-a", request_id="request-a")
+    release = managed.reap_if_finished(archived.__contains__)
 
     # Assert
+    assert release is not None
     assert release.outcome is WorktreeReleaseOutcome.KEPT_CANCELLED
-    record = managed.claim.read()
-    assert record is not None
-    assert record.reap_requested is False
     assert worktree.root.is_dir()
+    assert managed.claim.read() is not None
+    assert managed.claim.read_recovery() is None
 
 
-def test_prune_completes_a_pending_reap_below_the_retention_limit(
-    tmp_path: Path,
+def test_a_worktree_that_cannot_be_moved_is_kept_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """*Prepare*: An unheld worktree whose reap request survived a process restart.
-    *Do*: Run retention cleanup while the worktree count is below the limit.
-    *Assert*: The explicit reap still snapshots and removes the worktree.
+    """*Prepare*: An archived session's worktree that another program has a
+    file open in, so it cannot be moved, as on Windows.
+    *Do*: Reap it.
+    *Assert*: The reap fails with nothing touched: the checkout, its branch,
+    its claim are as they were, and no recovery points at a removal.
     """
     # Prepare
     repo = _init_repo(tmp_path)
-    worktree = _prepare_auto(tmp_path, suggested_name="pending-reap")
-    _hold(worktree.root, "session-a")
+    worktree = _prepare_auto(tmp_path, suggested_name="locked")
+    _join(worktree.root, tmp_path / "session-a")
     managed = ManagedWorktree.at(worktree.root)
     assert managed is not None
-    assert managed.reap().outcome is WorktreeReleaseOutcome.KEPT_IN_USE
-    managed.release_holder("session-a")
+
+    def refuse(self: Path, target: Path) -> Path:
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(Path, "rename", refuse)
 
     # Do
-    removed = ManagedWorktree.prune(limit=10)
+    with pytest.raises(PermissionError):
+        managed.reap_if_finished(lambda _dir: True)
 
     # Assert
+    assert (worktree.root / "file.txt").read_text() == "hello\n"
+    assert worktree.branch in (head.name for head in repo.heads)
+    assert str(worktree.root) in repo.git.worktree("list")
+    assert managed.claim.read() is not None
+    assert managed.claim.read_recovery() is None
+    assert _trash_entries() == []
+
+
+def test_a_removal_interrupted_after_the_move_keeps_its_first_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A reap that dies right after moving the worktree to the trash.
+    *Do*: Reap again, as the next process would.
+    *Assert*: Nothing is snapshotted twice: the saved work is the first
+    snapshot's, the claim is cleared and the trash is emptied.
+    """
+    # Prepare
+    repo = _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="interrupted")
+    (worktree.root / "work.txt").write_text("unsaved\n")
+    _join(worktree.root, tmp_path / "session-a")
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    forget = worktree_module._forget_checkout
+
+    def die_after_the_move(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("process killed")
+
+    monkeypatch.setattr(worktree_module, "_forget_checkout", die_after_the_move)
+    with pytest.raises(RuntimeError):
+        managed.reap_if_finished(lambda _dir: True)
+    saved = repo.commit(f"{SNAPSHOT_REF_PREFIX}/{worktree.name}").hexsha
+    monkeypatch.setattr(worktree_module, "_forget_checkout", forget)
+    snapshots: list[str] = []
+    snapshot = PreparedWorktree.snapshot
+
+    def counted_snapshot(prepared: PreparedWorktree) -> str:
+        snapshots.append(prepared.name)
+        return snapshot(prepared)
+
+    monkeypatch.setattr(PreparedWorktree, "snapshot", counted_snapshot)
+
+    # Do
+    release = managed.reap_if_finished(lambda _dir: True)
+
+    # Assert
+    assert release is not None
+    assert release.outcome is WorktreeReleaseOutcome.NOT_FOUND
+    assert snapshots == []
+    assert repo.commit(f"{SNAPSHOT_REF_PREFIX}/{worktree.name}").hexsha == saved
+    assert managed.claim.read() is None
+    ManagedWorktree.empty_trash()
+    assert _trash_entries() == []
+
+
+def test_a_retry_finishes_forgetting_a_checkout_git_could_not_forget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A reap whose deletion of Git's record of the worktree fails
+    once, after the checkout was moved to the trash.
+    *Do*: Reap again.
+    *Assert*: Git no longer lists the worktree, its branch is deleted and the
+    claim is cleared.
+    """
+    # Prepare
+    repo = _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="admin-locked")
+    _join(worktree.root, tmp_path / "session-a")
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    rmtree = shutil.rmtree
+
+    def fail_once(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path).parent.name != "worktrees":
+            return rmtree(path, *args, **kwargs)
+        monkeypatch.setattr(shutil, "rmtree", rmtree)
+        raise PermissionError("index in use")
+
+    monkeypatch.setattr(shutil, "rmtree", fail_once)
+    with pytest.raises(PermissionError):
+        managed.reap_if_finished(lambda _dir: True)
+    assert not worktree.root.exists()
+
+    # Do
+    release = managed.reap_if_finished(lambda _dir: True)
+
+    # Assert
+    assert release is not None
+    assert release.outcome is WorktreeReleaseOutcome.NOT_FOUND
+    assert "prunable" not in repo.git.worktree("list", "--porcelain")
+    assert worktree.branch not in (head.name for head in repo.heads)
+    assert managed.claim.read() is None
+
+
+def test_trash_left_by_an_interrupted_delete_is_emptied_by_the_next_prune(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A reap whose deletion of the moved worktree fails.
+    *Do*: Run retention cleanup.
+    *Assert*: The worktree was gone at once, and the leftover is deleted.
+    """
+    # Prepare
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="slow-delete")
+    _join(worktree.root, tmp_path / "session-a")
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    rmtree = shutil.rmtree
+
+    def fail_once(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path).parent != WorktreeClaim.trash_root():
+            return rmtree(path, *args, **kwargs)
+        monkeypatch.setattr(shutil, "rmtree", rmtree)
+        raise OSError("file in use")
+
+    monkeypatch.setattr(shutil, "rmtree", fail_once)
+    release = managed.reap_if_finished(lambda _dir: True)
+    assert release is not None
+    assert release.outcome is WorktreeReleaseOutcome.REMOVED
+    assert not worktree.root.exists()
+    assert len(_trash_entries()) == 1
+
+    # Do
+    ManagedWorktree.prune(limit=10)
+
+    # Assert
+    assert _trash_entries() == []
+
+
+def test_reap_snapshots_a_clean_worktree_before_removal(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="archived-session")
+    _join(worktree.root, tmp_path / "session-a")
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+
+    release = managed.reap_if_finished(lambda _dir: True)
+
+    assert release is not None
+    assert release.outcome is WorktreeReleaseOutcome.REMOVED
+    assert release.snapshot_ref is not None
+    assert repo.commit(release.snapshot_ref)
+
+
+@contextmanager
+def held_snapshot(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Event, list[str]]]:
+    """Stop every snapshot until the test lets the first one through.
+
+    Yields the event set once a snapshot has started, and the names of the
+    worktrees snapshotted so far.
+    """
+    snapshot = PreparedWorktree.snapshot
+    started = Event()
+    release = Event()
+    snapshotted: list[str] = []
+
+    def stopped_snapshot(prepared: PreparedWorktree) -> str:
+        snapshotted.append(prepared.name)
+        started.set()
+        release.wait(timeout=30)
+        return snapshot(prepared)
+
+    monkeypatch.setattr(PreparedWorktree, "snapshot", stopped_snapshot)
+    try:
+        yield started, snapshotted
+    finally:
+        release.set()
+
+
+def test_a_worktree_being_removed_is_in_use_for_a_second_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: An archived session's worktree whose reap is stopped mid-snapshot.
+    *Do*: Reap it again, then force-remove it, while the first reap runs.
+    *Assert*: Both report the worktree in use without touching it, and the
+    first reap removes it and keeps its recovery snapshot.
+    """
+    # Prepare
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="archived-session")
+    _join(worktree.root, tmp_path / "session-a")
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+
+    def finished(_dir: Path) -> bool:
+        return True
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with held_snapshot(monkeypatch) as (snapshot_started, snapshotted):
+            first = pool.submit(managed.reap_if_finished, finished)
+            assert snapshot_started.wait(timeout=10)
+
+            # Do
+            second_reap = managed.reap_if_finished(finished)
+            forced = managed.force_release()
+
+            # Assert
+            assert second_reap is not None
+            assert second_reap.outcome is WorktreeReleaseOutcome.KEPT_IN_USE
+            assert forced.outcome is WorktreeReleaseOutcome.KEPT_IN_USE
+            assert snapshotted == [worktree.name]
+            assert worktree.root.is_dir()
+
+        first_release = first.result(timeout=30)
+    assert first_release is not None
+    assert first_release.outcome is WorktreeReleaseOutcome.REMOVED
+    assert not worktree.root.exists()
+    recovery = managed.claim.read_recovery()
+    assert recovery is not None
+    assert recovery.snapshot_ref == first_release.snapshot_ref
+
+
+def test_attaching_during_removal_cannot_join_the_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="attaching")
+    _join(worktree.root, tmp_path / "session-a")
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with held_snapshot(monkeypatch) as (snapshot_started, _):
+            removal = pool.submit(managed.reap_if_finished, lambda _dir: True)
+            assert snapshot_started.wait(timeout=10)
+            with pytest.raises(WorktreeError, match="being removed"):
+                managed.hold_for_attachment()
+            with pytest.raises(WorktreeError, match="being removed"):
+                managed.hold("late-session")
+            assert managed.holders() == frozenset()
+            assert worktree.root.is_dir()
+        result = removal.result(timeout=30)
+        assert result is not None
+        assert result.outcome is WorktreeReleaseOutcome.REMOVED
+    assert not worktree.root.exists()
+    assert managed.holders() == frozenset()
+
+
+def test_a_removal_left_by_a_dead_process_does_not_block_the_next_one(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: An archived session's worktree with a removal marker that no
+    live process holds, as a crash during a removal leaves it.
+    *Do*: Reap the worktree.
+    *Assert*: The stale marker is discarded and the worktree is removed.
+    """
+    # Prepare
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="crashed-removal")
+    _join(worktree.root, tmp_path / "session-a")
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    stale_marker = managed.claim.directory / HOLDERS_DIR_NAME / REMOVING_HOLDER
+    stale_marker.parent.mkdir(parents=True, exist_ok=True)
+    stale_marker.touch()
+
+    # Do
+    release = managed.reap_if_finished(lambda _dir: True)
+
+    # Assert
+    assert release is not None
+    assert release.outcome is WorktreeReleaseOutcome.REMOVED
+    assert not worktree.root.exists()
+
+
+def test_prune_applies_the_limit_to_a_worktree_whose_sessions_are_not_finished(
+    tmp_path: Path,
+) -> None:
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="active")
+    _join(worktree.root, tmp_path / "session-a")
+
+    removed = ManagedWorktree.prune(0, session_finished=lambda _dir: False)
+
     assert removed == 1
     assert not worktree.root.exists()
-    assert repo.commit(f"{SNAPSHOT_REF_PREFIX}/{worktree.name}")
+
+
+def test_prune_leaves_an_archived_worktree_to_the_cleanup_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prune holds the lock every session start needs, so it must not spend
+    an archived worktree's snapshot under it.
+    """
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="archived")
+    _join(worktree.root, tmp_path / "session-a")
+    snapshots: list[str] = []
+    monkeypatch.setattr(
+        PreparedWorktree, "snapshot", lambda prepared: snapshots.append(prepared.name)
+    )
+
+    removed = ManagedWorktree.prune(limit=0, session_finished=lambda _dir: True)
+
+    assert removed == 0
+    assert snapshots == []
+    assert worktree.root.is_dir()
+
+
+def test_the_limit_does_not_count_a_worktree_about_to_be_reaped(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    archived = _prepare_auto(tmp_path, suggested_name="archived")
+    _join(archived.root, tmp_path / "session-a")
+    active = _prepare_auto(tmp_path, suggested_name="active")
+    _join(active.root, tmp_path / "session-b")
+    finished = {tmp_path / "session-a"}
+
+    removed = ManagedWorktree.prune(limit=1, session_finished=finished.__contains__)
+
+    assert removed == 0
+    assert active.root.is_dir()
 
 
 def test_remove_worktree_does_not_change_the_process_directory(

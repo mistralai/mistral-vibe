@@ -1,4 +1,4 @@
-//! The self-hiding inline status line (Python `InlineNotice`).
+//! The self-hiding inline status line.
 
 use std::time::{Duration, Instant};
 
@@ -12,13 +12,13 @@ use super::theme;
 use crate::app::{App, Notice, ToastSeverity};
 use crate::clipboard;
 
-/// Inline-notice timeout, Python `inline_notice.DEFAULT_NOTICE_TIMEOUT` (4s).
+/// Inline-notice timeout (4s).
 const NOTICE_TIMEOUT_SECS: u64 = 4;
-/// Native-copy hint, Python `clipboard.NATIVE_COPY_HINT`.
+/// Native-copy hint.
 const NATIVE_COPY_HINT: &str = "if paste fails, hold Shift (Option in iTerm2, Fn in Terminal.app) \
      while selecting for native copy";
 
-/// Copy `text` and surface the same inline notice as Python.
+/// Copy `text` and surface the copy notice.
 pub fn copied(app: &mut App, text: &str) {
     crate::telemetry::user_copied_text(app, text);
     let message = if clipboard::copy_to_clipboard(text) {
@@ -30,7 +30,7 @@ pub fn copied(app: &mut App, text: &str) {
 }
 
 /// Copy a finalized selection only when autocopy is on, gating the notice the
-/// same way for every surface. Python `on_mouse_up`: with autocopy off there is
+/// same way for every surface: with autocopy off there is
 /// no copy and no notice.
 pub fn copy_if_autocopy(app: &mut App, text: &str) {
     if !text.is_empty() && app.session.startup_config.autocopy_to_clipboard {
@@ -38,7 +38,7 @@ pub fn copy_if_autocopy(app: &mut App, text: &str) {
     }
 }
 
-/// Show an inline notice for `secs`, mirroring Python's `InlineNotice.show`.
+/// Show an inline notice for `secs`.
 pub fn show(app: &mut App, text: &str, secs: u64) {
     show_with_severity(app, text, secs, ToastSeverity::Information);
 }
@@ -48,8 +48,7 @@ pub fn show_warning(app: &mut App, text: &str, secs: u64) {
 }
 
 fn show_with_severity(app: &mut App, text: &str, secs: u64, severity: ToastSeverity) {
-    // The deadline is real time, like Python's `set_timer`, so captures line
-    // up with the Python client's own notice expiry.
+    // The deadline is wall-clock time, not a frame count.
     let until = Instant::now() + Duration::from_secs(secs);
     app.overlays.notice = Some(Notice {
         text: text.to_string(),
@@ -58,7 +57,7 @@ fn show_with_severity(app: &mut App, text: &str, secs: u64, severity: ToastSever
     });
 }
 
-/// Hide the inline notice (Python `InlineNoticeCleared`).
+/// Hide the inline notice.
 pub fn clear(app: &mut App) {
     app.overlays.notice = None;
 }

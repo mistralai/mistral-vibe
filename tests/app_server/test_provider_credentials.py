@@ -11,6 +11,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from unittest.mock import PropertyMock, patch
 
+import keyring
+from keyring.errors import KeyringError
 import pytest
 
 from tests.conftest import build_test_vibe_config
@@ -22,6 +24,7 @@ from vibe.core.llm.exceptions import BackendError, PayloadSummary
 from vibe.core.types import LLMMessage, Role
 import vibe.utils.api_keys as api_keys
 from vibe.utils.api_keys import ApiKeyOrigin, ApiKeySource
+import vibe.utils.keyring as keyring_utils
 
 if TYPE_CHECKING:
     from vibe.core.config.orchestrator import ConfigOrchestrator
@@ -197,6 +200,57 @@ async def test_a_missing_key_is_a_state_not_a_failure(
     assert result.reason == "missing"
     assert result.provider == "primary"
     assert "PRIMARY_KEY" in result.message
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_keyring_is_named_instead_of_a_missing_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ProviderCredentialService(_orchestrator(_config(_provider("primary"))))
+    monkeypatch.delenv("PRIMARY_KEY")
+
+    def _locked(service_name: str, username: str) -> str | None:
+        raise KeyringError("keychain locked")
+
+    monkeypatch.setattr(keyring, "get_password", _locked)
+
+    result = await service.resolve()
+
+    assert isinstance(result, ProviderAuthRequired)
+    assert result.reason == "missing"
+    assert "Can't read PRIMARY_KEY from the system keyring" in result.message
+    assert "keychain locked" in result.message
+    assert "Missing PRIMARY_KEY" not in result.message
+
+
+@pytest.mark.asyncio
+async def test_a_turn_after_the_keyring_is_unlocked_reads_it_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ProviderCredentialService(_orchestrator(_config(_provider("primary"))))
+    monkeypatch.delenv("PRIMARY_KEY")
+    elapsed = [0.0]
+    real_monotonic = keyring_utils.time.monotonic
+    monkeypatch.setattr(
+        keyring_utils.time, "monotonic", lambda: real_monotonic() + elapsed[0]
+    )
+    locked = True
+
+    def _get(service_name: str, username: str) -> str | None:
+        if locked:
+            raise KeyringError("keychain locked")
+        return "unlocked-key"
+
+    monkeypatch.setattr(keyring, "get_password", _get)
+    assert isinstance(await service.resolve(), ProviderAuthRequired)
+
+    locked = False
+    elapsed[0] = keyring_utils.READ_FAILURE_TTL_SECONDS
+
+    result = await service.resolve()
+
+    assert isinstance(result, ProviderCredentialSnapshot)
+    assert keyring_utils.keyring_read_failure("PRIMARY_KEY") is None
 
 
 @pytest.mark.asyncio

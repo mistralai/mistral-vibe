@@ -25,5 +25,5 @@ handshake = {
 }
 
 capture_startup = False
-screen_contains = {"rust": (value,)}
+screen_contains = (value,)
 timeline: Timeline = [resize(40, 80), "/config\r", "\r", "\x1b[H", "\x1b[F"]

@@ -1,4 +1,4 @@
-//! Fuzzy scoring kept in sync with the Textual path completer.
+//! Fuzzy scoring for path completion.
 
 pub fn score(pattern: &str, text: &str) -> Option<i64> {
     if pattern.is_empty() {

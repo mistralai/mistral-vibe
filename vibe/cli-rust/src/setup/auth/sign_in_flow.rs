@@ -59,7 +59,7 @@ pub async fn run_sign_in(
     let _ = tx
         .send(SignInEvent::StatusChanged(SignInStatus::Completed))
         .await;
-    // Python `SUCCESS_EXIT_DELAY_SECONDS`: the Finished step shows "Sign-in
+    // The Finished step shows "Sign-in
     // complete" for two seconds before the wizard moves on.
     tokio::time::sleep(Duration::from_secs(2)).await;
     let _ = tx.send(SignInEvent::Completed { api_key }).await;
@@ -88,8 +88,8 @@ async fn replay_sign_in(tx: mpsc::Sender<SignInEvent>) -> Result<(), SignInError
 }
 
 /// Poll until completion, expired, or error. The server advertises the
-/// sign-in deadline (`expires_at`); polling stops when it passes, like
-/// Python's `expires_at` check in `authenticate`. After three consecutive
+/// sign-in deadline (`expires_at`); polling stops when it passes. After
+/// three consecutive
 /// failures the error propagates: the spawn wrapper turns it into the
 /// `Failed` event.
 async fn poll_for_completion(
@@ -166,7 +166,7 @@ fn generate_pkce_pair() -> (String, String) {
 }
 
 fn generate_code_verifier() -> String {
-    // Python `secrets.token_urlsafe(64)`: 64 random bytes, base64url. A broken
+    // 64 random bytes, base64url. A broken
     // system RNG has no safe fallback; fail instead of guessing.
     let mut bytes = [0u8; 64];
     getrandom::fill(&mut bytes).expect("system RNG unavailable");

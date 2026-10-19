@@ -85,6 +85,17 @@ fn body_renders_error_reason_and_output_text_fallback() {
 }
 
 #[test]
+fn agent_tools_count_as_subagent_effects_under_both_namespaces() {
+    // `subagent.` is the deprecated pre-rename prefix of `agents.`.
+    for tool_name in ["agents.send_message", "subagent.send_message"] {
+        let entry = effect(json!({"detail": {"kind": "tool", "toolName": tool_name}}));
+        assert!(entry.is_subagent(), "{tool_name} is a subagent effect");
+    }
+    let other = effect(json!({"detail": {"kind": "tool", "toolName": "agentsx.read"}}));
+    assert!(!other.is_subagent());
+}
+
+#[test]
 fn subagent_body_keeps_status_paths_and_generic_output() {
     let spawn = json!({
         "kind": "subagent",

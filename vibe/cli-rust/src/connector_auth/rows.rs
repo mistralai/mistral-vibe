@@ -4,7 +4,7 @@ use super::{OptionId, Row};
 use crate::app::App;
 use crate::hints::{self, action};
 
-/// Indent of the three action options (Python `_OPTION_PADDING`).
+/// Indent of the three action options.
 const OPTION_PADDING: &str = "  ";
 
 /// The option rows: fetching, then either the auth actions or a plain note.
@@ -41,7 +41,7 @@ pub fn rows(app: &App) -> Vec<Row> {
     ]
 }
 
-/// The detail static, as `(text, is shortcut)` runs (Python `_update_detail_text`).
+/// The detail line, as `(text, is shortcut)` runs.
 pub fn detail(app: &App) -> Vec<(String, bool)> {
     let Some(url) = app.connector_auth.auth_url.as_deref() else {
         return vec![(String::new(), false)];
@@ -56,7 +56,7 @@ pub fn detail(app: &App) -> Vec<(String, bool)> {
     parts
 }
 
-/// The help line, prefixed with the current status (Python `_set_help_text`).
+/// The help line, prefixed with the current status.
 pub fn help_text(app: &App) -> Vec<(String, bool)> {
     let mut spans: Vec<(String, bool)> = Vec::new();
     if let Some(status) = &app.connector_auth.status_message {

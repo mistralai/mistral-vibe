@@ -1,4 +1,4 @@
-//! Built-in web search and fetch result bodies (Python `WebSearchResultWidget`, `WebFetchResultWidget`).
+//! Built-in web search and fetch result bodies.
 
 use serde_json::Value;
 
@@ -6,7 +6,7 @@ use super::effect_output::{lines, BodyLine};
 use crate::utils::clean::clean_output;
 use crate::utils::text::single_line;
 
-/// Python `_yield_text`: trim the outer newlines, sanitize, split.
+/// Trim the outer newlines, sanitize, split.
 pub(super) fn trimmed_text(output: &Value, key: &str) -> Vec<String> {
     output
         .get(key)
@@ -73,7 +73,7 @@ fn source_label_url(source: &Value) -> Option<(String, &str)> {
     (!label.is_empty()).then_some((label, url))
 }
 
-/// Python `links._is_safe_url`: only http(s) sources open.
+/// Only http(s) sources open.
 fn is_safe_url(url: &str) -> bool {
     url.split_once(':').is_some_and(|(scheme, _)| {
         scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")

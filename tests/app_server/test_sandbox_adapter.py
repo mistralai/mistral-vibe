@@ -36,6 +36,7 @@ from tests.stubs.local_sandbox import (
     Script,
     ScriptedModel,
     build_trusted_project,
+    run_turn,
 )
 from vibe.app_server._agents_md_hooks import agents_md_hook
 from vibe.app_server._runtime import HarnessProcess
@@ -45,9 +46,7 @@ from vibe.app_server.local import (
     LocalHarnessOptions,
 )
 from vibe.app_server.protocol import ClientCapabilities, ClientInfo, SessionOptions
-from vibe.app_server.run_export import HeadlessUsageError, RunLimits, RunOutcome
-from vibe.cli.headless_run import StopRequests
-from vibe.cli.programmatic import run_headless
+from vibe.app_server.run_export import HeadlessUsageError
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config.harness_files import HarnessFilesManager
 
@@ -72,8 +71,16 @@ async function main() {{
   }} catch (error) {{
     processes = "failed: " + error.message;
   }}
-  await tools.subagent.spawn({{agentName: "reader", message: {json.dumps(_CHILD_TASK)}}});
-  const child = await tools.subagent.wait({{agentName: "reader", timeoutMs: 30000}});
+  await tools.agents.spawn({{name: "reader", message: {json.dumps(_CHILD_TASK)}}});
+  // Spawn does not wait. Keep this Turn open until the child's Turn ends, so
+  // the child runs before the headless run finishes.
+  let child;
+  for (let attempt = 0; attempt < 50; attempt++) {{
+    const {{agents}} = await tools.agents.list({{}});
+    child = agents.find((agent) => agent.name === "reader");
+    if (child && child.status !== "running") break;
+    await tools.self.sleep({{seconds: 0.2}});
+  }}
   return {{processes: JSON.stringify(processes), child}};
 }}
 """
@@ -97,6 +104,33 @@ _SCRIPTS: dict[str, Script] = {
 }
 
 
+_WAITING_PARENT_TASK = "WAITING_PARENT_TASK"
+_SLOW_CHILD_TASK = "SLOW_CHILD_TASK"
+
+_SPAWN_PROGRAM = f"""
+async function main() {{
+  return await tools.agents.spawn({{name: "reader", message: {json.dumps(_SLOW_CHILD_TASK)}}});
+}}
+"""
+
+# The child pauses first, so the parent is already waiting when it finishes.
+_SLOW_CHILD_PROGRAM = """
+async function main() {
+  await tools.self.sleep({seconds: 1});
+  return await tools.file_system.read_file({path: "sub/notes.txt"});
+}
+"""
+
+# The parent spawns, then calls the direct ``wait`` tool on its own.
+_WAITING_SCRIPTS: dict[str, Script] = {
+    _WAITING_PARENT_TASK: [
+        ("run_typescript", {"code": _SPAWN_PROGRAM}),
+        ("wait", {"timeout_ms": 20_000}),
+    ],
+    _SLOW_CHILD_TASK: [("run_typescript", {"code": _SLOW_CHILD_PROGRAM})],
+}
+
+
 @pytest.fixture()
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return build_trusted_project(tmp_path / "project", monkeypatch)
@@ -104,19 +138,16 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def test_a_sandboxed_session_never_loads_project_files(tmp_path: Path) -> None:
     """*Prepare*: Project config, skills and hooks would come from the host's disk.
-    *Do*: Build a sandboxed harness process that asks for them, and one on the legacy harness.
-    *Assert*: Both are refused.
+    *Do*: Build a sandboxed harness process that asks for them.
+    *Assert*: Host project sources are refused; user-only sources are accepted.
     """
     sandbox = RecordingSandbox(tmp_path)
 
     with pytest.raises(HeadlessUsageError, match="cannot load project files"):
         HarnessProcess(
-            HarnessFilesManager(sources=("user", "project")),
-            experimental_harness=True,
-            sandbox=sandbox,
+            HarnessFilesManager(sources=("user", "project")), sandbox=sandbox
         )
-    with pytest.raises(HeadlessUsageError, match="requires the Unified Harness"):
-        HarnessProcess(legacy_harness=True, sandbox=sandbox)
+    HarnessProcess(sandbox=sandbox)
 
 
 @pytest.mark.asyncio
@@ -342,11 +373,13 @@ async def test_a_directory_whose_doc_read_failed_is_looked_up_again(
 async def test_a_subagent_works_in_its_parents_workspace(
     project: Path, monkeypatch: pytest.MonkeyPatch, sandboxed: bool
 ) -> None:
-    """*Prepare*: A scripted parent that reads a file, tries a process tool and
-    spawns a subagent that reads a file and runs a command.
+    """*Prepare*: A scripted parent that reads a file, tries a process tool,
+    spawns a subagent that reads a file and runs a command, and lists its
+    children until that one is done.
     *Do*: Run it headless on the host and against a Sandbox Adapter.
     *Assert*: Both see the same workspace and docs and start the process, the
-    sandboxed ones through the adapter.
+    sandboxed ones through the adapter. The child ends idle and its completion
+    reaches the parent's next model request.
     """
     # Prepare
     scripted = ScriptedModel(_SCRIPTS)
@@ -356,21 +389,20 @@ async def test_a_subagent_works_in_its_parents_workspace(
     host = LocalHarnessHost()
 
     # Do
-    report = await run_headless(
-        harness_options=_options(project, sandbox),
-        prompt=_PARENT_TASK,
-        stop=StopRequests(RunLimits()),
-        harness_host=host,
-    )
+    stop = await run_turn(host, _options(project, sandbox), _PARENT_TASK)
     await host.close()
 
     # Assert
-    assert report.result.outcome is RunOutcome.FINISHED, report.result.error
+    assert stop is None
     parent = scripted.final_input(_PARENT_TASK)
     child = scripted.final_input(_CHILD_TASK)
     assert SUB_DOC in parent
     assert "first note" in child
     assert "processId" in parent
+    # Spawn returns at once; the child's result is pushed to the parent as a
+    # notification, not returned by a wait.
+    assert _program_result(scripted)["child"]["status"] == "idle"
+    assert "Subagent reader completed turn 1." in parent
     if sandbox is None:
         return
     operations = sandbox.helper_operations
@@ -387,6 +419,51 @@ async def test_a_subagent_works_in_its_parents_workspace(
     assert "inside" in child
 
 
+@pytest.mark.parametrize("sandboxed", [False, True], ids=["host", "sandbox"])
+@pytest.mark.asyncio
+async def test_a_parent_that_waits_gets_its_subagents_answer(
+    project: Path, monkeypatch: pytest.MonkeyPatch, sandboxed: bool
+) -> None:
+    """*Prepare*: A scripted parent that spawns a subagent, then calls ``wait``.
+    *Do*: Run it headless on the host and against a Sandbox Adapter.
+    *Assert*: The wait wakes on the child's result, which reaches the parent's
+    next model request in the same Turn.
+    """
+    # Prepare
+    scripted = ScriptedModel(_WAITING_SCRIPTS)
+    monkeypatch.setattr(EXECUTE_COMPLETION, scripted)
+    sandbox = RecordingSandbox(project) if sandboxed else None
+    monkeypatch.setenv("XDG_STATE_HOME", str(project.parent / "state"))
+    host = LocalHarnessHost()
+
+    # Do
+    stop = await run_turn(host, _options(project, sandbox), _WAITING_PARENT_TASK)
+    await host.close()
+
+    # Assert
+    assert stop is None
+    assert "first note" in scripted.final_input(_SLOW_CHILD_TASK)
+    [waited] = [
+        message
+        for message in scripted.final_requests[_WAITING_PARENT_TASK]
+        if message.get("role") == "tool" and message.get("name") == "wait"
+    ]
+    assert json.loads(waited["content"][0]["text"]) == {"reason": "input_available"}
+    assert "Subagent reader completed turn 1." in scripted.final_input(
+        _WAITING_PARENT_TASK
+    )
+
+
+def _program_result(scripted: ScriptedModel) -> dict[str, Any]:
+    """What the parent's ``run_typescript`` program returned."""
+    [result] = [
+        message
+        for message in scripted.final_requests[_PARENT_TASK]
+        if message.get("role") == "tool" and message.get("name") == "run_typescript"
+    ]
+    return json.loads(result["content"][0]["text"])
+
+
 def _options(project: Path, sandbox: RecordingSandbox | None) -> LocalHarnessOptions:
     return LocalHarnessOptions(
         client=ClientDescriptor(
@@ -399,7 +476,6 @@ def _options(project: Path, sandbox: RecordingSandbox | None) -> LocalHarnessOpt
             trust_workspace=sandbox is None,
             headless=True,
         ),
-        experimental_harness=True,
         sandbox=sandbox,
     )
 

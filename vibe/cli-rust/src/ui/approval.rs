@@ -45,6 +45,7 @@ struct ApprovalRows {
     detail_total: usize,
     detail_viewport: usize,
     detail_scroll: usize,
+    options_start: u16,
 }
 
 fn draw_box(app: &mut App, f: &mut Frame, area: Rect, rows: ApprovalRows) {
@@ -69,6 +70,14 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, rows: ApprovalRows) {
         Paragraph::new(rows.lines).style(Style::default().bg(background)),
         content,
     );
+    let options = Rect {
+        y: content.y.saturating_add(rows.options_start),
+        height: OPTIONS.len() as u16,
+        ..content
+    };
+    app.approval
+        .list
+        .layout_rows(OPTIONS.len(), options.intersection(content));
     if rows.detail_total > rows.detail_viewport && rows.detail_viewport > 0 {
         let scroll_area = Rect {
             x: content.right().saturating_sub(1),
@@ -96,6 +105,7 @@ fn rows(app: &mut App, width: u16, max_rows: u16) -> ApprovalRows {
             detail_total: 0,
             detail_viewport: 0,
             detail_scroll: 0,
+            options_start: 0,
         };
     };
     let labels = callback
@@ -171,7 +181,8 @@ fn rows(app: &mut App, width: u16, max_rows: u16) -> ApprovalRows {
     let detail_start = title_rows.len() as u16;
     title_rows.extend(detail_rows.lines);
     title_rows.push(Line::default());
-    title_rows.extend(option_rows(app.approval.selected, width));
+    let options_start = title_rows.len() as u16;
+    title_rows.extend(option_rows(app.approval.list.selected(), width));
     title_rows.push(Line::default());
     title_rows.push(help());
     ApprovalRows {
@@ -180,6 +191,7 @@ fn rows(app: &mut App, width: u16, max_rows: u16) -> ApprovalRows {
         detail_total: app.approval.detail_rows,
         detail_viewport,
         detail_scroll,
+        options_start,
     }
 }
 

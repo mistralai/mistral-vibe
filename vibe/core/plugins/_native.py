@@ -80,7 +80,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_RESERVED_NAMESPACES = {"file_system", "self", "process", "skill", "subagent", "vibe"}
+# Tool namespaces a plugin cannot claim: Harness built-ins, the live `agents`
+# namespace, the retired `agent`, `subagent` and `collaboration` namespaces (which
+# hold replay-only functions), and `vibe`.
+_RESERVED_NAMESPACES = frozenset({
+    "agent",
+    "agents",
+    "collaboration",
+    "file_system",
+    "process",
+    "self",
+    "skill",
+    "subagent",
+    "vibe",
+})
 _VIBE_EXTENSION = "ai.mistral.vibe"
 _TYPESCRIPT_IDENTIFIER_PATTERN = r"^[A-Za-z_$][A-Za-z0-9_$]*$"
 _PLUGIN_PLACEHOLDER_PATTERN = re.compile(r"\$\{PLUGIN_(?:ROOT|DATA)\}")

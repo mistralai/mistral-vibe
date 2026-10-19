@@ -134,19 +134,19 @@ async def test_agent_switches_during_a_callback_and_remains_selected(
         if not isinstance(event, CallbackRequested):
             continue
         assert (
-            await backend_contract_session.resources.agents.switch("plan")
-        ).name == "plan"
+            await backend_contract_session.resources.agents.switch("auto-approve")
+        ).name == "auto-approve"
         assert (
             await backend_contract_session.resources.agents.switch("ask")
         ).name == "ask"
         assert (
-            await backend_contract_session.resources.agents.switch("plan")
-        ).name == "plan"
+            await backend_contract_session.resources.agents.switch("auto-approve")
+        ).name == "auto-approve"
         await backend_contract_session.respond_to_callback(
             event.callback.callback_id, _user_answer("Yes")
         )
 
-    assert backend_contract_session.resources.agents.active.name == "plan"
+    assert backend_contract_session.resources.agents.active.name == "auto-approve"
 
 
 @pytest.mark.asyncio
@@ -257,13 +257,11 @@ async def test_reconnect_redelivers_an_open_callback_before_accepting_its_result
 async def test_rejected_callback_delivery_fails_the_turn_and_closes_the_callback(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
-    experimental_harness: bool,
 ) -> None:
     backend_contract_mistral_api.mock(
         return_value=_user_question_response(backend_contract_mistral_response)
     )
     client = await connect_backend_contract_client(
-        experimental_harness,
         session_options=SessionOptions(enabled_tools=["ask_user_question"]),
         capabilities=ClientCapabilities(callback_kinds=["user_input"]),
     )
@@ -313,7 +311,7 @@ async def test_rejected_callback_delivery_fails_the_turn_and_closes_the_callback
 
 
 async def _next_event[EventT](
-    stream: AsyncGenerator[AppServerEvent, None], event_type: type[EventT]
+    stream: AsyncGenerator[AppServerEvent], event_type: type[EventT]
 ) -> EventT:
     async for event in stream:
         if isinstance(event, event_type):

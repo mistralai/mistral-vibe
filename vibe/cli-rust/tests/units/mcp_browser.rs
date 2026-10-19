@@ -1,4 +1,4 @@
-//! MCP browser rows, wire tolerance and runtime adoption match Python `MCPApp`.
+//! MCP browser rows, wire tolerance and runtime adoption.
 
 use std::sync::Arc;
 
@@ -74,6 +74,160 @@ fn malformed_source_is_skipped_and_new_fields_default() {
     assert_eq!(state.sources[0].label(), "fs");
     assert!(state.sources[0].plugin_name.is_none());
     assert!(state.manage_connectors_url.is_none());
+    assert!(!state.private_connectors_hidden);
+}
+
+#[test]
+fn private_connectors_warning_leads_connectors_without_taking_the_highlight() {
+    let app = open_app(&runtime(
+        vec![source("gh", "connector", json!({}))],
+        json!({
+            "privateConnectorsHidden": true,
+            "manageConnectorsUrl": "https://studio.example/connectors",
+        }),
+    ));
+    let rows = rows::rows(&app.mcp);
+    assert!(matches!(rows[1], Row::PrivateConnectorsHidden));
+    assert!(matches!(rows[2], Row::Manage));
+    assert!(matches!(&rows[app.mcp.list.selected()], Row::Source(row) if row.name == "gh"));
+}
+
+#[test]
+fn private_connectors_warning_shows_without_any_connector() {
+    let app = open_app(&runtime(
+        vec![source("fs", "server", json!({}))],
+        json!({"privateConnectorsHidden": true}),
+    ));
+    let rows = rows::rows(&app.mcp);
+    assert!(matches!(&rows[3], Row::Header(title) if title == "Available Connectors"));
+    assert!(matches!(rows[4], Row::PrivateConnectorsHidden));
+    assert_eq!(rows.len(), 5);
+}
+
+#[test]
+fn private_connectors_warning_shows_when_no_source_is_visible() {
+    let state =
+        serde_json::from_value(json!({"sources": [], "privateConnectorsHidden": true})).unwrap();
+    let mut app = App::default();
+    let event = mcp::Event::Opened {
+        response: None,
+        state,
+        initial_source: String::new(),
+        reopened: false,
+    };
+    mcp::apply_event(&mut app, &Arc::new(Client::stub()), event);
+    assert!(!app.mcp.open);
+    let transcript = &app.view.transcript;
+    assert!(transcript
+        .lines()
+        .filter_map(|entry| transcript.entry_content(entry.id))
+        .any(|content| content.to_string().contains("run `vibe --setup`")));
+}
+
+#[test]
+fn private_connectors_warning_stays_while_search_matches_nothing() {
+    let mut app = open_app(&runtime(
+        vec![source("gh", "connector", json!({}))],
+        json!({"privateConnectorsHidden": true}),
+    ));
+    app.mcp.search.query = "zzz".to_owned();
+    let rows = rows::rows(&app.mcp);
+    assert!(matches!(rows[1], Row::PrivateConnectorsHidden));
+    assert_eq!(rows.len(), 2);
+}
+
+fn shared_only_app() -> App {
+    let needs_auth = json!({"status": "needs_auth", "tools": []});
+    open_app(&runtime(
+        vec![
+            source("weather", "server", needs_auth.clone()),
+            source("gmail", "connector", needs_auth),
+            source("gh", "connector", json!({})),
+        ],
+        json!({"privateConnectorsHidden": true}),
+    ))
+}
+
+#[test]
+fn shared_only_key_greys_out_connectors_that_need_a_login() {
+    let app = shared_only_app();
+    let blocked: Vec<(String, bool, bool, String)> = source_rows(&app)
+        .into_iter()
+        .map(|row| (row.name, row.blocked, row.awaits_auth, row.status))
+        .collect();
+    assert_eq!(
+        blocked,
+        [
+            ("weather".to_owned(), false, true, "needs auth".to_owned()),
+            ("gh".to_owned(), false, false, "connected".to_owned()),
+            (
+                "gmail".to_owned(),
+                true,
+                false,
+                "needs a personal API key".to_owned()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn connector_needing_a_login_is_not_blocked_for_personal_keys() {
+    let needs_auth = json!({"status": "needs_auth", "tools": []});
+    let app = open_app(&runtime(
+        vec![source("gmail", "connector", needs_auth)],
+        json!({}),
+    ));
+    assert!(!source_rows(&app)[0].blocked);
+    assert!(source_rows(&app)[0].awaits_auth);
+}
+
+#[test]
+fn enter_on_a_blocked_connector_explains_instead_of_connecting() {
+    let mut app = shared_only_app();
+    let mut rx = with_channel(&mut app);
+    while !matches!(&rows::rows(&app.mcp)[app.mcp.list.selected()], Row::Source(row) if row.name == "gmail")
+    {
+        mcp::navigate(&mut app, true);
+    }
+    assert_eq!(mcp::help_text(&app)[1].1, "why blocked");
+    mcp::select(&mut app);
+    drain(&mut app, &mut rx);
+    assert!(app.mcp.open && !app.connector_auth.open);
+    assert_eq!(app.mcp.viewing_name.as_deref(), Some("gmail"));
+    let rows = rows::rows(&app.mcp);
+    assert!(matches!(&rows[..], [Row::Hint { key, .. }] if key == "vibe --setup"));
+}
+
+#[test]
+fn private_connectors_warning_survives_a_runtime_without_it() {
+    let mut app = open_app(&runtime(
+        vec![source("gh", "connector", json!({}))],
+        json!({"privateConnectorsHidden": true}),
+    ));
+    mcp::apply_runtime(
+        &mut app,
+        &runtime(vec![source("gh", "connector", json!({}))], json!({})),
+    );
+    assert!(app.mcp.state.private_connectors_hidden);
+}
+
+#[test]
+fn private_connectors_block_survives_a_reread_without_the_flag() {
+    let mut app = shared_only_app();
+    let needs_auth = json!({"status": "needs_auth", "tools": []});
+    let state = serde_json::from_value(json!({
+        "sources": [source("gmail", "connector", needs_auth)],
+    }))
+    .unwrap();
+    let event = mcp::Event::Opened {
+        response: None,
+        state,
+        initial_source: String::new(),
+        reopened: false,
+    };
+    mcp::apply_event(&mut app, &Arc::new(Client::stub()), event);
+    assert!(app.mcp.state.private_connectors_hidden);
+    assert!(source_rows(&app)[0].blocked);
 }
 
 #[test]
@@ -94,7 +248,7 @@ fn connectors_render_search_and_title_by_display_name() {
 }
 
 #[test]
-fn display_name_lookup_casefolds_like_python() {
+fn display_name_lookup_casefolds() {
     let state: MCPState = serde_json::from_value(json!({
         "sources": [source("st_alias", "connector", json!({"displayName": "Straße"}))],
     }))
@@ -127,7 +281,7 @@ fn manage_row_leads_connectors_but_never_takes_the_initial_highlight() {
     ));
     let rows = rows::rows(&app.mcp);
     assert!(matches!(rows[1], Row::Manage));
-    assert!(matches!(&rows[app.mcp.selected], Row::Source(row) if row.name == "gh"));
+    assert!(matches!(&rows[app.mcp.list.selected()], Row::Source(row) if row.name == "gh"));
 }
 
 #[test]
@@ -143,7 +297,7 @@ fn viewed_source_that_vanished_falls_back_to_the_list() {
     );
     assert!(app.mcp.viewing_name.is_none());
     assert!(
-        matches!(&rows::rows(&app.mcp)[app.mcp.selected], Row::Source(row) if row.name == "fs")
+        matches!(&rows::rows(&app.mcp)[app.mcp.list.selected()], Row::Source(row) if row.name == "fs")
     );
 }
 

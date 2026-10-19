@@ -18,7 +18,6 @@ env = {
 handshake = {"callback/result": {"accepted": True}}
 capture_startup = False
 capture_steps = {1, 2}
-clipboard_clients = {"rust"}
 clipboard_contains = ("User input required",)
 
 _QUESTIONS = [

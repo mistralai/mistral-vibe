@@ -7,6 +7,7 @@ from enum import StrEnum
 import logging
 from pathlib import Path
 import secrets
+import tempfile
 import time
 
 from mistralai_vibe_local_harness.protocol import (
@@ -65,6 +66,7 @@ from mistralai_vibe_local_harness.session_protocol import JsonObject
 from mistralai_vibe_local_harness.vibe._completion import execute_completion
 from mistralai_vibe_local_harness.vibe._file_tools import execute_file_tool
 from mistralai_vibe_local_harness.vibe._hook_matcher import qualified_tool_name
+from mistralai_vibe_local_harness.vibe._paths import is_windows
 from mistralai_vibe_local_harness.vibe._permissions import ALWAYS_ASK, PermissionOutcome
 from mistralai_vibe_local_harness.vibe._projection import (
     APPROVAL_META_KEY,
@@ -87,7 +89,6 @@ from mistralai_vibe_local_harness.vibe._saved_outputs import (
     SavedOutputs,
     build_saved_outputs,
 )
-from mistralai_vibe_local_harness.vibe._self_tools import execute_self_tool
 from mistralai_vibe_local_harness.vibe._shell_tools import execute_shell_tool
 from mistralai_vibe_local_harness.vibe._skill_tools import execute_skill_tool
 from mistralai_vibe_local_harness.vibe._smart_approve import (
@@ -210,6 +211,35 @@ type PostAgentTurnHookHandler = Callable[
 
 
 @dataclass(frozen=True, slots=True)
+class AcceptOrRetryPostAgentHandler:
+    """A post_agent_turn handler that only accepts the candidate unchanged or asks for
+    a retry.
+
+    A session streams its candidate ahead of such handlers (see
+    ``streams_provisional_content``): nothing they return can replace text the user
+    has already watched arrive. The promise is checked, not assumed: any other
+    decision fails the hook rather than reaching the Core.
+    """
+
+    handler: PostAgentTurnHookHandler
+
+    async def __call__(
+        self, hook_input: RustCompletionHookInput, context: HookContext
+    ) -> RustPostAgentTurnHookResult:
+        result = await self.handler(hook_input, context)
+        output = result.output
+        if isinstance(output, RustCompletionHookRetry) or (
+            isinstance(output, RustCompletionHookAccept)
+            and isinstance(output.acceptance, RustAcceptCandidate)
+        ):
+            return result
+        raise ValueError(
+            "an accept-or-retry post_agent handler may only accept the candidate "
+            "unchanged or ask for a retry"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ToolScopedHook[I, R]:
     # Tool points bind an ``always`` selector, so the Core dispatches every one of them on
     # every tool call and ``selects`` decides here (see ``_select_for_tool``). A handler
@@ -321,16 +351,21 @@ def streams_provisional_content(
 ) -> bool:
     """Whether a session may project completion content before the Core commits it.
 
-    A post-agent-turn hook can replace or reject the committed candidate, and the Step
-    Protocol forbids projecting output a later stage can still replace -- showing text
-    and then retracting it is worse than showing it late.
+    The candidate streams when every post-agent handler the session binds is an
+    ``AcceptOrRetryPostAgentHandler``: a retried draft is then settled as discarded.
+    Any other handler may replace the candidate, for example to redact it, so binding
+    one keeps the candidate private until it is accepted. ``handlers`` is the
+    session's merged registry, so on a shared ID the handler that actually runs
+    decides.
 
     Scoped to the bindings this session's Core actually carries, not to the registry:
     handlers are Host-global, so testing those alone would stop every session streaming
     as soon as one of them wants the hook.
     """
     return not any(
-        binding.point == "post_agent_turn" and binding.id in handlers.post_agent_turn
+        binding.point == "post_agent_turn"
+        and (handler := handlers.post_agent_turn.get(binding.id)) is not None
+        and not isinstance(handler, AcceptOrRetryPostAgentHandler)
         for binding in hook_bindings
     )
 
@@ -381,6 +416,27 @@ def build_local_action_executor(  # noqa: PLR0913 - explicit executor dependenci
     if notice_sink is not None:
         state.bind_notice_sink(notice_sink)
     return state.execute
+
+
+# Builtins that run a shell command, whose redirects the Host reads.
+_SHELL_COMMAND_TOOLS = frozenset({"file_system.bash", "process.start"})
+# A shell call whose resolver failed: none of its writes could be placed.
+_UNREAD_SHELL_WRITES = PermissionOutcome(
+    decision="ask",
+    unplaced_shell_writes=("files its redirects name (the command could not be read)",),
+)
+
+
+def _printable(value: object) -> str:
+    """``value`` with control characters escaped.
+
+    The name comes from the command, and is shown in the approval prompt: an
+    escape sequence in it must not reach the terminal.
+    """
+    return "".join(
+        char if char.isprintable() else char.encode("unicode_escape").decode("ascii")
+        for char in str(value)
+    )
 
 
 class _LocalActionState:
@@ -515,6 +571,9 @@ class _LocalActionState:
                 gated_tool_name(action),
                 exc_info=True,
             )
+            # A shell command's writes were not read, so none is placed.
+            if gated_tool_name(action) in _SHELL_COMMAND_TOOLS:
+                return _UNREAD_SHELL_WRITES
             return ALWAYS_ASK
 
     async def gate_process_call(
@@ -542,6 +601,24 @@ class _LocalActionState:
 
     def bind_completion_delta_sink(self, sink: CompletionDeltaSink) -> None:
         self._delta_sink = sink
+
+    @property
+    def hook_configuration(
+        self,
+    ) -> tuple[HookHandlers, frozenset[str], CompletionDeltaSink | None]:
+        """Return the replaceable hook state used by lifecycle rollback."""
+        return self._hook_handlers, self._foreign_binding_ids, self._delta_sink
+
+    def configure_hooks(
+        self,
+        handlers: HookHandlers,
+        foreign_binding_ids: frozenset[str],
+        completion_delta_sink: CompletionDeltaSink | None,
+    ) -> None:
+        """Replace idle-session hook routing and provisional-output policy."""
+        self._hook_handlers = handlers
+        self._foreign_binding_ids = foreign_binding_ids
+        self._delta_sink = completion_delta_sink
 
     async def _emit_notice(self, notice: HookNoticeData) -> None:
         # Notices are a UI side-channel: a sink failure must never change a hook's outcome
@@ -658,8 +735,6 @@ class _LocalActionState:
                 return self._with_approval_note(
                     await execute_skill_tool(action, self._config), action.action_id
                 )
-            if action.call.name == "self.sleep":
-                return await execute_self_tool(action)
         if isinstance(action, RustFilesystemAction):
             return await self._write_file(action)
         if isinstance(action, RustPreToolCallHookAction):
@@ -974,6 +1049,35 @@ class _LocalActionState:
     ) -> None:
         self._approval_meta[action_id] = (decision, approval_type, approval_source)
 
+    def _outside_writable_roots(self, paths: Sequence[Path]) -> Path | None:
+        """The first of ``paths`` outside the writable roots and temporary dirs.
+
+        The temporary directories are the ones a command writes scratch output to
+        (``/tmp``, the per-user ``TMPDIR``); nothing there decides what runs later.
+        """
+        allowed = (*self._writable_roots(), *self._temporary_roots())
+        return next(
+            (
+                path
+                for path in paths
+                if not any(path.is_relative_to(root) for root in allowed)
+            ),
+            None,
+        )
+
+    def _temporary_roots(self) -> tuple[Path, ...]:
+        match self._config.workspace.path_space:
+            case "host":
+                temporary = Path(tempfile.gettempdir()).resolve()
+                if is_windows():
+                    # ``/tmp`` resolves to ``\tmp`` on the current drive, which is
+                    # no temporary directory; Git Bash's ``/tmp`` arrives as the
+                    # real temp dir already.
+                    return (temporary,)
+                return (Path("/tmp").resolve(), temporary)
+            case "sandbox":
+                return (Path("/tmp"),)
+
     def _writable_roots(self) -> tuple[Path, ...]:
         """The directories this session may write to, as the file tools resolve them.
 
@@ -1200,13 +1304,28 @@ class _LocalActionState:
         # A path that decides what runs later is never auto-approved, whatever the
         # classifier says: writing one turns a single approved call into arbitrary
         # future execution, which is how an agent would widen its own authority.
+        # A shell write outside the session's writable roots goes to the user too,
+        # as a file-tool write there would: the classifier reads the command as
+        # text, and ``cat a <x/Users/me/y`` reads like a file read. So does a
+        # write from a root the Host cannot place before the command runs: one
+        # it cannot check is not taken to be inside.
         protected = protected_target(request.tool_name, action.call.arguments)
-        if protected is not None and result.verdict == ClassificationVerdict.ALLOW:
+        outside = self._outside_writable_roots(outcome.shell_write_paths)
+        unplaced = next(iter(outcome.unplaced_shell_writes), None)
+        guarded = (
+            f"This changes {_printable(protected)}, which decides what runs later."
+            if protected is not None
+            else f"This writes {_printable(outside)}, outside the session's "
+            "writable roots."
+            if outside is not None
+            else f"This writes {_printable(unplaced)}, which cannot be checked "
+            "against the session's writable roots before it runs."
+            if unplaced is not None
+            else None
+        )
+        if guarded is not None and result.verdict == ClassificationVerdict.ALLOW:
             result = result.model_copy(
-                update={
-                    "verdict": ClassificationVerdict.PROMPT,
-                    "reason": f"This changes {protected}, which decides what runs later.",
-                }
+                update={"verdict": ClassificationVerdict.PROMPT, "reason": guarded}
             )
         if result.verdict == ClassificationVerdict.ALLOW:
             self._emit_result(action, request.tool_name, result, _AUTO_APPROVED)
@@ -1225,7 +1344,7 @@ class _LocalActionState:
         repeat_of_denied_call = key in self._smart_denied_keys
         self._smart_denied_keys.add(key)
         escalate = (
-            protected is not None
+            guarded is not None
             or result.user_authorized
             or repeat_of_denied_call
             or self._smart_deny_consecutive >= _SMART_DENY_CONSECUTIVE_LIMIT
@@ -1508,6 +1627,7 @@ def _failed_tool_action(
 
 __all__ = [
     "CLASSIFICATION_EVENT_TYPE",
+    "AcceptOrRetryPostAgentHandler",
     "ApprovalGrant",
     "ApprovalRequester",
     "ClassificationSink",

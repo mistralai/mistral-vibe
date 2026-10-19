@@ -10,7 +10,7 @@ from vibe.core.config.harness_files import (
     init_harness_files_manager,
     reset_harness_files_manager,
 )
-from vibe.core.tools.base import InvokeContext, ToolError
+from vibe.core.tools.base import ToolError
 from vibe.core.tools.builtins.read_file import (
     DEFAULT_LINE_LIMIT,
     MAX_BYTES,
@@ -23,7 +23,7 @@ from vibe.core.tools.builtins.read_file import (
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay
 from vibe.core.trusted_folders import trusted_folders_manager
-from vibe.core.types import ToolResultEvent, ToolStreamEvent
+from vibe.core.types import ToolResultEvent
 from vibe.utils import VIBE_WARNING_TAG
 
 
@@ -48,6 +48,22 @@ async def test_reads_entire_small_file(
     assert result.start_line == 1
     assert "line one" in result.content
     assert "line two" in result.content
+
+
+@pytest.mark.asyncio
+async def test_reads_crlf_line_endings_verbatim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "crlf.txt").write_bytes(b"line one\r\nline two\r\n")
+    tool = _make_read()
+
+    result = await collect_result(
+        tool.run(ReadFileArgs(file_path=str(tmp_path / "crlf.txt")))
+    )
+
+    assert result.content == _add_line_numbers(["line one\r", "line two\r"], start=1)
+    assert result.num_lines == 2
 
 
 @pytest.mark.asyncio
@@ -302,91 +318,6 @@ def _setup_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[
     reset_harness_files_manager()
     init_harness_files_manager("user", "project")
     yield
-    reset_harness_files_manager()
-
-
-@pytest.mark.usefixtures("_setup_manager")
-def test_agents_md_injection(tmp_path: Path) -> None:
-    sub = tmp_path / "sub"
-    sub.mkdir()
-    (sub / "AGENTS.md").write_text("# Sub instructions", encoding="utf-8")
-    target = sub / "file.py"
-    target.write_text("hello", encoding="utf-8")
-
-    tool = _make_read()
-    result = ReadFileResult(
-        file_path=str(target), content="hello", num_lines=1, start_line=1, total_lines=1
-    )
-    annotation = tool.get_result_extra(result)
-    assert annotation is not None
-    assert VIBE_WARNING_TAG in annotation
-    assert "# Sub instructions" in annotation
-
-
-@pytest.mark.usefixtures("_setup_manager")
-def test_agents_md_deduplicates(tmp_path: Path) -> None:
-    sub = tmp_path / "sub"
-    sub.mkdir()
-    (sub / "AGENTS.md").write_text("# Sub", encoding="utf-8")
-    (sub / "a.py").write_text("a", encoding="utf-8")
-    (sub / "b.py").write_text("b", encoding="utf-8")
-
-    tool = _make_read()
-
-    r1 = ReadFileResult(
-        file_path=str(sub / "a.py"),
-        content="a",
-        num_lines=1,
-        start_line=1,
-        total_lines=1,
-    )
-    assert tool.get_result_extra(r1) is not None
-
-    r2 = ReadFileResult(
-        file_path=str(sub / "b.py"),
-        content="b",
-        num_lines=1,
-        start_line=1,
-        total_lines=1,
-    )
-    assert tool.get_result_extra(r2) is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("_setup_manager")
-async def test_agents_md_stream_event_concatenates_new_docs(tmp_path: Path) -> None:
-    sub = tmp_path / "sub"
-    nested = sub / "nested"
-    nested.mkdir(parents=True)
-    (sub / "AGENTS.md").write_text("# Sub", encoding="utf-8")
-    (nested / "AGENTS.md").write_text("# Nested", encoding="utf-8")
-    target = nested / "file.py"
-    target.write_text("hello", encoding="utf-8")
-
-    tool = _make_read()
-    ctx = InvokeContext(tool_call_id="call-1")
-
-    events: list[ToolStreamEvent | ReadFileResult] = []
-    async for item in tool.run(ReadFileArgs(file_path=str(target)), ctx):
-        events.append(item)
-
-    stream_events = [e for e in events if isinstance(e, ToolStreamEvent)]
-    assert len(stream_events) == 1
-    assert stream_events[0].message == "Discovered sub/AGENTS.md, sub/nested/AGENTS.md"
-    assert stream_events[0].tool_call_id == "call-1"
-
-
-def test_agents_md_returns_none_when_not_initialized(tmp_path: Path) -> None:
-    reset_harness_files_manager()
-    tool = _make_read()
-    result = ReadFileResult(
-        file_path=str(tmp_path / "file.py"),
-        content="",
-        num_lines=0,
-        start_line=1,
-        total_lines=0,
-    )
-    assert tool.get_result_extra(result) is None
     reset_harness_files_manager()
 
 

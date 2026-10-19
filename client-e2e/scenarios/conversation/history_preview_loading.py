@@ -23,8 +23,8 @@ handshake = {
 }
 request_methods = {"session/read", "session/history/list"}
 capture_startup = False
-screen_contains = {"rust": ("Preview message 79", "Resumed session")}
-screen_excludes = {"rust": ("Preview message 00", "Load more", "load more messages")}
+screen_contains = ("Preview message 79", "Resumed session")
+screen_excludes = ("Preview message 00", "Load more", "load more messages")
 
 timeline: Timeline = [
     "/resume\r",

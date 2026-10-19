@@ -14,7 +14,7 @@ env = {"VIBE_REPLAY_SETTLE_BUSY": "1", "VIBE_TYPING_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
 capture_startup = False
 capture_steps = {1, 2, 3}
-screen_excludes = {"rust": ("› 1. Wrap the content",)}
+screen_excludes = ("› 1. Wrap the content",)
 
 _WHEEL_DOWN = "\x1b[<65;10;13M"
 _CLICK_PARTIAL_OPTION = "\x1b[<0;10;13M\x1b[<0;10;13m"

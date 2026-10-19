@@ -6,11 +6,10 @@ from e2e.app_server.events import assistant_msg, turn_completed, turn_started, u
 from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 
-_PRESS = "\x1b[<0;1;12M"
-_DRAG = "\x1b[<32;120;20M"
-_RELEASE = "\x1b[<0;120;20m"
+_PRESS = "\x1b[<0;1;8M"
+_DRAG = "\x1b[<32;120;16M"
+_RELEASE = "\x1b[<0;120;16m"
 
 clipboard_contains = (
     "copy structured content",

@@ -502,7 +502,7 @@ class CodexPluginAdapter:
                     metadata = parse_openai_skill_metadata(
                         read_safe(resolved, raise_on_error=True).text
                     )
-                except (OSError, SkillParseError):
+                except OSError, SkillParseError:
                     pass
                 else:
                     if not metadata.has_unhandled_fields:

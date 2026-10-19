@@ -5,7 +5,6 @@ from __future__ import annotations
 from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 
 
 handshake = {

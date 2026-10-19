@@ -96,3 +96,31 @@ fn a_seed_prompt_names_its_pasted_images_by_path() {
     assert!(vibe_rs::commands::clear::seed(&app, "/clear").is_none());
     assert!(vibe_rs::commands::clear::seed(&app, "/clear   ").is_none());
 }
+
+#[tokio::test]
+async fn a_failed_clear_leaves_the_context_gauge_alone() {
+    let mut app = App::default();
+    app.session.session_id = Some("session".into());
+    app.session.status = vibe_rs::app::Status::Ready;
+    app.session.tokens = (12_500, 200_000);
+    app.subagents.main_tokens = app.session.tokens;
+    let (tx, mut commands) = tokio::sync::mpsc::channel(8);
+    app.command_tx = Some(tx);
+    let (config_tx, _config_rx) = tokio::sync::mpsc::channel(1);
+    let client = std::sync::Arc::new(vibe_rs::server::Client::stub());
+
+    app.chat_input.load_full_text("/clear".to_owned());
+    vibe_rs::commands::submission::submit(&mut app, &client, &config_tx);
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), commands.recv())
+        .await
+        .expect("the clear answers")
+        .expect("an event");
+
+    assert!(
+        matches!(&event, CommandEvent::Error(text) if text.starts_with("Failed to clear history")),
+        "the stub rejects the clear"
+    );
+    assert_eq!(app.session.session_id.as_deref(), Some("session"));
+    assert_eq!(app.session.tokens, (12_500, 200_000));
+    assert_eq!(app.subagents.main_tokens, app.session.tokens);
+}

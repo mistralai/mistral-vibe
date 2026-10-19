@@ -12,10 +12,10 @@ _CONTENT = (
 )
 
 # The lone read stays ungrouped, so its own header row unfolds the result.
-_EXPAND_RESULT = "\x1b[<0;1;15M\x1b[<0;1;15m"
+_EXPAND_RESULT = "\x1b[<0;1;11M\x1b[<0;1;11m"
 
-screen_contains = {"rust": ("def greet(name):", "return f'hello {name}'")}
-screen_excludes = {"rust": ("[31m", "https://example.com", "old")}
+screen_contains = ("def greet(name):", "return f'hello {name}'")
+screen_excludes = ("[31m", "https://example.com", "old")
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

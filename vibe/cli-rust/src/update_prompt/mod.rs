@@ -1,4 +1,4 @@
-//! The pre-TUI update prompt (Python `setup/update_prompt`), run before the
+//! The pre-TUI update prompt, run before the
 //! main terminal owns the screen.
 
 mod ansi;
@@ -12,6 +12,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::style::{Modifier, Style};
 
 use crate::event_loop::{emit_idle_marker, HOLD_KEY, RELEASE_KEY};
+use crate::terminal_read;
 use crate::ui::banner::petit_chat::PetitChat;
 use crate::ui::theme;
 use crate::update_notifier::gateway::UpdateSource;
@@ -22,24 +23,23 @@ pub use ansi::color_span;
 pub use view::draw;
 pub use view::option_span;
 
-/// Python `UpdatePromptMode`.
+/// Which flow opened the prompt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpdatePromptMode {
     Startup,
     CheckUpgrade,
 }
 
-/// Python `UpdateChoice`.
+/// The two prompt choices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpdateChoice {
     Update,
     Continue,
 }
 
-/// Python `UpdatePromptResult`; `Updated` and `UpdateFailed` carry what the
+/// The prompt's answer; `Updated` and `UpdateFailed` carry what the
 /// update commands actually printed, so the post-dialog lines can show the
-/// real outcome (Python's bool loses that and its success line can claim an
-/// upgrade that never happened).
+/// real outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UpdatePromptResult {
     Continue,
@@ -49,7 +49,7 @@ pub enum UpdatePromptResult {
 }
 
 impl UpdatePromptMode {
-    /// Python `_CONTINUE_LABELS`.
+    /// The Continue option's label.
     pub fn continue_label(self) -> &'static str {
         match self {
             Self::Startup => "Continue with current version",
@@ -66,7 +66,7 @@ impl UpdateChoice {
         }
     }
 
-    /// Python's modulo cycle over two choices: either direction swaps.
+    /// Either direction swaps between the two choices.
     fn next(self) -> Self {
         match self {
             Self::Update => Self::Continue,
@@ -100,7 +100,7 @@ impl UpdatePromptState {
             latest_version: latest_version.to_owned(),
             mode,
             source,
-            // Python starts on "Update now".
+            // Start on "Update now".
             selected: UpdateChoice::Update,
             updating: false,
         }
@@ -111,7 +111,7 @@ impl UpdatePromptState {
         [UpdateChoice::Update, UpdateChoice::Continue]
     }
 
-    /// Python `_move`: swap choices, ignored while updating.
+    /// Swap choices, ignored while updating.
     pub fn move_selection(&mut self) {
         if !self.updating {
             self.selected = self.selected.next();
@@ -119,11 +119,10 @@ impl UpdatePromptState {
     }
 }
 
-/// Python `ask_update_prompt`: own the terminal, answer one prompt. A terminal
-/// that cannot be taken over (piped stdout) falls back to Continue, like
-/// Python's `app.run(inline=True) or UpdatePromptResult.CONTINUE`.
+/// Own the terminal, answer one prompt. A terminal that cannot be taken over
+/// (piped stdout) falls back to Continue.
 pub async fn ask_update_prompt(state: &UpdatePromptState) -> UpdatePromptResult {
-    let Ok(mut terminal) = ratatui::try_init() else {
+    let Ok(mut terminal) = crate::terminal::try_init() else {
         return UpdatePromptResult::Continue;
     };
     let result = dialog_loop(&mut terminal, state).await;
@@ -131,7 +130,7 @@ pub async fn ask_update_prompt(state: &UpdatePromptState) -> UpdatePromptResult 
     // track alternate screens (the e2e vt) would otherwise keep its frame
     // under the next app, which styles blank cells differently than it
     // paints them.
-    let _ = terminal.clear();
+    let _ = crate::terminal::repaint(&mut terminal);
     ratatui::restore();
     // `ratatui::restore` leaves the cursor hidden; give the shell it back.
     let _ = crossterm::execute!(
@@ -142,10 +141,10 @@ pub async fn ask_update_prompt(state: &UpdatePromptState) -> UpdatePromptResult 
     result
 }
 
-/// Python `_show_update_prompt` (cli.py): run the dialog, then act on its
+/// Run the dialog, then act on its
 /// answer. Returns the exit code to take, or `None` to continue into the TUI.
 /// A dismissed-update cache write failure is logged by
-/// `mark_update_as_dismissed` with Python's `OSError` message.
+/// `mark_update_as_dismissed`.
 pub async fn show_update_prompt(
     state: &UpdatePromptState,
     dismiss_on_continue: bool,
@@ -209,9 +208,7 @@ pub async fn show_update_prompt(
             // upgrading, e.g. the re-resolved version is not newer after all
             // — must not cost the user their session or re-offer the same
             // no-op on every launch: dismiss the offer and continue into the
-            // TUI. Divergence from Python, which reports success on the same
-            // exit 0 and exits without the TUI either; a real failure still
-            // exits 1.
+            // TUI. A real failure still exits 1.
             if state.mode == UpdatePromptMode::Startup && no_op {
                 crate::update_notifier::update::mark_update_as_dismissed(
                     &crate::update_notifier::cache::FileSystemUpdateCacheRepository,
@@ -224,7 +221,7 @@ pub async fn show_update_prompt(
     }
 }
 
-/// Python's cancel binding: Ctrl+C or Ctrl+Q quits, from either selection and
+/// Ctrl+C or Ctrl+Q quits, from either selection and
 /// while updating.
 fn is_quit_key(key: &crossterm::event::KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q'))
@@ -259,7 +256,7 @@ pub fn apply_key(
 }
 
 async fn dialog_loop(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut crate::terminal::Tui,
     state: &UpdatePromptState,
 ) -> UpdatePromptResult {
     let mut state = state.clone();
@@ -271,9 +268,9 @@ async fn dialog_loop(
         if replaying && !marker_held {
             emit_idle_marker();
         }
-        let event = match crossterm::event::read() {
+        let event = match terminal_read::read() {
             Ok(event) => event,
-            // Python falls back to Continue when the dialog cannot run.
+            // Fall back to Continue when the dialog cannot run.
             Err(_) => return finish_step(replaying, UpdatePromptResult::Continue),
         };
         let Event::Key(key) = event else {
@@ -296,8 +293,8 @@ async fn dialog_loop(
             return finish_step(replaying, result);
         }
         if state.updating {
-            // Python `enter_updating_state`: swap the options for the spinner,
-            // then run the upgrade, cancellable like `action_quit_prompt`.
+            // Swap the options for the spinner, then run the upgrade,
+            // cancellable by the quit keys.
             view::draw(terminal, &state, &mut chat);
             if replaying {
                 emit_idle_marker();
@@ -308,8 +305,8 @@ async fn dialog_loop(
     }
 }
 
-/// Await the upgrade while animating the spinner, quitting on Ctrl+C/Q like
-/// Python's cancel path: the running command is `_terminate`d (gentle stop
+/// Await the upgrade while animating the spinner, quitting on Ctrl+C/Q: the
+/// running command is terminated (gentle stop
 /// first, so a mid-install uv is not SIGKILLed half-way through) and the
 /// terminated run settles before the dialog answers. The key reader is a
 /// `spawn_blocking` task whose poll loop rechecks the stop flag every
@@ -317,7 +314,7 @@ async fn dialog_loop(
 /// cycle — leaving it alive would let it read and discard the terminal's
 /// next key while the TUI starts.
 async fn run_update(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut crate::terminal::Tui,
     state: &UpdatePromptState,
     chat: &mut PetitChat,
 ) -> UpdatePromptResult {
@@ -377,7 +374,7 @@ pub fn quit_key_reader(stop: &AtomicBool) -> bool {
             return false;
         }
         match crossterm::event::poll(QUIT_POLL_INTERVAL) {
-            Ok(true) => match crossterm::event::read() {
+            Ok(true) => match terminal_read::read() {
                 Ok(Event::Key(key)) if key.kind == KeyEventKind::Press && is_quit_key(&key) => {
                     return true
                 }
@@ -410,7 +407,7 @@ fn drain_replay_release() {
         if !crossterm::event::poll(Duration::from_millis(5)).unwrap_or(false) {
             return;
         }
-        match crossterm::event::read() {
+        match terminal_read::read() {
             Ok(Event::Key(key)) if key.code == KeyCode::F(RELEASE_KEY) => return,
             Ok(_) => continue,
             Err(_) => return,

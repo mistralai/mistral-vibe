@@ -26,7 +26,7 @@ class SimpleTool(BaseTool[SimpleArgs, SimpleResult, BaseToolConfig, BaseToolStat
 
     async def run(
         self, args: SimpleArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | SimpleResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | SimpleResult]:
         yield SimpleResult(
             output=f"processed: {args.value}",
             had_context=ctx is not None,

@@ -29,7 +29,7 @@ pub fn kind(tool_name: Option<&str>) -> Option<&'static str> {
     }
 }
 
-/// The built-in loading label (Python `get_status_text`).
+/// The built-in loading label.
 pub fn status_text(tool_name: Option<&str>) -> Option<&'static str> {
     match tool_name? {
         WEB_SEARCH => Some("Searching the web"),
@@ -70,7 +70,7 @@ pub fn output(tool_name: Option<&str>, input: Option<&Value>, output: &Value) ->
     }
 }
 
-/// Python `get_call_display`: the quoted query, or the fetched domain.
+/// The call header: the quoted query, or the fetched domain.
 fn call_header(tool_name: &str, input: Option<&Value>, settled: bool) -> Option<Header> {
     let (running, done, message) = match tool_name {
         WEB_SEARCH => (
@@ -87,7 +87,7 @@ fn call_header(tool_name: &str, input: Option<&Value>, settled: bool) -> Option<
     Some((if settled { done } else { running }, message, ""))
 }
 
-/// Python `get_result_display`; an unreadable page shows no size, only a suffix.
+/// The result header; an unreadable page shows no size, only a suffix.
 fn result_header(tool_name: &str, input: Option<&Value>, output: &Value) -> Option<Header> {
     let structured = structured(output)?;
     match tool_name {
@@ -158,7 +158,7 @@ fn page(page: &Map<String, Value>) -> Option<Page<'_>> {
     })
 }
 
-/// Python `urlparse(url).netloc or url[:50]`.
+/// The URL's host, else its first 50 characters.
 fn domain(url: &str) -> String {
     let host = url
         .split_once("://")

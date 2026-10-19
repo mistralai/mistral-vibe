@@ -1,14 +1,10 @@
-//! `ask_user_question` bottom-app state, mirroring Python's `QuestionApp`.
+//! `ask_user_question` bottom-app state.
 
 mod answers;
 mod other;
-mod scroll;
 
-pub use answers::{
-    cancel, dismiss, select, select_option, submit_other, toggle_focused, toggle_selection,
-};
+pub use answers::{cancel, dismiss, select, submit_other, toggle_focused};
 pub use other::{handle_other_key, other_caret_at, paste_other, OtherField};
-pub use scroll::{reconcile_scroll, visible_option_rows};
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -18,15 +14,14 @@ use serde_json::Value;
 
 use crate::app::App;
 
-/// Keys buffered before the app appeared must not answer it (Python
-/// `_INPUT_GRACE_PERIOD_S`).
+/// Keys buffered before the app appeared must not answer it.
 pub const INPUT_GRACE_PERIOD: Duration = Duration::from_millis(500);
 const INPUT_GRACE_PERIOD_ENV_VAR: &str = "VIBE_INPUT_GRACE_PERIOD_MS";
 
 const DEFAULT_TYPING_DEBOUNCE_MS: u64 = 1000;
 const TYPING_DEBOUNCE_ENV_VAR: &str = "VIBE_TYPING_GRACE_PERIOD_MS";
 
-/// Who answers the open question (Python `_active_callback` vs `_pending_local_question`).
+/// Who answers the open question: a server callback or a local question.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QuestionSource {
     Callback(String),
@@ -38,23 +33,6 @@ pub fn callback_active(app: &App) -> bool {
     let state = &app.question_app;
     matches!(state.pending, Some((QuestionSource::Callback(_), _)))
         || (state.open && matches!(state.source, Some(QuestionSource::Callback(_))))
-}
-
-#[derive(Clone, Copy, Default)]
-pub struct Viewport {
-    pub offset: u16,
-    pub detached: bool,
-}
-
-impl Viewport {
-    pub fn follow_selection(&mut self) {
-        self.detached = false;
-    }
-
-    pub fn detach_at(&mut self, offset: u16) {
-        self.offset = offset;
-        self.detached = true;
-    }
 }
 
 /// How long the user must stop typing before a callback may take the input box
@@ -77,7 +55,7 @@ pub fn typing_pause_deadline(app: &App) -> Option<Instant> {
     Some(last + typing_debounce())
 }
 
-/// Take the input box once the user has paused (Python `_wait_for_typing_pause`).
+/// Take the input box once the user has paused.
 pub fn show_pending(app: &mut App) {
     if typing_pause_deadline(app).is_some_and(|deadline| Instant::now() < deadline) {
         return;
@@ -85,16 +63,13 @@ pub fn show_pending(app: &mut App) {
     let Some((source, request)) = app.question_app.pending.take() else {
         return;
     };
-    crate::terminal_notifier::action_required(app);
     let state = &mut app.question_app;
     state.open = true;
     state.source = Some(source);
     state.questions = request.questions;
     state.footer_note = request.footer_note;
     state.current_question_idx = 0;
-    state.selected_option = 0;
-    state.viewport = Viewport::default();
-    state.option_rows.clear();
+    state.list = Default::default();
     state.answers.clear();
     state.multi_selections.clear();
     state.other_texts.clear();
@@ -102,10 +77,11 @@ pub fn show_pending(app: &mut App) {
     state.other_scroll = 0;
     state.other_field = None;
     state.mount_time = Some(Instant::now());
+    crate::terminal_notifier::action_required(app);
 }
 
-/// Accept a `callback/call` of kind `user_input` (Python `_show_callback`). The
-/// app opens straight away unless the user is mid-keystroke.
+/// Accept a `callback/call` of kind `user_input`. The app opens straight away
+/// unless the user is mid-keystroke.
 pub fn on_callback_call(app: &mut App, params: &Value) {
     let Some(callback) = params.get("callback") else {
         return;
@@ -160,11 +136,11 @@ pub fn submit_option_idx(app: &App) -> Option<usize> {
 }
 
 pub fn is_other_selected(app: &App) -> bool {
-    other_option_idx(app) == Some(app.question_app.selected_option)
+    other_option_idx(app) == Some(app.question_app.list.selected())
 }
 
 pub fn is_submit_selected(app: &App) -> bool {
-    submit_option_idx(app) == Some(app.question_app.selected_option)
+    submit_option_idx(app) == Some(app.question_app.list.selected())
 }
 
 pub fn is_within_grace_period(app: &App) -> bool {
@@ -182,7 +158,7 @@ pub fn input_grace_period() -> Duration {
     Duration::from_millis(ms)
 }
 
-/// The free-text answer typed for `question_idx` (Python `_get_other_text`).
+/// The free-text answer typed for `question_idx`.
 pub fn other_text(app: &App, question_idx: usize) -> &str {
     app.question_app
         .other_texts
@@ -192,30 +168,28 @@ pub fn other_text(app: &App, question_idx: usize) -> &str {
 
 /// Move the cursor, parking the free-text caret at the end of its stored value.
 pub fn set_selected_option(app: &mut App, option_idx: usize) {
-    app.question_app.selected_option = option_idx;
+    app.question_app.list.highlight(option_idx);
     app.question_app.other_cursor = other_text(app, app.question_app.current_question_idx).len();
 }
 
 /// Move by keyboard and reattach the viewport to the selected option.
 pub fn navigate_to_option(app: &mut App, option_idx: usize) {
     set_selected_option(app, option_idx);
-    app.question_app.viewport.follow_selection();
+    app.question_app.list.follow();
 }
 
 pub fn move_up(app: &mut App) {
-    let total = total_options(app);
-    navigate_to_option(
-        app,
-        crate::list_nav::wrap(app.question_app.selected_option, total, false),
-    );
+    step(app, false);
 }
 
 pub fn move_down(app: &mut App) {
+    step(app, true);
+}
+
+fn step(app: &mut App, down: bool) {
     let total = total_options(app);
-    navigate_to_option(
-        app,
-        crate::list_nav::wrap(app.question_app.selected_option, total, true),
-    );
+    app.question_app.list.step(down, total, true, |_| true);
+    app.question_app.other_cursor = other_text(app, app.question_app.current_question_idx).len();
 }
 
 pub fn next_question(app: &mut App) {

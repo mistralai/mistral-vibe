@@ -13,10 +13,7 @@ from e2e.app_server.scenario import Timeline
 env = {"VIBE_REPLAY_SETTLE_BUSY": "1", "VIBE_TYPING_GRACE_PERIOD_MS": "0"}
 capture_startup = False
 capture_steps = {1}
-screen_contains = {
-    "python": ("-PATTERN-TAIL", "/PATH-TAIL"),
-    "rust": ("-PATTERN-TAIL", "/PATH-TAIL"),
-}
+screen_contains = ("-PATTERN-TAIL", "/PATH-TAIL")
 
 _INPUT = {
     "pattern": "pattern-" + "x" * 150 + "-PATTERN-TAIL",

@@ -13,7 +13,7 @@ fn cwd() -> Option<PathBuf> {
 #[test]
 fn cmd_is_split_into_program_and_args_without_default_args() {
     let launch = resolve_launch(
-        Some("uv run --with-editable ../harness vibe-app-server --experimental-harness".into()),
+        Some("uv run --with-editable ../harness vibe-app-server".into()),
         None,
         None,
         false,
@@ -22,13 +22,7 @@ fn cmd_is_split_into_program_and_args_without_default_args() {
     assert_eq!(launch.program, "uv");
     assert_eq!(
         launch.args,
-        vec![
-            "run",
-            "--with-editable",
-            "../harness",
-            "vibe-app-server",
-            "--experimental-harness",
-        ]
+        vec!["run", "--with-editable", "../harness", "vibe-app-server",]
     );
     assert_eq!(launch.cwd, cwd());
 }
@@ -49,10 +43,7 @@ fn bin_is_trimmed_with_default_args() {
 #[test]
 fn cmd_preserves_quoted_paths_with_spaces() {
     let launch = resolve_launch(
-        Some(
-            r#"uv run --with-editable "/a b/harness" vibe-app-server --experimental-harness"#
-                .into(),
-        ),
+        Some(r#"uv run --with-editable "/a b/harness" vibe-app-server"#.into()),
         None,
         None,
         false,
@@ -61,13 +52,7 @@ fn cmd_preserves_quoted_paths_with_spaces() {
     assert_eq!(launch.program, "uv");
     assert_eq!(
         launch.args,
-        vec![
-            "run",
-            "--with-editable",
-            "/a b/harness",
-            "vibe-app-server",
-            "--experimental-harness",
-        ]
+        vec!["run", "--with-editable", "/a b/harness", "vibe-app-server",]
     );
 }
 
@@ -89,7 +74,7 @@ fn cmd_unbalanced_quotes_fall_back_to_whitespace_split() {
 #[test]
 fn cmd_wins_over_bin() {
     let launch = resolve_launch(
-        Some("uv run vibe-app-server --experimental-harness".into()),
+        Some("uv run vibe-app-server".into()),
         Some("/venv/bin/vibe-app-server".into()),
         None,
         false,
@@ -103,15 +88,7 @@ fn cmd_wins_over_bin() {
 fn blank_cmd_and_bin_fall_back_to_default() {
     let launch = resolve_launch(Some("   ".into()), Some("".into()), None, false, cwd());
     assert_eq!(launch.program, "uv");
-    assert_eq!(
-        launch.args,
-        vec![
-            "run",
-            "--quiet",
-            "vibe-app-server",
-            "--experimental-harness"
-        ]
-    );
+    assert_eq!(launch.args, vec!["run", "--quiet", "vibe-app-server",]);
     assert_eq!(launch.cwd, cwd());
 }
 

@@ -41,7 +41,7 @@ fn a_crash_notice_is_visible_in_the_transcript() {
 
 #[test]
 fn a_server_notice_without_a_rendered_kind_mounts_nothing() {
-    // Python's `_handle_notice` dispatches by detail kind; notices like
+    // Notices dispatch by detail kind; notices like
     // `session_title_updated` update state without mounting a widget, so a
     // server notice's message must stay off the transcript.
     let mut app = App::default();
@@ -72,12 +72,15 @@ fn a_crash_locks_the_session() {
         since: std::time::Instant::now(),
     });
     assert_eq!(
-        app.terminal_notifier.take_title().as_deref(),
+        vibe_rs::terminal_notifier::take_title(&mut app).as_deref(),
         Some(">> Vibe")
     );
     assert!(surface_server_close(&mut app, true));
     assert!(matches!(app.session.status, Status::Failed));
-    assert_eq!(app.terminal_notifier.take_title().as_deref(), Some("Vibe"));
+    assert_eq!(
+        vibe_rs::terminal_notifier::take_title(&mut app).as_deref(),
+        Some("Vibe")
+    );
     assert!(app.session.startup_error.is_some());
     assert!(app.server_closed);
     assert!(!app.view.transcript.is_empty());

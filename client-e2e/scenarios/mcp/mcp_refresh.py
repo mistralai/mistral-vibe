@@ -10,6 +10,7 @@ request_methods = {
     "connector_catalog/refresh",
     "mcp_catalog/read",
     "mcp_catalog/refresh",
+    "session/ready/wait",
 }
 
 timeline: Timeline = ["/mcp\r", "r"]

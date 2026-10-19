@@ -13,7 +13,7 @@ use super::{
 };
 use crate::app::App;
 
-/// Enter outside the free-text row (Python `action_select`).
+/// Enter outside the free-text row.
 pub fn select(app: &mut App, client: &Arc<Client>) {
     if is_within_grace_period(app) {
         return;
@@ -34,10 +34,10 @@ pub fn select(app: &mut App, client: &Arc<Client>) {
         }
         return;
     }
-    toggle_selection(app, app.question_app.selected_option);
+    toggle_selection(app, app.question_app.list.selected());
 }
 
-/// Space on a multi-select option (Python `action_toggle_focused`).
+/// Space on a multi-select option.
 pub fn toggle_focused(app: &mut App) {
     if is_within_grace_period(app) {
         return;
@@ -45,10 +45,10 @@ pub fn toggle_focused(app: &mut App) {
     if !current_question(app).multi_select || is_submit_selected(app) {
         return;
     }
-    toggle_selection(app, app.question_app.selected_option);
+    toggle_selection(app, app.question_app.list.selected());
 }
 
-/// Enter on the focused free-text row (Python `on_input_submitted`).
+/// Enter on the focused free-text row.
 pub fn submit_other(app: &mut App, client: &Arc<Client>) {
     if current_question(app).multi_select {
         if let Some(other_idx) = other_option_idx(app) {
@@ -66,7 +66,7 @@ pub fn submit_other(app: &mut App, client: &Arc<Client>) {
     advance_or_submit(app, client);
 }
 
-pub fn toggle_selection(app: &mut App, option_idx: usize) {
+fn toggle_selection(app: &mut App, option_idx: usize) {
     let selections = app
         .question_app
         .multi_selections
@@ -75,15 +75,6 @@ pub fn toggle_selection(app: &mut App, option_idx: usize) {
     if !selections.remove(&option_idx) {
         selections.insert(option_idx);
     }
-}
-
-/// Mark an option selected without toggling it off (multi-select mouse click).
-pub fn select_option(app: &mut App, option_idx: usize) {
-    app.question_app
-        .multi_selections
-        .entry(app.question_app.current_question_idx)
-        .or_default()
-        .insert(option_idx);
 }
 
 fn advance_or_submit(app: &mut App, client: &Arc<Client>) {
@@ -151,7 +142,7 @@ fn save_single_select_answer(app: &mut App) {
         }
         return;
     }
-    let label = current_question(app).options[app.question_app.selected_option]
+    let label = current_question(app).options[app.question_app.list.selected()]
         .label
         .clone();
     app.question_app.answers.insert(idx, (label, false));
@@ -206,16 +197,14 @@ pub fn dismiss(app: &mut App, source: &QuestionSource) {
 /// Hide the app without answering; the caller owns `source`.
 fn close(app: &mut App) {
     app.question_app.open = false;
-    app.question_app.mouse_press_row = None;
     app.view.bottom_app_selection_chrome.clear();
     app.view.bottom_app_selection_folds = crate::selection::Folds::default();
     crate::selection::clear_region(app, crate::selection::RegionId::BottomApp);
     crate::selection::clear_region(app, crate::selection::RegionId::Loading);
-    crate::terminal_notifier::restore_running(app);
     app.view.loading.end_action_required();
 }
 
-/// Esc (Python `action_cancel`): answer nothing and let the tool report it.
+/// Esc: answer nothing and let the tool report it.
 pub fn cancel(app: &mut App, client: &Arc<Client>) {
     if is_within_grace_period(app) {
         return;

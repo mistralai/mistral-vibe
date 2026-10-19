@@ -44,8 +44,9 @@ This section is for developers who want to set up the repository for local devel
 
 ### Prerequisites
 
-- Python 3.12 or higher
+- Python 3.14 or higher
 - [uv](https://github.com/astral-sh/uv) - Modern Python package manager
+- [Rust](https://rustup.rs) - Builds the `vibe-rs` terminal UI
 
 ### Setup
 
@@ -72,16 +73,29 @@ This section is for developers who want to set up the repository for local devel
 
    Pre-commit hooks will automatically run checks before each commit.
 
+4. Run Vibe:
+
+   ```bash
+   uv run vibe
+   ```
+
+   In a source checkout, the first run builds the `vibe-rs` terminal UI from
+   `vibe/cli-rust` with cargo. After changing the Rust sources, rebuild it with
+   `make build`.
+
 ### Building distributions
 
 `uv build --wheel` produces one platform-specific wheel containing the Python
-CLI, the Rust terminal, and the Unified Harness runtime. The build requires a
-working Rust toolchain and fails if either native component cannot be built.
+package (`vibe-acp` and `vibe-app-server`), the Rust terminal UI, and the
+Unified Harness runtime. The build requires a working Rust toolchain and fails
+if either native component cannot be built.
 On Linux, set `CARGO_BUILD_FLAGS=--no-default-features` to build without ALSA.
 
 `VIBE_SKIP_RUST_TUI=1` may be used by development-only checks that do not need
-the terminal binary. Public releases always build both native components. The
-source distribution bundles both Rust sources, so building from it needs Rust.
+the terminal binary, and by CI builds that package only vibe-acp (it does not
+contain the terminal binary). Public releases always build both native
+components. The source distribution bundles both Rust sources, so building from
+it needs Rust.
 
 ### Logging Configuration
 
@@ -162,30 +176,6 @@ Run a specific test file:
 ```bash
 uv run pytest tests/test_agent_tool_call.py
 ```
-
-### Profiling
-
-Vibe ships a lightweight profiler module (`vibe.cli.profiler`) that wraps [pyinstrument](https://github.com/joerick/pyinstrument). It silently no-ops when pyinstrument is not installed or the `VIBE_PROFILE` env var is unset, so instrumentation can stay in the code with zero overhead in normal use.
-
-**1. Add profiling calls** around the code you want to measure:
-
-```python
-from vibe.cli import profiler
-
-profiler.start("startup")
-# ... code to measure ...
-profiler.stop_and_print()
-```
-
-Only one profiler can run at a time. The label passed to `start()` is used to name the output file. Each call to `stop_and_print` writes an HTML report (`<label>-profile.html`) and prints a text summary to stderr.
-
-**2. Run with profiling enabled:**
-
-```bash
-VIBE_PROFILE=1 uv run vibe
-```
-
-Without `VIBE_PROFILE=1`, all `start` / `stop_and_print` calls are no-ops.
 
 ### Linting and Type Checking
 

@@ -117,14 +117,17 @@ fn refresh_preserves_option_identity_and_resets_missing_selection() {
     state.query.text = "exact".into();
     state.refresh(None);
     assert_eq!(
-        state.items[state.selected]
+        state.items[state.list.selected()]
             .option_id(state.view.as_ref().unwrap())
             .as_deref(),
         Some("project:exact")
     );
     state.query.text = "missing".into();
     state.refresh(None);
-    assert!(matches!(state.items[state.selected], Item::Create { .. }));
+    assert!(matches!(
+        state.items[state.list.selected()],
+        Item::Create { .. }
+    ));
 }
 
 #[test]
@@ -135,10 +138,10 @@ fn arrows_wrap_and_skip_section_rows() {
     };
     state.show_picker();
     state.navigate(false);
-    assert_eq!(state.items[state.selected], Item::Unlink);
+    assert_eq!(state.items[state.list.selected()], Item::Unlink);
     state.navigate(true);
     assert_eq!(
-        state.items[state.selected]
+        state.items[state.list.selected()]
             .option_id(state.view.as_ref().unwrap())
             .as_deref(),
         Some("project:saved")
@@ -146,7 +149,7 @@ fn arrows_wrap_and_skip_section_rows() {
     state.show_picker();
     state.navigate(true);
     assert_eq!(
-        state.items[state.selected]
+        state.items[state.list.selected()]
             .option_id(state.view.as_ref().unwrap())
             .as_deref(),
         Some("project:exact")
@@ -183,7 +186,7 @@ fn default_branch_uses_branch_then_main() {
 }
 
 #[test]
-fn repository_normalization_and_display_match_python() {
+fn repository_normalization_and_display() {
     assert_eq!(
         normalize_repo_url(" git@github.com:Org/Repo.git/ "),
         "github.com/org/repo"
@@ -276,12 +279,12 @@ fn page_up_from_first_project_keeps_a_selectable_row() {
     state.show_picker();
     state.search_focused = false;
     state.list_area.height = 5;
-    let selected = state.selected;
+    let selected = state.list.selected();
 
     state.page(false);
 
-    assert_eq!(state.selected, selected);
-    assert!(state.items[state.selected].selectable());
+    assert_eq!(state.list.selected(), selected);
+    assert!(state.items[state.list.selected()].selectable());
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! Textual-compatible ranking for file completion candidates.
+//! Ranking for file completion candidates.
 
 use std::collections::BTreeMap;
 

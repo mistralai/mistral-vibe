@@ -19,10 +19,6 @@ env = {
 handshake = {"callback/result": {"accepted": True}}
 capture_startup = False
 
-skip_terminal_parity = (
-    "python's Textual notify toast mounts async; rust draws it inline"
-)
-
 _CHILD_SESSION_ID = "00000000-0000-4000-8000-000000000002"
 _PERMISSIONS = [
     {
@@ -57,4 +53,4 @@ timeline: Timeline = [
     server_warning("approval warning"),
 ]
 
-screen_contains = {"rust": ("approval warning",)}
+screen_contains = ("approval warning",)

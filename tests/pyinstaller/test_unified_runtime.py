@@ -1,9 +1,8 @@
 """Build-time behavior of the PyInstaller Unified Runtime helper.
 
-The helper backs all three spec files (vibe.spec, vibe-acp.spec,
-vibe-app-server.spec): the Runtime must be collected unconditionally and a
-missing Runtime must abort the packaging build instead of producing a
-legacy-only executable.
+The helper backs both spec files (vibe-acp.spec, vibe-app-server.spec): the
+Runtime must be collected unconditionally and a missing Runtime must abort the
+packaging build instead of producing a legacy-only executable.
 """
 
 from __future__ import annotations
@@ -282,9 +281,7 @@ def test_collect_unified_runtime_runs_the_guard_before_collection(
         helper.collect_unified_runtime()
 
 
-@pytest.mark.parametrize(
-    "spec_name", ["vibe.spec", "vibe-acp.spec", "vibe-app-server.spec"]
-)
+@pytest.mark.parametrize("spec_name", ["vibe-acp.spec", "vibe-app-server.spec"])
 def test_specs_collect_the_runtime_unconditionally(spec_name: str) -> None:
     content = (TESTS_ROOT.parent / spec_name).read_text()
     assert "collect_unified_runtime()" in content

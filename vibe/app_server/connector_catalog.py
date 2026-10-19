@@ -79,6 +79,7 @@ from vibe.core.tools.connectors.connector_registry import builtin_connectors
 from vibe.core.tools.mcp_settings import persist_mcp_toggle
 from vibe.core.utils.matching import name_matches
 from vibe.observability.logging import logger
+from vibe.setup.auth.whoami import WhoAmICache, load_cached_whoami
 from vibe.utils.http import (
     VibeAsyncHTTPClient,
     build_ssl_context,
@@ -104,6 +105,12 @@ _DEFAULT_BUILTIN_CONNECTORS = builtin_connectors(
 
 # Resolves the caller's org/workspace once per (base_url, api_key) for the console link.
 _IDENTITY_CACHE = IdentityCache()
+_WHOAMI_CACHE = WhoAmICache()
+# Last /whoami failure per key, so an unreachable console doesn't slow every read.
+_WHOAMI_FAILED_AT: dict[tuple[str, str], float] = {}
+_WHOAMI_RETRY_SECONDS = 5 * 60
+# Caps how long a cache miss can delay /mcp for the shared-only warning.
+_WHOAMI_TIMEOUT_SECONDS = 2.0
 _BOOTSTRAP_CACHE_FORMAT = 2
 _BOOTSTRAP_CACHE_TTL_SECONDS = 10 * 60
 _BOOTSTRAP_TIMEOUT_SECONDS = 30.0
@@ -449,7 +456,7 @@ class ConnectorCatalogCache:
         try:
             with self._path.open(encoding="utf-8") as file:
                 payload = json.load(file)
-        except (OSError, json.JSONDecodeError):
+        except OSError, json.JSONDecodeError:
             return {}
         if not isinstance(payload, dict):
             return {}
@@ -620,11 +627,16 @@ class ConnectorCatalogService:
             if context.control is not None
             else None
         )
+        manage_url, private_connectors_hidden = await asyncio.gather(
+            _manage_connectors_url(context.orchestrator.config),
+            _private_connectors_hidden(context.orchestrator.config),
+        )
         return ConnectorCatalogReadResponse(
             catalog=_project_catalog(result),
             selections=_project_selections(context.orchestrator.config, result.catalog),
             session=_project_session(session) if session is not None else None,
-            manage_url=await _manage_connectors_url(context.orchestrator.config),
+            manage_url=manage_url,
+            private_connectors_hidden=private_connectors_hidden,
         )
 
     async def _refresh_request(
@@ -1585,6 +1597,30 @@ async def _manage_connectors_url(config: VibeConfigSchema) -> str | None:
     )
 
 
+async def _private_connectors_hidden(config: VibeConfigSchema) -> bool:
+    provider = _resolve_provider(config)
+    if provider is None:
+        return False
+    key = (config.console_base_url, provider.api_key)
+    failed_at = _WHOAMI_FAILED_AT.get(key)
+    cooling_down = (
+        failed_at is not None and time.monotonic() - failed_at < _WHOAMI_RETRY_SECONDS
+    )
+    # The cooldown only skips the network; another caller may have cached whoami since.
+    if cooling_down:
+        whoami = load_cached_whoami(provider.api_key)
+    else:
+        whoami = await _WHOAMI_CACHE.resolve(
+            base_url=key[0], api_key=key[1], timeout=_WHOAMI_TIMEOUT_SECONDS
+        )
+    if whoami is None:
+        if not cooling_down:
+            _WHOAMI_FAILED_AT[key] = time.monotonic()
+        return False
+    _WHOAMI_FAILED_AT.pop(key, None)
+    return whoami.primitive_access_scope == "shared_only"
+
+
 def _resolve_catalog(
     payload: object, provider_fingerprint: str
 ) -> ResolvedConnectorCatalog:
@@ -1951,7 +1987,7 @@ def _is_fresh(stored_at: int, *, now: int) -> bool:
 def _json_size(value: object) -> int:
     try:
         return len(_canonical_json(value))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return _MAX_CACHE_ENTRY_BYTES + 1
 
 

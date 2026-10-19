@@ -11,17 +11,20 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let view = View {
         title: format!("Connector: {}", app.connector_auth.connector_name),
         rows: rows(app),
-        selected: app.connector_auth.selected,
+        selected: app.connector_auth.list.selected(),
         detail: connector_auth::detail(app),
         help: connector_auth::help_text(app),
     };
-    app.connector_auth.list_area = auth_app::draw(
+    let list_area = auth_app::draw(
         app,
         f,
         area,
         &view,
         crate::mouse::MouseTarget::ConnectorAuth,
     );
+    app.connector_auth
+        .list
+        .layout(&auth_app::option_lines(&view.rows), list_area);
 }
 
 fn rows(app: &App) -> Vec<Row> {

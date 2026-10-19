@@ -5,6 +5,7 @@ pub(crate) mod local;
 mod older;
 pub(crate) mod patch;
 mod scheduled_loop;
+mod settle;
 mod subagent;
 
 use std::collections::{HashMap, HashSet};
@@ -27,11 +28,11 @@ pub struct Transcript {
     hidden: HashSet<String>,
     next_rev: u64,
     pub last_event_id: u64,
-    /// Whether reasoning entries are shown (Python `config.show_thinking_nodes`).
+    /// Whether reasoning entries are shown (`show_thinking_nodes` config).
     show_reasoning: bool,
-    /// Whether the live trailing tool group still spins (Python keeps
-    /// `current_tool_group` open across a successful turn, and finalizes it
-    /// only on a non-grouping entry, a failed/interrupted turn, or a rebuild).
+    /// Whether the live trailing tool group still spins: the group stays open
+    /// across a successful turn, and finalizes only on a non-grouping entry, a
+    /// failed/interrupted turn, or a rebuild.
     live_tail_open: bool,
     /// Highest `[Image #N]` a user message has shown, so a new paste numbers past it.
     highest_image_label: usize,
@@ -56,13 +57,13 @@ struct StoredEntry {
     follows_user: bool,
     followed_by_user: bool,
     historical: bool,
-    /// Client-pinned to the document bottom (Python mounts the what's-new
-    /// message after the messages area, so later entries slot in above it).
+    /// Client-pinned to the document bottom (the what's-new message mounts
+    /// after the messages area, so later entries slot in above it).
     pinned_bottom: bool,
-    /// Whether history widgets existed at mount time (Python `after-history`).
+    /// Whether history entries existed at mount time.
     after_history: bool,
-    /// The latest `/state/outputText` append this entry received (Python's
-    /// stream widget holds the last patch's delta, not the merged text).
+    /// The latest `/state/outputText` append this entry received (the stream
+    /// line shows the last patch's delta, not the merged text).
     stream_delta: Option<String>,
     /// Completed subagent response carried by the following harness notification.
     attached_output: Option<String>,
@@ -86,7 +87,7 @@ pub struct TranscriptEntry<'a> {
     pub followed_by_user: bool,
     /// Opens the queued run, so it paints the `» Queued` header above itself.
     pub queue_header: bool,
-    /// What's-new body mounted below history (Python `.whats-new-message.after-history`).
+    /// What's-new body mounted below history.
     pub after_history: bool,
     /// The latest text appended to a running effect's `state.outputText`.
     pub stream_delta: Option<&'a str>,
@@ -128,8 +129,8 @@ impl Transcript {
         self.history_before_cursor = None;
     }
 
-    /// Python `stop_current_tool_call`: a failed or interrupted turn settles
-    /// the open live group; a successful one leaves it spinning.
+    /// A failed or interrupted turn settles the open live group; a successful
+    /// one leaves it spinning.
     pub fn finalize_tool_group(&mut self) {
         self.live_tail_open = false;
     }
@@ -164,9 +165,9 @@ impl Transcript {
 
     /// Rewindable user messages as `(entry index, entry id, text)`, the text
     /// showing its collapsed pastes as their placeholders: server-owned
-    /// user entries only, mirroring Python's `_get_user_message_widgets`, which
-    /// skips queued prompts and slash-command echoes. Prompts a scheduled loop
-    /// sent are skipped too: the harness refuses to rewind to them.
+    /// user entries only, skipping queued prompts and slash-command echoes.
+    /// Prompts a scheduled loop sent are skipped too: the harness refuses to
+    /// rewind to them.
     pub fn user_messages(&self) -> Vec<(usize, String, crate::collapsed_pastes::Collapsed)> {
         self.entries
             .iter()
@@ -190,8 +191,7 @@ impl Transcript {
     }
 
     /// Replace state from a full `PublicSessionState` (snapshot / session start).
-    /// A rebuild is Python `build_history_widgets`: it settles every group,
-    /// including the trailing one (the post-loop `current_group.finalize()`).
+    /// A rebuild settles every group, including the trailing one.
     pub fn load_snapshot(&mut self, state: &crate::server::PublicSessionState) {
         let local_entries = local::preserve(self);
         self.entries.clear();
@@ -206,13 +206,14 @@ impl Transcript {
                 self.insert(entry.clone(), true);
             }
         }
+        self.settle_rebuilt_compactions(state);
         local::restore(self, local_entries);
     }
 
     /// A live same-session snapshot (ADR 0009): retain the contiguous prefix
-    /// already loaded before the snapshot's history page (Python
-    /// `_merge_snapshot_suffix`) instead of discarding it, so a bounded page
-    /// never drops older rows a pending continuation still needs.
+    /// already loaded before the snapshot's history page instead of discarding
+    /// it, so a bounded page never drops older rows a pending continuation still
+    /// needs.
     pub fn load_live_snapshot(&mut self, state: &crate::server::PublicSessionState) {
         let local_entries = local::preserve(self);
         let previous: Vec<Value> = self
@@ -222,7 +223,7 @@ impl Transcript {
             .map(|entry| entry.raw.clone())
             .collect();
         let history = match state.history.as_ref() {
-            // Python keeps the loaded history when the snapshot carries none.
+            // Keep the loaded history when the snapshot carries none.
             None => previous,
             Some(current) => match merge_snapshot_suffix(&previous, current) {
                 // The retained prefix keeps the cursor that paged it in.
@@ -241,11 +242,12 @@ impl Transcript {
         for entry in history {
             self.insert(entry, true);
         }
+        self.settle_rebuilt_compactions(state);
         local::restore_positions(self, local_entries);
     }
 
-    /// `history/entryAdded`: Python `_handle_entry_added` finalizes the open
-    /// group when the entry cannot join it, and reopens one when it can.
+    /// `history/entryAdded`: finalize the open group when the entry cannot
+    /// join it, and reopen one when it can.
     pub fn add(&mut self, params: &Value) {
         if let Some(entry) = params.get("entry") {
             self.live_tail_open = self.insert(entry.clone(), false);
@@ -264,8 +266,8 @@ impl Transcript {
         let stored = &mut self.entries[index];
         if let Some(ops) = params.get("patch").and_then(Value::as_array) {
             apply_json_patch(&mut stored.raw, ops);
-            // Python's stream line shows the patch's own append (`_appended_text`),
-            // and a patch without one leaves the previous delta in place.
+            // The stream line shows the patch's own append, and a patch without one
+            // leaves the previous delta in place.
             let delta = appended_text(ops, "/state/outputText");
             if !delta.is_empty() {
                 stored.stream_delta = Some(delta);
@@ -277,8 +279,7 @@ impl Transcript {
         self.bump_event(params);
     }
 
-    /// Insert one entry, returning whether it can join a tool group
-    /// (Python `entry_keeps_tool_group`).
+    /// Insert one entry, returning whether it can join a tool group.
     fn insert(&mut self, mut raw: Value, historical: bool) -> bool {
         let Some(id) = entry_id(&raw) else {
             return false;
@@ -352,11 +353,9 @@ impl Transcript {
             self.entries[index] = stored;
             return groups;
         }
-        // The queued run is pinned to the bottom (Python `QueueController.pin_target`),
-        // so content arriving for the running turn slots in above it; a bottom-pinned
-        // banner stays below even the queue, like Python's after-messages widgets.
-        // A pre-tool hook notice slots in ahead of its paired tool entry, whose
-        // anchor Python mounts the container before.
+        // The queued run is pinned to the bottom, so content arriving for the
+        // running turn slots in above it; a bottom-pinned banner stays below even
+        // the queue. A pre-tool hook notice slots in ahead of its paired tool entry.
         let at = grouping::pre_tool_anchor(&stored.typed)
             .and_then(|anchor| self.indices.get(&anchor).copied())
             .unwrap_or_else(|| match (stored.pinned_bottom, stored.pending) {
@@ -412,8 +411,8 @@ impl Transcript {
             .unwrap_or(self.entries.len())
     }
 
-    /// Whether the server-owned history is non-empty (Python tracks its mounted
-    /// history widgets; the what's-new body adds a top margin only when they exist).
+    /// Whether the server-owned history is non-empty (the what's-new body adds
+    /// a top margin only when it is).
     pub fn has_server_entries(&self) -> bool {
         self.entries.iter().any(|entry| !entry.local)
     }
@@ -468,17 +467,16 @@ impl Transcript {
         Some(&self.entries[index].raw)
     }
 
-    /// Merge the hidden retried entry into the interrupted assistant row
-    /// (Python reuses the widget and appends): recompute the row as its frozen
-    /// base with the continuation's text spliced into the last text block —
-    /// Python's `append_content` writes into the same stream, no separator —
-    /// and the continuation's status applied.
+    /// Merge the hidden retried entry into the interrupted assistant row:
+    /// recompute the row as its frozen base with the continuation's text spliced
+    /// into the last text block, with no separator, and the continuation's
+    /// status applied.
     pub fn merge_continuation(&mut self, dst: &str, src: &str, base: &Value) {
         let (Some(&src_index), Some(&dst_index)) = (self.indices.get(src), self.indices.get(dst))
         else {
             return;
         };
-        // Python `PublicMessageEntry.text`: the continuation's text blocks joined.
+        // The continuation's text blocks joined, like `PublicMessageEntry.text`.
         let appended: Vec<String> = self.entries[src_index]
             .raw
             .get("content")
@@ -503,7 +501,7 @@ impl Transcript {
                 .rev()
                 .find(|block| block.get("type").and_then(Value::as_str) == Some("text"));
             match last_text {
-                // Python writes straight into the existing stream: no separator.
+                // Append straight into the existing text: no separator.
                 Some(block) => {
                     let merged = format!(
                         "{}{}",
@@ -577,8 +575,8 @@ impl Transcript {
         }
     }
 
-    /// Python mounts one `QueueHeaderMessage` above the whole queued run, so only
-    /// its first prompt carries the header.
+    /// One queue header sits above the whole queued run, so only its first
+    /// prompt carries the header.
     fn previous_is_pending(&self, index: usize) -> bool {
         self.entries[..index]
             .iter()
@@ -683,21 +681,6 @@ impl Transcript {
         }
     }
 
-    /// Settle the active reasoning row when response generation moves on.
-    pub fn settle_reasoning(&mut self) {
-        let Some(index) = self.entries.iter().rposition(|stored| {
-            matches!(&stored.typed, HistoryEntry::Reasoning(reasoning) if reasoning.generation_status.as_deref() == Some("in_progress"))
-        }) else {
-            return;
-        };
-        let stored = &mut self.entries[index];
-        // Persist onto raw so a later text-append `update` does not revive Thinking.
-        stored.raw["generationStatus"] = Value::String("completed".into());
-        stored.typed = HistoryEntry::from_value(&stored.raw);
-        self.next_rev += 1;
-        stored.rev = self.next_rev;
-    }
-
     /// The group the entry `id` belongs to, if any.
     pub fn group_of(&self, id: &str) -> Option<Group<'_>> {
         self.entry(*self.indices.get(id)?)?.group
@@ -710,9 +693,9 @@ impl Transcript {
     }
 
     /// Whether any entry would render (cheaper than building `lines`). A
-    /// bottom-pinned banner does not count: Python's loading area keeps its
+    /// bottom-pinned banner does not count: the loading area keeps its
     /// fresh-session height while the messages area itself is empty, and the
-    /// what's-new widget mounts outside it.
+    /// what's-new banner mounts outside it.
     pub fn is_empty(&self) -> bool {
         !self
             .entries
@@ -747,7 +730,7 @@ impl Transcript {
             .get(id)
             .and_then(|&index| self.entries.get(index))
         {
-            // An effect whose result Python renders without a fold, or whose
+            // An effect whose result renders without a fold, or whose
             // section has nothing to unfold, gives a click nothing to reveal.
             Some(stored) => match &stored.typed {
                 HistoryEntry::Effect(effect) => {
@@ -765,8 +748,8 @@ impl Transcript {
         }
     }
 
-    /// Whether `id` names a reasoning entry: Python mounts `ReasoningMessage`
-    /// with the bulk fold state, both live and on history rebuilds.
+    /// Whether `id` names a reasoning entry: reasoning rows mount with the bulk
+    /// fold state, both live and on history rebuilds.
     pub fn is_reasoning(&self, id: &str) -> bool {
         self.indices
             .get(id)
@@ -775,8 +758,7 @@ impl Transcript {
     }
 
     /// Every toggle key Ctrl+O unfolds: each folded group plus each entry a
-    /// click can fold (Python `action_toggle_tool` sets every section at once).
-    /// The id set does not depend on the group's running state.
+    /// click can fold. The id set does not depend on the group's running state.
     pub fn expandable_ids(&self) -> Vec<String> {
         let mut ids = Vec::new();
         for value in self.lines() {
@@ -791,7 +773,7 @@ impl Transcript {
     }
 
     /// Whether `id` names an assistant message entry, so a text append patch
-    /// can feed the narrator's turn summary (Python checks the event's role).
+    /// can feed the narrator's turn summary.
     pub fn is_assistant_message(&self, id: &str) -> bool {
         self.indices
             .get(id)
@@ -801,8 +783,8 @@ impl Transcript {
             )
     }
 
-    /// `(statusText, terminal)` for the effect `id`: Python steers the loading
-    /// label from the call display, then resets it once the result settles.
+    /// `(statusText, terminal)` for the effect `id`: the loading label follows
+    /// the call display, then resets once the result settles.
     pub fn effect_loading_status(&self, id: &str) -> Option<(String, bool)> {
         let stored = self
             .indices
@@ -815,7 +797,7 @@ impl Transcript {
     }
 
     /// Whether a server-owned tool call other than `skip` is still running
-    /// (Python resets the loading label only when `tool_calls` is empty).
+    /// (the loading label resets only when none is).
     pub fn has_live_tool_calls(&self, skip: &str) -> bool {
         self.entries.iter().any(|stored| {
             !stored.local
@@ -842,7 +824,7 @@ fn entry_id(entry: &Value) -> Option<String> {
     entry.get("id").and_then(Value::as_str).map(str::to_owned)
 }
 
-/// Python `_merge_snapshot_suffix`: the snapshot's page must be a contiguous
+/// The snapshot's page must be a contiguous
 /// suffix of the loaded history for the older prefix to be retained; any
 /// mismatch replaces the page wholesale. `None` means "no prefix retained".
 fn merge_snapshot_suffix(previous: &[Value], current: &[Value]) -> Option<Vec<Value>> {

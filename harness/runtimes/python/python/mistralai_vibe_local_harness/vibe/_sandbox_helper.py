@@ -51,6 +51,7 @@ MAX_READ_BYTES = 50 * 1_024
 MAX_WRITE_BYTES = 64_000
 MAX_WRITE_PREVIOUS_CONTENT_BYTES = 64_000
 MAX_EDIT_FILE_SIZE_BYTES = 512 * 1_024 * 1_024
+MAX_NEWLINE_SNIFF_BYTES = 1_024 * 1_024
 MAX_OUTPUT_BYTES = 16_000
 SESSION_DIRECTORY_PREFIX = "mistralai-vibe-session-"
 TOOL_RESULTS_DIRECTORY = "tool-results"
@@ -137,20 +138,27 @@ def read_file(path: Path, *, offset: int = 0, limit: int | None) -> dict[str, An
 
 
 def write_file(path: Path, content: str) -> tuple[dict[str, Any], str | None]:
-    """Write ``content`` atomically; also return the text it replaced, if small."""
-    content_bytes = content.encode("utf-8")
-    if len(content_bytes) > MAX_WRITE_BYTES:
+    """Write ``content`` atomically; also return the text it replaced, if small.
+
+    Overwriting a file keeps its dominant line ending, whichever ``content``
+    uses, so rewriting a CRLF file with ``\\n`` lines does not convert it. A new
+    file gets ``content`` as given.
+    """
+    if len(content.encode("utf-8")) > MAX_WRITE_BYTES:
         raise ValueError(f"Content exceeds {MAX_WRITE_BYTES} bytes limit")
     if path.exists() and path.is_dir():
         raise ValueError(f"Path is a directory, not a file: {path}")
 
     file_existed = path.exists()
     previous_content = _replaced_content(path) if file_existed else None
+    newline = _existing_newline(path) if file_existed else None
+    if newline is not None:
+        content = _from_lf(_to_lf(content), newline)
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(path, content, "utf-8")
     result = {
         "path": str(path),
-        "bytes_written": len(content_bytes),
+        "bytes_written": len(content.encode("utf-8")),
         "file_existed": file_existed,
     }
     return result, previous_content
@@ -158,10 +166,16 @@ def write_file(path: Path, content: str) -> tuple[dict[str, Any], str | None]:
 
 def search_replace(
     path: Path, blocks: Sequence[Mapping[str, Any]]
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Apply search/replace blocks in order; return the result and line previews.
+) -> tuple[dict[str, Any], list[dict[str, Any]], str | None]:
+    """Apply search/replace blocks in order; return the result, line previews
+    and the text the edit replaced.
 
     Each block maps ``old_str``, ``new_str`` and ``replace_all``.
+
+    Blocks and the file match with their line endings normalized to ``\\n``, so
+    a block written with either ``\\n`` or ``\\r\\n`` edits a CRLF file. An
+    edited file is written back with its dominant line ending, which also
+    unifies a file that mixed several.
     """
     handle, status = _open_file(path)
     with handle:
@@ -170,7 +184,9 @@ def search_replace(
                 f"File exceeds {MAX_EDIT_FILE_SIZE_BYTES} byte edit limit: {path}"
             )
         raw = handle.read()
-    original, encoding = _decode_editable_text(raw, path)
+    decoded, encoding = _decode_editable_text(raw, path)
+    newline = _dominant_newline(decoded) or os.linesep
+    original = _to_lf(decoded)
     updated = original
     previews: list[dict[str, Any]] = []
     lines_changed = 0
@@ -183,10 +199,28 @@ def search_replace(
     if updated == original:
         warnings.append("search/replace blocks leave the file unchanged")
     else:
-        _atomic_write_text(path, updated, encoding)
+        _atomic_write_text(path, _from_lf(updated, newline), encoding)
+    # Previews carry the lines as written, so a reader that splices them back
+    # into the file restores its own line endings.
+    for preview in previews:
+        for key in ("old_lines", "new_lines"):
+            preview[key] = [_from_lf(line, newline) for line in preview[key]]
 
     result = {"file": str(path), "lines_changed": lines_changed, "warnings": warnings}
-    return result, previews
+    # Carried text is exact only when re-encoding it as UTF-8 reproduces the
+    # file's bytes and it fits the cap, so other codecs carry nothing.
+    # utf-8-sig strips the BOM on decode; keep it so the carried text still
+    # re-encodes to the file's exact bytes. The text is the decoded file, not
+    # its LF form, so it keeps the file's line endings.
+    if len(raw) > MAX_WRITE_PREVIOUS_CONTENT_BYTES:
+        previous_content = None
+    elif encoding == "utf-8":
+        previous_content = decoded
+    elif encoding == "utf-8-sig":
+        previous_content = "\ufeff" + decoded
+    else:
+        previous_content = None
+    return result, previews, previous_content
 
 
 def _apply_block(
@@ -196,8 +230,9 @@ def _apply_block(
     path: Path,
     previews: list[dict[str, Any]],
 ) -> tuple[str, int]:
-    old_str: str = block["old_str"]
-    new_str: str = block["new_str"]
+    if not block["old_str"].removesuffix("\r"):
+        raise ValueError(f"block {index}: old_str cannot be empty")
+    old_str, new_str = _edit_strings_to_lf(block["old_str"], block["new_str"])
     replace_all = bool(block.get("replace_all", False))
     if old_str == new_str:
         raise ValueError(f"block {index}: old_str and new_str must differ")
@@ -231,7 +266,8 @@ def run_file_tool(request: Mapping[str, Any]) -> dict[str, Any]:
 
     ``request`` carries ``tool`` (``read_file``, ``write_file`` or
     ``search_replace``), its validated ``arguments`` and the path ``policy``.
-    Returns ``{"result": ..., "annotations": ...}``.
+    Returns ``{"result": ..., "annotations": ...}``, plus ``previous_content``
+    with the pre-edit text when the tool is a search/replace edit.
     """
     tool = request["tool"]
     arguments = request["arguments"]
@@ -263,15 +299,21 @@ def run_file_tool(request: Mapping[str, Any]) -> dict[str, Any]:
     if tool == "write_file":
         result, previous_content = write_file(path, arguments["content"])
         return {"result": result, "annotations": previous_content}
-    result, previews = search_replace(path, arguments["content"])
-    return {"result": result, "annotations": previews}
+    result, previews, previous_content = search_replace(path, arguments["content"])
+    return {
+        "result": result,
+        "annotations": previews,
+        "previous_content": previous_content,
+    }
 
 
 def _replaced_content(path: Path) -> str | None:
     try:
         if path.stat().st_size > MAX_WRITE_PREVIOUS_CONTENT_BYTES:
             return None
-        return path.read_text(encoding="utf-8")
+        # Decoded without newline translation, so a restore writes the file's
+        # own line endings back.
+        return path.read_bytes().decode("utf-8")
     except (OSError, UnicodeError):
         return None
 
@@ -389,6 +431,77 @@ def _decode_editable_text(raw: bytes, path: Path) -> tuple[str, str]:
             raise ValueError(f"Binary files are not supported: {path}")
         return text, encoding
     raise ValueError(f"Could not decode text file with supported encodings: {path}")
+
+
+def _existing_newline(path: Path) -> str | None:
+    """The dominant line ending of the file's start, if it has one.
+
+    Reads until a chunk holds a line ending, so a long first line does not
+    hide it, but at most :data:`MAX_NEWLINE_SNIFF_BYTES`.
+    """
+    try:
+        with _open_bytes(path) as handle:
+            prefix = b""
+            truncated = True
+            while truncated and len(prefix) < MAX_NEWLINE_SNIFF_BYTES:
+                chunk = handle.read(SNIFF_BYTES)
+                prefix += chunk
+                truncated = len(chunk) == SNIFF_BYTES
+                if b"\n" in chunk or b"\r" in chunk:
+                    break
+            if truncated:
+                # Up to one more code unit, so a CRLF the boundary splits is
+                # read whole in any encoding.
+                prefix += handle.read(4)
+    except OSError:
+        return None
+    # The first candidate is the BOM's encoding, which decodes UTF-16 and
+    # UTF-32, or UTF-8, which every BOM-less candidate shares line endings with.
+    encoding = _candidate_encodings(prefix)[0]
+    text = prefix.decode(encoding, errors="ignore")
+    if truncated:
+        # A CR the extended read still ends on may be half of a CRLF.
+        text = text.removesuffix("\r")
+    return _dominant_newline(text)
+
+
+def _dominant_newline(text: str) -> str | None:
+    """The line ending ``text`` uses most, or None when it has none."""
+    crlf = text.count("\r\n")
+    counts = {
+        "\r\n": crlf,
+        "\n": text.count("\n") - crlf,
+        "\r": text.count("\r") - crlf,
+    }
+    dominant = max(counts, key=counts.__getitem__)
+    return dominant if counts[dominant] > 0 else None
+
+
+def _to_lf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _edit_strings_to_lf(old: str, new: str) -> tuple[str, str]:
+    """:func:`_to_lf` for an edit's old and new text.
+
+    A trailing lone CR is the first half of a CRLF copied from a
+    :func:`read_file` line. On ``old`` it becomes LF, so the text still only
+    matches at the end of a line, and ``new`` then ends with LF too, so the
+    replacement keeps that line break. On ``new`` alone it is dropped, unless
+    ``old`` ends a line.
+    """
+    old_ends_with_cr = old.endswith("\r")
+    old = _to_lf(old)
+    if not old.endswith("\n"):
+        new = new.removesuffix("\r")
+    new = _to_lf(new)
+    if old_ends_with_cr and not new.endswith("\n"):
+        new += "\n"
+    return old, new
+
+
+def _from_lf(text: str, newline: str) -> str:
+    return text if newline == "\n" else text.replace("\n", newline)
 
 
 def _looks_binary(text: str, raw: bytes, encoding: str) -> bool:

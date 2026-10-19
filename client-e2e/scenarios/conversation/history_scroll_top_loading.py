@@ -35,8 +35,8 @@ request_methods = {"session/resume", "session/history/list"}
 capture_startup = False
 # Each key settles, so a page landing mid-burst cannot race the remaining keys.
 settle_per_key = True
-screen_contains = {"rust": ("Saved message 00", "Saved message 01")}
-screen_excludes = {"rust": ("Load more", "load more messages")}
+screen_contains = ("Saved message 00", "Saved message 01")
+screen_excludes = ("Load more", "load more messages")
 
 _TO_TOP = "\x1b[1;2A" * 60
 

@@ -1,4 +1,4 @@
-//! Custom-domain browser-auth URL resolution (Python `onboarding/context.py`).
+//! Custom-domain browser-auth URL resolution.
 
 use vibe_rs::setup::auth::rpc::ProviderView;
 use vibe_rs::setup::wizard::context::{
@@ -132,7 +132,7 @@ fn seeds_only_surface_meaningful_configured_values() {
 }
 
 #[test]
-fn custom_domain_validation_accepts_python_valid_urls() {
+fn custom_domain_validation_accepts_valid_urls() {
     for value in [
         "example.com",
         "https://example.com",
@@ -150,7 +150,7 @@ fn custom_domain_validation_accepts_python_valid_urls() {
 }
 
 #[test]
-fn custom_domain_validation_rejects_python_invalid_urls() {
+fn custom_domain_validation_rejects_invalid_urls() {
     for value in [
         "",
         "https://",

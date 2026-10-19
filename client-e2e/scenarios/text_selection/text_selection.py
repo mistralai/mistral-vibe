@@ -6,7 +6,7 @@ from e2e.app_server.scenario import Timeline
 # Force deterministic OSC 52 copying across hosts.
 env = {"SSH_TTY": "/dev/pts/0"}
 
-# Select a wide mid-transcript row shared by both clients.
+# Select a wide mid-transcript row.
 _ROW = 20
 _COL_START = 12
 _COL_MID = 30
@@ -30,10 +30,10 @@ _AUTO_PRESS = f"\x1b[<0;{_COL_START};{_EDGE_ROW}M"
 _AUTO_DRAG = "\x1b[<32;120;1M"
 _AUTO_RELEASE = "\x1b[<0;120;1m"
 _TOP_SELECT = (
-    f"\x1b[<0;{_COL_START};21M"
-    f"\x1b[<32;{_COL_MID};21M"
-    f"\x1b[<32;{_COL_END};21M"
-    f"\x1b[<0;{_COL_END};21m"
+    f"\x1b[<0;{_COL_START};17M"
+    f"\x1b[<32;{_COL_MID};17M"
+    f"\x1b[<32;{_COL_END};17M"
+    f"\x1b[<0;{_COL_END};17m"
 )
 
 

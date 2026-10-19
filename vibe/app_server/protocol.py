@@ -5,6 +5,7 @@ import binascii
 from enum import StrEnum, auto
 from functools import cache
 from typing import Annotated, Any, Literal, Self
+from uuid import UUID
 
 from pydantic import (
     Field,
@@ -41,12 +42,14 @@ from vibe.app_server.models import (
     AccountView,
     AgentStatsSnapshot,
     AgentSummary,
-    CallbackOutput,
     ConfigIssue,
     ConnectorCounts,
     ContentBlock,
     DebugLogPage,
     IdentityView,
+    ImportHarness,
+    ImportHarnessDiscovery,
+    ImportJob,
     JsonPatchOperation,
     MCPState,
     MentionStats,
@@ -127,13 +130,15 @@ SERVER_METHODS: tuple[str, ...] = (
     "connector_catalog/read",
     "connector_catalog/refresh",
     "connector_catalog/toggle",
-    "diagnostics/list",
     "diagnostics/logs/read",
     "events/read",
     "feedback/record",
     "feedback/shouldShow",
     "session/history/get",
     "identity/read",
+    "imports/discover",
+    "imports/read",
+    "imports/start",
     "loops/clear",
     "loops/create",
     "loops/delete",
@@ -221,10 +226,12 @@ SERVER_METHODS: tuple[str, ...] = (
     "skills/setVersion",
     "skills/updates",
     "skills/versions",
-    "stats/read",
     "telemetry/record",
-    "tools/list",
     "session/turn/enqueue",
+    "session/turn/queue/edit/cancel",
+    "session/turn/queue/edit/abandon",
+    "session/turn/queue/edit/save",
+    "session/turn/queue/edit/start",
     "session/turn/queue/read",
     "session/turn/queue/remove",
     "session/turn/queue/replace",
@@ -247,8 +254,6 @@ SERVER_METHODS: tuple[str, ...] = (
     "workspace/git/worktrees/limit/update",
     "workspace/git/worktrees/list",
     "workspace/git/worktrees/prune",
-    "workspace/git/worktrees/reap",
-    "workspace/git/worktrees/reap/cancel",
     "workspace/git/worktrees/remove",
     "workspace/prompt/prepare",
     "workspace/trust/decision",
@@ -505,14 +510,6 @@ class SessionStopResponse(ProtocolModel):
     closed: bool = True
 
 
-class SessionCloseParams(ProtocolModel):
-    session_id: str
-
-
-class SessionCloseResponse(ProtocolModel):
-    closed: bool = True
-
-
 class SessionListParams(ProtocolModel):
     cursor: str | None = None
     limit: int = Field(default=50, ge=1, le=500)
@@ -675,6 +672,46 @@ class SessionShellCommandResponse(ProtocolModel):
     last_event_id: int
 
 
+class ImportJobStartParams(ProtocolModel):
+    harnesses: list[ImportHarness] = Field(min_length=1)
+
+    @field_validator("harnesses")
+    @classmethod
+    def validate_unique_harnesses(
+        cls, harnesses: list[ImportHarness]
+    ) -> list[ImportHarness]:
+        if len(harnesses) != len(set(harnesses)):
+            raise ValueError("harnesses must not contain duplicates")
+        return harnesses
+
+
+class ImportDiscoveryParams(ProtocolModel):
+    pass
+
+
+class ImportDiscoveryResponse(ProtocolModel):
+    harnesses: list[ImportHarnessDiscovery]
+
+
+class ImportJobStartResponse(ProtocolModel):
+    job: ImportJob
+
+
+class ImportJobReadParams(ProtocolModel):
+    after_event_id: int = Field(default=0, ge=0, strict=True)
+    wait_ms: int = Field(default=0, ge=0, le=5_000, strict=True)
+
+
+class ImportJobReadResponse(ProtocolModel):
+    event_id: int = Field(ge=0, strict=True)
+    job: ImportJob | None
+
+
+class ImportJobUpdatedParams(ProtocolModel):
+    event_id: int = Field(ge=0, strict=True)
+    job: ImportJob | None
+
+
 class BackgroundProcessStopParams(ProtocolModel):
     session_id: str
     process_id: str
@@ -732,10 +769,6 @@ BackgroundProcessOutputResponse = Annotated[
 
 
 class SessionReadyWaitParams(ProtocolModel):
-    session_id: str
-
-
-class SessionReadyReadParams(ProtocolModel):
     session_id: str
 
 
@@ -920,7 +953,6 @@ class RuntimeSnapshot(ProtocolModel):
     connectors: ConnectorCounts
     mcp: MCPState
     bypass_tool_permissions: bool = False
-    experimental_harness: bool = False
 
 
 class PluginInfoParams(ProtocolModel):
@@ -1102,13 +1134,11 @@ class ConfigReadParams(ProtocolModel):
 
 class ConfigReadResponse(ProtocolModel):
     config: ConfigView
-    startup_issue: ConfigIssue | None = None
     stripped_history_images: int = 0
     skills_count: int = 0
     hooks_count: int = 0
     mcp_servers_total: int = 0
     mcp_servers_enabled: int = 0
-    harness_selection_source: str | None = None
 
 
 class AgentInstallParams(ProtocolModel):
@@ -1223,32 +1253,6 @@ class SkillsConvertLocalParams(ProtocolModel):
 
 class SkillsConvertResponse(RuntimeMutationResponse):
     converted: bool = False
-
-
-class ToolsListParams(ProtocolModel):
-    session_id: str
-
-
-class ToolsListResponse(ProtocolModel):
-    tools: list[ToolSummary]
-
-
-class StatsReadParams(ProtocolModel):
-    session_id: str
-
-
-class StatsReadResponse(ProtocolModel):
-    stats: AgentStatsSnapshot
-    context_window: int
-
-
-class DiagnosticsListParams(ProtocolModel):
-    session_id: str
-
-
-class DiagnosticsListResponse(ProtocolModel):
-    issues: list[ConfigIssue]
-    hooks_count: int
 
 
 class DiagnosticsLogsReadParams(ProtocolModel):
@@ -1418,6 +1422,7 @@ class ConnectorCatalogReadResponse(ProtocolModel):
     selections: list[ConnectorSelectionView] = Field(default_factory=list)
     session: SessionConnectorStateView | None = None
     manage_url: str | None = None
+    private_connectors_hidden: bool = False
 
 
 class ConnectorCatalogRefreshParams(ProtocolModel):
@@ -1519,16 +1524,25 @@ class MCPToggleParams(ProtocolModel):
 
 class MCPAddParams(ProtocolModel):
     session_id: str | None = None
-    url: str
+    url: str | None = None
     name: str | None = None
     scopes: list[str] = Field(default_factory=list)
-    transport: MCPAddTransport = "streamable-http"
+    transport: MCPAddTransport | Literal["stdio"] = "streamable-http"
     allow_insecure_http: bool = False
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    headers: dict[str, str] = Field(default_factory=dict)
+    api_key_env: str | None = None
+    api_key_header: str | None = None
+    api_key_format: str | None = None
+    startup_timeout_sec: float | None = Field(default=None, allow_inf_nan=False)
+    tool_timeout_sec: float | None = Field(default=None, allow_inf_nan=False)
 
 
 class MCPAddResponse(ProtocolModel):
     name: str
-    url: str
+    url: str | None = None
     created: bool
     runtime: RuntimeSnapshot | None = None
 
@@ -1694,9 +1708,7 @@ class WorkspaceWorktreeRemoveParams(ProtocolModel):
 
 
 # The remove-only extension: `force`/`inspect` are confirm-flow params that
-# exist so a client can ask before it discards (ADR 0014). They live on a
-# subclass, not on the base, so `WorkspaceWorktreeReapParams` keeps inheriting
-# the original `{cwd}` shape and reap never accepts a flag it would ignore.
+# exist so a client can ask before it discards (ADR 0014).
 class WorkspaceWorktreeRemoveConfirmParams(WorkspaceWorktreeRemoveParams):
     # Explicit confirmation to discard uncommitted changes, untracked files,
     # and new commits without saving a snapshot. Absent (the default) keeps the
@@ -1724,7 +1736,6 @@ type WorktreeRemoveOutcome = Literal[
     "kept_error",
     "not_found",
 ]
-type WorktreeReapOutcome = WorktreeRemoveOutcome | Literal["kept_cancelled"]
 
 
 class WorkspaceWorktreeRemoveResponse(ProtocolModel):
@@ -1742,36 +1753,6 @@ class WorkspaceWorktreeRemoveResponse(ProtocolModel):
     # holder discounted), so a caller can say "in use by N other session(s)".
     # None when there was no claim to count.
     holders: int | None = None
-
-
-class WorkspaceWorktreeReapParams(WorkspaceWorktreeRemoveParams):
-    requester_id: str | None = Field(default=None, min_length=1)
-    request_id: str | None = Field(default=None, min_length=1)
-
-    @model_validator(mode="after")
-    def validate_request_identity(self) -> Self:
-        if (self.requester_id is None) != (self.request_id is None):
-            raise ValueError("requesterId and requestId must be provided together")
-        return self
-
-
-class WorkspaceWorktreeReapResponse(ProtocolModel):
-    outcome: WorktreeReapOutcome
-    root: str | None = None
-    branch: str | None = None
-    branch_deleted: bool = False
-    reasons: list[str] = Field(default_factory=list)
-
-
-class WorkspaceWorktreeReapCancelParams(WorkspaceWorktreeRemoveParams):
-    requester_id: str | None = Field(default=None, min_length=1)
-    request_id: str | None = Field(default=None, min_length=1)
-
-    @model_validator(mode="after")
-    def validate_request_identity(self) -> Self:
-        if self.requester_id is None and self.request_id is not None:
-            raise ValueError("requestId requires requesterId")
-        return self
 
 
 class WorkspaceGitCheckoutsParams(ProtocolModel):
@@ -2140,16 +2121,53 @@ class TurnEnqueueResponse(ProtocolModel):
 class TurnQueueReplaceParams(_TurnQueueInputParams):
     queue_item_id: str
 
-    def as_enqueue_params(self) -> TurnEnqueueParams:
-        return TurnEnqueueParams(
-            idempotency_key=self.idempotency_key,
-            session_id=self.session_id,
-            entries=self.entries,
-        )
-
 
 class TurnQueueReplaceResponse(ProtocolModel):
     queue_item_id: str
+
+
+class _TurnQueueEditParams(ProtocolModel):
+    session_id: str
+    queue_item_id: str
+    edit_id: UUID
+
+
+class TurnQueueEditStartParams(_TurnQueueEditParams):
+    pass
+
+
+class TurnQueueEditStartResponse(ProtocolModel):
+    queue_item_id: str
+
+
+class TurnQueueEditSaveParams(_TurnQueueEditParams):
+    idempotency_key: str
+    entries: list[TurnInputEntry] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_entries(self) -> Self:
+        validate_turn_input_entries(self.entries)
+        return self
+
+
+class TurnQueueEditSaveResponse(ProtocolModel):
+    queue_item_id: str
+
+
+class TurnQueueEditCancelParams(_TurnQueueEditParams):
+    pass
+
+
+class TurnQueueEditCancelResponse(ProtocolModel):
+    pass
+
+
+class TurnQueueEditAbandonParams(_TurnQueueEditParams):
+    pass
+
+
+class TurnQueueEditAbandonResponse(ProtocolModel):
+    pass
 
 
 class TurnQueueSteerParams(ProtocolModel):
@@ -2257,16 +2275,6 @@ class CallbackCallResponse(ProtocolModel):
     accepted: bool = True
 
 
-class CallbackRespondParams(ProtocolModel):
-    session_id: str
-    callback_id: str
-    output: CallbackOutput
-
-
-class CallbackRespondResponse(ProtocolModel):
-    status: Literal["accepted", "duplicate"]
-
-
 class CallbackResultError(ProtocolModel):
     message: str
     code: str | None = None
@@ -2344,7 +2352,7 @@ class SessionCompactedParams(SessionHandoffParams):
 
 
 class SessionContextClearedParams(SessionHandoffParams):
-    plan_file_path: str | None = None
+    pass
 
 
 class SessionUpdatedParams(EventNotificationParams):

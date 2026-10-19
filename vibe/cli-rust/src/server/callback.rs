@@ -93,8 +93,7 @@ pub async fn handle_server_request(
     }
 }
 
-/// Deny a callback with the correct output shape per kind, mirroring Python
-/// `session.deny_callback`.
+/// Deny a callback with the correct output shape per kind.
 async fn send_deny(wiring: DenyWiring<'_>, callback_id: &str, kind: &str, session_id: &str) {
     let DenyWiring {
         pending,
@@ -116,7 +115,7 @@ async fn send_deny(wiring: DenyWiring<'_>, callback_id: &str, kind: &str, sessio
         _ => return,
     };
     // The tolerated callback shape omits `sessionId` (ADR 0014); an empty id
-    // would be rejected, so fall back to the active session like Python does.
+    // would be rejected, so fall back to the active session.
     let session_id = if session_id.is_empty() {
         active_session
             .lock()

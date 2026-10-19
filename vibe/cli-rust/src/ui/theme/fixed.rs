@@ -12,11 +12,11 @@ pub const RED: Color = Color::Rgb(0xE1, 0x05, 0x00);
 /// Warm gradient the loading label cycles through (yellow → orange → red).
 pub const LOADING_GRADIENT: [Color; 5] = [YELLOW, ORANGE_LIGHT, ORANGE, ORANGE_DARK, RED];
 
-/// Onboarding heading (Python `$mistral_orange_title`); not the selection orange.
+/// Onboarding heading; not the selection orange.
 pub const ONBOARDING_TITLE: Color = Color::Rgb(0xff, 0x5a, 0x00);
-/// Idle onboarding card border (Python `.onboarding-card` border).
+/// Idle onboarding card border.
 pub const ONBOARDING_CARD_BORDER: Color = Color::Rgb(0x30, 0x30, 0x40);
-/// Python `GRADIENT_COLORS`: the welcome banner highlight and the browser sign-in wait ramp.
+/// The welcome banner highlight and the browser sign-in wait ramp.
 pub const WELCOME_GRADIENT: [Color; 10] = [
     Color::Rgb(0xff, 0x6b, 0x00),
     Color::Rgb(0xff, 0x7b, 0x00),
@@ -44,7 +44,7 @@ pub mod sgr {
     pub const YELLOW: &str = "\x1b[33m";
 }
 
-/// Textual's `ansi_theme_dark` terminal palette.
+/// Terminal palette that resolves ANSI colors under dark themes.
 pub mod monokai {
     use ratatui::style::Color;
 
@@ -55,7 +55,7 @@ pub mod monokai {
     pub const BLACK: Color = Color::Rgb(26, 26, 26);
 }
 
-/// Textual's `ansi_theme_light` terminal palette.
+/// Terminal palette that resolves ANSI colors under light themes.
 pub mod alabaster {
     use ratatui::style::Color;
 
@@ -73,7 +73,7 @@ pub enum Named {
     Cyan,
 }
 
-/// A Rich named color the way Textual renders it: the raw terminal color under an
+/// A Rich named color as rendered: the raw terminal color under an
 /// ANSI theme, else mapped through Monokai (dark) or Alabaster (light).
 pub fn named(color: Named) -> Color {
     match (super::is_ansi(), super::is_dark(), color) {
@@ -94,7 +94,7 @@ pub fn ansi_caret() -> Style {
     Style::default().fg(Color::Black).bg(Color::Gray)
 }
 
-/// A compact input's block caret over `base` (Textual `Input`: `$input-cursor-*`).
+/// A compact input's block caret over `base`.
 pub fn input_caret(base: Style) -> Style {
     if super::is_ansi() {
         return base.patch(ansi_caret());

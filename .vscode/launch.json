@@ -50,20 +50,6 @@
       "subProcess": true
     },
     {
-      "name": "CLI",
-      "type": "debugpy",
-      "request": "launch",
-      "program": "vibe/cli/entrypoint.py",
-      "args": [],
-      "console": "integratedTerminal",
-      "justMyCode": false,
-      "cwd": "${workspaceFolder}",
-      "python": "${workspaceFolder}/.venv/bin/python",
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}"
-      }
-    },
-    {
       "name": "Attach using PID",
       "type": "debugpy",
       "request": "attach",

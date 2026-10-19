@@ -53,7 +53,7 @@ def test_subagent_surface_follows_the_switch(
     """*Prepare*: `enable_subagents` off or on, and a model that searches the
     tool functions for subagents.
     *Do*: Run `vibe -p --auto-approve`.
-    *Assert*: Off, the system prompt has no Subagents section and the search
+    *Assert*: Off, the system prompt has no Agents section and the search
     finds no subagent function; on, both are there. The export shows the
     setting either way.
     """
@@ -73,10 +73,10 @@ def test_subagent_surface_follows_the_switch(
     # Assert
     assert result.returncode == 0, result.stderr
     first_request = json.dumps(streaming_mock_server.requests[0])
-    assert ("## Subagents" in first_request) is enabled
-    assert ("tools.subagent" in first_request) is enabled
+    assert ("## Agents" in first_request) is enabled
+    assert ("tools.agents" in first_request) is enabled
     [search_result] = _tool_results(streaming_mock_server.requests[1])
-    expected = "subagent.spawn" if enabled else "No matching tool functions found"
+    expected = "agents.spawn" if enabled else "No matching tool functions found"
     assert expected in search_result, search_result
-    assert ("subagent." in search_result) is enabled, search_result
+    assert ("agents." in search_result) is enabled, search_result
     assert read_export_config(output_dir)["enable_subagents"] is enabled

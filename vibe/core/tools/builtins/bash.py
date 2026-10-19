@@ -43,7 +43,7 @@ from vibe.core.tools.utils import (
     shell_path_scope_root,
 )
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
-from vibe.core.utils import is_windows, kill_async_subprocess
+from vibe.core.utils import kill_async_subprocess
 from vibe.core.utils.shell import spawn_shell_command, uses_posix_shell
 from vibe.core.workspace import Workspace
 from vibe.permissions import (
@@ -155,17 +155,10 @@ _PATH_COMMANDS = _MUTATING_PATH_COMMANDS | set(_READ_ONLY_COMMANDS_POSIX)
 
 
 def _split_command_tokens(command: str) -> list[str]:
+    # Windows needs no special case: Git Bash honours backslash escapes like any
+    # POSIX shell, so keeping them literal would read `\"` as an opening quote.
     try:
-        if not is_windows():
-            return shlex.split(command)
-        # On Windows, escape="" keeps backslashes literal so paths like
-        # C:\Users\... survive tokenization; POSIX shlex would otherwise consume
-        # them as escape characters. This must stay Windows-only: on POSIX the
-        # backslash is a real escape and dropping it would corrupt path tokens.
-        lexer = shlex.shlex(command, posix=True)
-        lexer.whitespace_split = True
-        lexer.escape = ""
-        return list(lexer)
+        return shlex.split(command)
     except ValueError:
         return command.split()
 
@@ -746,7 +739,7 @@ class Bash(
 
     async def run(
         self, args: BashArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | CapturedShellResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | CapturedShellResult]:
         timeout = args.timeout or self.config.default_timeout
         max_bytes = self.config.max_output_bytes
 
@@ -809,7 +802,7 @@ class Bash(
                 exit_code=proc.returncode or 0,
             )
 
-        except (ToolError, asyncio.CancelledError):
+        except ToolError, asyncio.CancelledError:
             raise
         except Exception as exc:
             raise ToolError(f"Error running command {args.command!r}: {exc}") from exc

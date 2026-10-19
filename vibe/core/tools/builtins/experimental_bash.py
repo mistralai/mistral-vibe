@@ -12,7 +12,6 @@ import functools
 import json
 import os
 from pathlib import Path
-import shlex
 import threading
 import time
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, get_args
@@ -37,6 +36,10 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.builtins._powershell_lexer import (
+    split_powershell_arguments,
+    split_powershell_commands,
+)
 from vibe.core.tools.builtins._shell_command_policy import (
     analyze_shell_command_policy,
     git_repository_requires_approval,
@@ -47,6 +50,7 @@ from vibe.core.tools.builtins.bash import (
     BashToolConfig,
     _expand_guardrail_commands,
     _git_repository_permission_pattern,
+    _split_command_tokens,
     _update_guardrail_cwds,
     command_session_pattern,
     needs_exact_command_scope,
@@ -325,22 +329,6 @@ _MUTATING_PATH_COMMANDS = {"cd", "chmod", "chown", "cp", "mkdir", "mv", "rm", "t
 _PATH_COMMANDS = _MUTATING_PATH_COMMANDS | set(_READ_ONLY_COMMANDS_POSIX)
 
 
-def _split_command_tokens(
-    command: str, *, preserve_backslashes: bool | None = None
-) -> list[str]:
-    try:
-        if preserve_backslashes is None:
-            preserve_backslashes = is_windows()
-        if preserve_backslashes:
-            lexer = shlex.shlex(command, posix=True)
-            lexer.whitespace_split = True
-            lexer.escape = ""
-            return list(lexer)
-        return shlex.split(command)
-    except ValueError:
-        return command.split()
-
-
 def _looks_like_path(token: str) -> bool:
     return (
         token.startswith(os.sep)
@@ -359,7 +347,6 @@ def _collect_outside_paths(
     scratchpad_dir: Path | None,
     path_commands: Collection[str] = _PATH_COMMANDS,
     case_sensitive_commands: bool = True,
-    preserve_backslashes: bool = False,
 ) -> set[str]:
     paths: set[str] = set()
     if not is_path_within_workdir(
@@ -368,7 +355,7 @@ def _collect_outside_paths(
         paths.add(str(command_cwd))
 
     for part in command_parts:
-        tokens = _split_command_tokens(part, preserve_backslashes=preserve_backslashes)
+        tokens = _split_command_tokens(part)
         command = tokens[0] if tokens else None
         if not command:
             continue
@@ -398,7 +385,6 @@ def _collect_outside_dirs(
     scratchpad_dir: Path | None,
     path_commands: Collection[str] = _PATH_COMMANDS,
     case_sensitive_commands: bool = True,
-    preserve_backslashes: bool = False,
 ) -> set[str]:
     """Compatibility helper returning parents for outside paths."""
     paths = _collect_outside_paths(
@@ -408,7 +394,6 @@ def _collect_outside_dirs(
         scratchpad_dir=scratchpad_dir,
         path_commands=path_commands,
         case_sensitive_commands=case_sensitive_commands,
-        preserve_backslashes=preserve_backslashes,
     )
     return {
         str(Path(path) if Path(path).is_dir() else Path(path).parent) for path in paths
@@ -1085,7 +1070,7 @@ class TerminalSessionManager:
         for manifest_path in self.sessions_dir.glob("*.json"):
             try:
                 metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            except OSError, json.JSONDecodeError:
                 continue
             session_id = metadata.get("session_id")
             if not isinstance(session_id, str):
@@ -1173,7 +1158,7 @@ class _ForegroundStream:
             tool_name=self._tool_name, tool_call_id=self._tool_call_id, message=message
         )
 
-    async def pump(self, *, timeout: float) -> AsyncGenerator[ToolStreamEvent, None]:
+    async def pump(self, *, timeout: float) -> AsyncGenerator[ToolStreamEvent]:
         deadline = time.monotonic() + timeout
         while not self.completed:
             remaining_seconds = deadline - time.monotonic()
@@ -1526,12 +1511,12 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
             return False
         return tokens[0] in self.config.sensitive_patterns
 
+    @staticmethod
+    def _tokenize_command(command: str) -> list[str]:
+        return _split_command_tokens(command)
+
     def _resolve_guardrail_permission(
-        self,
-        command_parts: list[str],
-        *,
-        command_cwd: Path,
-        preserve_backslashes: bool | None = None,
+        self, command_parts: list[str], *, command_cwd: Path
     ) -> PermissionContext | None:
         option_required_by_command: dict[str, RequiredPermission] = {}
         possible_cwds = {command_cwd}
@@ -1548,9 +1533,7 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
                     permission=ToolPermission.NEVER,
                     reason=f"Command denied: '{part}' is not allowed as a standalone command. Do not attempt to run this command.",
                 )
-            tokens = _split_command_tokens(
-                part, preserve_backslashes=preserve_backslashes
-            )
+            tokens = self._tokenize_command(part)
             cwd_is_unknown = (
                 _update_guardrail_cwds(tokens, possible_cwds) or cwd_is_unknown
             )
@@ -1848,7 +1831,7 @@ class ExperimentalBash(
 
     async def run(
         self, args: ExperimentalBashArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | ExperimentalBashResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | ExperimentalBashResult]:
         requested_timeout = (
             float(args.timeout) if args.timeout is not None else args.timeout_seconds
         )
@@ -1933,7 +1916,7 @@ class ExperimentalBash(
     async def _kill_on_abort(self, session_id: str) -> AsyncIterator[None]:
         try:
             yield
-        except (asyncio.CancelledError, GeneratorExit):
+        except asyncio.CancelledError, GeneratorExit:
             try:
                 # Shielded: a second cancellation must not leave the PTY running.
                 await asyncio.shield(
@@ -2055,7 +2038,7 @@ class BashOutput(
 
     async def run(
         self, args: BashOutputArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | BashOutputResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | BashOutputResult]:
         _ = ctx
         cursor = 0 if args.cursor is None else args.cursor
         wait_seconds = min(args.wait_seconds, self.config.max_poll_seconds)
@@ -2153,23 +2136,21 @@ class BashStdin(
             return None
         try:
             command = self._session_manager().info(args.session_id).command
-        except (ManagedShellError, ManagedShellBackendError):
+        except ManagedShellError, ManagedShellBackendError:
             return self._pager_input_permission(args.session_id)
 
         if self.shell_family in {"powershell", "windows"}:
             # Imported lazily because windows_shell subclasses BashStdin.
             from vibe.core.tools.builtins.windows_shell import (
-                _split_windows_command_parts,
-                _split_windows_command_tokens,
                 _windows_command_name,
                 _windows_invoked_command,
             )
 
             command_parts = _expand_guardrail_commands(
-                _split_windows_command_parts(command)
+                split_powershell_commands(command)
             )
             for part in command_parts:
-                tokens = _split_windows_command_tokens(part)
+                tokens = split_powershell_arguments(part)
                 if not tokens:
                     continue
                 executable, _arguments = _windows_invoked_command(tokens)
@@ -2182,9 +2163,7 @@ class BashStdin(
             list(analyze_shell_command(command).command_parts)
         )
         for part in command_parts:
-            tokens = _split_command_tokens(
-                part, preserve_backslashes=self.shell_family == "git_bash"
-            )
+            tokens = _split_command_tokens(part)
             if tokens:
                 command_name = os.path.basename(tokens[0]).lower().removesuffix(".exe")
                 if command_name in self._PAGER_SESSION_COMMANDS:
@@ -2193,7 +2172,7 @@ class BashStdin(
 
     async def run(
         self, args: BashStdinArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | BashStdinResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | BashStdinResult]:
         _ = ctx
         try:
             payload = self._build_payload(args)
@@ -2328,7 +2307,7 @@ class BashSessions(
 
     async def run(
         self, args: BashSessionsArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | BashSessionsResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | BashSessionsResult]:
         _ = ctx
         max_bytes = args.max_bytes or self.config.max_inline_bytes
         try:
@@ -2460,7 +2439,7 @@ class BashLogFile(
 
     async def run(
         self, args: BashLogFileArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | BashLogFileResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | BashLogFileResult]:
         _ = ctx
         max_bytes = args.max_bytes or self.config.max_inline_bytes
         try:

@@ -49,7 +49,7 @@ def _read_entries(path: Path) -> dict[str, Any]:
     try:
         with path.open(encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -61,7 +61,7 @@ def _write_entries(path: Path, entries: dict[str, Any]) -> None:
         with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(entries, f, separators=(",", ":"))
         os.replace(tmp_path, path)
-    except (OSError, TypeError):
+    except OSError, TypeError:
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:

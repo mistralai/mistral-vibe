@@ -9,11 +9,9 @@ use tokio::io::AsyncReadExt;
 use tokio::process::ChildStdout;
 use tokio::sync::{mpsc, watch};
 
+use super::frames::Frames;
 use super::process::{ActiveSession, Pending, RequestFailure};
 use super::{notification, Incoming, Notification};
-
-/// Maximum accepted JSON-RPC frame size (bytes). Larger frames are a protocol error.
-pub(super) const MAX_FRAME: usize = 16 * 1024 * 1024;
 
 /// Parked-notification byte cap: past it the event loop is wedged, and the
 /// transport fails decisively instead of growing without bound.
@@ -91,7 +89,7 @@ pub fn next_frame(tail: &mut Vec<u8>, searched: &mut usize) -> Option<String> {
     Some(frame)
 }
 
-/// Bounds-check and route one frame; false stops the reader.
+/// Route one non-empty frame; false stops the reader.
 #[allow(clippy::too_many_arguments)]
 async fn accept_frame(
     frame: &str,
@@ -102,10 +100,6 @@ async fn accept_frame(
     deny_callbacks: &AtomicBool,
     active_session: &ActiveSession,
 ) -> bool {
-    if frame.len() > MAX_FRAME {
-        tracing::error!(len = frame.len(), "frame exceeds MAX_FRAME; protocol error");
-        return false;
-    }
     if frame.trim().is_empty() {
         return true;
     }
@@ -140,8 +134,7 @@ pub(super) fn spawn(
             backlog: VecDeque::new(),
             backlog_bytes: 0,
         };
-        let mut tail: Vec<u8> = Vec::new();
-        let mut searched = 0usize;
+        let mut frames = Frames::default();
         let mut chunk = vec![0u8; 16384];
         let mut flush_tick = tokio::time::interval(std::time::Duration::from_millis(20));
         let mut reading = true;
@@ -150,11 +143,7 @@ pub(super) fn spawn(
                 read = stdout.read(&mut chunk) => match read {
                     Ok(0) => {
                         // EOF: route a final unterminated frame, like lines() did.
-                        if !tail.is_empty() {
-                            let frame = String::from_utf8_lossy(&tail)
-                                .trim_end_matches('\r')
-                                .to_string();
-                            tail.clear();
+                        if let Some(frame) = frames.finish(&pending, &to_writer) {
                             reading = accept_frame(
                                 &frame,
                                 &pending,
@@ -170,8 +159,7 @@ pub(super) fn spawn(
                         }
                     }
                     Ok(n) => {
-                        tail.extend_from_slice(&chunk[..n]);
-                        while let Some(frame) = next_frame(&mut tail, &mut searched) {
+                        for frame in frames.push(&chunk[..n], &pending, &to_writer) {
                             if !accept_frame(
                                 &frame,
                                 &pending,
@@ -186,13 +174,6 @@ pub(super) fn spawn(
                                 reading = false;
                                 break;
                             }
-                        }
-                        if tail.len() > MAX_FRAME {
-                            tracing::error!(
-                                len = tail.len(),
-                                "frame exceeds MAX_FRAME; protocol error"
-                            );
-                            reading = false;
                         }
                     }
                     Err(err) => {

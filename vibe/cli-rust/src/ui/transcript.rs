@@ -41,9 +41,14 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         .map(|selection| (selection.key.clone(), selection.head_offset()));
     // The promo is width-wrapped, so each layout width gets its own banner rows.
     let empty = app.view.transcript.is_empty();
-    let config = app.view.banner.view(&app.session.startup_config);
-    let banner_full = banner(app, config.clone(), full_w, empty);
-    let banner_content = banner(app, config, content_w, empty);
+    let config = &app.session.startup_config;
+    let banner_full = banner(app, app.view.banner.view(config, full_w), full_w, empty);
+    let banner_content = banner(
+        app,
+        app.view.banner.view(config, content_w),
+        content_w,
+        empty,
+    );
     let selecting = app
         .selection
         .region
@@ -169,7 +174,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         view.scroll_target = target;
     }
     // Rewind selection asks for an entry to sit at the top of the viewport; the
-    // layout that answers it only exists here (Python `scroll_to_widget`).
+    // layout that answers it only exists here.
     if let Some(index) = view.scroll_to_entry.take() {
         if let Some(entry) = content_layout.entries.iter().find(|e| e.index == index) {
             let document_top = document_top.saturating_add(entry.top);
@@ -246,7 +251,7 @@ fn banner(
     if let Some(promo) = &app.view.promo {
         banner.append(markdown::guttered(promo, width, theme::ORANGE));
     }
-    // Python's `#subagent-transcripts` placeholder (`margin-top: 1`) flows under the banner.
+    // The subagent transcript placeholder (one blank row above) flows under the banner.
     if let (Some(child_id), true) = (
         app.subagents.viewed_subagent_id.as_deref(),
         transcript_empty,

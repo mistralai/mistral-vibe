@@ -49,13 +49,6 @@ def _warning(message: str) -> str:
     return f"<{VIBE_WARNING_TAG}>{message}</{VIBE_WARNING_TAG}>"
 
 
-def _display_relative(path: Path, base: Path) -> Path:
-    try:
-        return path.relative_to(base)
-    except ValueError:
-        return path
-
-
 class ReadFileArgs(BaseModel):
     file_path: ToolPath = Field(description="The absolute path to the file to read")
     offset: int | None = Field(
@@ -95,7 +88,7 @@ class ReadFileConfig(BaseToolConfig):
 
 
 class ReadFileState(BaseToolState):
-    injected_agents_md: set[str] = Field(default_factory=set)
+    pass
 
 
 class ReadFile(
@@ -116,26 +109,6 @@ class ReadFile(
             scratchpad_dir=self.scratchpad_dir,
         )
 
-    def _find_undiscovered_agents_md(self, file_path: Path) -> list[tuple[Path, str]]:
-        docs = self.harness_files.find_subdirectory_agents_md(file_path)
-        return [
-            (d, c)
-            for d, c in docs
-            if str(d.resolve()) not in self.state.injected_agents_md
-        ]
-
-    def get_result_extra(self, result: ReadFileResult) -> str | None:
-        new_docs = self._find_undiscovered_agents_md(Path(result.file_path))
-        if not new_docs:
-            return None
-        for d, _ in new_docs:
-            self.state.injected_agents_md.add(str(d.resolve()))
-        sections = [
-            f"Contents of {d}/AGENTS.md (project instructions for this directory):\n\n{c.strip()}"
-            for d, c in new_docs
-        ]
-        return f"<{VIBE_WARNING_TAG}>\n{'\n\n'.join(sections)}\n</{VIBE_WARNING_TAG}>"
-
     async def _read_file(
         self, args: ReadFileArgs, file_path: Path, tool_io: ToolIOPort | None = None
     ) -> tuple[list[str], int | None, bool]:
@@ -154,6 +127,7 @@ class ReadFile(
                     start_line=start_line,
                     limit=args.limit,
                     max_bytes=self.config.max_read_bytes,
+                    keep_carriage_returns=True,
                 )
         except Exception as exc:
             raise ToolError(f"Error reading {file_path}: {exc}") from exc
@@ -162,7 +136,7 @@ class ReadFile(
     @final
     async def run(
         self, args: ReadFileArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | ReadFileResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | ReadFileResult]:
         file_path = self._resolve_path(args.file_path)
 
         start_line = args.offset or 1
@@ -190,18 +164,6 @@ class ReadFile(
                 f"allowed size ({naturalsize(self.config.max_read_bytes, binary=True)}). "
                 f"Use offset and limit to read a smaller portion of the file."
             )
-
-        if ctx is not None:
-            new_docs = self._find_undiscovered_agents_md(file_path)
-            if new_docs:
-                parts = [
-                    f"{_display_relative(d, self.cwd)}/AGENTS.md" for d, _ in new_docs
-                ]
-                yield ToolStreamEvent(
-                    tool_name=self.get_name(),
-                    tool_call_id=ctx.tool_call_id,
-                    message=f"Discovered {', '.join(parts)}",
-                )
 
         yield ReadFileResult(
             file_path=str(file_path),

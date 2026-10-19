@@ -1,5 +1,4 @@
-//! Post-ready startup work: the account plan and the greeting (Python
-//! `_complete_post_ready_startup`).
+//! Post-ready startup work: the account plan and the greeting.
 
 use std::sync::Arc;
 
@@ -35,7 +34,7 @@ fn field(response: Value, key: &str) -> Value {
     response.get(key).cloned().unwrap_or(Value::Null)
 }
 
-/// The plan label the banner appends to its version line.
+/// The plan label the banner appends to its model line.
 pub fn plan_title(account: &Value) -> Option<String> {
     account
         .pointer("/plan/title")
@@ -67,7 +66,7 @@ pub fn fetch(app: &mut App, client: &Arc<Client>, show_greeting: bool) {
     });
 }
 
-/// Python `GreetingMessage`, shown only when identity exposes a first name.
+/// The greeting, shown only when identity exposes a first name.
 fn greeting(identity: &Value) -> Option<String> {
     let username = identity
         .get("firstName")

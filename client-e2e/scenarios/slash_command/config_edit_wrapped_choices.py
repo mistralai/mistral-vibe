@@ -47,5 +47,5 @@ handshake = {
 }
 
 capture_startup = False
-screen_contains = {"rust": ("Model 7", "multiple rows", "Enter select")}
+screen_contains = ("Model 7", "multiple rows", "Enter select")
 timeline: Timeline = ["/config\r", "\r", "\x1b[B" * 7, resize(20, 100)]

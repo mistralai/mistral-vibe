@@ -10,7 +10,7 @@ use crate::app::App;
 use crate::input::deliver;
 use crate::server::{method, Client};
 
-/// Re-discover sources for the open browser (Python `_start_refresh`), coalescing
+/// Re-discover sources for the open browser, coalescing
 /// with a refresh already in flight.
 pub fn refresh(app: &mut App, client: &Arc<Client>) {
     if app.mcp.refreshing {
@@ -24,7 +24,7 @@ pub fn refresh(app: &mut App, client: &Arc<Client>) {
     let pending = app.commit_started();
     tokio::spawn(async move {
         let params = json!({"sessionId": session_id});
-        // Python's refresh worker drops failures, so they never reach the transcript.
+        // Refresh failures are dropped, so they never reach the transcript.
         let response = match rediscover(&client, params).await {
             Ok(response) => Some(response),
             Err(error) => {
@@ -36,7 +36,7 @@ pub fn refresh(app: &mut App, client: &Arc<Client>) {
     });
 }
 
-/// Python `_refresh_mcp_browser`: wait for init, then re-fetch connectors and servers.
+/// Wait for init, then re-fetch connectors and servers.
 pub(super) async fn rediscover(client: &Client, params: Value) -> anyhow::Result<Value> {
     client
         .request(method::SESSION_READY_WAIT, params.clone())
@@ -59,7 +59,7 @@ pub fn refresh_deadline(app: &App) -> tokio::time::Instant {
         .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600))
 }
 
-/// The background tick (Python `set_interval`): refresh and schedule the next one.
+/// The background tick: refresh and schedule the next one.
 pub fn background_refresh(app: &mut App, client: &Arc<Client>) {
     app.mcp.refresh_at = Some(Instant::now() + BACKGROUND_REFRESH_INTERVAL);
     refresh(app, client);

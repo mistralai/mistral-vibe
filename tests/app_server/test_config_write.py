@@ -1,61 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_config
-from tests.stubs.app_server import build_test_app_server
+from tests.conftest import build_test_vibe_config
 from vibe.app_server._config_write import config_write_targets, model_config_write_ops
-from vibe.app_server.client import AppServerClient
-from vibe.app_server.protocol import (
-    ClientInfo,
-    ConfigWriteOpWire,
-    ConfigWriteParams,
-    SessionStartParams,
-)
-from vibe.app_server.transport import memory_transport_pair
 from vibe.core.config import ModelConfig, build_default_orchestrator
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.trusted_folders import trusted_folders_manager
-from vibe.observability.logging import get_log_level_chain, set_config_log_level
-
-
-async def _write_model_ops(
-    *, config: VibeConfigSchema, ops: list[ConfigWriteOpWire]
-) -> dict[str, Any]:
-    client_transport, server_transport = memory_transport_pair()
-    agent_loop = build_test_agent_loop(config=config)
-    server = build_test_app_server(agent_loop, server_transport)
-    client = AppServerClient(client_transport, run_peer=server.serve)
-
-    try:
-        await client.initialize(ClientInfo(name="config-write-test", version="1"))
-        await client.notify("initialized")
-        await client.request("session/start", SessionStartParams())
-        response = await client.request(
-            "config/write", ConfigWriteParams(session_id=agent_loop.session_id, ops=ops)
-        )
-    finally:
-        await client_transport.close()
-        await server_transport.close()
-        await agent_loop.aclose()
-
-    assert response["rejected"] is False
-    persisted = await agent_loop.config_orchestrator.load_persistence_layer()
-    return persisted.model_dump()["models"]
-
-
-async def _write_model_field(
-    *, config: VibeConfigSchema, alias: str, field: str, value: Any
-) -> dict[str, Any]:
-    models = await _write_model_ops(
-        config=config,
-        ops=[ConfigWriteOpWire(op="set", path=f"/models/{alias}/{field}", value=value)],
-    )
-    return models[alias]
 
 
 def _routed_model() -> ModelConfig:
@@ -67,162 +21,6 @@ def _routed_model() -> ModelConfig:
         thinking="off",
         supports_images=True,
     )
-
-
-def _routed_config() -> VibeConfigSchema:
-    return build_test_vibe_config(
-        active_model="",
-        routed_default_model="glm-5-2",
-        routed_model_config=_routed_model().model_dump_json(),
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "field, value",
-    [("thinking", "low"), ("temperature", 0.7), ("supports_images", False)],
-)
-async def test_config_write_model_field_materializes_routed_default(
-    field: str, value: Any
-) -> None:
-    persisted = await _write_model_field(
-        config=_routed_config(), alias="glm-5-2", field=field, value=value
-    )
-
-    assert persisted[field] == value
-    assert persisted["name"] == "glm-5.2"
-    assert persisted["provider"] == "mistral"
-    assert persisted["alias"] == "glm-5-2"
-    # Only required fields + the changed field are persisted; admin-layer values
-    # (temperature, input_price, etc.) are NOT baked into the user's config.
-    assert set(persisted.keys()) == {"name", "provider", "alias", field}
-
-
-@pytest.mark.asyncio
-async def test_config_write_materializes_a_model_that_is_not_active_yet() -> None:
-    """*Prepare*: A routed default, and a second model no durable layer declares.
-    *Do*: Pick that second model and set a field on it in one write, the way a
-    pick naming a model and a thinking level does.
-    *Assert*: The model is materialized with its identity. The write lands
-    before it becomes the active one, and an entry holding a single field is
-    the whole definition of that model once its layer stops declaring it.
-    """
-    config = build_test_vibe_config(
-        active_model="",
-        routed_default_model="glm-5-2",
-        routed_model_config=_routed_model().model_dump_json(),
-        routed_extra_models=[
-            ModelConfig(
-                name="glm-5.9", provider="mistral", alias="glm-5-9", thinking="off"
-            )
-        ],
-    )
-
-    models = await _write_model_ops(
-        config=config,
-        ops=[
-            ConfigWriteOpWire(op="set", path="/active_model", value="glm-5-9"),
-            ConfigWriteOpWire(op="set", path="/models/glm-5-9/thinking", value="high"),
-        ],
-    )
-
-    persisted = models["glm-5-9"]
-    assert persisted["thinking"] == "high"
-    assert persisted["name"] == "glm-5.9"
-    assert persisted["provider"] == "mistral"
-    assert persisted["alias"] == "glm-5-9"
-
-
-@pytest.mark.asyncio
-async def test_config_write_batch_model_fields_accumulate_into_one_upsert() -> None:
-    models = await _write_model_ops(
-        config=_routed_config(),
-        ops=[
-            ConfigWriteOpWire(op="set", path="/models/glm-5-2/thinking", value="low"),
-            ConfigWriteOpWire(op="set", path="/models/glm-5-2/temperature", value=0.7),
-        ],
-    )
-    persisted = models["glm-5-2"]
-
-    assert persisted["thinking"] == "low"
-    assert persisted["temperature"] == 0.7
-    assert persisted["name"] == "glm-5.2"
-    assert persisted["provider"] == "mistral"
-    assert persisted["alias"] == "glm-5-2"
-    assert set(persisted.keys()) == {
-        "name",
-        "provider",
-        "alias",
-        "thinking",
-        "temperature",
-    }
-
-
-@pytest.mark.asyncio
-async def test_config_write_model_field_sparse_when_model_in_durable_layer() -> None:
-    # "mistral-medium-3.5" is a built-in default, so DefaultConfigLayer
-    # reconstructs it on restart: the write must stay sparse (only the changed
-    # field), never materializing identity fields into the user's config.
-    config = build_test_vibe_config(active_model="mistral-medium-3.5")
-    persisted = await _write_model_field(
-        config=config, alias="mistral-medium-3.5", field="thinking", value="off"
-    )
-
-    # Only the changed field is persisted; alias is back-filled from the map key.
-    # Identity fields (name, provider) are NOT materialized — they come from
-    # DefaultConfigLayer at merge time.
-    assert persisted == {"thinking": "off", "alias": "mistral-medium-3.5"}
-
-
-@pytest.mark.asyncio
-async def test_config_write_model_window_stays_sparse() -> None:
-    # Declaring a window on a built-in must persist only that field. The
-    # write-then-derive path is proven end to end by the unified harness
-    # adapter test.
-    config = build_test_vibe_config(active_model="mistral-medium-3.5")
-    persisted = await _write_model_field(
-        config=config,
-        alias="mistral-medium-3.5",
-        field="max_context_length",
-        value=131_072,
-    )
-
-    assert persisted == {"max_context_length": 131_072, "alias": "mistral-medium-3.5"}
-
-
-@pytest.mark.asyncio
-async def test_config_write_log_level_applies_to_the_running_process() -> None:
-    client_transport, server_transport = memory_transport_pair()
-    agent_loop = build_test_agent_loop(config=build_test_vibe_config())
-    server = build_test_app_server(agent_loop, server_transport)
-    client = AppServerClient(client_transport, run_peer=server.serve)
-
-    try:
-        await client.initialize(ClientInfo(name="log-level-test", version="1"))
-        await client.notify("initialized")
-        await client.request("session/start", SessionStartParams())
-        await client.request(
-            "config/write",
-            ConfigWriteParams(
-                session_id=agent_loop.session_id,
-                ops=[ConfigWriteOpWire(op="set", path="/log_level", value="DEBUG")],
-            ),
-        )
-        assert get_log_level_chain().config == "DEBUG"
-
-        await client.request(
-            "config/write",
-            ConfigWriteParams(
-                session_id=agent_loop.session_id,
-                ops=[ConfigWriteOpWire(op="remove", path="/log_level")],
-            ),
-        )
-        assert get_log_level_chain().config is None
-    finally:
-        set_config_log_level(None)
-        await client_transport.close()
-        await server_transport.close()
-        await agent_loop.aclose()
 
 
 @pytest.mark.asyncio

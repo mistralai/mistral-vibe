@@ -6,7 +6,6 @@ import pytest
 
 from tests.conftest import ConfigBuilder, OrchestratorLoader
 from vibe.core.agents.manager import AgentManager
-from vibe.core.agents.models import PLAN
 from vibe.core.agents.registry import apply_profile_overrides
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.orchestrator import ConfigOrchestrator
@@ -53,36 +52,16 @@ def _merged_delta(
     return _delta(base, manager.config.model_dump(mode="json"))
 
 
-def test_ask_profile_only_disables_exit_plan_mode(
+def test_ask_profile_leaves_the_config_untouched(
     orchestrator: ConfigOrchestrator[VibeConfigSchema], base: dict[str, Any]
 ) -> None:
-    assert _merged_delta(orchestrator, base, "ask") == {
-        "disabled_tools": [[], ["exit_plan_mode"]]
-    }
-
-
-def test_plan_profile_scopes_file_tools_to_plans_dir(
-    orchestrator: ConfigOrchestrator[VibeConfigSchema], base: dict[str, Any]
-) -> None:
-    plans_allowlist = PLAN.overrides["tools"]["read_file"]["allowlist"]
-    assert _merged_delta(orchestrator, base, "plan") == {
-        "tools/edit": [
-            "__MISSING__",
-            {"permission": "never", "allowlist": plans_allowlist},
-        ],
-        "tools/read_file": ["__MISSING__", {"allowlist": plans_allowlist}],
-        "tools/write_file": [
-            "__MISSING__",
-            {"permission": "never", "allowlist": plans_allowlist},
-        ],
-    }
+    assert _merged_delta(orchestrator, base, "ask") == {}
 
 
 def test_accept_edits_profile_auto_approves_file_edits(
     orchestrator: ConfigOrchestrator[VibeConfigSchema], base: dict[str, Any]
 ) -> None:
     assert _merged_delta(orchestrator, base, "accept-edits") == {
-        "disabled_tools": [[], ["exit_plan_mode"]],
         "tools/edit": ["__MISSING__", {"permission": "always"}],
         "tools/write_file": ["__MISSING__", {"permission": "always"}],
     }
@@ -92,8 +71,7 @@ def test_auto_approve_profile_bypasses_permissions(
     orchestrator: ConfigOrchestrator[VibeConfigSchema], base: dict[str, Any]
 ) -> None:
     assert _merged_delta(orchestrator, base, "auto-approve") == {
-        "bypass_tool_permissions": [False, True],
-        "disabled_tools": [[], ["exit_plan_mode"]],
+        "bypass_tool_permissions": [False, True]
     }
 
 
@@ -136,5 +114,4 @@ def test_lean_profile_unions_providers_and_models(
     assert merged.active_model == "leanstral"
     assert merged.compaction_model is not None
     assert merged.compaction_model.alias == "devstral-compact"
-    assert "exit_plan_mode" in merged.disabled_tools
     assert merged.system_prompt_id == "lean"

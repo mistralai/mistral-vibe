@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from sentry_sdk.types import Event, Hint
 
-from vibe.observability.sentry import SentryTarget, _before_send, init_sentry
+from vibe.observability.sentry import _before_send, init_sentry
 
 
 def _send(event: dict[str, Any]) -> dict[str, Any]:
@@ -40,11 +40,6 @@ def test_before_send_scrubs_paths_across_event():
     assert result["exception"]["values"][0]["value"] == "failed in [Filtered]/x.py"
 
 
-def test_sentry_target_maps_to_distinct_project_server_names():
-    assert SentryTarget.CLI.server_name == "vibe-cli"
-    assert SentryTarget.ACP.server_name == "vibe-acp"
-
-
 @patch("sentry_sdk.set_tag")
 @patch("sentry_sdk.is_initialized", return_value=True)
 @patch("sentry_sdk.init")
@@ -55,7 +50,6 @@ def test_init_sentry_uses_primitive_settings_and_tags(
         enabled=True,
         headless=True,
         tags={"entrypoint": "acp", "client_name": "vibe_acp"},
-        target=SentryTarget.ACP,
     )
 
     assert enabled is True

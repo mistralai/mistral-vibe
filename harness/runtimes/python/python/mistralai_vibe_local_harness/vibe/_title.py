@@ -27,10 +27,7 @@ from mistralai_vibe_local_harness.vibe._credentials import (
     ProviderCredentialResult,
     ProviderCredentialSnapshot,
 )
-from mistralai_vibe_local_harness.vibe._runtime_config import (
-    LocalModelRoute,
-    LocalRuntimeAdapterConfig,
-)
+from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
 from mistralai_vibe_local_harness.vibe.adapters._provider_failure import (
     read_provider_failure,
 )
@@ -82,7 +79,9 @@ class TitlePolicy:
     request_timeout_seconds: float = 6.0
     retry_budget_seconds: float = 10.0
     total_timeout_seconds: float = 20.0
-    max_tokens: int = 96
+    # Covers a reasoning trace too: a model that cannot turn reasoning off
+    # spends output tokens on it before the title.
+    max_tokens: int = 1024
     max_title_chars: int = 72
     generic_titles: frozenset[str] = frozenset({
         "new session",
@@ -148,12 +147,6 @@ def clean_title(
     return collapsed
 
 
-def _cold_route(config: LocalRuntimeAdapterConfig) -> LocalModelRoute:
-    return LocalModelRoute(
-        model=config.active_model.model, temperature=0.0, thinking="off"
-    )
-
-
 def _title_completion_config(
     config: LocalRuntimeAdapterConfig, *, policy: TitlePolicy
 ) -> LocalRuntimeAdapterConfig:
@@ -197,10 +190,15 @@ async def execute_title_completion(
         return None
     assert isinstance(credential, ProviderCredentialSnapshot)
 
-    route = config.title_model or _cold_route(config)
+    # The session's own route is the one the provider is known to accept.
+    route = config.title_model or config.active_model
     messages: list[RustMessage] = [
         RustSystemMessage(
-            content=[RustTextContentBlock(text=_SESSION_TITLE_SYSTEM_PROMPT)]
+            content=[
+                RustTextContentBlock(
+                    text=config.title_prompt or _SESSION_TITLE_SYSTEM_PROMPT
+                )
+            ]
         ),
         RustUserMessage(
             content=[
@@ -246,9 +244,10 @@ async def execute_title_completion(
                 )
         logger.warning("Title completion failed", exc_info=True)
         return None
-    if not result.parts:
-        return None
-    return getattr(result.parts[0], "text", None) or None
+    text = "".join(
+        part.text for part in result.parts if isinstance(part, RustTextContentBlock)
+    )
+    return text or None
 
 
 async def generate_session_title(

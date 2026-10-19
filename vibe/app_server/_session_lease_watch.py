@@ -36,7 +36,7 @@ def read_lease_holder(storage_root: Path, session_id: str) -> LeaseHolder | None
 
 async def watch_session_leases(
     storage_root: Path,
-) -> AsyncGenerator[dict[str, LeaseHolder | None], None]:
+) -> AsyncGenerator[dict[str, LeaseHolder | None]]:
     lease_dir = storage_root / "active"
     await asyncio.to_thread(lease_dir.mkdir, mode=0o700, parents=True, exist_ok=True)
     marker = lease_dir / f".watch-{uuid.uuid4().hex}"
@@ -89,7 +89,10 @@ async def watch_session_leases(
             )
             changes: dict[str, LeaseHolder | None] = {}
             for session_id, holder in holders.items():
-                if holder == held.get(session_id):
+                # A passive read may have observed acquisition before this
+                # watcher. Publish release even if a debounced batch skipped
+                # the held state, so those readers can clear their lock.
+                if holder is not None and holder == held.get(session_id):
                     continue
                 changes[session_id] = holder
                 if holder is None:
@@ -248,9 +251,33 @@ class _HolderExits:
         close()
 
 
+_SYS_PIDFD_OPEN = 434  # __NR_pidfd_open, same number on all Linux arches
+
+
+def _pidfd_open(pid: int) -> int:
+    """Open a pidfd for ``pid``.
+
+    Falls back to a raw ``syscall(2)`` when the interpreter was built
+    without ``os.pidfd_open`` (some python-build-standalone 3.14 builds
+    lack it because they are configured without ``HAVE_GETRANDOM_SYSCALL``).
+    """
+    pidfd_open = getattr(os, "pidfd_open", None)
+    if pidfd_open is not None:
+        return pidfd_open(pid)
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    descriptor = libc.syscall(_SYS_PIDFD_OPEN, pid, 0)
+    if descriptor < 0:
+        errno = ctypes.get_errno()
+        raise OSError(errno, os.strerror(errno))
+    return descriptor
+
+
 def _process_exit_descriptor(pid: int) -> tuple[int, Callable[[], None]] | None:
     if sys.platform == "linux":
-        descriptor = os.pidfd_open(pid)
+        descriptor = _pidfd_open(pid)
         return descriptor, lambda: os.close(descriptor)
     if sys.platform == "darwin" or sys.platform.startswith("freebsd"):
         queue = select.kqueue()
@@ -276,7 +303,7 @@ def _process_exit_descriptor(pid: int) -> tuple[int, Callable[[], None]] | None:
 def _holder_process_id(diagnostic_path: Path) -> int | None:
     try:
         diagnostic = json.loads(diagnostic_path.read_bytes())
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
     if not isinstance(diagnostic, dict):
         return None

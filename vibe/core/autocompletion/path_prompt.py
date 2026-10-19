@@ -113,7 +113,7 @@ def _to_resource(candidate: str, base_dir: Path) -> PathResource | None:
         resolved = resolved.resolve()
         if not resolved.exists():
             return None
-    except (RuntimeError, OSError):
+    except RuntimeError, OSError:
         return None
 
     kind: Literal["file", "folder", "image"]

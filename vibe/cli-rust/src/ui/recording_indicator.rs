@@ -1,4 +1,4 @@
-//! Recording indicator glyphs (Python `RecordingIndicator`).
+//! Recording indicator glyphs.
 
 use crate::app::App;
 use crate::voice::TranscribeState;

@@ -27,13 +27,13 @@ pub(super) struct EffectView<'a> {
 }
 
 /// A non-collapsible result has no disclosure header: its call row keeps the
-/// settled indicator and its body is always rendered (Python `COLLAPSIBLE`).
+/// settled indicator and its body is always rendered.
 fn settled_open(effect: &crate::server::EffectEntry, in_progress: bool) -> bool {
     !effect.is_collapsible() && !in_progress
 }
 
 /// Gutter width of the edit diff this effect renders, or `None` when it renders
-/// none. The selection treats it as chrome (Python `DiffView._gutter_width`).
+/// none. The selection treats it as chrome.
 pub(super) fn diff_gutter(
     effect: &crate::server::EffectEntry,
     in_progress: bool,
@@ -84,7 +84,7 @@ pub(super) fn push_effect(
     let has_body =
         effect.has_body() || attached_output.is_some_and(|text| !clean_output(text).is_empty());
     let shown = (expanded && has_body) || settled_open;
-    // Python `has_body`: a settled collapsible result with nothing to unfold
+    // A settled collapsible result with nothing to unfold
     // shows the inert marker in the disclosure slot instead of the fold triangle.
     let inert = !in_progress && effect.is_collapsible() && !has_body;
     let settled_marker = |glyph: &str| {
@@ -145,7 +145,7 @@ pub(super) fn push_effect(
             summary(verb_color).add_modifier(Modifier::BOLD),
         ));
     }
-    // Rows after the first hang under the message column, as Textual's header row does.
+    // Rows after the first hang under the message column.
     let mut hanging = Vec::new();
     if !message.is_empty() {
         spans.push(Span::raw(" "));
@@ -167,7 +167,7 @@ pub(super) fn push_effect(
             .collect();
     }
     // The suffix widget sits right after the header text, one cell in, muted
-    // like the rest of the chrome (Python `.status-indicator-suffix`).
+    // like the rest of the chrome.
     if !suffix.is_empty() {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(suffix.to_string(), theme::muted_style()));
@@ -179,7 +179,7 @@ pub(super) fn push_effect(
         between.push_folded(line, fold);
     }
     // The stream widget: a running call's latest `/state/outputText` append,
-    // one gutter in (Python `tool-stream-message`, cleared on settle). It holds
+    // one gutter in (cleared on settle). It holds
     // the last patch's own delta, never the accumulated state text.
     if in_progress && !local {
         let stream_delta = clean_output(stream_delta.unwrap_or(""));
@@ -236,7 +236,7 @@ fn push_result(
         push_todo_body(lines, &rows, width);
         return;
     }
-    // Python renders read, write, and scratchpad note results as fenced code
+    // Read, write, and scratchpad note results render as fenced code
     // blocks: they highlight from the file's extension, and unhighlightable
     // content keeps the plain code colour.
     let code_path = effect.code_path();

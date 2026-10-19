@@ -20,8 +20,8 @@ pub(super) fn push_edit_diff(
     warnings: &[String],
 ) {
     let content_width = body_width(width);
-    // Python composes the warnings into the same result widget as the diff, so
-    // they join the diff's border run and shift its closing glyph down.
+    // The warnings share the diff's result block, so they join the diff's
+    // border run and shift its closing glyph down.
     let warning_rows = wrap_warnings(warnings, content_width);
     let mut rendered = Vec::new();
     for row in rows {
@@ -47,8 +47,8 @@ enum Row {
     Text(String),
 }
 
-/// The bordered result body: warnings stacked above the content rows
-/// (Python's Read/Edit/Grep widgets compose them into one result widget).
+/// The bordered result body: warnings stacked above the content rows in one
+/// result block (Read/Edit/Grep).
 pub(super) fn push_effect_body(
     lines: &mut LinkedLines,
     body: &[BodyLine],
@@ -136,8 +136,8 @@ pub(super) fn push_effect_body(
     }
 }
 
-/// Python `TodoResultWidget`: one `{icon} {content}` row per todo, bucketed by
-/// status and colored per bucket (`.todo-{status}` classes).
+/// Todo result: one `{icon} {content}` row per todo, bucketed by status and
+/// colored per bucket.
 pub(super) fn push_todo_body(lines: &mut LinkedLines, rows: &[TodoRow<'_>], width: u16) {
     let wrapped = rows
         .iter()
@@ -171,7 +171,7 @@ fn wrap_warnings(warnings: &[String], width: u16) -> Vec<(String, Option<u16>)> 
     warnings
         .iter()
         .flat_map(|warning| {
-            // Python stacks each result warning as `⚠ {warning}` (`.tool-result-warning`).
+            // Each result warning stacks as `⚠ {warning}`.
             fold::wrap_hard(&text::expand_tabs(&format!("⚠ {warning}")), width as usize)
         })
         .collect()

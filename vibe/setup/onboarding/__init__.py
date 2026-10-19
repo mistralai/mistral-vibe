@@ -8,8 +8,6 @@ from typing import Any
 from rich import print as rprint
 from textual.app import App
 
-from vibe.cli.clipboard import copy_to_clipboard
-from vibe.cli.theme import resolve_auto_theme, resolve_theme, resolve_theme_name
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config._defaults import (
     DEFAULT_CONSOLE_BASE_URL,
@@ -30,6 +28,7 @@ from vibe.setup.auth.api_key_persistence import (
     resolve_api_key_provider,
 )
 from vibe.setup.auth.whoami import resolve_tenant_domains
+from vibe.setup.onboarding.clipboard import copy_to_clipboard
 from vibe.setup.onboarding.context import (
     OnboardingContext,
     browser_auth_account_base,
@@ -49,6 +48,11 @@ from vibe.setup.onboarding.screens.browser_sign_in import (
     SIGN_IN_URL_HELP_DELAY_SECONDS,
     SUCCESS_EXIT_DELAY_SECONDS,
     CopySignInUrl,
+)
+from vibe.setup.onboarding.theme import (
+    resolve_auto_theme,
+    resolve_theme,
+    resolve_theme_name,
 )
 
 

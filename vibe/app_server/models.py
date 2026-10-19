@@ -810,6 +810,7 @@ class MCPState(ProtocolModel):
     discovery_errors: dict[str, str] = Field(default_factory=dict)
     connector_error: str | None = None
     manage_connectors_url: str | None = None
+    private_connectors_hidden: bool = False
 
     def resolve_source(self, query: str) -> MCPSourceSummary | None:
         # `/mcp <query>` takes an alias, or the display name the browser shows.
@@ -984,12 +985,31 @@ class _PublicHistoryEntryBase(ProtocolModel):
 type PublicMessageSource = Literal["turn_start", "turn_steer", "harness"]
 
 
+class CommittedGenerationOutcome(ProtocolModel):
+    type: Literal["committed"] = "committed"
+
+
+class DiscardedGenerationOutcome(ProtocolModel):
+    type: Literal["discarded"] = "discarded"
+    # Any string, not the Harness's current set: an app-server must not reject
+    # an entry over a cause a newer Harness added.
+    cause: str
+
+
+# Whether completed assistant output was kept or discarded, and why. Unset while
+# the entry is generating and on entries a Harness does not settle.
+type GenerationOutcome = Annotated[
+    CommittedGenerationOutcome | DiscardedGenerationOutcome, Field(discriminator="type")
+]
+
+
 class PublicMessageEntry(_PublicHistoryEntryBase):
     type: Literal["message"] = "message"
     role: Literal["system", "user", "assistant"]
     content: list[ContentBlock]
     source: PublicMessageSource | None = None
     user_display_content: UserDisplayContent | None = None
+    outcome: GenerationOutcome | None = None
 
     @property
     def text(self) -> str:
@@ -1010,6 +1030,7 @@ class PublicReasoningEntry(_PublicHistoryEntryBase):
     type: Literal["reasoning"] = "reasoning"
     text: str
     summary: list[str] = Field(default_factory=list)
+    outcome: GenerationOutcome | None = None
 
 
 class PublicEffectEntry(_PublicHistoryEntryBase):
@@ -1056,23 +1077,9 @@ class AgentChangedNoticeDetail(ProtocolModel):
     agent_name: str
 
 
-class ContextClearedNoticeDetail(ProtocolModel):
-    kind: Literal["context_cleared"] = "context_cleared"
-    plan_file_path: str | None = None
-
-
 class SessionTitleUpdatedNoticeDetail(ProtocolModel):
     kind: Literal["session_title_updated"] = "session_title_updated"
     title: str
-
-
-class PlanReviewStartedNoticeDetail(ProtocolModel):
-    kind: Literal["plan_review_started"] = "plan_review_started"
-    file_path: str
-
-
-class PlanReviewEndedNoticeDetail(ProtocolModel):
-    kind: Literal["plan_review_ended"] = "plan_review_ended"
 
 
 class WaitingForInputNoticeDetail(ProtocolModel):
@@ -1090,10 +1097,7 @@ class ScheduledLoopFiredNoticeDetail(ProtocolModel):
 NoticeDetail = Annotated[
     HookNoticeDetail
     | AgentChangedNoticeDetail
-    | ContextClearedNoticeDetail
     | SessionTitleUpdatedNoticeDetail
-    | PlanReviewStartedNoticeDetail
-    | PlanReviewEndedNoticeDetail
     | WaitingForInputNoticeDetail
     | ScheduledLoopFiredNoticeDetail,
     Field(discriminator="kind"),
@@ -1251,10 +1255,17 @@ class PublicQueuedTurn(ProtocolModel):
 TURN_QUEUE_MAX_ITEMS = 32
 
 
+class PublicTurnQueueEditState(ProtocolModel):
+    queue_item_id: str
+
+
 class PublicTurnQueue(ProtocolModel):
     items: list[PublicQueuedTurn] = Field(default_factory=list)
     paused: bool = False
     max_items: int = Field(default=TURN_QUEUE_MAX_ITEMS, ge=1, strict=True)
+    editing: PublicTurnQueueEditState | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class PublicTurn(ProtocolModel):
@@ -1290,6 +1301,31 @@ class PublicBackgroundProcess(ProtocolModel):
     status: Literal["running", "completed", "failed", "stopped", "orphaned"]
     exit_code: int | None = None
     created_at: str
+
+
+class ImportJobStatus(StrEnum):
+    QUEUED = auto()
+    RUNNING = auto()
+    COMPLETED = auto()
+    FAILED = auto()
+
+
+class ImportHarness(StrEnum):
+    CLAUDE = auto()
+
+
+class ImportHarnessDiscovery(ProtocolModel):
+    harness: ImportHarness
+    project_count: int = Field(ge=0, strict=True)
+    session_count: int = Field(ge=0, strict=True)
+
+
+class ImportJob(ProtocolModel):
+    id: str
+    status: ImportJobStatus
+    message: str | None = None
+    created_at: int
+    updated_at: int
 
 
 class PublicSessionState(ProtocolModel):

@@ -45,14 +45,12 @@ request_methods = frozenset({"session/read"})
 
 env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 
-screen_contains = {
-    "rust": (
-        "Viewing Explore 1 · read-only · Esc to return",
-        "This subagent is ready for a new instruction. Return to Main conversation and ask the main agent to give it a new",
-        _CHILD_RESULT,
-    )
-}
-screen_excludes = {"rust": ("Waiting for input",)}
+screen_contains = (
+    "Viewing Explore 1 · read-only · Esc to return",
+    "This subagent is ready for a new instruction. Return to Main conversation and ask the main agent to give it a new",
+    _CHILD_RESULT,
+)
+screen_excludes = ("Waiting for input",)
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

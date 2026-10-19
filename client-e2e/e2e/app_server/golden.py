@@ -1,4 +1,4 @@
-"""Store and load Rust golden snapshots (SVG + requests JSON) for e2e scenarios."""
+"""Store and load golden snapshots (SVG + requests JSON) for e2e scenarios."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from e2e.app_server.config import GOLDEN_DIR
-from e2e.app_server.parity import _normalized_cells, normalize_requests
+from e2e.app_server.normalize import _normalized_cells, normalize_requests
 from e2e.app_server.scenario import Request
 from e2e.app_server.svg import to_svg
 from e2e.pty.screen import Snapshot

@@ -99,7 +99,7 @@ fn draw_rows(app: &mut App, f: &mut Frame, rows: Rect, heading: Style) {
     }
 }
 
-/// Python's `.proxy-input`: a `wide` left border, one cell of padding, the text.
+/// A proxy input: a `wide` left border, one cell of padding, the text.
 fn draw_input(
     f: &mut Frame,
     x: u16,

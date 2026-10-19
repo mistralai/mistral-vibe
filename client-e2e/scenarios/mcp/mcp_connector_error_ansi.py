@@ -14,10 +14,8 @@ _RAW_CONNECTOR_ERROR = (
 
 handshake = mcp_handshake(sample_sources(), connector_error=_RAW_CONNECTOR_ERROR)
 
-screen_contains = {
-    # The redrawed word must render sanitized, closing the error block's gutter.
-    "rust": ("⎣ connectors unavailable",)
-}
+# The redrawed word must render sanitized, closing the error block's gutter.
+screen_contains = ("⎣ connectors unavailable",)
 
 
 timeline: Timeline = ["/mcp\r"]

@@ -1,4 +1,4 @@
-"""Remote-project mouse parity."""
+"""One click selects a remote-project option."""
 
 from __future__ import annotations
 

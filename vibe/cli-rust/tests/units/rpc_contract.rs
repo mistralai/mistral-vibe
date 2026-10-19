@@ -11,7 +11,7 @@ use vibe_rs::server::{
 };
 
 #[test]
-fn history_limit_matches_the_python_default() {
+fn history_limit_default() {
     assert_eq!(HISTORY_LIMIT, 200);
 }
 
@@ -267,6 +267,12 @@ fn agent_summaries_default_and_tolerate_unknown_enums() {
     .unwrap();
     assert_eq!(known.safety, AgentSafety::Yolo);
     assert_eq!(known.agent_type, AgentType::Subagent);
+
+    let smart: AgentSummary = serde_json::from_value(json!({
+        "name": "smart-approve", "safety": "smart"
+    }))
+    .unwrap();
+    assert_eq!(smart.safety, AgentSafety::Smart);
 }
 
 #[test]

@@ -15,7 +15,7 @@ handshake = {
                     "Vision-capable model that describes attached images for an active "
                     "model that cannot see them. Only needed to override the default, "
                     "which is any vision-capable model on the active model's own provider; "
-                    "set this to reach a different provider. Requires --experimental-harness."
+                    "set this to reach a different provider. Choose a model that supports images."
                 ),
                 "path": "/vision_model",
                 "popular": True,
@@ -29,6 +29,6 @@ handshake = {
 }
 
 capture_startup = False
-screen_contains = {"rust": ("Ctrl+S save", "Vision-capable model")}
-screen_excludes = {"rust": ("Enlarge terminal",)}
+screen_contains = ("Ctrl+S save", "Vision-capable model")
+screen_excludes = ("Enlarge terminal",)
 timeline: Timeline = [resize(24, 73), "/config\r", "\r", resize(24, 74)]

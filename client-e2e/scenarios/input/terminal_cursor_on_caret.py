@@ -13,4 +13,4 @@ _PROMPT = "write the migration"
 timeline: Timeline = [f"{_PROMPT}\r", turn_started(), user_msg(_PROMPT), "déjà"]
 
 # Dead-key and IME previews draw at the terminal cursor: it must sit on the caret cell.
-screen_cursor = {"rust": (35, 6)}
+screen_cursor = (35, 6)

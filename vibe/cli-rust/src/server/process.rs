@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -16,6 +16,7 @@ use super::child::ChildHandle;
 use crate::server::Request;
 use crate::server::RpcError;
 
+mod replay;
 mod stub;
 
 /// Maximum notifications buffered (channel capacity). A full channel backpressures the reader.
@@ -36,6 +37,8 @@ pub type ActiveSession = Arc<Mutex<Option<String>>>;
 pub enum RequestFailure {
     Rpc(RpcError),
     AppServerClosed,
+    /// The response exceeded `MAX_FRAME` (its size in bytes) and was dropped.
+    FrameTooLarge(usize),
 }
 
 impl RequestFailure {
@@ -56,6 +59,9 @@ impl std::fmt::Display for RequestFailure {
         match self {
             Self::Rpc(error) => write!(formatter, "[{}] {}", error.code(), error.message),
             Self::AppServerClosed => formatter.write_str("app-server closed"),
+            Self::FrameTooLarge(len) => {
+                write!(formatter, "app-server response too large ({len} bytes)")
+            }
         }
     }
 }
@@ -72,9 +78,13 @@ pub struct Client {
     /// When true, server callbacks are denied instead of forwarded (headless).
     deny_callbacks: Arc<AtomicBool>,
     active_session: ActiveSession,
+    replay_drained: AtomicU64,
+    unsent_telemetry: AtomicU64,
+    /// The app-server's own pid, from `initialize`'s `processId`; 0 before it.
+    server_pid: AtomicU32,
 }
 
-/// How to launch the backend; defaults to `uv run --quiet vibe-app-server --experimental-harness`.
+/// How to launch the backend; defaults to `uv run --quiet vibe-app-server`.
 #[derive(Clone)]
 pub struct Launch {
     pub program: String,
@@ -84,7 +94,7 @@ pub struct Launch {
 
 /// Params always passed to the app-server, whatever program launches it, so a
 /// wheel install and a source checkout run the same backend.
-pub const DEFAULT_APP_SERVER_ARGS: &[&str] = &["--experimental-harness"];
+pub const DEFAULT_APP_SERVER_ARGS: &[&str] = &[];
 
 impl Default for Launch {
     fn default() -> Self {
@@ -193,6 +203,9 @@ impl Client {
                 shutdown_requested,
                 deny_callbacks,
                 active_session,
+                replay_drained: AtomicU64::new(0),
+                unsent_telemetry: AtomicU64::new(0),
+                server_pid: AtomicU32::new(0),
             },
             child,
             notif_rx,
@@ -246,6 +259,9 @@ impl Client {
             Ok(Err(RequestFailure::Rpc(error))) => Err(error),
             Ok(Err(RequestFailure::AppServerClosed)) => {
                 Err(RpcError::synthetic("transport", "app-server closed"))
+            }
+            Ok(Err(failure @ RequestFailure::FrameTooLarge(_))) => {
+                Err(RpcError::synthetic("transport", &failure.to_string()))
             }
             Err(_) => Err(RpcError::synthetic("transport", "response channel dropped")),
         }

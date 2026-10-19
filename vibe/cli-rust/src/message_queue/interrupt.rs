@@ -1,10 +1,10 @@
-//! Interrupting a turn the server has not started yet (Python `_interrupt_turn`).
+//! Interrupting a turn the server has not started yet.
 
 use std::time::{Duration, Instant};
 
 use crate::app::App;
 
-/// How long Python's `_interrupt_turn` waits for a pending turn to start.
+/// How long an interrupt waits for a pending turn to start.
 const START_WAIT: Duration = Duration::from_secs(30);
 
 /// Whether an interrupt is waiting for the next turn to start.

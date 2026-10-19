@@ -157,11 +157,10 @@ def _simulate_native_windows(
     powershell_available: bool,
     managed_supported: bool,
 ) -> None:
-    from vibe.core.tools.builtins import bash, git_bash, windows_shell
+    from vibe.core.tools.builtins import git_bash, windows_shell
     from vibe.core.tools.builtins.managed_shell import backend
 
     monkeypatch.setattr(tool_manager_module, "is_windows", lambda: True)
-    monkeypatch.setattr(bash, "is_windows", lambda: True)
     monkeypatch.setattr(git_bash, "is_windows", lambda: True)
     monkeypatch.setattr(
         git_bash, "git_bash_shell_available", lambda: git_bash_available

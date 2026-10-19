@@ -13,8 +13,8 @@ from e2e.app_server.scenario import Timeline
 
 env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 settle_per_key = True
-screen_contains = {"rust": ("Generating", "Voice settings closed (no changes saved).")}
-screen_excludes = {"rust": ("should not be pasted", "Voice Settings")}
+screen_contains = ("Generating", "Voice settings closed (no changes saved).")
+screen_excludes = ("should not be pasted", "Voice Settings")
 timeline: Timeline = [
     "first\r",
     turn_started(),

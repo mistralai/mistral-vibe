@@ -19,8 +19,8 @@ pub(crate) use crate::core::action_id::{
 pub(crate) use crate::core::capabilities::{HookBinding, HookSelector};
 pub(crate) use crate::core::config::{
     ContextSettings, HarnessConfig, HarnessConfigUpdate, HarnessSettings, ImageDeliveryMode,
-    ImageDeliverySettings, ProvidedToolDefinition, ProvidedToolExposure, ToolGroupDefinition,
-    ToolGroupMetadata, ToolSettings, TurnSettings,
+    ImageDeliverySettings, ImageTokenCost, ProvidedToolDefinition, ProvidedToolExposure,
+    ToolGroupDefinition, ToolGroupMetadata, ToolSettings, TurnSettings,
 };
 pub(crate) use crate::core::error::CoreError;
 pub(crate) use crate::core::features::background_processes::Mode as BackgroundProcessMode;
@@ -273,14 +273,24 @@ pub(crate) fn config() -> HarnessConfig {
             context: ContextSettings {
                 compaction: CompactionPolicy::Disabled,
                 image_delivery: ImageDeliverySettings::default(),
+                notifications: crate::core::features::notifications::Settings {
+                    pending_count: 1000,
+                    pending_bytes: 1024 * 1024,
+                    recent_ids: 1000,
+                },
+                image_token_cost: ImageTokenCost::SerializedBytes,
             },
             tools: ToolSettings {
+                max_wait_ms: 3_600_000,
+                model_wait: Default::default(),
                 programmatic: ProgrammaticToolSettings {
                     max_effects: 128,
                     max_operations: 1024,
+                    max_elapsed_ms: 60_000,
+                    max_sleep_ms: 30_000,
                 },
                 large_output: crate::core::features::large_output::Policy::Disabled,
-                subagents: SubagentMode::Enabled,
+                subagents: SubagentMode::enabled(),
                 background_processes: BackgroundProcessMode::Disabled,
                 command_environment: CommandEnvironment::Unix,
                 permissions: None,

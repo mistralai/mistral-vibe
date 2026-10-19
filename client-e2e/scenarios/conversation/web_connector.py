@@ -1,4 +1,9 @@
-"""Unified web connector calls render like the built-in web search and fetch."""
+"""Unified web connector calls render like the built-in web search and fetch.
+
+The app server projects `connector_web_search.web_search` and `open_url` into
+the built-in web kinds, so the connector calls render through the same widgets
+as the legacy tools they replaced.
+"""
 
 from __future__ import annotations
 
@@ -54,31 +59,19 @@ _BLOCKED = {
 }
 
 # The settled tool group header, then each connector entry header once unfolded.
-_EXPAND = "\x1b[<0;1;15M\x1b[<0;1;15m"
-_EXPAND_SEARCH = "\x1b[<0;8;16M\x1b[<0;8;16m"
+_EXPAND = "\x1b[<0;1;11M\x1b[<0;1;11m"
+_EXPAND_SEARCH = "\x1b[<0;8;12M\x1b[<0;8;12m"
 # The unreadable page first: unfolding it leaves the page row above it in place.
-_EXPAND_BLOCKED = "\x1b[<0;8;23M\x1b[<0;8;23m"
-_EXPAND_PAGE = "\x1b[<0;8;22M\x1b[<0;8;22m"
+_EXPAND_BLOCKED = "\x1b[<0;8;19M\x1b[<0;8;19m"
+_EXPAND_PAGE = "\x1b[<0;8;18M\x1b[<0;8;18m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",
     turn_started(),
     user_msg(_PROMPT),
-    web_connector_call(
-        "web_search",
-        {"query": "peluche chat", "limit": 10},
-        _RESULTS,
-        label=("Searching", "the web", "Searched"),
-    ),
-    web_connector_call(
-        "open_url", {"url": _PAGE["url"]}, _PAGE, label=("Opening", "a URL", "Opened")
-    ),
-    web_connector_call(
-        "open_url",
-        {"url": _BLOCKED["url"]},
-        _BLOCKED,
-        label=("Opening", "a URL", "Opened"),
-    ),
+    web_connector_call("web_search", {"query": "peluche chat", "limit": 10}, _RESULTS),
+    web_connector_call("open_url", {"url": _PAGE["url"]}, _PAGE),
+    web_connector_call("open_url", {"url": _BLOCKED["url"]}, _BLOCKED),
     assistant_msg("Voici les peluches."),
     turn_completed(),
     _EXPAND,

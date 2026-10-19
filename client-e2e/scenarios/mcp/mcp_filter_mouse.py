@@ -1,4 +1,4 @@
-"""Mouse focus and filtered clicks open the right source; Esc leaves search, clears it, then closes."""
+"""Mouse focus and a click on the highlighted filtered source opens it; Esc leaves search, clears it, then closes."""
 
 from __future__ import annotations
 
@@ -26,5 +26,5 @@ timeline: Timeline = [
     "/mcp\r",
 ]
 
-screen_contains = {"rust": ("Local MCP Servers", "filesystem", "github", "gmail")}
-screen_excludes = {"rust": ("GH", "Connector: github")}
+screen_contains = ("Local MCP Servers", "filesystem", "github", "gmail")
+screen_excludes = ("GH", "Connector: github")

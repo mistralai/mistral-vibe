@@ -2,6 +2,10 @@
 
 ## Decision
 
+Textual is used only by the `vibe-acp --setup` onboarding wizard
+(`vibe/setup/onboarding`); this decision applies to that code. The terminal UI
+is the Rust CLI ([0016](0016-rust-cli-delivery-surface.md)).
+
 Render styled text with Textual `Content` and apply styles on it directly (`Content.assemble`, `Content.styled`). Use Rich `Text` or `escape()` only when strictly necessary. Be careful with parsing: keep dynamic text out of markup parsers.
 
 ## Rationale
@@ -21,3 +25,4 @@ Render styled text with Textual `Content` and apply styles on it directly (`Cont
 - A span needs a theme variable but sits in Rich `Text` (migrate to `Content`).
 - Markup is assembled from dynamic input, or `escape()` is used to make it "safe".
 - A widget accepts only Rich renderables and blocks moving to `Content`.
+- A change adds Textual code outside the onboarding wizard.

@@ -12,8 +12,8 @@ use crate::server::{
 
 use super::StartupEvent;
 
-/// Gate the session on the user's answer when the cwd is untrusted (Python
-/// `_resolve_workspace_trust`). A trusted cwd answers without any details.
+/// Gate the session on the user's answer when the cwd is untrusted. A trusted
+/// cwd answers without any details.
 pub async fn resolve_workspace_trust(
     client: &Arc<Client>,
     event_tx: &mpsc::Sender<StartupEvent>,

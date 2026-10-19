@@ -1,4 +1,4 @@
-"""Remote-project resize recovery, including a known Textual reflow gap."""
+"""Remote-project resize recovery."""
 
 from __future__ import annotations
 
@@ -23,7 +23,4 @@ timeline: Timeline = [
     "\x1b",
 ]
 
-skip_terminal_parity = (
-    "Textual retains the old picker dimensions after PTY shrink; Rust reflows."
-)
-screen_excludes = {"rust": ("Search projects:", "Project 24")}
+screen_excludes = ("Search projects:", "Project 24")

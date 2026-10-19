@@ -41,10 +41,7 @@ handshake = {
 client_args = ("--continue",)
 capture_startup = False
 
-expected_actions = {
-    "rust": [Action("open_url", f"file://{quote(_PATH)}")],
-    "python": [Action("open_url", f"file://{quote(_PATH)}")],
-}
+expected_actions = [Action("open_url", f"file://{quote(_PATH)}")]
 
 
 def _click(column: int, row: int) -> str:
@@ -54,5 +51,5 @@ def _click(column: int, row: int) -> str:
 
 timeline: Timeline = [
     "x",
-    _click(3, 14),  # `charts final.png`, the label's continuation row
+    _click(3, 10),  # `charts final.png`, the label's continuation row
 ]

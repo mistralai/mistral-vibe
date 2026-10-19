@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -28,6 +30,95 @@ async def test_session_start_returns_the_attached_public_session(
     assert (
         backend_contract_session.state.session.id == backend_contract_session.session_id
     )
+
+
+@pytest.mark.asyncio
+async def test_unified_session_advertises_only_supported_agent_tools(
+    backend_contract_mistral_api: respx.Route, tmp_path: Path
+) -> None:
+    """*Prepare*: A local Unified Harness session and usage-free provider chunks.
+    *Do*: Start a turn and discover the agent tool declarations.
+    *Assert*: Local agent tools are declared under ``tools.agents``; waiting is the
+              standalone direct ``wait`` tool, not an ``agents`` function.
+    """
+    # Prepare
+    # Accounting is covered separately; optional provider usage is omitted here.
+    choices = [
+        {
+            "index": 0,
+            "finish_reason": "tool_calls",
+            "delta": {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "discover-agent-tools",
+                        "index": 0,
+                        "function": {
+                            "name": "search_tool_functions",
+                            "arguments": json.dumps({
+                                "mode": "details",
+                                "functions": [
+                                    "agents.list",
+                                    "agents.spawn",
+                                    "agents.send_message",
+                                    "agents.interrupt",
+                                ],
+                            }),
+                        },
+                    }
+                ],
+            },
+        },
+        {
+            "index": 0,
+            "finish_reason": "stop",
+            "delta": {"role": "assistant", "content": "Local agent tools are ready."},
+        },
+    ]
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                content="data: "
+                + json.dumps({
+                    "id": "completion-agent-tools",
+                    "object": "chat.completion.chunk",
+                    "created": 1234567890,
+                    "model": "mistral-vibe-cli-latest",
+                    "choices": [choice],
+                })
+                + "\n\ndata: [DONE]\n",
+                headers={"Content-Type": "text/event-stream"},
+            )
+            for choice in choices
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(cwd=str(tmp_path)),
+        capabilities=ClientCapabilities(),
+    )
+    try:
+        # Do
+        session = await connection.host.open_session()
+        _ = [event async for event in session.act("Show the local agent tools")]
+    finally:
+        await connection.host.close()
+
+    # Assert
+    first_request, second_request = [
+        json.loads(call.request.content) for call in backend_contract_mistral_api.calls
+    ]
+    direct_tools = {tool["function"]["name"] for tool in first_request["tools"]}
+    assert {"search_tool_functions", "run_typescript", "wait"} <= direct_tools
+    declarations = next(
+        message["content"]
+        for message in second_request["messages"]
+        if message.get("tool_call_id") == "discover-agent-tools"
+    )
+    assert "declare namespace tools.agents" in declarations
+    for operation in ("list", "spawn", "send_message", "interrupt"):
+        assert f"function {operation}(" in declarations
+    assert "function wait(" not in declarations
 
 
 @pytest.mark.asyncio
@@ -128,7 +219,6 @@ async def test_detached_fork_is_readable_and_resumable_from_a_new_host(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_session: AppServerSession,
-    experimental_harness: bool,
 ) -> None:
     backend_contract_mistral_api.mock(
         return_value=backend_contract_mistral_response("First answer")
@@ -144,9 +234,7 @@ async def test_detached_fork_is_readable_and_resumable_from_a_new_host(
     )
 
     connection = await connect_backend_contract_host(
-        experimental_harness,
-        session_options=SessionOptions(),
-        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(), capabilities=ClientCapabilities()
     )
     resumed: AppServerSession | None = None
     try:
@@ -201,7 +289,6 @@ async def test_continue_attaches_the_latest_persisted_session_and_keeps_it_usabl
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
-    experimental_harness: bool,
 ) -> None:
     backend_contract_mistral_api.mock(
         side_effect=[
@@ -217,9 +304,7 @@ async def test_continue_attaches_the_latest_persisted_session_and_keeps_it_usabl
         await session.close()
 
     continued_connection = await connect_backend_contract_host(
-        experimental_harness,
-        session_options=SessionOptions(),
-        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(), capabilities=ClientCapabilities()
     )
     continued = await continued_connection.host.continue_session()
     try:
@@ -240,7 +325,6 @@ async def test_resume_attaches_the_requested_persisted_session_and_keeps_it_usab
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
-    experimental_harness: bool,
 ) -> None:
     backend_contract_mistral_api.mock(
         side_effect=[
@@ -256,9 +340,7 @@ async def test_resume_attaches_the_requested_persisted_session_and_keeps_it_usab
         await session.close()
 
     resumed_connection = await connect_backend_contract_host(
-        experimental_harness,
-        session_options=SessionOptions(),
-        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(), capabilities=ClientCapabilities()
     )
     resumed = await resumed_connection.host.resume_session(session_id)
     try:
@@ -277,17 +359,12 @@ async def test_resume_attaches_the_requested_persisted_session_and_keeps_it_usab
 async def test_stopping_a_session_leaves_its_siblings_on_a_shared_harness_serving(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
-    experimental_harness: bool,
 ) -> None:
     backend_contract_mistral_api.mock(
         side_effect=lambda _request: backend_contract_mistral_response("still here")
     )
     harness_host = LocalHarnessHost()
-    options = LocalHarnessOptions(
-        session_options=SessionOptions(),
-        experimental_harness=experimental_harness,
-        legacy_harness=not experimental_harness,
-    )
+    options = LocalHarnessOptions(session_options=SessionOptions())
     try:
         stopped = await harness_host.start(options)
         sibling = await harness_host.start(options)

@@ -39,8 +39,5 @@ handshake = {
 }
 
 capture_startup = False
-screen_contains = {
-    "python": ("'theme' is pinned by env; nothing to clear.",),
-    "rust": ("'theme' is pinned by env; nothing to clear.",),
-}
+screen_contains = ("'theme' is pinned by env; nothing to clear.",)
 timeline: Timeline = ["/config\r", "\x12"]

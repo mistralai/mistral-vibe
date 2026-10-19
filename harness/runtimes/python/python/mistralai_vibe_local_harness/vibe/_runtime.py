@@ -16,7 +16,9 @@ from typing import TYPE_CHECKING, Literal, cast
 from pydantic import JsonValue, TypeAdapter
 
 from mistralai_vibe_local_harness import HarnessSession
+from mistralai_vibe_local_harness._deprecated_tools import deprecated_tool_failure
 from mistralai_vibe_local_harness.protocol import (
+    DEPRECATED_RUNTIME_BUILTIN_TOOL_NAMES,
     RustAcceptedApplyResult,
     RustAction,
     RustActionsNextAction,
@@ -46,6 +48,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustNotificationEvent,
     RustPendingCompletionAction,
     RustPluginContextDefinition,
+    RustPluginsChange,
     RustProtocolError,
     RustProvidedToolCallAction,
     RustReconfigureEvent,
@@ -56,6 +59,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustSessionTransition,
     RustSettingsChange,
     RustSkillDefinition,
+    RustSystemInstructionsChange,
     RustToolCallAction,
     RustToolFailedEvent,
     RustToolFailureResult,
@@ -129,6 +133,10 @@ from mistralai_vibe_local_harness.vibe._runtime_config import (
     CompletionDelta,
     LocalRuntimeAdapterConfig,
 )
+from mistralai_vibe_local_harness.vibe._self_tools import (
+    execute_model_wait,
+    execute_self_tool,
+)
 from mistralai_vibe_local_harness.vibe._storage import (
     CommandReservedRecordV1,
     CoreInputRecordV1,
@@ -143,12 +151,15 @@ from mistralai_vibe_local_harness.vibe._storage import (
     RuntimeActionV1,
     RuntimeStateV3,
     SessionIdentity,
+    SessionMetadataV1,
     StoredSession,
     UnifiedInteropSourceV1,
     UnifiedSessionStore,
     apply_projection_delta,
     canonical_json,
     committed_history_from_checkpoint,
+    compute_projection_delta,
+    parse_stored_settings,
     restore_core_from_checkpoint,
     sha256_json,
 )
@@ -178,6 +189,10 @@ type RecoveryMode = Literal[
 
 _ACTION_ADAPTER = TypeAdapter(RustAction)
 _CAPABILITY_RECONFIGURE_METHOD = "runtime/capabilities/reconfigure"
+_CONFIGURATION_RECONFIGURE_METHOD = "runtime/configuration/reconfigure"
+_PLUGIN_RECONFIGURE_METHOD = "runtime/plugins/reconfigure"
+_PLUGIN_CONTEXTS_ADAPTER = TypeAdapter(list[RustPluginContextDefinition])
+_STRING_ADAPTER = TypeAdapter(str)
 _SETTINGS_RECONFIGURE_METHOD = "runtime/settings/reconfigure"
 _EVENT_ADAPTER = TypeAdapter(RustEvent)
 _PROCESS_ACTION_OVERHEAD_BYTES = 256 * 1024
@@ -270,7 +285,9 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     ) -> None:
         self._config = config
         self._post_recovery_capabilities: RustHarnessCapabilitySet | None = None
+        self._post_recovery_plugins: list[RustPluginContextDefinition] | None = None
         self._post_recovery_settings: RustHarnessSettings | None = None
+        self._post_recovery_system_instructions: str | None = None
         self._store = store
         self._core = core
         self._identity = identity
@@ -305,6 +322,8 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         self._pending_process_core_input: _PendingProcessCoreInput | None = None
         self._terminal_retry_task: asyncio.Task[None] | None = None
         self._terminal_retry_wakeup = asyncio.Event()
+        # Replaced and set after every committed Core input; wakes standalone waits.
+        self._core_input_committed = asyncio.Event()
         self._logged_terminal_processes: set[str] = set()
         self._process_action_reservations: dict[str, tuple[int, int, str | None]] = {}
         self._process_lifetime_reservations: dict[str, int] = {}
@@ -377,6 +396,10 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             runtime._post_recovery_capabilities = config.capabilities
         if replayed_config.settings != config.settings:
             runtime._post_recovery_settings = config.settings
+        if replayed_config.plugins != config.plugins:
+            runtime._post_recovery_plugins = list(config.plugins)
+        if replayed_config.system_instructions != config.system_instructions:
+            runtime._post_recovery_system_instructions = config.system_instructions
         runtime._restore_process_storage_reservations(stored)
         return runtime
 
@@ -754,6 +777,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 "core_capabilities": self._config.capabilities,
                 "core_settings": self._config.settings,
                 "core_plugins": list(self._config.plugins),
+                "core_system_instructions": self._config.system_instructions,
             }
         )
         self._store.write_generation(
@@ -1202,6 +1226,60 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 self._projector.append_public_history_entries(entries, observed_at=now)
             )
 
+    async def relocate_session(
+        self,
+        cwd: str,
+        checkpoint: JsonObject,
+        *,
+        plugin_lock: PluginLockV1,
+        model: str | None = None,
+    ) -> SessionMetadataV1:
+        """Persist a cwd change and its public checkpoint as one journal record."""
+        async with self._lock:
+            self._guard_open()
+            await self._catch_up_projection()
+            stored = await asyncio.to_thread(self._store.load)
+            if not stored.runtime_state.quiescent:
+                raise RuntimeError("cannot relocate a non-quiescent session")
+
+            observed_at = time.time_ns() // 1_000_000
+            projector = SessionProjector(stored.projection_state)
+            if model is not None:
+                projector.apply_model_change(model, observed_at=observed_at)
+            update = projector.append_public_history_entries(
+                [checkpoint], observed_at=observed_at
+            )
+            delta = compute_projection_delta(
+                stored.projection_state.snapshot, update.journaled_snapshot
+            )
+            metadata = stored.runtime_state.session_metadata.relocated_to(
+                cwd
+            ).model_copy(
+                update={"hook_bindings": list(self._config.capabilities.hook_bindings)}
+            )
+            record = await asyncio.to_thread(
+                self._store.relocate_session,
+                metadata,
+                plugin_lock,
+                update.projection.watermark,
+                delta,
+            )
+            projection = update.projection.model_copy(
+                update={"snapshot_sequence": record.sequence}
+            )
+            self._projector = SessionProjector(projection)
+            if self._event_sink is not None:
+                try:
+                    emitted = self._event_sink(update.event)
+                    if isinstance(emitted, Awaitable):
+                        await emitted
+                except Exception:
+                    logger.exception(
+                        "Failed to publish committed session relocation event",
+                        extra={"session_id": self._store.session_id},
+                    )
+            return metadata
+
     async def append_provisional_completion_content(
         self, delta: CompletionDelta
     ) -> None:
@@ -1293,17 +1371,52 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             lambda live: live.model_copy(update={"skills": list(skills)}, deep=True)
         )
 
+    async def reconfigure_configuration(self, config: RustHarnessConfig) -> None:
+        """Replace every live Core configuration dimension as one command."""
+        async with self._lock:
+            self._guard_open()
+            await self._reconfigure_configuration_locked(config)
+
+    async def _reconfigure_configuration_locked(
+        self, config: RustHarnessConfig
+    ) -> None:
+        params = _configuration_reconfigure_params(config)
+        pending = await self._flush_pending_configuration_command()
+        self._post_recovery_capabilities = None
+        self._post_recovery_plugins = None
+        self._post_recovery_settings = None
+        self._post_recovery_system_instructions = None
+        if pending is not None and pending.params == params:
+            return
+        await self._command_without_actions_locked(
+            client_command_id=self._store.resolve_internal_command_id("configuration"),
+            method=_CONFIGURATION_RECONFIGURE_METHOD,
+            params=params,
+            command=_configuration_reconfigure_command(params),
+            response_factory=lambda _transition: {},
+            compact=False,
+        )
+        await self._accept_configuration(params)
+
     async def reconfigure_plugins(
         self, plugins: Sequence[RustPluginContextDefinition]
     ) -> None:
+        params = _plugin_reconfigure_params(plugins)
         async with self._lock:
             self._guard_open()
-            updated = self._config.model_copy(
-                update={"plugins": list(plugins)}, deep=True
-            )
-            if updated == self._config:
+            pending = await self._flush_pending_plugin_command()
+            self._post_recovery_plugins = None
+            if pending is not None and pending.params == params:
                 return
-            self._config = updated
+            await self._command_without_actions_locked(
+                client_command_id=self._store.resolve_internal_command_id("plugins"),
+                method=_PLUGIN_RECONFIGURE_METHOD,
+                params=params,
+                command=_plugin_reconfigure_command(params),
+                response_factory=lambda _transition: {},
+                compact=False,
+            )
+            await self._accept_plugin_config(params)
 
     async def reconfigure_capability_dimension(
         self, update: Callable[[RustHarnessCapabilitySet], RustHarnessCapabilitySet]
@@ -1384,6 +1497,12 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     async def replace_quiescent_context(
         self, *, checkpoint: dict[str, JsonValue], projection: PublicSessionState
     ) -> None:
+        """Start a new timeline from ``checkpoint`` under a fresh, recorded task ID.
+
+        Core namespaces completion and compaction Action IDs by task ID, so a
+        Core rebuilt under the previous one could reissue the Action IDs of the
+        entries the replacement history keeps.
+        """
         async with self._lock:
             self._guard_open()
             await self._catch_up_projection()
@@ -1396,6 +1515,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 raise RuntimeError(
                     "cannot replace context while Runtime work is pending"
                 )
+            task_id = f"{self._store.session_id}:context:{secrets.token_hex(16)}"
             sequence = stored.runtime_state.snapshot_sequence
             watermark = stored.projection_state.watermark + 1
             projection_state = stored.projection_state.model_copy(
@@ -1414,12 +1534,15 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                         "core_capabilities": self._config.capabilities,
                         "core_settings": self._config.settings,
                         "core_plugins": list(self._config.plugins),
+                        "core_system_instructions": self._config.system_instructions,
+                        "core_task_id": task_id,
                     }
                 ),
                 projection_state=projection_state,
                 core_action_ids=self.pending_action_ids,
             )
             refreshed = self._store.load()
+            self._config = refreshed.replayed_config(self._config)
             replacement = _rebuilt_core(refreshed.restore_core(self._config), 0)
             previous = self._core
             self._core = replacement
@@ -1440,8 +1563,9 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                     await emitted
 
     async def reconfigure_capabilities(
-        self, capabilities: RustHarnessCapabilitySet, *, revision: str
+        self, capabilities: RustHarnessCapabilitySet, *, revision: str | None = None
     ) -> None:
+        revision = revision or _capability_revision(capabilities)
         params = _capability_reconfigure_params(capabilities, revision)
         async with self._lock:
             self._guard_open()
@@ -1459,12 +1583,30 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             accept=self._accept_capability_config,
         )
 
+    async def _flush_pending_configuration_command(
+        self,
+    ) -> PendingInternalCommand | None:
+        return await self._flush_pending_internal_command(
+            namespace="configuration",
+            method=_CONFIGURATION_RECONFIGURE_METHOD,
+            command=_configuration_reconfigure_command,
+            accept=self._accept_configuration,
+        )
+
     async def _flush_pending_settings_command(self) -> PendingInternalCommand | None:
         return await self._flush_pending_internal_command(
             namespace="settings",
             method=_SETTINGS_RECONFIGURE_METHOD,
             command=_settings_reconfigure_command,
             accept=self._accept_settings_config,
+        )
+
+    async def _flush_pending_plugin_command(self) -> PendingInternalCommand | None:
+        return await self._flush_pending_internal_command(
+            namespace="plugins",
+            method=_PLUGIN_RECONFIGURE_METHOD,
+            command=_plugin_reconfigure_command,
+            accept=self._accept_plugin_config,
         )
 
     async def _flush_pending_internal_command(
@@ -1604,7 +1746,8 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         One generation carries both, so a reader can never see a Core built
         against plugins the lock does not name. Nothing durable is written
         until the replacement Core exists, which is what leaves a failed re-pin
-        with the previous lock recorded.
+        with the previous lock recorded. The Core keeps the task ID it runs
+        under; ``config``'s is not used.
         """
         async with self._lock:
             self._guard_open()
@@ -1801,14 +1944,18 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         # capability one does, and nothing else on a restore path answers it.
         # Flushing may itself install the deferred set, which
         # ``_take_deferred_capabilities`` then reports as done.
+        await self._flush_pending_configuration_command()
         await self._flush_pending_settings_command()
         await self._flush_pending_capability_command()
+        await self._flush_pending_plugin_command()
         capabilities = self._take_deferred_capabilities()
         if capabilities is not None:
             await self._reconfigure_capabilities_locked(
                 capabilities, _capability_revision(capabilities)
             )
         await self._restore_current_settings_locked()
+        await self._restore_current_plugins_locked()
+        await self._restore_current_system_instructions_locked()
 
     async def _restore_current_settings_locked(self) -> None:
         """Adopt the settings a restore deferred to replay under the journalled set.
@@ -1843,8 +1990,61 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         return capabilities
 
     async def _accept_settings_config(self, params: dict[str, JsonValue]) -> None:
-        settings = RustHarnessSettings.model_validate(params.get("settings"))
+        settings = parse_stored_settings(params.get("settings"))
         self._config = self._config.model_copy(update={"settings": settings}, deep=True)
+        if not self.inspection.pending_actions:
+            await self._compact_store()
+
+    async def _accept_configuration(self, params: dict[str, JsonValue]) -> None:
+        self._config = self._config.model_copy(
+            update={
+                "settings": parse_stored_settings(params.get("settings")),
+                "capabilities": RustHarnessCapabilitySet.model_validate(
+                    params.get("capabilities")
+                ),
+                "plugins": _PLUGIN_CONTEXTS_ADAPTER.validate_python(
+                    params.get("plugins")
+                ),
+                "system_instructions": _STRING_ADAPTER.validate_python(
+                    params.get("systemInstructions")
+                ),
+            },
+            deep=True,
+        )
+        if not self.inspection.pending_actions:
+            await self._compact_store()
+
+    async def _restore_current_plugins_locked(self) -> None:
+        plugins = self._post_recovery_plugins
+        self._post_recovery_plugins = None
+        if plugins is None or plugins == self._config.plugins:
+            return
+        await self._flush_pending_plugin_command()
+        params = _plugin_reconfigure_params(plugins)
+        await self._command_without_actions_locked(
+            client_command_id=self._store.resolve_internal_command_id("plugins"),
+            method=_PLUGIN_RECONFIGURE_METHOD,
+            params=params,
+            command=_plugin_reconfigure_command(params),
+            response_factory=lambda _transition: {},
+            compact=False,
+        )
+        await self._accept_plugin_config(params)
+
+    async def _restore_current_system_instructions_locked(self) -> None:
+        instructions = self._post_recovery_system_instructions
+        self._post_recovery_system_instructions = None
+        if instructions is None or instructions == self._config.system_instructions:
+            return
+        await self._reconfigure_configuration_locked(
+            self._config.model_copy(update={"system_instructions": instructions})
+        )
+
+    async def _accept_plugin_config(self, params: dict[str, JsonValue]) -> None:
+        plugins = _PLUGIN_CONTEXTS_ADAPTER.validate_python(params.get("plugins"))
+        self._config = self._config.model_copy(
+            update={"plugins": list(plugins)}, deep=True
+        )
         if not self.inspection.pending_actions:
             await self._compact_store()
 
@@ -2136,11 +2336,30 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         try:
             controller = self._subagent_controller
             if (
+                isinstance(action, RustRuntimeBuiltinToolCallAction)
+                and action.call.name in DEPRECATED_RUNTIME_BUILTIN_TOOL_NAMES
+            ):
+                event = deprecated_tool_failure(action)
+            elif (
                 controller is not None
                 and isinstance(action, RustRuntimeBuiltinToolCallAction)
-                and controller.handles(action)
+                and controller.handles(action, recovering=recovering)
             ):
-                event = await controller.execute(action, recovering=recovering)
+                event = await controller.execute_core_action(
+                    action, recovering=recovering
+                )
+            elif (
+                isinstance(action, RustRuntimeBuiltinToolCallAction)
+                and action.call.name == "self.wait"
+            ):
+                # Read-only. A recovered wait answers at once instead of holding
+                # resume until its deadline (recovery mode "reconcile").
+                event = await execute_model_wait(
+                    action,
+                    self._model_input_signal,
+                    max_wait_ms=self._config.settings.tools.max_wait_ms,
+                    recovering=recovering,
+                )
             elif isinstance(
                 action, RustRuntimeBuiltinToolCallAction
             ) and action.call.name.startswith("process."):
@@ -2152,6 +2371,14 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                     event = self._process_note_rider(event, action.action_id)
             elif recovering:
                 event = await self._recover(durable, action)
+            elif (
+                isinstance(action, RustRuntimeBuiltinToolCallAction)
+                and action.call.name == "self.sleep"
+            ):
+                event = await execute_self_tool(
+                    action,
+                    max_sleep_ms=self._config.settings.tools.programmatic.max_sleep_ms,
+                )
             else:
                 event = await self._execute_action(action)
         except asyncio.CancelledError:
@@ -3412,7 +3639,28 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             action, "The interrupted effect cannot be reconnected safely"
         )
 
+    async def _model_input_signal(self) -> asyncio.Event | None:
+        # Under the lock, Core state matches the journal: `_apply` commits there.
+        async with self._lock:
+            self._guard_open()
+            if self.inspection.has_pending_model_input:
+                return None
+            return self._core_input_committed
+
+    def _signal_core_input_committed(self) -> None:
+        committed = self._core_input_committed
+        self._core_input_committed = asyncio.Event()
+        committed.set()
+
     async def _apply(self, command: RustEvent) -> RustSessionTransition:
+        # Wake standalone waits on every path, early returns and failures included.
+        # A spurious wake-up is harmless: the wait re-reads Core state.
+        try:
+            return await self._apply_core_input(command)
+        finally:
+            self._signal_core_input_committed()
+
+    async def _apply_core_input(self, command: RustEvent) -> RustSessionTransition:
         await self._maybe_compact_journal()
         pending = self._pending_process_core_input
         if pending is not None:
@@ -3503,6 +3751,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             self._config.capabilities,
             self._config.settings,
             self._config.plugins,
+            self._config.system_instructions,
         )
         await self._record_projection_update(update)
 
@@ -3521,6 +3770,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 self._config.capabilities,
                 self._config.settings,
                 self._config.plugins,
+                self._config.system_instructions,
             )
         except Exception:
             # Unlike the process path this one has no retry owner, so a lost write
@@ -3859,6 +4109,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     def _rewrite_plugins_sync(
         self, plugin_lock: PluginLockV1, config: RustHarnessConfig
     ) -> None:
+        config = config.model_copy(update={"task_id": self._config.task_id})
         stored = self._load_quiescent()
         sequence = stored.runtime_state.snapshot_sequence
         checkpoint, core_last_input_id = self._capture_core_generation()
@@ -3879,6 +4130,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                         "core_capabilities": config.capabilities,
                         "core_settings": config.settings,
                         "core_plugins": list(config.plugins),
+                        "core_system_instructions": config.system_instructions,
                     }
                 ),
                 projection_state=stored.projection_state.model_copy(
@@ -4003,15 +4255,15 @@ def _runtime_state_for_replaced_context(
 ) -> RuntimeStateV3:
     """Drop the ledgers that belong to the timeline a replaced context abandons.
 
-    A Core rebuilt from history numbers its inputs from the beginning again, and
-    the identities it derives from that numbering come back with it: Action IDs,
-    the provider operations and approval callbacks named after them, and the
-    processes named after the call that started them. Carried across, the first
-    Action of the new timeline is answered by the durable record of whatever
-    occupied its slot in the old one -- the Runtime replays that result and
-    never asks the model -- so the ledgers are dropped with the turns they
-    describe. Only a quiescent session can get here, so nothing being dropped is
-    still in flight and every recorded process has already terminated.
+    The replacement runs under a fresh task ID, but a rebuilt Core's tool
+    Action IDs derive from the model's call IDs, so its new Actions, with the
+    provider operations, callbacks and processes named after them, can carry
+    identities the old ledgers record. Carried across, such an Action is
+    answered by the old timeline's durable record -- the Runtime replays that
+    result and never asks the model -- so the ledgers are dropped with the
+    turns they describe. Only a quiescent session can get here, so nothing
+    being dropped is still in flight and every recorded process has already
+    terminated.
 
     The accepted-input cursor restarts with them. Every other generation write
     carries it forward so its rebuild is transparent; this one is the single place
@@ -4176,6 +4428,31 @@ def _capability_reconfigure_params(
     }
 
 
+def _configuration_reconfigure_params(
+    config: RustHarnessConfig,
+) -> dict[str, JsonValue]:
+    return {
+        "systemInstructions": config.system_instructions,
+        "settings": cast(
+            JsonValue,
+            config.settings.model_dump(mode="json", by_alias=True, exclude_none=True),
+        ),
+        "capabilities": cast(
+            JsonValue,
+            config.capabilities.model_dump(
+                mode="json", by_alias=True, exclude_none=True
+            ),
+        ),
+        "plugins": cast(
+            JsonValue,
+            [
+                plugin.model_dump(mode="json", by_alias=True, exclude_none=True)
+                for plugin in config.plugins
+            ],
+        ),
+    }
+
+
 def _settings_reconfigure_params(settings: RustHarnessSettings) -> dict[str, JsonValue]:
     return {
         "settings": cast(
@@ -4185,9 +4462,49 @@ def _settings_reconfigure_params(settings: RustHarnessSettings) -> dict[str, Jso
     }
 
 
+def _plugin_reconfigure_params(
+    plugins: Sequence[RustPluginContextDefinition],
+) -> dict[str, JsonValue]:
+    return {
+        "plugins": cast(
+            JsonValue,
+            [
+                plugin.model_dump(mode="json", by_alias=True, exclude_none=True)
+                for plugin in plugins
+            ],
+        )
+    }
+
+
 def _settings_reconfigure_command(params: dict[str, JsonValue]) -> RustReconfigureEvent:
-    settings = RustHarnessSettings.model_validate(params.get("settings"))
+    settings = parse_stored_settings(params.get("settings"))
     return RustReconfigureEvent(changes=[RustSettingsChange(value=settings)])
+
+
+def _plugin_reconfigure_command(params: dict[str, JsonValue]) -> RustReconfigureEvent:
+    plugins = _PLUGIN_CONTEXTS_ADAPTER.validate_python(params.get("plugins"))
+    return RustReconfigureEvent(changes=[RustPluginsChange(value=plugins)])
+
+
+def _configuration_reconfigure_command(
+    params: dict[str, JsonValue],
+) -> RustReconfigureEvent:
+    return RustReconfigureEvent(
+        changes=[
+            RustSystemInstructionsChange(
+                value=_STRING_ADAPTER.validate_python(params.get("systemInstructions"))
+            ),
+            RustSettingsChange(value=parse_stored_settings(params.get("settings"))),
+            RustCapabilitiesChange(
+                value=RustHarnessCapabilitySet.model_validate(
+                    params.get("capabilities")
+                )
+            ),
+            RustPluginsChange(
+                value=_PLUGIN_CONTEXTS_ADAPTER.validate_python(params.get("plugins"))
+            ),
+        ]
+    )
 
 
 def _capability_revision(capabilities: RustHarnessCapabilitySet) -> str:
@@ -4220,7 +4537,9 @@ def _action_kind(
     if isinstance(action, RustRuntimeBuiltinToolCallAction):
         if action.call.name.startswith("process."):
             return "process"
-        if action.call.name.startswith("subagent."):
+        # Deprecated: `subagent.` is the retired prefix of `agents.`, kept only
+        # for Actions restored from earlier sessions.
+        if action.call.name.startswith(("agents.", "subagent.")):
             return "child"
     return "tool"
 
@@ -4233,6 +4552,13 @@ def _recovery_mode(action: RustAction) -> RecoveryMode:
         return "reconcile"
     if kind == "filesystem":
         return "idempotent_retry"
+    if (
+        isinstance(action, RustRuntimeBuiltinToolCallAction)
+        and action.call.name == "self.wait"
+    ):
+        # Recovery answers a standalone wait from the current Session state
+        # instead of waiting again.
+        return "reconcile"
     return "fail"
 
 

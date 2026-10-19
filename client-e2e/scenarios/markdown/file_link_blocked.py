@@ -1,4 +1,4 @@
-"""Assistant-authored file links stay non-actionable in the Rust client."""
+"""Assistant-authored file links stay non-actionable."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ _ANSWER = f"## Docs\n\nOpen [local file]({_URL})."
 _ROW, _COL = 32, 8
 _CLICK = f"\x1b[<0;{_COL};{_ROW}M\x1b[<0;{_COL};{_ROW}m"
 
-expected_actions: dict[str, list[Action]] = {"rust": []}
+expected_actions: dict[str, list[Action]] = []
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

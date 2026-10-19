@@ -106,7 +106,7 @@ fn zero_score_and_missing_matches_are_excluded() {
 #[test]
 fn refresh_preserves_the_field_when_fuzzy_ranks_change() {
     let mut app = app_with(&[("api_timeout", "", false), ("api_key", "", false)], "api");
-    app.config_screen.selected = 1;
+    app.config_screen.list.highlight(1);
     let fields = app_with(&[("api_timeout", "", false), ("api_key", "", true)], "")
         .config_screen
         .fields;
@@ -114,10 +114,10 @@ fn refresh_preserves_the_field_when_fuzzy_ranks_change() {
         &mut app,
         config::Loaded {
             fields,
-            targets: Vec::new(),
+            ..config::Loaded::default()
         },
     );
     assert_eq!(app.config_screen.search.query, "api");
-    assert_eq!(names(&app)[app.config_screen.selected], "api_key");
-    assert_eq!(app.config_screen.selected, 0);
+    assert_eq!(names(&app)[app.config_screen.list.selected()], "api_key");
+    assert_eq!(app.config_screen.list.selected(), 0);
 }

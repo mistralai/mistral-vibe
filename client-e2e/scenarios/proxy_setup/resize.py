@@ -7,7 +7,7 @@ from e2e.app_server.scenario import Timeline, resize
 
 handshake = proxy_handshake()
 request_methods = METHODS
-screen_contains = {"rust": ("Proxy Configuration", "SSL_CERT_DIR", "/etc/ssl")}
+screen_contains = ("Proxy Configuration", "SSL_CERT_DIR", "/etc/ssl")
 timeline: Timeline = [
     "/proxy-setup\r",
     resize(14, 80),

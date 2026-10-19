@@ -11,6 +11,6 @@ handshake["config/proxy/write"] = {
     "error": {"code": "invalid_params", "message": MESSAGE}
 }
 request_methods = METHODS
-screen_contains = {"rust": (f"Failed to apply: proxy settings — {MESSAGE}",)}
-screen_excludes = {"rust": ("Proxy settings saved.", "Proxy Configuration")}
+screen_contains = (f"Failed to apply: proxy settings — {MESSAGE}",)
+screen_excludes = ("Proxy settings saved.", "Proxy Configuration")
 timeline: Timeline = ["/proxy-setup\r", "proxy:8080", "\r"]

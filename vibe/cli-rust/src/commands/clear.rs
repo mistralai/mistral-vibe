@@ -96,12 +96,12 @@ pub fn apply_cleared(
     app.terminal_notifier.set_default_title("");
     app.set_session_id(session_id);
     app.session.active_turn_id = None;
-    // The cleared replacement owns its own child sessions (Python `replace_state`).
+    // The cleared replacement owns its own child sessions.
     app.subagents.seed_snapshot(child_sessions);
-    // Python `SessionContextCleared` -> `_reset_subagent_views`.
+    // A cleared context drops the previous session's subagent views.
     crate::subagents::reset_views(app);
     crate::subagents::refresh(app);
-    // Python `reset_usage_baseline` on the clear adopt, falling back to the
+    // Reset the usage baseline on the clear adopt, falling back to the
     // stats still held when the fresh state carries no usage.
     let baseline = usage.unwrap_or_else(|| crate::session_exit::current_usage(app));
     app.session.usage_baseline = Some(baseline);
@@ -109,7 +109,7 @@ pub fn apply_cleared(
     app.subagents.main_tokens = app.session.tokens;
 }
 
-/// Python `_clear_history`'s notice, naming the previous session when it can be resumed.
+/// The `/clear` notice, naming the previous session when it can be resumed.
 pub fn new_conversation_text(previous_session_id: Option<&str>) -> String {
     let Some(previous) = previous_session_id else {
         return "New conversation started.".to_owned();

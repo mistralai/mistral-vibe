@@ -15,8 +15,8 @@ from e2e.app_server.scenario import Timeline
 _PROMPT = "fetch the articles"
 
 # The settled tool group header, then its first web-fetch entry on the next row once unfolded.
-_EXPAND = "\x1b[<0;1;15M\x1b[<0;1;15m"
-_EXPAND_ENTRY = "\x1b[<0;8;16M\x1b[<0;8;16m"
+_EXPAND = "\x1b[<0;1;11M\x1b[<0;1;11m"
+_EXPAND_ENTRY = "\x1b[<0;8;12M\x1b[<0;8;12m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

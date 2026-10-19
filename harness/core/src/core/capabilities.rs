@@ -302,11 +302,6 @@ pub(crate) fn render_sections(config: &HarnessConfig) -> Vec<String> {
     if !knowledge.is_empty() {
         sections.push(render_knowledge(knowledge));
     }
-    if config.settings.tools.subagents.is_enabled()
-        && let Some(agent_types) = subagents::render_agent_types(config.agent_types())
-    {
-        sections.push(agent_types);
-    }
     if let Some(section) = render_plugins(&config.plugins) {
         sections.push(section);
     }
@@ -486,11 +481,10 @@ mod tests {
         let mut config = crate::core::testing::config();
         config.plugins = vec![plugin()];
         let sections = render_sections(&config);
-        assert_eq!(sections.len(), 3);
+        assert_eq!(sections.len(), 2);
         assert!(sections[0].contains("Policy &lt;index&gt;"));
         assert!(sections[0].contains("<plugin-name>finance</plugin-name>"));
-        assert!(sections[1].contains("finance:researcher"));
-        assert!(sections[2].contains("Finance &lt;tools&gt;"));
+        assert!(sections[1].contains("Finance &lt;tools&gt;"));
     }
 
     #[test]

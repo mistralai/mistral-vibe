@@ -41,7 +41,6 @@ agents, prompts, logs, and session data live here.
   logs/
     vibe.log           # Main log file
     session/           # Session log files
-  plans/               # Session plans
 
 ~/.agents/
   skills/              # Additional user-level skills directory
@@ -175,9 +174,8 @@ show_greeting = true  # Show "Hello {name}" greeting below the banner at startup
 log_level = "WARNING"  # Optional. DEBUG | INFO | WARNING | ERROR | CRITICAL — log level for ~/.vibe/logs/vibe.log
 ```
 
-`cursor_blink` controls the main input cursor in both Python and Rust terminals.
-Change it through `/config`, or edit `config.toml` and run `/reload`; no restart
-is needed.
+`cursor_blink` controls the main input cursor. Change it through `/config`, or
+edit `config.toml` and run `/reload`; no restart is needed.
 
 ### Copy and Text Selection
 
@@ -394,19 +392,19 @@ disabled_skills = ["experimental-*"]
 agent_paths = ["/path/to/custom/agents"]
 
 # Enable/disable agents
-enabled_agents = ["ask", "plan"]
+enabled_agents = ["ask", "accept-edits"]
 disabled_agents = ["auto-approve"]
 
 # Opt-in builtin agents (only affects agents with install_required=True, e.g. lean)
 installed_agents = ["lean"]
 
 # Agent profile to use when --agent is not passed
-# (default: "accept-edits"). Valid values: "ask", "plan", "accept-edits",
+# (default: "accept-edits"). Valid values: "ask", "accept-edits",
 # "auto-approve", "lean" (only when listed in installed_agents), or any
 # custom agent name from ~/.vibe/agents/ or .vibe/agents/. Subagents
 # (e.g. "explore") are rejected. Applies in both interactive and programmatic
 # (-p/--prompt) mode.
-default_agent = "plan"
+default_agent = "ask"
 ```
 
 ### MCP Servers
@@ -431,6 +429,20 @@ Otherwise the server uses OAuth and starts browser login by default. Pass
 `vibe mcp add --help` for all supported authentication and timeout options.
 Use `vibe mcp remove <name>` to remove a server from the user configuration;
 stored OAuth credentials are deleted when available.
+
+`vibe mcp add NAME --url URL` adds remote servers, including static
+authentication with `--api-key-env`, `--api-key-header`, `--api-key-format`,
+and repeatable `--header NAME=VALUE`.
+Add local standard input/output (stdio) servers with
+`vibe mcp add NAME --transport stdio --command COMMAND`, repeatable
+`--arg VALUE` (use `--arg=-y` for flags), and `--env NAME=VALUE`.
+A string stdio `command` is split into words like a shell line; on native
+Windows a backslash is a path separator, not an escape, so quote a path that
+contains spaces: `command = '"C:\Program Files\tool\tool.exe" --stdio'`.
+Set `--startup-timeout-sec` and `--tool-timeout-sec` for either transport.
+The legacy `vibe mcp add URL --name NAME` form is also accepted.
+Shell `add` and `remove NAME` update user config without a chat session;
+`remove` is not a slash command.
 
 Hosted OAuth MCP servers can also be added from inside Vibe:
 
@@ -495,12 +507,9 @@ Mistral connectors are auto-discovered when the active provider is Mistral
 and the API key env var is set. Toggle the master switch or hide individual
 connectors / tools:
 
-The legacy backend keeps a discovered connector disabled until it has an
-explicit `[[connectors]]` entry. The Unified Harness backend (the default
-runtime) enables ready connectors by default in memory. It does not write that
+The Unified Harness enables ready connectors by default in memory. It does not write that
 default to TOML, and the master switch plus explicit connector, tool, allowlist,
-and denylist settings always take precedence. Use `--legacy-harness` for the
-temporary legacy escape hatch if you prefer the old behavior.
+and denylist settings always take precedence.
 
 ```toml
 enable_connectors = true          # Master switch (default: true)
@@ -735,6 +744,10 @@ non-conforming stdout) emits a UI warning and lets the gated action proceed
 
 #### Execution semantics
 
+- A hook `command` is a shell line, run in the session working directory. On
+  macOS and Linux it runs in `/bin/sh`. On native Windows it runs in the same
+  shell as the `bash` tool: Git Bash when it is installed, otherwise
+  PowerShell. Write Windows hooks in that shell's syntax.
 - Hooks of the same type fire sequentially in load order (project file first,
   then user file; declaration order within each file).
 - Tool calls within a single LLM turn run **concurrently**; each call's hook
@@ -777,8 +790,6 @@ vibe --max-tokens N                 # Max total session tokens (programmatic mod
 vibe --enabled-tools TOOL           # Enable specific tools (repeatable)
 vibe --disabled-tools TOOL          # Disable specific tools (repeatable)
 vibe --output text|json|streaming   # Output format (programmatic mode)
-vibe --experimental-harness        # Select the Unified Harness backend (redundant: it is the default runtime)
-vibe --legacy-harness             # Force the legacy Python harness (temporary escape hatch)
 ```
 
 ## Built-in Agents
@@ -792,7 +803,6 @@ There are two kinds of agents:
 ### Agents
 
 - **ask**: Requests approval for tool executions
-- **plan**: Planning-focused agent
 - **accept-edits**: Default agent; auto-approves file edits but asks for other tools
 - **auto-approve**: Auto-approves all tool calls
 - **lean**: Specialized Lean 4 proof assistant. Not available by default — must be
@@ -811,12 +821,8 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/help` - Show help message
 - `/config` - Full-screen settings browser. Fields show their value and origin layer (default / TOML / env / override). Type to filter, arrows to move, Enter to edit; booleans toggle, closed-set fields (theme, models) pick from a list, scalars edit inline, complex fields open a JSON editor. The edit modal shows an inspector of the layers setting the field; edits persist to the user config (`~/.vibe/config.toml`) by default, `Tab` cycles the save target through the project config (`.vibe/config.toml`, when the project layer is active) and the ephemeral session override (until restart), and `Ctrl+R` clears the field one writable layer at a time toward the default. The `tools` field opens a grouped tool list with a per-tool config editor (permission, allow/deny lists, `Ctrl+E` for raw JSON). Enabling/disabling whole MCP servers or connectors stays in `/mcp`.
 - `/model` - Select active model
-- `/skills` - Browse and manage the skills available to this session. Lists the
-  installed ones alongside the shared skills you can add, and can import a
-  skill, pin it to a version or alias, convert it to a local copy, or remove it.
-  Registered only when `experimental_enable_registry_skills` is set.
 - `/thinking` - Select thinking level
-- `/theme` - Select Textual UI theme; `auto` follows terminal/OS appearance (persisted in config)
+- `/theme` - Select UI theme; `auto` follows terminal/OS appearance (persisted in config)
 - `/reload` - Reload configuration, agent instructions, and skills from disk
 - `/clear`, `/new` - Start a new conversation. Optionally pass a prompt to seed it
 - `/log` - Show path to current interaction log file
@@ -866,6 +872,8 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
   clears it instead. In the rewind panel: `↑/↓` pick option, `Shift+↑/↓`
   scroll, `←`/`Esc` edit previous message, `→` edit next message, `Enter`
   accept, `q` quit.
+- `/branch` - Fork the current conversation into a new resumable session,
+  leaving this session unchanged. Resume the copy with `vibe --resume <id>`.
 - `/loop [schedule] [prompt]` - With the Unified Harness, ask the model to
   schedule a recurring prompt, e.g. `/loop every two minutes check the build`
   or `/loop weekdays at 9am review CI`.
@@ -917,7 +925,7 @@ Image attachments:
 
 - Require `supports_images = true` on the active model in `config.toml`.
   The legacy loop rejects an image its model cannot read; under
-  `--experimental-harness` the send always goes through, and the agent is
+  the Unified Harness the send always goes through, and the agent is
   shown a description of the image or, failing that, a link to the file.
 - The describer is picked automatically: any `supports_images` model on
   the active model's **own** provider, no config needed. Same provider
@@ -945,12 +953,15 @@ Image attachments:
   intercepted at paste time: if the pasted content is a standalone existing
   absolute or home-relative file or folder (or a newline-delimited list of
   them), the input automatically prepends `@` and quotes paths containing
-  spaces. This applies to text files, folders, and images; pasted prose,
-  relative paths, and missing paths are left unchanged.
+  spaces. This applies to text files and folders (images become
+  `[Image #N]` placeholders, see below); pasted prose, relative paths, and
+  missing paths are left unchanged.
 - **Image copy/paste from the clipboard** (**macOS only** for now):
-  writes the image to `<session_dir>/attachments/clipboard-<ts>.png`
-  (or the system temp dir when no session is active) and inserts an
-  `@<path>` token at the cursor. Two entry points:
+  writes the image to a persistent temporary PNG, inserts a numbered
+  `[Image #N]` placeholder at the cursor, then snapshots it under the
+  session attachments on submit. A pasted standalone image path becomes a
+  placeholder too. In a `!` shell command the raw path is inserted instead.
+  Two entry points:
   1. `Ctrl+V` keybinding inside the prompt.
   2. `/paste-image` slash command.
 
@@ -990,8 +1001,8 @@ enters queue selection mode: the last queued item is highlighted and
 the input is locked (no cursor, no typing). **Up/Down** navigate
 between queued prompts, **Enter** loads the selected prompt into the input
 for editing (press Enter again to update it in-place), **Backspace** (or
-**Delete** in the Python CLI, **Ctrl+C** in the Rust CLI) removes the selected
-item and moves selection to the next, and **Esc** exits selection mode and
+**Ctrl+C**) removes the selected item and moves selection to the next, and
+**Esc** exits selection mode and
 restores the original input text.
 
 ## Plugins
@@ -1152,17 +1163,14 @@ using OpenAI's `agents/openai.yaml` convention can set
 `policy.allow_implicit_invocation: false` for the same provider-independent behavior.
 
 A `/` at the very start of the input opens the slash menu (commands and skills).
-A `/word` typed mid-prompt (not the first word) instead shows an inline ghost-text
-preview of the best-matching skill name; press `Tab` to accept it. Only skills are
-offered inline, and no popup is shown.
+A `/word` typed mid-prompt (not the first word) instead opens a completion popup
+of matching user-invocable skills.
 
 ## Environment Variables
 
 - `VIBE_HOME` - Override the Vibe home directory (default: `~/.vibe`)
 - `MISTRAL_API_KEY` - API key for Mistral provider
 - `VIBE_ACTIVE_MODEL` - Override active model
-- `VIBE_CLI` - Selects the CLI implementation: `rust` starts the experimental
-  Rust TUI; any other value (or unset) runs the legacy Python (Textual) TUI.
 - `VIBE_*` - Any config field can be overridden with the `VIBE_` prefix
 - `LOG_LEVEL` - Overrides `log_level` config for `$VIBE_HOME/logs/vibe.log`.
   One of `DEBUG`, `INFO`, `WARNING` (default), `ERROR`, `CRITICAL`. Invalid values

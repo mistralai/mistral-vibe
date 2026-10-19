@@ -81,7 +81,7 @@ class TestAgentManager:
 
         # These are AGENT type
         assert "ask" not in names
-        assert "plan" not in names
+        assert "accept-edits" not in names
         assert "auto-approve" not in names
 
     def test_get_builtin_agent(self, manager: AgentManager) -> None:
@@ -208,20 +208,20 @@ class TestAgentManager:
     ) -> None:
         """Test that creating AgentManager with an agent-type agent works."""
         config = build_config()
-        manager = AgentManager(load_orchestrator(config), initial_agent="plan")
-        assert manager.active_profile.name == "plan"
+        manager = AgentManager(load_orchestrator(config), initial_agent="ask")
+        assert manager.active_profile.name == "ask"
 
     def test_initial_agent_raises_when_agent_is_disabled(
         self,
         build_config: ConfigBuilder,
         load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        config = build_config(disabled_agents=["plan"])
+        config = build_config(disabled_agents=["ask"])
         with pytest.raises(ValueError, match="disabled_agents") as exc_info:
-            AgentManager(load_orchestrator(config), initial_agent="plan")
+            AgentManager(load_orchestrator(config), initial_agent="ask")
         message = str(exc_info.value)
         assert "default_agent" not in message
-        assert message.startswith("Agent 'plan'")
+        assert message.startswith("Agent 'ask'")
 
     def test_explicit_agent_excluded_by_enabled_agents_does_not_blame_default(
         self,
@@ -230,10 +230,10 @@ class TestAgentManager:
     ) -> None:
         config = build_config(enabled_agents=["ask"])
         with pytest.raises(ValueError, match="enabled_agents") as exc_info:
-            AgentManager(load_orchestrator(config), initial_agent="plan")
+            AgentManager(load_orchestrator(config), initial_agent="auto-approve")
         message = str(exc_info.value)
         assert "default_agent" not in message
-        assert message.startswith("Agent 'plan'")
+        assert message.startswith("Agent 'auto-approve'")
 
     def test_initial_agent_raises_when_agent_does_not_exist(
         self,
@@ -249,7 +249,7 @@ class TestAgentManager:
         build_config: ConfigBuilder,
         load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        config = build_config(enabled_agents=["plan"])
+        config = build_config(enabled_agents=["ask"])
         with pytest.raises(ValueError, match="enabled_agents") as exc_info:
             AgentManager(load_orchestrator(config))
         message = str(exc_info.value)
@@ -272,11 +272,74 @@ class TestAgentManager:
         build_config: ConfigBuilder,
         load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        config = build_config(enabled_agents=["plan"], disabled_agents=["plan"])
+        config = build_config(enabled_agents=["ask"], disabled_agents=["ask"])
         with caplog.at_level("WARNING"):
-            manager = AgentManager(load_orchestrator(config), initial_agent="plan")
-        assert manager.active_profile.name == "plan"
+            manager = AgentManager(load_orchestrator(config), initial_agent="ask")
+        assert manager.active_profile.name == "ask"
         assert caplog.text == ""
+
+    def test_removed_plan_default_agent_starts_on_ask(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        config = build_config(default_agent="plan")
+        with caplog.at_level("WARNING"):
+            manager = AgentManager(
+                load_orchestrator(config), initial_agent=config.resolve_default_agent()
+            )
+
+        assert manager.active_profile.name == "ask"
+        assert "plan" not in manager.available_agents
+        assert "default_agent 'plan' is no longer a builtin agent" in caplog.text
+
+    def test_explicit_plan_agent_is_rejected_like_any_unknown_agent(
+        self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        with pytest.raises(ValueError, match="Agent 'plan' not found"):
+            AgentManager(load_orchestrator(build_config()), initial_agent="plan")
+
+    def test_custom_plan_agent_keeps_serving_as_default_agent(
+        self,
+        tmp_path: Path,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "plan.toml").write_text(
+            'display_name = "My Plan"\n', encoding="utf-8"
+        )
+        config = build_config(default_agent="plan", agent_paths=[agents_dir])
+
+        manager = AgentManager(
+            load_orchestrator(config), initial_agent=config.resolve_default_agent()
+        )
+
+        assert manager.active_profile.name == "plan"
+        assert manager.active_profile.display_name == "My Plan"
+
+    def test_custom_agent_listing_exit_plan_mode_still_loads(
+        self,
+        tmp_path: Path,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "legacy.toml").write_text(
+            'enabled_tools = ["read_file", "exit_plan_mode"]\n'
+            'disabled_tools = ["exit_plan_mode"]\n',
+            encoding="utf-8",
+        )
+        config = build_config(agent_paths=[agents_dir])
+
+        manager = AgentManager(load_orchestrator(config), initial_agent="legacy")
+
+        assert manager.active_profile.name == "legacy"
 
     def test_install_required_agent_reports_install_not_disabled_agents(
         self,

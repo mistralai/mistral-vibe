@@ -6,7 +6,6 @@ from e2e.app_server.events import assistant_msg, turn_completed, turn_started, u
 from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 
 _PROMPT = (
     "please explain why a prompt this long wraps in the transcript while the copy keeps it"
@@ -29,7 +28,7 @@ _CODE = (
     ' not split where the renderer folded it" && true'
 )
 # Drag from the prompt's first letter to the last transcript row (1-based SGR).
-_SELECT_ALL = "\x1b[<0;3;12M\x1b[<32;120;25M\x1b[<0;120;25m"
+_SELECT_ALL = "\x1b[<0;3;8M\x1b[<32;120;21M\x1b[<0;120;21m"
 _ANSWER = f"{_PARAGRAPH}\n\n- {_BULLET}\n  - {_NESTED}\n\n```sh\n{_CODE}\n```"
 # Bullets keep their displayed marker and nesting indent, like Python's MarkdownBullet.
 # The margin between the prompt and the answer is layout; the answer's own blank lines are content.

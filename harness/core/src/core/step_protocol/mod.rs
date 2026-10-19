@@ -79,6 +79,7 @@ pub(crate) enum HarnessApplyResult {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub(crate) enum HarnessCommandRejection {
+    QueueFull,
     StaleInput {
         received_input_id: u64,
         last_accepted_input_id: u64,
@@ -116,6 +117,7 @@ pub(crate) fn invalid_command(message: impl Into<String>) -> HarnessCommandRejec
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub(crate) struct Inspection {
+    pub(super) has_pending_model_input: bool,
     pub(super) protocol_version: u8,
     pub(super) status: SessionStatus,
     pub(super) active_turn_id: Option<String>,
@@ -147,6 +149,11 @@ pub(crate) enum HarnessCommand {
     ApprovalFailed {
         action_id: String,
         reason: ApprovalFailureReason,
+    },
+    AgentMessage {
+        turn_id: String,
+        message: crate::core::helpers::AgentMessageContext,
+        mode: UserMessageMode,
     },
     UserMessage {
         turn_id: String,
@@ -220,6 +227,7 @@ impl HarnessCommand {
             Self::ApprovalCompleted { .. } => "approval_completed",
             Self::ApprovalFailed { .. } => "approval_failed",
             Self::UserMessage { .. } => "user_message",
+            Self::AgentMessage { .. } => "agent_message",
             Self::ContextMessage { .. } => "context_message",
             Self::Notification { .. } => "notification",
             Self::Compact { .. } => "compact",
@@ -255,6 +263,7 @@ impl HarnessCommand {
             | Self::FilesystemFailed { action_id, .. }
             | Self::FailTurn { action_id, .. } => Some(action_id),
             Self::UserMessage { .. }
+            | Self::AgentMessage { .. }
             | Self::ContextMessage { .. }
             | Self::Notification { .. }
             | Self::Compact { .. }

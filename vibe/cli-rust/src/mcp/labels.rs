@@ -1,4 +1,4 @@
-//! Column texts of an `/mcp` source row (Python `_add_source_group` helpers).
+//! Column texts of an `/mcp` source row.
 
 use crate::server::{MCPSourceKind, MCPSourceStatus, MCPSourceSummary};
 

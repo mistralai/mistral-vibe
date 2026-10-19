@@ -88,7 +88,7 @@ fn dual_domain_state(mock: &SignInMock) -> OnboardingState {
 #[test]
 fn vibe_theme_env_still_wins_over_the_server_view() {
     let _sandbox = sandbox();
-    // Python's context env override: VIBE_THEME wins over the (server-owned)
+    // The context env override: VIBE_THEME wins over the (server-owned)
     // config view the status carries.
     std::env::set_var("VIBE_THEME", "ansi-dark");
     let status = vibe_rs::setup::auth::rpc::SetupStatus {
@@ -195,7 +195,7 @@ async fn browser_sign_in_walks_every_step_to_completion() {
         rx.recv().await,
         Some(SignInEvent::StatusChanged(SignInStatus::Exchanging))
     ));
-    // Python's success delay shows "Sign-in complete" before the final
+    // The success delay shows "Sign-in complete" before the final
     // event: the status first, then the completed key.
     assert!(matches!(
         rx.recv().await,

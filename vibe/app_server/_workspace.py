@@ -18,7 +18,6 @@ from vibe.app_server.protocol import (
     WorkspaceTrustStatusResponse,
     WorkspaceUntrustedConfigResponse,
 )
-from vibe.core.agent_loop import AgentLoop
 from vibe.core.autocompletion.path_prompt import (
     PathPromptPayload,
     PathResource,
@@ -149,19 +148,6 @@ def _workspace_trust_details(prompt: WorkspaceTrustPrompt) -> WorkspaceTrustDeta
             )
         ],
     )
-
-
-def prepare_prompt(agent_loop: AgentLoop, message: str) -> PreparedPrompt:
-    model = agent_loop.config.get_active_model()
-    prompt = prepare_prompt_from_context(
-        message, cwd=agent_loop.cwd, session_dir=agent_loop.session_logger.session_dir
-    )
-    if prompt.images and not model.supports_images:
-        raise PromptPreparationError(
-            f"Model `{model.display_name or model.alias}` does not support images. "
-            "Switch with /model or remove the attachment."
-        )
-    return prompt
 
 
 def prepare_prompt_from_context(

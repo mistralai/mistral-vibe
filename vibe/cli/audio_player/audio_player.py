@@ -115,7 +115,7 @@ class AudioPlayer:
             stream.close()
         self._on_stream_finished()
 
-    def _playback_generator(self) -> Generator[bytes, int, None]:
+    def _playback_generator(self) -> Generator[bytes, int]:
         """Generator that provides audio data to miniaudio for playback.
 
         miniaudio sends the requested number of frames; we yield the

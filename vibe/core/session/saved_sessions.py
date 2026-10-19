@@ -7,9 +7,8 @@ import shutil
 from typing import Any
 
 from vibe.core.config import SessionLoggingConfig
-from vibe.core.session import last_session_pointer
+from vibe.core.session.metadata import persist_metadata
 from vibe.core.session.session_loader import METADATA_FILENAME, SessionLoader
-from vibe.core.session.session_logger import SessionLogger
 from vibe.utils.io import read_safe
 
 
@@ -39,7 +38,7 @@ def _find_saved_session_dir(
     ):
         try:
             metadata = _load_raw_metadata(session_dir)
-        except (OSError, ValueError, json.JSONDecodeError):
+        except OSError, ValueError, json.JSONDecodeError:
             continue
 
         if metadata.get("session_id") == session_id:
@@ -64,7 +63,7 @@ async def update_saved_session_title_at_path(
     metadata = _load_raw_metadata(session_dir)
 
     updated_metadata = {**metadata, "title": normalized_title, "title_source": "manual"}
-    await SessionLogger.persist_metadata(updated_metadata, session_dir)
+    await persist_metadata(updated_metadata, session_dir)
     return updated_metadata
 
 
@@ -89,7 +88,7 @@ async def update_saved_session_pin_at_path(
     if pinned_at is not None and isinstance(existing, str):
         return metadata
     updated_metadata = {**metadata, "pinned_at": pinned_at}
-    await SessionLogger.persist_metadata(updated_metadata, session_dir)
+    await persist_metadata(updated_metadata, session_dir)
     return updated_metadata
 
 
@@ -126,7 +125,7 @@ async def relocate_saved_session_at_path(
         "environment": environment,
         "origin_directory": origin,
     }
-    await SessionLogger.persist_metadata(updated_metadata, session_dir)
+    await persist_metadata(updated_metadata, session_dir)
     return updated_metadata
 
 
@@ -143,9 +142,7 @@ async def delete_saved_session(
     """Remove a saved session, reporting whether this store held one."""
     session_dir = _find_saved_session_dir(session_id, session_config)
     if session_dir is None:
-        last_session_pointer.clear_matching(session_config, session_id)
         return False
 
     await asyncio.to_thread(shutil.rmtree, session_dir)
-    last_session_pointer.clear_matching(session_config, session_id)
     return True

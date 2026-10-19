@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,9 @@ from mistralai_vibe_local_harness.protocol import (
     RustTokenUsage,
 )
 from mistralai_vibe_local_harness.vibe import SandboxExecResult
+from vibe.app_server.events import CallbackRequested
+from vibe.app_server.local import LocalHarnessHost, LocalHarnessOptions
+from vibe.app_server.models import TurnStop, turn_stop
 from vibe.core.trusted_folders import trusted_folders_manager
 
 ROOT_DOC = "Root rule: keep answers short."
@@ -206,3 +210,22 @@ class ScriptedModel:
                 usage=RustTokenUsage(input_tokens=1, output_tokens=1, total_tokens=2),
             ),
         )
+
+
+async def run_turn(
+    host: LocalHarnessHost, options: LocalHarnessOptions, prompt: str
+) -> TurnStop | None:
+    """Run ``prompt`` as one headless turn, denying every callback.
+
+    Returns how the turn stopped, or None when it finished; a turn error raises.
+    """
+    session = await host.start(options)
+    try:
+        await session.resources.runtime.wait_until_ready()
+        async with aclosing(session.act(prompt)) as events:
+            async for event in events:
+                if isinstance(event, CallbackRequested):
+                    await session.deny_callback(event.callback)
+        return turn_stop(next(reversed(session.state.turns or []), None))
+    finally:
+        await session.close()

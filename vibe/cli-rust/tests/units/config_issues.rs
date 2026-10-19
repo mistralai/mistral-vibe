@@ -1,8 +1,10 @@
-//! Startup runtime-snapshot config issues surface as warning toasts, matching
-//! the legacy Python CLI's `_show_config_issues` (VIBE-4622).
+//! Runtime-snapshot config issues surface as warning toasts (VIBE-4622),
+//! validation warnings once the session is ready (VIBE-5122).
+
+use std::time::Instant;
 
 use serde_json::json;
-use vibe_rs::app::{App, ToastSeverity};
+use vibe_rs::app::{App, Status, ToastSeverity};
 use vibe_rs::config_issues;
 
 #[test]
@@ -90,4 +92,87 @@ fn more_than_five_config_issues_are_retained() {
         .unwrap()
         .text
         .contains("broken-0"));
+}
+
+fn _runtime_with_warnings(warnings: &[&str]) -> serde_json::Value {
+    json!({
+        "runtime": {
+            "issues": [],
+            "config": {"validationWarnings": warnings}
+        }
+    })
+}
+
+#[test]
+fn updated_warning_is_held_until_ready_then_toasts_once() {
+    let mut app = App::default();
+    let runtime = _runtime_with_warnings(&["Active model 'toto' is not configured"]);
+
+    config_issues::show_updated_config_warnings(&mut app, &runtime);
+    assert!(app.overlays.toasts.is_empty());
+
+    app.set_status(Status::Ready);
+    config_issues::show_updated_config_warnings(&mut app, &runtime);
+    config_issues::show_updated_config_warnings(&mut app, &runtime);
+    assert_eq!(app.overlays.toasts.len(), 1);
+    assert_eq!(
+        app.overlays.toasts.back().unwrap().text,
+        "Active model 'toto' is not configured"
+    );
+}
+
+#[test]
+fn updated_warning_toasts_while_generating() {
+    let mut app = App::default();
+    app.set_status(Status::Generating {
+        since: Instant::now(),
+    });
+    let runtime = _runtime_with_warnings(&["Active model 'toto' is not configured"]);
+
+    config_issues::show_updated_config_warnings(&mut app, &runtime);
+
+    assert_eq!(app.overlays.toasts.len(), 1);
+}
+
+#[test]
+fn startup_warnings_are_not_retoasted_by_a_later_update() {
+    let mut app = App::default();
+    app.set_status(Status::Ready);
+    let runtime = _runtime_with_warnings(&["Active model 'toto' is not configured"]);
+
+    config_issues::show_config_issues(&mut app, &runtime);
+    config_issues::show_updated_config_warnings(&mut app, &runtime);
+
+    assert_eq!(app.overlays.toasts.len(), 1);
+}
+
+#[test]
+fn a_warning_that_disappears_can_toast_again() {
+    let mut app = App::default();
+    app.set_status(Status::Ready);
+
+    config_issues::show_updated_config_warnings(
+        &mut app,
+        &_runtime_with_warnings(&["Active model 'toto' is not configured"]),
+    );
+    config_issues::show_updated_config_warnings(&mut app, &_runtime_with_warnings(&[]));
+    config_issues::show_updated_config_warnings(
+        &mut app,
+        &_runtime_with_warnings(&["Active model 'toto' is not configured"]),
+    );
+
+    assert_eq!(app.overlays.toasts.len(), 2);
+}
+
+#[test]
+fn updated_warning_is_held_when_failed() {
+    let mut app = App::default();
+    app.set_status(Status::Failed);
+
+    config_issues::show_updated_config_warnings(
+        &mut app,
+        &_runtime_with_warnings(&["Active model 'toto' is not configured"]),
+    );
+
+    assert!(app.overlays.toasts.is_empty());
 }

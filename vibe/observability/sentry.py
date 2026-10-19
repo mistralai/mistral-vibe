@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from enum import StrEnum, auto
 import errno
 import platform
 import re
@@ -12,29 +11,9 @@ from vibe import __version__
 if TYPE_CHECKING:
     from sentry_sdk.types import Event, Hint
 
-_CLI_SENTRY_DSN = None
+# Injected at release time by scripts/ci/inject-sentry-dsn.sh. The terminal UI
+# reports through its own DSN in vibe/cli-rust; only vibe-acp initializes Sentry here.
 _ACP_SENTRY_DSN = None
-
-
-class SentryTarget(StrEnum):
-    CLI = auto()
-    ACP = auto()
-
-    @property
-    def dsn(self) -> str | None:
-        match self:
-            case SentryTarget.CLI:
-                return _CLI_SENTRY_DSN
-            case SentryTarget.ACP:
-                return _ACP_SENTRY_DSN
-
-    @property
-    def server_name(self) -> str:
-        match self:
-            case SentryTarget.CLI:
-                return "vibe-cli"
-            case SentryTarget.ACP:
-                return "vibe-acp"
 
 
 # Benign exceptions to drop before reporting: clean Ctrl-C quit, and a broken
@@ -174,13 +153,7 @@ def _before_send(event: Event, hint: Hint) -> Event | None:
     return event
 
 
-def init_sentry(
-    *,
-    enabled: bool,
-    headless: bool,
-    tags: Mapping[str, str],
-    target: SentryTarget = SentryTarget.CLI,
-) -> bool:
+def init_sentry(*, enabled: bool, headless: bool, tags: Mapping[str, str]) -> bool:
     if not enabled:
         return False
 
@@ -188,11 +161,11 @@ def init_sentry(
     from sentry_sdk.integrations.asyncio import AsyncioIntegration
 
     sentry_sdk.init(
-        dsn=target.dsn,
+        dsn=_ACP_SENTRY_DSN,
         release=f"vibe@{__version__}",
         integrations=[AsyncioIntegration()],
         auto_enabling_integrations=False,
-        server_name=target.server_name,
+        server_name="vibe-acp",
         include_local_variables=False,
         before_send=_before_send,
     )
@@ -230,4 +203,4 @@ def capture_sentry_exception(
         scope.capture_exception(error)
 
 
-__all__ = ["SentryTarget", "capture_sentry_exception", "init_sentry", "scrub_paths"]
+__all__ = ["capture_sentry_exception", "init_sentry", "scrub_paths"]

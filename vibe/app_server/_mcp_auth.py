@@ -12,8 +12,6 @@ import json
 import time
 import weakref
 
-from mcp.client.auth import OAuthFlowError
-
 from vibe.app_server._session_backend_port import (
     MCPAuthorizationProvider,
     MCPAuthorizationRef,
@@ -329,6 +327,8 @@ class MCPAuthenticationService(MCPAuthorizationProvider):
     async def _resolve_oauth(  # noqa: PLR0911 - closed authorization outcomes
         self, server: RemoteMCPServer, declared_headers: Mapping[str, str]
     ) -> MCPAuthorizationResult:
+        from mcp.client.auth import OAuthFlowError
+
         try:
             current_fingerprint = Fingerprint.compute(server)
             storage = KeyringTokenStorage(alias=server.name)
@@ -364,7 +364,7 @@ class MCPAuthenticationService(MCPAuthorizationProvider):
                 self._advance_descriptor(server.name)
                 self._advance_connection(server.name)
                 return self._required(server.name, "expired")
-            except (MCPOAuthTransientRefreshError, OAuthFlowError, MCPOAuthError):
+            except MCPOAuthTransientRefreshError, OAuthFlowError, MCPOAuthError:
                 return self._required(server.name, "expired")
             tokens = await storage.get_tokens()
             if tokens is None:
@@ -385,6 +385,8 @@ class MCPAuthenticationService(MCPAuthorizationProvider):
         return self._snapshot(server.name, headers, expires_at)
 
     async def _refresh_oauth(self, server: RemoteMCPServer) -> None:
+        from mcp.client.auth import OAuthFlowError
+
         async def reject_redirect(_url: str) -> None:
             raise OAuthFlowError("Interactive MCP OAuth login is required")
 

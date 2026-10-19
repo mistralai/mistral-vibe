@@ -25,6 +25,7 @@ pub mod key {
     pub const CTRL_J: &str = "Ctrl+J";
     pub const CTRL_R: &str = "Ctrl+R";
     pub const CTRL_S: &str = "Ctrl+S";
+    pub const CTRL_BACKSLASH: &str = "Ctrl+\\";
 }
 
 /// Action names: lowercase verbs, shared across screens.
@@ -53,6 +54,7 @@ pub mod action {
     pub const ENABLE: &str = "enable";
     pub const SHOW_TOOLS: &str = "show tools";
     pub const CONNECT: &str = "connect";
+    pub const WHY_BLOCKED: &str = "why blocked";
     pub const PREVIEW: &str = "preview";
     pub const SWITCH_BADGE: &str = "switch badge";
     pub const CREATE: &str = "create";

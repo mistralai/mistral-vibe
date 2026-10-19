@@ -97,7 +97,7 @@ fn tail_merge_without_overlap_appends_the_whole_tail() {
     );
     assert!(
         merge_history_tail(&history, &[]).is_empty(),
-        "Python clears on an empty tail"
+        "an empty tail clears the history"
     );
 }
 
@@ -107,7 +107,7 @@ fn a_complete_history_replaces_the_cached_one_wholesale() {
     cache.replace_history("child", vec![entry("a", "old")], true, false);
     assert!(cache.child("child").unwrap().history_complete);
     assert!(cache.select(Some("child")));
-    // Leaving for another child drops the cached completeness (Python `select`).
+    // Leaving for another child drops the cached completeness.
     cache.select(Some("other"));
     assert!(!cache.child("child").unwrap().history_complete);
     cache.replace_history("child", vec![entry("b", "new")], false, false);
@@ -187,6 +187,32 @@ fn the_parent_instruction_is_prepended_once() {
         ids(cache.child("child2").unwrap().history.as_ref().unwrap()),
         ["parent-instruction:child2", "a"]
     );
+}
+
+#[test]
+fn the_parent_instruction_is_remembered_for_both_spawn_tool_names() {
+    // `subagent.spawn` is the deprecated pre-rename spelling of `agents.spawn`.
+    for tool_name in ["agents.spawn", "subagent.spawn"] {
+        let spawn = json!({
+            "id": "spawn",
+            "type": "effect",
+            "detail": {
+                "kind": "subagent",
+                "toolName": tool_name,
+                "childSessionId": "child",
+                "input": {"task": "go investigate"},
+            },
+        });
+        let mut app = vibe_rs::app::App::default();
+        vibe_rs::subagents::remember_parent_instruction_from_entry(&mut app, &spawn);
+        let instruction = app
+            .subagents
+            .transcripts
+            .parent_instructions
+            .get("child")
+            .unwrap_or_else(|| panic!("{tool_name} records the parent instruction"));
+        assert_eq!(instruction["id"], "parent-instruction:child");
+    }
 }
 
 #[test]
@@ -294,7 +320,7 @@ fn local_messages_survive_a_history_rebuild() {
     assert_eq!(stored.local_user_messages.len(), 1);
     let id = "subagent-local-child-0";
     assert!(stored.transcript.contains(id));
-    // Python `UserMessage(severity=ERROR)`: the severity rides the entry role.
+    // The severity rides the entry role.
     assert_eq!(
         stored.transcript.entry_raw(id).unwrap().get("role"),
         Some(&serde_json::json!("subagent_error"))
@@ -630,5 +656,46 @@ fn reset_holds_the_drain_until_the_outstanding_read_lands() {
     assert!(
         app.subagents.refresh_at.is_none(),
         "the late read still owns the drain"
+    );
+}
+
+#[test]
+fn eviction_drops_the_evicted_children_parked_state() {
+    use vibe_rs::subagents::child::MAX_CACHED_SUBAGENT_TRANSCRIPTS;
+    let mut transcripts = SubagentTranscripts::default();
+    transcripts.scroll_offsets.insert(None, 3);
+    for number in 0..=(MAX_CACHED_SUBAGENT_TRANSCRIPTS) {
+        let session_id = format!("child-{number}");
+        transcripts.prepare(&session_id);
+        transcripts.remember_instruction(json!({"sessionId": session_id, "text": "go"}));
+        transcripts
+            .scroll_offsets
+            .insert(Some(session_id.clone()), 7);
+    }
+    assert_eq!(transcripts.len(), MAX_CACHED_SUBAGENT_TRANSCRIPTS);
+    assert!(
+        !transcripts.parent_instructions.contains_key("child-0"),
+        "the evicted child's parent instruction is dropped with it"
+    );
+    assert!(
+        !transcripts
+            .scroll_offsets
+            .contains_key(&Some("child-0".into())),
+        "the evicted child's parked scroll offset is dropped with it"
+    );
+    assert!(
+        transcripts
+            .parent_instructions
+            .contains_key(&format!("child-{MAX_CACHED_SUBAGENT_TRANSCRIPTS}")),
+        "the newest child keeps its instruction"
+    );
+    assert!(
+        transcripts.child("child-0").is_none(),
+        "the cache itself evicted the oldest child"
+    );
+    assert_eq!(
+        transcripts.scroll_offsets.get(&None),
+        Some(&3),
+        "the main conversation's parked offset survives child evictions"
     );
 }

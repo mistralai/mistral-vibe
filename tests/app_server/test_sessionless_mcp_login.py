@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Never
 
 import pytest
 
-from vibe.app_server._legacy_composition import create_legacy_app_server
 from vibe.app_server._mcp_auth import MCPAuthenticationService
-from vibe.app_server._runtime import RootOpenRequest
+from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.mcp_catalog import MCPCatalogService
 from vibe.app_server.protocol import (
@@ -38,18 +36,15 @@ async def test_sessionless_login_delivers_auth_url_before_login_completes(
         await on_url("https://auth.example.invalid/login")
         await authorized.wait()
 
-    async def open_root(_request: RootOpenRequest) -> Never:
-        raise AssertionError("MCP login must not create a session")
-
     monkeypatch.setattr("vibe.app_server._mcp_auth.perform_oauth_login", login)
     client_transport, server_transport = memory_transport_pair()
-    server = create_legacy_app_server(
-        server_transport,
-        open_root=open_root,
-        mcp_catalog_service=MCPCatalogService(
-            MCPAuthenticationService(),
-            sessionless_catalog_factory=build_user_config_orchestrator,
-        ),
+    process = HarnessProcess()
+    process.mcp_catalog = MCPCatalogService(
+        MCPAuthenticationService(),
+        sessionless_catalog_factory=build_user_config_orchestrator,
+    )
+    server = await create_harness_server(
+        server_transport, transport_kind="in_process", process=process
     )
     client = AppServerClient(client_transport, run_peer=server.serve)
     incoming = client.incoming()

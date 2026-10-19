@@ -7,5 +7,5 @@ from e2e.app_server.scenario import Timeline
 
 handshake = prefilled()
 request_methods = METHODS
-screen_contains = {"rust": ("http://old-proxy:8080", "https://old-proxy:8443")}
+screen_contains = ("http://old-proxy:8080", "https://old-proxy:8443")
 timeline: Timeline = ["/proxy-setup\r"]

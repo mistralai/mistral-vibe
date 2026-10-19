@@ -2,16 +2,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
-
-from tests.conftest import (
-    build_test_agent_loop,
-    build_test_vibe_app,
-    build_test_vibe_config,
-    stub_config_reload,
-)
 from tests.stubs.app_config import build_test_app_config
 from tests.stubs.fake_voice_manager import FakeVoiceManager
 from vibe.cli.lazy_audio_managers import LazyNarratorManager, LazyVoiceManager
@@ -19,7 +11,6 @@ from vibe.cli.narrator_manager.narrator_manager_port import (
     NarratorManagerListener,
     NarratorState,
 )
-from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.voice_manager.voice_manager_port import TranscribeState
 
 
@@ -69,10 +60,10 @@ class FakeNarratorManager:
         pass
 
 
-def test_importing_tui_app_does_not_import_optional_audio_modules() -> None:
+def test_importing_acp_agent_does_not_import_optional_audio_modules() -> None:
     code = """
 import sys
-import vibe.cli.textual_ui.app
+import vibe.acp.agent
 
 blocked = [
     "miniaudio",
@@ -93,30 +84,6 @@ if loaded:
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
-
-
-@pytest.mark.asyncio
-async def test_default_tui_app_does_not_materialize_disabled_optional_managers() -> (
-    None
-):
-    config = build_test_vibe_config(voice_mode_enabled=False, narrator_enabled=False)
-
-    with (
-        patch(
-            "vibe.cli.lazy_audio_managers._create_real_voice_manager",
-            side_effect=AssertionError("voice should stay lazy"),
-        ),
-        patch(
-            "vibe.cli.lazy_audio_managers._create_real_narrator_manager",
-            side_effect=AssertionError("narrator should stay lazy"),
-        ),
-    ):
-        app = build_test_vibe_app(config=config, voice_manager=None)
-        await app.prepare()
-
-    assert app._voice_manager.is_enabled is False
-    assert app._voice_manager.transcribe_state == TranscribeState.IDLE
-    assert app._narrator_manager.state == NarratorState.IDLE
 
 
 def test_lazy_voice_manager_materializes_when_used() -> None:
@@ -153,32 +120,6 @@ def test_lazy_narrator_manager_sync_materializes_after_enable() -> None:
 
     config = config.model_copy(update={"narrator_enabled": True})
     manager.sync()
-
-    factory.assert_called_once()
-    assert narrator.synced is False
-
-
-@pytest.mark.asyncio
-async def test_tui_config_refresh_syncs_lazy_narrator(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    initial_config = build_test_vibe_config(narrator_enabled=False)
-    refreshed_config = build_test_vibe_config(narrator_enabled=True)
-    agent_loop = build_test_agent_loop(config=initial_config)
-    narrator = FakeNarratorManager()
-    factory = MagicMock(return_value=narrator)
-    app: VibeApp | None = None
-    public_config = build_test_app_config(narrator_enabled=False)
-
-    def get_config():
-        return public_config if app is None else app.config
-
-    narrator_manager = LazyNarratorManager(get_config, factory)
-    app = build_test_vibe_app(agent_loop=agent_loop, narrator_manager=narrator_manager)
-    stub_config_reload(monkeypatch, refreshed_config)
-
-    await app.prepare()
-    await app._refresh_config_from_disk()
 
     factory.assert_called_once()
     assert narrator.synced is False

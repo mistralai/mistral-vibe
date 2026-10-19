@@ -8,7 +8,7 @@ use super::composer_layout::{self, ComposerLayout};
 use super::question_layout::Row;
 use super::question_rows::option_prefix;
 use super::tab_cells::cells;
-use super::theme;
+use super::{list_cursor, theme};
 use crate::app::App;
 use crate::question_app::{current_question, is_other_selected, other_text};
 use crate::selection::fold;
@@ -41,8 +41,8 @@ pub(super) fn follow_caret(app: &mut App, text_width: u16) {
 
 /// The field rows, each flagged when it ends with a scroll arrow and paired with
 /// its fold gap when it soft-wraps the row above: the prefix, then the answer with
-/// its caret, or the placeholder. `.question-other-prefix` keeps `$foreground`
-/// and only takes the bold of `.question-option-selected`.
+/// its caret, or the placeholder. Focused, every row is a cursor bar like a
+/// focused option's.
 pub(super) fn other_rows(
     app: &App,
     other_idx: usize,
@@ -55,14 +55,14 @@ pub(super) fn other_rows(
         .get(&app.question_app.current_question_idx)
         .is_some_and(|selections| selections.contains(&other_idx));
     let prefix = option_prefix(other_idx, current_question(app).multi_select, selected);
-    let prefix_style = match focused {
-        true => super::list_cursor::style(),
-        false => theme::text(theme::foreground()),
+    let (body, muted) = match focused {
+        true => list_cursor::styles(true),
+        false => (theme::text(theme::foreground()), theme::muted_style()),
     };
     let caret = focused && app.view.cursor_on;
     let text = other_text(app, app.question_app.current_question_idx);
     if text.is_empty() {
-        return vec![(placeholder_row(prefix, prefix_style, caret), false, None)];
+        return vec![(placeholder_row(prefix, body, muted, caret), false, None)];
     }
 
     let text_width = text_width(app, other_idx, content_width);
@@ -70,7 +70,6 @@ pub(super) fn other_rows(
     let top = app.question_app.other_scroll;
     let hidden_below = usize::from(layout.height()) > top + OTHER_MAX_ROWS;
     let indent = " ".repeat(prefix.chars().count());
-    let body = theme::text(theme::foreground());
     let rows: Vec<_> = layout.rows().collect();
     let gaps = fold::gaps(text, &rows.iter().map(|row| row.text).collect::<Vec<_>>());
     let visible: Vec<_> = rows
@@ -85,10 +84,10 @@ pub(super) fn other_rows(
         .enumerate()
         .map(|(index, (visual, gap))| {
             let lead = match index {
-                0 => (prefix.clone(), prefix_style),
-                _ => (indent.clone(), body),
+                0 => prefix.clone(),
+                _ => indent.clone(),
             };
-            let mut row = vec![lead];
+            let mut row = vec![(lead, body)];
             push_text(
                 &mut row,
                 visual,
@@ -100,18 +99,18 @@ pub(super) fn other_rows(
                 _ if index == last && hidden_below => Some("↓"),
                 _ => None,
             };
-            let arrow = arrow.is_some_and(|arrow| push_indicator(&mut row, arrow, content_width));
+            let arrow =
+                arrow.is_some_and(|arrow| push_indicator(&mut row, arrow, muted, content_width));
             (row, arrow, gap)
         })
         .collect()
 }
 
 /// Empty means the placeholder, whether from the static or the focused `Input`.
-fn placeholder_row(prefix: String, prefix_style: Style, caret: bool) -> Row {
-    let muted = theme::muted_style();
-    let mut row = vec![(prefix, prefix_style)];
+fn placeholder_row(prefix: String, body: Style, muted: Style, caret: bool) -> Row {
+    let mut row = vec![(prefix, body)];
     if caret {
-        row.push(("T".into(), theme::fixed::input_caret(muted)));
+        row.push(("T".into(), list_cursor::caret()));
         row.push(("ype your answer...".into(), muted));
     } else {
         row.push(("Type your answer...".into(), muted));
@@ -133,18 +132,18 @@ fn push_text(row: &mut Row, visual: composer_layout::Row<'_>, caret: Option<usiz
         false => visual.shown(lo..hi),
     };
     row.push((visual.shown(..lo), style));
-    row.push((under, theme::fixed::input_caret(style)));
+    row.push((under, list_cursor::caret()));
     row.push((visual.shown(hi..), style));
 }
 
 /// Right-align a muted scroll arrow in the field's last column, when it is free.
-fn push_indicator(row: &mut Row, arrow: &str, content_width: usize) -> bool {
+fn push_indicator(row: &mut Row, arrow: &str, muted: Style, content_width: usize) -> bool {
     let used: usize = row.iter().map(|(text, _)| text.width()).sum();
     let column = content_width.saturating_sub(1);
     if used > column {
         return false;
     }
-    row.push((" ".repeat(column - used), theme::muted_style()));
-    row.push((arrow.into(), theme::muted_style()));
+    row.push((" ".repeat(column - used), muted));
+    row.push((arrow.into(), muted));
     true
 }

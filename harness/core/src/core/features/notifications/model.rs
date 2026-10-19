@@ -4,8 +4,16 @@ use serde::Serialize;
 use crate::core::wire::content::ContentBlock;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum NotificationSource {
+    AgentMessage {
+        sender_agent_path: String,
+        kind: crate::core::helpers::AgentMessageKind,
+    },
+    AgentResult {
+        sender_agent_path: String,
+        termination: crate::core::helpers::AgentResultTermination,
+    },
     BackgroundProcess {
         process_id: String,
         status: ProcessTerminalStatus,

@@ -2,28 +2,65 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use serde_json::Value;
-use vibe_rs::cli::OutputFormat;
-use vibe_rs::headless::{build_disabled_tools, turn_id_from};
-use vibe_rs::headless_output::{last_assistant_text, Output};
+use serde_json::{json, Value};
+use vibe_rs::cli::{HeadlessOptions, HeadlessSession, OutputFormat};
+use vibe_rs::headless::{agent_config, build_disabled_tools, open_failure, turn_id_from};
+use vibe_rs::headless_output::{last_assistant_text, turn_entries, Output};
 use vibe_rs::headless_prompt::{parse_piped_prompt, PipedPrompt, MAX_STDIN_PROMPT_BYTES};
 use vibe_rs::headless_trust::warning_from;
-use vibe_rs::server::AgentConfig;
+use vibe_rs::run_export::RunOutcome;
+use vibe_rs::server::{AgentConfig, RpcError};
 use vibe_rs::utils::paths::user_home_from;
 
 #[test]
-fn disabled_tools_appends_ask_user_question_and_exit_plan_mode() {
+fn disabled_tools_appends_ask_user_question_and_cron() {
     let tools = build_disabled_tools(&[]);
-    assert!(tools.contains(&"ask_user_question".into()));
-    assert!(tools.contains(&"exit_plan_mode".into()));
+    assert_eq!(
+        tools,
+        vec!["ask_user_question".to_owned(), "cron".to_owned()]
+    );
 }
 
 #[test]
 fn disabled_tools_preserves_explicit_and_dedupes() {
     let tools = build_disabled_tools(&["bash".into(), "ask_user_question".into()]);
-    assert_eq!(tools.len(), 3); // bash + ask_user_question + exit_plan_mode
-    assert!(tools.contains(&"bash".into()));
-    assert!(tools.contains(&"exit_plan_mode".into()));
+    assert_eq!(
+        tools,
+        vec![
+            "bash".to_owned(),
+            "ask_user_question".to_owned(),
+            "cron".to_owned()
+        ]
+    );
+}
+
+fn rpc_error(code: &str, data: Option<Value>) -> RpcError {
+    serde_json::from_value(json!({"code": code, "message": "m", "data": data})).unwrap()
+}
+
+#[test]
+fn a_session_that_does_not_open_is_classified_for_the_export() {
+    let config = json!({"kind": "configuration"});
+    assert_eq!(
+        open_failure(&rpc_error("unauthorized", None)),
+        RunOutcome::ConfigError
+    );
+    assert_eq!(
+        open_failure(&rpc_error("invalid_params", Some(config))),
+        RunOutcome::ConfigError
+    );
+    assert_eq!(
+        open_failure(&rpc_error("not_found", None)),
+        RunOutcome::UsageError
+    );
+    assert_eq!(
+        open_failure(&rpc_error("invalid_params", None)),
+        RunOutcome::UsageError
+    );
+    assert_eq!(
+        open_failure(&rpc_error("internal_error", None)),
+        RunOutcome::InfrastructureFailure
+    );
 }
 
 #[test]
@@ -76,12 +113,12 @@ fn agent_config_includes_budget_fields_when_set() {
 #[test]
 fn agent_config_includes_agent_and_auto_approve() {
     let config = AgentConfig {
-        agent: Some("plan".into()),
+        agent: Some("ask".into()),
         auto_approve: true,
         ..Default::default()
     };
     let json = serde_json::to_value(&config).unwrap();
-    assert_eq!(json.get("agent").and_then(Value::as_str), Some("plan"));
+    assert_eq!(json.get("agent").and_then(Value::as_str), Some("ask"));
     assert_eq!(json.get("autoApprove").and_then(Value::as_bool), Some(true));
 }
 
@@ -193,6 +230,38 @@ fn last_assistant_text_joins_multiple_blocks() {
 }
 
 #[test]
+fn last_assistant_text_skips_a_draft_a_hook_sent_back_for_a_retry() {
+    let history = serde_json::json!([
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Before."}],
+            "outcome": {"type": "committed"}
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Draft."}],
+            "outcome": {"type": "discarded", "cause": "retry"}
+        }
+    ]);
+    assert_eq!(last_assistant_text(&history).as_deref(), Some("Before."));
+}
+
+#[test]
+fn last_assistant_text_keeps_an_interrupted_partial_answer() {
+    let history = serde_json::json!([
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Partial."}],
+            "outcome": {"type": "discarded", "cause": "interrupt"}
+        }
+    ]);
+    assert_eq!(last_assistant_text(&history).as_deref(), Some("Partial."));
+}
+
+#[test]
 fn last_assistant_text_skips_user_messages() {
     let history = serde_json::json!([
         {
@@ -219,6 +288,25 @@ fn last_assistant_text_finds_last_assistant() {
         }
     ]);
     assert_eq!(last_assistant_text(&history).unwrap(), "new");
+}
+
+#[test]
+fn a_resumed_run_answers_only_with_its_own_turn() {
+    let history = serde_json::json!([
+        {
+            "type": "message",
+            "role": "assistant",
+            "turnId": "earlier",
+            "content": [{"type": "text", "text": "Looked it up."}]
+        },
+        {"type": "message", "role": "user", "turnId": "this-run", "content": []}
+    ]);
+    assert!(last_assistant_text(&turn_entries(&history, Some("this-run"))).is_none());
+    assert!(turn_entries(&history, None).as_array().unwrap().is_empty());
+    assert_eq!(
+        last_assistant_text(&turn_entries(&history, Some("earlier"))).as_deref(),
+        Some("Looked it up.")
+    );
 }
 
 #[test]
@@ -344,4 +432,161 @@ fn piped_prompt_empty_or_whitespace_is_no_prompt() {
         parse_piped_prompt("  \n\t ".as_bytes().to_vec()),
         PipedPrompt::Empty
     ));
+}
+
+fn headless_options_with_budgets() -> HeadlessOptions {
+    HeadlessOptions {
+        prompt: "hi".into(),
+        session: HeadlessSession::New,
+        output: OutputFormat::Text,
+        max_turns: Some(5),
+        max_price: Some(1.5),
+        max_tokens: Some(10000),
+        time_limit: None,
+        output_dir: None,
+        agent: None,
+        auto_approve: false,
+        enabled_tools: vec![],
+        disabled_tools: vec![],
+        trust: false,
+        add_dir: vec![],
+        worktree: None,
+        agent_socket: None,
+    }
+}
+
+#[test]
+fn agent_config_sends_max_turns_to_server() {
+    // max_turns stays server-side; the server enforces
+    // it and sets stopReason: "limit" on the turn.
+    let config = agent_config(&headless_options_with_budgets(), None).unwrap();
+    assert_eq!(config.max_turns, Some(5));
+}
+
+#[test]
+fn agent_config_omits_price_and_token_budgets() {
+    // max_price and max_session_tokens are enforced client-side by
+    // StopRequests.observe_usage(), not sent to the server.
+    let config = agent_config(&headless_options_with_budgets(), None).unwrap();
+    assert_eq!(config.max_price, None);
+    assert_eq!(config.max_session_tokens, None);
+}
+
+#[test]
+fn agent_config_serializes_max_turns_when_set() {
+    let config = agent_config(&headless_options_with_budgets(), None).unwrap();
+    let json = serde_json::to_value(&config).unwrap();
+    assert_eq!(json.get("maxTurns").and_then(Value::as_u64), Some(5));
+    // Price and token budgets should be omitted (None + skip_serializing_if).
+    assert!(json.get("maxPrice").is_none());
+    assert!(json.get("maxSessionTokens").is_none());
+}
+
+#[test]
+fn turn_error_outcome_maps_wire_codes() {
+    use vibe_rs::headless::turn_error_outcome;
+    use vibe_rs::run_export::RunOutcome;
+
+    // Codes come over the wire in lower case (the app server's TurnErrorCode StrEnum).
+    assert_eq!(
+        turn_error_outcome(Some("invalid_api_key")),
+        RunOutcome::ConfigError
+    );
+    assert_eq!(
+        turn_error_outcome(Some("invalid_model")),
+        RunOutcome::ConfigError
+    );
+    assert_eq!(
+        turn_error_outcome(Some("context_too_long")),
+        RunOutcome::Length
+    );
+    assert_eq!(
+        turn_error_outcome(Some("response_too_long")),
+        RunOutcome::Length
+    );
+    // The model's own answer, so the run is scored rather than dropped.
+    assert_eq!(turn_error_outcome(Some("refusal")), RunOutcome::Refusal);
+    assert_eq!(
+        turn_error_outcome(Some("backend_error")),
+        RunOutcome::InfrastructureFailure
+    );
+    assert_eq!(turn_error_outcome(None), RunOutcome::InfrastructureFailure);
+    // An upper-case code never matched: a bad API key is a config error, not
+    // an infrastructure failure a runner would retry.
+    assert_eq!(
+        turn_error_outcome(Some("INVALID_API_KEY")),
+        RunOutcome::InfrastructureFailure
+    );
+}
+
+#[test]
+fn stopped_report_maps_the_requested_outcome() {
+    use vibe_rs::headless::stopped_report;
+    use vibe_rs::run_export::{RunOutcome, TurnStop};
+
+    let (outcome, stop_reason, error, _) = stopped_report(RunOutcome::TurnLimit, true, None);
+    assert_eq!(outcome, RunOutcome::TurnLimit);
+    assert_eq!(stop_reason, Some(TurnStop::Limit));
+    assert!(error.is_none());
+
+    let (outcome, stop_reason, _, _) = stopped_report(RunOutcome::Terminated, true, None);
+    assert_eq!(outcome, RunOutcome::Terminated);
+    assert_eq!(stop_reason, Some(TurnStop::Interrupted));
+
+    let (_, stop_reason, _, _) = stopped_report(RunOutcome::Deadline, true, None);
+    assert_eq!(stop_reason, Some(TurnStop::Interrupted));
+
+    // A stop before the turn started has no stop reason to report.
+    let (outcome, stop_reason, _, _) = stopped_report(RunOutcome::Terminated, false, None);
+    assert_eq!(outcome, RunOutcome::Terminated);
+    assert_eq!(stop_reason, None);
+}
+
+#[test]
+fn final_outcome_lets_an_enforced_limit_win_over_a_finished_turn() {
+    use std::sync::Arc;
+
+    use vibe_rs::headless::final_outcome;
+    use vibe_rs::headless_run::StopRequests;
+    use vibe_rs::run_export::{RunError, RunLimits, RunOutcome};
+
+    // The turn completed on its own, but the run went past --max-turns: the
+    // enforced limit wins.
+    let stop = Arc::new(StopRequests::new(RunLimits {
+        max_turns: Some(1),
+        ..Default::default()
+    }));
+    stop.request(RunOutcome::TurnLimit);
+    assert_eq!(
+        final_outcome(RunOutcome::Finished, &None, &stop),
+        RunOutcome::TurnLimit
+    );
+
+    // An externally requested stop (deadline, signal) loses to a finished
+    // turn: the run did finish.
+    let stop = Arc::new(StopRequests::new(RunLimits::default()));
+    stop.request(RunOutcome::Deadline);
+    assert_eq!(
+        final_outcome(RunOutcome::Finished, &None, &stop),
+        RunOutcome::Finished
+    );
+
+    // An error still wins, as it says more.
+    let stop = Arc::new(StopRequests::new(RunLimits::default()));
+    stop.request(RunOutcome::PriceLimit);
+    let error = Some(RunError {
+        message: "boom".into(),
+        code: None,
+    });
+    assert_eq!(
+        final_outcome(RunOutcome::Finished, &error, &stop),
+        RunOutcome::Finished
+    );
+
+    // No request: the turn's own outcome stands.
+    let stop = Arc::new(StopRequests::new(RunLimits::default()));
+    assert_eq!(
+        final_outcome(RunOutcome::Length, &None, &stop),
+        RunOutcome::Length
+    );
 }

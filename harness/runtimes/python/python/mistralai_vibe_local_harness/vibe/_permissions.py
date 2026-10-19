@@ -41,6 +41,25 @@ class PermissionOutcome:
     it outside the workspace roots. That is how a Host grant reaches the tool.
     """
 
+    shell_write_paths: tuple[Path, ...] = ()
+    """Resolved files a shell command's redirects write, where the Host places them.
+
+    Only targets named from a root whose spelling has one meaning are listed:
+    nothing the shell can change before opening them (a ``cd``, ``HOME``, a
+    variable) moves those. Under ``classify`` such a write outside the writable
+    roots and the temporary directories always goes to the user. A write made by
+    the program itself (``cp``, ``tee``) or to a relative target is not in it.
+    """
+
+    unplaced_shell_writes: tuple[str, ...] = ()
+    """Redirect targets from a root, as written, that the Host cannot place.
+
+    The shell decides where they land only when it runs: the spelling needs
+    expanding, names a mapping the Host does not read, or the command is not
+    read the way the shell reads it. Under ``classify`` any of them sends the
+    call to the user.
+    """
+
 
 ALWAYS_ASK = PermissionOutcome(decision="ask")
 """The outcome for an unbound resolver: keep whatever the mode already decided."""

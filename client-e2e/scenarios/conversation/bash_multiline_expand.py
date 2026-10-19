@@ -14,8 +14,8 @@ _PROMPT = "run the loop"
 # Collapsed flattens the newlines away; expanded restores them under the message column.
 _COMMAND = 'for f in *.py; do\n  echo "$f"\ndone'
 
-# The settled bash disclosure header lands on SGR row 15.
-_CLICK = "\x1b[<0;1;15M\x1b[<0;1;15m"
+# The settled bash disclosure header lands on SGR row 11.
+_CLICK = "\x1b[<0;1;11M\x1b[<0;1;11m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

@@ -1,6 +1,6 @@
-//! Terminal-safe text for transcript payloads (Python `clean_output`).
+//! Terminal-safe text for transcript payloads.
 
-/// Sanitize captured output for display (Python `clean_output`): collapse each
+/// Sanitize captured output for display: collapse each
 /// `\r`-redrawn line to its final write, strip ANSI escapes, drop control bytes
 /// except tab.
 pub fn clean_output(content: &str) -> String {
@@ -16,7 +16,7 @@ pub fn clean_output(content: &str) -> String {
         .join("\n")
 }
 
-/// Python `_ANSI_ESCAPE`: drop CSI, OSC, and other ESC-prefixed sequences.
+/// Drop CSI, OSC, and other ESC-prefixed sequences.
 fn strip_ansi(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
@@ -46,7 +46,7 @@ fn strip_ansi(text: &str) -> String {
                     at += 1;
                 }
             }
-            // Two-byte ESC sequences; `[` (0x5b) is excluded by the Python class.
+            // Two-byte ESC sequences; `[` (0x5b) is excluded.
             Some(&c)
                 if ('\u{40}'..='\u{5a}').contains(&c) || ('\u{5c}'..='\u{5f}').contains(&c) =>
             {
@@ -81,7 +81,7 @@ fn skip_range(chars: &[char], mut at: usize, lo: char, hi: char) -> usize {
     at
 }
 
-/// Python `_CONTROL_BYTES`: control bytes except tab, dropped.
+/// Control bytes except tab, dropped.
 fn strip_control(text: &str) -> String {
     text.chars()
         .filter(|c| !matches!(c, '\u{0}'..='\u{8}' | '\u{b}'..='\u{1f}' | '\u{7f}'))

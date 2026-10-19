@@ -23,6 +23,7 @@ class ModelConfigView(ProtocolModel):
     # None when the model's window is unknown; defaulted so older clients
     # tolerate the field's absence (ADR 0014).
     max_context_length: int | None = None
+    auto_compact_threshold: int | None = None
     # The levels the active model offers; defaulted so a client against an
     # older server still renders the five (ADR 0014).
     thinking_levels: list[ThinkingLevel] = Field(

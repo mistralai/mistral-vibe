@@ -1,8 +1,8 @@
-//! Agent wire types (Python `AgentSummary`, `AgentSafety`, `AgentType`).
+//! Agent wire types (app-server `AgentSummary`, `AgentSafety`, `AgentType`).
 
 use serde::{Deserialize, Serialize};
 
-/// How much a profile is allowed to do without asking (Python `AgentSafety`).
+/// How much a profile is allowed to do without asking (app-server `AgentSafety`).
 /// Unknown wire values read as `Neutral`, so a newer server never breaks the UI.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(from = "String", rename_all = "lowercase")]
@@ -11,6 +11,7 @@ pub enum AgentSafety {
     #[default]
     Neutral,
     Destructive,
+    Smart,
     Yolo,
 }
 
@@ -19,13 +20,14 @@ impl From<String> for AgentSafety {
         match value.as_str() {
             "safe" => Self::Safe,
             "destructive" => Self::Destructive,
+            "smart" => Self::Smart,
             "yolo" => Self::Yolo,
             _ => Self::Neutral,
         }
     }
 }
 
-/// Primary agents cycle with Shift+Tab; subagents never do (Python `AgentType`).
+/// Primary agents cycle with Shift+Tab; subagents never do (app-server `AgentType`).
 /// Unknown wire values read as `Other` and stay out of the cycle.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(from = "String", rename_all = "lowercase")]
@@ -46,7 +48,7 @@ impl From<String> for AgentType {
     }
 }
 
-/// One selectable agent from the runtime snapshot (Python `AgentSummary`).
+/// One selectable agent from the runtime snapshot (app-server `AgentSummary`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSummary {
@@ -67,4 +69,19 @@ pub struct AgentSummary {
 pub struct AgentSwitchParams {
     pub session_id: String,
     pub agent_name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentInstallParams {
+    pub session_id: String,
+    pub agent_name: String,
+}
+
+/// The agents after an install or uninstall, which may switch the active one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentsListResponse {
+    pub active: AgentSummary,
+    pub agents: Vec<AgentSummary>,
 }

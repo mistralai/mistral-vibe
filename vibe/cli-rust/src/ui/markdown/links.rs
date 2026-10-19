@@ -79,7 +79,7 @@ impl LinkedLines {
         self.push_folded(line, None);
     }
 
-    /// Push a blank spacing row (a Textual margin): layout, never copied.
+    /// Push a blank spacing row (a margin): layout, never copied.
     pub fn push_gap(&mut self) {
         self.gaps.push(self.lines.len());
         self.push(Line::from(""));

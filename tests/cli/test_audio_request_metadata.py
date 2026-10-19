@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import build_test_vibe_app
 from vibe import __version__
 from vibe.cli.audio_request_metadata import build_audio_request_metadata
 
@@ -43,18 +42,3 @@ def test_build_audio_request_metadata_omits_absent_optional_values(
 
     assert "os_version" not in metadata
     assert "parent_session_id" not in metadata
-
-
-@pytest.mark.asyncio
-async def test_app_metadata_getter_reads_replaced_session_state() -> None:
-    app = build_test_vibe_app()
-    await app.prepare()
-    metadata_getter = app._get_audio_request_metadata
-
-    app.app_server.state.session = app.app_server.state.session.model_copy(
-        update={"id": "replacement-session", "parent_session_id": "parent-session"}
-    )
-
-    metadata = metadata_getter()
-    assert metadata["session_id"] == "replacement-session"
-    assert metadata["parent_session_id"] == "parent-session"

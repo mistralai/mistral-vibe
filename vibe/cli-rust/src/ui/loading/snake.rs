@@ -17,7 +17,7 @@ pub struct Snake {
 
 impl Default for Snake {
     fn default() -> Self {
-        // Mirrors Python `[1, 0, 1j]` -> (x, y): head (1,0), (0,0), (0,1).
+        // Initial (x, y) positions: head (1,0), (0,0), (0,1).
         Self {
             positions: vec![(1, 0), (0, 0), (0, 1)],
             rng: Rng::default(),

@@ -72,6 +72,31 @@ fn a_call_groups_with_reasoning_only_while_reasoning_shows() {
     assert_eq!(group.kinds, vec![("shell", 1)]);
 }
 
+/// Hiding thinking drops a reasoning-only run entirely but keeps the calls of a mixed one.
+#[test]
+fn hiding_reasoning_removes_reasoning_only_runs_and_keeps_calls() {
+    let mut transcript = live(&[
+        reasoning("r1"),
+        reasoning("r2"),
+        assistant_text("m1", "separator"),
+        reasoning("r3"),
+        effect("e1", "completed"),
+    ]);
+    let ids = |transcript: &Transcript| -> Vec<String> {
+        transcript.lines().map(|line| line.id.to_owned()).collect()
+    };
+    transcript.set_show_reasoning(true);
+    assert_eq!(ids(&transcript), ["r1", "r2", "m1", "r3", "e1"]);
+    let reasoning_only = transcript.group_of("r1").expect("groups");
+    assert!(reasoning_only.reasoning && reasoning_only.kinds.is_empty());
+    assert!(transcript.group_of("e1").expect("groups").reasoning);
+
+    transcript.set_show_reasoning(false);
+    assert_eq!(ids(&transcript), ["m1", "e1"]);
+    assert!(transcript.group_of("r1").is_none());
+    assert!(transcript.group_of("e1").is_none());
+}
+
 #[test]
 fn unknown_and_missing_kinds_count_as_one_tool_label() {
     let transcript = live(&[

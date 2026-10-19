@@ -74,7 +74,7 @@ impl FormatTime for TimeAndPid {
 }
 
 /// ERROR records become Sentry events; nothing else, since breadcrumbs are
-/// dropped anyway (Python `_scrub_pii`).
+/// dropped anyway.
 fn sentry_layer<S>() -> impl Layer<S>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,

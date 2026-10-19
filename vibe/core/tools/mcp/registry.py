@@ -635,14 +635,6 @@ class MCPRegistry:
         if descriptor_revision is not None:
             self._descriptor_revisions[alias] = descriptor_revision
 
-    def record_disabled_authorization(
-        self, alias: str, descriptor_revision: str
-    ) -> None:
-        self._drop_alias_cache(alias)
-        self._needs_auth.discard(alias)
-        self._force_refresh.discard(alias)
-        self._descriptor_revisions[alias] = descriptor_revision
-
     def descriptor_revision(self, alias: str) -> str:
         return self._descriptor_revisions.get(alias, "")
 

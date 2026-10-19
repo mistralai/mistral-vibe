@@ -7,6 +7,7 @@ use crate::core::capabilities::PluginContextDefinition;
 use crate::core::features::background_processes;
 use crate::core::features::compaction::CompactionPolicy;
 use crate::core::features::large_output;
+pub(crate) use crate::core::features::notifications::Settings as NotificationSettings;
 use crate::core::features::programmatic_tool_calling;
 use crate::core::features::subagents;
 use crate::core::tools::command_environment::CommandEnvironment;
@@ -82,8 +83,11 @@ pub(crate) struct TurnSettings {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ContextSettings {
     pub compaction: CompactionPolicy,
+    pub notifications: NotificationSettings,
     #[serde(default, skip_serializing_if = "ImageDeliverySettings::is_native")]
     pub image_delivery: ImageDeliverySettings,
+    #[serde(default, skip_serializing_if = "ImageTokenCost::is_serialized_bytes")]
+    pub image_token_cost: ImageTokenCost,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -109,9 +113,38 @@ impl ImageDeliverySettings {
     }
 }
 
+/// Selects how a native image contributes to a model input token estimate.
+/// `SerializedBytes` derives the cost from the serialized image bytes. `Fixed`
+/// charges one constant token cost per delivered native image.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ImageTokenCost {
+    #[default]
+    SerializedBytes,
+    Fixed,
+}
+
+impl ImageTokenCost {
+    /// Whether each delivered native image is charged one fixed token cost
+    /// instead of its serialized bytes.
+    pub(crate) fn is_fixed(&self) -> bool {
+        matches!(self, Self::Fixed)
+    }
+
+    /// Whether the field can be omitted from a serialized document because it
+    /// holds the default policy.
+    pub(crate) fn is_serialized_bytes(&self) -> bool {
+        matches!(self, Self::SerializedBytes)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ToolSettings {
+    #[serde(default)]
+    pub model_wait: crate::core::features::model_wait::Mode,
+    #[serde(default = "crate::core::features::model_wait::default_max_wait_ms")]
+    pub max_wait_ms: u64,
     pub programmatic: programmatic_tool_calling::Settings,
     pub large_output: large_output::Policy,
     pub subagents: subagents::Mode,
@@ -167,7 +200,14 @@ pub(crate) fn validate_settings(settings: &HarnessSettings) -> Result<(), CoreEr
         ));
     }
     settings.context.compaction.validate()?;
+    settings.context.notifications.validate()?;
     settings.tools.programmatic.validate()?;
+    if settings.tools.max_wait_ms == 0 {
+        return Err(CoreError::invalid_configuration(
+            "settings.tools.max_wait_ms",
+            "maximum wait must be positive",
+        ));
+    }
     settings.tools.large_output.validate()?;
     if settings.tools.background_processes.is_enabled()
         && !settings.tools.command_environment.is_enabled()

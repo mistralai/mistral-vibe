@@ -56,7 +56,6 @@ async def test_completed_turn_survives_a_new_host(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
-    experimental_harness: bool,
 ) -> None:
     backend_contract_mistral_api.mock(
         return_value=backend_contract_mistral_response("stored")
@@ -69,9 +68,7 @@ async def test_completed_turn_survives_a_new_host(
         await session.close()
 
     resumed_connection = await connect_backend_contract_host(
-        experimental_harness,
-        session_options=SessionOptions(),
-        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(), capabilities=ClientCapabilities()
     )
     resumed = await resumed_connection.host.resume_session(session_id)
     try:
@@ -88,7 +85,6 @@ async def test_completed_turn_survives_a_new_host(
 @pytest.mark.asyncio
 async def test_empty_started_session_is_not_persisted(
     backend_contract_persistent_connection: BackendContractConnection,
-    experimental_harness: bool,
 ) -> None:
     """*Prepare*: Open a session backed by persistent session logging.
     *Do*: Close it without ever starting a Turn, then inspect a new Host.
@@ -102,9 +98,7 @@ async def test_empty_started_session_is_not_persisted(
     await session.close()
 
     passive_connection = await connect_backend_contract_host(
-        experimental_harness,
-        session_options=SessionOptions(),
-        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(), capabilities=ClientCapabilities()
     )
     try:
         sessions = await passive_connection.host.list_sessions()
@@ -219,16 +213,12 @@ async def test_unified_compaction_responds_before_checkpoint_notifications(
     backend_contract_mistral_completion: Callable[[str], httpx.Response],
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
-    experimental_harness: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """*Prepare*: A Unified session with one completed turn and recorded client traffic.
     *Do*: Request manual compaction and wait for its checkpoint update notification.
     *Assert*: The response precedes notifications whose IDs are covered by its state.
     """
-    if not experimental_harness:
-        pytest.skip("Unified event buffering contract")
-
     # Prepare
     backend_contract_mistral_api.mock(
         side_effect=[
@@ -331,15 +321,13 @@ async def test_compaction_provider_failure_is_typed(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_session: AppServerSession,
-    experimental_harness: bool,
 ) -> None:
     """*Prepare*: A completed turn followed by a provider rejection during compaction.
     *Do*: Request manual compaction.
     *Assert*: The backend returns COMPACTION_FAILED and leaves the session idle.
     """
     # Prepare
-    if not experimental_harness:
-        pytest.skip("Legacy provider failures do not use COMPACTION_FAILED")
+
     backend_contract_mistral_api.mock(
         side_effect=[
             backend_contract_mistral_response("Before compaction"),
@@ -361,7 +349,6 @@ async def test_compaction_survives_a_new_host_with_the_same_public_identity(
     backend_contract_mistral_completion: Callable[[str], httpx.Response],
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
-    experimental_harness: bool,
 ) -> None:
     backend_contract_mistral_api.mock(
         side_effect=[
@@ -380,9 +367,7 @@ async def test_compaction_survives_a_new_host_with_the_same_public_identity(
         await session.close()
 
     resumed_connection = await connect_backend_contract_host(
-        experimental_harness,
-        session_options=SessionOptions(),
-        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(), capabilities=ClientCapabilities()
     )
     resumed = await resumed_connection.host.resume_session(session_id)
     try:
@@ -408,11 +393,8 @@ async def test_an_agent_change_survives_a_new_host(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
-    experimental_harness: bool,
 ) -> None:
     """An agent-mode switch is kept in the persisted session journal."""
-    if not experimental_harness:
-        pytest.skip("only the unified harness Runtime records agent changes")
     backend_contract_mistral_api.mock(
         return_value=backend_contract_mistral_response("Answered under ask")
     )
@@ -420,14 +402,12 @@ async def test_an_agent_change_survives_a_new_host(
     try:
         _ = [event async for event in session.act("first question")]
         session_id = session.session_id
-        await session.resources.agents.switch("plan")
+        await session.resources.agents.switch("auto-approve")
     finally:
         await session.close()
 
     resumed_connection = await connect_backend_contract_host(
-        experimental_harness,
-        session_options=SessionOptions(),
-        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(), capabilities=ClientCapabilities()
     )
     resumed = await resumed_connection.host.resume_session(session_id)
     try:
@@ -435,7 +415,7 @@ async def test_an_agent_change_survives_a_new_host(
             entry.details
             for entry in resumed.history
             if isinstance(entry, PublicCheckpointEntry) and entry.kind == "agent_change"
-        ] == [{"agent": "plan"}]
+        ] == [{"agent": "auto-approve"}]
     finally:
         await resumed.close()
 
@@ -557,7 +537,6 @@ async def test_a_stored_session_preview_pages_back_to_the_first_entry(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
-    experimental_harness: bool,
 ) -> None:
     session = await backend_contract_persistent_connection.host.open_session()
     try:
@@ -568,9 +547,7 @@ async def test_a_stored_session_preview_pages_back_to_the_first_entry(
     finally:
         await session.close()
     viewer = await connect_backend_contract_host(
-        experimental_harness,
-        session_options=SessionOptions(),
-        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(), capabilities=ClientCapabilities()
     )
     current = await viewer.host.open_session()
     try:
@@ -591,7 +568,6 @@ async def test_a_bounded_resume_pages_back_to_the_first_entry(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
-    experimental_harness: bool,
 ) -> None:
     session = await backend_contract_persistent_connection.host.open_session()
     try:
@@ -602,9 +578,7 @@ async def test_a_bounded_resume_pages_back_to_the_first_entry(
     finally:
         await session.close()
     resumed = await connect_backend_contract_host(
-        experimental_harness,
-        session_options=SessionOptions(),
-        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(), capabilities=ClientCapabilities()
     )
     try:
         response = SessionResumeResponse.model_validate(

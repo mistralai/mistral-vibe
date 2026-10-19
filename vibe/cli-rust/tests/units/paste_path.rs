@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
 use vibe_rs::app::App;
 use vibe_rs::input;
@@ -141,6 +142,31 @@ fn inserts_numbered_image_placeholders_with_token_boundaries() {
 
     assert_eq!(app.chat_input.input, "inspect [Image #2] ");
     assert_eq!(pasted_image_path("inspect /tmp/diagram.png"), None);
+}
+
+fn typed(text: &str) -> String {
+    let mut app = App::default();
+    let client = std::sync::Arc::new(vibe_rs::server::Client::stub());
+    let (config_tx, _config_rx) = tokio::sync::mpsc::channel(1);
+    for character in text.chars() {
+        let key = KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE);
+        input::handle_key(&mut app, &client, &config_tx, key);
+    }
+    app.chat_input.input
+}
+
+#[test]
+fn a_typed_quoted_image_path_becomes_a_mention_once_its_quote_closes() {
+    assert_eq!(typed("'/tmp/vibe/shot.png"), "'/tmp/vibe/shot.png");
+    assert_eq!(typed("'/tmp/vibe/shot.png'"), "@/tmp/vibe/shot.png");
+}
+
+#[test]
+fn a_typed_quoted_image_path_with_spaces_keeps_its_quotes_in_the_mention() {
+    assert_eq!(
+        typed("'/tmp/vibe/has space.png'"),
+        "@'/tmp/vibe/has space.png'"
+    );
 }
 
 #[test]

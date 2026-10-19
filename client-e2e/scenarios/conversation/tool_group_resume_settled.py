@@ -17,7 +17,7 @@ def _history_entry(event: AppServerEvent) -> dict[str, object]:
 
 
 # The persisted history ends on tool calls (the CLI was killed mid-turn), so
-# the trailing group has no later entry to finalize it: both clients must still
+# the trailing group has no later entry to finalize it: the client must still
 # settle it once the resume rebuild mounts the history.
 _HISTORY = [
     _history_entry(user_msg("run the flaky command")),
@@ -33,8 +33,8 @@ handshake = {
 client_args = ("--continue",)
 capture_startup = False
 
-screen_contains = {"rust": ("⏵ Ran 2 commands",), "python": ("⏵ Ran commands",)}
-screen_excludes = {"rust": ("Running 2 commands",), "python": ("Running commands",)}
+screen_contains = ("⏵ Ran 2 commands",)
+screen_excludes = ("Running 2 commands",)
 
 
 timeline: Timeline = ["x"]

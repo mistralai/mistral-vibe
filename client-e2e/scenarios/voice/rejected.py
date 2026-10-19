@@ -6,12 +6,10 @@ from e2e.app_server.scenario import Timeline
 
 handshake = {"config/write": {"rejected": True, "failures": []}}
 request_methods = {"telemetry/record"}
-screen_contains = {
-    "rust": (
-        "Failed to apply: voice settings",
-        "Invalid configuration edit",
-        "Voice mode: On",
-    )
-}
-screen_excludes = {"rust": ("Voice mode disabled.",)}
+screen_contains = (
+    "Failed to apply: voice settings",
+    "Invalid configuration edit",
+    "Voice mode: On",
+)
+screen_excludes = ("Voice mode disabled.",)
 timeline: Timeline = ["/voice\r", " ", "\x1b", "/voice\r"]

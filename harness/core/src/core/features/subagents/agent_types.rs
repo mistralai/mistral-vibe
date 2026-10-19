@@ -33,54 +33,9 @@ pub(crate) fn validate_agent_types<'a>(
     Ok(())
 }
 
-pub(crate) fn render_agent_types<'a>(
-    agent_types: impl Iterator<Item = &'a AgentTypeDefinition>,
-) -> Option<String> {
-    let mut agent_types = agent_types.collect::<Vec<_>>();
-    if agent_types.is_empty() {
-        return None;
-    }
-
-    agent_types.sort_by(|left, right| left.name.cmp(&right.name));
-    let entries = agent_types
-        .into_iter()
-        .map(|agent_type| {
-            format!(
-                r#"  <agent>
-    <name>{}</name>
-    <description>{}</description>
-    <path>{}</path>
-  </agent>"#,
-                escape_xml(&agent_type.name),
-                escape_xml(&agent_type.description),
-                escape_xml(&agent_type.path),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(format!(
-        r#"## Available agent types
-
-Spawn a listed preconfigured subagent by passing its exact name as `agentType` to `tools.subagent.spawn`.
-
-<available-agent-types>
-{entries}
-</available-agent-types>"#
-    ))
-}
-
 fn validate_text(value: &str, field: &str) -> Result<(), String> {
     if value.trim().is_empty() {
         return Err(format!("{field} must not be empty"));
     }
     Ok(())
-}
-
-fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }

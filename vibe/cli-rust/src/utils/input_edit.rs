@@ -6,12 +6,12 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::graphemes::split_graphemes;
 
-/// A word char, matching Python's `\w` (unicode alphanumerics plus underscore).
+/// A word char, matching regex `\w` (unicode alphanumerics plus underscore).
 pub(crate) fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// Byte range of the `\w+` run around `cursor`, Python `_word_boundary_around`.
+/// Byte range of the `\w+` run around `cursor`.
 /// `None` when the cursor sits between two non-word chars.
 pub(crate) fn word_bounds(input: &str, cursor: usize) -> Option<(usize, usize)> {
     let (line_start, line_end) = line_bounds(input, cursor);
@@ -76,7 +76,7 @@ pub(crate) fn char_index_to_byte_offset(input: &str, index: usize) -> usize {
         .map_or(input.len(), |(byte, _)| byte)
 }
 
-/// Insert `s` at the cursor and advance past it (Textual paste / typed char).
+/// Insert `s` at the cursor and advance past it (paste or typed char).
 pub(crate) fn insert(input: &mut String, cursor: &mut usize, s: &str) {
     input.insert_str(*cursor, s);
     *cursor += s.len();

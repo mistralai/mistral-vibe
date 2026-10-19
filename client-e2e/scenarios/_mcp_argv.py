@@ -14,6 +14,7 @@ class MCPArgvScenario:
     stdout: str
     returncode: int = 0
     stderr_contains: str = ""
+    starts_server: bool = True
 
 
 _ADD = {

@@ -31,14 +31,8 @@ handshake = {
     }
 }
 settle_per_key = True
-screen_contains = {
-    "python": ("describe this image edited", "attached image: diagram.png"),
-    "rust": ("describe this image edited", "attached image: diagram.png"),
-}
-screen_excludes = {
-    "python": ("queue/replace failed",),
-    "rust": ("queue/replace failed",),
-}
+screen_contains = ("describe this image edited", "attached image: diagram.png")
+screen_excludes = ("queue/replace failed",)
 
 timeline: Timeline = [
     "first\r",

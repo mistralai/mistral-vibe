@@ -13,7 +13,7 @@ from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
 
-_HEADER_DRAG = "\x1b[<0;8;15M\x1b[<32;29;15M\x1b[<0;29;15m"
+_HEADER_DRAG = "\x1b[<0;8;11M\x1b[<32;29;11M\x1b[<0;29;11m"
 
 timeline: Timeline = [
     "show chrome\r",

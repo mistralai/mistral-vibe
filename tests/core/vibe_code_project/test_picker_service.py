@@ -26,7 +26,7 @@ class FakePageFetcher:
     def __init__(self, pages: list[VibeCodeProjectPage]) -> None:
         self.pages = pages
         self.calls: list[tuple[str | None, int | None]] = []
-        self.created: list[tuple[str, str, str]] = []
+        self.created: list[tuple[str, str | None, str | None]] = []
 
     async def list_projects(
         self, cursor: str | None = None, limit: int | None = None
@@ -35,10 +35,14 @@ class FakePageFetcher:
         return self.pages.pop(0)
 
     async def create_project(
-        self, *, name: str, repo_url: str, default_branch: str
+        self,
+        *,
+        name: str,
+        repo_url: str | None = None,
+        default_branch: str | None = None,
     ) -> VibeCodeProject:
         self.created.append((name, repo_url, default_branch))
-        return _project("created", name, repo_url)
+        return _project("created", name, repo_url or "")
 
 
 class TrackingProjectsStore(VibeProjectsStore):

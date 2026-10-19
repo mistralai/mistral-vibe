@@ -19,14 +19,13 @@ env = {
 handshake = {"callback/result": {"accepted": True}}
 capture_startup = False
 capture_steps = {5, 6}
-clipboard_clients = {"rust"}
 clipboard_contains = (
     "Which database should we use for this project?",
     "line two",
     "line six",
 )
 clipboard_excludes = ("↑", "↓", "line one")
-screen_contains = {"rust": ("↑",)}
+screen_contains = ("↑",)
 
 _QUESTIONS = [
     {

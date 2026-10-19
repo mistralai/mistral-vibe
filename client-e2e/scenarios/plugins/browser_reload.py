@@ -16,4 +16,4 @@ request_methods = METHODS
 
 timeline: Timeline = ["/plugins\r", "r"]
 
-screen_contains = {"rust": ("Plugins reloaded", "review")}
+screen_contains = ("Plugins reloaded", "review")

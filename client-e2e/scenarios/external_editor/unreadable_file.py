@@ -10,6 +10,6 @@ _CTRL_G = "\x07"
 env = {"VISUAL": "sh -c 'rm \"$1\"' editor"}
 
 capture_startup = False
-screen_contains = {"rust": ("keep my draft", "Could not read the edited text")}
+screen_contains = ("keep my draft", "Could not read the edited text")
 
 timeline: Timeline = ["keep my draft", _CTRL_G]

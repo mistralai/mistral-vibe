@@ -1,5 +1,5 @@
-//! The onboarding welcome screen (Python `WelcomeScreen`): typewriter banner
-//! with a gradient highlight, in a rounded box. No petit chat, per Python.
+//! The onboarding welcome screen: typewriter banner with a gradient
+//! highlight, in a rounded box. No petit chat.
 
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
@@ -14,13 +14,13 @@ use crate::ui::{hint_line, theme};
 const HIGHLIGHT_START: usize = 11;
 const HIGHLIGHT_END: usize = 23;
 
-/// Python `WelcomeScreen`: round border, padding 1 3, centered text, `Enter continue` hint.
+/// Round border, padding 1 3, centered text, `Enter continue` hint.
 pub(super) fn draw(wizard: &mut OnboardingState, f: &mut Frame, area: Rect) {
     let text = &WELCOME_TEXT[..wizard.welcome_char_index.min(WELCOME_TEXT.len())];
     // The box is text plus border and padding; narrow terminals clip it.
     let box_w = (WELCOME_TEXT.len() as u16 + 8).min(area.width);
     let box_x = area.x + (area.width.saturating_sub(box_w)) / 2;
-    // Python: align center middle, margin-bottom 2 on the box, hint below.
+    // Align center middle, margin-bottom 2 on the box, hint below.
     // Total = 5 (box) + 2 (gap) + 1 (hint) = 8 rows, centered in area height.
     let total_h = 8u16;
     let box_y = area.y + (area.height.saturating_sub(total_h)) / 2;

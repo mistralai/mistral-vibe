@@ -923,7 +923,7 @@ async def test_apply_patch_end_to_end_falls_back_to_user_layer_when_no_target_is
     monkeypatch: pytest.MonkeyPatch, tmp_working_directory: Path
 ) -> None:
     toml_path = tmp_working_directory / "config.toml"
-    toml_path.write_text('default_agent = "plan"\n', encoding="utf-8")
+    toml_path.write_text('default_agent = "ask"\n', encoding="utf-8")
     monkeypatch.setenv("VIBE_ACTIVE_MODEL", "env-model")
 
     user_layer = UserConfigLayer(path=toml_path)
@@ -957,7 +957,7 @@ async def test_apply_patch_end_to_end_respects_explicit_target_layer(
     monkeypatch: pytest.MonkeyPatch, tmp_working_directory: Path
 ) -> None:
     toml_path = tmp_working_directory / "config.toml"
-    toml_path.write_text('default_agent = "plan"\n', encoding="utf-8")
+    toml_path.write_text('default_agent = "ask"\n', encoding="utf-8")
     monkeypatch.setenv("VIBE_ACTIVE_MODEL", "env-model")
 
     user_layer = UserConfigLayer(path=toml_path)
@@ -1041,7 +1041,7 @@ async def test_apply_patch_end_to_end_routes_default_writes_to_project_layer(
     workspace.mkdir()
     project_config_path = workspace / ".vibe" / "config.toml"
     project_config_path.parent.mkdir(parents=True, exist_ok=True)
-    project_config_path.write_text('default_agent = "plan"\n', encoding="utf-8")
+    project_config_path.write_text('default_agent = "ask"\n', encoding="utf-8")
 
     user_config_path = tmp_working_directory / "user.toml"
     user_config_path.write_text('default_agent = "accept-edits"\n', encoding="utf-8")
@@ -1068,7 +1068,7 @@ async def test_apply_patch_end_to_end_routes_default_writes_to_project_layer(
 
     assert project_layer.is_file_discovered is True
     assert orch.config.active_model == "env-model"
-    assert orch.config.default_agent == "plan"
+    assert orch.config.default_agent == "ask"
     assert orch.config.enabled_tools == ["read"]
 
     result = await orch.apply_patch(

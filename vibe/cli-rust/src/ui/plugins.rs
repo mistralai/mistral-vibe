@@ -8,7 +8,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthChar;
 
 use super::mcp::layout::{merge, text, wrap, Sc};
-use super::{list_scroll, scrollbar, theme};
+use super::{scrollbar, theme};
 use crate::app::App;
 use crate::mouse::MouseTarget;
 use crate::plugins::rows::{self, Row};
@@ -49,7 +49,7 @@ fn search_shown(app: &App) -> bool {
     app.plugins.viewing.is_none()
 }
 
-/// Lay the rows out for `visible` lines (Textual `max-height: 50vh`), reserving the scrollbar once they overflow.
+/// Lay the rows out for `visible` lines (at most `50vh`), reserving the scrollbar once they overflow.
 fn visual_lines(app: &App, width: u16, visible: usize) -> Vec<Line> {
     let lines = lay_out(app, width.saturating_sub(GUTTER) as usize);
     if lines.len() <= visible {
@@ -58,7 +58,7 @@ fn visual_lines(app: &App, width: u16, visible: usize) -> Vec<Line> {
     lay_out(app, width.saturating_sub(SCROLLBAR_GUTTER) as usize)
 }
 
-/// Plugin rows stay on one line (Python `no_wrap`); notes and facts wrap.
+/// Plugin rows stay on one line; notes and facts wrap.
 fn lay_out(app: &App, width: usize) -> Vec<Line> {
     let state = &app.plugins;
     let plugins = &state.catalog.plugins;
@@ -73,7 +73,7 @@ fn lay_out(app: &App, width: usize) -> Vec<Line> {
         .unwrap_or(0);
     let mut out = Vec::new();
     for (index, row) in rows.iter().enumerate() {
-        let highlighted = index == state.selected && row.selectable();
+        let highlighted = index == state.list.selected() && row.selectable();
         let (base, dim) = styles(highlighted);
         let wrapped = match row {
             Row::Entry(entry) => {
@@ -129,7 +129,7 @@ fn fold(row: Vec<Sc>, room: usize) -> Vec<Vec<Sc>> {
     out
 }
 
-/// Disabled options take `$text-disabled` (Textual `option-list--option-disabled`).
+/// Disabled options take `$text-disabled`.
 fn disabled(base: Style) -> Style {
     base.fg(theme::muted())
 }
@@ -139,12 +139,12 @@ fn styles(highlighted: bool) -> (Style, Style) {
     super::list_cursor::styles(highlighted)
 }
 
-/// `  name  scope · format · digest`, plus drift and uninstall notes (Python `_entry_label`).
+/// `  name  scope · format · digest`, plus drift and uninstall notes.
 fn entry_chars(entry: &PluginCatalogEntry, width: usize, base: Style, dim: Style) -> Vec<Sc> {
     let mut chars = text(&format!("  {:<width$}", entry.name), base);
     chars.extend(text(&format!("  {}", entry_facts(entry)), dim));
     if entry.drifted > 0 {
-        let warning = base.fg(theme::text_warning());
+        let warning = super::list_cursor::accent(base, theme::text_warning());
         chars.extend(text(&format!(" · ⚠ {} drifted", entry.drifted), warning));
     }
     if entry.installed_root.is_none() {
@@ -180,16 +180,20 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, lines: &[Line]) {
     }
     let visible = area.height.saturating_sub(chrome(app)) as usize;
     let top = area.y + 3 + u16::from(search_shown(app));
-    let offset = reconcile_scroll(app, lines, visible);
     let overflows = lines.len() > visible;
-    app.plugins.list_area = Rect::new(
+    let list_area = Rect::new(
         area.x + 1,
         top,
         area.width.saturating_sub(2),
         visible as u16,
     );
-    crate::mouse::register_region(app, app.plugins.list_area, MouseTarget::Plugins);
-    app.plugins.line_rows = lines.iter().map(|line| line.row).collect();
+    app.plugins.list_area = list_area;
+    crate::mouse::register_region(app, list_area, MouseTarget::Plugins);
+    let options: Vec<_> = lines
+        .iter()
+        .map(|line| line.selectable.then_some(line.row))
+        .collect();
+    let offset = app.plugins.list.layout(&options, list_area);
     for (row, line) in lines.iter().skip(offset).take(visible).enumerate() {
         draw_line(f, area, top + row as u16, line, overflows);
     }
@@ -215,7 +219,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, lines: &[Line]) {
     draw_help(app, f, help);
 }
 
-/// The search row under the title; the field owns its mouse like Python's `Input`.
+/// The search row under the title; the field owns its mouse.
 fn draw_search(app: &mut App, f: &mut Frame, area: Rect) {
     let row = Rect::new(area.x + 3, area.y + 2, area.width.saturating_sub(6), 1);
     let input = super::search_field::draw_row(
@@ -248,30 +252,6 @@ fn draw_line(f: &mut Frame, area: Rect, y: u16, line: &Line, overflows: bool) {
             .set_stringn(x, y, &span.content, room, span.style)
             .0;
     }
-}
-
-/// Keep the highlighted option visible, the wheel's free scroll aside.
-fn reconcile_scroll(app: &mut App, lines: &[Line], visible: usize) -> usize {
-    let max = lines.len().saturating_sub(visible);
-    let offset = match app.plugins.free_scroll {
-        true => app.plugins.scroll.min(max),
-        false => {
-            let first = lines.iter().position(|line| line.highlighted);
-            let last = lines.iter().rposition(|line| line.highlighted);
-            let highlight = first
-                .zip(last)
-                .map_or(0..0, |(first, last)| first..last + 1);
-            list_scroll::follow(
-                app.plugins.scroll,
-                visible,
-                lines.len(),
-                highlight,
-                |line| lines[line].selectable,
-            )
-        }
-    };
-    app.plugins.scroll = offset;
-    offset
 }
 
 /// The hint line, clipped to the box.

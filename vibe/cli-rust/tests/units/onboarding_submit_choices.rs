@@ -1,7 +1,7 @@
-//! The wizard's `setup/submit-choices` payload (Python
-//! `persist_credentials` plus the post-exit `/theme` write): the full
-//! provider and base-URL choices on every completion — the server judges
-//! drift — and the theme whenever one was selected, never when none was.
+//! The wizard's `setup/submit-choices` payload (credentials plus the
+//! post-exit `/theme` write): the full provider and base-URL choices on
+//! every completion — the server judges drift — and the theme whenever one
+//! was selected, never when none was.
 
 use serde_json::json;
 
@@ -69,8 +69,8 @@ fn the_base_urls_always_submit_with_the_provider() {
 
 #[test]
 fn a_theme_is_submitted_whenever_one_was_selected() {
-    // Python persists /theme on every completed onboarding that selected
-    // one — even the seeded value, not only a moved selection.
+    // A completed onboarding that selected a theme persists /theme — even
+    // the seeded value, not only a moved selection.
     let mut state = OnboardingState {
         theme_selected: true,
         ..OnboardingState::default()

@@ -28,14 +28,14 @@ _SOURCES = [
 ]
 
 # The lone web search stays ungrouped, so its own header row unfolds the sources.
-_EXPAND = "\x1b[<0;1;15M\x1b[<0;1;15m"
+_EXPAND = "\x1b[<0;1;11M\x1b[<0;1;11m"
 # Hovering either row of the wrapped title highlights both; the tail row hangs past the bullet.
-_HOVER = "\x1b[<35;14;19M"
-_HOVER_TAIL = "\x1b[<35;8;20M"
+_HOVER = "\x1b[<35;14;15M"
+_HOVER_TAIL = "\x1b[<35;8;16M"
 # Clicking the wrapped tail opens the source.
-_CLICK_TAIL = "\x1b[<0;8;20M\x1b[<0;8;20m"
+_CLICK_TAIL = "\x1b[<0;8;16M\x1b[<0;8;16m"
 
-expected_actions = {"rust": [Action("open_url", _SOURCES[0]["url"])]}
+expected_actions = [Action("open_url", _SOURCES[0]["url"])]
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

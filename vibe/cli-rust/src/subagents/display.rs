@@ -1,8 +1,8 @@
-//! Naming and status helpers (Python `subagent_list` module functions).
+//! Subagent naming and status helpers.
 
 use crate::server::SessionStatus;
 
-/// Python `_display_name`: split on `-_`, word and acronym boundaries, then
+/// Split on `-_`, word and acronym boundaries, then
 /// capitalize lowercase words; values containing a space pass through.
 pub fn display_name(value: &str) -> String {
     if value.contains(' ') {
@@ -21,7 +21,7 @@ pub fn display_name(value: &str) -> String {
         .join(" ")
 }
 
-/// Python `_WORD_BOUNDARY.split`: `[-_]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])`.
+/// Word boundaries: `[-_]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])`.
 fn words(value: &str) -> Vec<String> {
     let chars: Vec<char> = value.chars().collect();
     let mut words = Vec::new();
@@ -59,14 +59,14 @@ fn words(value: &str) -> Vec<String> {
     words
 }
 
-/// Python drops empty split results (`if word`).
+/// Empty split results are dropped.
 fn push_word(words: &mut Vec<String>, current: &mut String) {
     if !current.is_empty() {
         words.push(std::mem::take(current));
     }
 }
 
-/// Python `str.islower`: at least one cased character, all cased lowercase.
+/// At least one cased character, all cased lowercase.
 fn is_lower(word: &str) -> bool {
     let mut cased = 0;
     let mut lower = 0;
@@ -81,7 +81,7 @@ fn is_lower(word: &str) -> bool {
     cased > 0 && cased == lower
 }
 
-/// Python `str.capitalize`: first character upper, the rest lower.
+/// First character upper, the rest lower.
 fn capitalize(word: &str) -> String {
     let mut chars = word.chars();
     match chars.next() {
@@ -90,7 +90,7 @@ fn capitalize(word: &str) -> String {
     }
 }
 
-/// Python `_status` label half.
+/// The status label.
 pub fn status_label(status: SessionStatus) -> &'static str {
     match status {
         SessionStatus::Running => "running",
@@ -102,7 +102,7 @@ pub fn status_label(status: SessionStatus) -> &'static str {
     }
 }
 
-/// Python `_status` theme half, as a theme tone the UI maps to a color.
+/// The status color, as a theme tone the UI maps to a color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusTone {
     Success,
@@ -120,7 +120,7 @@ pub fn status_tone(status: SessionStatus) -> StatusTone {
     }
 }
 
-/// Python `subagent_loading_status`: the loading label while a viewed child runs.
+/// The loading label while a viewed child runs.
 pub fn subagent_loading_status(status: SessionStatus) -> Option<&'static str> {
     match status {
         SessionStatus::Running => Some("Running"),
@@ -129,7 +129,7 @@ pub fn subagent_loading_status(status: SessionStatus) -> Option<&'static str> {
     }
 }
 
-/// Python `_is_active`: the child counts as work in flight.
+/// The child counts as work in flight.
 pub fn is_active(status: SessionStatus) -> bool {
     matches!(status, SessionStatus::Running | SessionStatus::Blocked)
 }

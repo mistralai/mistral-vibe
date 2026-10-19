@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from vibe.core.config import VibeConfigSchema
+from vibe.core.config.mcp_servers import MCP_DISABLED_MESSAGE
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.types import ConcurrencyConflictError
 
@@ -34,6 +35,8 @@ async def persist_mcp_toggle(
             preflight=preflight,
         )
         return
+    if not orchestrator.config.enable_mcp:
+        raise ValueError(MCP_DISABLED_MESSAGE)
     await _persist_server_toggle(
         orchestrator, name=name, disabled=disabled, tool_name=tool_name
     )

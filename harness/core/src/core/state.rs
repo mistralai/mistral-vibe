@@ -72,6 +72,7 @@ impl PartialEq for ToolCatalogLedger {
 }
 
 pub(crate) struct StateInspection {
+    pub(crate) has_pending_model_input: bool,
     pub(crate) status: SessionStatus,
     pub(crate) active_turn_id: Option<String>,
     pub(crate) last_turn_id: Option<String>,
@@ -100,7 +101,12 @@ impl HarnessState {
             TurnState::Active(_) | TurnState::Compacting { .. } => Delivery::Deferred,
             TurnState::Idle | TurnState::Terminal { .. } => Delivery::Immediate,
         };
-        let acceptance = self.notifications.accept(notification.clone(), delivery)?;
+        let acceptance = self.notifications.accept(
+            notification.clone(),
+            delivery,
+            &self.config.settings.context.notifications,
+            self.active().map_or(0, |active| active.pending_steer.len()),
+        )?;
         if matches!(acceptance, Acceptance::Duplicate) {
             return Ok(Outcome::quiet());
         }
@@ -391,6 +397,7 @@ impl HarnessState {
             })
             .collect();
         StateInspection {
+            has_pending_model_input: self.has_pending_model_input(),
             status,
             active_turn_id: self.active_turn_id().map(str::to_string),
             last_turn_id: self.last_finished_turn_id.clone(),

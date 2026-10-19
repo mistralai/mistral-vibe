@@ -24,15 +24,6 @@ from mistralai_vibe_local_harness.vibe._subagents._models import (
     TurnFailedChild,
 )
 
-SUBAGENT_TOOL_NAMES = frozenset({
-    "subagent.list",
-    "subagent.spawn",
-    "subagent.wait",
-    "subagent.send_message",
-    "subagent.interrupt",
-    "subagent.stop",
-})
-
 
 class ListInput(SubagentModel):
     pass
@@ -138,7 +129,6 @@ def child_is_sendable(child: ChildSessionRecord) -> bool:
 
 
 __all__ = [
-    "SUBAGENT_TOOL_NAMES",
     "AgentInput",
     "ListInput",
     "MessageInput",

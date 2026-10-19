@@ -46,11 +46,15 @@ pub(super) fn run_command(
         "/remote-project" => crate::vibe_code_project::open(app, client),
         "/teleport" => crate::teleport::command(app, client),
         "/log-level" => log_level_picker::open(app),
+        "/debug" => crate::debug_console::toggle(app, client),
         "/resume" | "/continue" => resume_picker::open(app, client),
         "/rewind" => rewind::start(app, client),
+        "/branch" => super::branch::branch_session(app, client),
         "/mcp" | "/connectors" => mcp::show(app, client, value),
         "/plugins" => crate::plugins::show(app, client),
         "/reload-plugins" => crate::plugins::reload(app, client),
+        "/leanstall" => super::leanstall::install_lean(app, client),
+        "/unleanstall" => super::leanstall::uninstall_lean(app, client),
         "/help" => add_text(app, &help_text()),
         "/clear" | "/new" | "/clean" => clear_history(app, client, value),
         "/compact" => super::compact::start_compact(app, client, value),
@@ -79,7 +83,7 @@ pub(super) fn run_command(
     false
 }
 
-/// Python `parse_command`'s `cmd_args`: input after the command word.
+/// The command's arguments: input after the command word.
 fn command_args(value: &str) -> &str {
     value
         .split_once(char::is_whitespace)

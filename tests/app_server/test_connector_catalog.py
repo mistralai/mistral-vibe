@@ -37,9 +37,11 @@ from vibe.app_server.connector_catalog import (
     connector_tool_enabled,
     resolve_connector_selection,
 )
+from vibe.app_server.models import AccountPlanKind
 from vibe.app_server.protocol import ConnectorAuthRequiredParams, ProtocolErrorCode
 from vibe.core.config import ConnectorConfig, VibeConfigSchema
 from vibe.core.identity import IdentityResult
+from vibe.setup.auth.whoami import WhoAmIResult, store_cached_whoami
 
 
 @pytest.mark.asyncio
@@ -107,6 +109,108 @@ async def test_manage_connectors_url_none_when_identity_incomplete(monkeypatch) 
     )
 
     assert await connector_catalog._manage_connectors_url(config) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    [("shared_only", True), ("personal_and_shared", False), (None, False)],
+)
+async def test_private_connectors_hidden_only_for_shared_only_keys(
+    monkeypatch, scope: str | None, expected: bool
+) -> None:
+    config = build_test_vibe_config(enable_connectors=True)
+    provider = connector_catalog._ConnectorProvider(
+        fingerprint="fp", base_url="https://api.mistral.ai", api_key="k"
+    )
+    monkeypatch.setattr(
+        connector_catalog, "_resolve_provider", lambda _config: provider
+    )
+    whoami = WhoAmIResult(
+        plan_type=AccountPlanKind.API, plan_name="FREE", primitive_access_scope=scope
+    )
+    resolve = AsyncMock(return_value=whoami)
+    monkeypatch.setattr(connector_catalog._WHOAMI_CACHE, "resolve", resolve)
+    monkeypatch.setattr(connector_catalog, "_WHOAMI_FAILED_AT", {})
+
+    assert await connector_catalog._private_connectors_hidden(config) is expected
+    assert resolve.await_args is not None
+    assert resolve.await_args.kwargs["base_url"] == config.console_base_url
+    assert resolve.await_args.kwargs["timeout"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_private_connectors_hidden_retries_whoami_only_after_cooldown(
+    monkeypatch,
+) -> None:
+    config = build_test_vibe_config(enable_connectors=True)
+    provider = connector_catalog._ConnectorProvider(
+        fingerprint="fp", base_url="https://api.mistral.ai", api_key="k"
+    )
+    monkeypatch.setattr(
+        connector_catalog, "_resolve_provider", lambda _config: provider
+    )
+    resolve = AsyncMock(return_value=None)
+    monkeypatch.setattr(connector_catalog._WHOAMI_CACHE, "resolve", resolve)
+    failed_at: dict[tuple[str, str], float] = {}
+    monkeypatch.setattr(connector_catalog, "_WHOAMI_FAILED_AT", failed_at)
+
+    assert await connector_catalog._private_connectors_hidden(config) is False
+    assert await connector_catalog._private_connectors_hidden(config) is False
+    assert resolve.await_count == 1
+
+    key = (config.console_base_url, "k")
+    failed_at[key] -= connector_catalog._WHOAMI_RETRY_SECONDS + 1
+    resolve.return_value = WhoAmIResult(
+        plan_type=AccountPlanKind.API,
+        plan_name="FREE",
+        primitive_access_scope="shared_only",
+    )
+
+    assert await connector_catalog._private_connectors_hidden(config) is True
+    assert resolve.await_count == 2
+    assert key not in failed_at
+
+
+@pytest.mark.asyncio
+async def test_private_connectors_hidden_reads_disk_cache_during_cooldown(
+    monkeypatch,
+) -> None:
+    config = build_test_vibe_config(enable_connectors=True)
+    provider = connector_catalog._ConnectorProvider(
+        fingerprint="fp", base_url="https://api.mistral.ai", api_key="k"
+    )
+    monkeypatch.setattr(
+        connector_catalog, "_resolve_provider", lambda _config: provider
+    )
+    resolve = AsyncMock(return_value=None)
+    monkeypatch.setattr(connector_catalog._WHOAMI_CACHE, "resolve", resolve)
+    failed_at: dict[tuple[str, str], float] = {}
+    monkeypatch.setattr(connector_catalog, "_WHOAMI_FAILED_AT", failed_at)
+
+    assert await connector_catalog._private_connectors_hidden(config) is False
+    store_cached_whoami(
+        "k",
+        WhoAmIResult(
+            plan_type=AccountPlanKind.API,
+            plan_name="FREE",
+            primitive_access_scope="shared_only",
+        ),
+    )
+
+    assert await connector_catalog._private_connectors_hidden(config) is True
+    assert resolve.await_count == 1
+    assert failed_at == {}
+
+
+@pytest.mark.asyncio
+async def test_private_connectors_hidden_false_without_mistral_provider(
+    monkeypatch,
+) -> None:
+    config = build_test_vibe_config(enable_connectors=True)
+    monkeypatch.setattr(connector_catalog, "_resolve_provider", lambda _config: None)
+
+    assert await connector_catalog._private_connectors_hidden(config) is False
 
 
 def test_resolve_provider_gates_document_library_connector(monkeypatch) -> None:

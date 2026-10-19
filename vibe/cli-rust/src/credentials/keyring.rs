@@ -1,4 +1,4 @@
-//! OS keyring API-key lookup (Python `vibe.utils.keyring`), the read half
+//! OS keyring API-key lookup, the read half
 //! only: macOS shells out to `security`; Linux and Windows use the keyring
 //! crates. Writes stay server-side through setup/store-credential.
 
@@ -14,7 +14,7 @@ pub fn get_api_key_from_keyring(env_key: &str) -> Option<String> {
     find_generic_password(KEYRING_SERVICE, env_key)
 }
 
-fn keyring_disabled() -> bool {
+pub fn keyring_disabled() -> bool {
     std::env::var(DISABLE_KEYRING_ENV_VAR).ok().as_deref() == Some("1")
 }
 
@@ -49,8 +49,8 @@ fn find_generic_password(service: &str, account: &str) -> Option<String> {
     .flatten()
 }
 
-/// Python's `keyring` WinVaultKeyring naming, so keys written by either CLI
-/// are visible to the other: the credential's target name is the bare
+/// The Python `keyring` WinVaultKeyring naming the server writes with, so its
+/// keys are visible here: the credential's target name is the bare
 /// service (`ai.mistral.vibe`, UserName = the env key), with a different
 /// user's credential moved to the compound `{username}@{service}` target.
 #[cfg(target_os = "windows")]
@@ -79,7 +79,7 @@ mod win_vault {
         Entry::new_with_modifiers(target, target, &modifiers)
     }
 
-    /// Python `_resolve_credential`: the service-target credential when its
+    /// The service-target credential when its
     /// UserName matches, else the compound one.
     pub(super) fn find(service: &str, account: &str) -> Option<String> {
         if let Ok(service_entry) = entry(service) {

@@ -12,12 +12,11 @@ from e2e.app_server.events import (
 from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 
 _QUESTION = "Which part of the repo should I focus on?"
 
-# The answered row lands on SGR row 15; drag across it from the first column.
-_SELECT = "\x1b[<0;1;15M\x1b[<32;120;15M\x1b[<0;120;15m"
+# The answered row lands on SGR row 11; drag across it from the first column.
+_SELECT = "\x1b[<0;1;11M\x1b[<32;120;11M\x1b[<0;120;11m"
 expected_clipboard = f'Answered "{_QUESTION}" → vibe/core'
 
 timeline: Timeline = [

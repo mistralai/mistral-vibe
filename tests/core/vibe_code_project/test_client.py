@@ -149,6 +149,37 @@ async def test_create_project_posts_repo_linked_project() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_project_posts_project_without_repository() -> None:
+    seen_request: httpx.Request | None = None
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_request
+        seen_request = request
+        return httpx.Response(
+            200,
+            json={
+                "id": "project-1",
+                "name": "Folder project",
+                "isReadOnly": False,
+                "repositories": [],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = VibeCodeProjectClient(
+            "https://chat.example.com", "api-key", client=http
+        )
+        project = await client.create_project(name="Folder project")
+
+    assert seen_request is not None
+    assert json.loads(seen_request.content) == {
+        "name": "Folder project",
+        "repositories": [],
+    }
+    assert project.repositories == ()
+
+
+@pytest.mark.asyncio
 async def test_create_project_raises_on_http_error() -> None:
     async def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, text="invalid repo")

@@ -13,6 +13,14 @@ impl ProgrammaticName {
     }
 }
 
+/// A removed function may replay saved results, but cannot request another effect.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ReplayOnlyTool {
+    pub name: String,
+    pub programmatic_name: ProgrammaticName,
+    pub rejection_message: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct TypeScriptTool {
     pub name: String,

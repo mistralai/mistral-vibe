@@ -8,8 +8,7 @@ use crate::utils::input_edit::{
 };
 
 /// A chat input editing action, decoupled from any key backend. `keymap` maps a
-/// terminal key to one of these; `apply` runs it. Names mirror Textual's TextArea
-/// action methods for bijection.
+/// terminal key to one of these; `apply` runs it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     CursorLeft,
@@ -18,7 +17,7 @@ pub enum Action {
     CursorWordRight,
     CursorLineStart,
     CursorLineEnd,
-    // Shift variants: extend the selection while moving (Textual `*(select=True)`).
+    // Shift variants: extend the selection while moving.
     SelectLeft,
     SelectRight,
     SelectWordLeft,

@@ -1,13 +1,12 @@
-"""Vibe client-e2e paths, clients, terminal geometry, and home config."""
+"""Vibe client-e2e paths, client binary, terminal geometry, and home config."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 ROWS, COLUMNS = 40, 120
 IDLE_MARKER = b"\x1b]5379;vibe-idle\x07"
-# Kitty-protocol F23/F24. Both clients drop them and use them to hold the idle
+# Kitty-protocol F23/F24. The client drops them and uses them to hold the idle
 # marker across a batched step, so a step's keys cost one marker, not one each.
 BATCH_KEYS = ("\x1b[57386u", "\x1b[57387u")
 # 2026-09-10T09:00:45Z, exactly two weeks after the fixture sessions.
@@ -16,16 +15,12 @@ REPLAY_NOW_MS = 1_789_030_845_000
 E2E_DIR = Path(__file__).resolve().parents[2]
 VIBE_DIR = E2E_DIR.parent
 SCENARIO_DIR = E2E_DIR / "scenarios"
-# Committed golden reference snapshots for Rust-only testing.
+# Committed golden reference snapshots.
 GOLDEN_DIR = E2E_DIR / "goldens"
 FIXTURE_PATH = E2E_DIR / "fixtures" / "fixture.json"
-REPLAY_BIN = VIBE_DIR / "vibe" / "cli-rust" / "target" / "release" / "vibe-replay"
-
-CLIENTS = {
-    "rust": (
-        os.fspath(VIBE_DIR / "vibe" / "cli-rust" / "target" / "release" / "vibe-rs"),
-    )
-}
+WHATS_NEW_FIXTURE = E2E_DIR / "fixtures" / "whats_new.fixture"
+CLIENT_BIN = VIBE_DIR / "vibe" / "cli-rust" / "target" / "release" / "vibe-rs"
+REPLAY_BIN = CLIENT_BIN.with_name("vibe-replay")
 
 MINIMAL_HOME_CONFIG = """\
 active_model = "mistral-medium-3.5"

@@ -12,6 +12,7 @@ from pydantic import JsonValue
 
 from mistralai_vibe_local_harness.protocol import (
     RustDisabledRuntimeToolFeature,
+    RustEnabledModelWait,
     RustHarnessCapabilitySet,
     RustHarnessConfig,
 )
@@ -253,9 +254,12 @@ def child_config(
 def _child_core_config(
     config: RustHarnessConfig, *, system_instructions: str
 ) -> RustHarnessConfig:
-    tools = config.settings.tools.model_copy(
-        update={"subagents": RustDisabledRuntimeToolFeature()}, deep=True
-    )
+    update: dict[str, object] = {"subagents": RustDisabledRuntimeToolFeature()}
+    if config.settings.tools.model_wait.mode == "enabled":
+        # The child cannot spawn agents, but its parent may message it. That is
+        # external input, so Core still offers `wait`.
+        update["model_wait"] = RustEnabledModelWait(external_input=True)
+    tools = config.settings.tools.model_copy(update=update, deep=True)
     settings = config.settings.model_copy(update={"tools": tools}, deep=True)
     capabilities = config.capabilities.model_copy(update={"agent_types": []}, deep=True)
     return config.model_copy(

@@ -1,4 +1,4 @@
-//! PEP 440 version parsing and ordering (Python `packaging.version.Version`).
+//! PEP 440 version parsing and ordering, as `packaging.version.Version` does.
 
 use std::cmp::Ordering;
 
@@ -6,7 +6,7 @@ mod segments;
 
 use segments::{parse_dev, parse_epoch, parse_local, parse_post, parse_pre, parse_release};
 
-/// Pre-release label, in Python `_PRE_RANK` sort order.
+/// Pre-release label, in PEP 440 sort order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum PreLabel {
     Alpha,
@@ -24,7 +24,7 @@ impl PreLabel {
     }
 }
 
-/// Pre-release rank, including the two pseudo-ranks Python `_cmpkey` uses.
+/// Pre-release rank, including the dev-only and stable pseudo-ranks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum PreRank {
     DevOnly,
@@ -56,12 +56,12 @@ enum LocalSegment {
 }
 
 impl LocalSegment {
-    /// Python `_parse_local_version`: digit-only parts become numbers.
+    /// Digit-only parts become numbers.
     fn parse(raw: &str) -> Self {
         match raw.parse::<u64>() {
             Ok(number) => Self::Num(number),
-            // Digits overflowing u64 keep their string form; Python's
-            // unbounded ints rank them numerically, which we cannot.
+            // Digits overflowing u64 keep their string form, so they cannot
+            // rank numerically.
             Err(_) => Self::Str(raw.to_ascii_lowercase()),
         }
     }
@@ -104,7 +104,7 @@ pub struct Pep440Version {
     local: Vec<LocalSegment>,
 }
 
-/// Python `Version(raw)`: PEP 440 with normalization; unparsable is `None`.
+/// PEP 440 with normalization; unparsable is `None`.
 pub fn parse_pep440_version(raw: &str) -> Option<Pep440Version> {
     let mut rest = raw.trim();
     rest = rest
@@ -134,7 +134,7 @@ pub fn parse_pep440_version(raw: &str) -> Option<Pep440Version> {
 }
 
 impl Pep440Version {
-    /// Python `str(Version)`: the normalized, round-trippable form.
+    /// The normalized, round-trippable form.
     pub fn as_str(&self) -> String {
         let mut out = String::new();
         if self.epoch > 0 {

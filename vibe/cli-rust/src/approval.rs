@@ -14,7 +14,7 @@ use tokio::sync::mpsc::Sender;
 use crate::app::{App, Status, ToastSeverity};
 use crate::server::{ApprovalCallback, ApprovalDecisionType, Client};
 
-pub use input::{handle_key, handle_mouse, key_action, KeyAction};
+pub use input::{handle_key, handle_mouse, key_action, wheel, KeyAction};
 
 const DEFAULT_TYPING_DEBOUNCE_MS: u64 = 1000;
 const TYPING_DEBOUNCE_ENV_VAR: &str = "VIBE_TYPING_GRACE_PERIOD_MS";
@@ -41,7 +41,7 @@ pub struct State {
     pub open: bool,
     pending: VecDeque<ApprovalCallback>,
     pub active: Option<ApprovalCallback>,
-    pub selected: usize,
+    pub list: crate::option_list::OptionList<crate::option_list::SingleAction>,
     pub mount_time: Option<Instant>,
     pub detail_scroll: usize,
     pub detail_rows: usize,
@@ -157,10 +157,10 @@ pub fn show_pending(app: &mut App) {
     let Some(callback) = app.approval.pending.pop_front() else {
         return;
     };
-    crate::terminal_notifier::action_required(app);
     app.approval.open = true;
     app.approval.active = Some(callback);
-    app.approval.selected = 0;
+    crate::terminal_notifier::action_required(app);
+    app.approval.list = Default::default();
     app.approval.mount_time = Some(Instant::now());
     app.approval.detail_scroll = 0;
     app.approval.detail_callback_id = None;
@@ -227,7 +227,6 @@ pub fn apply_event(app: &mut App, event: Event) {
                 show_pending(app);
             } else {
                 app.view.loading.end_action_required();
-                crate::terminal_notifier::restore_running(app);
             }
         }
         Event::Failed { error, .. } => {

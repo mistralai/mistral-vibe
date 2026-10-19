@@ -1,4 +1,4 @@
-//! The expanding border every result body sits in (Python `_bordered`).
+//! The expanding border every result body sits in.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -11,7 +11,7 @@ use crate::utils::text;
 
 /// Columns a tool border occupies: the glyph under its toggle arrow, then one pad.
 pub(super) const BORDER_WIDTH: u16 = 2;
-/// Columns Textual's result container keeps free on the right.
+/// Columns the result container keeps free on the right.
 const RESULT_MARGIN: u16 = 2;
 /// Pad cells a message, notice, or interrupt border keeps before its glyph.
 const INSET_WIDTH: u16 = 2;

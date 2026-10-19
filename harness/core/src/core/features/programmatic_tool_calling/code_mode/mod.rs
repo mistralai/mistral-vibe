@@ -8,20 +8,24 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::core::features::programmatic_tool_calling::TypeScriptTool;
-use crate::core::features::programmatic_tool_calling::model::PartialEvaluation;
 use crate::core::features::programmatic_tool_calling::model::ToolState;
+use crate::core::features::programmatic_tool_calling::model::{PartialEvaluation, ProgramBudget};
+use crate::core::features::programmatic_tool_calling::{ReplayOnlyTool, TypeScriptTool};
 use crate::core::step_protocol::DeterminismContext;
 
 mod v8;
 
+pub(crate) use v8::MAX_SOURCE_BYTES;
+
 pub(crate) struct EvaluationRequest<'a> {
     pub(crate) partial_evaluation: &'a PartialEvaluation,
     pub(crate) tools: &'a [TypeScriptTool],
+    pub(crate) replay_only_tools: &'a [ReplayOnlyTool],
     pub(crate) execution_id: &'a str,
     pub(crate) determinism: DeterminismContext,
     pub(crate) max_program_effects: u32,
     pub(crate) max_program_operations: u32,
+    pub(crate) budget: ProgramBudget,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

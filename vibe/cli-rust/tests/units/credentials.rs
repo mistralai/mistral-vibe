@@ -1,4 +1,4 @@
-//! The credential read model (Python `resolve_api_key`): env first, empty
+//! The credential read model: env first, empty
 //! reads as absent. The live-keyring lookup itself is not unit-tested
 //! against a real keychain — e2e runs pin `VIBE_TEST_DISABLE_KEYRING=1`.
 
@@ -27,14 +27,14 @@ fn an_absent_env_value_reads_keyless() {
 #[test]
 fn an_empty_env_value_reads_absent() {
     let _guard = locked_and_keyring_disabled();
-    // Python truthiness: an empty value falls through, here to a disabled
+    // An empty value falls through, here to a disabled
     // keyring, so the read is keyless.
     std::env::set_var("MISTRAL_API_KEY", "");
     assert_eq!(resolve_api_key("MISTRAL_API_KEY"), None);
     std::env::remove_var("MISTRAL_API_KEY");
 }
 
-/// Python `os.environ.get` treats a non-UTF-8 value as present, so the read
+/// A non-UTF-8 value counts as present, so the read
 /// is lossy rather than absent (unix-only: it takes an `OsString` from bytes).
 #[test]
 #[cfg(unix)]

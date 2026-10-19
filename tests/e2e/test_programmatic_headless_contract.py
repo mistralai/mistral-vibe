@@ -639,21 +639,19 @@ def _refused_reply(
 
 
 @pytest.mark.parametrize("streaming_mock_server", [_refused_reply], indirect=True)
-def test_a_model_refusal_is_a_refusal_outcome(
+def test_a_model_refusal_is_a_refusal_outcome_and_exits_three(
     streaming_mock_server: StreamingMockServer, e2e_workdir: Path, tmp_path: Path
 ) -> None:
-    """*Prepare*: A model that refuses to answer. Only the legacy runtime
-    reports a refusal as one, so the run uses it.
+    """*Prepare*: A model that refuses to answer.
     *Do*: Run `vibe -p`.
-    *Assert*: Exit 3, and the export reports `refusal` with the error's code.
+    *Assert*: Exit 3 with the `refusal` outcome, the model's own answer to score.
     """
     # Prepare
     output_dir = tmp_path / "out"
 
     # Do
     result = run_vibe_headless(
-        e2e_workdir,
-        ["--legacy-harness", "-p", "hello", "--output-dir", str(output_dir)],
+        e2e_workdir, ["-p", "hello", "--output-dir", str(output_dir)]
     )
 
     # Assert
@@ -661,7 +659,4 @@ def test_a_model_refusal_is_a_refusal_outcome(
     export = read_export(output_dir)
     assert export.outcome == "refusal"
     assert export.exit_code == 3
-    assert export.error is not None
-    assert export.error.code == "refusal"
-    assert "declined to respond" in export.error.message
     assert len(streaming_mock_server.requests) == 1

@@ -25,7 +25,6 @@ from mistralai_vibe_local_harness.vibe._mcp_models import (
     MCPTransportDisconnected,
     ResolvedMCPServerConfig,
 )
-from mistralai_vibe_local_harness.vibe._mcp_transport import call_http
 from mistralai_vibe_local_harness.vibe._observability import record_connector_operation
 
 logger = logging.getLogger(__name__)
@@ -142,6 +141,9 @@ class ConnectorGatewayClient:
             connection_revision="connector-gateway/v1",
             descriptor_revision="connector-gateway/v1",
         )
+        # Imported on use: the MCP SDK is slow to import and most sessions skip it.
+        from mistralai_vibe_local_harness.vibe._mcp_transport import call_http
+
         try:
             result = await call_http(
                 server,

@@ -1,4 +1,4 @@
-//! The update prompt's frames (Python `update_prompt_dialog.tcss`).
+//! The update prompt's frames.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -35,7 +35,7 @@ pub fn draw<B: ratatui::backend::Backend>(
         frame.render_widget(block, dialog);
         let mut lines = vec![title(), version_line(state), Line::from("").centered()];
         if state.updating {
-            // Python hides the options and help and shows the spinner instead.
+            // While updating, the spinner replaces the options and help.
             // The grid is newline-joined rows; ratatui drops a `\n` inside one
             // `Line`, so each row needs its own.
             lines.extend(chat.render().lines().map(|row| {
@@ -58,9 +58,8 @@ pub fn draw<B: ratatui::backend::Backend>(
     });
 }
 
-/// A dialog-sized centered rect, like Textual's `CenterMiddle`. `#update-dialog`
-/// is `max-width: 70` with `height: auto` — 13 rows for the updating spinner,
-/// 11 for the options, plus the border and padding.
+/// A dialog-sized centered rect, at most 70 wide — 13 rows for the updating
+/// spinner, 11 for the options, plus the border and padding.
 fn centered(area: Rect, updating: bool) -> Rect {
     let width = 70.min(area.width);
     let content_rows = if updating { 13 } else { 11 };
@@ -91,7 +90,7 @@ fn version_line(state: &UpdatePromptState) -> Line<'static> {
     .centered()
 }
 
-/// The two options on one row, the selected one on the list-cursor bar (Python `_refresh_options`).
+/// The two options on one row, the selected one on the list-cursor bar.
 fn options(state: &UpdatePromptState) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, choice) in state.choices().into_iter().enumerate() {

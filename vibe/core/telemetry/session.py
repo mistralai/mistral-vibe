@@ -118,6 +118,7 @@ class SessionTelemetry:
         operation: SubagentOperation,
         outcome: SubagentOutcome,
         profile_source: SubagentProfileSource | None,
+        caller_agent_path: str,
         message_id: str | None = None,
     ) -> None:
         send_unified_subagent_tool_call_finished(
@@ -125,6 +126,7 @@ class SessionTelemetry:
             operation=operation,
             outcome=outcome,
             model=self._model,
+            caller_agent_path=caller_agent_path,
             profile_source=profile_source,
             message_id=message_id,
         )

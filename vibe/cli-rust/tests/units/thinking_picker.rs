@@ -15,9 +15,9 @@ fn unchanged_set_keeps_the_moved_selection() {
     let mut app = App::default();
     thinking_picker::apply_runtime(&mut app, &runtime(&["off", "medium", "high"]));
     thinking_picker::open(&mut app);
-    app.thinking_picker.selected = 0;
+    app.thinking_picker.list.highlight(0);
     thinking_picker::apply_runtime(&mut app, &runtime(&["off", "medium", "high"]));
-    assert_eq!(app.thinking_picker.selected, 0);
+    assert_eq!(app.thinking_picker.list.selected(), 0);
 }
 
 #[test]
@@ -25,8 +25,8 @@ fn changed_set_re_anchors_within_bounds() {
     let mut app = App::default();
     thinking_picker::apply_runtime(&mut app, &runtime(&["off", "medium", "high"]));
     thinking_picker::open(&mut app);
-    app.thinking_picker.selected = 2;
+    app.thinking_picker.list.highlight(2);
     thinking_picker::apply_runtime(&mut app, &runtime(&["off", "high"]));
-    assert_eq!(app.thinking_picker.selected, 0);
+    assert_eq!(app.thinking_picker.list.selected(), 0);
     assert_eq!(app.thinking_picker.levels, vec!["off", "high"]);
 }

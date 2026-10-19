@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 pub const MAX_ENTRIES: usize = 100;
 
-/// Merge pending entries onto the disk view, deduplicating at the seam (Python `persist`).
+/// Merge pending entries onto the disk view, deduplicating at the seam.
 pub fn merge_entries(mut entries: Vec<String>, pending: &[String], max: usize) -> Vec<String> {
     for entry in pending {
         if entries.last().map(String::as_str) != Some(entry.as_str()) {
@@ -25,7 +25,7 @@ pub fn read_entries(file: &Path) -> Vec<String> {
     try_read_entries(file).unwrap_or_default()
 }
 
-/// Like `read_entries`, but a failed read is an error, not an empty history (Python `_read_entries` → `None`).
+/// Like `read_entries`, but a failed read is an error, not an empty history.
 fn try_read_entries(file: &Path) -> std::io::Result<Vec<String>> {
     let text = match fs::read_to_string(file) {
         Ok(text) => text,
@@ -44,12 +44,12 @@ fn try_read_entries(file: &Path) -> std::io::Result<Vec<String>> {
     Ok(entries)
 }
 
-/// Off-thread read-merge-write half of Python's `HistoryManager`.
+/// Off-thread read-merge-write half of the history manager.
 pub struct Persister {
     file: Option<PathBuf>,
-    /// Serializes the read-merge-write (Python `_io_lock`).
+    /// Serializes the read-merge-write.
     io: Mutex<()>,
-    /// Entries added this session but not yet flushed (Python `_pending_entries`).
+    /// Entries added this session but not yet flushed.
     pending: Mutex<Vec<String>>,
 }
 
@@ -117,14 +117,14 @@ fn write_entries(file: &Path, entries: &[String]) -> std::io::Result<()> {
             body.push('\n');
         }
     }
-    // Unique per process: two sessions flushing concurrently must not share the temp file (Python `mkstemp`).
+    // Unique per process: two sessions flushing concurrently must not share the temp file.
     let name = file
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("history");
     let tmp = file.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-    // Python's persist unlinks the temp file on failure; do the same so crashed
-    // or failed flushes don't leave per-process tmp files behind.
+    // Unlink the temp file on failure so crashed or failed flushes don't
+    // leave per-process tmp files behind.
     let result = fs::write(&tmp, body).and_then(|()| fs::rename(&tmp, file));
     if result.is_err() {
         let _ = fs::remove_file(&tmp);

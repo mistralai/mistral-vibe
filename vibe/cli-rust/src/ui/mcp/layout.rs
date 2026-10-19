@@ -1,21 +1,21 @@
-//! Option rows to wrapped visual lines, as Textual's `OptionList` folds them.
+//! Option rows to wrapped visual lines.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use unicode_width::UnicodeWidthChar;
 
 use crate::mcp::rows::{Row, SourceRow, ToolRow, MANAGE_CONNECTORS_LABEL};
-use crate::ui::theme;
+use crate::mcp::scope::SHARED_ONLY_WARNING;
+use crate::ui::{list_cursor, theme};
 
 /// A styled character, the unit the wrapper works on.
 pub(crate) type Sc = (char, Style);
 
 /// One rendered line of an option row.
 pub struct VisualLine {
-    /// Index of the row this line belongs to, for click routing.
-    pub row: usize,
+    /// The selectable row this line belongs to, for click routing.
+    pub option: Option<usize>,
     pub highlighted: bool,
-    pub selectable: bool,
     pub spans: Vec<Span<'static>>,
 }
 
@@ -26,9 +26,8 @@ pub fn lines(rows: &[Row], selected: usize, width: usize) -> Vec<VisualLine> {
         let highlighted = index == selected && row.selectable();
         for chars in wrap(&styled(row, highlighted), width) {
             out.push(VisualLine {
-                row: index,
+                option: row.selectable().then_some(index),
                 highlighted,
-                selectable: row.selectable(),
                 spans: merge(&chars),
             });
         }
@@ -39,7 +38,7 @@ pub fn lines(rows: &[Row], selected: usize, width: usize) -> Vec<VisualLine> {
 /// The styled characters of one row, before wrapping.
 fn styled(row: &Row, highlighted: bool) -> Vec<Sc> {
     // The block cursor bolds the whole highlighted option, dim spans included.
-    let (base, dim) = crate::ui::list_cursor::styles(highlighted);
+    let (base, dim) = list_cursor::styles(highlighted);
     match row {
         Row::Header(title) => text(title, base.add_modifier(Modifier::BOLD)),
         Row::Blank => Vec::new(),
@@ -47,7 +46,7 @@ fn styled(row: &Row, highlighted: bool) -> Vec<Sc> {
         Row::Detail(detail) => text(detail, dim),
         Row::Hint { before, key, after } => {
             let mut chars = text(before, dim);
-            chars.extend(text(key, base.fg(theme::primary())));
+            chars.extend(text(key, list_cursor::accent(base, theme::primary())));
             chars.extend(text(after, dim));
             chars
         }
@@ -57,16 +56,19 @@ fn styled(row: &Row, highlighted: bool) -> Vec<Sc> {
             MANAGE_CONNECTORS_LABEL,
             base.add_modifier(Modifier::UNDERLINED),
         ),
+        Row::PrivateConnectorsHidden => text(
+            SHARED_ONLY_WARNING,
+            list_cursor::accent(base, theme::error()).add_modifier(Modifier::BOLD),
+        ),
     }
 }
 
 /// `  name  [transport]  [plugin:x]  n tools  ● status`, columns padded by the row builder.
 fn source_chars(source: &SourceRow, base: Style, dim: Style, bg: Color) -> Vec<Sc> {
-    // Column separators carry no modifier, so each span re-emits its own bold
-    // and dim; ratatui's diff would otherwise drop bold after a dim span.
     let gap = Style::default().bg(bg);
+    let base = if source.blocked { dim } else { base };
     let symbol = if source.connected {
-        base.fg(crate::ui::list_cursor::current_color())
+        list_cursor::accent(base, list_cursor::current_color())
     } else {
         dim
     };
@@ -122,7 +124,7 @@ pub(crate) fn wrap(chars: &[Sc], width: usize) -> Vec<Vec<Sc>> {
 }
 
 /// Greedy word wrap keeping runs of spaces, so padded columns stay aligned.
-/// The space run a break happens on is dropped, like Textual's fold.
+/// The space run a break happens on is dropped.
 fn wrap_line(chars: &[Sc], width: usize) -> Vec<Vec<Sc>> {
     let width = width.max(1);
     let mut rows: Vec<Vec<Sc>> = Vec::new();

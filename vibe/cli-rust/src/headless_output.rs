@@ -1,4 +1,4 @@
-//! Output formatting for headless mode, mirroring Python `ProgrammaticOutput`.
+//! Output formatting for headless mode (text, json, streaming).
 
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -11,7 +11,7 @@ use crate::transcript::apply_json_patch;
 
 const MAX_TRACKED_ENTRIES: usize = 512;
 
-/// Output formatter, mirroring Python `ProgrammaticOutput`.
+/// Headless output formatter.
 pub struct Output {
     format: OutputFormat,
     pending: HashMap<String, Value>,
@@ -23,6 +23,10 @@ impl Output {
             format,
             pending: Default::default(),
         }
+    }
+
+    pub fn format(&self) -> OutputFormat {
+        self.format.clone()
     }
 
     /// Apply one history notification and return an entry when it becomes completed.
@@ -104,8 +108,20 @@ fn is_completed(entry: &Value) -> bool {
     entry.get("generationStatus").and_then(Value::as_str) == Some("completed")
 }
 
-/// Last assistant text from a history array, mirroring `_last_assistant_text`.
-/// Joins all text blocks with `\n\n`, matching the Python `PublicMessageEntry.text` property.
+/// The history entries of the run's turn: a reopened session's earlier runs already answered.
+pub fn turn_entries(history: &Value, turn_id: Option<&str>) -> Value {
+    let entries = history.as_array().into_iter().flatten();
+    let turn_id = turn_id.map(Value::from);
+    Value::Array(
+        entries
+            .filter(|entry| turn_id.is_some() && entry.get("turnId") == turn_id.as_ref())
+            .cloned()
+            .collect(),
+    )
+}
+
+/// Last assistant text from a history array: all text blocks joined with
+/// `\n\n`, like the server's `PublicMessageEntry.text` property.
 pub fn last_assistant_text(history: &Value) -> Option<String> {
     let entries = history.as_array()?;
     entries.iter().rev().find_map(|entry| {
@@ -113,6 +129,9 @@ pub fn last_assistant_text(history: &Value) -> Option<String> {
             return None;
         }
         if entry.get("role").and_then(Value::as_str) != Some("assistant") {
+            return None;
+        }
+        if sent_back_for_a_retry(entry) {
             return None;
         }
         let blocks = entry.get("content").and_then(Value::as_array)?;
@@ -129,4 +148,10 @@ pub fn last_assistant_text(history: &Value) -> Option<String> {
         let joined = text.join("\n\n");
         (!joined.is_empty()).then_some(joined)
     })
+}
+
+/// A draft a post_agent hook rejected: shown while it streamed, never the answer.
+fn sent_back_for_a_retry(entry: &Value) -> bool {
+    entry.pointer("/outcome/type").and_then(Value::as_str) == Some("discarded")
+        && entry.pointer("/outcome/cause").and_then(Value::as_str) == Some("retry")
 }

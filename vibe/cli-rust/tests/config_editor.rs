@@ -126,11 +126,11 @@ fn a_multiline_draft_scrolls_only_once_the_caret_leaves_the_view() {
 
     let bottom = draw(&mut app, &mut terminal);
 
-    assert_eq!(bottom, Some(20));
+    assert_eq!(bottom, 20);
     app.config_screen.edit.as_mut().unwrap().cursor = caret_at(25);
-    assert_eq!(draw(&mut app, &mut terminal), Some(20));
+    assert_eq!(draw(&mut app, &mut terminal), 20);
     app.config_screen.edit.as_mut().unwrap().cursor = caret_at(19);
-    assert_eq!(draw(&mut app, &mut terminal), Some(19));
+    assert_eq!(draw(&mut app, &mut terminal), 19);
 }
 
 #[test]
@@ -177,4 +177,44 @@ fn caret_inside_a_grapheme_is_drawn_on_that_grapheme() {
         .map(|cell| cell.symbol())
         .collect();
     assert_eq!(caret, ["1\u{FE0F}\u{20E3}"]);
+}
+
+#[test]
+fn an_admin_enforced_setting_opens_no_editor_and_resets_nothing() {
+    let mut app = App::default();
+    app.session.session_id = Some("session".into());
+    app.config_screen.open = true;
+    config::apply_loaded(
+        &mut app,
+        config_fields::parse(&json!({
+            "fields": [{
+                "name": "enable_telemetry", "path": "/enable_telemetry", "kind": "bool",
+                "value": false,
+                "layerValues": [{"layer": "admin", "value": false}, {"layer": "default", "value": true}],
+            }],
+            "targets": ["user-toml"],
+        })),
+    );
+    let client = std::sync::Arc::new(vibe_rs::server::Client::stub());
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let key = |code, modifiers| crossterm::event::KeyEvent::new(code, modifiers);
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    config::handle_key(
+        &mut app,
+        &client,
+        &tx,
+        key(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    config::handle_key(
+        &mut app,
+        &client,
+        &tx,
+        key(KeyCode::Char('r'), KeyModifiers::CONTROL),
+    );
+
+    assert!(app.config_screen.edit.is_none());
+    assert!(app.config_screen.open);
+    let in_flight = app.commit_started();
+    assert_eq!(in_flight.load(std::sync::atomic::Ordering::Relaxed), 1);
 }

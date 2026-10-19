@@ -1,4 +1,4 @@
-//! The project picker opened for `/teleport` (Python `teleport_pending`).
+//! The project picker opened for `/teleport`.
 
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use crate::server::Client;
 
 pub const REMOTE_CHANGED_MESSAGE: &str = "The saved Vibe Code project link points to a different repository remote. Pick the project to use for this repository.";
 
-/// Python `_resolve_vibe_code_project_for_teleport`: a saved link skips the picker.
+/// A saved link skips the picker.
 pub fn open(app: &mut App, client: &Arc<Client>, prompt: Option<String>) {
     if app.vibe_code_project.pending {
         return;
@@ -23,7 +23,7 @@ pub fn open(app: &mut App, client: &Arc<Client>, prompt: Option<String>) {
     request::start(app, client, Operation::Open);
 }
 
-/// Python `_continue_pending_teleport`: close the picker and start teleporting.
+/// Close the picker and start teleporting.
 pub(super) fn continue_pending(app: &mut App, client: &Arc<Client>, project_id: String) {
     let state = std::mem::take(&mut app.vibe_code_project);
     crate::teleport::begin(

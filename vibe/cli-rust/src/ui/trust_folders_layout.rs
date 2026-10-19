@@ -173,7 +173,7 @@ fn options_row(trust: &TrustFolders) -> Row {
         if index > 0 {
             row.push((" ".repeat(OPTION_GAP), plain));
         }
-        let style = match index == trust.selected {
+        let style = match index == trust.list.selected() {
             true => super::list_cursor::style(),
             false => plain,
         };

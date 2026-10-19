@@ -223,6 +223,7 @@ ChildLifecycleState = Annotated[
 
 
 class ChildSessionRecord(SubagentModel):
+    admission_sequence: int = Field(default=0, ge=0)
     agent_name: str = Field(min_length=1)
     agent_type: str | None
     child_session_id: str = Field(min_length=1, pattern=_SESSION_ID_PATTERN.pattern)

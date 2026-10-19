@@ -1,6 +1,5 @@
 //! `/config` settings screen: a centered modal listing config rows in Popular
-//! and Advanced sections. Mirrors Python's `ConfigScreen` and the layout
-//! constants in `screens/config/_common.py`.
+//! and Advanced sections.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -8,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use super::{config_edit, config_options, list_cursor, list_scroll, scrollbar, theme};
+use super::{config_edit, config_options, list_cursor, scrollbar, theme};
 use crate::app::App;
 use crate::config::{self, ConfigField};
 use crate::hints::{self, action, key, Hint};
@@ -38,16 +37,15 @@ pub(super) enum Opt {
     Header(String),
     Blank,
     Row {
-        selected: bool,
+        index: usize,
         name: String,
         value: String,
     },
 }
 
 /// Draw the modal over `area` (the full screen); the base UI shows through the
-/// margins, like Textual's centered `ModalScreen`.
+/// margins.
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    app.config_screen.area = area;
     // The modal hides the chat caret and takes the keys.
     app.view.cursor_position = None;
     let w = ((area.width as u32 * 96 / 100) as u16).min(92);
@@ -107,11 +105,19 @@ fn draw_options(app: &mut App, f: &mut Frame, bx: u16, top: u16, w: u16, help_y:
     let fields: Vec<ConfigField> = config::filtered(app).into_iter().cloned().collect();
     let lines = config_options::build_lines(
         &fields,
-        app.config_screen.selected,
         app.config_screen.search.query.trim().is_empty() || fields.len() > 5,
     );
     let total = lines.len() as u16;
-    let offset = reconcile_scroll(app, &lines, visible);
+    let options: Vec<_> = lines
+        .iter()
+        .map(|line| match line {
+            Opt::Row { index, .. } => Some(*index),
+            _ => None,
+        })
+        .collect();
+    let rows = Rect::new(opt_x, top, opt_width.saturating_sub(1), visible);
+    let offset = app.config_screen.list.layout(&options, rows);
+    let highlighted = app.config_screen.list.selected();
     for (row, line) in lines.iter().skip(offset).take(visible as usize).enumerate() {
         let y = top + row as u16;
         match line {
@@ -129,12 +135,8 @@ fn draw_options(app: &mut App, f: &mut Frame, bx: u16, top: u16, w: u16, help_y:
                         .add_modifier(Modifier::DIM),
                 );
             }
-            Opt::Row {
-                selected,
-                name,
-                value,
-            } => {
-                let (name_style, value_style) = if *selected {
+            Opt::Row { index, name, value } => {
+                let (name_style, value_style) = if *index == highlighted {
                     let bar = Rect::new(opt_x, y, opt_width.saturating_sub(1), 1);
                     f.buffer_mut().set_style(bar, list_cursor::style());
                     (list_cursor::style(), list_cursor::style())
@@ -179,32 +181,6 @@ fn draw_options(app: &mut App, f: &mut Frame, bx: u16, top: u16, w: u16, help_y:
             offset as u16,
         );
     }
-}
-
-/// Keep the highlighted field visible, the wheel's free scroll aside. Returns
-/// the new top line offset.
-fn reconcile_scroll(app: &mut App, lines: &[Opt], visible: u16) -> usize {
-    let visible = visible as usize;
-    let max = lines.len().saturating_sub(visible);
-    let offset = match app.config_screen.free_scroll {
-        true => app.config_screen.scroll.min(max),
-        false => {
-            let selected = lines
-                .iter()
-                .position(|l| matches!(l, Opt::Row { selected: true, .. }));
-            let highlight = selected.map_or(0..0, |line| line..line + 1);
-            let is_option = |line: usize| matches!(lines[line], Opt::Row { .. });
-            list_scroll::follow(
-                app.config_screen.scroll,
-                visible,
-                lines.len(),
-                highlight,
-                is_option,
-            )
-        }
-    };
-    app.config_screen.scroll = offset;
-    offset
 }
 
 /// A centered section rule with the dim dashes and a brighter bold label.

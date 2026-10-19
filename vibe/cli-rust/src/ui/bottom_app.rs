@@ -11,7 +11,7 @@ use crate::selection::RegionId;
 /// The two border columns plus the `padding: 0 1` every bottom-app box uses.
 const BORDER_WIDTH: u16 = 4;
 
-/// Which bottom app replaces the input box (Python's `BottomApp`).
+/// Which bottom app replaces the input box.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Approval,
@@ -81,8 +81,8 @@ pub(crate) fn draw(
     bottom_bar::draw(app, f, bar);
 }
 
-/// The text rectangle inside the box border and padding (Python selects
-/// everything its widgets paint, but never the container's border).
+/// The text rectangle inside the box border and padding (selection covers
+/// everything painted inside, never the border).
 pub(crate) fn content(area: Rect) -> Rect {
     Rect {
         x: area.x.saturating_add(BORDER_WIDTH / 2),

@@ -7,7 +7,6 @@ from vibe import __version__
 from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.telemetry.types import (
     AgentEntrypoint,
-    AttachmentKind,
     ExperimentAssignment,
     LaunchContext,
     TelemetryBaseMetadata,
@@ -15,7 +14,6 @@ from vibe.core.telemetry.types import (
     TelemetryRequestMetadata,
     TerminalEmulator,
 )
-from vibe.core.types import LLMMessage
 from vibe.utils.platform import get_platform_id, get_platform_version
 
 
@@ -77,17 +75,6 @@ def build_request_metadata(
         user_plan=user_plan,
         **launch_payload,
     )
-
-
-def build_attachment_counts(
-    message: LLMMessage | None, *, supports_images: bool
-) -> dict[AttachmentKind, int]:
-    if message is None:
-        return {}
-    counts: dict[AttachmentKind, int] = {}
-    if supports_images and message.images:
-        counts[AttachmentKind.IMAGE] = len(message.images)
-    return counts
 
 
 def build_launch_context(

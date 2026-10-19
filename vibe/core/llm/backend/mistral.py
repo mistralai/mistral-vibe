@@ -116,7 +116,7 @@ def _cached_tokens(usage: object | None) -> int:
     )
     try:
         return int(value or 0)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0
 
 
@@ -553,7 +553,7 @@ class MistralBackend:
         tool_choice: StrToolChoice | AvailableTool | None,
         extra_headers: dict[str, str] | None,
         metadata: dict[str, str] | None = None,
-    ) -> AsyncGenerator[LLMChunk, None]:
+    ) -> AsyncGenerator[LLMChunk]:
         call = ModelCall(
             provider=self._provider.name,
             endpoint=self._server_url,

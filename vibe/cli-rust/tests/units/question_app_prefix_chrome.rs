@@ -6,9 +6,14 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use vibe_rs::app::{App, Selection};
-use vibe_rs::question_input::handle_mouse;
 use vibe_rs::selection::{region, Granularity, Region, RegionId};
 use vibe_rs::server::{QuestionChoice, UserQuestion};
+
+/// Route one mouse event through the question app with a stub app-server client.
+fn handle_mouse(app: &mut App, event: crossterm::event::MouseEvent) {
+    let client = std::sync::Arc::new(vibe_rs::server::Client::stub());
+    vibe_rs::question_input::handle_mouse(app, &client, event);
+}
 
 /// The box-content region the question draw publishes, as the render would.
 fn question_region(x: u16, y: u16, width: u16, height: u16) -> Region {
@@ -91,7 +96,7 @@ fn question_selection(anchor: (u16, i32), head: (u16, i32)) -> Selection {
 #[test]
 fn a_press_on_an_option_prefix_anchors_no_selection() {
     let mut app = app_with_question();
-    app.question_app.option_rows = vec![(7, 0), (8, 1)];
+    crate::question_app::set_rows(&mut app, &[(7, 0), (8, 1)]);
     app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
     app.view.bottom_app_selection_chrome = vec![(7, 2, 6), (8, 2, 6)];
 
@@ -113,7 +118,7 @@ fn a_press_on_an_option_prefix_anchors_no_selection() {
 #[test]
 fn a_same_cell_press_on_a_prefix_still_clicks_its_option() {
     let mut app = app_with_question();
-    app.question_app.option_rows = vec![(7, 0), (8, 1)];
+    crate::question_app::set_rows(&mut app, &[(7, 0), (8, 1)]);
     app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
     app.view.bottom_app_selection_chrome = vec![(7, 2, 6), (8, 2, 6)];
 
@@ -123,13 +128,13 @@ fn a_same_cell_press_on_a_prefix_still_clicks_its_option() {
     );
     handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 3, 8));
 
-    assert_eq!(app.question_app.selected_option, 1);
+    assert_eq!(app.question_app.list.selected(), 1);
 }
 
 #[test]
 fn a_same_cell_press_on_a_multi_select_prefix_still_ticks_its_option() {
     let mut app = app_with_multi_select_question();
-    app.question_app.option_rows = vec![(7, 0), (8, 1)];
+    crate::question_app::set_rows(&mut app, &[(7, 0), (8, 1)]);
     app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
     app.view.bottom_app_selection_chrome = vec![(7, 2, 10)];
 
@@ -139,7 +144,7 @@ fn a_same_cell_press_on_a_multi_select_prefix_still_ticks_its_option() {
     );
     handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 3, 7));
 
-    assert_eq!(app.question_app.selected_option, 0);
+    assert_eq!(app.question_app.list.selected(), 0);
     assert!(app.question_app.multi_selections[&0].contains(&0));
 }
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 from collections.abc import Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -22,22 +21,17 @@ from vibe.app_server._project_links import (
     ProjectLinksInternalError,
     ProjectLinksInvalidRequest,
 )
-from vibe.app_server._projection import (
-    project_config_view,
-    project_unified_agent_summaries,
-)
+from vibe.app_server._projection import project_agent_summaries, project_config_view
 from vibe.app_server._session_model import active_model_is_pinned
 from vibe.app_server._setup import SetupRequestHandler
 from vibe.app_server._state import build_stored_public_state, history_page
-from vibe.app_server._utils import now_ms, optional_time_ms, time_ms
 from vibe.app_server._workspace import (
     WorkspaceTrustError,
     decide_workspace_trust,
     read_untrusted_config_dirs,
     read_workspace_trust,
 )
-from vibe.app_server._worktree_session import SessionWorktrees
-from vibe.app_server.models import ConfigIssue, IdleSessionStatus, PublicSession
+from vibe.app_server._worktree_cleanup import session_finished, worktree_cleanup
 from vibe.app_server.protocol import (
     AgentsListParams,
     AgentsListResponse,
@@ -68,8 +62,6 @@ from vibe.app_server.protocol import (
     SessionHistoryGetResponse,
     SessionHistoryListParams,
     SessionHistoryListResponse,
-    SessionListParams,
-    SessionListResponse,
     SessionReadParams,
     SessionReadResponse,
     SessionRelocateParams,
@@ -90,9 +82,6 @@ from vibe.app_server.protocol import (
     WorkspaceWorktreeListResponse,
     WorkspaceWorktreePruneParams,
     WorkspaceWorktreePruneResponse,
-    WorkspaceWorktreeReapCancelParams,
-    WorkspaceWorktreeReapParams,
-    WorkspaceWorktreeReapResponse,
     WorkspaceWorktreeRemoveConfirmParams,
     WorkspaceWorktreeRemoveResponse,
     WorktreeRemoveOutcome,
@@ -100,6 +89,7 @@ from vibe.app_server.protocol import (
 from vibe.core.agents.manager import AgentManager
 from vibe.core.config import VibeConfigSchema, build_default_orchestrator
 from vibe.core.config.harness_files import HarnessFilesManager
+from vibe.core.config.layers.model_catalog import apply_cached_model_catalog
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.git.errors import (
     GitError,
@@ -114,17 +104,11 @@ from vibe.core.git.worktree import (
     WorktreeRepository,
 )
 from vibe.core.hooks.config import load_hooks_from_fs
-from vibe.core.session import last_session_pointer
-from vibe.core.session.resume_sessions import (
-    ResumeSessionInfo,
-    list_local_resume_sessions,
-)
 from vibe.core.session.saved_sessions import (
     delete_saved_session,
     relocate_saved_session,
     update_saved_session_title,
 )
-from vibe.core.session.session_interop import resolve_legacy_session_reference
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.skills.manager import SkillManager
 from vibe.core.skills.models import SkillSource
@@ -146,10 +130,9 @@ _HOST_METHODS = frozenset({
     "projectLinks/unlink",
     "session/delete",
     "session/history/list",
-    "session/list",
     "session/read",
-    # Only reached with no session attached. A live one is routed to the agent
-    # loop, which moves the workspace it is holding; here there is nothing
+    # Only reached with no session attached. A live one is routed to its
+    # backend, which moves the workspace it is holding; here there is nothing
     # holding it, so the move is the record and nothing else.
     "session/relocate",
     "session/rename",
@@ -163,54 +146,21 @@ _HOST_METHODS = frozenset({
     "workspace/git/worktrees/limit/update",
     "workspace/git/worktrees/list",
     "workspace/git/worktrees/prune",
-    "workspace/git/worktrees/reap",
-    "workspace/git/worktrees/reap/cancel",
     "workspace/git/worktrees/remove",
 })
 
 
 class HostRequestHandler:
     def __init__(
-        self,
-        harness_files: HarnessFilesManager,
-        startup_issue: ConfigIssue | None = None,
-        harness_selection_source: str | None = None,
-        *,
-        image_fallback: bool = False,
+        self, harness_files: HarnessFilesManager, *, image_fallback: bool = False
     ) -> None:
         self._harness_files = harness_files
-        # Always None from this server since VIBE-4903 (a Runtime that cannot
-        # load aborts startup); kept for wire compatibility with older servers
-        # that still fall back and report a startup issue.
-        self._startup_issue = startup_issue
-        self._harness_selection_source = harness_selection_source
         self._image_fallback = image_fallback
         self._project_links = ProjectLinksController()
         self._setup = SetupRequestHandler(harness_files)
 
     def handles(self, method: str) -> bool:
         return method in _HOST_METHODS
-
-    async def legacy_open_target(
-        self, session_id: str | None, cwd: str | None
-    ) -> tuple[str, str | None] | None:
-        config = await self._load_config(None if session_id is not None else cwd)
-        if session_id is not None:
-            reference = await asyncio.to_thread(
-                resolve_legacy_session_reference, session_id, config.session_logging
-            )
-            if reference is None:
-                return None
-            return reference.session_id, reference.cwd or None
-
-        sessions = await asyncio.to_thread(_continue_resume_sessions, config, cwd)
-        target_id = _continue_session_id(config, sessions)
-        if target_id is None:
-            return None
-        target = next(
-            session for session in sessions if session.session_id == target_id
-        )
-        return target.session_id, target.cwd or None
 
     async def dispatch(
         self,
@@ -283,16 +233,12 @@ class HostRequestHandler:
         self, method: str, raw_params: dict[str, Any]
     ) -> ProtocolModel:
         match method:
-            case "session/list":
-                params = validate_wire(SessionListParams, raw_params)
-                config = await self._load_config(params.cwd)
-                response: ProtocolModel = await asyncio.to_thread(
-                    project_session_list, config, params
-                )
             case "session/read":
                 params = validate_wire(SessionReadParams, raw_params)
                 config = await self._load_config(None)
-                response = await asyncio.to_thread(self._read_session, params, config)
+                response: ProtocolModel = await asyncio.to_thread(
+                    self._read_session, params, config
+                )
             case "session/relocate":
                 response = await self._relocate_session(
                     validate_wire(SessionRelocateParams, raw_params),
@@ -349,7 +295,7 @@ class HostRequestHandler:
             orchestrator.config.resolve_default_agent(),
             harness_files=self._harness_files.for_session(self._cwd(None)),
         )
-        active, available = project_unified_agent_summaries(
+        active, available = project_agent_summaries(
             agents.active_profile, agents.available_agents.values()
         )
         return AgentsListResponse(active=active, agents=available)
@@ -384,12 +330,10 @@ class HostRequestHandler:
 
         return ConfigReadResponse(
             config=view,
-            startup_issue=self._startup_issue,
             skills_count=skills_count,
             hooks_count=hooks_count,
             mcp_servers_total=mcp_servers_total,
             mcp_servers_enabled=mcp_servers_enabled,
-            harness_selection_source=self._harness_selection_source,
         )
 
     async def _dispatch_project_links(
@@ -508,28 +452,14 @@ class HostRequestHandler:
                 )
             case "workspace/git/worktrees/prune":
                 validate_wire(WorkspaceWorktreePruneParams, raw_params)
+                worktree_cleanup().sweep()
                 orchestrator = await self._load_orchestrator(None)
                 removed = await asyncio.to_thread(
-                    ManagedWorktree.prune, orchestrator.config.worktree_limit
+                    ManagedWorktree.prune,
+                    orchestrator.config.worktree_limit,
+                    session_finished,
                 )
                 response = WorkspaceWorktreePruneResponse(removed=removed)
-            case "workspace/git/worktrees/reap":
-                params = validate_wire(WorkspaceWorktreeReapParams, raw_params)
-                response = await asyncio.to_thread(
-                    worktree_reap_response,
-                    self._cwd(params.cwd),
-                    params.requester_id,
-                    params.request_id,
-                )
-            case "workspace/git/worktrees/reap/cancel":
-                params = validate_wire(WorkspaceWorktreeReapCancelParams, raw_params)
-                await asyncio.to_thread(
-                    SessionWorktrees.cancel_reap,
-                    self._cwd(params.cwd),
-                    params.requester_id,
-                    params.request_id,
-                )
-                response = EmptyResponse()
             case "workspace/git/checkouts":
                 checkouts = validate_wire(WorkspaceGitCheckoutsParams, raw_params)
                 response = await asyncio.to_thread(
@@ -670,6 +600,7 @@ class HostRequestHandler:
         from vibe.app_server._runtime import _apply_cached_experiment_variants
 
         await _apply_cached_experiment_variants(orchestrator)
+        await apply_cached_model_catalog(orchestrator)
         return orchestrator
 
     @staticmethod
@@ -686,156 +617,6 @@ def config_schema_response() -> ConfigSchemaReadResponse:
         "config_schema_version": f"sha256:{version}",
         "config_schema": schema,
     })
-
-
-def project_session_list(
-    config: VibeConfigSchema, params: SessionListParams
-) -> SessionListResponse:
-    # `cwds` is the union of what `cwd` matches for each entry, so an explicit
-    # empty list matches nothing and an absent one keeps the single-cwd search.
-    requested = params.cwds if params.cwds is not None else [params.cwd]
-    sessions = list(
-        {
-            session.session_id: session
-            for cwd in requested
-            for session in _continue_resume_sessions(config, cwd)
-        }.values()
-    )
-    roots = _session_roots(sessions)
-    filtered = [
-        session
-        for session in sessions
-        if (
-            params.root_session_id is None
-            or roots[session.session_id] == params.root_session_id
-        )
-        and (
-            params.parent_session_id is None
-            or session.parent_session_id == params.parent_session_id
-        )
-    ]
-    filtered.sort(
-        key=lambda session: (session.updated_at, session.session_id), reverse=True
-    )
-    start = _session_cursor_index(filtered, params.cursor)
-    page = filtered[start : start + params.limit]
-    return SessionListResponse(
-        items=[
-            PublicSession(
-                id=session.session_id,
-                root_session_id=roots[session.session_id],
-                parent_session_id=session.parent_session_id,
-                title=session.title,
-                preview=SessionLoader.get_first_user_message(
-                    session.session_id, config.session_logging
-                ),
-                status=IdleSessionStatus(),
-                created_at=time_ms(
-                    session.start_time or session.updated_at, fallback=now_ms
-                ),
-                updated_at=time_ms(session.updated_at, fallback=now_ms),
-                bumped_at=optional_time_ms(session.bumped_at),
-                cwd=session.cwd or None,
-            )
-            for session in page
-        ],
-        next_cursor=(
-            _encode_session_cursor(page[-1])
-            if start + len(page) < len(filtered) and page
-            else None
-        ),
-        continue_session_id=_continue_session_id(config, filtered),
-    )
-
-
-def _continue_session_id(
-    config: VibeConfigSchema, filtered: list[ResumeSessionInfo]
-) -> str | None:
-    """The session ``--continue`` resumes: pointer-first, else most recent."""
-    if not filtered:
-        return None
-    candidate_ids = {session.session_id for session in filtered}
-    pointer_id = last_session_pointer.load(config.session_logging)
-    if pointer_id is not None and pointer_id in candidate_ids:
-        return pointer_id
-    return filtered[0].session_id
-
-
-def _continue_resume_sessions(
-    config: VibeConfigSchema, cwd: str | None
-) -> list[ResumeSessionInfo]:
-    sessions = list_local_resume_sessions(config, cwd)
-    if cwd is None:
-        return sessions
-
-    requested = Path(cwd).expanduser().resolve()
-    listed_ids = {session.session_id for session in sessions}
-    sessions.extend(
-        session
-        for session in list_local_resume_sessions(config, None)
-        if session.session_id not in listed_ids
-        and _resume_session_cwd_matches(session.cwd, requested)
-    )
-    sessions.sort(
-        key=lambda session: (session.updated_at, session.session_id), reverse=True
-    )
-    return sessions
-
-
-def _resume_session_cwd_matches(session_cwd: str, requested_cwd: Path) -> bool:
-    cwd = Path(session_cwd).expanduser().resolve()
-    if cwd == requested_cwd:
-        return True
-    managed = ManagedWorktree.at(cwd)
-    if managed is None:
-        return False
-    mapping = managed.retained_repository_mapping(cwd)
-    return (
-        mapping is not None
-        and requested_cwd.is_relative_to(mapping.root)
-        and mapping.cwd.is_relative_to(requested_cwd)
-    )
-
-
-def _session_roots(sessions: list[ResumeSessionInfo]) -> dict[str, str]:
-    parents = {session.session_id: session.parent_session_id for session in sessions}
-    roots: dict[str, str] = {}
-    for session_id in parents:
-        seen: set[str] = set()
-        current = session_id
-        while (parent := parents.get(current)) is not None and parent in parents:
-            if parent in seen:
-                current = session_id
-                break
-            seen.add(current)
-            current = parent
-        roots[session_id] = current
-    return roots
-
-
-def _encode_session_cursor(session: ResumeSessionInfo) -> str:
-    payload = f"{session.updated_at}\0{session.session_id}".encode()
-    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
-
-
-def _session_cursor_index(sessions: list[ResumeSessionInfo], cursor: str | None) -> int:
-    if cursor is None:
-        return 0
-    padded = cursor + "=" * (-len(cursor) % 4)
-    try:
-        updated_at, session_id = (
-            base64.urlsafe_b64decode(padded).decode().split("\0", 1)
-        )
-    except (ValueError, UnicodeDecodeError):
-        return len(sessions)
-    return next(
-        (
-            index + 1
-            for index, session in enumerate(sessions)
-            if (session.updated_at, session.session_id) == (updated_at, session_id)
-        ),
-        len(sessions),
-    )
 
 
 def worktree_list_response(
@@ -1015,31 +796,6 @@ def worktree_remove_response(
         reasons=list(release.reasons),
         branch_created=branch_created,
         holders=holders,
-    )
-
-
-def worktree_reap_response(
-    cwd: Path, requester_id: str | None = None, request_id: str | None = None
-) -> WorkspaceWorktreeReapResponse:
-    managed = ManagedWorktree.at(cwd)
-    if managed is None:
-        return WorkspaceWorktreeReapResponse(outcome="kept_unmanaged")
-    try:
-        release = managed.reap(requester_id=requester_id, request_id=request_id)
-    except (GitError, OSError) as exc:
-        logger.warning("Failed to reap worktree cwd=%s: %s", cwd, exc)
-        return WorkspaceWorktreeReapResponse(outcome="kept_error", reasons=[str(exc)])
-
-    return WorkspaceWorktreeReapResponse(
-        outcome=(
-            "kept_cancelled"
-            if release.outcome is WorktreeReleaseOutcome.KEPT_CANCELLED
-            else _WORKTREE_REMOVE_OUTCOMES[release.outcome]
-        ),
-        root=None if release.root is None else str(release.root),
-        branch=release.branch,
-        branch_deleted=release.branch_deleted,
-        reasons=list(release.reasons),
     )
 
 

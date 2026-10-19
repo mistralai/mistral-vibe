@@ -1,4 +1,4 @@
-//! Voice recording state machine (Python `VoiceManager`).
+//! Voice recording state machine.
 
 #[cfg(feature = "voice")]
 pub mod audio_recorder;
@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use tokio::sync::mpsc::Sender;
 
-/// Recording lifecycle, mirrors Python `TranscribeState`.
+/// Recording lifecycle.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum TranscribeState {
     #[default]
@@ -21,7 +21,7 @@ pub enum TranscribeState {
     Flushing,
 }
 
-/// Projected transcription config from `config/read` (Python `TranscriptionConfigView`).
+/// Projected transcription config from `config/read` (app-server `TranscriptionConfigView`).
 #[derive(Clone)]
 pub struct TranscriptionConfig {
     pub name: String,
@@ -32,7 +32,7 @@ pub struct TranscriptionConfig {
     pub api_key_env_var: String,
 }
 
-/// UI-bound updates emitted by the recording pipeline (Python listener callbacks).
+/// UI-bound updates emitted by the recording pipeline.
 pub enum VoiceEvent {
     /// The pipeline finished draining and returned to `Idle`.
     Finished,
@@ -68,7 +68,7 @@ impl Recording {
     }
 }
 
-/// Start capture + transcription (Python `VoiceManager.start_recording`).
+/// Start capture + transcription.
 #[cfg(feature = "voice")]
 pub fn start(
     cfg: &TranscriptionConfig,

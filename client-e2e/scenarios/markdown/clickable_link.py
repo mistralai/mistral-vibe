@@ -7,12 +7,9 @@ _PROMPT = "give me a link to Google"
 _URL = "https://www.google.com"
 _ANSWER = f"Open [Google]({_URL}) in your browser."
 
-expected_actions = {
-    "rust": [Action("open_url", _URL)],
-    "python": [Action("open_url", _URL)],
-}
+expected_actions = [Action("open_url", _URL)]
 
-_ROW, _COL = 15, 8
+_ROW, _COL = 11, 8
 _CLICK = f"\x1b[<0;{_COL};{_ROW}M\x1b[<0;{_COL};{_ROW}m"
 
 timeline: Timeline = [

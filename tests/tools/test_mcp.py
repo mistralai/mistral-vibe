@@ -200,8 +200,8 @@ class TestMCPHttpClient:
                 "vibe.core.tools.mcp.tools.create_vibe_mcp_http_client",
                 return_value=fake_client,
             ) as create_client,
-            patch("vibe.core.tools.mcp.tools.streamable_http_client", fake_stream),
-            patch("vibe.core.tools.mcp.tools.ClientSession", _FakeMCPClientSession),
+            patch("mcp.client.streamable_http.streamable_http_client", fake_stream),
+            patch("mcp.ClientSession", _FakeMCPClientSession),
         ):
             tools = await list_tools_http(
                 "https://mcp.example.com",
@@ -234,8 +234,8 @@ class TestMCPHttpClient:
                 "vibe.core.tools.mcp.tools.create_vibe_mcp_http_client",
                 return_value=fake_client,
             ) as create_client,
-            patch("vibe.core.tools.mcp.tools.streamable_http_client", fake_stream),
-            patch("vibe.core.tools.mcp.tools.ClientSession", _FakeMCPClientSession),
+            patch("mcp.client.streamable_http.streamable_http_client", fake_stream),
+            patch("mcp.ClientSession", _FakeMCPClientSession),
         ):
             result = await call_tool_http(
                 "https://mcp.example.com",
@@ -504,6 +504,30 @@ class TestMCPConfigModels:
         )
 
         assert config.argv() == ["python", "-m", "server", "--port", "8080"]
+
+    def test_mcp_stdio_argv_keeps_windows_path_backslashes(self, monkeypatch):
+        monkeypatch.setattr("vibe.core.config.models.is_windows", lambda: True)
+        config = MCPStdio(
+            name="test",
+            transport="stdio",
+            command='"C:\\Program Files\\dotnet\\dotnet.exe" C:\\srv\\server.dll',
+            args=["--port", "8080"],
+        )
+
+        assert config.argv() == [
+            "C:\\Program Files\\dotnet\\dotnet.exe",
+            "C:\\srv\\server.dll",
+            "--port",
+            "8080",
+        ]
+
+    def test_mcp_stdio_argv_keeps_posix_escapes_off_windows(self, monkeypatch):
+        monkeypatch.setattr("vibe.core.config.models.is_windows", lambda: False)
+        config = MCPStdio(
+            name="test", transport="stdio", command="/opt/my\\ server/run --flag"
+        )
+
+        assert config.argv() == ["/opt/my server/run", "--flag"]
 
     def test_mcp_stdio_argv_with_list_command(self):
         config = MCPStdio(
@@ -868,9 +892,9 @@ class TestMCPStdioCwd:
     @pytest.mark.asyncio
     async def test_list_tools_stdio_passes_cwd_to_params(self):
         with (
-            patch("vibe.core.tools.mcp.tools.stdio_client") as mock_client,
-            patch("vibe.core.tools.mcp.tools.ClientSession") as mock_session_cls,
-            patch("vibe.core.tools.mcp.tools.StdioServerParameters") as mock_params_cls,
+            patch("mcp.client.stdio.stdio_client") as mock_client,
+            patch("mcp.ClientSession") as mock_session_cls,
+            patch("mcp.client.stdio.StdioServerParameters") as mock_params_cls,
         ):
             mock_client.return_value.__aenter__ = AsyncMock(
                 return_value=(MagicMock(), MagicMock())
@@ -893,9 +917,9 @@ class TestMCPStdioCwd:
     @pytest.mark.asyncio
     async def test_call_tool_stdio_passes_cwd_to_params(self):
         with (
-            patch("vibe.core.tools.mcp.tools.stdio_client") as mock_client,
-            patch("vibe.core.tools.mcp.tools.ClientSession") as mock_session_cls,
-            patch("vibe.core.tools.mcp.tools.StdioServerParameters") as mock_params_cls,
+            patch("mcp.client.stdio.stdio_client") as mock_client,
+            patch("mcp.ClientSession") as mock_session_cls,
+            patch("mcp.client.stdio.StdioServerParameters") as mock_params_cls,
             patch("vibe.core.tools.mcp.tools._parse_call_result") as mock_parse,
         ):
             mock_client.return_value.__aenter__ = AsyncMock(

@@ -3,7 +3,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-/// One `vibeCode/teleport/event` payload (Python `TeleportEvent`).
+/// One `vibeCode/teleport/event` payload (the server's `TeleportEvent`).
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(
     tag = "kind",

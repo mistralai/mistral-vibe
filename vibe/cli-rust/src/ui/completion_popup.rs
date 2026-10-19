@@ -10,7 +10,7 @@ use crate::app::App;
 use crate::completion_manager::CompletionEntry;
 use crate::utils::text::wrap_hard;
 
-/// Popup viewport height in content rows (Python `max_height` 12 minus borders).
+/// Popup viewport height in content rows (a 12-row popup minus borders).
 const MAX_VISIBLE: usize = 10;
 
 /// One rendered terminal row: label fragment, selected flag, description fragment.
@@ -59,7 +59,7 @@ pub fn popup_height(app: &App, width: u16) -> u16 {
     (lines.len().min(MAX_VISIBLE) + 2) as u16
 }
 
-/// Width of the command column: the widest label, capped at Python's `max-width: 30%`.
+/// Width of the command column: the widest label, capped at 30% of the width.
 fn command_width(width: u16, entries: &[CompletionEntry]) -> usize {
     let cap = if entries.iter().any(|entry| !entry.description.is_empty()) {
         (width as usize)
@@ -157,7 +157,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     {
         let y = inner.y + row as u16;
         if let Some(label) = &line.label {
-            // Textual's `.completion-selected .completion-command` is `bold reverse`;
+            // The selected command is `bold reverse`;
             // a manual color swap would be a no-op under terminal-default ansi colors.
             let mut style = Style::default()
                 .fg(theme::foreground())

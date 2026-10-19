@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from vibe.core.model_catalog.cache import store_cached_model_catalog
 from vibe.core.model_catalog.client import ModelCatalogClient
 from vibe.core.model_catalog.models import ModelCatalogResponse
+from vibe.core.model_catalog.wait import mark_model_catalog_failed
 from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
@@ -18,7 +19,9 @@ async def refresh_model_catalog(
     credential — never on the active model's provider.
 
     Returns None when the feature is disabled, no Mistral credential is held,
-    or the fetch failed; the caller then keeps whatever it already has.
+    or the fetch failed; the caller then keeps whatever it already has. A
+    failed fetch is also recorded for the process, so no later session waits
+    for the catalog (``vibe.core.model_catalog.wait``).
     """
     if not config.experimental_enable_model_catalog:
         logger.debug("Model catalog fetch skipped: experimental flag off")
@@ -32,9 +35,17 @@ async def refresh_model_catalog(
     provider, api_key = provider_and_key
     client = ModelCatalogClient.from_provider(provider)
     try:
-        return await client.fetch(api_key)
+        response = await client.fetch(api_key)
+    except Exception:
+        mark_model_catalog_failed()
+        raise
     finally:
         await client.aclose()
+    # Recorded only past the skips above: a user who adds a credential later
+    # in the process must still wait for the catalog.
+    if response is None:
+        mark_model_catalog_failed()
+    return response
 
 
 async def fetch_and_cache_model_catalog(

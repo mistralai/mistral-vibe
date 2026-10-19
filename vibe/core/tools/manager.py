@@ -40,7 +40,7 @@ def _try_canonical_module_name(path: Path) -> str | None:
     """
     try:
         parts = path.resolve().parts
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
 
     package_indices = [
@@ -163,14 +163,6 @@ class ToolManager:
         )
         if not defer_mcp:
             self.integrate_all()
-
-    def set_mcp_registry(self, mcp_registry: MCPRegistry | None) -> None:
-        self._mcp_registry = mcp_registry
-
-    def set_connector_registry(
-        self, connector_registry: ConnectorRegistry | None
-    ) -> None:
-        self._connector_registry = connector_registry
 
     def _get_mcp_registry(self) -> MCPRegistry:
         if self._mcp_registry is None:
@@ -549,7 +541,7 @@ class ToolManager:
         """Async MCP discovery — canonical implementation."""
         if self._mcp_integrated:
             return
-        if not self._config.mcp_servers:
+        if not self._config.enable_mcp or not self._config.mcp_servers:
             if self._mcp_registry is not None:
                 self._mcp_registry.sync_active_servers([])
             return
@@ -633,15 +625,6 @@ class ToolManager:
 
         await self._integrate_all_async(force_refresh=True)
 
-    async def reconfigure_mcp_async(self) -> None:
-        """Rebuild MCP tool visibility while retaining valid registry descriptors."""
-        with self._lock:
-            self._purge_mcp_state()
-            self._mcp_integrated = False
-            if self._mcp_registry is not None:
-                self._mcp_registry.sync_active_servers(self._config.mcp_servers)
-        await self._integrate_mcp_async()
-
     def suspend_mcp(self, name: str, tool_name: str | None = None) -> None:
         """Withdraw one source or remote tool before reducing its authority."""
         with self._lock:
@@ -650,21 +633,6 @@ class ToolManager:
                 for key, tool_class in self._all_tools.items()
                 if self._is_remote_tool_class(tool_class)
                 and not tool_class.is_connector()
-                and tool_class.get_server_name() == name
-                and (tool_name is None or tool_class.get_remote_name() == tool_name)
-            ]
-            for key in stale_keys:
-                self._all_tools.pop(key, None)
-                self._instances.pop(key, None)
-
-    def suspend_connector(self, name: str, tool_name: str | None = None) -> None:
-        """Withdraw one connector source or tool before reducing its authority."""
-        with self._lock:
-            stale_keys = [
-                key
-                for key, tool_class in self._all_tools.items()
-                if self._is_remote_tool_class(tool_class)
-                and tool_class.is_connector()
                 and tool_class.get_server_name() == name
                 and (tool_name is None or tool_class.get_remote_name() == tool_name)
             ]
@@ -784,12 +752,3 @@ class ToolManager:
         )
         self._instances[tool_name] = instance
         return instance
-
-    def pop_mcp_errors(self) -> dict[str, str]:
-        """Return and clear pending MCP discovery errors (server name -> message)."""
-        if self._mcp_registry is None:
-            return {}
-        return self._mcp_registry.pop_failed()
-
-    def reset_all(self) -> None:
-        self._instances.clear()

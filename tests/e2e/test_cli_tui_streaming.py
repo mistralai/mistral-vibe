@@ -7,9 +7,9 @@ import pytest
 
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
-    ansi_tolerant_pattern,
     send_ctrl_c_until_quit_confirmation,
     wait_for_main_screen,
+    wait_for_rendered_text,
     wait_for_request_count_while_draining_child_output,
 )
 from tests.e2e.mock_server import StreamingMockServer
@@ -34,7 +34,7 @@ def test_spawn_cli_to_send_and_receive_message(
             expected_count=1,
             timeout=10,
         )
-        child.expect(ansi_tolerant_pattern("Hello from mock server"), timeout=10)
+        wait_for_rendered_text(child, captured, "Hello from mock server", timeout=10)
 
         send_ctrl_c_until_quit_confirmation(child, captured, timeout=5)
         child.expect(pexpect.EOF, timeout=10)

@@ -26,8 +26,8 @@ _UP = "\x1b[A"
 
 # After the save the queue controls are gone and the edited prompt is still
 # visible; the steer itself is proven by the requests.json golden.
-screen_contains = {"rust": ("second edited",)}
-screen_excludes = {"rust": ("↑↓/jk to select", "Enter to save")}
+screen_contains = ("second edited",)
+screen_excludes = ("↑↓/jk to select", "Enter to save")
 settle_per_key = True
 capture_steps = {5, 6}
 

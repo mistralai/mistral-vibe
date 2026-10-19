@@ -28,15 +28,12 @@ pub struct State {
     pub query: Field,
     pub clipboard: String,
     pub items: Vec<Item>,
-    pub selected: usize,
-    pub scroll: usize,
-    pub free_scroll: bool,
+    pub list: crate::option_list::OptionList<crate::option_list::SingleAction>,
     pub search_focused: bool,
     pub create: Option<Create>,
     pub list_area: ratatui::layout::Rect,
     pub search_area: ratatui::layout::Rect,
     pub branch_area: ratatui::layout::Rect,
-    pub pressed: Option<usize>,
     pub dragged_field: Option<FieldSlot>,
     pub teleport_pending: bool,
     pub teleport_prompt: Option<String>,
@@ -76,40 +73,29 @@ impl State {
         let Some(view) = &self.view else { return };
         let previous = focus.or_else(|| {
             self.items
-                .get(self.selected)
+                .get(self.list.selected())
                 .and_then(|i| i.option_id(view))
         });
         self.items = build_project_picker_items(view, &self.query.text);
-        self.selected = previous
+        let selected = previous
             .and_then(|id| {
                 self.items
                     .iter()
                     .position(|i| i.option_id(view).as_deref() == Some(&id))
             })
             .unwrap_or_else(|| self.items.iter().position(Item::selectable).unwrap_or(0));
-        self.free_scroll = false;
+        self.list.select(selected);
     }
 
     pub fn show_picker(&mut self) {
         self.create = None;
         self.query = Field::default();
         self.items.clear();
-        self.scroll = 0;
+        self.list.reset_viewport();
         self.search_focused = false;
-        self.pressed = None;
+        self.list.cancel();
         self.dragged_field = None;
         self.refresh(None);
-    }
-
-    pub(crate) fn selectable_index_at(&self, at: (u16, u16)) -> Option<usize> {
-        if !self.list_area.contains(at.into()) {
-            return None;
-        }
-        let index = self.scroll + at.1.saturating_sub(self.list_area.y) as usize;
-        self.items
-            .get(index)
-            .is_some_and(Item::selectable)
-            .then_some(index)
     }
 
     pub fn page(&mut self, down: bool) {
@@ -118,9 +104,9 @@ impl State {
         }
         let height = self.list_area.height as usize;
         let target = if down {
-            self.selected.saturating_add(height)
+            self.list.selected().saturating_add(height)
         } else {
-            self.selected.saturating_sub(height)
+            self.list.selected().saturating_sub(height)
         }
         .min(self.items.len().saturating_sub(1));
         let selected = if down {
@@ -129,20 +115,14 @@ impl State {
             (0..=target).rev().find(|&i| self.items[i].selectable())
         };
         if let Some(selected) = selected {
-            self.selected = selected;
-            self.free_scroll = false;
+            self.list.select(selected);
         }
     }
 
     pub fn navigate(&mut self, down: bool) {
-        let len = self.items.len();
-        let selectable = |index: usize| self.items[index].selectable();
-        let Some(selected) = crate::list_nav::wrap_selectable(self.selected, len, down, selectable)
-        else {
-            return;
-        };
-        self.selected = selected;
-        self.free_scroll = false;
+        let items = &self.items;
+        self.list
+            .step(down, items.len(), true, |index| items[index].selectable());
     }
 }
 
@@ -189,10 +169,12 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, reply: Reply) {
         Event::Loaded(response) => {
             let state = &mut app.vibe_code_project;
             let focus = response.focus_option_id.or_else(|| {
-                state
-                    .view
-                    .as_ref()
-                    .and_then(|v| state.items.get(state.selected).and_then(|i| i.option_id(v)))
+                state.view.as_ref().and_then(|v| {
+                    state
+                        .items
+                        .get(state.list.selected())
+                        .and_then(|i| i.option_id(v))
+                })
             });
             state.view = Some(response.view);
             state.refresh(focus);
@@ -252,7 +234,7 @@ pub fn select(app: &mut App, client: &Arc<Client>) {
     let Some(view) = &state.view else { return };
     let Some(item) = state
         .items
-        .get(state.selected)
+        .get(state.list.selected())
         .filter(|i| i.selectable())
         .or_else(|| state.items.iter().find(|i| i.selectable()))
     else {

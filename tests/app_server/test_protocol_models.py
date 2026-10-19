@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from uuid import UUID
 
 from pydantic import ValidationError
 import pytest
@@ -18,6 +19,7 @@ from vibe.app_server.models import (
     PublicSessionState,
     PublicTurn,
     PublicTurnQueue,
+    PublicTurnQueueEditState,
     PublicTurnStatus,
     TextContentBlock,
     validate_history_entry,
@@ -54,6 +56,14 @@ from vibe.app_server.protocol import (
     TurnEnqueueParams,
     TurnEnqueueResponse,
     TurnInterruptResponse,
+    TurnQueueEditAbandonParams,
+    TurnQueueEditAbandonResponse,
+    TurnQueueEditCancelParams,
+    TurnQueueEditCancelResponse,
+    TurnQueueEditSaveParams,
+    TurnQueueEditSaveResponse,
+    TurnQueueEditStartParams,
+    TurnQueueEditStartResponse,
     TurnQueueReadResponse,
     TurnQueueRemoveParams,
     TurnQueueRemoveResponse,
@@ -68,6 +78,13 @@ from vibe.app_server.protocol import (
     TurnSteerResponse,
     TurnUserInputEntry,
 )
+
+
+@pytest.mark.parametrize("method", ["tools/list", "stats/read", "diagnostics/list"])
+def test_retired_methods_are_not_advertised(method: str) -> None:
+    assert method not in SERVER_METHODS
+
+
 from vibe.user_content import UserDisplayContent
 
 
@@ -217,7 +234,7 @@ def test_agent_config_carries_app_server_and_vibe_launch_fields() -> None:
         "instructions": "Use the project conventions.",
         "workdir": "/workspace",
         "workspaceRoots": ["/workspace", "/shared"],
-        "agent": "plan",
+        "agent": "ask",
         "tools": [
             {
                 "name": "select_customer",
@@ -343,6 +360,20 @@ def test_turn_queue_protocol_models_use_camel_case() -> None:
         queue_item_id="queue-1",
         entries=params.entries,
     )
+    edit_id = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    edit_start = TurnQueueEditStartParams(
+        session_id="session-1", queue_item_id="queue-1", edit_id=edit_id
+    )
+    edit_save = TurnQueueEditSaveParams(
+        session_id="session-1",
+        queue_item_id="queue-1",
+        edit_id=edit_id,
+        idempotency_key="save-1",
+        entries=params.entries,
+    )
+    edit_cancel = TurnQueueEditCancelParams(
+        session_id="session-1", queue_item_id="queue-1", edit_id=edit_id
+    )
     remove = TurnQueueRemoveParams(session_id="session-1", queue_item_id="queue-1")
     notification = TurnQueueUpdatedParams(
         event_id=3, session_id="session-1", emitted_at=30, queue=queue
@@ -367,6 +398,19 @@ def test_turn_queue_protocol_models_use_camel_case() -> None:
         "entries": params.model_dump(mode="json")["entries"],
         "queueItemId": "queue-1",
     }
+    assert edit_start.model_dump(mode="json") == {
+        "sessionId": "session-1",
+        "queueItemId": "queue-1",
+        "editId": str(edit_id),
+    }
+    assert edit_save.model_dump(mode="json") == {
+        "sessionId": "session-1",
+        "queueItemId": "queue-1",
+        "editId": str(edit_id),
+        "idempotencyKey": "save-1",
+        "entries": params.model_dump(mode="json")["entries"],
+    }
+    assert edit_cancel.model_dump(mode="json") == edit_start.model_dump(mode="json")
     assert remove.model_dump(mode="json") == {
         "sessionId": "session-1",
         "queueItemId": "queue-1",
@@ -389,6 +433,30 @@ def test_turn_queue_protocol_models_use_camel_case() -> None:
         ).idempotency_key
         is None
     )
+
+
+def test_queued_turn_edit_save_requires_an_idempotency_key() -> None:
+    with pytest.raises(ValidationError):
+        validate_wire(
+            TurnQueueEditSaveParams,
+            {
+                "sessionId": "session-1",
+                "queueItemId": "queue-1",
+                "editId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "entries": [
+                    {"role": "user", "content": [{"type": "text", "text": "edited"}]}
+                ],
+            },
+        )
+
+
+def test_public_turn_queue_exposes_only_the_edited_item_identity() -> None:
+    queue = _turn_queue().model_copy(
+        update={"editing": PublicTurnQueueEditState(queue_item_id="queue-1")}
+    )
+
+    assert queue.model_dump(mode="json")["editing"] == {"queueItemId": "queue-1"}
+    assert "editId" not in queue.model_dump_json()
 
 
 def test_canonical_enqueue_rejects_the_old_vibe_payload() -> None:
@@ -588,6 +656,10 @@ def test_canonical_enqueue_requires_the_user_entry_to_be_last() -> None:
 def test_turn_queue_methods_are_advertised() -> None:
     assert {
         "session/turn/enqueue",
+        "session/turn/queue/edit/cancel",
+        "session/turn/queue/edit/abandon",
+        "session/turn/queue/edit/save",
+        "session/turn/queue/edit/start",
         "session/turn/queue/read",
         "session/turn/queue/remove",
         "session/turn/queue/replace",
@@ -618,6 +690,27 @@ def test_background_process_output_method_is_advertised() -> None:
     assert is_advertised
 
 
+def test_turn_queue_abandonment_uses_only_the_edit_identity() -> None:
+    """*Prepare*: A queue edit identity belonging to one Session.
+    *Do*: Serialize the abandonment request and response.
+    *Assert*: The request carries no content and the response is empty.
+    """
+    # Prepare
+    identity = {
+        "sessionId": "session-1",
+        "queueItemId": "queue-1",
+        "editId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    }
+
+    # Do
+    params = TurnQueueEditAbandonParams.model_validate(identity)
+    response = TurnQueueEditAbandonResponse()
+
+    # Assert
+    assert params.model_dump(mode="json") == identity
+    assert response.model_dump(mode="json") == {}
+
+
 def test_turn_queue_command_results_are_minimal() -> None:
     assert TurnEnqueueResponse(queue_item_id="queue-1").model_dump(mode="json") == {
         "queueItemId": "queue-1"
@@ -625,6 +718,13 @@ def test_turn_queue_command_results_are_minimal() -> None:
     assert TurnQueueReplaceResponse(queue_item_id="queue-1").model_dump(
         mode="json"
     ) == {"queueItemId": "queue-1"}
+    assert TurnQueueEditStartResponse(queue_item_id="queue-1").model_dump(
+        mode="json"
+    ) == {"queueItemId": "queue-1"}
+    assert TurnQueueEditSaveResponse(queue_item_id="queue-1").model_dump(
+        mode="json"
+    ) == {"queueItemId": "queue-1"}
+    assert TurnQueueEditCancelResponse().model_dump(mode="json") == {}
     assert TurnQueueReadResponse(queue=_turn_queue()).model_dump(mode="json") == {
         "queue": _turn_queue().model_dump(mode="json")
     }

@@ -7,8 +7,8 @@ from e2e.app_server.scenario import Timeline
 
 handshake = proxy_handshake()
 request_methods = METHODS
-screen_contains = {"rust": ("localhost,127.0.0.1",)}
-screen_excludes = {"rust": ("second line",)}
+screen_contains = ("localhost,127.0.0.1",)
+screen_excludes = ("second line",)
 timeline: Timeline = [
     "/proxy-setup\r",
     "\x1b[A",

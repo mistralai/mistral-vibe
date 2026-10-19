@@ -15,6 +15,14 @@ fn automatic_compaction_config_with_threshold(token_threshold: u64) -> HarnessCo
     serde_json::from_value(value).expect("automatic compaction config is valid")
 }
 
+fn automatic_compaction_config_with_fixed_image_cost(token_threshold: u64) -> HarnessConfig {
+    let mut value =
+        serde_json::to_value(automatic_compaction_config_with_threshold(token_threshold))
+            .expect("config serializes");
+    value["settings"]["context"]["image_token_cost"] = json!("fixed");
+    serde_json::from_value(value).expect("fixed image token cost config is valid")
+}
+
 fn completion_failed(action: &Value, code: &str, message: &str) -> Value {
     json!({
         "type": "completion_failed",
@@ -134,98 +142,6 @@ fn message_text(message: &Value) -> Option<&str> {
 
 fn large_text(label: &str) -> String {
     format!("{label} {}", "0123456789abcdef".repeat(12_000))
-}
-
-const PRE_LLM_BINDING_IDS: [&str; 1] = ["test-hook-0-PreLlmCall"];
-
-/// Starts a turn whose pre-LLM hook returns `github` context. Checks that the
-/// turn fails before a compaction call because no replacement can hold it.
-fn fail_turn_with_unfittable_context(
-    runtime: &mut SynchronousRuntime,
-    compaction_id: &str,
-    turn_id: &str,
-    context: &str,
-) {
-    let error = json!({
-        "code": "compaction_replacement_too_large",
-        "message": "compaction summary and required continuation context cannot fit the configured token threshold",
-        "retryable": false,
-        "details": null,
-    });
-    let hook = runtime
-        .apply(
-            user_message(turn_id, "inspect the repository", "queue"),
-            running(turn_id)
-                .dispatch(hook_call("pre_llm_call", &PRE_LLM_BINDING_IDS, Value::Null))
-                .observe(turn_started(turn_id, "inspect the repository")),
-        )
-        .only_action();
-    runtime.apply(
-        hook_completed(
-            &hook,
-            "pre_llm_call",
-            pre_llm_continue_with_context(&[("github", context)]),
-        ),
-        failed(turn_id, error.clone())
-            .observe(json!({
-                "type": "context_compaction_failed",
-                "turn_id": turn_id,
-                "action_id": compaction_id,
-                "compaction_id": compaction_id,
-                "attempt": 1,
-                "trigger": "automatic",
-                "error": error.clone(),
-            }))
-            .observe(turn_failed(turn_id, error)),
-    );
-}
-
-/// Starts a turn whose pre-LLM hook returns `output` before and after an
-/// automatic compaction. Returns the agent completion that follows.
-fn compact_turn_after_pre_llm_hook(
-    runtime: &mut SynchronousRuntime,
-    turn_id: &str,
-    output: Value,
-) -> Value {
-    let first_hook = runtime
-        .apply(
-            user_message(turn_id, "inspect it again", "queue"),
-            running(turn_id)
-                .dispatch(hook_call("pre_llm_call", &PRE_LLM_BINDING_IDS, Value::Null))
-                .observe(turn_started(turn_id, "inspect it again")),
-        )
-        .only_action();
-    let compaction = runtime
-        .apply(
-            hook_completed(&first_hook, "pre_llm_call", output.clone()),
-            running(turn_id).dispatch(compaction_call("automatic", 0, 1)),
-        )
-        .only_action();
-    let second_hook = runtime
-        .apply(
-            summary_completion(&compaction, "repository summary"),
-            running(turn_id)
-                .dispatch(hook_call("pre_llm_call", &PRE_LLM_BINDING_IDS, Value::Null))
-                .observe(context_compacted(
-                    turn_id,
-                    &compaction,
-                    "repository summary",
-                )),
-        )
-        .only_action();
-    runtime
-        .apply(
-            hook_completed(&second_hook, "pre_llm_call", output),
-            running(turn_id).dispatch(llm_call(0)),
-        )
-        .only_action()
-}
-
-fn model_texts(action: &Value) -> Vec<&str> {
-    action_messages(action)
-        .iter()
-        .filter_map(message_text)
-        .collect()
 }
 
 fn user_message_with_content(turn_id: &str, content: Value) -> Value {
@@ -413,6 +329,26 @@ fn oversized_agent_input_compacts_before_any_agent_provider_call() {
         .find(|text| text.contains("current request"))
         .expect("replacement context must preserve the latest user request");
     assert!(resumed_request.len() <= 20_000 * 4);
+}
+
+#[test]
+fn oversized_agent_input_compacts_before_a_pre_llm_hook() {
+    let turn_id = "turn-preflight-before-hook";
+    let request = large_text("current request");
+    let mut config = automatic_compaction_config();
+    add_always_hook(&mut config, HookPoint::PreLlmCall);
+    let mut runtime = SynchronousRuntime::new(config);
+
+    let compaction = runtime
+        .apply(
+            user_message(turn_id, &request, "queue"),
+            running(turn_id)
+                .dispatch(compaction_call("automatic", 0, 1))
+                .observe(turn_started(turn_id, &request)),
+        )
+        .only_action();
+
+    assert_eq!(compaction["purpose"], "compaction");
 }
 
 #[test]
@@ -1410,274 +1346,170 @@ fn manual_compaction_retries_invalid_summary_then_returns_idle() {
     );
 }
 
-///
-/// *Prepare*: A completed turn received keyed context from its pre-LLM hook.
-/// *Do*: Compact manually, then start a turn whose pre-LLM hook returns the same keyed context.
-/// *Assert*: The summary request leaves the keyed context out, and Core delivers it again after the compacted replacement.
-///
+/// *Prepare*: Automatic compaction is enabled with a 40,000-token threshold and
+/// the fixed image token cost, so one native image estimates at the constant
+/// instead of its serialized size.
+/// *Do*: Send one prompt carrying a large native image.
+/// *Assert*: The turn reaches the agent completion with the image delivered
+/// natively, because the fixed cost keeps the input under the threshold. This
+/// turn does not compact; the steered-image scenario covers fitting a
+/// compaction request that carries an image.
 #[test]
-fn keyed_pre_llm_context_is_left_out_of_the_summary_and_delivered_after_compaction() {
-    // Prepare
-    let context = "GitHub is not connected.";
-    let mut config = config();
-    add_always_hook(&mut config, HookPoint::PreLlmCall);
-    let binding_ids = ["test-hook-0-PreLlmCall"];
+fn fixed_image_cost_lets_one_prompt_and_one_image_reach_the_agent() {
+    let turn_id = "turn-fixed-image-cost-single-image";
+    let config = automatic_compaction_config_with_fixed_image_cost(40_000);
+    let content = file_image_content();
     let mut runtime = SynchronousRuntime::new(config);
-    let first_hook = runtime
-        .apply(
-            user_message("turn-before-compaction", "inspect the repository", "queue"),
-            running("turn-before-compaction")
-                .dispatch(hook_call("pre_llm_call", &binding_ids, Value::Null))
-                .observe(turn_started(
-                    "turn-before-compaction",
-                    "inspect the repository",
-                )),
-        )
-        .only_action();
-    let first_agent = runtime
-        .apply(
-            hook_completed(
-                &first_hook,
-                "pre_llm_call",
-                pre_llm_continue_with_context(&[("github", context)]),
-            ),
-            running("turn-before-compaction").dispatch(llm_call(0)),
-        )
-        .only_action();
-    runtime.finish_turn_with_text("turn-before-compaction", &first_agent, "first answer");
 
-    // Do
-    let compaction = runtime
+    let action = runtime
         .apply(
-            compact(""),
-            compacting("manual").dispatch(compaction_call("manual", 0, 1)),
-        )
-        .only_action();
-    runtime.apply(
-        summary_completion(&compaction, "repository summary"),
-        idle().observe(json!({
-            "type": "context_compacted",
-            "turn_id": null,
-            "action_id": action_id(&compaction),
-            "compaction_id": compaction["compaction_id"],
-            "attempt": compaction["attempt"],
-            "trigger": "manual",
-            "summary": "repository summary",
-            "usage": null,
-        })),
-    );
-    let second_hook = runtime
-        .apply(
-            user_message("turn-after-compaction", "continue", "queue"),
-            running("turn-after-compaction")
-                .dispatch(hook_call("pre_llm_call", &binding_ids, Value::Null))
-                .observe(turn_started("turn-after-compaction", "continue")),
-        )
-        .only_action();
-    let resumed = runtime
-        .apply(
-            hook_completed(
-                &second_hook,
-                "pre_llm_call",
-                pre_llm_continue_with_context(&[("github", context)]),
-            ),
-            running("turn-after-compaction").dispatch(llm_call(0)),
+            user_message_with_content(turn_id, content.clone()),
+            running(turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_started_with_content(turn_id, content)),
         )
         .only_action();
 
-    // Assert
-    assert!(
-        action_messages(&compaction)
-            .iter()
-            .all(|message| message_text(message) != Some(context))
-    );
-    let delivered = action_messages(&resumed)
-        .iter()
-        .filter(|message| message_text(message) == Some(context))
-        .count();
-    assert_eq!(delivered, 1);
-    assert_eq!(
-        action_messages(&resumed).last().and_then(message_text),
-        Some(context)
-    );
-    runtime.finish_turn_with_text("turn-after-compaction", &resumed, "done");
+    assert_eq!(action["purpose"], "agent");
+    let image = first_action_block_with_type(&action, "image");
+    assert_eq!(image["mimeType"], "image/png");
+    assert!(image["data"].as_str().is_some_and(|data| !data.is_empty()));
 }
 
-///
-/// *Prepare*: A pre-LLM hook returns keyed context that pushes the agent input over the threshold, and compaction starts.
-/// *Do*: Restart Core from its checkpoint, compact, then let the resumed pre-LLM hook return the same keyed context.
-/// *Assert*: The replacement leaves room for the keyed context across the restore, so Core dispatches the agent completion instead of compacting again.
-///
-#[test]
-fn keyed_context_redelivered_after_automatic_compaction_reaches_the_agent() {
-    // Prepare
-    let turn_id = "turn-keyed-context-compaction";
-    let request = format!("current request {}", "0123456789abcdef".repeat(5_000));
-    let context = format!("GitHub state {}", "fedcba9876543210".repeat(6_250));
-    let mut config = automatic_compaction_config();
-    add_always_hook(&mut config, HookPoint::PreLlmCall);
-    let binding_ids = ["test-hook-0-PreLlmCall"];
-    let mut runtime = SynchronousRuntime::new(config);
-    let first_hook = runtime
-        .apply(
-            user_message(turn_id, &request, "queue"),
-            running(turn_id)
-                .dispatch(hook_call("pre_llm_call", &binding_ids, Value::Null))
-                .observe(turn_started(turn_id, &request)),
+/// Leaves a steered native image and an oversized tool result pending in an
+/// automatic compaction, and returns its Action.
+fn pending_compaction_with_steered_image(runtime: &mut SynchronousRuntime, turn_id: &str) -> Value {
+    let first_agent = runtime.start_turn(turn_id, "read the file");
+    let arguments = json!({"path": "small.txt"});
+    let calls = vec![tool_call("small-read", "read_file", arguments.clone())];
+    let tool_action = runtime
+        .complete_with_tool_calls(
+            turn_id,
+            &first_agent,
+            &calls,
+            [runtime_tool("file_system.read_file", arguments)],
         )
         .only_action();
-    let compaction = runtime
-        .apply(
-            hook_completed(
-                &first_hook,
-                "pre_llm_call",
-                pre_llm_continue_with_context(&[("github", context.as_str())]),
-            ),
-            running(turn_id).dispatch(compaction_call("automatic", 0, 1)),
-        )
-        .only_action();
-    assert_eq!(
-        runtime.checkpoint_value()["turn"]["phase"]["context_keys"],
-        json!(["github"])
+    let steering_content = json!([{
+        "type": "image",
+        "data": "a".repeat(200_000),
+        "mimeType": "image/png",
+    }]);
+
+    runtime.apply(
+        user_message_with_content_and_mode(turn_id, steering_content.clone(), "steer"),
+        running(turn_id).keep(&tool_action).observe(json!({
+            "type": "turn_steering_received",
+            "turn_id": turn_id,
+            "content": steering_content,
+        })),
     );
 
-    // Do
-    runtime.restart_from_checkpoint();
-    let second_hook = runtime
+    let tool_output = format!("file contents {}", "0123456789abcdef".repeat(1_200));
+    let tool_result = file_read_success(&tool_action, &tool_output);
+    let expected = running(turn_id)
+        .dispatch(compaction_call("automatic", 1, 1))
+        .observe_completed_tool_result(&tool_action, &tool_result)
+        .observe(json!({
+            "type": "turn_steered",
+            "turn_id": turn_id,
+            "content": steering_content,
+        }));
+    runtime.apply(tool_result, expected).only_action()
+}
+
+/// *Prepare*: Automatic compaction is enabled with a 12,000-token threshold and
+/// the fixed image token cost. A turn is mid-flight when the user steers it
+/// with a large native image, and its pending tool result carries enough text
+/// to cross the threshold, so the compaction request would be unfittable under
+/// the serialized-byte estimate of the image.
+/// *Do*: Complete the tool call the turn is waiting for.
+/// *Assert*: The turn dispatches the compaction completion instead of failing
+/// with `compaction_request_too_large`, and the resumed agent input still
+/// carries the image natively.
+#[test]
+fn fixed_image_cost_lets_a_steered_image_compact_instead_of_failing() {
+    let turn_id = "turn-fixed-image-cost-steering";
+    let config = automatic_compaction_config_with_fixed_image_cost(12_000);
+    let mut runtime = SynchronousRuntime::new(config);
+    let compaction = pending_compaction_with_steered_image(&mut runtime, turn_id);
+
+    assert_eq!(compaction["purpose"], "compaction");
+    let resumed = runtime
         .apply(
-            summary_completion(&compaction, "repository summary"),
+            summary_completion(&compaction, "the user steered with a screenshot"),
             running(turn_id)
-                .dispatch(hook_call("pre_llm_call", &binding_ids, Value::Null))
+                .dispatch(llm_call(1))
                 .observe(context_compacted(
                     turn_id,
                     &compaction,
-                    "repository summary",
+                    "the user steered with a screenshot",
                 )),
         )
         .only_action();
+    assert_eq!(resumed["purpose"], "agent");
+    assert!(
+        action_messages(&resumed)
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .any(|block| block["type"] == "image")
+    );
+    runtime.finish_turn_with_text(turn_id, &resumed, "done");
+}
+
+/// *Prepare*: A compaction is in flight while the context holds a native image,
+/// and Core was checkpointed under the fixed image token cost.
+/// *Do*: Restore the checkpoint with the fixed policy, then complete the summary.
+/// *Assert*: The replacement is budgeted with the fixed cost, so the agent
+/// resumes with the native image.
+#[test]
+fn fixed_image_cost_budgets_an_in_flight_compaction_after_restore() {
+    let turn_id = "turn-fixed-image-cost-restore";
+    let mut runtime =
+        SynchronousRuntime::new(automatic_compaction_config_with_fixed_image_cost(12_000));
+    let compaction = pending_compaction_with_steered_image(&mut runtime, turn_id);
+
+    runtime.restart_from_checkpoint();
+
     let resumed = runtime
         .apply(
-            hook_completed(
-                &second_hook,
-                "pre_llm_call",
-                pre_llm_continue_with_context(&[("github", context.as_str())]),
-            ),
-            running(turn_id).dispatch(llm_call(0)),
+            summary_completion(&compaction, "restored with the fixed cost"),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(context_compacted(
+                    turn_id,
+                    &compaction,
+                    "restored with the fixed cost",
+                )),
         )
         .only_action();
-
-    // Assert
     assert!(
-        action_messages(&compaction)
+        action_messages(&resumed)
             .iter()
-            .all(|message| message_text(message) != Some(context.as_str()))
-    );
-    let delivered = action_messages(&resumed)
-        .iter()
-        .filter(|message| message_text(message) == Some(context.as_str()))
-        .count();
-    assert_eq!(delivered, 1);
-    assert_eq!(
-        action_messages(&resumed).last().and_then(message_text),
-        Some(context.as_str())
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .any(|block| block["type"] == "image")
     );
     runtime.finish_turn_with_text(turn_id, &resumed, "done");
 }
 
-///
-/// *Prepare*: A pre-LLM hook is bound.
-/// *Do*: The hook returns keyed context larger than the automatic compaction threshold.
-/// *Assert*: The turn fails before any compaction call, because no replacement can hold the hook's current context.
-///
+/// *Prepare*: The same in-flight compaction, checkpointed under the fixed cost.
+/// *Do*: Restore the checkpoint under the `serialized_bytes` policy.
+/// *Assert*: The checkpoint does not store the policy, so the restoring
+/// configuration budgets the image by its serialized size and the restore is
+/// rejected as unfittable.
 #[test]
-fn keyed_context_that_cannot_fit_fails_before_a_compaction_call() {
-    // Prepare
-    let mut config = automatic_compaction_config();
-    add_always_hook(&mut config, HookPoint::PreLlmCall);
-    let compaction_id = compaction_action_id(&config.task_id, 1);
-    let mut runtime = SynchronousRuntime::new(config);
+fn restore_budgets_an_in_flight_compaction_under_the_restoring_image_policy() {
+    let turn_id = "turn-serialized-image-cost-restore";
+    let mut runtime =
+        SynchronousRuntime::new(automatic_compaction_config_with_fixed_image_cost(12_000));
+    pending_compaction_with_steered_image(&mut runtime, turn_id);
 
-    // Do / Assert
-    fail_turn_with_unfittable_context(
-        &mut runtime,
-        &compaction_id,
-        "turn-unfittable-keyed-context",
-        &large_text("GitHub state"),
+    let error = runtime
+        .checkpoint_restore_error(automatic_compaction_config_with_threshold(12_000))
+        .expect("restore is rejected under the serialized-byte policy");
+
+    assert!(
+        error.contains("token threshold cannot fit"),
+        "unexpected restore error: {error}"
     );
-}
-
-///
-/// *Prepare*: A turn fails because its pre-LLM hook returned `github` context larger than the threshold.
-/// *Do*: Start the next turn, and let the hook return smaller `github` context.
-/// *Assert*: The hook runs before compaction, the replacement leaves room only for the smaller context, and the agent sees only that context.
-///
-#[test]
-fn oversized_keyed_context_failure_does_not_block_the_next_turn() {
-    // Prepare
-    let small = "GitHub is connected.";
-    let mut config = automatic_compaction_config();
-    add_always_hook(&mut config, HookPoint::PreLlmCall);
-    let compaction_id = compaction_action_id(&config.task_id, 1);
-    let mut runtime = SynchronousRuntime::new(config);
-    fail_turn_with_unfittable_context(
-        &mut runtime,
-        &compaction_id,
-        "turn-oversized-context",
-        &large_text("GitHub state"),
-    );
-
-    // Do
-    let turn_id = "turn-after-oversized-context";
-    let resumed = compact_turn_after_pre_llm_hook(
-        &mut runtime,
-        turn_id,
-        pre_llm_continue_with_context(&[("github", small)]),
-    );
-
-    // Assert
-    let texts = model_texts(&resumed);
-    assert_eq!(texts.iter().filter(|text| **text == small).count(), 1);
-    assert!(texts.iter().all(|text| !text.starts_with("GitHub state")));
-    runtime.finish_turn_with_text(turn_id, &resumed, "done");
-}
-
-///
-/// *Prepare*: A turn fails because its pre-LLM hook returned `github` context larger than the threshold.
-/// *Do*: In the next turn, the hook returns only `jira` context, or no context.
-/// *Assert*: The replacement leaves no room for the stale `github` context, so compaction succeeds and the agent completion follows.
-///
-#[test]
-fn stale_context_key_is_not_reserved() {
-    for (label, output) in [
-        (
-            "other key",
-            pre_llm_continue_with_context(&[("jira", "Jira is connected.")]),
-        ),
-        ("no context", json!({"type": "continue"})),
-    ] {
-        // Prepare
-        let mut config = automatic_compaction_config();
-        add_always_hook(&mut config, HookPoint::PreLlmCall);
-        let compaction_id = compaction_action_id(&config.task_id, 1);
-        let mut runtime = SynchronousRuntime::new(config);
-        fail_turn_with_unfittable_context(
-            &mut runtime,
-            &compaction_id,
-            "turn-stale-context",
-            &large_text("GitHub state"),
-        );
-
-        // Do
-        let turn_id = "turn-after-stale-context";
-        let resumed = compact_turn_after_pre_llm_hook(&mut runtime, turn_id, output);
-
-        // Assert
-        assert!(
-            model_texts(&resumed)
-                .iter()
-                .all(|text| !text.starts_with("GitHub state")),
-            "{label}"
-        );
-        runtime.finish_turn_with_text(turn_id, &resumed, "done");
-    }
 }

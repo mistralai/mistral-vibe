@@ -50,7 +50,9 @@ fn app_with_multi_select_question() -> App {
 #[test]
 fn paste_keeps_every_line_in_the_free_text_row() {
     let mut app = app_with_question();
-    app.question_app.selected_option = other_option_idx(&app).unwrap();
+    app.question_app
+        .list
+        .highlight(other_option_idx(&app).unwrap());
 
     handle_paste(&mut app, "one\ntwo\nthree".into());
 
@@ -63,13 +65,13 @@ fn paste_keeps_every_line_in_the_free_text_row() {
 fn paste_ticks_the_free_text_row_only_while_it_has_text() {
     let mut app = app_with_multi_select_question();
     let other_idx = other_option_idx(&app).unwrap();
-    app.question_app.selected_option = other_idx;
+    app.question_app.list.highlight(other_idx);
 
     handle_paste(&mut app, "custom answer".into());
     assert!(app.question_app.multi_selections[&0].contains(&other_idx));
 
     let mut app = app_with_multi_select_question();
-    app.question_app.selected_option = other_idx;
+    app.question_app.list.highlight(other_idx);
 
     handle_paste(&mut app, "   \n  ".into());
     assert!(!app.question_app.multi_selections[&0].contains(&other_idx));
@@ -78,12 +80,14 @@ fn paste_ticks_the_free_text_row_only_while_it_has_text() {
 #[test]
 fn paste_reattaches_a_scrolled_away_viewport() {
     let mut app = app_with_question();
-    app.question_app.selected_option = other_option_idx(&app).unwrap();
-    app.question_app.viewport.detach_at(9);
+    app.question_app
+        .list
+        .highlight(other_option_idx(&app).unwrap());
+    app.question_app.list.detach_at(9);
 
     handle_paste(&mut app, "one\ntwo".into());
 
-    assert!(!app.question_app.viewport.detached);
+    assert!(!app.question_app.list.free_scroll());
 }
 
 #[test]
@@ -99,7 +103,9 @@ fn paste_on_an_option_row_is_dropped() {
 #[test]
 fn paste_inserts_at_the_cursor_inside_existing_text() {
     let mut app = app_with_question();
-    app.question_app.selected_option = other_option_idx(&app).unwrap();
+    app.question_app
+        .list
+        .highlight(other_option_idx(&app).unwrap());
     app.question_app.other_texts.insert(0, "one three".into());
     app.question_app.other_cursor = 4;
 
@@ -110,9 +116,11 @@ fn paste_inserts_at_the_cursor_inside_existing_text() {
 }
 
 #[test]
-fn paste_normalises_every_python_line_boundary_to_a_newline() {
+fn paste_normalises_every_line_boundary_to_a_newline() {
     let mut app = app_with_question();
-    app.question_app.selected_option = other_option_idx(&app).unwrap();
+    app.question_app
+        .list
+        .highlight(other_option_idx(&app).unwrap());
 
     handle_paste(&mut app, "one\r\ntwo\rthree".into());
     assert_eq!(app.question_app.other_texts[&0], "one\ntwo\nthree");
@@ -136,7 +144,9 @@ fn paste_into_a_question_without_a_free_text_row_is_dropped() {
 #[test]
 fn an_empty_paste_leaves_the_free_text_row_untouched() {
     let mut app = app_with_question();
-    app.question_app.selected_option = other_option_idx(&app).unwrap();
+    app.question_app
+        .list
+        .highlight(other_option_idx(&app).unwrap());
 
     handle_paste(&mut app, String::new());
 

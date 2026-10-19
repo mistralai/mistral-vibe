@@ -49,10 +49,8 @@ request_methods = frozenset({"session/read"})
 # gradient so the idle capture cannot catch it mid-wipe on a slow host.
 env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 
-screen_contains = {
-    "rust": ("Main conversation", "Explore (Explore 1) [running] · 0 tokens")
-}
-screen_excludes = {"rust": ("Loading subagent transcript…",)}
+screen_contains = ("Main conversation", "Explore (Explore 1) [running] · 0 tokens")
+screen_excludes = ("Loading subagent transcript…",)
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

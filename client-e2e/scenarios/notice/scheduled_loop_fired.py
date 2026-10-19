@@ -13,10 +13,8 @@ from e2e.app_server.scenario import Timeline
 
 env = {"TZ": "UTC"}
 
-screen_contains = {
-    "rust": ["> Run the linter", "└ loop 1a2b3c4d - 2026-08-24 17:41:00 UTC"]
-}
-screen_excludes = {"rust": ["Loop `1a2b3c4d` fired"]}
+screen_contains = ["> Run the linter", "└ loop 1a2b3c4d - 2026-08-24 17:41:00 UTC"]
+screen_excludes = ["Loop `1a2b3c4d` fired"]
 
 timeline: Timeline = [
     "Run the linter\r",

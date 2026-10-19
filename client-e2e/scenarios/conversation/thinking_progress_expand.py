@@ -12,8 +12,8 @@ env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 capture_steps = {1, 2, 3}
 settle_per_key = True
 
-# The in-progress reasoning header lands on SGR row 15 after the gated events.
-_ROW, _COL = 15, 1
+# The in-progress reasoning header lands on SGR row 11 after the gated events.
+_ROW, _COL = 11, 1
 _CLICK = f"\x1b[<0;{_COL};{_ROW}M\x1b[<0;{_COL};{_ROW}m"
 
 timeline: Timeline = [

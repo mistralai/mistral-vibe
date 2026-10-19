@@ -122,6 +122,7 @@ class _FakeService:
         self._load_initial_error = load_initial_error
         self._link_error = link_error
         self.cleared = False
+        self.import_create_calls: list[dict[str, str | None]] = []
 
     async def find_linkable_project(
         self, *, project_id: str, repo_url: str
@@ -151,6 +152,20 @@ class _FakeService:
             ),
             project=_project(),
         )
+
+    async def create_import_project(
+        self,
+        *,
+        name: str,
+        repo_url: str | None = None,
+        default_branch: str | None = None,
+    ) -> VibeCodeProject:
+        self.import_create_calls.append({
+            "name": name,
+            "repo_url": repo_url,
+            "default_branch": default_branch,
+        })
+        return _project()
 
     def save_project_link(
         self, *, context: Any, project_id: str, project_name: str
@@ -564,6 +579,70 @@ class TestPicker:
 
 
 class TestMutations:
+    @pytest.mark.asyncio
+    async def test_ensure_import_project_creates_and_links_plain_directory(
+        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        service = _FakeService()
+
+        async def _inspect(root_path: str) -> dict[str, Any]:
+            return {"root": {"directoryPath": str(REPO_ROOT)}, "savedLink": None}
+
+        async def _resolve(root_path: str) -> SimpleNamespace:
+            return SimpleNamespace(path=REPO_ROOT, name="widgets", git=None)
+
+        saved: list[tuple[str, str, str, str | None]] = []
+
+        async def _save(
+            root_path: str,
+            project_id: str,
+            project_name: str,
+            expected_github_repo_url: str | None,
+        ) -> dict[str, Any]:
+            saved.append((
+                root_path,
+                project_id,
+                project_name,
+                expected_github_repo_url,
+            ))
+            return {"link": {"projectId": project_id}}
+
+        async def _build(repo_root: Path) -> _FakeService:
+            return service
+
+        monkeypatch.setattr(controller, "inspect_root", _inspect)
+        monkeypatch.setattr(controller, "_resolve_inspection_root", _resolve)
+        monkeypatch.setattr(controller, "_build_service", _build)
+        monkeypatch.setattr(controller, "save", _save)
+
+        result = await controller.ensure_import_project(str(REPO_ROOT), "Widgets")
+
+        assert result == {"link": {"projectId": "proj-1"}}
+        assert service.import_create_calls == [
+            {"name": "Widgets", "repo_url": None, "default_branch": None}
+        ]
+        assert saved == [(str(REPO_ROOT), "proj-1", "Widgets", None)]
+
+    @pytest.mark.asyncio
+    async def test_ensure_import_project_reuses_saved_link(
+        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _inspect(root_path: str) -> dict[str, Any]:
+            return {
+                "root": {"directoryPath": str(REPO_ROOT)},
+                "savedLink": {"projectId": "proj-1", "projectName": "Widgets"},
+            }
+
+        monkeypatch.setattr(controller, "inspect_root", _inspect)
+
+        assert await controller.ensure_import_project(str(REPO_ROOT), "Ignored") == {
+            "link": {
+                "projectId": "proj-1",
+                "projectName": "Widgets",
+                "directoryPath": str(REPO_ROOT),
+            }
+        }
+
     @pytest.mark.asyncio
     async def test_link_existing_project(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch

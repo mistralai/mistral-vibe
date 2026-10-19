@@ -1,5 +1,4 @@
-//! The wizard's `setup/submit-choices` payload (Python
-//! `persist_credentials` plus the post-exit `/theme` write): the provider
+//! The wizard's `setup/submit-choices` payload: the provider
 //! and base-URL fields on every completion — the server judges drift — and
 //! the theme whenever one was selected. Sent before the session exists —
 //! the client never writes config.toml itself (ADR 0016).

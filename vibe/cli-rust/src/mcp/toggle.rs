@@ -1,4 +1,4 @@
-//! `d`/`e` toggles of the `/mcp` browser (Python `_set_highlighted_disabled`).
+//! `d`/`e` toggles of the `/mcp` browser.
 
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use super::{Event, TOAST_SECS};
 use crate::app::{App, ToastSeverity};
 use crate::input::deliver;
 
-/// One toggle request (Python `MCPToggled`), kept to undo its paint on rejection.
+/// One toggle request, kept to undo its paint on rejection.
 pub struct Toggle {
     pub name: String,
     pub kind: MCPSourceKind,
@@ -21,7 +21,10 @@ pub struct Toggle {
 /// Only a disable is painted up front: whether an enabled source connects is
 /// up to discovery and auth, so its status waits for the server's answer.
 pub fn set_disabled(app: &mut App, client: &Arc<Client>, disabled: bool) {
-    let (name, kind, tool_name) = match rows::rows(&app.mcp).into_iter().nth(app.mcp.selected) {
+    let (name, kind, tool_name) = match rows::rows(&app.mcp)
+        .into_iter()
+        .nth(app.mcp.list.selected())
+    {
         Some(Row::Source(row)) => (row.name, Some(row.kind), None),
         Some(Row::Tool(row)) => match app.mcp.viewing_name.clone() {
             Some(name) => (name, app.mcp.viewing_kind, Some(row.name)),

@@ -10,8 +10,8 @@ env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 settle_per_key = True
 capture_steps = {2, 3, 4}
 
-screen_contains = {"rust": ["Cleared 2 scheduled loops"]}
-screen_excludes = {"rust": ["vibe.cron", "interval_seconds", "next_fire_at"]}
+screen_contains = ["Cleared 2 scheduled loops"]
+screen_excludes = ["vibe.cron", "interval_seconds", "next_fire_at"]
 
 timeline: Timeline = [
     "clear scheduled prompts\r",

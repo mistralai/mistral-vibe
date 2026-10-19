@@ -78,22 +78,16 @@ class _PartialThenGatedSSEStream(httpx.AsyncByteStream):
 
 
 async def connect_backend_contract_host(
-    experimental_harness: bool,
     *,
     session_options: SessionOptions,
     capabilities: ClientCapabilities,
     account_gateway: AccountGateway | None = None,
     identity_gateway: IdentityGateway | None = None,
 ) -> BackendContractConnection:
-    # Both legs name their backend: with neither flag set the choice falls
-    # through to the GrowthBook rollout cache in `~/.vibe`, so the Legacy leg
-    # would run whichever backend the developer's machine last evaluated.
     client_transport, server_transport = memory_transport_pair()
     harness = await create_harness_server(
         server_transport,
         transport_kind="in_process",
-        experimental_harness=experimental_harness,
-        legacy_harness=not experimental_harness,
         account_gateway=account_gateway,
         identity_gateway=identity_gateway,
     )
@@ -109,18 +103,10 @@ async def connect_backend_contract_host(
 
 
 async def connect_backend_contract_client(
-    experimental_harness: bool,
-    *,
-    session_options: SessionOptions,
-    capabilities: ClientCapabilities,
+    *, session_options: SessionOptions, capabilities: ClientCapabilities
 ) -> AppServerClient:
     client_transport, server_transport = memory_transport_pair()
-    harness = await create_harness_server(
-        server_transport,
-        transport_kind="in_process",
-        experimental_harness=experimental_harness,
-        legacy_harness=not experimental_harness,
-    )
+    harness = await create_harness_server(server_transport, transport_kind="in_process")
     client = AppServerClient(client_transport, run_peer=harness.serve)
     try:
         await client.start()
@@ -151,6 +137,10 @@ def _mock_identity_endpoint(respx_mock: respx.MockRouter) -> None:
     # request. Stub it so strict-RESPX contract tests don't fail on it; 401 makes
     # identity resolve to None, which the projection assertions don't depend on.
     respx_mock.get(f"{MISTRAL_BASE_URL}/v1/users/me").mock(
+        return_value=httpx.Response(401)
+    )
+    # Same for /whoami, read for the private-connectors warning.
+    respx_mock.get("https://console.mistral.ai/api/vibe/whoami").mock(
         return_value=httpx.Response(401)
     )
 
@@ -266,12 +256,10 @@ def _mistral_sse_payload(
 
 @pytest_asyncio.fixture
 async def backend_contract_host(
-    experimental_harness: bool,
     backend_contract_session_options: SessionOptions,
     backend_contract_capabilities: ClientCapabilities,
 ) -> AsyncIterator[AppServerHost]:
     connection = await connect_backend_contract_host(
-        experimental_harness,
         session_options=backend_contract_session_options,
         capabilities=backend_contract_capabilities,
     )
@@ -283,12 +271,10 @@ async def backend_contract_host(
 
 @pytest_asyncio.fixture
 async def backend_contract_connection(
-    experimental_harness: bool,
     backend_contract_session_options: SessionOptions,
     backend_contract_capabilities: ClientCapabilities,
 ) -> AsyncIterator[BackendContractConnection]:
     connection = await connect_backend_contract_host(
-        experimental_harness,
         session_options=backend_contract_session_options,
         capabilities=backend_contract_capabilities,
     )
@@ -312,7 +298,7 @@ async def backend_contract_session(
 
 @pytest_asyncio.fixture
 async def backend_contract_persistent_connection(
-    config_dir: Path, experimental_harness: bool, tmp_path: Path
+    config_dir: Path, tmp_path: Path
 ) -> AsyncIterator[BackendContractConnection]:
     config_file = config_dir / "config.toml"
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
@@ -322,9 +308,7 @@ async def backend_contract_persistent_connection(
     }
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
     connection = await connect_backend_contract_host(
-        experimental_harness,
-        session_options=SessionOptions(),
-        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(), capabilities=ClientCapabilities()
     )
     try:
         yield connection

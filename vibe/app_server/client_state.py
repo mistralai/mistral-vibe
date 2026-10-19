@@ -12,10 +12,8 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import (
     AgentsListResponse,
-    DiagnosticsListResponse,
     RuntimeReadResponse,
     RuntimeSnapshot,
-    StatsReadResponse,
 )
 
 
@@ -72,15 +70,6 @@ class ClientSessionState:
         self.agents = list(response.agents)
         self.state.session.agent = response.active
 
-    def apply_stats(self, response: StatsReadResponse) -> None:
-        self.stats = response.stats
-        self.context_window = response.context_window
-        self.state.session.token_usage = response.stats.token_usage
-
-    def apply_diagnostics(self, response: DiagnosticsListResponse) -> None:
-        self.issues = list(response.issues)
-        self.hooks_count = response.hooks_count
-
     def apply_runtime(self, snapshot: RuntimeSnapshot) -> None:
         self.config = snapshot.config
         self.active_agent = snapshot.active_agent
@@ -92,23 +81,27 @@ class ClientSessionState:
         self.issues = list(snapshot.issues)
         self.hooks_count = snapshot.hooks_count
         self.connectors = snapshot.connectors
-        # The Studio "add connectors" link is resolved on the client during
-        # connector_catalog/read and never rides the runtime snapshot, so a
-        # mutation snapshot (toggle/refresh) would blank it. Carry the last
-        # resolved URL forward until the next catalog read replaces it.
+        # The Studio "add connectors" link and the private-connectors warning
+        # are resolved on the client during connector_catalog/read and never
+        # ride the runtime snapshot, so a mutation snapshot (toggle/refresh)
+        # would blank them. Carry them forward until the next catalog read.
         previous_mcp = getattr(self, "mcp", None)
         carried_manage_url = (
             previous_mcp.manage_connectors_url if previous_mcp is not None else None
         )
-        self.mcp = (
-            snapshot.mcp
-            if snapshot.mcp.manage_connectors_url is not None
-            else snapshot.mcp.model_copy(
-                update={"manage_connectors_url": carried_manage_url}
-            )
+        carried_private_hidden = (
+            previous_mcp is not None and previous_mcp.private_connectors_hidden
+        )
+        self.mcp = snapshot.mcp.model_copy(
+            update={
+                "manage_connectors_url": snapshot.mcp.manage_connectors_url
+                if snapshot.mcp.manage_connectors_url is not None
+                else carried_manage_url,
+                "private_connectors_hidden": snapshot.mcp.private_connectors_hidden
+                or carried_private_hidden,
+            }
         )
         self.bypass_tool_permissions = snapshot.bypass_tool_permissions
-        self.experimental_harness = snapshot.experimental_harness
         self.state.session.model = snapshot.config.active_model.alias
         self.state.session.agent = snapshot.active_agent
         self.state.session.token_usage = snapshot.stats.token_usage

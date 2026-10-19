@@ -19,7 +19,6 @@ env = {
 handshake = {"callback/result": {"accepted": True}}
 capture_startup = False
 capture_steps = {5, 6}
-clipboard_clients = {"rust"}
 
 _LONG = (
     "We need something embedded, ideally SQLite with WAL enabled, because the CLI "

@@ -250,7 +250,7 @@ def _build_onboarding_snapshot_payload(**overrides: Any) -> dict[str, Any]:
                 _ONBOARDING_FIELDS.difference(explicit_overrides)
             )
         )
-    except (ValidationError, ValueError):
+    except ValidationError, ValueError:
         if not _can_resolve_provider_from_explicit_overrides(explicit_overrides):
             raise
     payload.update(explicit_overrides)
@@ -269,7 +269,7 @@ def _validated_payloads[PayloadConfig: ModelConfig | ProviderConfig](
             continue
         try:
             validated_payloads.append(model_type.model_validate(payload))
-        except (ValidationError, ValueError):
+        except ValidationError, ValueError:
             continue
     return validated_payloads
 
@@ -343,7 +343,7 @@ class OnboardingContext:
                 console_base_url=snapshot.console_base_url,
                 theme=snapshot.theme,
             )
-        except (RuntimeError, ValidationError, ValueError):
+        except RuntimeError, ValidationError, ValueError:
             logger.warning(
                 "Onboarding config fallback activated; using defaults", exc_info=True
             )

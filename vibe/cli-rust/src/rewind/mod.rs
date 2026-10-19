@@ -1,10 +1,9 @@
 //! Rewind mode: pick an earlier user message, then rewind the session to it.
-//! Mirrors Python's `App.action_rewind_prev` and its two-step `RewindApp`.
 
 mod request;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -16,13 +15,18 @@ use crate::server::{Client, PublicSessionState};
 use crate::transcript::local;
 use request::{confirm, select};
 
-/// Window in which a second Escape enters rewind mode (Python `DOUBLE_ESC_DELAY`).
-pub const DOUBLE_ESC_DELAY: Duration = Duration::from_millis(200);
+/// Window in which a second Escape clears the input or enters rewind mode.
+pub const DOUBLE_ESC_DELAY: Duration = Duration::from_millis(500);
 
-/// Seconds a rewind toast stays up (Python `App.NOTIFICATION_TIMEOUT`).
+/// Whether an Escape at `now` completes a double Escape armed at `last`.
+pub fn is_double_escape(last: Option<Instant>, now: Instant) -> bool {
+    last.is_some_and(|at| now.duration_since(at) < DOUBLE_ESC_DELAY)
+}
+
+/// Seconds a rewind toast stays up.
 const TOAST_SECS: u64 = 5;
 
-/// The two option sets the panel walks through (Python `_RewindStep`).
+/// The two option sets the panel walks through.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Step {
     #[default]
@@ -56,7 +60,7 @@ pub fn start(app: &mut App, client: &Arc<Client>) {
 }
 
 /// Move the highlight to the previous user message, entering rewind mode when
-/// none is highlighted yet (Python `action_rewind_prev`).
+/// none is highlighted yet.
 pub fn prev(app: &mut App, client: &Arc<Client>) {
     if matches!(app.session.status, Status::Generating { .. }) {
         return;
@@ -67,8 +71,8 @@ pub fn prev(app: &mut App, client: &Arc<Client>) {
     }
     let index = match current_index(app, &messages) {
         None => messages.len() - 1,
-        // Above the first message there is nothing to select, so Python scrolls
-        // the transcript home instead.
+        // Above the first message there is nothing to select, so scroll the
+        // transcript home instead.
         Some(0) => {
             app.view.scroll_target = u16::MAX;
             app.view.scroll = u16::MAX;
@@ -79,7 +83,7 @@ pub fn prev(app: &mut App, client: &Arc<Client>) {
     select(app, client, &messages, index);
 }
 
-/// Move the highlight to the next user message (Python `action_rewind_next`).
+/// Move the highlight to the next user message.
 pub fn next(app: &mut App, client: &Arc<Client>) {
     if !app.rewind.open {
         return;
@@ -94,17 +98,17 @@ pub fn next(app: &mut App, client: &Arc<Client>) {
     select(app, client, &messages, index + 1);
 }
 
-/// Leave rewind mode, restoring the input box (Python `_exit_rewind_mode`).
+/// Leave rewind mode, restoring the input box.
 pub fn quit(app: &mut App) {
     app.rewind.open = false;
     app.rewind.entry_id = None;
     app.rewind.preview = Collapsed::default();
     app.rewind.step = Step::Action;
     app.rewind.restore_files = false;
-    app.rewind.selected = 0;
+    app.rewind.list.highlight(0);
 }
 
-/// The panel owns keys while open (Python `RewindApp.BINDINGS`).
+/// The panel owns keys while open.
 pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     match key.code {
         // Escape backs out of the persistence step, else it walks further back.
@@ -113,7 +117,7 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
         KeyCode::Right => next(app, client),
         KeyCode::Up | KeyCode::Char('k') => navigate(app, false),
         KeyCode::Down | KeyCode::Char('j') => navigate(app, true),
-        KeyCode::Enter => choose(app, client, app.rewind.selected),
+        KeyCode::Enter => choose(app, client, app.rewind.list.selected()),
         KeyCode::Char('q') => quit(app),
         _ => {
             if let Some(option) = crate::list_nav::digit(&key, options(app).len()) {
@@ -123,7 +127,7 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     }
 }
 
-/// Labels of the current step, in order (Python `_build_*_options`).
+/// Labels of the current step, in order.
 pub fn options(app: &App) -> Vec<&'static str> {
     match app.rewind.step {
         Step::Action if app.rewind.has_file_changes => vec![
@@ -135,24 +139,24 @@ pub fn options(app: &App) -> Vec<&'static str> {
     }
 }
 
-/// Move the highlight one option up/down, wrapping (Python `action_move_*`).
+/// Move the highlight one option up/down, wrapping.
 fn navigate(app: &mut App, down: bool) {
     let count = options(app).len();
-    app.rewind.selected = crate::list_nav::wrap(app.rewind.selected, count, down);
+    app.rewind.list.step(down, count, true, |_| true);
 }
 
 /// Act on an option: the action step arms the restore choice and advances, the
-/// persistence step confirms the rewind (Python `_handle_selection`).
+/// persistence step confirms the rewind.
 fn choose(app: &mut App, client: &Arc<Client>, option: usize) {
     if option >= options(app).len() {
         return;
     }
-    app.rewind.selected = option;
+    app.rewind.list.highlight(option);
     match app.rewind.step {
         Step::Action => {
             app.rewind.restore_files = app.rewind.has_file_changes && option == 0;
             app.rewind.step = Step::Persistence;
-            app.rewind.selected = 0;
+            app.rewind.list.highlight(0);
         }
         Step::Persistence => confirm(app, client, option == 0),
     }
@@ -161,7 +165,7 @@ fn choose(app: &mut App, client: &Arc<Client>, option: usize) {
 fn reset_to_action(app: &mut App) {
     app.rewind.step = Step::Action;
     app.rewind.restore_files = false;
-    app.rewind.selected = 0;
+    app.rewind.list.highlight(0);
 }
 
 /// Index of the highlighted message in the rewindable list.
@@ -179,7 +183,7 @@ pub fn apply_event(app: &mut App, event: Event) {
             preview,
             has_file_changes,
         } => {
-            // A new message resets the flow, like remounting the Python panel.
+            // A new message resets the flow, like a freshly opened panel.
             app.rewind.open = true;
             app.rewind.entry_id = Some(entry_id);
             app.rewind.preview = preview;
@@ -239,8 +243,8 @@ fn apply_done(
     let new_session_id = state.session.id.clone();
     app.set_session_id(new_session_id.clone());
     app.session.active_turn_id = None;
-    // Python drops the queued prompts and rebuilds every widget from the
-    // returned history, so no client-owned entry survives the rewind.
+    // Drop the queued prompts and rebuild every row from the returned
+    // history, so no client-owned entry survives the rewind.
     app.view.transcript.clear();
     // Either rewind mode leaves the harness session without its todo list.
     app.todo_tracker.clear();

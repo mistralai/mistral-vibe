@@ -32,7 +32,6 @@ fn capture_rejects_compaction_state_that_disagrees_with_its_lifecycle() {
                     crate::core::action_id::compaction("task", 1),
                     "different-turn".to_string(),
                     active.iterations,
-                    Vec::new(),
                     projection,
                 ),
             };
@@ -57,7 +56,6 @@ fn capture_rejects_compaction_state_that_disagrees_with_its_lifecycle() {
                     crate::core::action_id::compaction("task", 1),
                     "work".to_string(),
                     0,
-                    Vec::new(),
                     projection,
                 ),
             };
@@ -86,6 +84,7 @@ fn compaction_projection(state: &crate::core::HarnessState) -> CompactionProject
         CompactionBudget {
             token_threshold: state.config.settings.context.compaction.token_threshold(),
             image_delivery: state.config.settings.context.image_delivery.compaction,
+            image_cost: state.config.settings.context.image_token_cost,
         },
     )
     .expect("test compaction projection can be estimated");

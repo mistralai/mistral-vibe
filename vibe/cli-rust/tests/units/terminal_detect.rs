@@ -1,4 +1,4 @@
-//! Terminal-emulator detection mapping (Python `cli/terminal_detect.py`).
+//! Terminal-emulator detection mapping.
 
 use vibe_rs::terminal_detect::{
     detect_from, from_env_markers, from_term_program, is_vscode_family, EnvSource,
@@ -16,7 +16,7 @@ impl EnvSource for FakeEnv {
 }
 
 #[test]
-fn term_program_map_matches_python() {
+fn term_program_values_map_to_terminals() {
     let cases = [
         ("apple_terminal", Some("apple_terminal")),
         ("iterm.app", Some("iterm2")),
@@ -35,7 +35,7 @@ fn term_program_map_matches_python() {
 }
 
 #[test]
-fn env_markers_match_python() {
+fn env_markers_map_to_terminals() {
     let markers = [
         ("WEZTERM_PANE", "wezterm"),
         ("GHOSTTY_RESOURCES_DIR", "ghostty"),
@@ -84,7 +84,7 @@ fn vscode_hosts_resolve_cursor_insiders_and_stable() {
 }
 
 #[test]
-fn vscode_family_matches_python() {
+fn vscode_family_covers_vscode_hosts_only() {
     for terminal in ["vscode", "vscode_insiders", "cursor"] {
         assert!(is_vscode_family(terminal), "{terminal}");
     }

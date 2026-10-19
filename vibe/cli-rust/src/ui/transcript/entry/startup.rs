@@ -1,4 +1,4 @@
-//! Client-owned startup banners (Python `messages.py` warning widgets).
+//! Client-owned startup banners.
 
 use ratatui::style::Color;
 use ratatui::text::{Line, Span};
@@ -7,8 +7,8 @@ use crate::selection::{fold, Fold};
 use crate::ui::markdown::{self, LinkedLines};
 use crate::ui::theme;
 
-/// Python `WarningMessage` with `show_border=False`: a plain `NoMarkupStatic`
-/// whose text wraps in `$warning`, mounted straight into the messages area.
+/// A borderless warning: plain text that wraps in `$warning`, mounted straight
+/// into the messages area.
 pub(super) fn push_warning(lines: &mut LinkedLines, text: &str, width: u16) {
     let style = theme::text(theme::warning());
     // `.warning-content` keeps a two-cell right padding free.
@@ -18,7 +18,7 @@ pub(super) fn push_warning(lines: &mut LinkedLines, text: &str, width: u16) {
     }
 }
 
-/// Python `WhatsNewMessage`: the markdown body under a heavy `$mistral_orange`
+/// What's new: the markdown body under a heavy `$mistral_orange`
 /// left border, one blank above it when history widgets existed at mount time.
 pub(super) fn push_whats_new(lines: &mut LinkedLines, text: &str, width: u16, after_history: bool) {
     if after_history {

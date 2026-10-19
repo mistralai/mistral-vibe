@@ -68,7 +68,7 @@ pub(crate) fn field(f: &mut Frame, area: Rect, field: &mut Field, focused: bool,
 pub(super) fn item(f: &mut Frame, area: Rect, state: &State, index: usize, name_width: usize) {
     let Some(view) = &state.view else { return };
     let item = &state.items[index];
-    let highlighted = index == state.selected && item.selectable();
+    let highlighted = index == state.list.selected() && item.selectable();
     let (base, _) = crate::ui::list_cursor::styles(highlighted);
     let (fg, bg) = (base.fg.unwrap_or_default(), base.bg.unwrap_or_default());
     let dimmed = dim(base);
@@ -124,12 +124,16 @@ pub(super) fn item(f: &mut Frame, area: Rect, state: &State, index: usize, name_
                 "repo-linked project"
             },
             if *recommended {
-                base.fg(action_color(false))
+                crate::ui::list_cursor::accent(base, action_color(false))
             } else {
                 base
             },
         ),
-        Item::Unlink => (String::new(), "", base.fg(action_color(true))),
+        Item::Unlink => (
+            String::new(),
+            "",
+            crate::ui::list_cursor::accent(base, action_color(true)),
+        ),
         _ => (String::new(), "", base),
     };
     let name = fit_to_width(item.label(view), name_width);
@@ -181,7 +185,7 @@ pub(super) fn dim(style: Style) -> Style {
     }
 }
 
-/// Rich's `red`/`cyan`, as Textual renders named colors.
+/// The named terminal `red`/`cyan`.
 fn action_color(red: bool) -> Color {
     use theme::fixed::Named;
     theme::fixed::named(if red { Named::Red } else { Named::Cyan })

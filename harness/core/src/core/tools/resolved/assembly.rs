@@ -36,6 +36,14 @@ pub(crate) fn direct_routes(config: &HarnessConfig) -> Vec<(String, ToolTarget)>
             )
         })
         .collect::<Vec<_>>();
+    if crate::core::features::model_wait::is_offered(&config.settings.tools) {
+        routes.push((
+            "wait".to_string(),
+            ToolTarget::RuntimeBuiltin {
+                name: crate::core::tools::external::RuntimeBuiltinToolName::SelfWait,
+            },
+        ));
+    }
     let skill_name = skills::ToolName::Read;
     routes.push((
         skill_name.direct_name().to_string(),
@@ -85,9 +93,10 @@ fn filesystem_tools(environment: CommandEnvironment) -> Vec<ToolBinding> {
         .collect()
 }
 
-fn subagent_tools() -> Vec<ToolBinding> {
+fn subagent_tools(mode: &subagents::Mode) -> Vec<ToolBinding> {
     subagents::tools()
         .into_iter()
+        .filter(|spec| mode.supports(spec.name))
         .map(|spec| ToolBinding {
             descriptor: TypeScriptTool {
                 name: spec.name.sandbox_name().to_string(),
@@ -148,6 +157,11 @@ fn skill_tool() -> ToolBinding {
 
 pub(crate) fn direct_tools(config: &HarnessConfig) -> Vec<ToolDefinition> {
     let mut tools = Vec::new();
+    if crate::core::features::model_wait::is_offered(&config.settings.tools) {
+        tools.push(crate::core::features::model_wait::tool(
+            config.settings.tools.max_wait_ms,
+        ));
+    }
     tools.extend(
         filesystem_tools(config.settings.tools.command_environment)
             .into_iter()
@@ -191,6 +205,7 @@ pub(crate) fn is_reserved_direct_name(environment: CommandEnvironment, name: &st
         || background_processes::is_sandbox_name(name)
         || skills::is_direct_name(name)
         || name == "sleep"
+        || name == "wait"
 }
 
 /// Hookable tool identities used by Runtime hook-selector planning.
@@ -198,7 +213,7 @@ pub(crate) fn is_reserved_direct_name(environment: CommandEnvironment, name: &st
 /// Feature modules remain the source of built-in identities and availability.
 pub(crate) fn hook_tool_catalog(config: &HarnessConfig) -> Vec<HookToolKey> {
     let mut tools = filesystem_tools(config.settings.tools.command_environment);
-    tools.extend(self_tools());
+    tools.extend(self_tools(config.settings.tools.programmatic.max_sleep_ms));
     // Unconditional, unlike the model-facing list: skills have no enable/disable setting,
     // and a hook scoped to `skill` must not disappear from the catalogue just because the
     // project has not declared a skill yet.
@@ -207,12 +222,20 @@ pub(crate) fn hook_tool_catalog(config: &HarnessConfig) -> Vec<HookToolKey> {
         tools.extend(background_process_tools());
     }
     if config.settings.tools.subagents.is_enabled() {
-        tools.extend(subagent_tools());
+        tools.extend(subagent_tools(&config.settings.tools.subagents));
     }
     let mut keys = tools
         .into_iter()
         .map(|tool| tool.target.hook_tool_key())
         .collect::<BTreeSet<_>>();
+    if crate::core::features::model_wait::is_offered(&config.settings.tools) {
+        keys.insert(
+            ToolTarget::RuntimeBuiltin {
+                name: crate::core::tools::external::RuntimeBuiltinToolName::SelfWait,
+            }
+            .hook_tool_key(),
+        );
+    }
     keys.extend(config.tool_groups().flat_map(|group| {
         group.tools.iter().map(|tool| HookToolKey {
             target: HookToolTarget::Provided,
@@ -222,9 +245,9 @@ pub(crate) fn hook_tool_catalog(config: &HarnessConfig) -> Vec<HookToolKey> {
     keys.into_iter().collect()
 }
 
-pub(super) fn non_filesystem_runtime_builtin_tools() -> Vec<ToolBinding> {
-    let mut tools = subagent_tools();
-    tools.extend(self_tools());
+pub(super) fn non_filesystem_runtime_builtin_tools(max_sleep_ms: u64) -> Vec<ToolBinding> {
+    let mut tools = subagent_tools(&subagents::Mode::enabled());
+    tools.extend(self_tools(max_sleep_ms));
     tools.push(skill_tool());
     tools.extend(background_process_tools());
     tools
@@ -293,10 +316,10 @@ Example:
     fn builtin_catalog_should_be_covered_by_reserved_tool_namespaces() {
         let bindings = filesystem_tools(CommandEnvironment::Unix)
             .into_iter()
-            .chain(self_tools())
+            .chain(self_tools(30_000))
             .chain(std::iter::once(skill_tool()))
             .chain(background_process_tools())
-            .chain(subagent_tools())
+            .chain(subagent_tools(&subagents::Mode::enabled()))
             .collect::<Vec<_>>();
         let mut stable_ids = BTreeSet::new();
         let mut namespaces = BTreeSet::new();
@@ -321,7 +344,7 @@ Example:
 
     ///
     /// *Prepare*: Disable optional process and subagent tools in an otherwise empty configuration.
-    /// *Do*: Build the Core hook-tool catalog, then enable both optional features and rebuild it.
+    /// *Do*: Build the Core hook-tool catalog, then enable both optional features and wait, and rebuild it.
     /// *Assert*: Always-available tools remain stable and optional tools follow their settings.
     ///
     #[test]
@@ -334,7 +357,9 @@ Example:
         // Do
         let baseline = hook_tool_catalog(&config);
         config.settings.tools.background_processes = BackgroundProcessMode::Enabled;
-        config.settings.tools.subagents = SubagentMode::Enabled;
+        config.settings.tools.subagents = SubagentMode::enabled();
+        config.settings.tools.model_wait =
+            serde_json::from_value(serde_json::json!({"mode": "enabled"})).unwrap();
         let enabled = hook_tool_catalog(&config);
 
         // Assert
@@ -373,12 +398,11 @@ Example:
             "process.write",
             "process.list",
             "process.stop",
-            "subagent.list",
-            "subagent.spawn",
-            "subagent.wait",
-            "subagent.send_message",
-            "subagent.interrupt",
-            "subagent.stop",
+            "agents.list",
+            "agents.spawn",
+            "agents.send_message",
+            "agents.interrupt",
+            "self.wait",
         ] {
             assert!(enabled.iter().any(|key| key.qualified_name == expected));
         }
@@ -440,14 +464,16 @@ Example:
         let names = file_system::runtime_contracts()
             .into_iter()
             .map(|contract| contract.name)
-            .chain(non_filesystem_runtime_builtin_tools().into_iter().map(
-                |tool| match tool.target {
-                    ToolTarget::RuntimeBuiltin { name } => name,
-                    ToolTarget::Provided { .. } => {
-                        unreachable!("resolved built-in tools contain no provided tools")
-                    }
-                },
-            ))
+            .chain(
+                non_filesystem_runtime_builtin_tools(30_000)
+                    .into_iter()
+                    .map(|tool| match tool.target {
+                        ToolTarget::RuntimeBuiltin { name } => name,
+                        ToolTarget::Provided { .. } => {
+                            unreachable!("resolved built-in tools contain no provided tools")
+                        }
+                    }),
+            )
             .collect::<Vec<_>>();
 
         // Do

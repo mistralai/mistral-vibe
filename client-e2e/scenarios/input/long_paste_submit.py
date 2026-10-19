@@ -63,8 +63,8 @@ handshake = {
 
 capture_startup = False
 capture_steps = {1, 2, 3}
-screen_contains = {"rust": ("> summarize [Pasted 74 characters]", "Twelve rows.")}
-screen_excludes = {"rust": ("row 5",)}
+screen_contains = ("> summarize [Pasted 74 characters]", "Twelve rows.")
+screen_excludes = ("row 5",)
 
 # One Backspace after the placeholder removes it whole; the second paste then submits.
 timeline: Timeline = [

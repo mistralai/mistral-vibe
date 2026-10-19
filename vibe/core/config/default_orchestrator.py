@@ -15,6 +15,7 @@ from vibe.core.config.layers.agent_profile import AgentProfileLayer
 from vibe.core.config.layers.default import DefaultConfigLayer
 from vibe.core.config.layers.environment import EnvironmentLayer
 from vibe.core.config.layers.growthbook import GrowthbookLayer
+from vibe.core.config.layers.model_catalog import ModelCatalogLayer
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.layers.project import ProjectConfigLayer
 from vibe.core.config.layers.user import UserConfigLayer
@@ -30,9 +31,10 @@ async def build_default_orchestrator(
 ) -> ConfigOrchestrator[VibeConfigSchema]:
     """Build the CLI ConfigOrchestrator with the standard layer stack.
 
-    Priority order (lowest to highest): schema defaults, GrowthBook experiments,
-    user TOML, project TOML, VIBE_* env vars, runtime overrides, agent profile
-    overrides, enforced admin config. The agent-profile slot ships empty and is
+    Priority order (lowest to highest): schema defaults, the model catalog,
+    GrowthBook experiments, user TOML, project TOML, VIBE_* env vars, runtime
+    overrides, agent profile overrides, enforced admin config. The agent-profile
+    slot ships empty and is
     filled in place by AgentManager; the admin layer stays on top so an enforced
     org config shadows every layer below it. Both the user and project TOML
     layers are installed together when
@@ -67,6 +69,8 @@ async def build_default_orchestrator(
 
     layers = [
         DefaultConfigLayer(schema=VibeConfigSchema),
+        # Filled at runtime from the cached or fetched model catalog.
+        ModelCatalogLayer(),
         GrowthbookLayer(),
         *([user_layer] if user_layer is not None else []),
         *([project_layer] if project_layer is not None else []),
@@ -93,16 +97,23 @@ async def build_default_orchestrator(
 
 
 async def build_user_config_orchestrator() -> ConfigOrchestrator[VibeConfigSchema]:
-    """Build a user-config-only orchestrator for configuration management."""
+    """Build a user-config orchestrator that still honors org-enforced config.
+
+    Includes the admin layer so managed-config flags like ``enable_mcp`` are
+    visible to sessionless CLI commands (``vibe mcp add`` / ``vibe mcp remove``).
+    The layer starts empty; callers must call ``refresh_admin_layer`` to
+    populate it from the server before relying on the enforced values.
+    """
     manager = get_harness_files_manager()
     user_layer = UserConfigLayer(path=manager.user_config_file)
     # Single-layer view: a project-defined ``local`` is invisible here, so a
     # sparse user entry may still get stamped. Harmless — a higher complete
     # entry wins the merge — and the full stack migrates with cross-file
     # visibility at startup.
+    admin_layer = AdminConfigLayer()
     await migrate_config_layers([user_layer])
     return await ConfigOrchestrator.create(
         schema=VibeConfigSchema,
-        layers=[user_layer],
+        layers=[user_layer, admin_layer],
         default_layer_resolver=lambda: user_layer,
     )

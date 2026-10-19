@@ -29,8 +29,6 @@ handshake = {
 }
 
 capture_startup = False
-screen_contains = {client: ("api_timeout",) for client in ("rust", "python")}
-screen_excludes = {
-    client: ("max_tokens", "color_depth") for client in ("rust", "python")
-}
+screen_contains = ("api_timeout",)
+screen_excludes = ("max_tokens", "color_depth")
 timeline: Timeline = ["/config\r", "/network", "\x7f" * 7 + "APTO"]

@@ -55,4 +55,4 @@ timeline: Timeline = [
 ]
 
 # The first Esc only closes the panel; the second cancels the question.
-screen_excludes = {"rust": ("Todos · 1/3 done", "↑↓/jk navigate")}
+screen_excludes = ("Todos · 1/3 done", "↑↓/jk navigate")

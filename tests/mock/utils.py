@@ -56,7 +56,7 @@ def get_mocking_env(mock_chunks: list[LLMChunk] | None = None) -> dict[str, str]
     return {MOCK_DATA_ENV_VAR: json.dumps(mock_data, ensure_ascii=False)}
 
 
-async def collect_result[T](gen: AsyncGenerator[ToolStreamEvent | T, None]) -> T:
+async def collect_result[T](gen: AsyncGenerator[ToolStreamEvent | T]) -> T:
     result = None
     async for item in gen:
         if not isinstance(item, ToolStreamEvent):

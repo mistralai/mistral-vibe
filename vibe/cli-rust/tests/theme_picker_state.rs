@@ -15,7 +15,7 @@ fn auto_uses_detection_and_failed_writes_restore_the_configured_theme() {
     theme_picker::open(&mut app);
 
     assert_eq!(app.theme_picker.current, 0);
-    assert_eq!(app.theme_picker.selected, 0);
+    assert_eq!(app.theme_picker.list.selected(), 0);
     theme_picker::cancel(&mut app);
     assert_eq!(theme::active().name, "atom-one-light");
 

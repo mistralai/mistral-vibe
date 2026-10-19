@@ -78,7 +78,7 @@ class AskUserQuestion(
 
     async def run(
         self, args: AskUserQuestionArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[AskUserQuestionResult, None]:
+    ) -> AsyncGenerator[AskUserQuestionResult]:
         if ctx is None or ctx.interaction_requests is None:
             raise ToolError(
                 "User input not available. This tool requires an interactive UI."

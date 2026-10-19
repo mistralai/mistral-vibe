@@ -13,7 +13,7 @@ use crate::ui::rng::Rng;
 const WIDTH: i16 = 22;
 const HEIGHT: i16 = 12;
 const LECHONK_WIDTH: i16 = 26;
-const LECHONK_HEIGHT: i16 = 15;
+const LECHONK_HEIGHT: i16 = 12;
 pub const FRAME_INTERVAL: Duration = Duration::from_millis(160);
 const CYCLE_DELAY_MIN_S: f64 = 5.0;
 const CYCLE_DELAY_MAX_S: f64 = 20.0;
@@ -27,7 +27,7 @@ pub enum CatVariant {
     /// The classic petit chat (22×12).
     #[default]
     LeChat,
-    /// The chonkier pixilart cat (26×15), shown for Mistral Large / ml4 models.
+    /// The chonkier pixilart cat (26×12), shown for Mistral Large / ml4 models.
     LeChonk,
 }
 

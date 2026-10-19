@@ -265,7 +265,7 @@ fn config_fields_parse_rejects_payloads_without_fields() {
 }
 
 #[test]
-fn config_format_value_renders_each_kind_like_python() {
+fn config_format_value_renders_each_kind() {
     assert_eq!(format_value(&json!(true)), "True");
     assert_eq!(format_value(&json!(false)), "False");
     assert_eq!(format_value(&json!("")), "\"\"");

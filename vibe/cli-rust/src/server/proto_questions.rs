@@ -1,4 +1,4 @@
-//! `ask_user_question` wire types, mirroring Python's `vibe/questions.py`.
+//! `ask_user_question` wire types, matching the server's `vibe/questions.py`.
 
 use serde::{Deserialize, Serialize};
 

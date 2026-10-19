@@ -59,7 +59,6 @@ from vibe.core.tools.builtins.windows_shell import (
     WindowsShellSessions,
     WindowsShellStdin,
     WindowsShellToolConfig,
-    _split_windows_command_parts,
 )
 from vibe.core.tools.io_port import ShellCommandRequest, ShellCommandResult, ToolIOPort
 from vibe.core.tools.permissions import PermissionContext
@@ -270,14 +269,6 @@ def test_git_bash_resolver_rejects_powershell_override(monkeypatch):
 )
 def test_windows_shell_argv_builder(shell: str, expected: list[str]):
     assert _windows.build_windows_shell_argv(shell, "echo hello") == expected
-
-
-def test_windows_shell_tokenizer_preserves_backslash_paths():
-    tokens = experimental_bash_module._split_command_tokens(
-        r"type C:\Users\victim\secret.txt", preserve_backslashes=True
-    )
-
-    assert tokens == ["type", r"C:\Users\victim\secret.txt"]
 
 
 def test_pywinpty_availability_handles_missing_import(monkeypatch):
@@ -662,52 +653,6 @@ def test_windows_shell_permission_requires_approval_for_outside_cwd(
     )
 
 
-def test_windows_shell_splits_single_ampersand_outside_quotes():
-    assert _split_windows_command_parts("dir & del secrets.txt") == [
-        "dir",
-        "del secrets.txt",
-    ]
-    assert _split_windows_command_parts('echo "a & b" & dir') == ['echo "a & b"', "dir"]
-    assert _split_windows_command_parts("echo a ^& b & dir") == ["echo a ^& b", "dir"]
-
-
-def test_windows_shell_splits_newlines_outside_quotes():
-    assert _split_windows_command_parts("dir\ndel secrets.txt") == [
-        "dir",
-        "del secrets.txt",
-    ]
-    assert _split_windows_command_parts('echo "a\nb"\ndir') == ['echo "a\nb"', "dir"]
-
-
-def test_windows_shell_extracts_nested_powershell_commands():
-    assert _split_windows_command_parts("echo $(Get-Date; Remove-Item secret.txt)") == [
-        "echo $(Get-Date; Remove-Item secret.txt)",
-        "Get-Date",
-        "Remove-Item secret.txt",
-    ]
-    assert _split_windows_command_parts('echo "prefix $(Get-Date)"; Get-Location') == [
-        'echo "prefix $(Get-Date)"',
-        "Get-Location",
-        "Get-Date",
-    ]
-    assert _split_windows_command_parts("echo '$(Remove-Item secret.txt)'") == [
-        "echo '$(Remove-Item secret.txt)'"
-    ]
-    assert _split_windows_command_parts("& { Get-Date; cmd /k }") == [
-        "{ Get-Date; cmd /k }",
-        "Get-Date",
-        "cmd /k",
-    ]
-    assert _split_windows_command_parts("& (Get-Date; cmd /k)") == [
-        "(Get-Date; cmd /k)",
-        "Get-Date",
-        "cmd /k",
-    ]
-    assert _split_windows_command_parts("echo @{Name = 'safe'}") == [
-        "echo @{Name = 'safe'}"
-    ]
-
-
 def test_windows_shell_nested_commands_are_all_allowlisted():
     tool = WindowsShell(
         config_getter=lambda: WindowsShellToolConfig(allowlist=["echo", "get-date"]),
@@ -735,6 +680,89 @@ def test_windows_shell_nested_denylisted_command_is_rejected():
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.NEVER
     assert "Remove-Item" in (permission.reason or "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo 'a`'; Remove-Item x",
+        "echo a^; Remove-Item x",
+        "echo 'x’; Remove-Item x; ‘y'",
+        "echo 'a'#it's\nRemove-Item x",
+        "echo a$(echo ')'; Remove-Item x)",
+        "echo \"$(echo ')'; Remove-Item x)\"",
+        "echo a\x1c#; Remove-Item x",
+        "echo '--%' it's | Remove-Item x",
+        "echo -a:--%; Remove-Item x",
+        "echo a, --% b; Remove-Item x",
+        "echo a,\n--% b; Remove-Item x",
+    ],
+)
+def test_windows_shell_denylist_sees_every_statement_powershell_runs(command):
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(
+            allowlist=["echo"], denylist=["remove-item"]
+        ),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(WindowsShellArgs(command=command))
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.NEVER
+
+
+def test_windows_shell_hashtable_values_require_approval():
+    # A hashtable value is a pipeline that PowerShell runs. It is checked as
+    # "a = Remove-Item x", which no allowlist entry matches.
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(allowlist=["echo"]),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(
+        WindowsShellArgs(command="echo @{a = Remove-Item x}")
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize(
+    "command_template",
+    [
+        "type x#y {outside}",
+        'type `"x {outside} `"',
+        "type x,{outside}",
+        'type "x"{outside}',
+        "type 'x’ {outside} '",
+        "type `u{{2E}}`u{{2E}}/outside/secret.txt",
+        r"Get-Content -Path.\..\outside\secret.txt",
+        "type (echo {outside})",
+        "Get-Content -Path:(echo {outside})",
+        "echo hi > (echo {outside})",
+    ],
+)
+def test_windows_shell_path_check_sees_the_arguments_powershell_passes(
+    command_template, tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside" / "secret.txt"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(
+            allowlist=["echo", "type", "get-content"]
+        ),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(
+        WindowsShellArgs(command=command_template.format(outside=outside.as_posix()))
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
 
 
 @pytest.mark.parametrize(
@@ -1591,6 +1619,39 @@ def test_git_bash_permission_uses_posix_guardrails_on_native_windows():
     assert "rm" in (permission.reason or "")
 
 
+@pytest.mark.parametrize(
+    "command_template",
+    [
+        "cat x#y {outside}",
+        "ls x#y {outside}",
+        "find . -name x#y -o -delete",
+        r"cat x\ #y {outside}",
+        r"cat \"x {outside} \"",
+        r"cat \'x {outside} \'",
+    ],
+)
+def test_git_bash_guardrail_sees_the_tokens_git_bash_runs(
+    command_template, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(experimental_bash_module, "is_windows", lambda: True)
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside" / "secret.txt"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    tool = ExperimentalGitBash(
+        config_getter=lambda: GitBashToolConfig(), state=BaseToolState()
+    )
+
+    permission = tool.resolve_permission(
+        ExperimentalBashArgs(
+            command=command_template.format(outside=outside.as_posix())
+        )
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
 def test_experimental_git_bash_does_not_reject_native_windows(monkeypatch):
     monkeypatch.setattr(experimental_bash_module, "is_windows", lambda: True)
     tool = ExperimentalGitBash(
@@ -2052,3 +2113,60 @@ async def test_windows_shell_reset_clears_logs(native_windows_platform):
     )
 
     assert result.action == "reset"
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (r"echo x > C:\Users\me\profile.ps1", ((r"C:\Users\me\profile.ps1",) * 2,)),
+        (r"echo x > \\server\share\x.txt", ((r"\\server\share\x.txt",) * 2,)),
+        (r"echo x > C:\PROGRA~1\x.txt", ((r"C:\PROGRA~1\x.txt",) * 2,)),
+        (r"echo x > 'C:\a b\x.txt'", ((r"'C:\a b\x.txt'", r"C:\a b\x.txt"),)),
+        (r'echo x > "C:\a b\x.txt"', ((r'"C:\a b\x.txt"', r"C:\a b\x.txt"),)),
+        # Listed as read; whether it names one file is the caller's to judge.
+        ("echo x > /Users/me/x.txt", (("/Users/me/x.txt",) * 2,)),
+        (r"echo x > \Users\me\x.txt", ((r"\Users\me\x.txt",) * 2,)),
+        ("echo x > C:x.txt", (("C:x.txt",) * 2,)),
+        # A script block or subexpression may run, so its redirects count.
+        (r"& { 'x' > C:\Users\me\x.ps1 }", ((r"C:\Users\me\x.ps1",) * 2,)),
+        (
+            r"echo $('x' > C:\a\inner) > C:\a\outer",
+            ((r"C:\a\outer",) * 2, (r"C:\a\inner",) * 2),
+        ),
+        # From a root, but only PowerShell can read the spelling.
+        (r'echo x > "C:\a\$name.txt"', ((r'"C:\a\$name.txt"', None),)),
+        (r"echo x > C:\work\*.txt", ((r"C:\work\*.txt", None),)),
+        ("echo x > C:\\work\\`\n..\\x", (("C:\\work\\`\n..\\x", None),)),
+        ("echo x > `\nC:\\x", (("`\nC:\\x", None),)),
+        (r"echo x > \\?\C:\x", ((r"\\?\C:\x", None),)),
+        # An array target: the reader cannot place a list, whatever comes first.
+        (
+            r"echo x > C:\ws\a.txt, C:\Users\me\x.plist",
+            ((r"C:\ws\a.txt, C:\Users\me\x.plist", None),),
+        ),
+        (
+            r"echo x > $null, C:\Users\me\x.plist",
+            ((r"$null, C:\Users\me\x.plist", None),),
+        ),
+        (
+            r"echo x > (C:\ws\a.txt, C:\Users\me\x.plist)",
+            ((r"(C:\ws\a.txt, C:\Users\me\x.plist)", None),),
+        ),
+        ("echo x > @(1)", (("@(1)", None),)),
+        # Relative, variable-led or discarded: not listed.
+        ("echo x > out.txt", ()),
+        (r"echo x > $env:TEMP\x.txt", ()),
+        (r"echo x > %TEMP%\x.txt", ()),
+        ("echo x > $null", ()),
+        ("echo x > NUL 2>&1", ()),
+    ],
+)
+def test_windows_redirect_writes_place_only_plainly_spelled_targets(command, expected):
+    """A target from a root -- a drive, a share or the current drive's root --
+    is read exactly where it is spelled plainly, and listed unread otherwise.
+    One led by a variable or relative to the current location is not listed;
+    any other spelling is listed unread.
+    """
+    writes = windows_shell_module.windows_redirect_writes(command)
+
+    assert tuple((write.spelling, write.path) for write in writes) == expected

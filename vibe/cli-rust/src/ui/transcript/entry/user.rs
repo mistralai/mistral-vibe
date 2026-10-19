@@ -13,7 +13,7 @@ use crate::transcript::{FiredLoop, TranscriptEntry};
 use crate::utils::{datetime, text};
 
 const QUEUE_HEADER_LABEL: &str = "» Queued";
-/// Shown once the server holds the queue: Enter releases it (Python `PAUSED_LABEL`).
+/// Shown once the server holds the queue: Enter releases it.
 const QUEUE_PAUSED_PREFIX: &str = "» Queued — press ";
 const QUEUE_PAUSED_SUFFIX: &str = " to send, type to add";
 const ATTACHED_IMAGE: &str = "  ┝ attached image: ";
@@ -21,14 +21,14 @@ const LAST_ATTACHED_IMAGE: &str = "  └ attached image: ";
 /// The alias the harness gives a resumed image, which forgets its placeholder.
 const GENERIC_IMAGE_ALIAS: &str = "image";
 
-/// Python `QueueHeaderMessage`: one gap row, the bold-italic label, then the
+/// The queue header: one gap row, the bold-italic label, then the
 /// same expanding separator a user message paints.
 pub(super) fn push_queue_header(lines: &mut LinkedLines, width: u16, paused: bool) {
     let label = theme::text(theme::ORANGE).add_modifier(Modifier::BOLD | Modifier::ITALIC);
     lines.push_gap();
     lines.push(match paused {
         false => Line::from(Span::styled(QUEUE_HEADER_LABEL, label)),
-        // The shortcut only recolors the label it sits in (Python `SHORTCUT_STYLE`).
+        // The shortcut only recolors the label it sits in.
         true => Line::from(vec![
             Span::styled(QUEUE_PAUSED_PREFIX, label),
             Span::styled(crate::hints::key::ENTER, label.fg(theme::primary())),
@@ -72,7 +72,7 @@ impl<'a> UserView<'a> {
 }
 
 /// A queued prompt is packed against its neighbours and italic, and drops its
-/// separator; the highlighted one reverses its content (Python `.queue-selected`).
+/// separator; the highlighted one reverses its content.
 /// A prompt a scheduled loop sent swaps the orange marker for primary.
 pub(super) fn push_user(
     lines: &mut LinkedLines,
@@ -133,7 +133,7 @@ pub(super) fn push_user(
             chars.extend(segment.chars().map(|c| (c, style, None)));
             body.push_str(segment);
         }
-        // Continuation rows hang under the text, like Python's prompt/content `Horizontal`.
+        // Continuation rows hang under the text, not under the prompt marker.
         for (row_index, (mut row, gap)) in markdown::wrap_chars_folded(&chars, content_width)
             .into_iter()
             .enumerate()

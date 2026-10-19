@@ -290,6 +290,33 @@ impl SynchronousRuntime {
             .expect("Core checkpoint serializes")
     }
 
+    /// Loads a frozen checkpoint and adopts its already-issued Actions as a Host would.
+    pub(super) fn from_checkpoint(
+        config: HarnessConfig,
+        encoded: &str,
+        saved_actions: Vec<Value>,
+    ) -> Self {
+        let checkpoint =
+            crate::core::decode_checkpoint(encoded).expect("frozen checkpoint decodes");
+        let session = HarnessSession::restore(config.clone(), checkpoint, 0)
+            .expect("frozen checkpoint restores");
+        let pending_actions = saved_actions
+            .into_iter()
+            .map(|action| (action_id(&action).to_string(), action))
+            .collect();
+        let runtime = Self {
+            hook_bindings: configured_hook_bindings(&config),
+            config,
+            session,
+            next_input_id: 1,
+            pending_actions,
+            model_input: ModelInputCache::default(),
+            model_requests: Vec::new(),
+        };
+        runtime.assert_pending_actions_match_inspection();
+        runtime
+    }
+
     pub(super) fn inspection_value(&self) -> Value {
         serde_json::to_value(self.session.inspect()).expect("Core inspection serializes")
     }
@@ -301,7 +328,13 @@ impl SynchronousRuntime {
 
     /// Restores Core with the Host's current configuration.
     pub(super) fn restart_from_checkpoint_with_config(&mut self, config: HarnessConfig) {
-        let checkpoint = self.session.checkpoint().expect("Core checkpoints");
+        self.restore_checkpoint_value(self.checkpoint_value(), config);
+    }
+
+    /// Restores a serialized checkpoint, including accepted earlier V1 shapes.
+    pub(super) fn restore_checkpoint_value(&mut self, checkpoint: Value, config: HarnessConfig) {
+        let checkpoint = crate::core::decode_checkpoint(&checkpoint.to_string())
+            .expect("valid serialized checkpoint");
         self.hook_bindings = configured_hook_bindings(&config);
         self.session = HarnessSession::restore(config.clone(), checkpoint, 0)
             .expect("Core restores its checkpoint with current configuration");
@@ -310,6 +343,13 @@ impl SynchronousRuntime {
         self.model_input = ModelInputCache::default();
         self.model_requests.clear();
         self.assert_pending_actions_match_inspection();
+    }
+
+    /// Returns the error from restoring the current checkpoint with `config`,
+    /// or `None` when the restore succeeds. The runtime stays unchanged.
+    pub(super) fn checkpoint_restore_error(&self, config: HarnessConfig) -> Option<String> {
+        let checkpoint = self.session.checkpoint().expect("Core checkpoints");
+        HarnessSession::restore(config, checkpoint, 0).err()
     }
 
     /// Replaces complete Core settings and retains them for later restoration.
@@ -451,9 +491,26 @@ impl SynchronousRuntime {
         command: Value,
         expected: ExpectedTransition,
     ) -> AppliedTransition {
+        self.apply_at(command, 1_700_000_000_000 + self.next_input_id, expected)
+    }
+
+    /// Supplies Host time explicitly while checking the same complete transition.
+    pub(super) fn apply_at(
+        &mut self,
+        command: Value,
+        time_unix_ms: u64,
+        expected: ExpectedTransition,
+    ) -> AppliedTransition {
         self.assert_result_correlation(&command);
         let input_id = self.next_input_id;
-        let result = accepted_value(self.session.apply(input(input_id, command)));
+        let input = serde_json::from_value(json!({
+            "protocol_version": 1,
+            "input_id": input_id,
+            "determinism": {"time_unix_ms": time_unix_ms, "random_seed": input_id},
+            "command": command,
+        }))
+        .expect("timed Runtime input validates");
+        let result = accepted_value(self.session.apply(input));
         self.next_input_id += 1;
 
         let transition = result["transition"].clone();

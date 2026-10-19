@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+import re
 
 from tree_sitter import Language, Node, Parser
 import tree_sitter_bash as tsbash
@@ -65,6 +66,186 @@ def _file_redirect_reason(node: Node) -> str | None:
     if target.text.decode("utf-8") == _DISCARD_TARGET:
         return None
     return "redirection"
+
+
+@dataclass(frozen=True, slots=True)
+class RedirectWrite:
+    """A file a redirect writes that is named from a root, or may be."""
+
+    spelling: str
+    """The target as the command writes it."""
+
+    path: str | None
+    """The target exactly as the shell opens it, or ``None`` when only the shell
+    can tell: the spelling needs expanding, or the command is not read the way
+    the shell reads it.
+    """
+
+
+# Operators that only open their target for reading. Every other one writes it:
+# ``<>`` reads and writes, and the grammar splits it into ``<`` and an error.
+_READ_OPERATORS = {"<", "<&"}
+# Operators that close a descriptor and open nothing.
+_CLOSE_OPERATORS = {">&-", "<&-"}
+# Targets that are a stream, not a file the command leaves behind.
+_STREAM_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
+# A target the shell opens exactly as written: an unquoted word with no escape,
+# expansion or pattern, or a quoted one whose quotes expand nothing.
+_PLAIN_WORD = re.compile(r"[\w.,/:@%+=-]+")
+_PLAIN_SINGLE_QUOTED = re.compile(r"'([^'\n]*)'")
+_PLAIN_DOUBLE_QUOTED = re.compile(r'"([^"\\$`!\n]*)"')
+_DRIVE = re.compile(r"[A-Za-z]:")
+# The shell joins a line ending in a backslash to the next before reading words;
+# the grammar does not reliably, so where it lies in code no target is certain.
+_LINE_CONTINUATION = re.compile(rb"\\\r?\n")
+# Nodes whose text is data, where a backslash-newline joins no words: a heredoc
+# body, quoted text (a ``$(...)`` inside double quotes is code, and its own node)
+# and a comment, which ends at the newline whatever precedes it.
+_DATA_NODES = {"heredoc_body", "raw_string", "string_content", "comment"}
+# How a target left to the classifier starts: a relative name, which a ``cd``
+# moves; ``~``, which ``HOME`` moves; or an expansion the command's variables
+# or commands decide.
+_RELATIVE_START = re.compile(r"[\w.-]")
+_EXPANSION_START = re.compile(r"\$[\w{(]|`")
+
+
+def redirect_writes(
+    command: str, *, drive_paths: bool = False
+) -> tuple[RedirectWrite, ...]:
+    """The files ``command``'s redirects write from a root, as a POSIX shell reads it.
+
+    A target from a root is placed only where the shell cannot read it
+    otherwise: the command parses cleanly with no line continuation in its
+    code, and the target is spelled plainly. A relative, ``~`` or
+    expansion-led target is not listed: it moves with a ``cd``, a ``HOME`` or a
+    variable the command may set first, and is left to the classifier. Every
+    other write is listed with no path -- any other spelling, and every write
+    of a command not read faithfully -- so a spelling this reader does not
+    know is never taken for one it does.
+
+    ``drive_paths``: Git Bash also opens ``C:/x`` and a quoted ``C:\\x`` from a
+    root; to any other POSIX shell those are relative paths.
+    """
+    source = command.encode("utf-8")
+    root = _get_parser().parse(source).root_node
+    faithful = not root.has_error and not _continues_code_line(source, root)
+    writes: list[RedirectWrite] = []
+    for node in _walk(root):
+        if node.type != "file_redirect":
+            continue
+        target = _redirect_target(node)
+        if not _writes_a_file(node, target):
+            continue
+        if not faithful or target is None:
+            spelling = _text(target if target is not None else node)
+            writes.append(RedirectWrite(spelling, None))
+            continue
+        spelling = _text(target)
+        path = _plain_text(target)
+        if path is not None and _rooted(path, drive_paths=drive_paths):
+            writes.append(RedirectWrite(spelling, path))
+        elif not _moves_with_the_command(
+            spelling, plain=path is not None, drive_paths=drive_paths
+        ):
+            writes.append(RedirectWrite(spelling, None))
+    return tuple(dict.fromkeys(writes))
+
+
+def _walk(root: Node) -> list[Node]:
+    nodes: list[Node] = []
+    pending = [root]
+    while pending:
+        node = pending.pop()
+        nodes.append(node)
+        pending.extend(reversed(node.children))
+    return nodes
+
+
+def _text(node: Node) -> str:
+    return node.text.decode("utf-8") if node.text is not None else ""
+
+
+def _continues_code_line(source: bytes, root: Node) -> bool:
+    data = [
+        (node.start_byte, node.end_byte)
+        for node in _walk(root)
+        if node.type in _DATA_NODES
+    ]
+    return any(
+        not any(start <= match.start() < end for start, end in data)
+        for match in _LINE_CONTINUATION.finditer(source)
+    )
+
+
+def _redirect_target(node: Node) -> Node | None:
+    """The word after the operator. The grammar hangs any later words of the
+    command on the redirect too (``> out a b``), but only the first is opened.
+    """
+    return next(
+        (
+            child
+            for child in node.children
+            if child.is_named and child.type not in {"file_descriptor", "ERROR"}
+        ),
+        None,
+    )
+
+
+def _writes_a_file(node: Node, target: Node | None) -> bool:
+    operators = {child.type for child in node.children if not child.is_named}
+    has_error = any(child.type == "ERROR" for child in node.children)
+    if (
+        operators <= _READ_OPERATORS or operators <= _CLOSE_OPERATORS
+    ) and not has_error:
+        return False
+    if target is None:
+        return True
+    # ``>&2`` renumbers a descriptor and ``>&-`` closes one; ``>&file`` writes.
+    if operators <= _DUPLICATION_OPERATORS and (
+        target.type == "number" or _text(target) == "-"
+    ):
+        return False
+    return _plain_text(target) not in _STREAM_TARGETS
+
+
+def _plain_text(node: Node) -> str | None:
+    """``node`` as the shell opens it, or ``None`` unless it is spelled plainly."""
+    text = _text(node)
+    match node.type:
+        case "word" | "number":
+            return text if _PLAIN_WORD.fullmatch(text) else None
+        case "raw_string":
+            match = _PLAIN_SINGLE_QUOTED.fullmatch(text)
+        case "string":
+            match = _PLAIN_DOUBLE_QUOTED.fullmatch(text)
+        case _:
+            return None
+    return match[1] if match else None
+
+
+def _rooted(path: str, *, drive_paths: bool) -> bool:
+    if path.startswith("/"):
+        return True
+    return drive_paths and (_DRIVE.match(path) is not None or path.startswith("\\"))
+
+
+def _moves_with_the_command(spelling: str, *, plain: bool, drive_paths: bool) -> bool:
+    """Whether a target not from a root is relative, ``~``- or expansion-led.
+
+    zsh expands an unquoted ``=cmd`` to the command's path, and a process
+    substitution (``>(...)``) hands the output to a program that writes
+    wherever it wants: those, and any spelling not named here, are not.
+    """
+    if plain:
+        return not spelling.startswith("=")
+    head = spelling.lstrip("'\"")
+    if _rooted(head, drive_paths=drive_paths):
+        return False
+    return bool(
+        head.startswith("~")
+        or _EXPANSION_START.match(head)
+        or _RELATIVE_START.match(head)
+    )
 
 
 # Reasons are noun phrases so they read as a list in the approval prompt.

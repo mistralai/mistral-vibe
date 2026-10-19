@@ -1,4 +1,4 @@
-"""Remote-project dark parity."""
+"""Remote-project picker in the dark theme."""
 
 from __future__ import annotations
 

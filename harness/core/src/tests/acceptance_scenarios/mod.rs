@@ -4,12 +4,15 @@
 
 use super::*;
 
+mod agents;
 mod async_features;
 mod compaction;
 mod completion_and_tools;
 mod hooks;
 mod large_output;
+mod model_wait;
 mod permissions;
+mod program_timing;
 mod recovery;
 mod runtime_driver;
 mod steering;
@@ -115,14 +118,6 @@ fn hook_completed(action: &Value, hook: &str, output: Value) -> Value {
             "output": output,
         },
     })
-}
-
-fn pre_llm_continue_with_context(context: &[(&str, &str)]) -> Value {
-    let context_messages = context
-        .iter()
-        .map(|(key, text)| json!({"key": key, "content": [{"type": "text", "text": text}]}))
-        .collect::<Vec<_>>();
-    json!({"type": "continue", "context_messages": context_messages})
 }
 
 fn turn_started(turn_id: &str, text: &str) -> Value {
@@ -272,6 +267,15 @@ fn turn_completed_at_iteration_limit(turn_id: &str, output: Vec<Value>) -> Value
         "turn_id": turn_id,
         "output": output,
         "stop_reason": "iteration_limit",
+    })
+}
+
+fn turn_completed_skipped(turn_id: &str, reason: Vec<Value>) -> Value {
+    json!({
+        "type": "turn_completed",
+        "turn_id": turn_id,
+        "output": reason,
+        "stop_reason": "skipped",
     })
 }
 

@@ -10,7 +10,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::{list_scroll, scrollbar, theme};
+use super::{scrollbar, theme};
 use crate::app::App;
 use crate::hints::{self, action, key};
 use crate::mouse::{register_region, MouseTarget};
@@ -98,6 +98,7 @@ fn draw_create(app: &mut App, f: &mut Frame, area: Rect) {
     state.search_area = Rect::new(x + 16, area.y + 4, width.saturating_sub(16), 1);
     state.branch_area = Rect::new(x + 16, area.y + 6, width.saturating_sub(16), 1);
     state.list_area = Rect::default();
+    state.list.layout(&[], state.list_area);
     paint::field(
         f,
         state.search_area,
@@ -161,20 +162,19 @@ fn draw_picker(app: &mut App, f: &mut Frame, area: Rect) {
         app.view.cursor_on,
     );
     let visible = area.height.saturating_sub(10) as usize;
-    let total = state.items.len();
-    state.scroll = match state.free_scroll {
-        true => state.scroll.min(total.saturating_sub(visible)),
-        false => {
-            let items = &state.items;
-            let highlight = state.selected..state.selected + 1;
-            list_scroll::follow(state.scroll, visible, total, highlight, |line| {
-                items[line].selectable()
-            })
-        }
-    };
-    let offset = state.scroll;
-    let overflow = total > visible;
     state.list_area = Rect::new(x, area.y + 7, width, visible as u16);
+    let options: Vec<_> = (0..state.items.len())
+        .map(|index| state.items[index].selectable().then_some(index))
+        .collect();
+    let total = state.items.len();
+    let overflow = total > visible;
+    let rows = Rect::new(
+        x + 1,
+        state.list_area.y,
+        width.saturating_sub(2 + u16::from(overflow)),
+        state.list_area.height,
+    );
+    let offset = state.list.layout(&options, rows);
     let Some(view) = &state.view else { return };
     let name_width = state
         .items
@@ -186,12 +186,11 @@ fn draw_picker(app: &mut App, f: &mut Frame, area: Rect) {
     for (row, index) in (offset..total).take(visible).enumerate() {
         paint::item(
             f,
-            Rect::new(
-                x + 1,
-                area.y + 7 + row as u16,
-                width.saturating_sub(2 + u16::from(overflow)),
-                1,
-            ),
+            Rect {
+                y: rows.y + row as u16,
+                height: 1,
+                ..rows
+            },
             state,
             index,
             name_width,

@@ -16,7 +16,6 @@ from vibe.core.config.harness_files import (
 from vibe.core.skills.builtins import BUILTIN_SKILLS
 from vibe.core.skills.models import (
     REGISTRY_LATEST_ALIAS,
-    ParsedSkillCommand,
     RegistryRef,
     SkillConfigIssue,
     SkillInfo,
@@ -420,25 +419,3 @@ class SkillManager:
         if skill is None or not skill.model_invocable:
             return None
         return skill
-
-    def parse_skill_command(self, text_prompt: str) -> ParsedSkillCommand | None:
-        stripped = text_prompt.strip()
-        if not stripped.startswith("/"):
-            return None
-
-        parts = stripped[1:].split(None, 1)
-        if not parts:
-            return None
-
-        skill_name = parts[0].lower()
-        skill_info = self.get_skill(skill_name)
-        if skill_info is None or not skill_info.user_invocable:
-            return None
-
-        extra_instructions = parts[1] if len(parts) > 1 else None
-
-        return ParsedSkillCommand(
-            name=skill_name,
-            content=skill_info.prompt,
-            extra_instructions=extra_instructions,
-        )

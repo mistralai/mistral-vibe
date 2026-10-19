@@ -1,6 +1,6 @@
-//! Terminal-emulator detection (Python `cli/terminal_detect.py`).
+//! Terminal-emulator detection.
 
-/// Python `TerminalEmulator` values, sent as `ClientInfo.terminalEmulator`.
+/// App-server `TerminalEmulator` values, sent as `ClientInfo.terminalEmulator`.
 pub const VSCODE: &str = "vscode";
 pub const VSCODE_INSIDERS: &str = "vscode_insiders";
 pub const CURSOR: &str = "cursor";
@@ -15,7 +15,7 @@ pub const HYPER: &str = "hyper";
 pub const WINDOWS_TERMINAL: &str = "windows_terminal";
 pub const UNKNOWN: &str = "unknown";
 
-/// Python `_VSCODE_FAMILY_TERMINALS`: the hosts the VS Code extension promo targets.
+/// The hosts the VS Code extension promo targets.
 pub const VSCODE_FAMILY_TERMINALS: [&str; 3] = [VSCODE, VSCODE_INSIDERS, CURSOR];
 
 /// Whether `terminal` is in `VSCODE_FAMILY_TERMINALS`.
@@ -23,7 +23,7 @@ pub fn is_vscode_family(terminal: &str) -> bool {
     VSCODE_FAMILY_TERMINALS.contains(&terminal)
 }
 
-/// Detect the host terminal from the process environment (Python `detect_terminal`).
+/// Detect the host terminal from the process environment.
 pub fn detect() -> &'static str {
     detect_from(&Env)
 }
@@ -48,7 +48,7 @@ pub fn detect_from(env: &dyn EnvSource) -> &'static str {
     from_env_markers(env).unwrap_or(UNKNOWN)
 }
 
-/// Python `term_map`: `TERM_PROGRAM` values other than `vscode`.
+/// `TERM_PROGRAM` values other than `vscode`.
 pub fn from_term_program(term_program: &str) -> Option<&'static str> {
     match term_program {
         "apple_terminal" => Some(APPLE_TERMINAL),
@@ -62,7 +62,7 @@ pub fn from_term_program(term_program: &str) -> Option<&'static str> {
     }
 }
 
-/// Python `_detect_terminal_from_env`: multiplexer and shell markers.
+/// Multiplexer and shell markers.
 pub fn from_env_markers(env: &dyn EnvSource) -> Option<&'static str> {
     let markers = [
         ("WEZTERM_PANE", WEZTERM),
@@ -87,7 +87,7 @@ pub fn from_env_markers(env: &dyn EnvSource) -> Option<&'static str> {
     None
 }
 
-/// Python `_is_cursor`: VS Code-env paths mention Cursor when it hosts the terminal.
+/// VS Code-env paths mention Cursor when it hosts the terminal.
 fn is_cursor(env: &dyn EnvSource) -> bool {
     [
         "VSCODE_GIT_ASKPASS_NODE",

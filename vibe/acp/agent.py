@@ -188,10 +188,7 @@ from vibe.observability.sentry import capture_sentry_exception
 from vibe.questions import UserAnswer, UserQuestionRequest, UserQuestionResult
 from vibe.user_content import UserDisplayContent, UserResource
 
-NON_INTERACTIVE_DISABLED_TOOLS: tuple[str, ...] = (
-    "ask_user_question",
-    "exit_plan_mode",
-)
+NON_INTERACTIVE_DISABLED_TOOLS: tuple[str, ...] = ("ask_user_question",)
 
 
 def _session_agent_changed(event: SessionUpdated) -> bool:
@@ -431,14 +428,10 @@ class VibeAcpAgent(AcpAgent):
         credentials_persister: CredentialsPersister | None = None,
         tenant_domain_resolver: TenantDomainResolver | None = None,
         environ_before_dotenv_load: Mapping[str, str] | None = None,
-        experimental_harness: bool = False,
-        legacy_harness: bool = False,
     ) -> None:
         self.sessions: dict[str, AcpSession] = {}
         self.client_capabilities: ClientCapabilities | None = None
         self.client_info: Implementation | None = None
-        self._experimental_harness = experimental_harness
-        self._legacy_harness = legacy_harness
         self._harness_host = LocalHarnessHost()
         self._start_session = session_starter or self._harness_host.start
         self._passive_host: AppServerHost | None = None
@@ -623,8 +616,6 @@ class VibeAcpAgent(AcpAgent):
                     ),
                     session=intent,
                     client_tool_handler=client_tool_handler,
-                    experimental_harness=self._experimental_harness,
-                    legacy_harness=self._legacy_harness,
                 )
             )
         except AppServerResponseError as exc:
@@ -736,10 +727,10 @@ class VibeAcpAgent(AcpAgent):
         if isinstance(event, TurnRetrying):
             await self._send_retrying(session, event)
             return
-        # An autonomous profile switch (e.g. exit_plan_mode accepting the plan)
-        # patches the session's `agent`. The mode is otherwise only carried on the
-        # load/new session response, so external ACP clients would keep showing
-        # the stale mode. `SessionUpdated` is processed after the client state's
+        # A profile switch the client did not request (e.g. `/unleanstall` moving
+        # off the active Lean agent) patches the session's `agent`. The mode is
+        # otherwise only carried on the load/new session response, so external
+        # ACP clients would keep showing the stale mode. `SessionUpdated` is processed after the client state's
         # active agent is flipped, so re-pushing the full config options here
         # reflects the new profile (mode + model + thinking) on the selector.
         if isinstance(event, SessionUpdated) and _session_agent_changed(event):
@@ -778,6 +769,18 @@ class VibeAcpAgent(AcpAgent):
             resources=content.resources,
             user_display_content=display,
             mention_stats=prepared.mentions,
+        )
+
+    def _client_connection_closed(self) -> bool:
+        """Whether the ACP connection to the client is closed or disconnected.
+
+        The SDK sets both flags before ``Connection.close()`` cancels in-flight
+        handlers, distinguishing connection teardown from a turn-level cancel.
+        """
+        connection = getattr(self.client, "_conn", None)
+        return bool(
+            getattr(connection, "_closed", False)
+            or getattr(connection, "_disconnected", False)
         )
 
     @override
@@ -832,7 +835,14 @@ class VibeAcpAgent(AcpAgent):
         try:
             await run_turn()
         except asyncio.CancelledError:
+            if self._client_connection_closed():
+                # Connection teardown: the client is gone and the sender is
+                # closed, so neither a usage update nor a response would get
+                # out — re-raise so shutdown is not held up.
+                raise
             self._send_usage_update(session)
+            # Turn-level cancel: the client still waits for the prompt request
+            # to settle, so the "cancelled" response must be delivered.
             return PromptResponse(stop_reason="cancelled", usage=self._usage(session))
         except AppServerTurnError as exc:
             if exc.error.code == TurnErrorCode.RESPONSE_TOO_LONG:
@@ -1482,8 +1492,6 @@ class VibeAcpAgent(AcpAgent):
                     LocalHarnessOptions(
                         client=self._client_descriptor(),
                         session_options=SessionOptions(cwd=str(Path.cwd())),
-                        experimental_harness=self._experimental_harness,
-                        legacy_harness=self._legacy_harness,
                     )
                 )
         return self._passive_host
@@ -1833,16 +1841,9 @@ async def _serve_acp_agent(agent: VibeAcpAgent) -> None:
 
 
 def run_acp_server(
-    *,
-    environ_before_dotenv_load: Mapping[str, str] | None = None,
-    experimental_harness: bool = False,
-    legacy_harness: bool = False,
+    *, environ_before_dotenv_load: Mapping[str, str] | None = None
 ) -> None:
-    agent = VibeAcpAgent(
-        environ_before_dotenv_load=environ_before_dotenv_load,
-        experimental_harness=experimental_harness,
-        legacy_harness=legacy_harness,
-    )
+    agent = VibeAcpAgent(environ_before_dotenv_load=environ_before_dotenv_load)
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
 
     def handle_sigterm(_signum: int, _frame: Any) -> None:

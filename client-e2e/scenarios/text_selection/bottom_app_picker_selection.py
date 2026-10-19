@@ -12,14 +12,13 @@ env = {
 }
 capture_startup = False
 capture_steps = {1, 2, 3, 4}
-clipboard_clients = {"rust"}
 expected_clipboard = "Log Level"
 
 _SENTENCE = "Bright violet machines hum quietly in the northern hall."
 
 # Drag across the assistant row above the box, then across the picker title (1-based SGR coordinates).
 _DRAG_TITLE = "\x1b[<0;3;29M\x1b[<32;60;29M\x1b[<0;60;29m"
-_DRAG_TRANSCRIPT = "\x1b[<0;3;15M\x1b[<32;119;15M\x1b[<0;119;15m"
+_DRAG_TRANSCRIPT = "\x1b[<0;3;11M\x1b[<32;119;11M\x1b[<0;119;11m"
 
 timeline: Timeline = [
     "hi\r",

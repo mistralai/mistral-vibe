@@ -55,6 +55,8 @@ from vibe.app_server.protocol import (
     SessionPinResponse,
     SessionReadParams,
     SessionReadResponse,
+    SessionRelocateParams,
+    SessionRelocateResponse,
     SessionResumeParams,
     SessionRewindParams,
     SessionRewindResponse,
@@ -66,6 +68,14 @@ from vibe.app_server.protocol import (
     TurnEnqueueResponse,
     TurnInterruptParams,
     TurnInterruptResponse,
+    TurnQueueEditAbandonParams,
+    TurnQueueEditAbandonResponse,
+    TurnQueueEditCancelParams,
+    TurnQueueEditCancelResponse,
+    TurnQueueEditSaveParams,
+    TurnQueueEditSaveResponse,
+    TurnQueueEditStartParams,
+    TurnQueueEditStartResponse,
     TurnQueueReadParams,
     TurnQueueReadResponse,
     TurnQueueRemoveParams,
@@ -471,6 +481,29 @@ class SessionBackend(Protocol):
 
 
 @runtime_checkable
+class SessionBackendQueuedTurnEditing(Protocol):
+    """Optional hold-and-replace lifecycle for editing an accepted queued Turn."""
+
+    async def start_queued_turn_edit(
+        self, params: TurnQueueEditStartParams
+    ) -> SessionBackendResult[TurnQueueEditStartResponse]: ...
+
+    async def save_queued_turn_edit(
+        self, params: TurnQueueEditSaveParams
+    ) -> SessionBackendResult[TurnQueueEditSaveResponse]: ...
+
+    async def cancel_queued_turn_edit(
+        self, params: TurnQueueEditCancelParams
+    ) -> SessionBackendResult[TurnQueueEditCancelResponse]: ...
+
+    async def abandon_queued_turn_edit(
+        self, params: TurnQueueEditAbandonParams
+    ) -> SessionBackendResult[TurnQueueEditAbandonResponse]: ...
+
+    async def abandon_active_queued_turn_edit(self) -> None: ...
+
+
+@runtime_checkable
 class SessionBackendQueuedTurnSteering(Protocol):
     """Optional atomic transfer of an accepted queued Turn into the active Turn."""
 
@@ -570,9 +603,7 @@ class SessionBackendHostPin(Protocol):
 
 @runtime_checkable
 class SessionBackendHostLeaseWatch(Protocol):
-    def watch_leases(
-        self,
-    ) -> AsyncGenerator[dict[str, SessionLeaseHolder | None], None]: ...
+    def watch_leases(self) -> AsyncGenerator[dict[str, SessionLeaseHolder | None]]: ...
 
 
 @runtime_checkable
@@ -610,6 +641,15 @@ class SessionBackendHostDelete(Protocol):
     """Optional selected-backend ownership of durable session deletion."""
 
     async def delete(self, params: SessionDeleteParams) -> EmptyResponse: ...
+
+
+@runtime_checkable
+class SessionBackendHostRelocate(Protocol):
+    """Optional selected-backend ownership of attached or stored relocation."""
+
+    async def relocate(
+        self, params: SessionRelocateParams, attached: SessionBackend | None
+    ) -> SessionRelocateResponse: ...
 
 
 @runtime_checkable

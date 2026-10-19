@@ -7,6 +7,7 @@ use crossterm::event::{
     PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
+use crossterm::style::Print;
 use crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
 
 use crate::resync_backend::ResyncBackend;
@@ -19,7 +20,7 @@ pub struct TerminalGuard {
 }
 
 /// Ratatui's `try_init`, with the resyncing backend.
-fn try_init() -> std::io::Result<Tui> {
+pub fn try_init() -> std::io::Result<Tui> {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         ratatui::restore();
@@ -28,6 +29,17 @@ fn try_init() -> std::io::Result<Tui> {
     enable_raw_mode()?;
     execute!(std::io::stdout(), EnterAlternateScreen)?;
     Tui::new(ResyncBackend::new(std::io::stdout()))
+}
+
+/// Exit unless stdout, where the TUI draws, is a terminal (e.g. not `nohup vibe > /dev/null`).
+pub fn require_interactive_terminal() {
+    use std::io::IsTerminal;
+    // No stdin check: crossterm reads keys from /dev/tty (CONIN$ on Windows) when stdin is not one.
+    if std::io::stdout().is_terminal() {
+        return;
+    }
+    eprintln!("Error: Interactive mode needs a terminal. Use -p/--prompt to run without one.");
+    std::process::exit(1);
 }
 
 pub fn init() -> std::io::Result<(Tui, TerminalGuard)> {
@@ -46,6 +58,14 @@ pub fn init() -> std::io::Result<(Tui, TerminalGuard)> {
     Ok((terminal, guard))
 }
 
+/// Turn SGR-pixels mouse reports on or off to match the window's cells.
+pub fn sync_pixel_reports() -> std::io::Result<()> {
+    match crate::mouse::pixels::sync() {
+        Some(sequence) => execute!(std::io::stdout(), Print(sequence)),
+        None => Ok(()),
+    }
+}
+
 /// Draw `app`, then park the hidden cursor on its caret, else the static bottom-left cell.
 pub fn draw(terminal: &mut Tui, app: &mut crate::app::App) -> std::io::Result<()> {
     let area = terminal.draw(|frame| app.draw(frame))?.area;
@@ -57,8 +77,16 @@ pub fn draw(terminal: &mut Tui, app: &mut crate::app::App) -> std::io::Result<()
     ))
 }
 
+/// Clear the screen and force a full redraw. Unlike `Terminal::clear`, this sends no cursor-position query.
+pub fn repaint<B: ratatui::backend::Backend>(
+    terminal: &mut ratatui::Terminal<B>,
+) -> Result<(), B::Error> {
+    let area = terminal.size()?.into();
+    terminal.resize(area)
+}
+
 /// Give the Ratatui terminal back, skipping its Drop when the terminal is gone:
-/// Ratatui 0.29 panics there if showing the cursor and stderr both fail.
+/// Ratatui panics there if showing the cursor and stderr both fail.
 pub fn release(mut terminal: Tui) {
     if terminal.show_cursor().is_err() {
         std::mem::forget(terminal);
@@ -78,6 +106,7 @@ impl TerminalGuard {
             EnableBracketedPaste,
             EnableFocusChange
         )?;
+        sync_pixel_reports()?;
         // Unsupported Unix terminals ignore the push; Windows rejects the command.
         if cfg!(unix) && std::env::var_os("VIBE_REPLAY_FIXTURE").is_none() {
             execute!(
@@ -97,6 +126,9 @@ impl TerminalGuard {
             let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
         }
         crate::pointer::emit(crate::pointer::Shape::Default);
+        if crate::mouse::pixels::disable() {
+            let _ = execute!(std::io::stdout(), Print(crate::mouse::pixels::DISABLE));
+        }
         let _ = execute!(
             std::io::stdout(),
             DisableFocusChange,

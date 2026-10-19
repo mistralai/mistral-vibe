@@ -431,6 +431,81 @@ fn tool_discovery_reports_the_completed_summary() {
 }
 
 ///
+/// *Prepare*: A session exposes one programmatic tool with a multi-line description.
+/// *Do*: Complete the first model call with a details request for that tool.
+/// *Assert*: The declaration carries the description once, as JSDoc on the function.
+///
+#[test]
+fn tool_discovery_details_render_the_description_once() {
+    // Prepare
+    let turn_id = "turn-tool-discovery-details";
+    let mut harness_config = config();
+    harness_config.capabilities.tool_groups = serde_json::from_value(json!([{
+        "name": "github",
+        "description": "GitHub tools",
+        "tools": [{
+            "name": "search_issues",
+            "description": "Search GitHub issues.\n\nUse it for open bugs.",
+            "input_schema": {"type": "object"},
+            "exposure": "programmatic",
+        }],
+    }]))
+    .expect("tool discovery configuration is valid");
+    let mut runtime = SynchronousRuntime::new(harness_config);
+    let first_completion = runtime.start_turn(turn_id, "find GitHub issues");
+    let discovery_calls = vec![tool_call(
+        "discovery-details",
+        "search_tool_functions",
+        json!({"mode": "details", "functions": ["github.search_issues"]}),
+    )];
+    let discovery_result = "---\nmode: details\nrelevantFunctionCount: 1\nrelatedFunctionCount: 1\nrelatedConnectorCount: 1\nrelevantConnectorNoticeCount: 0\nrequestedFunctionCount: 1\nloadedFunctionCount: 1\nloadedFunctions:\n  - name: github.search_issues\n    connector: github\n---\n\n# Tool Function Details\n\n```ts\n// Result 1.\n// connector: github\n// function: github.search_issues\n// tool: tools.github.search_issues\n\ndeclare namespace tools.github {\n  type SearchIssuesArg = Record<string, unknown>;\n  type SearchIssuesReturned = unknown;\n  /**\n   * Search GitHub issues.\n   *\n   * Use it for open bugs.\n   */\n  function search_issues(arg: SearchIssuesArg): Promise<SearchIssuesReturned>;\n}\n```";
+
+    // Do
+    let second_completion = runtime
+        .apply(
+            tool_call_completion(action_id(&first_completion), discovery_calls.clone()),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(assistant_tool_calls_committed(
+                    turn_id,
+                    &first_completion,
+                    &discovery_calls,
+                ))
+                .observe(tool_execution_started(turn_id, "discovery-details"))
+                .observe(json!({
+                    "type": "tool_discovery_finished",
+                    "turn_id": turn_id,
+                    "call_id": "discovery-details",
+                    "summary": {
+                        "kind": "details",
+                        "tool_count": 1,
+                        "connector_notice_count": 0,
+                        "group_namespaces": ["github"],
+                    },
+                }))
+                .observe(tool_execution_finished(
+                    turn_id,
+                    "discovery-details",
+                    json!({
+                        "type": "success",
+                        "content": [{"type": "text", "text": discovery_result}],
+                    }),
+                )),
+        )
+        .only_action();
+    runtime.finish_turn_with_text(turn_id, &second_completion, "GitHub tool loaded");
+
+    // Assert
+    let tool_result_text = second_completion["model_input"]["messages"]["messages"]
+        .as_array()
+        .and_then(|messages| messages.last())
+        .and_then(|message| message["content"][0]["text"].as_str())
+        .expect("the discovery result is appended to the next model request");
+    assert_eq!(tool_result_text.matches("Search GitHub issues.").count(), 1);
+    assert_eq!(second_completion["iteration"], 1);
+}
+
+///
 /// *Prepare*: A session exposes 22 tools whose descriptions share one unique query token.
 /// *Do*: Complete the first model call with a best-match discovery request matching every tool.
 /// *Assert*: The formatter reports 22 related matches and 20 returned tools, while Core observes the returned count.

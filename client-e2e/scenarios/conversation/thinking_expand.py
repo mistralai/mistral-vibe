@@ -14,8 +14,8 @@ handshake = {
     "runtime/read": {"runtime": {"config": {"showThinkingNodes": True}}},
 }
 
-# The collapsed `⏵ Thought` header lands on SGR row 15 once the turn settles.
-_ROW, _COL = 15, 1
+# The collapsed `⏵ Thought` header lands on SGR row 11 once the turn settles.
+_ROW, _COL = 11, 1
 _CLICK = f"\x1b[<0;{_COL};{_ROW}M\x1b[<0;{_COL};{_ROW}m"
 
 timeline: Timeline = [

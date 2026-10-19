@@ -16,7 +16,7 @@ from vibe.app_server.protocol import (
 from vibe.observability.logging import logger
 
 type SendNotification = Callable[[str, ProtocolModel], Awaitable[None]]
-type LeaseChanges = AsyncGenerator[dict[str, SessionLeaseHolder | None], None]
+type LeaseChanges = AsyncGenerator[dict[str, SessionLeaseHolder | None]]
 
 
 class SessionLeaseSubscription:

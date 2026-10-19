@@ -41,7 +41,5 @@ handshake["config/fields/read"]["fields"].append({
 })
 
 capture_startup = False
-screen_contains = {
-    "rust": ("True", "False", "defaults", "user config", "project config")
-}
+screen_contains = ("True", "False", "defaults", "user config", "project config")
 timeline: Timeline = ["/config\r", "\r", "\x1b[B", "\t"]

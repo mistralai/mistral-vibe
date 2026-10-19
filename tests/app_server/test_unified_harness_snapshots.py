@@ -11,6 +11,8 @@ import pytest
 from vibe.app_server._effect_models import (
     FileEditEffectDetail,
     FileEditEffectInput,
+    FileEditEffectOccurrence,
+    FileEditEffectOutput,
     FileWriteEffectDetail,
     FileWriteEffectInput,
     FileWriteEffectOutput,
@@ -102,13 +104,51 @@ def _write_effect(
             input=FileWriteEffectInput(file_path=str(path), content=content),
         ),
         state=CompletedEffectState(
-            output=output.model_dump(mode="json", by_alias=True),
+            output=(
+                output.model_dump(mode="json", by_alias=True)
+                if output is not None
+                else None
+            ),
             display=EffectResultDisplay(success=True, message=str(path)),
         ),
     )
 
 
-def _edit_effect(path: Path, *, turn: str) -> PublicEffectEntry:
+def _edit_effect(
+    path: Path,
+    *,
+    turn: str,
+    old_string: str = "a",
+    new_string: str = "b",
+    start_line: int | None = 1,
+    new_start_line: int | None = None,
+    previous_content: str | None = None,
+    with_occurrences: bool = True,
+    occurrences: list[tuple[int, int | None, str, str]] | None = None,
+) -> PublicEffectEntry:
+    # One hunk per edit unless the caller supplies the harness's full batch.
+    hunks = (
+        occurrences
+        if occurrences is not None
+        else [(start_line, new_start_line, old_string, new_string)]
+    )
+    output = (
+        FileEditEffectOutput(
+            file=str(path),
+            occurrences=[
+                FileEditEffectOccurrence(
+                    start_line=hunk_start,
+                    new_start_line=hunk_new_start,
+                    old_text=hunk_old,
+                    new_text=hunk_new,
+                )
+                for hunk_start, hunk_new_start, hunk_old, hunk_new in hunks
+            ],
+            previous_content=previous_content,
+        )
+        if with_occurrences
+        else None
+    )
     return PublicEffectEntry(
         id=f"edit-{turn}-{path.name}",
         session_id="session-1",
@@ -121,11 +161,16 @@ def _edit_effect(path: Path, *, turn: str) -> PublicEffectEntry:
             tool_name="edit",
             display=EffectCallDisplay(summary="Editing", status_text="Editing"),
             input=FileEditEffectInput(
-                file_path=str(path), old_string="a", new_string="b"
+                file_path=str(path), old_string=old_string, new_string=new_string
             ),
         ),
         state=CompletedEffectState(
-            output=None, display=EffectResultDisplay(success=True, message=str(path))
+            output=(
+                output.model_dump(mode="json", by_alias=True)
+                if output is not None
+                else None
+            ),
+            display=EffectResultDisplay(success=True, message=str(path)),
         ),
     )
 
@@ -255,7 +300,7 @@ class TestRestore:
         _run(
             recorder,
             "t1",
-            [_edit_effect(target, turn="t1")],
+            [_edit_effect(target, turn="t1", with_occurrences=False)],
             mid_turn=_write(target, "edited"),
         )
         assert recorder.restorable_paths(_anchor("t1")) == []
@@ -267,6 +312,203 @@ class TestRestore:
         recorder.restore(_anchor("t2"))
 
         assert _text(target) == "edited"
+
+    def test_an_edit_effect_reconstructs_the_preedit_state(
+        self, tmp_path: Path
+    ) -> None:
+        """The runtime applies an edit before its effect is observable, so a
+        raw disk read at effect time records post-edit content. The effect's
+        own old/new text must recover the true turn-start state.
+        """
+        target = tmp_path / "alpha.txt"
+        original = "one\ntwo\nthree\n"
+        target.write_text(original, encoding="utf-8")
+        recorder = _recorder(tmp_path)
+        _run(
+            recorder,
+            "t1",
+            [
+                _edit_effect(
+                    target,
+                    turn="t1",
+                    old_string="two\n",
+                    new_string="TWO\n",
+                    start_line=2,
+                )
+            ],
+            mid_turn=_write(target, "one\nTWO\nthree\n"),
+        )
+
+        assert recorder.restorable_paths(_anchor("t1")) == [str(target)]
+        recorder.restore(_anchor("t1"))
+        assert _text(target) == original
+
+    def test_a_later_edit_effect_refines_the_reconstruction(
+        self, tmp_path: Path
+    ) -> None:
+        """Two edits land before either effect is observed: the first
+        observation reconstructs from the effects it has seen so far, and the
+        second effect's arrival must refine the recorded pre-edit state to the
+        turn's true start content.
+        """
+        target = tmp_path / "alpha.txt"
+        original = "one\ntwo\nthree\nfour\nfive\nsix\n"
+        final = "one\nTWO\nthree\nfour\nFIVE\nsix\n"
+        target.write_text(original, encoding="utf-8")
+        recorder = _recorder(tmp_path)
+        first = _edit_effect(
+            target, turn="t1", old_string="two\n", new_string="TWO\n", start_line=2
+        )
+        second = _edit_effect(
+            target, turn="t1", old_string="five\n", new_string="FIVE\n", start_line=5
+        )
+        second = second.model_copy(update={"id": "edit-t1-alpha-2"})
+
+        recorder.observe(_state("t1"))
+        _write(target, final)()
+        recorder.observe(_state("t1", [first]))
+        recorder.observe(_state("t1", [first, second]))
+        recorder.observe(_state(None))
+
+        recorder.restore(_anchor("t1"))
+        assert _text(target) == original
+
+    def test_occurrence_text_without_endings_reconstructs_cleanly(
+        self, tmp_path: Path
+    ) -> None:
+        """The runtime's occurrence old/new text carries line content without
+        trailing newlines; the reconstruction must reattach the replaced
+        block's endings instead of splicing the bare text as whole lines.
+        """
+        target = tmp_path / "svc.txt"
+        original = "header\nkeepA\nbbb\nkeepB\nccc\nkeepC\neee\nfooter\n"
+        target.write_text(original, encoding="utf-8")
+        recorder = _recorder(tmp_path)
+        first = _edit_effect(
+            target, turn="t1", old_string="bbb", new_string="BBB_T1", start_line=3
+        )
+        second = _edit_effect(
+            target, turn="t1", old_string="eee", new_string="EEE_T1", start_line=7
+        )
+        second = second.model_copy(update={"id": "edit-t1-svc-2"})
+
+        recorder.observe(_state("t1"))
+        _write(target, "header\nkeepA\nBBB_T1\nkeepB\nccc\nkeepC\nEEE_T1\nfooter\n")()
+        recorder.observe(_state("t1", [first]))
+        recorder.observe(_state("t1", [first, second]))
+        recorder.observe(_state(None))
+
+        recorder.restore(_anchor("t1"))
+        assert _text(target) == original
+
+    def test_a_deletion_hunk_is_skipped_rather_than_spliced(
+        self, tmp_path: Path
+    ) -> None:
+        """A deletion leaves no post-edit text to verify the hunk against,
+        so the fallback skips it rather than splicing a corrupted file.
+        """
+        target = tmp_path / "alpha.txt"
+        target.write_text("one\ntwo\nthree\n", encoding="utf-8")
+        recorder = _recorder(tmp_path)
+        _run(
+            recorder,
+            "t1",
+            [
+                _edit_effect(
+                    target, turn="t1", old_string="two\n", new_string="", start_line=2
+                )
+            ],
+            mid_turn=_write(target, "one\nthree\n"),
+        )
+
+        assert recorder.restorable_paths(_anchor("t1")) == []
+        recorder.restore(_anchor("t1"))
+        assert _text(target) == "one\nthree\n"
+
+    def test_a_deletion_with_carried_text_restores_exactly(
+        self, tmp_path: Path
+    ) -> None:
+        """The carried pre-edit text is exact for deletions too: rewind undoes
+        them even though the fallback cannot verify a deletion hunk.
+        """
+        target = tmp_path / "alpha.txt"
+        original = "one\ntwo\nthree\n"
+        target.write_text(original, encoding="utf-8")
+        recorder = _recorder(tmp_path)
+        _run(
+            recorder,
+            "t1",
+            [
+                _edit_effect(
+                    target,
+                    turn="t1",
+                    old_string="two\n",
+                    new_string="",
+                    start_line=2,
+                    previous_content=original,
+                )
+            ],
+            mid_turn=_write(target, "one\nthree\n"),
+        )
+
+        recorder.restore(_anchor("t1"))
+        assert _text(target) == original
+
+    def test_a_write_after_edits_refines_through_its_replaced_text(
+        self, tmp_path: Path
+    ) -> None:
+        """A write's replaced text is an exact mid-turn state: reversing the
+        edits observed before it against that state yields the turn-start
+        content even though the current disk has moved on past the write.
+        """
+        target = tmp_path / "alpha.txt"
+        original = "one\ntwo\nthree\n"
+        target.write_text(original, encoding="utf-8")
+        recorder = _recorder(tmp_path)
+        edit = _edit_effect(
+            target, turn="t1", old_string="two\n", new_string="TWO\n", start_line=2
+        )
+        write = _write_effect(
+            target, turn="t1", content="rewritten", replaced="one\nTWO\nthree\n"
+        )
+        write = write.model_copy(update={"id": f"write-t1-{target.name}"})
+
+        recorder.observe(_state("t1"))
+        _write(target, "rewritten")()
+        recorder.observe(_state("t1", [edit]))
+        recorder.observe(_state("t1", [edit, write]))
+        recorder.observe(_state(None))
+
+        recorder.restore(_anchor("t1"))
+        assert _text(target) == original
+
+    def test_a_write_the_runtime_could_not_diff_keeps_the_edit_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        """A write with no replaced text records nothing for the path, so it
+        must not trigger a refinement: re-reading the post-write disk would
+        reverse the earlier edits against content they never touched and
+        clobber the already-correct turn-start snapshot with a worse one.
+        """
+        target = tmp_path / "alpha.txt"
+        original = "one\ntwo\nthree\n"
+        target.write_text(original, encoding="utf-8")
+        recorder = _recorder(tmp_path)
+        edit = _edit_effect(
+            target, turn="t1", old_string="two\n", new_string="TWO\n", start_line=2
+        )
+        write = _write_effect(target, turn="t1", content="rewritten", replaced=None)
+        write = write.model_copy(update={"id": f"write-t1-{target.name}"})
+
+        recorder.observe(_state("t1"))
+        _write(target, "one\nTWO\nthree\n")()
+        recorder.observe(_state("t1", [edit]))
+        _write(target, "rewritten")()
+        recorder.observe(_state("t1", [edit, write]))
+        recorder.observe(_state(None))
+
+        recorder.restore(_anchor("t1"))
+        assert _text(target) == original
 
     @pytest.mark.parametrize("anchor", ["user-never-observed", ""])
     def test_an_unrecorded_anchor_restores_nothing(
@@ -480,3 +722,441 @@ class TestTurnBoundaries:
         recorder.observe(_state(None))
 
         assert recorder.restorable_paths(_anchor("t1")) == [str(target.resolve())]
+
+
+class TestRealHarnessSearchReplace:
+    """Restores against the real harness ``search_replace``, end to end.
+
+    The hand-built fixtures above anchor whole lines; the real tool matches
+    substrings that can start mid-line, computes its blocks' start lines on
+    the content after the effect's earlier blocks, and carries the pre-edit
+    text in its annotations. These run the tool, mirror the adapter's
+    annotation-to-occurrence mapping, and assert the recorder restores the
+    exact original file.
+    """
+
+    @staticmethod
+    def _harness_edit_effect(
+        target: Path, *, turn: str, blocks: Sequence[Any]
+    ) -> PublicEffectEntry:
+        file_tools = pytest.importorskip(
+            "mistralai_vibe_local_harness.vibe._file_tools"
+        )
+        sandbox_helper = pytest.importorskip(
+            "mistralai_vibe_local_harness.vibe._sandbox_helper"
+        )
+        args = file_tools.SearchReplaceArgs(file_path=str(target), content=blocks)
+        _, previews, previous_content = sandbox_helper.search_replace(
+            target, args.model_dump(mode="json")["content"]
+        )
+        occurrences = [
+            (
+                block["old_start_line"],
+                block["new_start_line"],
+                "".join(block["old_lines"]),
+                "".join(block["new_lines"]),
+            )
+            for block in previews
+        ]
+        return _edit_effect(
+            target,
+            turn=turn,
+            occurrences=occurrences,
+            previous_content=previous_content,
+        )
+
+    def _assert_restored(
+        self, tmp_path: Path, original: str, blocks: Sequence[Any]
+    ) -> None:
+        target = tmp_path / "alpha.txt"
+        target.write_bytes(original.encode("utf-8"))
+        recorder = _recorder(tmp_path)
+        effect = self._harness_edit_effect(target, turn="t1", blocks=blocks)
+        post = target.read_bytes().decode("utf-8")
+        assert post != original
+
+        _run(recorder, "t1", [effect], mid_turn=_write(target, post))
+
+        recorder.restore(_anchor("t1"))
+        assert target.read_bytes().decode("utf-8") == original
+
+    def test_a_mid_line_edit_restores_exactly(self, tmp_path: Path) -> None:
+        self._assert_restored(
+            tmp_path, "x = foo\ny = 1\n", [_block(old_str="foo", new_str="bar")]
+        )
+
+    def test_a_replace_all_edit_restores_exactly(self, tmp_path: Path) -> None:
+        self._assert_restored(
+            tmp_path,
+            "foo()\nz = foo + 1\n",
+            [_block(old_str="foo", new_str="qux", replace_all=True)],
+        )
+
+    def test_a_multi_block_line_count_change_restores_exactly(
+        self, tmp_path: Path
+    ) -> None:
+        self._assert_restored(
+            tmp_path,
+            "a\nb\nc\nd\n",
+            [_block(old_str="a", new_str="a1\na2"), _block(old_str="d", new_str="D")],
+        )
+
+    def test_a_crlf_edit_restores_its_endings(self, tmp_path: Path) -> None:
+        self._assert_restored(
+            tmp_path,
+            "one\r\ntwo\r\nthree\r\n",
+            [_block(old_str="two\r\n", new_str="TWO\r\n")],
+        )
+
+    def test_a_last_line_without_a_newline_restores_exactly(
+        self, tmp_path: Path
+    ) -> None:
+        self._assert_restored(
+            tmp_path, "one\ntwo", [_block(old_str="two", new_str="TWO")]
+        )
+
+    def test_a_bom_first_line_edit_restores_exactly(self, tmp_path: Path) -> None:
+        self._assert_restored(
+            tmp_path, "\ufeffone\ntwo\n", [_block(old_str="one\n", new_str="ONE\n")]
+        )
+
+
+def _block(*, old_str: str, new_str: str, replace_all: bool = False) -> Any:
+    """A search/replace block of the real harness's argument shape."""
+    file_tools = pytest.importorskip("mistralai_vibe_local_harness.vibe._file_tools")
+    return file_tools.SearchReplaceBlock(
+        old_str=old_str, new_str=new_str, replace_all=replace_all
+    )
+
+
+class TestOccurrenceFallback:
+    """The positional reversal when an edit carries no pre-edit text.
+
+    A harness without the carried text (or an oversized file) leaves the
+    recorded pre-state to reverse the effect's hunks. Hunk positions come
+    from the effect's own anchors, and a hunk that is not line-aligned is
+    skipped: a stale reconstruction is recoverable, a corrupted one is not.
+    """
+
+    def test_a_mid_line_hunk_skips_rather_than_corrupts(self, tmp_path: Path) -> None:
+        original = "x = foo\ny = 1\n"
+        post = "x = bar\ny = 1\n"
+        target = tmp_path / "alpha.txt"
+        target.write_text(post, encoding="utf-8")
+        recorder = _recorder(tmp_path)
+        effect = _edit_effect(
+            target,
+            turn="t1",
+            old_string="foo",
+            new_string="bar",
+            start_line=1,
+            new_start_line=1,
+        )
+
+        _run(recorder, "t1", [effect])
+
+        # Unaligned hunk without an exact pre-state: skipped, not spliced.
+        assert recorder.restorable_paths(_anchor("t1")) == []
+        recorder.restore(_anchor("t1"))
+        assert _text(target) == post
+        assert _text(target) != original
+
+    def test_a_mid_line_deletion_skips_rather_than_corrupts(
+        self, tmp_path: Path
+    ) -> None:
+        post = "x = \ny = 1\n"
+        target = tmp_path / "alpha.txt"
+        target.write_text(post, encoding="utf-8")
+        recorder = _recorder(tmp_path)
+        effect = _edit_effect(
+            target,
+            turn="t1",
+            old_string="foo",
+            new_string="",
+            start_line=1,
+            new_start_line=1,
+        )
+
+        _run(recorder, "t1", [effect])
+
+        # A deletion leaves no post-edit text at its position to verify the
+        # hunk against, so like an unaligned hunk it is skipped: the file
+        # keeps its post-edit content rather than taking a corrupted splice.
+        assert recorder.restorable_paths(_anchor("t1")) == []
+        recorder.restore(_anchor("t1"))
+        assert _text(target) == post
+
+    def test_multi_block_hunks_undo_through_their_own_anchors(
+        self, tmp_path: Path
+    ) -> None:
+        original = "a\nb\nc\nd\n"
+        post = "a1\na2\nb\nc\nD\n"
+        target = tmp_path / "alpha.txt"
+        target.write_text(post, encoding="utf-8")
+        recorder = _recorder(tmp_path)
+        # The second block's anchor is computed on the content after the
+        # first block was applied: line 5, already shifted, never re-shifted.
+        effect = _edit_effect(
+            target, turn="t1", occurrences=[(1, 1, "a", "a1\na2"), (5, 5, "d", "D")]
+        )
+
+        _run(recorder, "t1", [effect])
+
+        recorder.restore(_anchor("t1"))
+        assert _text(target) == original
+
+    def test_a_later_line_count_change_does_not_shift_earlier_anchors(
+        self, tmp_path: Path
+    ) -> None:
+        """A later hunk's line delta must not be added to an earlier anchor.
+
+        Anchors already name the post-hunk line, and splices run last to
+        first, so the earlier anchor matches again once the later hunk is
+        undone. Shifting it skips that hunk and records a half-undone file.
+        """
+        original = "a\nb\nc\nd\n"
+        post = "a1\na2\nb\nc\nd1\nd2\n"
+        target = tmp_path / "alpha.txt"
+        target.write_text(post, encoding="utf-8")
+        recorder = _recorder(tmp_path)
+        effect = _edit_effect(
+            target,
+            turn="t1",
+            occurrences=[(1, 1, "a", "a1\na2"), (5, 5, "d", "d1\nd2")],
+        )
+
+        _run(recorder, "t1", [effect])
+
+        recorder.restore(_anchor("t1"))
+        assert _text(target) == original
+
+    def test_replace_all_line_count_changes_undo_at_each_anchor(
+        self, tmp_path: Path
+    ) -> None:
+        original = "a\nb\na\n"
+        post = "a1\na2\nb\na1\na2\n"
+        target = tmp_path / "alpha.txt"
+        target.write_text(post, encoding="utf-8")
+        recorder = _recorder(tmp_path)
+        # The second match's anchor is already shifted by the first match.
+        effect = _edit_effect(
+            target,
+            turn="t1",
+            occurrences=[(1, 1, "a", "a1\na2"), (3, 4, "a", "a1\na2")],
+        )
+
+        _run(recorder, "t1", [effect])
+
+        recorder.restore(_anchor("t1"))
+        assert _text(target) == original
+
+    def test_an_out_of_range_anchor_skips_rather_than_splices(
+        self, tmp_path: Path
+    ) -> None:
+        post = "a\nb\nc\nd\n"
+        target = tmp_path / "alpha.txt"
+        target.write_text(post, encoding="utf-8")
+        recorder = _recorder(tmp_path)
+        # A malformed hunk naming a line before the file starts: a negative
+        # position would slice from the end and splice "c" there.
+        effect = _edit_effect(target, turn="t1", occurrences=[(-1, None, "X", "c")])
+
+        _run(recorder, "t1", [effect])
+
+        recorder.restore(_anchor("t1"))
+        assert _text(target) == post
+
+    def test_crlf_endings_survive_the_reversal(self, tmp_path: Path) -> None:
+        original = "one\r\ntwo\r\nthree\r\n"
+        post = "one\r\nTWO\r\nthree\r\n"
+        target = tmp_path / "alpha.txt"
+        target.write_bytes(post.encode("utf-8"))
+        recorder = _recorder(tmp_path)
+        effect = _edit_effect(
+            target,
+            turn="t1",
+            old_string="two\r\n",
+            new_string="TWO\r\n",
+            start_line=2,
+            new_start_line=2,
+        )
+
+        _run(recorder, "t1", [effect])
+
+        recorder.restore(_anchor("t1"))
+        assert target.read_bytes().decode("utf-8") == original
+
+    def test_a_bom_first_line_hunk_undoes_and_keeps_the_bom(
+        self, tmp_path: Path
+    ) -> None:
+        original = "\ufeffone\ntwo\n"
+        post = "\ufeffONE\ntwo\n"
+        target = tmp_path / "alpha.txt"
+        target.write_bytes(post.encode("utf-8"))
+        recorder = _recorder(tmp_path)
+        # The harness reads a BOM file as utf-8-sig, so its hunk text never
+        # carries the BOM character the disk read keeps on the first line.
+        effect = _edit_effect(
+            target,
+            turn="t1",
+            old_string="one\n",
+            new_string="ONE\n",
+            start_line=1,
+            new_start_line=1,
+        )
+
+        _run(recorder, "t1", [effect])
+
+        recorder.restore(_anchor("t1"))
+        assert target.read_bytes().decode("utf-8") == original
+
+    def test_a_bom_base_restart_stays_aligned_for_an_earlier_first_line_hunk(
+        self, tmp_path: Path
+    ) -> None:
+        original = "\ufeffone\ntwo\n"
+        edited = "\ufeffONE\ntwo\n"
+        target = tmp_path / "alpha.txt"
+        target.write_bytes(edited.encode("utf-8"))
+        recorder = _recorder(tmp_path)
+        edit = _edit_effect(
+            target,
+            turn="t1",
+            old_string="one\n",
+            new_string="ONE\n",
+            start_line=1,
+            new_start_line=1,
+        )
+        write = _write_effect(target, turn="t1", content="rewritten", replaced=edited)
+        write = write.model_copy(update={"id": f"write-t1-{target.name}"})
+
+        recorder.observe(_state("t1"))
+        _write(target, "rewritten")()
+        recorder.observe(_state("t1", [edit]))
+        recorder.observe(_state("t1", [edit, write]))
+        recorder.observe(_state(None))
+
+        recorder.restore(_anchor("t1"))
+        assert target.read_bytes().decode("utf-8") == original
+
+    def test_an_edit_with_carried_text_records_it_as_the_exact_base(
+        self, tmp_path: Path
+    ) -> None:
+        original = "one\ntwo\nthree\n"
+        post = "one\nTWO\nthree\n"
+        target = tmp_path / "alpha.txt"
+        target.write_text(post, encoding="utf-8")
+        recorder = _recorder(tmp_path)
+        effect = _edit_effect(
+            target,
+            turn="t1",
+            old_string="two\n",
+            new_string="TWO\n",
+            start_line=2,
+            new_start_line=2,
+            previous_content=original,
+        )
+
+        _run(recorder, "t1", [effect])
+
+        assert recorder.restorable_paths(_anchor("t1")) == [str(target)]
+        recorder.restore(_anchor("t1"))
+        assert _text(target) == original
+
+
+def test_review_records_edits_first_observed_in_the_terminal_snapshot(
+    tmp_path: Path,
+) -> None:
+    from vibe.core.review import AllTarget
+
+    path = tmp_path / "review.txt"
+    original = "one\ntwo\nthree\nfour\nfive\nsix\n"
+    path.write_text(original)
+    recorder = _recorder(tmp_path)
+    recorder.observe(_state("t1"))
+    path.write_text("one\nTWO\nthree\nfour\nFIVE\nsix\n")
+    first = _edit_effect(
+        path, turn="t1", old_string="two", new_string="TWO", start_line=2
+    )
+    second = _edit_effect(
+        path, turn="t1", old_string="five", new_string="FIVE", start_line=5
+    ).model_copy(update={"id": "second"})
+    recorder.observe(_state(None, [_user_entry("t1"), first, second]))
+    review = recorder.review_manager()
+    state = review.review_state()
+    assert len(state.files) == 1
+    assert len(state.files[0].regions) == 2
+    assert review.baseline_text(str(path)) == original
+    review.revert_review(AllTarget())
+    assert path.read_text() == original
+
+
+def test_review_keeps_manual_edits_and_later_turn_dependencies(tmp_path: Path) -> None:
+    from vibe.core.review import AllTarget
+
+    path = tmp_path / "review.txt"
+    original = "one\ntwo\nthree\n"
+    path.write_text(original)
+    recorder = _recorder(tmp_path)
+    first = _edit_effect(
+        path, turn="t1", old_string="two", new_string="TWO", start_line=2
+    )
+    _run(recorder, "t1", [first], mid_turn=_write(path, "one\nTWO\nthree\n"))
+    path.write_text("one\nTWO\nTHREE\n")
+    second = _edit_effect(
+        path, turn="t2", old_string="TWO", new_string="EDITED", start_line=2
+    )
+    _run(recorder, "t2", [second], mid_turn=_write(path, "one\nEDITED\nTHREE\n"))
+    review = recorder.review_manager()
+    assert len(review.review_state().scopes) == 3
+    review.revert_review(AllTarget())
+    assert path.read_text() == original
+
+
+def test_review_reads_a_completed_edit_before_the_turn_settles(tmp_path: Path) -> None:
+    from vibe.core.review import AllTarget
+
+    path = tmp_path / "live.txt"
+    path.write_text("before\n")
+    recorder = _recorder(tmp_path)
+    recorder.observe(_state("t1"))
+    path.write_text("after\n")
+    effect = _edit_effect(
+        path, turn="t1", old_string="before", new_string="after", start_line=1
+    )
+    recorder.observe(_state("t1", [effect]))
+    review = recorder.review_manager()
+    assert review.baseline_text(str(path)) == "before\n"
+    assert len(review.review_state().files) == 1
+    # Repeated live reads must not seal or mutate the recorder's open turn.
+    assert len(recorder.review_manager().review_state().files) == 1
+    recorder.observe(_state(None, [_user_entry("t1"), effect]))
+    settled = recorder.review_manager()
+    settled.revert_review(AllTarget())
+    assert path.read_text() == "before\n"
+
+
+def test_review_reconstructs_a_turn_after_disk_has_overtaken_effect_delivery(
+    tmp_path: Path,
+) -> None:
+    from vibe.core.review import AllTarget
+
+    path = tmp_path / "coalesced.txt"
+    original = "one\ntwo\nthree\nfour\nfive\nsix\n"
+    path.write_text(original)
+    recorder = _recorder(tmp_path)
+    recorder.observe(_state("t1"))
+    path.write_text("one\nTWO\nthree\nfour\nFIVE\nsix\n")
+    first = _edit_effect(
+        path, turn="t1", old_string="two", new_string="TWO", start_line=2
+    )
+    second = _edit_effect(
+        path, turn="t1", old_string="five", new_string="FIVE", start_line=5
+    ).model_copy(update={"id": "second"})
+    # Disk already includes the second edit when only the first result arrives.
+    recorder.observe(_state("t1", [first]))
+    recorder.observe(_state("t1", [first, second]))
+    recorder.observe(_state(None, [_user_entry("t1"), first, second]))
+    review = recorder.review_manager()
+    assert len(review.review_state().files[0].regions) == 2
+    review.revert_review(AllTarget())
+    assert path.read_text() == original

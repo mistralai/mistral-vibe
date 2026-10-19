@@ -14,6 +14,8 @@ from vibe.core.config.builder import ConfigBuilder
 from vibe.core.config.event_bus import EventBus
 from vibe.core.config.layer import ConfigLayer, LayerNotLoadedError, RawConfig
 from vibe.core.config.layers.default import DefaultConfigLayer
+from vibe.core.config.layers.growthbook import GrowthbookLayer
+from vibe.core.config.layers.model_catalog import ModelCatalogLayer
 from vibe.core.config.layers.project import ProjectConfigLayer
 from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.patch import (
@@ -49,18 +51,28 @@ class DefaultLayerResolutionError(Exception):
 
 type DefaultLayerResolver = Callable[[], ConfigLayer[RawConfig]]
 
-# Durable layers reconstruct deterministically on restart, so a model alias
-# present in any of them is safe to override sparsely. Dynamic layers
-# (GrowthBook, admin) are excluded on purpose: a runtime-injected model absent
-# from the durable layers must be materialized, or its sparse override would
-# fail schema validation on the next launch (VIBE-4041).
-_DURABLE_LAYER_TYPES = (DefaultConfigLayer, UserConfigLayer, ProjectConfigLayer)
+# A model alias any of these layers defines takes a sparse (field-only)
+# write. Durable layers reconstruct the model at restart; the catalog and
+# GrowthBook layers re-fetch theirs at launch, and once they no longer define
+# the model the missing-model fallback drops the sparse entry with a warning
+# instead of failing validation (VIBE-4877). A model only a session override,
+# an agent profile or the admin layer defines is excluded: nothing redefines
+# it at launch, so its write must carry identity fields.
+_SPARSE_OVERRIDE_LAYER_TYPES = (
+    DefaultConfigLayer,
+    UserConfigLayer,
+    ProjectConfigLayer,
+    ModelCatalogLayer,
+    GrowthbookLayer,
+)
 
 
-async def _durable_model_aliases(layers: Iterable[ConfigLayer[RawConfig]]) -> set[str]:
+async def _sparse_override_model_aliases(
+    layers: Iterable[ConfigLayer[RawConfig]],
+) -> set[str]:
     aliases: set[str] = set()
     for layer in layers:
-        if not isinstance(layer, _DURABLE_LAYER_TYPES):
+        if not isinstance(layer, _SPARSE_OVERRIDE_LAYER_TYPES):
             continue
         try:
             raw = await layer.load()
@@ -168,9 +180,15 @@ class ConfigOrchestrator[S: ConfigSchema]:
     async def load_persistence_layer(self) -> RawConfig:
         return await self._default_layer_resolver().load()
 
-    async def durable_model_aliases(self) -> set[str]:
-        """Model aliases reconstructable from durable layers after a restart."""
-        return await _durable_model_aliases(self.layers)
+    async def sparse_override_model_aliases(self) -> set[str]:
+        """Model aliases a sparse (field-only) write is safe for.
+
+        Durable layers reconstruct the model at restart; the catalog and
+        GrowthBook layers re-fetch theirs at launch. A model none of them
+        defines gets its identity materialized instead, or its sparse entry
+        would be an orphan no layer completes on the next launch.
+        """
+        return await _sparse_override_model_aliases(self.layers)
 
     def persisted_active_model(self) -> str:
         data = self._default_layer_resolver().cached_data

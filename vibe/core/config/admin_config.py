@@ -97,6 +97,13 @@ async def fetch_managed_config(base_url: str, api_key: str) -> ManagedConfigResu
     except httpx.RequestError as exc:
         logger.debug("Managed config fetch failed url=%s error=%s", url, exc)
         return ManagedConfigResult(error=str(exc))
+    except Exception as exc:
+        # The promise above is unconditional, so it has to cover the failures
+        # that never reach the wire: a trust store that will not build, a
+        # malformed proxy in the environment. Callers fail open on an empty
+        # admin layer; they have no answer for an exception.
+        logger.debug("Managed config fetch errored url=%s error=%s", url, exc)
+        return ManagedConfigResult(error=str(exc))
 
     try:
         config = ManagedConfig.model_validate(response.json())

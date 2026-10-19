@@ -1,4 +1,4 @@
-"""A consumed queued edit uses a visible Rust warning confirmation."""
+"""A consumed queued edit shows a visible warning confirmation."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 _UP = "\x1b[A"
 _WARNING = "This message was already processed"
 
-screen_contains = {"rust": (_WARNING,)}
+screen_contains = (_WARNING,)
 capture_steps = {10}
 settle_per_key = True
 

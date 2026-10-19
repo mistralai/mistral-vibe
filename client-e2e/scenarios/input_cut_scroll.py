@@ -5,7 +5,7 @@ from e2e.app_server.scenario import Timeline
 expected_clipboard = "line23"
 capture_startup = False
 capture_steps = {2}
-screen_contains = {"python": ("line22",), "rust": ("line22",)}
+screen_contains = ("line22",)
 
 _WHEEL_UP_OVER_COMPOSER = "\x1b[<64;60;30M"
 _CUT = "\x18"

@@ -19,11 +19,10 @@ use crate::transcript::local;
 use crate::{completion_manager, config, message_queue};
 
 pub(super) const NOTICE_TIMEOUT_SECS: u64 = 4;
-/// Toast timeout, Python `App.NOTIFICATION_TIMEOUT` (5s).
+/// Toast timeout (5s).
 const TOAST_SECS: u64 = 5;
 
-/// Replay slash commands deferred while the session was starting (Python
-/// releases `_session_ready.wait()` and dispatches the held input).
+/// Replay slash commands deferred while the session was starting.
 /// Returns true if a deferred `/exit` was replayed, so the caller can quit.
 pub fn flush_pending(
     app: &mut App,
@@ -31,7 +30,7 @@ pub fn flush_pending(
     config_tx: &mpsc::Sender<config::Loaded>,
 ) -> bool {
     // Nothing was deferred: leave input and completions untouched so a bare
-    // Ready does not reopen a dismissed popup (Python dispatches nothing).
+    // Ready does not reopen a dismissed popup.
     if app.pending_commands.is_empty() {
         return false;
     }
@@ -100,11 +99,11 @@ pub fn submit(
         return false;
     }
     // A held queue takes a bare Enter as "send it now"; an active turn takes it
-    // as "steer the accepted queue into this turn" (Python `_handle_paused_submit`).
+    // as "steer the accepted queue into this turn".
     if value.is_empty() {
         if app.queue.paused {
-            // Python drops the what's-new body past its empty-input early
-            // return, so releasing a held queue with Enter dismisses it too.
+            // Releasing a held queue with Enter dismisses the what's-new body,
+            // as any non-empty submission does.
             banners::dismiss_whats_new(app);
             message_queue::resume(app, client);
         } else {
@@ -139,6 +138,10 @@ pub fn submit(
             );
             return false;
         }
+        if app.agents.installing {
+            reject_input(app, &value, "Wait for the agent install to finish.".into());
+            return false;
+        }
         if app.teleport.is_some()
             && matches!(
                 &classified,
@@ -162,9 +165,8 @@ pub fn submit(
             }
         }
         ClassifiedInput::SlashCommand { command } => {
-            // Defer every slash command until the session is ready, matching
-            // Python's `_dispatch_idle_input` which awaits `_session_ready` before
-            // any dispatch.
+            // Defer every slash command until the session is ready: nothing
+            // dispatches before it.
             if matches!(app.session.status, Status::Starting) {
                 clear_and_remember(app, &value);
                 app.pending_commands.push(value);
@@ -269,15 +271,16 @@ fn teleport_rejection(hint: &str) -> String {
     format!("Teleport cannot be queued — {hint}")
 }
 
-/// Why a non-side-channel command cannot run now (Python `_REJECT_HINT_*`).
+/// Why a non-side-channel command cannot run now.
 fn reject_hint(app: &App) -> Option<&'static str> {
     if app.queue.paused {
         return Some("clear the queue first or remove this input.");
     }
-    // Compaction runs in Python's `_agent_task`, so it counts as a busy job too.
+    // Compaction runs as an agent job, so it counts as busy too.
     if matches!(app.session.status, Status::Generating { .. })
         || app.compacting
         || app.vibe_code_project.pending
+        || app.agents.installing
         || app.teleport.is_some()
         || !app.queue.is_empty()
     {
@@ -287,9 +290,9 @@ fn reject_hint(app: &App) -> Option<&'static str> {
 }
 
 pub(super) fn clear_and_remember(app: &mut App, value: &str) {
-    // Python's text-changed watcher drops the loaded-entry state whenever the
-    // text changes; a submitted recall must not leave the composer pretending
-    // it still shows a history entry, or every later Down feeds the recall.
+    // Any text change drops the loaded-entry state: a submitted recall must not
+    // leave the composer pretending it still shows a history entry, or every
+    // later Down feeds the recall.
     crate::input::reset_history_state(app);
     app.chat_input.clear();
     completion_manager::input_changed(app);
@@ -304,7 +307,7 @@ fn remember(app: &mut App, value: &str) {
     app.chat_input.history.persist();
 }
 
-/// Escape while a turn runs (Python `_interrupt_turn`): cancel the active turn,
+/// Escape while a turn runs: cancel the active turn,
 /// drop the loading spinner, and mount the local interrupt marker. A turn the
 /// server has not started yet has no id: interrupt it once it starts.
 pub fn interrupt_turn(app: &mut App, client: &Arc<Client>) {
@@ -342,10 +345,9 @@ pub fn send_interrupt(app: &mut App, client: &Arc<Client>) {
     });
 }
 
-/// Prepare the prompt (mentions, auto-title) then start the turn, as Python's
-/// `_send_prompt` does before `session.start_turn`. When `injected` is true,
-/// use `turn/start` with `injected=true` so the projection suppresses the
-/// user-message entry (Python `session.act(injected=True)`).
+/// Prepare the prompt (mentions, auto-title) then start the turn. When
+/// `injected` is true, use `turn/start` with `injected=true` so the projection
+/// suppresses the user-message entry.
 pub(super) async fn start_turn(
     client: Arc<Client>,
     session_id: String,
@@ -355,9 +357,9 @@ pub(super) async fn start_turn(
     let _ = start_turn_with(client, session_id, prompt, false, telemetry).await;
 }
 
-/// Like `start_turn` but marks the prompt as injected, matching Python's
-/// `_retry` → `session.act(injected=True)`. Returns the request outcome so the
-/// caller can recover the busy state when the RPC never reaches the server.
+/// Like `start_turn` but marks the prompt as injected (as `/retry` does).
+/// Returns the request outcome so the caller can recover the busy state when
+/// the RPC never reaches the server.
 pub(super) async fn start_injected_turn(
     client: Arc<Client>,
     session_id: String,

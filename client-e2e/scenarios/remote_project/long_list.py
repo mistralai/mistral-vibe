@@ -1,4 +1,4 @@
-"""Remote-project long list parity."""
+"""Remote-project picker with a long list."""
 
 from __future__ import annotations
 

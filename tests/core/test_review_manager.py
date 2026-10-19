@@ -6,12 +6,11 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.stubs.fake_checkpoint_capture import FakeCheckpointCapture, FileSnapshot
 from vibe.core.checkpoints import (
     AgentTurn,
     Checkpointer,
-    CheckpointRecorder,
     Decision,
-    FileSnapshot,
     FileState,
     OpaqueReason,
     Owner,
@@ -53,7 +52,7 @@ def _snap(path: Path) -> FileSnapshot:
 
 
 class _Shells(NamedTuple):
-    recorder: CheckpointRecorder
+    recorder: FakeCheckpointCapture
     review: ReviewManager
     messages: MessageList
 
@@ -61,7 +60,7 @@ class _Shells(NamedTuple):
 def _shells(messages: MessageList) -> _Shells:
     checkpointer = Checkpointer()
     return _Shells(
-        recorder=CheckpointRecorder(checkpointer, messages),
+        recorder=FakeCheckpointCapture(checkpointer, messages),
         review=ReviewManager(checkpointer),
         messages=messages,
     )
@@ -601,6 +600,95 @@ class TestManualEditDuringReview:
         assert f.read_text(encoding="utf-8") == s(
             top="topx", a="A_1", b="B_2", c="C_u", d=("D_0",), e="E_u"
         )
+
+
+class TestCarriedPreMidTurnRead:
+    def test_mid_turn_read_folds_held_back_carried_pre(self, tmp_path: Path) -> None:
+        """A command writes no file effect, so the unified recorder holds the
+        turn-start read back instead of committing it to the open turn. A review
+        read mid-turn must still see the disk drift: the carried pre state folds
+        in as a provisional edit of the open turn — the same edit the seal
+        records — while a read without it stays stale at the last sealed turn.
+        """
+        checkpointer = Checkpointer()
+        f = tmp_path / "f.txt"
+        path = str(f.resolve())
+
+        f.write_text("original\n", encoding="utf-8")
+        checkpointer.begin_turn(1)
+        checkpointer.record_pre_edit(path, FileState.from_text("original\n"))
+        checkpointer.record_post_edit(path, FileState.from_text("AGENT_EDIT\n"))
+        f.write_text("AGENT_EDIT\n", encoding="utf-8")
+        checkpointer.seal_turn()
+
+        # Turn 2 opens with the turn-start read held back, then a command
+        # rewrites the file before any file effect is observed.
+        checkpointer.begin_turn(2)
+        carried = {path: FileState.from_text("AGENT_EDIT\n")}
+        f.write_text("COMMAND_EDIT\n", encoding="utf-8")
+
+        without = ReviewManager(checkpointer)
+        with_carried = ReviewManager(checkpointer, carried_pre=lambda: dict(carried))
+
+        stale = without.review_state()
+        assert len(stale.files) == 1
+        assert len(stale.files[0].regions) == 1
+        assert [(h.side, h.line) for h in without.file_hunks(path)] == [
+            ("additions", 0)
+        ]
+
+        # The carried pre folds the command's write in as the open turn's
+        # provisional edit: a second pending region, and the whole-file hunk
+        # decides both turns' regions together.
+        fresh = with_carried.review_state()
+        assert len(fresh.files[0].regions) == 2
+        assert with_carried.baseline_text(path) == "original\n"
+        hunks = with_carried.file_hunks(path)
+        assert [(h.side, h.line) for h in hunks] == [("additions", 0)]
+        assert [len(h.regions) for h in hunks] == [2]
+
+        # Sealing records exactly the provisional edit the read folded in, so
+        # the post-seal read matches the mid-turn one.
+        for carried_path, state in carried.items():
+            checkpointer.record_pre_edit(carried_path, state)
+        checkpointer.record_post_edit(path, FileState.from_text("COMMAND_EDIT\n"))
+        checkpointer.seal_turn()
+
+        sealed = without.review_state()
+        assert len(sealed.files[0].regions) == 2
+        assert [(h.side, h.line) for h in without.file_hunks(path)] == [
+            ("additions", 0)
+        ]
+        assert [len(h.regions) for h in without.file_hunks(path)] == [2]
+
+    def test_mid_turn_read_ignores_carried_pre_without_drift(
+        self, tmp_path: Path
+    ) -> None:
+        """A held-back carried pre that matches the disk folds in nothing: an
+        untouched file gains no provisional region mid-turn.
+        """
+        checkpointer = Checkpointer()
+        f = tmp_path / "f.txt"
+        path = str(f.resolve())
+
+        f.write_text("original\n", encoding="utf-8")
+        checkpointer.begin_turn(1)
+        checkpointer.record_pre_edit(path, FileState.from_text("original\n"))
+        checkpointer.record_post_edit(path, FileState.from_text("AGENT_EDIT\n"))
+        f.write_text("AGENT_EDIT\n", encoding="utf-8")
+        checkpointer.seal_turn()
+
+        checkpointer.begin_turn(2)
+        carried = {path: FileState.from_text("AGENT_EDIT\n")}
+        review = ReviewManager(checkpointer, carried_pre=lambda: dict(carried))
+
+        state = review.review_state()
+        assert len(state.files[0].regions) == 1
+        hunks = review.file_hunks(path)
+        assert [(h.side, h.line) for h in hunks] == [("additions", 0)]
+        assert [len(h.regions) for h in hunks] == [1]
+
+        checkpointer.seal_turn()
 
 
 class TestReviewErrors:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 import json
 from typing import Any
+from urllib.parse import urlparse
 import uuid
 
 from e2e.app_server.config import FIXTURE_PATH
@@ -113,6 +114,13 @@ def turn_completed(
 ) -> AppServerEvent:
     """Build a `turn/completed`, optionally stopped for a reason (e.g. `limit`)."""
     return _turn(completed=True, stop_reason=stop_reason, session_id=session_id)
+
+
+def turn_interrupted() -> AppServerEvent:
+    """A turn/completed the user interrupted (Esc)."""
+    event = _turn(completed=True)
+    event["params"]["turn"]["status"] = "interrupted"
+    return event
 
 
 def turn_failed(
@@ -271,6 +279,45 @@ def complete_entry(entry_id: str) -> AppServerEvent:
     )
 
 
+COMPACTION_ENTRY_ID = "checkpoint-compaction-00000000-0000-4000-8000-0000000000c1"
+
+
+def compaction_started(trigger: str = "automatic") -> AppServerEvent:
+    """Open a compaction checkpoint as the harness projects its running attempt."""
+    entry = _entry(
+        "checkpoint",
+        entry_id=COMPACTION_ENTRY_ID,
+        generation_status="in_progress",
+        kind="compaction",
+        message="Compacting context",
+        details={"trigger": trigger, "attempt": 1},
+    )
+    if trigger == "manual":
+        entry["turnId"] = None
+    return _added(entry)
+
+
+def compaction_settled(
+    trigger: str = "automatic", *, failed: bool = False
+) -> AppServerEvent:
+    """Settle the open compaction checkpoint as a compacted or failed attempt."""
+    details: dict[str, Any] = {"trigger": trigger, "attempt": 1}
+    if failed:
+        details["error"] = {"code": "invalid_compaction_summary"}
+        details["reason"] = "empty_summary"
+    else:
+        details["summaryLength"] = 42
+    message = "Context compaction failed" if failed else "Context compacted"
+    return _updated(
+        COMPACTION_ENTRY_ID,
+        [
+            {"op": "replace", "path": "/generationStatus", "value": "completed"},
+            {"op": "replace", "path": "/message", "value": message},
+            {"op": "replace", "path": "/details", "value": details},
+        ],
+    )
+
+
 def notice(message: str, detail: dict[str, Any]) -> AppServerEvent:
     """Build a completed notice entry; `detail` carries its discriminating kind."""
     return _added(_entry("notice", level="info", message=message, detail=detail))
@@ -314,6 +361,18 @@ def hook_completed(
 def server_warning(message: str) -> AppServerEvent:
     """Build a server-pushed operational warning (Python `ServerWarning`)."""
     return _event("warning", {"warning": {"code": "warning", "message": message}})
+
+
+def runtime_updated(
+    validation_warnings: list[str] | None = None, *, session_id: str | None = None
+) -> AppServerEvent:
+    """Build a `runtime/updated` notification over the fixture runtime."""
+    runtime = json.loads(json.dumps(_fixture["handshake"]["runtime/read"]["runtime"]))
+    if validation_warnings is not None:
+        runtime["config"]["validationWarnings"] = validation_warnings
+    return _event(
+        "runtime/updated", {"sessionId": session_id or SESSION_ID, "runtime": runtime}
+    )
 
 
 def reasoning(text: str, *, generation_status: str = "completed") -> AppServerEvent:
@@ -1303,45 +1362,98 @@ def web_search_completed(
 
 
 def web_connector_call(
-    tool: str,
-    arguments: dict[str, Any],
-    structured_content: dict[str, Any],
-    *,
-    label: tuple[str, str, str],
+    tool: str, arguments: dict[str, Any], structured_content: dict[str, Any]
 ) -> AppServerEvent:
-    """Build a completed Unified `connector_web_search.<tool>` effect as the app server labels it."""
-    verb, noun, settled_verb = label
-    return _added(
-        _entry(
-            "effect",
-            title=f"connector_web_search.{tool}",
-            detail={
-                "toolName": f"connector_web_search.{tool}",
-                "display": {
-                    "summary": f"{verb} {noun}",
-                    "verb": verb,
-                    "message": noun,
-                    "settledVerb": settled_verb,
-                    "settledMessage": noun,
-                    "statusText": f"{verb} {noun}",
-                },
-                "kind": "tool",
-                "input": arguments,
-            },
-            state={
-                "status": "completed",
-                "output": {
-                    "type": "success",
-                    "content": [
-                        {"type": "text", "text": json.dumps(structured_content)}
-                    ],
-                    "structured_content": structured_content,
-                    "_meta": {"approval": {"decision": "execute"}},
-                },
-                "display": {"success": True, "verb": settled_verb, "message": noun},
-            },
+    """Build a completed Unified `connector_web_search.<tool>` effect as the app server projects it.
+
+    The app server classifies the web-search connector's `web_search` and
+    `open_url` tools into the built-in web kinds, so a connector call renders
+    exactly like the built-in it replaced: the detail carries the semantic
+    kind/input and the state carries the semantic output projected from the
+    connector's structured content (result cards keyed by reference id, or a
+    page object).
+    """
+    if tool == "web_search":
+        query = str(arguments.get("query", ""))
+        cards = sorted(
+            structured_content.values(), key=lambda card: card.get("rank", 0)
         )
-    )
+        sources = [
+            {"title": str(card.get("title", "")), "url": str(card.get("url", ""))}
+            for card in cards
+        ]
+        plural = "" if len(sources) == 1 else "s"
+        return _added(
+            _entry(
+                "effect",
+                title=f"connector_web_search.{tool}",
+                detail={
+                    "toolName": f"connector_web_search.{tool}",
+                    "display": {
+                        "summary": f"Searching the web: '{query}'",
+                        "content": None,
+                        "suffix": "",
+                        "verb": "Searching",
+                        "message": f"the web: '{query}'",
+                        "settledVerb": "Searched",
+                        "settledMessage": f"the web: '{query}'",
+                        "statusText": "Searching the web",
+                    },
+                    "kind": "web_search",
+                    "input": {"query": query},
+                },
+                state={
+                    "status": "completed",
+                    "output": {"query": query, "answer": "", "sources": sources},
+                    "display": {
+                        "success": True,
+                        "verb": "Searched",
+                        "message": f"'{query}' ({len(sources)} source{plural})",
+                    },
+                },
+            )
+        )
+    if tool == "open_url":
+        url = str(arguments.get("url", ""))
+        content = str(structured_content.get("content", ""))
+        domain = urlparse(url).netloc or url[:50]
+        return _added(
+            _entry(
+                "effect",
+                title=f"connector_web_search.{tool}",
+                detail={
+                    "toolName": f"connector_web_search.{tool}",
+                    "display": {
+                        "summary": f"Fetching: {domain}",
+                        "content": None,
+                        "suffix": "",
+                        "verb": "Fetching",
+                        "message": domain,
+                        "settledVerb": "Fetched",
+                        "settledMessage": domain,
+                        "statusText": "Fetching URL",
+                    },
+                    "kind": "web_fetch",
+                    "input": {"url": url, "timeout": None},
+                },
+                state={
+                    "status": "completed",
+                    "output": {
+                        "url": str(structured_content.get("url", url)),
+                        "content": content,
+                        "contentType": "",
+                        "wasTruncated": False,
+                    },
+                    "display": {
+                        "success": True,
+                        "verb": "Fetched",
+                        "message": f"{structured_content.get('url', url)} ({len(content):,} chars)",
+                        "suffix": "",
+                    },
+                },
+            )
+        )
+    raise ValueError(f"unsupported connector tool for golden fabrication: {tool}")
 
 
 def worktree_settled(

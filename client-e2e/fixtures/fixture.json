@@ -363,17 +363,17 @@
             "agentType": "agent"
           },
           {
-            "name": "plan",
-            "displayName": "Plan",
-            "description": "Read-only agent for exploration and planning",
-            "safety": "safe",
-            "agentType": "agent"
-          },
-          {
             "name": "accept-edits",
             "displayName": "Accept Edits",
             "description": "Auto-approves file edits only",
             "safety": "destructive",
+            "agentType": "agent"
+          },
+          {
+            "name": "smart-approve",
+            "displayName": "Smart Approve",
+            "description": "Classifies each tool call and auto-runs the safe ones, prompting only for risky ones",
+            "safety": "smart",
             "agentType": "agent"
           },
           {
@@ -502,7 +502,15 @@
       "auth": {
         "modelDisplayName": "mistral-medium-3.5",
         "providerName": "mistral",
-        "apiBase": "https://api.mistral.ai/v1"
+        "apiBase": "https://api.mistral.ai/v1",
+        "authKind": "api_key",
+        "apiKeyEnvVar": "MISTRAL_API_KEY",
+        "envFilePath": "/home/e2e-user/.vibe/.env",
+        "sources": [
+          {"kind": "process_env", "state": "in_use"},
+          {"kind": "vibe_home_env_file", "state": "available"},
+          {"kind": "os_keyring", "state": "available"}
+        ]
       }
     },
     "session/ready/wait": {
@@ -930,20 +938,12 @@
           "name": "disabled_tools",
           "kind": "list",
           "description": "A list of tool names/patterns to disable after 'enabled_tools' filtering. Supports glob patterns and regex with 're:' prefix.",
-          "value": [
-            "exit_plan_mode"
-          ],
+          "value": [],
           "path": "/disabled_tools",
           "popular": false,
           "enumChoices": [],
           "valueLabels": {},
           "layerValues": [
-            {
-              "layer": "agent-profile",
-              "value": [
-                "exit_plan_mode"
-              ]
-            },
             {
               "layer": "default",
               "value": []
@@ -1065,7 +1065,7 @@
         {
           "name": "default_agent",
           "kind": "str",
-          "description": "Agent profile to use when no --agent flag is passed. Builtin: ask, plan, accept-edits, smart-approve, auto-approve. Applies in both interactive and programmatic (-p/--prompt) mode.",
+          "description": "Agent profile to use when no --agent flag is passed. Builtin: ask, accept-edits, smart-approve, auto-approve. Applies in both interactive and programmatic (-p/--prompt) mode.",
           "value": "accept-edits",
           "path": "/default_agent",
           "popular": true,
@@ -1853,6 +1853,41 @@
     "session/stop": {
       "closed": true
     },
+    "diagnostics/logs/read": {
+      "logs": {
+        "entries": [
+          {
+            "id": "93a15f17857cd55a5f9a5972167f9c0c93c40339",
+            "timestamp": "2026-01-02T03:04:07.000000+00:00",
+            "ppid": 1,
+            "pid": 4242,
+            "level": "ERROR",
+            "message": "turn failed: boom",
+            "rawLine": "2026-01-02T03:04:07.000000+00:00 [ERROR] turn failed: boom"
+          },
+          {
+            "id": "a71691e52d72f3be39664bdfb210bcd27dbe40a3",
+            "timestamp": "2026-01-02T03:04:06.000000+00:00",
+            "ppid": 1,
+            "pid": 4242,
+            "level": "WARNING",
+            "message": "retrying request",
+            "rawLine": "2026-01-02T03:04:06.000000+00:00 [WARNING] retrying request"
+          },
+          {
+            "id": "10177457b24b50e2aaddd14af5c555c28c752014",
+            "timestamp": "2026-01-02T03:04:05.000000+00:00",
+            "ppid": 1,
+            "pid": 4242,
+            "level": "INFO",
+            "message": "session started",
+            "rawLine": "2026-01-02T03:04:05.000000+00:00 [INFO] session started"
+          }
+        ],
+        "hasMore": false,
+        "cursor": null
+      }
+    },
     "config/write": {
       "runtime": {
         "config": {
@@ -1951,17 +1986,17 @@
             "agentType": "agent"
           },
           {
-            "name": "plan",
-            "displayName": "Plan",
-            "description": "Read-only agent for exploration and planning",
-            "safety": "safe",
-            "agentType": "agent"
-          },
-          {
             "name": "accept-edits",
             "displayName": "Accept Edits",
             "description": "Auto-approves file edits only",
             "safety": "destructive",
+            "agentType": "agent"
+          },
+          {
+            "name": "smart-approve",
+            "displayName": "Smart Approve",
+            "description": "Classifies each tool call and auto-runs the safe ones, prompting only for risky ones",
+            "safety": "smart",
             "agentType": "agent"
           },
           {

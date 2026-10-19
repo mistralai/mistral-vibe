@@ -2,6 +2,7 @@
 
 pub mod level;
 pub mod logging;
+pub mod memory;
 pub mod rotating;
 pub mod scrub;
 pub mod sentry;

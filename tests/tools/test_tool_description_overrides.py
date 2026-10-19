@@ -11,7 +11,6 @@ import sys
 import pytest
 
 from tests.conftest import build_test_vibe_config
-from vibe.core.llm.format import APIToolFormatHandler
 from vibe.core.tools.builtins.bash import Bash
 from vibe.core.tools.manager import ToolManager
 from vibe.core.trusted_folders import find_trustable_files, trusted_folders_manager
@@ -95,19 +94,6 @@ def test_later_search_path_wins(tmp_path: Path) -> None:
 
     # Later search paths win, matching how duplicate `.py` tools resolve.
     assert _descriptions(manager)["bash"] == "From second."
-
-
-def test_override_flows_through_available_tools(tmp_path: Path) -> None:
-    (_prompts_dir(tmp_path) / "bash.md").write_text(
-        "Custom bash description.", encoding="utf-8"
-    )
-    config = build_test_vibe_config(tool_paths=[str(tmp_path / "tools")])
-    manager = ToolManager(lambda: config)
-
-    available = APIToolFormatHandler().get_available_tools(manager)
-    bash_tool = next(t for t in available if t.function.name == "bash")
-
-    assert bash_tool.function.description == "Custom bash description."
 
 
 def test_override_from_project_vibe_tools_dir(

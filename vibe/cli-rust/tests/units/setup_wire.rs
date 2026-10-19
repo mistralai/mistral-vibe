@@ -1,5 +1,5 @@
 //! The setup wire-shape pin: the fixture holds the canonical payloads of
-//! the Python protocol models (`model_dump(by_alias=True)` — the camelCase
+//! the app-server protocol models (`model_dump(by_alias=True)` — the camelCase
 //! the app-server serializes with and validates against), generated from
 //! `vibe/app_server/protocol.py`'s real models. Each Rust struct must
 //! round-trip it byte-for-byte, so the client can never re-diverge from
@@ -24,7 +24,7 @@ fn provider_view() -> ProviderView {
 }
 
 #[test]
-fn the_status_response_round_trips_the_python_payload() {
+fn the_status_response_round_trips_the_server_payload() {
     let mut expected = fixture()["statusResponse"].clone();
     let status: SetupStatus =
         serde_json::from_value(expected.clone()).expect("deserializes the server's frame");
@@ -47,7 +47,7 @@ fn the_status_response_round_trips_the_python_payload() {
 }
 
 #[test]
-fn store_credential_params_match_the_python_payload() {
+fn store_credential_params_match_the_server_payload() {
     let params = serde_json::to_value(StoreCredential {
         provider: "mistral",
         api_key: "sk-mock-key",
@@ -58,7 +58,7 @@ fn store_credential_params_match_the_python_payload() {
 }
 
 #[test]
-fn submit_choices_params_match_the_python_payload() {
+fn submit_choices_params_match_the_server_payload() {
     let params = serde_json::to_value(SubmitChoices {
         provider: Some(provider_view()),
         console_base_url: Some("https://console.mistral.ai".into()),
@@ -70,7 +70,7 @@ fn submit_choices_params_match_the_python_payload() {
 }
 
 #[test]
-fn the_store_outcomes_round_trip_the_python_payload() {
+fn the_store_outcomes_round_trip_the_server_payload() {
     let outcomes = fixture()["storeResponses"].clone();
     let parsed: Vec<StoreOutcome> = outcomes
         .as_array()
@@ -94,7 +94,7 @@ fn the_store_outcomes_round_trip_the_python_payload() {
 }
 
 #[test]
-fn the_submit_outcomes_round_trip_the_python_payload() {
+fn the_submit_outcomes_round_trip_the_server_payload() {
     let outcomes = fixture()["submitResponses"].clone();
     let parsed: Vec<SubmitOutcome> = outcomes
         .as_array()

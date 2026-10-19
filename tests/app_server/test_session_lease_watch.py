@@ -176,6 +176,27 @@ async def test_reports_a_lease_taken_just_after_a_slow_watcher_start(
 
 
 @pytest.mark.asyncio
+async def test_reports_a_release_even_when_acquisition_was_not_observed(
+    tmp_path: Path,
+) -> None:
+    updates = watch_session_leases(tmp_path)
+    try:
+        assert await anext(updates) == {}
+
+        # Passive reads can observe a held lease before the debounced watcher.
+        # Acquisition and release in one batch must still clear that read.
+        lease = SessionLease(tmp_path, SESSION_ID).acquire()
+        try:
+            assert read_lease_holder(tmp_path, SESSION_ID) == LeaseHolder(os.getpid())
+        finally:
+            lease.release()
+
+        assert await asyncio.wait_for(anext(updates), 5) == {SESSION_ID: None}
+    finally:
+        await updates.aclose()
+
+
+@pytest.mark.asyncio
 async def test_rechecks_a_holder_whose_diagnostic_names_another_live_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -232,3 +253,21 @@ async def test_does_not_spin_on_a_holder_this_process_cannot_see(
         lease.release()
 
     assert reads <= 3
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="pidfd_open is Linux-only")
+def test_process_exit_descriptor_falls_back_to_syscall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Some python-build-standalone 3.14 builds ship no os.pidfd_open; the
+    # ctypes syscall fallback must still yield a usable pidfd.
+    monkeypatch.delattr(os, "pidfd_open", raising=False)
+    watched = _session_lease_watch._process_exit_descriptor(os.getpid())
+    assert watched is not None
+    descriptor, close = watched
+    try:
+        os.fstat(descriptor)
+    finally:
+        close()
+    with pytest.raises(ProcessLookupError):
+        _session_lease_watch._process_exit_descriptor(1 << 30)

@@ -99,7 +99,16 @@ class SearchReplacePreviewBlock(BaseModel):
 
 
 class SearchReplaceAnnotations(BaseModel):
+    """Applied replacement previews and the text the edit replaced.
+
+    ``previous_content`` is the file's whole pre-edit text, carried so readers
+    that need the before-state (diffing, restore) can take it exactly instead
+    of reversing the previews. It is None when the file did not decode as
+    UTF-8 or was larger than the write annotation cap.
+    """
+
     blocks: list[SearchReplacePreviewBlock]
+    previous_content: str | None = None
 
 
 class ReadFileResponse(BaseModel):
@@ -124,9 +133,12 @@ class WriteFileResponse(BaseModel):
 class SearchReplaceResponse(BaseModel):
     result: SearchReplaceResult
     annotations: list[SearchReplacePreviewBlock]
+    previous_content: str | None = None
 
     def meta(self) -> dict[str, JsonValue] | None:
-        previews = SearchReplaceAnnotations(blocks=self.annotations)
+        previews = SearchReplaceAnnotations(
+            blocks=self.annotations, previous_content=self.previous_content
+        )
         return {SEARCH_REPLACE_ANNOTATION_KEY: previews.model_dump(mode="json")}
 
 

@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-/// One item of the latest `todo write` result (Python `TodoEffectItem`).
+/// One item of the latest `todo write` result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TodoItem {
     pub id: String,
@@ -30,7 +30,7 @@ impl TodoStatus {
     }
 }
 
-/// Python `todo_tracker.status_icon`: the status row and plan panel glyphs.
+/// The status row and plan panel glyphs.
 pub fn status_icon(status: TodoStatus) -> &'static str {
     match status {
         TodoStatus::Pending => "☐",
@@ -40,7 +40,7 @@ pub fn status_icon(status: TodoStatus) -> &'static str {
     }
 }
 
-/// Python `progress_label`: `done/total`, cancelled items out of the denominator.
+/// `done/total`, cancelled items out of the denominator.
 pub fn progress_label(todos: &[TodoItem]) -> String {
     let countable = todos
         .iter()
@@ -53,7 +53,7 @@ pub fn progress_label(todos: &[TodoItem]) -> String {
     format!("{done}/{countable}")
 }
 
-/// Python `summary_line`: the pinned row's one line, or `None` with no todos.
+/// The pinned row's one line, or `None` with no todos.
 pub fn summary_line(todos: &[TodoItem]) -> Option<String> {
     if todos.is_empty() {
         return None;
@@ -85,7 +85,7 @@ pub fn summary_line(todos: &[TodoItem]) -> Option<String> {
     ))
 }
 
-/// Python `TodoTracker`: the latest written list, from settled todo effects.
+/// The latest written list, from settled todo effects.
 #[derive(Default)]
 pub struct TodoTracker {
     todos: Vec<TodoItem>,
@@ -136,7 +136,7 @@ impl TodoSidebar {
     }
 }
 
-/// Python `_record_todos` only ever sees a `PublicEffectEntry`; this port reads raw wire JSON, so it checks the tag itself.
+/// Reads raw wire JSON, so it checks the effect tag itself.
 pub fn todos_from_entry(raw: &Value) -> Option<Vec<TodoItem>> {
     if raw.pointer("/type") != Some(&Value::String("effect".into())) {
         return None;

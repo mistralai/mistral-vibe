@@ -1,4 +1,4 @@
-//! MCP server and connector wire types (Python `vibe/app_server/models.py`).
+//! MCP server and connector wire types (app server `vibe/app_server/models.py`).
 
 use std::collections::BTreeMap;
 
@@ -97,6 +97,9 @@ pub struct MCPState {
     pub connector_error: Option<String>,
     #[serde(default)]
     pub manage_connectors_url: Option<String>,
+    /// The API key is `shared_only`, so private connectors are missing from the list.
+    #[serde(default)]
+    pub private_connectors_hidden: bool,
 }
 
 /// Skip a malformed source instead of failing the whole state (ADR 0014).

@@ -23,7 +23,5 @@ timeline: Timeline = [
     "\r",
 ]
 
-screen_contains = {
-    "rust": ("MCP Server: filesystem", "read_file", "write_file", "(disabled)")
-}
-screen_excludes = {"rust": ("Search servers and connectors", "Available Connectors")}
+screen_contains = ("MCP Server: filesystem", "read_file", "write_file", "(disabled)")
+screen_excludes = ("Search servers and connectors", "Available Connectors")

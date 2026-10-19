@@ -71,5 +71,5 @@ class FileSystemCacheStore:
         try:
             with self._cache_path.open("rb") as f:
                 return tomllib.load(f)
-        except (OSError, tomllib.TOMLDecodeError):
+        except OSError, tomllib.TOMLDecodeError:
             return {}

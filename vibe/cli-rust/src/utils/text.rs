@@ -1,4 +1,4 @@
-//! Header text shaping: Python's `_single_line` / `_multi_line` plus cell-aware ellipsis.
+//! Header text shaping: single-line and multi-line forms plus cell-aware ellipsis.
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -8,7 +8,7 @@ fn is_control(c: char) -> bool {
     matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}')
 }
 
-/// Python's `:,` integer format: digits grouped in threes by commas.
+/// Integer with digits grouped in threes by commas.
 pub fn thousands(value: u64) -> String {
     let digits = value.to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
@@ -24,7 +24,7 @@ pub fn thousands(value: u64) -> String {
 const COUNT_SUFFIXES: [&str; 5] = ["", "k", "M", "B", "T"];
 const SIGNIFICANT_DIGITS: u32 = 3;
 
-/// Python `format_compact_count`: three significant digits and a `k`/`M`/`B`/`T` suffix.
+/// Three significant digits and a `k`/`M`/`B`/`T` suffix.
 pub fn format_compact_count(value: u64) -> String {
     if value < 1_000 {
         return value.to_string();
@@ -45,7 +45,7 @@ pub fn format_compact_count(value: u64) -> String {
     }
 }
 
-/// Python `format_count_markdown`: the compact count, then the exact one as emphasis from one thousand up.
+/// The compact count, then the exact one as emphasis from one thousand up.
 pub fn format_count_markdown(value: u64) -> String {
     let compact = format_compact_count(value);
     if value < 1_000 {
@@ -169,9 +169,9 @@ pub fn ellipsize(text: &str, width: usize) -> String {
 
 /// Word-wrap to `width` cells, breaking at newlines like Rich. A run with no
 /// break opportunity (a long path) is cut at the cell boundary instead of
-/// overflowing its row, as Textual's `text-overflow: fold` does. This is the
-/// only wrap there is: an over-wide row is re-wrapped by whatever paints it,
-/// and the overflow lands outside the row's own border or indent.
+/// overflowing its row. This is the only wrap there is: an over-wide row is
+/// re-wrapped by whatever paints it, and the overflow lands outside the row's
+/// own border or indent.
 pub fn wrap_hard(text: &str, width: usize) -> Vec<String> {
     text.split('\n')
         .flat_map(|line| wrap_line(line, width))

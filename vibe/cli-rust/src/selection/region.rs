@@ -36,8 +36,8 @@ pub struct Region {
     pub top: i32,
     /// The region reserved its rightmost column for a scrollbar.
     pub scrollbar: bool,
-    /// Stock Textual screens stop before the cell under the pointer; the
-    /// transcript keeps it, like Python's `WordSelectScreen`.
+    /// Most screens stop before the cell under the pointer; the transcript
+    /// keeps it.
     pub end_exclusive: bool,
     /// The region can re-render its document off-screen, so a copy also reaches
     /// rows scrolled out of the viewport. Only the transcript can.
@@ -199,7 +199,7 @@ pub fn extract_document(app: &App) -> Option<String> {
 }
 
 /// True when a press at `at` anchors a selection: inside the region and on a
-/// cell some widget owns, since Textual anchors nothing on bare padding. The
+/// cell some widget owns, since bare padding anchors nothing. The
 /// chrome map belongs to its region: the transcript's padding and the
 /// bottom-app box's prefixes and scrollbars; a toast publishes only its text rows.
 pub fn selectable(app: &App, at: (u16, u16), owner: RegionId) -> bool {

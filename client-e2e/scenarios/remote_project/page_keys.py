@@ -1,4 +1,4 @@
-"""Remote-project page and boundary key parity."""
+"""Remote-project picker page and boundary keys."""
 
 from __future__ import annotations
 

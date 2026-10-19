@@ -5,6 +5,115 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-10-15
+
+### Added
+
+- The app-server reports each model's compaction threshold, so a client can show how full a session's context is before it compacts.
+- Desktop can import projects and sessions from another coding agent during onboarding.
+- Rust CLI: `/leanstall` and `/unleanstall` install and uninstall the Lean agent.
+- With `experimental_enable_model_catalog` on, the model list includes Mistral's curated models, and your config can still override their settings.
+- Rust CLI: Tool approval options, /thinking levels, /resume sessions and /log-level rows and badges can be clicked.
+- Rust CLI: Option lists show a faint hover background under the mouse.
+- With a "shared only" API key, `/mcp` blocks connectors that need your login and tells you to run `vibe --setup`.
+- Rust CLI: `/branch` forks the current conversation into a new resumable session.
+- The agent can now wait for your next message or for background work to finish, instead of repeatedly checking.
+- Rust CLI: Debug console for live session logs, opened with /debug or Ctrl+\.
+- Rust CLI: Report activity, approvals, questions, completion, and failure with session titles and error messages through the OSC 7501 Program Status Protocol.
+- `/status` shows the credential source in use and the shadowed sources
+- Admin-enforceable `enable_mcp` flag to block all user-facing MCP server operations (add, remove, toggle, login, logout, tool registration), including plugin-provided MCP servers, via managed config.
+
+### Changed
+
+- `read_file` shows a file's line endings as they are on disk, like shell commands do
+- `write_file` writes new files with the line endings it is given, also on Windows
+- The app server now shows up as `vibe-app-server` instead of `python3` in Activity Monitor, `ps`, and `top`.
+- Rust CLI: dragging a scrollbar moves smoothly in fine steps on terminals that report the mouse in pixels, such as Ghostty, kitty and WezTerm.
+- displayed_workdir, context_warnings and raise_on_compaction_failure are deprecated: they remain accepted in existing configs but have no effect on Unified execution.
+- Rust CLI: The welcome banner starts at the top left, with the conversation and what's new flowing below it while queued messages stay at the bottom.
+- Rust CLI: One click picks an option whose only action is choosing it (tool approvals, questions, /theme, /plugins, subagents, config choices, the remote project picker, MCP or connector sign-in); options with several actions (/model, /thinking, /resume, /mcp, /config) highlight on the first click and confirm on the second.
+- Rust CLI: The highlighted free-text answer spans the full row, and clicking its number unticks it in multi-select questions.
+- Rust CLI: Colored text on a highlighted row takes the row's text color.
+- Rust CLI: headless mode (`-p`) now follows the Python CLI's run contract, with turn, token, price and time limits, graceful stops, and a JSON run export whose exit code reports the outcome.
+- Pressing Esc twice to clear the input or open rewind now accepts a slower second press.
+- Rust CLI: The welcome banner is more compact: the cat sits beside the version, model and plan, and the model, connector, MCP server, skill and hook counts are gone.
+- The Vibe VS Code extension (ACP surface) now gets the same background session titles as CLI and Desktop; the sessions list shows the summarized title instead of the message preview
+- The agent's subagent tools are renamed from `subagent.*` to `agents.*`, and sessions saved with the old names still resume.
+- Plugins can no longer use the `agents`, `agent` or `collaboration` tool namespaces, which are reserved for built-in agent tools.
+- A programmatic tool call now stops after 60 seconds in total, and a single sleep inside it is capped at 30 seconds.
+- Faster session startup when no MCP server is used.
+- Vibe now requires Python 3.14 or newer (previously 3.12)
+- Outbound HTTPS connections now validate certificate chains with stricter RFC 5280 rules; a private CA missing SKID/AKID or KeyUsage extensions may be rejected — set `enable_system_trust_store` or use a compliant CA
+- Vibe Code: the retry notice keeps counting the seconds past the planned retry instead of freezing until the provider answers, and screen readers get paced progress announcements
+- `vibe -p` JSON and streaming output mark each completed assistant message and reasoning with an `outcome`: committed, or discarded with its cause.
+- The Rust TUI detects terminal activity reporting support to avoid duplicate title indicators and notification bells.
+- Faster session startup, most noticeably on Windows and in repositories with many branches or tags.
+
+### Fixed
+
+- Desktop local Code holds queued messages while editing without a timeout; Save and Cancel let the queue continue unless paused.
+- Disconnecting during an unfinished queued edit keeps the original message and pauses the queue until Resume.
+- In Vibe Desktop, the sidebar session list now only reorders when a new conversation turn starts, instead of jumping around on queued messages, steers, and permission answers.
+- On Windows, the shell tools no longer auto-approve commands that use a mid-word `#`, an escaped quote, or PowerShell quoting to hide part of the command from the approval check.
+- Multi-line edits to CRLF files no longer fail, and edited lines keep the file's line endings
+- The Unified Harness no longer converts a CRLF file to LF when it overwrites it
+- Sessions containing a large image no longer fail with a compaction error when the context is nowhere near full.
+- Listing saved sessions (`/resume` and the Desktop session sidebar) is several times faster when you have thousands of sessions.
+- Rust CLI: scrolling with the wheel or a scrollbar no longer stutters or trails the pointer when the view is slow to redraw.
+- Rust CLI: the smart approve mode now shows its warning-colored input border and cycles with Shift+Tab, matching the Python CLI.
+- Automatic context compaction now shows a progress row in the transcript that settles to done, failed, or interrupted.
+- The current input line no longer blinks with the cursor in the textual-dark theme.
+- A suspended Rust CLI now dies when its terminal closes or it is killed, instead of lingering forever.
+- Resuming a suspended session with shell `bg` twice no longer exits the CLI with an interrupted-syscall error.
+- Rust CLI: Fix shell MCP commands to support named URLs, static authentication, stdio servers, and timeout options.
+- Rust CLI: `/mcp` add, login, logout, and status errors now show the server's reason.
+- Session meta.json records the active model and provider model name for Unified Harness sessions.
+- Subagents now see connector tools in sessions whose connector catalog finishes loading after the session starts, and connector changes applied mid-session reach subagents spawned afterwards.
+- Starting, resuming, or continuing another session no longer resets the shared host's resolved connector catalog to its start-time placeholder, so a session promoted after that keeps its connector grants.
+- Rust CLI: config validation warnings that appear mid-session now surface as a toast, not only at startup.
+- Very large tool outputs are truncated in the transcript, so sessions containing them can be previewed and resumed again.
+- Rust CLI: A session preview that fails to load no longer closes the resume picker or makes the CLI unusable.
+- Rust CLI: The `/rename` usage tip and `/mcp add --help` show their `<...>` placeholders instead of dropping them.
+- A locked or unapproved macOS Keychain no longer hangs `vibe -p` forever: the read gives up after 60s and the error says the Keychain could not be read instead of reporting a missing key.
+- Rust CLI: `-p` runs announce on stderr when the API key comes from the keyring, fail if startup stalls, and print the server's error instead of a bare `session/start`.
+- When a third-party model declines a request, Vibe now says so instead of recording an empty reply.
+- Sessions where a third-party model returned an empty reply no longer fail every later message with a 400 error.
+- Sessions on GLM and other reasoning models get automatic titles again
+- Rust CLI: Characters typed or pasted with AltGr on Windows (such as Polish `ą`) are no longer dropped.
+- Rust CLI: `vibe -p --resume SESSION_ID` continues that session instead of being rejected or starting a new one
+- Windows (Git Bash): the agent now uses `/c/...` paths in shell commands instead of retrying several path spellings.
+- Ctrl+Shift+C copies the selection on terminals that report the shifted letter in uppercase.
+- Text pasted while a picker or rewind is open no longer lands in the hidden prompt.
+- Confirming a /model or /thinking pick after a turn has started, such as a /loop prompt firing while the picker is open, now saves it for the next turn instead of failing.
+- Deleting the last saved session from `/resume` now confirms which session was deleted.
+- Restored the occasional feedback survey in Unified Harness sessions.
+- `/config` now shows an error toast with the server's reason when saving or loading a setting fails, instead of silently doing nothing.
+- In Vibe Desktop, archiving a session now reliably removes its worktree once every session that used it is archived or deleted, without slowing the archive down.
+- Vibe Code renders agent file edits as an inline diff in the chat panel again.
+- Vibe Code restores the aggregate review panel on the unified backend.
+- Rust CLI on Windows: pasting multiline text inserts it whole instead of sending each line as a separate message.
+- Rust CLI: highlighted list rows no longer randomly lose their bold text.
+- Rust CLI: Text no longer blinks or garbles in terminals without truecolor support, such as macOS Terminal.
+- Rust CLI: Keep terminal status accurate across queued turns, overlapping dialogs, and interruptions.
+- Smart approve now asks before a shell command whose redirect target it can place outside your workspace and temporary directories, or cannot place at all, even when the command looks like it only reads.
+- Answers stream live again when a `post_agent` hook is configured, instead of appearing all at once when the turn ends.
+- The `title_prompt_id` setting now also applies to session titles in Vibe Desktop and in the CLI's default harness.
+- Starting the interactive CLI or the `vibe update` prompt without a terminal (e.g. `nohup vibe > /dev/null 2>&1 &`) now exits with an error instead of running forever at full CPU.
+- The review diff refreshes when a shell command changes a tracked file mid-turn
+- Interrupts that arrive while a turn is starting are delivered instead of dropped
+- Cancelling a prompt no longer hangs the agent shutdown
+- A `grep` or `rg` shell command run by the agent shows its matches as a file-search result with clickable file chips
+- Git timeouts while reading project context are now enforced on Windows.
+- Recent commit messages in the project context are no longer truncated at their first parenthesis.
+
+### Removed
+
+- Removed harness selection flags and rollout settings. Vibe, ACP, app-server, Desktop, and IDE sessions now always use the Unified Harness.
+- Removed the retired legacy execution runtime while preserving Unified execution and read-only imports of Vibe 2.0+ session folders (meta.json and messages.jsonl). Vibe 1.x single-JSON sessions are no longer supported.
+- Removed the unused app-server RPCs tools/list, stats/read and diagnostics/list.
+- The legacy Python TUI and the `VIBE_CLI` environment variable: `vibe` always starts the Rust TUI.
+- Plan mode: the `plan` agent and the `exit_plan_mode` tool.
+
 ## [2.26.1] - 2026-10-09
 
 ### Added

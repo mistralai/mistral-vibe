@@ -25,7 +25,7 @@ def _click(column: int, row: int) -> str:
     return f"\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m"
 
 
-# After Ctrl+O: group 15, notes 16, its diff 17-21, todo 22-24, "Done." 26, shell gap 27, shell 28.
+# After Ctrl+O: group 11, notes 12, its diff 13-17, todo 18-20, "Done." 22, shell gap 23, shell 24.
 timeline: Timeline = [
     f"{_PROMPT}\r",
     turn_started(),
@@ -36,17 +36,17 @@ timeline: Timeline = [
     turn_completed(),
     manual_shell("printf 'one\\ntwo'", "one\ntwo\n"),
     "\x0f",
-    _select(26),
-    _click(12, 19),
-    _select(26),
-    _click(2, 15),
-    _select(26),
-    _click(2, 27),
-    _select(26),
-    _click(2, 28),
+    _select(22),
+    _click(12, 15),
+    _select(22),
+    _click(2, 11),
+    _select(22),
+    _click(2, 23),
+    _select(22),
+    _click(2, 24),
     # Folding the shell body leaves the rows above it in place.
-    _select(26),
-    _click(2, 16),
+    _select(22),
+    _click(2, 12),
 ]
 
 capture_steps = {3, 5, 7, 9, 11}

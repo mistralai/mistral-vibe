@@ -9,8 +9,6 @@ _CTRL_G = "\x07"
 env = {"VISUAL": "vibe-e2e-missing-editor --wait"}
 
 capture_startup = False
-screen_contains = {
-    "rust": ("keep my draft", "Could not open editor vibe-e2e-missing-editor")
-}
+screen_contains = ("keep my draft", "Could not open editor vibe-e2e-missing-editor")
 
 timeline: Timeline = ["keep my draft", _CTRL_G]

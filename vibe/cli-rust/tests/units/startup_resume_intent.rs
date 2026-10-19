@@ -1,5 +1,4 @@
-//! `--continue`/`--resume` CLI intent resolution, mirroring the Python
-//! `_session_intent` (entrypoint.py).
+//! `--continue`/`--resume` CLI intent resolution.
 
 use clap::Parser;
 use vibe_rs::cli::{Cli, StartupResume};

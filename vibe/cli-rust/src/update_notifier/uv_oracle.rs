@@ -1,6 +1,6 @@
-//! The uv-managed update oracle (Rust-only; Python polls public PyPI).
+//! The uv-managed update oracle.
 //!
-//! Python's gateway polls pypi.org regardless of the user's package source,
+//! The PyPI gateway polls pypi.org regardless of the user's package source,
 //! so it advertises versions the local uv configuration — private index,
 //! pinned `exclude-newer`, per-package rules — may never install, and the
 //! update then ends in a confusing no-op. When mistral-vibe is installed as

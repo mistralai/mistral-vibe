@@ -1,6 +1,5 @@
-//! `cache.toml` section reads and writes under `VIBE_HOME`, shared with the
-//! Python CLI (Python `FileSystemCacheStore`); one section is left untouched by
-//! another's write.
+//! `cache.toml` section reads and writes under `VIBE_HOME`; one section is
+//! left untouched by another's write.
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -10,13 +9,13 @@ use super::paths;
 
 const FILE_NAME: &str = "cache.toml";
 
-/// One section key's value, mirroring Python's mixed str/int `write_section` payloads.
+/// One section key's value: a string or an integer.
 pub enum SectionValue {
     Str(String),
     Int(i64),
 }
 
-/// Python's `_FILE_LOCK`: several subsystems read and write different sections
+/// Several subsystems read and write different sections
 /// of the same file, so the whole-file access is serialized per process.
 fn file_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -26,7 +25,7 @@ fn file_lock() -> MutexGuard<'static, ()> {
 }
 
 fn read() -> Option<DocumentMut> {
-    // Python's `read_section` holds the lock across the read.
+    // Hold the lock across the read.
     let _lock = file_lock();
     let text = std::fs::read_to_string(cache_file()?).ok()?;
     text.parse::<DocumentMut>().ok()
@@ -95,7 +94,7 @@ pub fn read_section(section: &str) -> Option<Table> {
 }
 
 /// Merge several keys of one section into an in-memory document, preserving
-/// every other section and key (Python `CacheStore.write_section`). Optional
+/// every other section and key. Optional
 /// keys are simply omitted from `entries` by the caller, so an omitted key
 /// keeps its stored value.
 pub fn insert_section(doc: &mut DocumentMut, section: &str, entries: &[(&str, SectionValue)]) {

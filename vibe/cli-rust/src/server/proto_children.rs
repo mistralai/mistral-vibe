@@ -1,11 +1,11 @@
-//! Child-session wire types (Python `PublicChildSession` and its status union).
+//! Child-session wire types (app-server `PublicChildSession` and its status union).
 
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::types::TokenUsage;
 
-/// Session status union (Python `PublicSessionStatus`). Unknown wire tags read
+/// Session status union (app-server `PublicSessionStatus`). Unknown wire tags read
 /// as `Unknown`, so a newer server never breaks the client (ADR 0014).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SessionStatus {
@@ -44,8 +44,8 @@ impl<'de> Deserialize<'de> for SessionStatus {
     }
 }
 
-/// A child (subagent) session (Python `PublicChildSession`). Required fields
-/// have no default, so a malformed child fails its own parse like Python's.
+/// A child (subagent) session (app-server `PublicChildSession`). Required fields
+/// have no default, so a malformed child fails its own parse.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicChildSession {
@@ -62,8 +62,7 @@ pub struct PublicChildSession {
 }
 
 impl PublicChildSession {
-    /// Tokens shown in the status row (Python `_child_row`): the context
-    /// usage when present, else 0.
+    /// Tokens shown in the status row: the context usage when present, else 0.
     pub fn context_tokens(&self) -> u64 {
         match &self.context_usage {
             Some(usage) => usage.total_tokens,
@@ -72,7 +71,7 @@ impl PublicChildSession {
     }
 }
 
-/// `session/childSessionUpdated` params (Python `ChildSessionUpdatedParams`).
+/// `session/childSessionUpdated` params (app-server `ChildSessionUpdatedParams`).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChildSessionUpdatedParams {

@@ -1,15 +1,15 @@
-//! JSON-Patch application for transcript entries (Python `apply_json_patch`).
+//! JSON-Patch application for transcript entries (the server's `apply_json_patch` ops).
 
 use serde_json::Value;
 
-/// Apply the JSON-Patch ops to an entry (Python `apply_json_patch`).
+/// Apply the JSON-Patch ops to an entry.
 pub fn apply_json_patch(root: &mut Value, ops: &[Value]) {
     for op in ops {
         apply_operation(root, op);
     }
 }
 
-/// The text appended at `path` by this patch (Python `_appended_text`).
+/// The text appended at `path` by this patch.
 pub(crate) fn appended_text(ops: &[Value], path: &str) -> String {
     ops.iter()
         .filter(|op| {

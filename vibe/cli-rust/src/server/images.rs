@@ -29,7 +29,7 @@ pub struct PreparedPrompt {
     pub prompt_text: Option<String>,
     #[serde(default, deserialize_with = "deserialize_images")]
     pub images: Vec<ImageAttachment>,
-    /// Python `MentionStats`, reported as `vibe.at_mention_inserted` when the prompt runs.
+    /// App-server `MentionStats`, reported as `vibe.at_mention_inserted` when the prompt runs.
     #[serde(default)]
     pub mentions: Option<Value>,
 }

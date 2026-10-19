@@ -48,12 +48,13 @@ fn start(app: &mut App, client: &Arc<Client>, command: String) {
         return;
     };
     app.begin_command_loading();
-    app.terminal_notifier.set_running(true);
+    app.terminal_notifier.clear_outcome();
     let pending = app.commit_started();
     let operation_id = new_message_id();
     app.session.shell_operation_id = Some(operation_id.clone());
     app.session.shell_started_at = Some(std::time::Instant::now());
     app.session.shell_request_started = false;
+    app.session.shell_rpc_completed = false;
     app.session.shell_interrupt_requested = false;
     app.view
         .loading

@@ -27,7 +27,7 @@ pub fn help_text() -> String {
         "- `Ctrl+C` Quit (or clear input if text present)".to_owned(),
         "- `Ctrl+G` Edit input in external editor".to_owned(),
         "- `Ctrl+O` Toggle tool output view".to_owned(),
-        "- `Shift+Tab` Cycle through agents (ask, plan, ...)".to_owned(),
+        "- `Shift+Tab` Cycle through agents (ask, accept-edits, ...)".to_owned(),
         "- `Esc Esc` Rewind to a previous message (when input is empty)".to_owned(),
         String::new(),
         "### Special Features".to_owned(),
@@ -135,7 +135,7 @@ pub(super) fn rename_session(app: &mut App, client: &Arc<Client>, value: &str) {
     if title.is_empty() {
         if let Some(tx) = app.command_tx.clone() {
             app.commit_started();
-            let _ = tx.try_send(CommandEvent::Result("Usage: /rename <title>".to_owned()));
+            let _ = tx.try_send(CommandEvent::Error("Usage: /rename <title>".to_owned()));
         }
         return;
     }
@@ -207,8 +207,8 @@ pub(super) fn whoami(app: &mut App, client: &Arc<Client>) {
     });
 }
 
-/// Python `IdentityView.name`: full name, else first name, else the email. The
-/// wire carries `firstName`/`lastName` only, since `name` is a bare property.
+/// Display name: full name, else first name, else the email. The wire carries
+/// `firstName`/`lastName` only: the server's `IdentityView.name` is not serialized.
 fn identity_name(identity: &Value, email: Option<&str>) -> Option<String> {
     let part = |key: &str| {
         identity
@@ -223,7 +223,7 @@ fn identity_name(identity: &Value, email: Option<&str>) -> Option<String> {
     }
 }
 
-/// The `/whoami` body, or Python's fallback when no Mistral identity is available.
+/// The `/whoami` body, or a fallback when no Mistral identity is available.
 pub fn whoami_text(reads: &AccountReads) -> String {
     let identity = &reads.identity;
     if identity.is_null() {

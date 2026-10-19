@@ -91,16 +91,12 @@ async def test_turn_streams_public_events_over_json_rpc(
 async def test_stateful_subagent_runs_through_the_backend(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
-    experimental_harness: bool,
     tmp_path,
 ) -> None:
     """*Prepare*: Mock a parent that discovers and invokes the stateful subagent tool.
     *Do*: Run a parent turn through the Unified Harness backend.
     *Assert*: The child runs and its completed effect appears in parent history.
     """
-    if not experimental_harness:
-        pytest.skip("stateful subagents require the Unified Harness backend")
-
     # Prepare
     requests: list[dict[str, object]] = []
 
@@ -127,8 +123,8 @@ async def test_stateful_subagent_runs_through_the_backend(
                             "name": "run_typescript",
                             "arguments": json.dumps({
                                 "code": (
-                                    "async function main() { return tools.subagent.spawn({"
-                                    "agentName: 'researcher', "
+                                    "async function main() { return tools.agents.spawn({"
+                                    "name: 'researcher', "
                                     "message: 'Investigate the local Harness marker'"
                                     "}); }"
                                 )
@@ -156,7 +152,6 @@ async def test_stateful_subagent_runs_through_the_backend(
 
     backend_contract_mistral_api.mock(side_effect=respond)
     connection = await connect_backend_contract_host(
-        experimental_harness,
         session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
         capabilities=ClientCapabilities(),
     )
@@ -202,14 +197,11 @@ async def test_stateful_subagent_runs_through_the_backend(
 async def test_read_file_tool_call_runs_through_the_backend(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
-    experimental_harness: bool,
     tmp_path,
 ) -> None:
     target = tmp_path / "notes.txt"
     target.write_text("from file\n", encoding="utf-8")
-    tool_arguments = (
-        {"path": str(target)} if experimental_harness else {"file_path": str(target)}
-    )
+    tool_arguments = {"path": str(target)}
     backend_contract_mistral_api.mock(
         side_effect=[
             backend_contract_mistral_response(
@@ -229,7 +221,6 @@ async def test_read_file_tool_call_runs_through_the_backend(
         ]
     )
     connection = await connect_backend_contract_host(
-        experimental_harness,
         session_options=SessionOptions(
             cwd=str(tmp_path), enabled_tools=["read_file"], auto_approve=True
         ),
@@ -259,7 +250,6 @@ async def test_read_file_tool_call_runs_through_the_backend(
 async def test_shell_tool_call_runs_through_the_backend(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
-    experimental_harness: bool,
     tmp_path,
 ) -> None:
     backend_contract_mistral_api.mock(
@@ -284,7 +274,6 @@ async def test_shell_tool_call_runs_through_the_backend(
         ]
     )
     connection = await connect_backend_contract_host(
-        experimental_harness,
         session_options=SessionOptions(
             cwd=str(tmp_path), enabled_tools=["bash"], auto_approve=True
         ),
@@ -314,7 +303,6 @@ async def test_shell_tool_call_runs_through_the_backend(
 async def test_shell_tool_call_waits_for_approval(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
-    experimental_harness: bool,
     tmp_path,
 ) -> None:
     backend_contract_mistral_api.mock(
@@ -339,7 +327,6 @@ async def test_shell_tool_call_waits_for_approval(
         ]
     )
     connection = await connect_backend_contract_host(
-        experimental_harness,
         session_options=SessionOptions(cwd=str(tmp_path), enabled_tools=["bash"]),
         capabilities=ClientCapabilities(callback_kinds=["approval"]),
     )
@@ -377,7 +364,6 @@ async def test_shell_tool_call_waits_for_approval(
 async def test_interrupt_closes_shell_approval_callback(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
-    experimental_harness: bool,
     tmp_path,
 ) -> None:
     backend_contract_mistral_api.mock(
@@ -399,7 +385,6 @@ async def test_interrupt_closes_shell_approval_callback(
         )
     )
     connection = await connect_backend_contract_host(
-        experimental_harness,
         session_options=SessionOptions(cwd=str(tmp_path), enabled_tools=["bash"]),
         capabilities=ClientCapabilities(callback_kinds=["approval"]),
     )

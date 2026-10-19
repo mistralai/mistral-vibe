@@ -13,6 +13,8 @@ use ratatui::backend::{Backend, ClearType, CrosstermBackend, WindowSize};
 use ratatui::buffer::Cell;
 use ratatui::layout::{Position, Size};
 
+use crate::ui::theme::color_system;
+
 type NextMove = Rc<StdCell<Option<(u16, u16)>>>;
 
 /// Writes the pending cursor move before the next bytes, i.e. before the next cell's output.
@@ -39,17 +41,54 @@ impl<W: Write> Write for ResyncWriter<W> {
 pub struct ResyncBackend<W: Write> {
     inner: CrosstermBackend<ResyncWriter<W>>,
     next_move: NextMove,
+    truecolor: bool,
 }
 
 impl<W: Write> ResyncBackend<W> {
     pub fn new(writer: W) -> Self {
+        Self::with_truecolor(writer, color_system::truecolor())
+    }
+
+    /// Without `truecolor`, RGB cells are drawn from the 256-color palette.
+    pub fn with_truecolor(writer: W, truecolor: bool) -> Self {
         let next_move = NextMove::default();
         let inner = CrosstermBackend::new(ResyncWriter {
             inner: writer,
             next_move: next_move.clone(),
         });
-        Self { inner, next_move }
+        Self {
+            inner,
+            next_move,
+            truecolor,
+        }
     }
+
+    fn draw_resynced<'a, I>(&mut self, content: I) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        let next_move = self.next_move.clone();
+        // Column right after the last drawn cell, if the terminal may have drawn it at another width.
+        let mut cursor_unsure_at = None;
+        let force_moves = content.inspect(move |&(x, y, cell)| {
+            // Ratatui prints this cell without a move, trusting a cursor that may have drifted.
+            if cursor_unsure_at == Some((x, y)) {
+                // Ratatui pulls a cell before writing its bytes, so the move lands right before it.
+                next_move.set(Some((x, y)));
+            }
+            cursor_unsure_at = needs_resync(cell).then_some((x + 1, y));
+        });
+        self.inner.draw(force_moves)
+    }
+}
+
+/// `cell` with its RGB colors mapped onto the 256-color palette.
+fn downgraded(cell: &Cell) -> Cell {
+    let mut cell = cell.clone();
+    cell.fg = color_system::downgrade(cell.fg);
+    cell.bg = color_system::downgrade(cell.bg);
+    cell.underline_color = color_system::downgrade(cell.underline_color);
+    cell
 }
 
 // Clusters like `e` + U+0301, emoji-prone symbol blocks and non-BMP codepoints may be drawn at another width.
@@ -68,22 +107,20 @@ fn needs_resync(cell: &Cell) -> bool {
 }
 
 impl<W: Write> Backend for ResyncBackend<W> {
+    type Error = io::Error;
+
     fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
-        let next_move = self.next_move.clone();
-        // Column right after the last drawn cell, if the terminal may have drawn it at another width.
-        let mut cursor_unsure_at = None;
-        let force_moves = content.inspect(move |&(x, y, cell)| {
-            // Ratatui prints this cell without a move, trusting a cursor that may have drifted.
-            if cursor_unsure_at == Some((x, y)) {
-                // Ratatui pulls a cell before writing its bytes, so the move lands right before it.
-                next_move.set(Some((x, y)));
-            }
-            cursor_unsure_at = needs_resync(cell).then_some((x + 1, y));
-        });
-        self.inner.draw(force_moves)
+        if self.truecolor {
+            return self.draw_resynced(content);
+        }
+        // Terminals without truecolor read `38;2;r;g;b` components as attributes (5 blinks).
+        let cells: Vec<(u16, u16, Cell)> = content
+            .map(|(x, y, cell)| (x, y, downgraded(cell)))
+            .collect();
+        self.draw_resynced(cells.iter().map(|(x, y, cell)| (*x, *y, cell)))
     }
 
     fn append_lines(&mut self, n: u16) -> io::Result<()> {

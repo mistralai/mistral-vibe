@@ -18,7 +18,6 @@ env = {
 }
 handshake = {"callback/result": {"accepted": True}}
 capture_startup = False
-clipboard_clients = {"rust"}
 
 _QUESTION = (
     "Which color scheme should the terminal use when the question is long enough to wrap"

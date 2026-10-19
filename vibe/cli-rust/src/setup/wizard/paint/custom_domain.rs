@@ -1,4 +1,4 @@
-//! The custom-domain screen (Python `CustomDomainScreen`): the domain plus the
+//! The custom-domain screen: the domain plus the
 //! optional split-horizon browser-auth API base.
 
 use ratatui::layout::Rect;
@@ -19,7 +19,7 @@ pub(super) fn draw(
     let domain = wizard.custom_domain.clone();
     let api = wizard.custom_domain_api.clone();
     let focus = wizard.custom_domain_focus;
-    // Python's feedback is change-driven: the row describes the last edited
+    // Feedback is change-driven: the row describes the last edited
     // input, not the focused one, so Tab never clears it.
     let validation = if wizard.custom_domain_feedback == 0 {
         domain.validation.clone()
@@ -27,9 +27,8 @@ pub(super) fn draw(
         api.validation.clone()
     };
     // The first card sits two blank rows under the subtitle — the gap the
-    // option screens keep (options.rs). Python's subtitles differ per screen
-    // (`margin-bottom: 2` for the option screens, `1` here), and the wizard
-    // holds one gap. The validation row only exists while it carries text —
+    // option screens keep (options.rs). The validation row only exists
+    // while it carries text —
     // no content means no reserved padding — and the hint keeps the two
     // blank rows every panel screen uses before it.
     let has_feedback = !matches!(validation, ValidationState::None);

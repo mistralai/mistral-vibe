@@ -9,19 +9,15 @@ from e2e.app_server.scenario import Timeline
 _PROMPT = "take notes"
 _FIXTURE = "scratchpad_effects.json"
 
-screen_contains = {
-    "rust": (
-        "Wrote findings.md",
-        "- Rust renders the note like a written file",
-        "Read plan.py",
-        "return 'it'",
-        "Listed 2 files",
-        "research/api-notes.md",
-    )
-}
-screen_excludes = {
-    "rust": ("structured_content", "_meta", "approvalSource", '"verb"', "files: ")
-}
+screen_contains = (
+    "Wrote findings.md",
+    "- Rust renders the note like a written file",
+    "Read plan.py",
+    "return 'it'",
+    "Listed 2 files",
+    "research/api-notes.md",
+)
+screen_excludes = ("structured_content", "_meta", "approvalSource", '"verb"', "files: ")
 
 # Ctrl+O unfolds the group and every result body at once.
 timeline: Timeline = [

@@ -1,4 +1,4 @@
-//! `-v`/`--version` flag parity with the Python `argparse` `action="version"`.
+//! `-v`/`--version` flag: prints `vibe <version>` and exits.
 
 use clap::error::ErrorKind;
 use clap::Parser;
@@ -17,7 +17,7 @@ fn short_version_flag_is_recognized() {
 }
 
 #[test]
-fn version_output_matches_python_format() {
+fn version_output_format() {
     let err = Cli::try_parse_from(["vibe-rs", "--version"]).unwrap_err();
     let rendered = err.to_string();
     assert_eq!(rendered, format!("vibe {}\n", env!("CARGO_PKG_VERSION")));

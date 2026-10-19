@@ -16,38 +16,45 @@ use crate::model_picker;
 use crate::search_field::{self, Outcome, Search};
 pub fn open(app: &mut App, client: &Arc<Client>, tx: &mpsc::Sender<Loaded>) {
     app.config_screen.fields.clear();
-    app.config_screen.selected = 0;
-    app.config_screen.scroll = 0;
-    app.config_screen.free_scroll = false;
+    app.config_screen.list.reset();
     app.config_screen.search = Search::default();
     app.config_screen.edit = None;
     app.config_screen.loading = true;
     app.config_screen.open = true;
     if let Some(session_id) = app.session.session_id.clone() {
-        load(session_id, client, tx);
+        load(session_id, client, tx, true);
     }
 }
-pub fn load(session_id: String, client: &Arc<Client>, tx: &mpsc::Sender<Loaded>) {
+/// Read the fields; a failed read is reported, or dropped when `report` is off.
+pub fn load(session_id: String, client: &Arc<Client>, tx: &mpsc::Sender<Loaded>, report: bool) {
     let client = client.clone();
     let tx = tx.clone();
     tokio::spawn(async move {
         let params = serde_json::json!({ "sessionId": session_id });
-        let loaded = client
-            .request(method::CONFIG_FIELDS_READ, params)
-            .await
-            .map_or_else(
-                |_| Loaded {
-                    fields: Vec::new(),
-                    targets: Vec::new(),
-                },
-                |value| crate::config_fields::parse(&value),
-            );
-        let _ = tx.send(loaded).await;
+        let loaded = match client.request(method::CONFIG_FIELDS_READ, params).await {
+            Ok(value) => crate::config_fields::parse(&value),
+            Err(error) => Loaded {
+                error: Some(crate::server::request_error::describe(&error)),
+                ..Loaded::default()
+            },
+        };
+        if report || loaded.error.is_none() {
+            let _ = tx.send(loaded).await;
+        }
     });
 }
 pub fn apply_loaded(app: &mut App, mut loaded: Loaded) {
+    if let Some(error) = loaded.error.take() {
+        app.config_screen.loading = false;
+        if app.config_screen.open {
+            let message = format!("Failed to load settings: {error}");
+            let secs = model_picker::FAILED_TOAST_SECS;
+            app.show_toast(message, ToastSeverity::Error, secs);
+        }
+        return;
+    }
     voice_toggle::record(app, &loaded);
-    let index = app.config_screen.selected;
+    let index = app.config_screen.list.selected();
     let path = filtered(app).get(index).map(|field| field.path.clone());
     for field in &mut loaded.fields {
         dynamic::apply_choices(app, field);
@@ -55,9 +62,10 @@ pub fn apply_loaded(app: &mut App, mut loaded: Loaded) {
     app.config_screen.fields = loaded.fields;
     app.config_screen.targets = loaded.targets;
     let fields = filtered(app);
-    app.config_screen.selected = path
-        .and_then(|path| fields.iter().position(|field| field.path == path))
-        .unwrap_or_else(|| index.min(fields.len().saturating_sub(1)));
+    app.config_screen.list.highlight(
+        path.and_then(|path| fields.iter().position(|field| field.path == path))
+            .unwrap_or_else(|| index.min(fields.len().saturating_sub(1))),
+    );
     app.config_screen.loading = false;
 }
 
@@ -84,7 +92,7 @@ pub fn filtered(app: &App) -> Vec<&ConfigField> {
         })
         .collect();
     if scored.len() <= 5 {
-        // Popular fields get Python's 1.25x boost only in the merged list.
+        // Popular fields get a 1.25x boost only in the merged list.
         scored.sort_by_key(|(score, field)| Reverse(score * if field.popular { 5 } else { 4 }));
     } else {
         scored.sort_by_key(|(score, field)| (!field.popular, Reverse(*score)));
@@ -123,9 +131,7 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, tx: &mpsc::Sender<Loaded>
 }
 
 fn query_changed(app: &mut App) {
-    app.config_screen.selected = 0;
-    app.config_screen.scroll = 0;
-    app.config_screen.free_scroll = false;
+    app.config_screen.list.reset();
 }
 
 pub fn handle_mouse(
@@ -136,8 +142,8 @@ pub fn handle_mouse(
 ) {
     if app.config_screen.edit.is_some() {
         match event.kind {
-            MouseEventKind::Down(MouseButton::Left)
-                if crate::config_edit::click(app, event.column, event.row) =>
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+                if crate::config_edit::mouse(app, event) =>
             {
                 crate::config_edit::commit(app, client, tx)
             }
@@ -145,14 +151,19 @@ pub fn handle_mouse(
         }
         return;
     }
-    if let MouseEventKind::Down(MouseButton::Left) = event.kind {
-        let search = &mut app.config_screen.search;
-        if search.area.contains((event.column, event.row).into()) {
-            search.focused = true;
-        } else if let Some(index) = crate::config_mouse::row_at(app, event.column, event.row) {
-            app.config_screen.search.focused = false;
-            app.config_screen.selected = index;
+    if event.kind == MouseEventKind::Down(MouseButton::Left) {
+        let at = (event.column, event.row);
+        let screen = &mut app.config_screen;
+        if screen.search.area.contains(at.into()) {
+            screen.search.focused = true;
+            return;
         }
+        if screen.list.index_at(at).is_some() {
+            screen.search.focused = false;
+        }
+    }
+    if app.config_screen.list.confirmed(event).is_some() {
+        edit_selected(app);
     }
 }
 
@@ -176,9 +187,7 @@ fn close(app: &mut App) {
 /// ↑↓/jk: one row, wrapping at the ends.
 fn step(app: &mut App, down: bool) {
     let count = filtered(app).len();
-    let selected = app.config_screen.selected;
-    app.config_screen.selected = crate::list_nav::wrap(selected, count, down);
-    app.config_screen.free_scroll = false;
+    app.config_screen.list.step(down, count, true, |_| true);
 }
 
 /// PageUp/PageDown: a page of rows, clamped at the ends.
@@ -187,26 +196,13 @@ fn move_by(app: &mut App, delta: isize) {
     if count == 0 {
         return;
     }
-    app.config_screen.selected = app
-        .config_screen
-        .selected
-        .saturating_add_signed(delta)
-        .min(count - 1);
-    app.config_screen.free_scroll = false;
-}
-
-fn scroll_by(app: &mut App, delta: isize) {
-    app.config_screen.scroll = app.config_screen.scroll.saturating_add_signed(delta);
-    app.config_screen.free_scroll = true;
-}
-
-pub(crate) fn wheel(app: &mut App, delta: isize) {
-    scroll_by(app, delta);
+    let list = &mut app.config_screen.list;
+    list.select(list.selected().saturating_add_signed(delta).min(count - 1));
 }
 
 fn selected(app: &App) -> Option<ConfigField> {
     filtered(app)
-        .get(app.config_screen.selected)
+        .get(app.config_screen.list.selected())
         .cloned()
         .cloned()
 }
@@ -287,13 +283,17 @@ pub(crate) fn write(
             Ok(result) => model_picker::Event::Written(result),
             Err(err) => {
                 tracing::warn!(%err, path = %field.path, "settings update failed");
-                model_picker::Event::Failed
+                let verb = if op == "set" { "save" } else { "reset" };
+                let layer = origin_label(&target);
+                model_picker::Event::Failed(format!(
+                    "Failed to {verb} {} ({layer}): {err}",
+                    field.name
+                ))
             }
         };
-        let applied = matches!(event, model_picker::Event::Written(_));
+        let failed = matches!(event, model_picker::Event::Failed(_));
         crate::input::deliver(runtime_tx, event, &pending).await;
-        if applied {
-            load(session_id, &client, &tx);
-        }
+        // A failed write may still have moved layers; its toast already reports the failure.
+        load(session_id, &client, &tx, !failed);
     });
 }

@@ -21,6 +21,16 @@ authorities installed in the system trust store. Applying the setting only
 after authentication makes the authentication connection fail before Vibe can
 start.
 
+## Strict chain validation
+
+Since Python 3.13, `ssl.create_default_context()` enables `VERIFY_X509_STRICT`
+by default, so the Certifi path above validates chains against stricter RFC
+5280 rules (SKID/AKID presence and matching, critical BasicConstraints on CAs,
+CA KeyUsage). The system-trust-store path (`truststore`) does not set this
+flag. A private CA chain that verified on Python 3.12 can therefore be
+rejected on 3.13+; affected users should enable `enable_system_trust_store`
+or issue a compliant CA. Vibe keeps the stricter default deliberately.
+
 ## Agent Guidance
 
 - Use Vibe's shared HTTP/TLS helpers for Vibe-owned clients.

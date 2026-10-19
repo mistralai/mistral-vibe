@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import struct
+import threading
 import time
 from unittest.mock import MagicMock, patch
 import wave
@@ -11,7 +12,7 @@ import pytest
 
 try:
     import miniaudio  # noqa: F401
-except (OSError, ImportError):
+except OSError, ImportError:
     pytest.skip("miniaudio library not available", allow_module_level=True)
 
 from vibe.cli.audio_recorder.audio_recorder import AudioRecorder
@@ -305,13 +306,15 @@ class TestCancel:
 class TestMaxDuration:
     @patch("vibe.cli.audio_recorder.audio_recorder.ma.CaptureDevice")
     def test_auto_stops_after_max_duration(self, mock_device_cls: MagicMock) -> None:
+        expired = threading.Event()
         recorder = AudioRecorder()
-        recorder.start(RecordingMode.BUFFER, max_duration=0.1)
+        recorder.start(
+            RecordingMode.BUFFER, max_duration=0.1, on_expire=lambda _: expired.set()
+        )
 
         _send_audio(mock_device_cls, _make_pcm_frames(5000))
 
-        time.sleep(0.3)
-
+        assert expired.wait(timeout=5.0)
         assert recorder.is_recording is False
 
     @patch("vibe.cli.audio_recorder.audio_recorder.ma.CaptureDevice")

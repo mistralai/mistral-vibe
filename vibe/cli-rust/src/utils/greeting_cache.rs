@@ -1,4 +1,4 @@
-//! `[greeting] last_shown_at` in `~/.vibe/cache.toml`, shared with the Python CLI.
+//! `[greeting] last_shown_at` in `~/.vibe/cache.toml`.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,10 +10,10 @@ use super::paths;
 const FILE_NAME: &str = "cache.toml";
 const SECTION: &str = "greeting";
 const KEY: &str = "last_shown_at";
-/// Python `_GREETING_INTERVAL_SECONDS`: at most one greeting per 24 hours.
+/// At most one greeting per 24 hours.
 const INTERVAL_SECONDS: i64 = 24 * 60 * 60;
 
-/// Whether the greeting is due, failing open exactly as Python does.
+/// Whether the greeting is due, failing open.
 pub fn should_show() -> bool {
     let Some(last_shown) = last_shown() else {
         return true;

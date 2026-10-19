@@ -8,14 +8,14 @@ from textual.containers import Center, Vertical
 from textual.validation import Function, ValidationResult
 from textual.widgets import Input
 
-from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
-from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
-from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.setup.onboarding.base import OnboardingScreen
 from vibe.setup.onboarding.context import (
     is_likely_mistral_private_cloud_domain,
     is_valid_custom_domain,
 )
+from vibe.setup.onboarding.shortcut_hints import shortcut, shortcut_hint
+from vibe.setup.onboarding.widgets.no_markup_static import NoMarkupStatic
+from vibe.setup.onboarding.widgets.petit_chat import PetitChat
 
 if TYPE_CHECKING:
     from textual.widget import Widget

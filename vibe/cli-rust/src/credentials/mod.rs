@@ -1,12 +1,12 @@
-//! The client-side read-only credential read model (Python `vibe/utils/api_keys.py`):
+//! The client-side read-only credential read model:
 //! env, dotenv, and OS keyring reads. Writes stay server-side through
 //! setup/store-credential — no set/delete surface lives here.
 
 pub mod dotenv;
 pub mod keyring;
 
-/// Python `resolve_api_key`: a non-empty process env value first (empty reads
-/// as absent, Python truthiness), then the OS keyring — the single
+/// A non-empty process env value first (empty reads as absent), then the OS
+/// keyring — the single
 /// `ai.mistral.vibe` service only; the legacy `vibe` migration stays on the
 /// server path.
 pub fn resolve_api_key(env_key: &str) -> Option<String> {
@@ -14,15 +14,14 @@ pub fn resolve_api_key(env_key: &str) -> Option<String> {
         return None;
     }
     if let Some(value) = std::env::var_os(env_key).filter(|value| !value.is_empty()) {
-        // A present value is present even when it is not UTF-8 (Python
-        // `os.environ.get` never fails on the value).
+        // A present value is present even when it is not UTF-8.
         return Some(value.to_string_lossy().into_owned());
     }
     keyring::get_api_key_from_keyring(env_key)
 }
 
 /// Whether `MISTRAL_API_KEY` resolves at all (env or keyring): the cheap
-/// pre-spawn probe (Python `require_api_key_or_onboarding`) that lets a
+/// pre-spawn probe that lets a
 /// normal launch skip the pre-session `setup/status` and overlap the child
 /// boot with the first draw. A positive probe never decides the key IS
 /// valid: it only skips the pre-session check and defers to the session

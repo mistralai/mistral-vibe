@@ -1,5 +1,5 @@
-//! Server-pushed `warning`/`error`/`turn/retrying` notifications reach the UI,
-//! matching the legacy Python CLI (VIBE-4622).
+//! Server-pushed `warning`/`error`/`turn/retrying` notifications reach the UI
+//! (VIBE-4622).
 
 use std::sync::Arc;
 use std::time::Instant;

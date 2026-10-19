@@ -1,4 +1,4 @@
-//! Pipe tables, matching Textual's grid + `keyline` border cell-for-cell.
+//! Pipe tables: a grid with a `keyline` border.
 
 use std::sync::Arc;
 

@@ -1,10 +1,9 @@
-//! Sign-in URL validation against a configured base (Python
-//! `_validate_url_against_base_url`).
+//! Sign-in URL validation against a configured base.
 
 use super::sign_in_gateway::{SignInError, SignInErrorCode};
 
 /// Validate a server-returned URL against a configured base and return the
-/// URL to actually use (Python `_validate_url_against_base_url`): reject
+/// URL to actually use: reject
 /// foreign origins unless rewrite is allowed, reject paths outside the
 /// base path in either mode, and re-home a rewritten URL onto the
 /// configured origin (scheme, userinfo, host, and port), keeping the
@@ -52,8 +51,8 @@ pub fn validate_url(
     let _ = rewritten.set_scheme(base.scheme());
     let _ = rewritten.set_host(base.host_str());
     let _ = rewritten.set_port(base.port());
-    // `set_host` leaves userinfo in place; Python replaces the whole
-    // netloc, so gateway credentials must not survive onto the configured
+    // `set_host` leaves userinfo in place, but gateway credentials must not
+    // survive onto the configured
     // origin. Clear the password first: an empty username keeps a
     // leftover `:pass@`.
     let _ = rewritten.set_password(base.password());
@@ -62,16 +61,15 @@ pub fn validate_url(
 }
 
 /// Canonical (scheme, host, effective-port) comparison; a URL's explicit
-/// port equal to the scheme default matches a port-less base (Python
-/// `normalize_url_origin`).
+/// port equal to the scheme default matches a port-less base.
 fn origins_match(a: &url::Url, b: &url::Url) -> bool {
     a.scheme() == b.scheme()
         && a.host_str() == b.host_str()
         && a.port_or_known_default() == b.port_or_known_default()
 }
 
-/// The URL's path must stay under the base path (Python
-/// `_is_path_under_base_path`): percent-decode both, normalize, and accept
+/// The URL's path must stay under the base path: percent-decode both,
+/// normalize, and accept
 /// the base itself or anything below it. `..` segments that escape the base
 /// are rejected.
 fn path_is_under_base(path: &str, base_path: &str) -> bool {

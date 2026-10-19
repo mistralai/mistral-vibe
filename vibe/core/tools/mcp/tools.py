@@ -14,10 +14,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, TextIO
 import httpx
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from mcp import ClientSession
-from mcp.client.auth import OAuthFlowError
-from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamable_http_client
 from vibe import __version__
 from vibe.core.tools.base import (
     BaseTool,
@@ -33,7 +29,6 @@ from vibe.core.tools.mcp.authorization import (
     MCPAuthorizationRequiredSink,
     MCPAuthorizationSnapshot,
 )
-from vibe.core.tools.mcp_sampling import MCPSamplingHandler
 from vibe.core.tools.remote import MCPTool, MCPToolResult, RemoteTool, _OpenArgs
 from vibe.core.tools.ui import ToolResultDisplay
 from vibe.core.types import ToolStreamEvent
@@ -41,7 +36,11 @@ from vibe.observability.logging import logger
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 from vibe.utils.io import decode_console_safe
 
+# The MCP SDK is imported where used: its package import loads ~230 modules.
 if TYPE_CHECKING:
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters
+    from vibe.core.tools.mcp_sampling import MCPSamplingHandler
     from vibe.core.types import ToolResultEvent
 
 
@@ -60,7 +59,7 @@ def _stderr_logger_thread(read_fd: int) -> None:
 
 
 @contextlib.asynccontextmanager
-async def _mcp_stderr_capture() -> AsyncGenerator[TextIO, None]:
+async def _mcp_stderr_capture() -> AsyncGenerator[TextIO]:
     r, w = os.pipe()
     errlog = None
     thread_started = False
@@ -147,6 +146,9 @@ async def list_tools_http(
     auth: httpx.Auth | None = None,
     startup_timeout_sec: float | None = None,
 ) -> list[RemoteTool]:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
     timeout = timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
     async with create_vibe_mcp_http_client(headers, auth=auth) as http_client:
         async with streamable_http_client(url, http_client=http_client) as (
@@ -173,6 +175,9 @@ async def call_tool_http(
     tool_timeout_sec: float | None = None,
     sampling_callback: MCPSamplingHandler | None = None,
 ) -> MCPToolResult:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
     init_timeout = (
         timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
     )
@@ -249,7 +254,7 @@ def create_mcp_http_proxy_tool_class(
 
         async def run(
             self, args: _OpenArgs, ctx: InvokeContext | None = None
-        ) -> AsyncGenerator[ToolStreamEvent | MCPToolResult, None]:
+        ) -> AsyncGenerator[ToolStreamEvent | MCPToolResult]:
             try:
                 sampling_callback = (
                     ctx.sampling_callback if ctx and self._sampling_enabled else None
@@ -387,12 +392,16 @@ def is_authorization_rejection(exc: BaseException) -> bool:
         return any(is_authorization_rejection(child) for child in exc.exceptions)
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code == httpx.codes.UNAUTHORIZED
+    from mcp.client.auth import OAuthFlowError
+
     return isinstance(exc, OAuthFlowError)
 
 
 def build_stdio_params(
     command: list[str], *, env: dict[str, str] | None = None, cwd: str | None = None
 ) -> StdioServerParameters:
+    from mcp.client.stdio import StdioServerParameters
+
     return StdioServerParameters(command=command[0], args=command[1:], env=env, cwd=cwd)
 
 
@@ -409,6 +418,9 @@ async def enter_stdio_session(
     session. The one-shot helpers close the stack immediately; the connection pool
     keeps it open for the session lifetime.
     """
+    from mcp import ClientSession
+    from mcp.client.stdio import stdio_client
+
     errlog = await stack.enter_async_context(_mcp_stderr_capture())
     read, write = await stack.enter_async_context(stdio_client(params, errlog=errlog))
     session = await stack.enter_async_context(
@@ -518,7 +530,7 @@ def create_mcp_stdio_proxy_tool_class(
 
         async def run(
             self, args: _OpenArgs, ctx: InvokeContext | None = None
-        ) -> AsyncGenerator[ToolStreamEvent | MCPToolResult, None]:
+        ) -> AsyncGenerator[ToolStreamEvent | MCPToolResult]:
             try:
                 sampling_callback = (
                     ctx.sampling_callback if ctx and self._sampling_enabled else None

@@ -1,24 +1,23 @@
-//! `/theme` picker state. Mirrors Python's `ThemePickerApp`: an option list of
-//! `sorted_theme_names()` with live preview on highlight and persist on select.
+//! `/theme` picker state: an option list of the theme names with live
+//! preview on highlight and persist on select.
 
 use std::time::{Duration, Instant};
 
 use crate::app::App;
 use crate::ui::theme;
 
-/// Delay between the highlight moving and the preview applying (Python
-/// `PREVIEW_DEBOUNCE_SECONDS`), so held arrow keys do not repaint per step.
+/// Delay between the highlight moving and the preview applying, so held
+/// arrow keys do not repaint per step.
 pub const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(100);
 
-/// The picker options: `auto` first, then every theme in `theme::ALL` order
-/// (which matches Textual's `sorted_theme_names()`).
+/// The picker options: `auto` first, then every theme in `theme::ALL` order.
 pub fn options() -> Vec<&'static str> {
     let mut names = vec![theme::AUTO_NAME];
     names.extend(theme::ALL.iter().map(|t| t.name));
     names
 }
 
-/// Open the picker highlighted on the configured theme (Python `on_mount`).
+/// Open the picker highlighted on the configured theme.
 pub fn open(app: &mut App) {
     let names = options();
     let configured = app.session.startup_config.theme.as_str();
@@ -28,9 +27,7 @@ pub fn open(app: &mut App) {
         .unwrap_or(0);
     app.theme_picker.current = current;
     app.theme_picker.original = theme::active_index();
-    app.theme_picker.selected = current;
-    app.theme_picker.scroll = 0;
-    app.theme_picker.free_scroll = false;
+    app.theme_picker.list = crate::option_list::OptionList::new(current);
     app.theme_picker.preview_at = None;
     app.theme_picker.open = true;
 }
@@ -38,9 +35,9 @@ pub fn open(app: &mut App) {
 /// Move the highlight up/down by one, wrapping at the ends, then arm the
 /// debounced preview of the newly highlighted theme.
 pub fn navigate(app: &mut App, down: bool) {
-    app.theme_picker.free_scroll = false;
-    let picker = &mut app.theme_picker;
-    picker.selected = crate::list_nav::wrap(picker.selected, options().len(), down);
+    app.theme_picker
+        .list
+        .step(down, options().len(), true, |_| true);
     app.theme_picker.preview_at = Some(Instant::now() + PREVIEW_DEBOUNCE);
 }
 
@@ -54,7 +51,7 @@ pub fn preview(app: &mut App) {
 
 /// The highlighted option's theme name (or `auto`).
 pub fn selected_name(app: &App) -> &'static str {
-    options()[app.theme_picker.selected.min(options().len() - 1)]
+    options()[app.theme_picker.list.selected().min(options().len() - 1)]
 }
 
 /// A committed selection's server answer, applied on the main thread.

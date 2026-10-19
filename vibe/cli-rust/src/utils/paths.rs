@@ -12,7 +12,7 @@ pub fn vibe_home() -> Option<PathBuf> {
     )
 }
 
-/// Python `is_dangerous_directory`: why running in `path` is not recommended,
+/// Why running in `path` is not recommended,
 /// or `None` when it is safe. Same check over an injected home for testability.
 pub fn dangerous_directory_reason_at(path: &Path, home: &Path) -> Option<String> {
     let dangerous = [
@@ -36,14 +36,14 @@ pub fn dangerous_directory_reason_at(path: &Path, home: &Path) -> Option<String>
         .map(|(_, description)| format!("You are in the {description}"))
 }
 
-/// Python `is_dangerous_directory` over the resolved cwd and `$HOME`.
+/// The dangerous-directory check over the resolved cwd and `$HOME`.
 pub fn dangerous_directory_reason() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     dangerous_directory_reason_at(&cwd, &home)
 }
 
-/// Replace a leading `$HOME` with `~` (Python `PathDisplay`, `_format_display_path`).
+/// Replace a leading `$HOME` with `~`.
 pub fn collapse_home(path: &str) -> String {
     match std::env::var("HOME") {
         Ok(home) if !home.is_empty() && path == home => "~".to_string(),
@@ -89,7 +89,7 @@ pub fn expand_tilde(p: &Path) -> PathBuf {
     p.into()
 }
 
-/// Validate and resolve `--add-dir` paths, mirroring Python entrypoint.py.
+/// Validate and resolve `--add-dir` paths.
 /// Relative paths resolve against the process cwd, which `--workdir` has
 /// already changed by the time this runs.
 pub fn resolve_add_dirs(paths: &[PathBuf]) -> Result<Vec<String>> {

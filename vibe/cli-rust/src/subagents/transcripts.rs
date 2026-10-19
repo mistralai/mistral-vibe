@@ -1,4 +1,4 @@
-//! Bounded LRU of child transcripts (Python `SubagentTranscripts`).
+//! Bounded LRU of child transcripts.
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,12 +11,14 @@ use crate::subagents::child::{
 use crate::subagents::is_active;
 use crate::transcript::local;
 
-/// Bounded LRU of child transcripts (Python `SubagentTranscripts`).
+/// Bounded LRU of child transcripts.
 #[derive(Default)]
 pub struct SubagentTranscripts {
     ordered: Vec<(String, ChildTranscript)>,
     selected: Option<String>,
     pub parent_instructions: HashMap<String, Value>,
+    /// Transition-driven, not pruned here: an id drops on every non-active
+    /// status, so it stays bounded while the session observes its children.
     pub active_session_ids: HashSet<String>,
     pub scroll_offsets: HashMap<Option<String>, u16>,
 }
@@ -45,7 +47,7 @@ impl SubagentTranscripts {
             .map(|(_, transcript)| transcript)
     }
 
-    /// Python `SubagentTranscripts.select`: drop the previous selection's
+    /// Drop the previous selection's
     /// completeness, keep the picked one most recent; false when not cached.
     pub fn select(&mut self, session_id: Option<&str>) -> bool {
         if self.selected.as_deref() != session_id {
@@ -67,7 +69,7 @@ impl SubagentTranscripts {
         found.is_some()
     }
 
-    /// Python `prepare`: mount the loading placeholder, evicting the oldest
+    /// Mount the loading placeholder, evicting the oldest
     /// entry beyond the cap while never evicting the viewed child.
     pub fn prepare(&mut self, session_id: &str) {
         if let Some(index) = self.position(session_id) {
@@ -85,11 +87,16 @@ impl SubagentTranscripts {
             else {
                 break;
             };
-            self.ordered.remove(index);
+            let (evicted, _) = self.ordered.remove(index);
+            // The per-child maps stay bounded with the cache: an evicted
+            // child re-derives its parent instruction from fetched history and
+            // anchors at the newest content instead of a parked scroll offset.
+            self.parent_instructions.remove(&evicted);
+            self.scroll_offsets.remove(&Some(evicted));
         }
     }
 
-    /// Python `replace_history`: tail-merge against the cached history,
+    /// Tail-merge against the cached history,
     /// prepend the remembered parent instruction, rebuild the transcript.
     pub fn replace_history(
         &mut self,
@@ -109,8 +116,8 @@ impl SubagentTranscripts {
         } else {
             merge_history_tail(cached_history.as_deref().unwrap_or(&[]), &latest)
         };
-        // The child transcript starts with the parent's spawn task (Python
-        // synthesizes `parent-instruction:<child>` and prepends it).
+        // The child transcript starts with the parent's spawn task, a
+        // synthesized `parent-instruction:<child>` entry.
         let rendered = match self.parent_instructions.get(session_id) {
             Some(instruction)
                 if !rendered
@@ -164,10 +171,10 @@ impl SubagentTranscripts {
         true
     }
 
-    /// Python `announce_ready_transition`: once per active period, append the
+    /// Once per active period, append the
     /// ready message when a child leaves running/blocked for idle. A new
     /// active period retires the parked row first, so at most one shows and
-    /// only while the child is actually idle (Python stacks one per period).
+    /// only while the child is actually idle.
     pub fn announce_ready_transition(&mut self, session: &PublicChildSession) -> bool {
         if is_active(session.status) {
             if self.active_session_ids.insert(session.id.clone()) {
@@ -187,7 +194,7 @@ impl SubagentTranscripts {
     }
 
     /// Drop the parked ready row: its period ended when the child started work
-    /// on a new instruction (Python keeps every row; one shows at a time here).
+    /// on a new instruction (one shows at a time).
     /// Local ids are positional, so every later row re-renders under a fresh
     /// one; reusing the vacated id would overwrite a live row on the next append.
     fn remove_ready_message(&mut self, session_id: &str) {
@@ -223,7 +230,7 @@ impl SubagentTranscripts {
         }
     }
 
-    /// Python `append_local_user_message`: a client-owned row the server never sees.
+    /// A client-owned row the server never sees.
     pub fn append_local_user_message(
         &mut self,
         session_id: &str,
@@ -247,7 +254,7 @@ impl SubagentTranscripts {
         );
     }
 
-    /// Python `show_error`: replace the loading placeholder unless history exists.
+    /// Replace the loading placeholder unless history exists.
     pub fn show_error(&mut self, session_id: &str) {
         self.prepare(session_id);
         let Some(transcript) = self.child_mut(session_id) else {
@@ -258,7 +265,7 @@ impl SubagentTranscripts {
         }
     }
 
-    /// Python `remember_parent_instruction` from live events: first one wins.
+    /// Remember a parent instruction from live events: first one wins.
     pub fn remember_instruction(&mut self, instruction: Value) {
         let Some(session_id) = instruction.get("sessionId").and_then(Value::as_str) else {
             return;
@@ -268,7 +275,7 @@ impl SubagentTranscripts {
             .or_insert(instruction);
     }
 
-    /// Python `_remember_parent_instruction` from fetched history: latest wins.
+    /// Remember the parent instruction from fetched history: latest wins.
     fn remember_parent_instruction_from_history(&mut self, session_id: &str, history: &[Value]) {
         let Some(instruction) = history.iter().find(|entry| {
             entry.get("type").and_then(Value::as_str) == Some("message")
@@ -281,7 +288,7 @@ impl SubagentTranscripts {
             .insert(session_id.to_owned(), instruction.clone());
     }
 
-    /// Python `clear` on `_reset_subagent_views`.
+    /// Drop every cached transcript when the subagent views reset.
     pub fn clear(&mut self) {
         self.ordered.clear();
         self.selected = None;
@@ -295,7 +302,7 @@ impl SubagentTranscripts {
     }
 }
 
-/// Python `_merge_history_tail`: keep the cached prefix up to the first shared
+/// Keep the cached prefix up to the first shared
 /// id, then append the new tail.
 pub fn merge_history_tail(history: &[Value], latest: &[Value]) -> Vec<Value> {
     if latest.is_empty() {
@@ -324,7 +331,7 @@ pub(super) fn local_message_id(session_id: &str, index: usize) -> String {
     format!("subagent-local-{session_id}-{index}")
 }
 
-/// Python renders these with `UserMessage(severity=...)`: the role carries the
+/// Local severity rows: the role carries the
 /// severity so the transcript renderer styles the border and the text.
 fn severity_role(severity: Severity) -> &'static str {
     match severity {

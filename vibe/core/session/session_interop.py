@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 from pydantic import JsonValue
 
@@ -17,17 +17,16 @@ from vibe.core.session.session_loader import (
 )
 from vibe.core.types import (
     FileImageSource,
-    FunctionCall,
     ImageAttachment,
     InlineImageSource,
     LLMMessage,
-    PersistedToolResult,
     Role,
-    ToolCall,
 )
 from vibe.core.utils import CANCELLATION_TAG, TOOL_ERROR_TAG, TaggedText
 from vibe.user_content import UserBlobResource, UserResourceLink, UserTextResource
 from vibe.utils.session_id import shorten_session_id
+
+_REASONING_PAYLOADS_META_KEY = "vibe_reasoning_payloads"
 
 
 class InvalidLegacyInteropSourceError(ValueError):
@@ -124,7 +123,7 @@ def export_legacy_committed_history(
                 f"Legacy session identity changed while exporting: {session_id}"
             )
         revision = _legacy_store_revision(metadata_path, messages_path)
-        history = [_export_message(message, session_dir) for message in messages]
+        history = export_messages_to_interop_history(messages, source_root=session_dir)
     except InvalidLegacyInteropSourceError:
         raise
     except (OSError, TypeError, ValueError) as exc:
@@ -139,39 +138,19 @@ def export_legacy_committed_history(
     )
 
 
+def export_messages_to_interop_history(
+    messages: list[LLMMessage], *, source_root: Path
+) -> list[dict[str, JsonValue]]:
+    """Convert Vibe messages into the committed-history format Unified accepts."""
+    return [_export_message(message, source_root) for message in messages]
+
+
 def _active_model_from_metadata(metadata: dict[str, Any]) -> str | None:
     config = metadata.get("config")
     if not isinstance(config, dict):
         return None
     active_model = config.get("active_model")
     return active_model if isinstance(active_model, str) and active_model else None
-
-
-def import_unified_committed_history(
-    document: dict[str, Any],
-) -> tuple[list[LLMMessage], dict[str, JsonValue]]:
-    """Validate and map a Unified CommittedHistoryV1 into legacy messages."""
-    if set(document) != {"interop_version", "source", "history", "history_sha256"}:
-        raise ValueError("Unified interop export has unexpected fields")
-    if document.get("interop_version") != 1:
-        raise ValueError("Unsupported Unified interop export version")
-    source = document.get("source")
-    history = document.get("history")
-    fingerprint = document.get("history_sha256")
-    if not isinstance(source, dict) or source.get("backend") != "unified":
-        raise ValueError("Unified interop export has an invalid source")
-    if not isinstance(history, list) or not isinstance(fingerprint, str):
-        raise ValueError("Unified interop export has an invalid history")
-    messages = [_import_message(_require_object(item)) for item in history]
-    provenance = cast(
-        dict[str, JsonValue],
-        {
-            "interop_version": 1,
-            "source": cast(dict[str, JsonValue], source),
-            "history_sha256": fingerprint,
-        },
-    )
-    return messages, provenance
 
 
 def _legacy_candidates(session_id: str, config: SessionLoggingConfig) -> list[Path]:
@@ -269,11 +248,20 @@ def _export_assistant_parts(
     message: LLMMessage, session_dir: Path
 ) -> list[dict[str, JsonValue]]:
     parts: list[dict[str, JsonValue]] = []
-    if message.reasoning_content:
-        parts.append({
+    if message.reasoning_content or message.reasoning_payloads:
+        reasoning_part: dict[str, JsonValue] = {
             "type": "reasoning",
-            "content": [{"type": "text", "text": message.reasoning_content}],
-        })
+            "content": (
+                [{"type": "text", "text": message.reasoning_content}]
+                if message.reasoning_content
+                else [{"type": "redacted", "data": ""}]
+            ),
+        }
+        if message.reasoning_payloads:
+            reasoning_part["_meta"] = cast(
+                JsonValue, {_REASONING_PAYLOADS_META_KEY: message.reasoning_payloads}
+            )
+        parts.append(reasoning_part)
     if message.content is not None:
         parts.append({
             "type": "content",
@@ -366,187 +354,10 @@ def _export_resource_content(resource: Any) -> dict[str, JsonValue]:
     raise InvalidLegacyInteropSourceError("Unknown persisted resource")
 
 
-def _import_message(message: dict[str, Any]) -> LLMMessage:
-    role = message.get("role")
-    if role in {"system", "user"}:
-        _require_fields(message, {"role", "content"})
-        text, images, resources = _import_content(message.get("content"))
-        return LLMMessage(
-            role=Role(role),
-            content="\n".join(text),
-            images=images or None,
-            resources=resources or None,
-        )
-    if role == "assistant":
-        return _import_assistant_message(message)
-    if role == "tool":
-        allowed = {"role", "tool_call_id", "name", "outcome", "content", "_meta"}
-        if not set(message).issubset(allowed) or not {
-            "role",
-            "tool_call_id",
-            "name",
-            "outcome",
-            "content",
-        }.issubset(message):
-            raise ValueError("Tool interop message has unexpected fields")
-        text, _images, _resources = _import_content(message.get("content"))
-        outcome = message.get("outcome")
-        if outcome not in {"success", "failure"}:
-            raise ValueError("Tool interop outcome is invalid")
-        return LLMMessage(
-            role=Role.tool,
-            tool_call_id=_require_string(message.get("tool_call_id")),
-            name=_require_string(message.get("name")),
-            content="\n".join(text),
-            tool_result=PersistedToolResult(
-                output={
-                    "interop_outcome": cast(Literal["success", "failure"], outcome)
-                },
-                cancelled=outcome == "failure",
-            ),
-        )
-    raise ValueError(f"Unsupported interop message role: {role!r}")
-
-
-def _import_assistant_message(message: dict[str, Any]) -> LLMMessage:
-    _require_fields(message, {"role", "parts"})
-    text: list[str] = []
-    reasoning: list[str] = []
-    tool_calls: list[ToolCall] = []
-    images: list[ImageAttachment] = []
-    resources: list[Any] = []
-    for raw_part in _require_list(message.get("parts")):
-        part = _require_object(raw_part)
-        part_type = part.get("type")
-        if part_type == "content":
-            _require_fields(part, {"type", "content"})
-            part_text, part_images, part_resources = _import_content([
-                part.get("content")
-            ])
-            text.extend(part_text)
-            images.extend(part_images)
-            resources.extend(part_resources)
-        elif part_type == "reasoning":
-            for raw_reasoning in _require_list(part.get("content")):
-                reasoning_part = _require_object(raw_reasoning)
-                value = reasoning_part.get("text", reasoning_part.get("data", ""))
-                reasoning.append(_require_string(value))
-        elif part_type == "tool_call":
-            arguments = _require_object(part.get("arguments"))
-            raw = _require_string(arguments.get("raw"))
-            tool_calls.append(
-                ToolCall(
-                    id=_require_string(part.get("id")),
-                    function=FunctionCall(
-                        name=_require_string(part.get("name")), arguments=raw
-                    ),
-                )
-            )
-        else:
-            raise ValueError(f"Unsupported assistant interop part: {part_type!r}")
-    return LLMMessage(
-        role=Role.assistant,
-        content="\n".join(text),
-        reasoning_content="\n".join(reasoning) or None,
-        tool_calls=tool_calls or None,
-        images=images or None,
-        resources=resources or None,
-    )
-
-
-def _import_content(value: Any) -> tuple[list[str], list[ImageAttachment], list[Any]]:
-    text: list[str] = []
-    images: list[ImageAttachment] = []
-    resources: list[Any] = []
-    for raw_block in _require_list(value):
-        block = _require_object(raw_block)
-        block_type = block.get("type")
-        if block_type == "text":
-            text.append(_require_string(block.get("text")))
-        elif block_type == "image":
-            images.append(_import_image(block))
-        elif block_type == "resource":
-            resource = _require_object(block.get("resource"))
-            uri = _require_string(resource.get("uri"))
-            media_type = resource.get("mimeType")
-            if media_type is not None:
-                media_type = _require_string(media_type)
-            if "text" in resource:
-                resources.append(
-                    UserTextResource(
-                        uri=uri,
-                        media_type=media_type,
-                        text=_require_string(resource.get("text")),
-                    )
-                )
-            elif "blob" in resource:
-                resources.append(
-                    UserBlobResource(
-                        uri=uri,
-                        media_type=media_type,
-                        blob=_require_string(resource.get("blob")),
-                    )
-                )
-            else:
-                raise ValueError("Embedded resource has no content")
-        elif block_type == "resource_link":
-            resources.append(
-                UserResourceLink(
-                    uri=_require_string(block.get("uri")),
-                    name=_optional_string(block.get("name")),
-                    title=_optional_string(block.get("title")),
-                    description=_optional_string(block.get("description")),
-                    media_type=_optional_string(block.get("mimeType")),
-                    size=block.get("size"),
-                )
-            )
-        elif block_type == "audio":
-            text.append(json.dumps(block, ensure_ascii=False, sort_keys=True))
-        else:
-            raise ValueError(f"Unsupported interop content block: {block_type!r}")
-    return text, images, resources
-
-
-def _import_image(block: dict[str, Any]) -> ImageAttachment:
-    return ImageAttachment(
-        source=InlineImageSource(data=_require_string(block.get("data"))),
-        alias="imported-image",
-        mime_type=_require_string(block.get("mimeType")),
-    )
-
-
-def _require_fields(value: dict[str, Any], fields: set[str]) -> None:
-    if set(value) != fields:
-        raise ValueError("Interop message has unexpected fields")
-
-
-def _require_object(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError("Expected an interop object")
-    return value
-
-
-def _require_list(value: Any) -> list[Any]:
-    if not isinstance(value, list):
-        raise ValueError("Expected an interop list")
-    return value
-
-
-def _require_string(value: Any) -> str:
-    if not isinstance(value, str):
-        raise ValueError("Expected an interop string")
-    return value
-
-
-def _optional_string(value: Any) -> str | None:
-    return None if value is None else _require_string(value)
-
-
 __all__ = [
     "InvalidLegacyInteropSourceError",
     "LegacyCommittedHistory",
     "LegacySessionReference",
     "export_legacy_committed_history",
-    "import_unified_committed_history",
     "resolve_legacy_session_reference",
 ]

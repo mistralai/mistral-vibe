@@ -1,10 +1,10 @@
-//! Grapheme cells with tab stops, as Textual's TextArea expands tabs.
+//! Grapheme cells with tab stops.
 
 use unicode_width::UnicodeWidthStr;
 
 use crate::utils::graphemes::split_graphemes;
 
-/// Textual's TextArea `indent_width`: tabs stop every 4 columns from the line start.
+/// Tabs stop every 4 columns from the line start.
 const TAB_SIZE: usize = 4;
 const TAB_SPACES: &str = "    ";
 

@@ -4,8 +4,8 @@ import pytest
 from textual.app import App
 from textual.widgets import Input
 
-from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.setup.onboarding.screens.custom_domain import CustomDomainScreen
+from vibe.setup.onboarding.widgets.no_markup_static import NoMarkupStatic
 
 
 class _Harness(App[None]):

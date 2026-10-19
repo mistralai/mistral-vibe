@@ -6,7 +6,6 @@ from e2e.app_server.events import assistant_msg, turn_completed, turn_started, u
 from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 clipboard_contains = ("line 01.", "line 30.")
 
 
@@ -24,7 +23,7 @@ timeline: Timeline = [
     assistant_msg(_wide_reply(30)),
     turn_completed(),
     "\x1b[1;2A" * 8,
-    "\x1b[<0;12;14M",
-    "\x1b[<32;120;40M",
-    "\x1b[<0;120;40m",
+    "\x1b[<0;12;10M",
+    "\x1b[<32;120;36M",
+    "\x1b[<0;120;36m",
 ]

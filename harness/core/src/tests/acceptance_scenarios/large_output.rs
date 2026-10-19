@@ -96,6 +96,46 @@ fn saved_receipt(
     )
 }
 
+fn too_large_result(code: &str, message: &str, limit_bytes: usize) -> Value {
+    json!({
+        "type": "failure",
+        "content": [{"type": "text", "text": message}],
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": false,
+            "details": {"limit_bytes": limit_bytes},
+        },
+    })
+}
+
+/// The `run_typescript` failure for a replay over the memory limit, and its text.
+fn memory_limit_failure(operation_count: usize) -> (Value, String) {
+    let memory_error = json!({
+        "name": "MemoryLimitError",
+        "message": format!("run_typescript exceeded its 16 MiB memory limit with {operation_count} recorded operations. Retry with fewer tool calls in each run_typescript block, request smaller tool results, or split the work across multiple run_typescript calls. Return only the fields needed for the next step instead of every full tool result."),
+        "details": {
+            "memoryLimitMiB": 16,
+            "operationCount": operation_count,
+        },
+    });
+    let failure_text = format!(
+        "run_typescript failed: {}",
+        serde_json::to_string(&memory_error).unwrap()
+    );
+    let failure_result = json!({
+        "type": "failure",
+        "content": [{"type": "text", "text": failure_text}],
+        "error": {
+            "code": "MemoryLimitError",
+            "message": memory_error["message"],
+            "retryable": false,
+            "details": memory_error["details"],
+        },
+    });
+    (failure_result, failure_text)
+}
+
 fn hard_limit_receipt(
     tool_name: &str,
     serialized: &str,
@@ -406,16 +446,8 @@ fn programmatic_result_beyond_the_nested_result_limit_fails_before_the_post_tool
         "The tool ran, but its result is too large to return to run_typescript: it exceeds the {} MiB limit. Request a smaller result by filtering, paginating, or narrowing the query, or split the work across multiple run_typescript calls.",
         NESTED_RESULT_LIMIT_BYTES / (1024 * 1024)
     );
-    let rejected_result = json!({
-        "type": "failure",
-        "content": [{"type": "text", "text": message}],
-        "error": {
-            "code": "tool_result_too_large",
-            "message": message,
-            "retryable": false,
-            "details": {"limit_bytes": NESTED_RESULT_LIMIT_BYTES},
-        },
-    });
+    let rejected_result =
+        too_large_result("tool_result_too_large", &message, NESTED_RESULT_LIMIT_BYTES);
 
     // Do
     let post_hook = runtime
@@ -472,6 +504,344 @@ fn programmatic_result_beyond_the_nested_result_limit_fails_before_the_post_tool
         &[
             model_assistant_typescript(call_id, source),
             model_tool_text(call_id, "run_typescript", r#"{"rejected":true}"#),
+        ],
+    );
+}
+
+///
+/// *Prepare*: `run_typescript` fans out four nested calls with `Promise.allSettled`.
+/// *Do*: Return two 7 MiB results, a third 7 MiB result that would take the program past the 16 MiB it can replay, then a small fourth result.
+/// *Assert*: The third result is committed as a small failure the checkpoint never holds, the small result is still accepted, and the program fails without failing the turn.
+///
+#[test]
+fn programmatic_results_beyond_what_one_program_can_replay_fail_on_arrival() {
+    const RETAINED_RESULTS_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+    const LARGE_RESULT_BYTES: usize = 7 * 1024 * 1024;
+
+    // Prepare
+    let turn_id = "turn-programmatic-retained-limit";
+    let call_id = "program-retained-limit";
+    let source = "async function main() { const pages = await Promise.allSettled([0, 1, 2, 3].map(page => tools.data.large_lookup({ page }))); return pages.map(page => page.status); }";
+    let mut harness_config = large_output_config(ProvidedToolExposure::Programmatic);
+    harness_config.settings.tools.large_output = LargeOutputPolicy::Filesystem {
+        max_output_tokens: 10_000,
+        model_visible_output_tokens: 5_000,
+    };
+    let mut runtime = SynchronousRuntime::new(harness_config);
+    let first_completion = runtime.start_turn(turn_id, "fetch every page");
+    let actions = runtime
+        .complete_with_typescript_program(
+            turn_id,
+            &first_completion,
+            call_id,
+            source,
+            (0..4).map(|page| provided_action(json!({"page": page}))),
+        )
+        .actions();
+    assert_eq!(actions.len(), 4);
+    let large_result = |action: &Value| text_tool_success(action, &"x".repeat(LARGE_RESULT_BYTES));
+    for (index, action) in actions.iter().enumerate().take(2) {
+        let result = large_result(action);
+        let expected = actions[index + 1..]
+            .iter()
+            .fold(running(turn_id), |expected, pending| expected.keep(pending))
+            .observe_tool_result(action, &result);
+        runtime.apply(result, expected);
+    }
+    let message = format!(
+        "The tool ran, but run_typescript cannot hold its result: together with the results this program already holds it exceeds the {} MiB limit for one program. Return only the fields needed from each result, make fewer tool calls in each run_typescript block, or split the work across multiple run_typescript calls.",
+        RETAINED_RESULTS_LIMIT_BYTES / (1024 * 1024)
+    );
+    let rejected_result = too_large_result(
+        "program_results_too_large",
+        &message,
+        RETAINED_RESULTS_LIMIT_BYTES,
+    );
+
+    // Do
+    runtime.apply(
+        large_result(&actions[2]),
+        running(turn_id)
+            .keep(&actions[3])
+            .observe(tool_result_committed(turn_id, &actions[2], rejected_result)),
+    );
+    let checkpoint_bytes = runtime.checkpoint_value().to_string().len();
+    let small_result = text_tool_success(&actions[3], "small page");
+    let (failure_result, failure_text) = memory_limit_failure(4);
+    let failure_serialized = serde_json::to_string_pretty(&failure_result).unwrap();
+    let next_completion = runtime
+        .apply(
+            small_result.clone(),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe_tool_result(&actions[3], &small_result)
+                .observe(serialized_observation(
+                    turn_id,
+                    call_id,
+                    "run_typescript",
+                    failure_serialized.encode_utf16().count(),
+                ))
+                .observe_tool_execution_finished(call_id, failure_result),
+        )
+        .only_action();
+
+    // Assert
+    assert!(
+        checkpoint_bytes < RETAINED_RESULTS_LIMIT_BYTES,
+        "the checkpoint must not hold the rejected payload ({checkpoint_bytes} bytes)"
+    );
+    runtime.assert_last_model_message_update(
+        &next_completion,
+        "append",
+        &[
+            model_assistant_typescript(call_id, source),
+            json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": "run_typescript",
+                "outcome": "failure",
+                "content": [{"type": "text", "text": failure_text}],
+            }),
+        ],
+    );
+}
+
+///
+/// *Prepare*: `run_typescript` fans out four nested calls under a post-tool hook.
+/// *Do*: Return 1.5 and 7.5 MiB, then 7.9 MiB while the 7.5 MiB result awaits its hook, pass both through, then grow a small result to 7.9 MiB in its hook.
+/// *Assert*: A result awaiting its hook counts once, and results that would cross the limit fail on arrival and after the hook.
+///
+#[test]
+fn programmatic_results_awaiting_a_post_tool_hook_count_once() {
+    const MIB: usize = 1024 * 1024;
+
+    // Prepare
+    let turn_id = "turn-programmatic-retained-hooks";
+    let call_id = "program-retained-hooks";
+    let source = "async function main() { const pages = await Promise.allSettled([0, 1, 2, 3].map(page => tools.data.large_lookup({ page }))); return pages.map(page => page.status); }";
+    let mut harness_config = large_output_config(ProvidedToolExposure::Programmatic);
+    harness_config.settings.tools.large_output = LargeOutputPolicy::Filesystem {
+        max_output_tokens: 10_000,
+        model_visible_output_tokens: 5_000,
+    };
+    harness_config.capabilities.hook_bindings = serde_json::from_value(json!([
+        {"id": "nested-post-tool", "point": "post_tool_call", "order": 0, "selector": {"type": "always"}}
+    ]))
+    .expect("post-tool hook configures");
+    let mut runtime = SynchronousRuntime::new(harness_config);
+    let first_completion = runtime.start_turn(turn_id, "fetch every page");
+    let actions = runtime
+        .complete_with_typescript_program(
+            turn_id,
+            &first_completion,
+            call_id,
+            source,
+            (0..4).map(|page| provided_action(json!({"page": page}))),
+        )
+        .actions();
+    let post_hook = || hook_call("post_tool_call", &["nested-post-tool"], Value::Null);
+    let pass_through = |hook: &Value, result: &Value| {
+        hook_completed(
+            hook,
+            "post_tool_call",
+            json!({"tool_result": result["result"]}),
+        )
+    };
+    let message = format!(
+        "The tool ran, but run_typescript cannot hold its result: together with the results this program already holds it exceeds the {} MiB limit for one program. Return only the fields needed from each result, make fewer tool calls in each run_typescript block, or split the work across multiple run_typescript calls.",
+        16
+    );
+    let rejected = too_large_result("program_results_too_large", &message, 16 * MIB);
+    let first = text_tool_success(&actions[0], &"x".repeat(3 * MIB / 2));
+    let first_hook = runtime
+        .apply(
+            first.clone(),
+            running(turn_id)
+                .dispatch(post_hook())
+                .keep(&actions[1])
+                .keep(&actions[2])
+                .keep(&actions[3]),
+        )
+        .only_action();
+    runtime.apply(
+        pass_through(&first_hook, &first),
+        running(turn_id)
+            .keep(&actions[1])
+            .keep(&actions[2])
+            .keep(&actions[3])
+            .observe_tool_result(&actions[0], &first),
+    );
+    let second = text_tool_success(&actions[1], &"x".repeat(15 * MIB / 2));
+    let second_hook = runtime
+        .apply(
+            second.clone(),
+            running(turn_id)
+                .dispatch(post_hook())
+                .keep(&actions[2])
+                .keep(&actions[3]),
+        )
+        .only_action();
+
+    // Do
+    let third_hook = runtime
+        .apply(
+            text_tool_success(&actions[2], &"x".repeat(79 * MIB / 10)),
+            running(turn_id)
+                .keep(&second_hook)
+                .dispatch(hook_call(
+                    "post_tool_call",
+                    &["nested-post-tool"],
+                    json!({"tool_result": rejected}),
+                ))
+                .keep(&actions[3]),
+        )
+        .only_action();
+    runtime.apply(
+        pass_through(&second_hook, &second),
+        running(turn_id)
+            .keep(&third_hook)
+            .keep(&actions[3])
+            .observe_tool_result(&actions[1], &second),
+    );
+    runtime.apply(
+        hook_completed(
+            &third_hook,
+            "post_tool_call",
+            json!({"tool_result": rejected}),
+        ),
+        running(turn_id)
+            .keep(&actions[3])
+            .observe(tool_result_committed(
+                turn_id,
+                &actions[2],
+                rejected.clone(),
+            )),
+    );
+    let fourth_hook = runtime
+        .apply(
+            text_tool_success(&actions[3], "small page"),
+            running(turn_id).dispatch(post_hook()),
+        )
+        .only_action();
+    let (failure_result, failure_text) = memory_limit_failure(4);
+    let failure_serialized = serde_json::to_string_pretty(&failure_result).unwrap();
+    let grown = text_tool_success(&actions[3], &"x".repeat(79 * MIB / 10));
+    let next_completion = runtime
+        .apply(
+            pass_through(&fourth_hook, &grown),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(tool_result_committed(
+                    turn_id,
+                    &actions[3],
+                    rejected.clone(),
+                ))
+                .observe(serialized_observation(
+                    turn_id,
+                    call_id,
+                    "run_typescript",
+                    failure_serialized.encode_utf16().count(),
+                ))
+                .observe_tool_execution_finished(call_id, failure_result),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(
+        &next_completion,
+        "append",
+        &[
+            model_assistant_typescript(call_id, source),
+            json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": "run_typescript",
+                "outcome": "failure",
+                "content": [{"type": "text", "text": failure_text}],
+            }),
+        ],
+    );
+}
+
+///
+/// *Prepare*: `run_typescript` fans out three nested calls and holds two 5 MiB results.
+/// *Do*: Return 3.5 MiB of structured content with a JSON text copy, which replay drops.
+/// *Assert*: The result counts at what replay keeps and is accepted.
+///
+#[test]
+fn programmatic_results_count_only_what_replay_keeps() {
+    // Prepare
+    let turn_id = "turn-programmatic-replay-size";
+    let call_id = "program-replay-size";
+    let source = "async function main() { const pages = await Promise.allSettled([0, 1, 2].map(page => tools.data.large_lookup({ page }))); return pages.map(page => page.status); }";
+    let mut harness_config = large_output_config(ProvidedToolExposure::Programmatic);
+    harness_config.settings.tools.large_output = LargeOutputPolicy::Filesystem {
+        max_output_tokens: 10_000,
+        model_visible_output_tokens: 5_000,
+    };
+    let mut runtime = SynchronousRuntime::new(harness_config);
+    let first_completion = runtime.start_turn(turn_id, "fetch every page");
+    let actions = runtime
+        .complete_with_typescript_program(
+            turn_id,
+            &first_completion,
+            call_id,
+            source,
+            (0..3).map(|page| provided_action(json!({"page": page}))),
+        )
+        .actions();
+    for (index, action) in actions.iter().enumerate().take(2) {
+        let result = text_tool_success(action, &"x".repeat(5 * 1024 * 1024));
+        let expected = actions[index + 1..]
+            .iter()
+            .fold(running(turn_id), |expected, pending| expected.keep(pending))
+            .observe_tool_result(action, &result);
+        runtime.apply(result, expected);
+    }
+    let structured = json!({"items": "y".repeat(3584 * 1024)});
+    let structured_result = json!({
+        "type": "tool_succeeded",
+        "action_id": actions[2]["action_id"],
+        "call_id": actions[2]["call_id"],
+        "result": {
+            "type": "success",
+            "content": [{"type": "text", "text": structured.to_string()}],
+            "structured_content": structured,
+        },
+    });
+    let (failure_result, failure_text) = memory_limit_failure(3);
+    let failure_serialized = serde_json::to_string_pretty(&failure_result).unwrap();
+
+    // Do
+    let next_completion = runtime
+        .apply(
+            structured_result.clone(),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe_tool_result(&actions[2], &structured_result)
+                .observe(serialized_observation(
+                    turn_id,
+                    call_id,
+                    "run_typescript",
+                    failure_serialized.encode_utf16().count(),
+                ))
+                .observe_tool_execution_finished(call_id, failure_result),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(
+        &next_completion,
+        "append",
+        &[
+            model_assistant_typescript(call_id, source),
+            json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": "run_typescript",
+                "outcome": "failure",
+                "content": [{"type": "text", "text": failure_text}],
+            }),
         ],
     );
 }
@@ -576,28 +946,7 @@ fn sequential_programmatic_batches_report_memory_limit_and_continue() {
 
     let last_second_action = second_actions.last().unwrap();
     let last_second_result = nested_result(last_second_action, second_queries.last().unwrap());
-    let memory_error = json!({
-        "name": "MemoryLimitError",
-        "message": "run_typescript exceeded its 16 MiB memory limit with 42 recorded operations. Retry with fewer tool calls in each run_typescript block, request smaller tool results, or split the work across multiple run_typescript calls. Return only the fields needed for the next step instead of every full tool result.",
-        "details": {
-            "memoryLimitMiB": 16,
-            "operationCount": 42,
-        },
-    });
-    let failure_text = format!(
-        "run_typescript failed: {}",
-        serde_json::to_string(&memory_error).unwrap()
-    );
-    let failure_result = json!({
-        "type": "failure",
-        "content": [{"type": "text", "text": failure_text}],
-        "error": {
-            "code": "MemoryLimitError",
-            "message": memory_error["message"],
-            "retryable": false,
-            "details": memory_error["details"],
-        },
-    });
+    let (failure_result, failure_text) = memory_limit_failure(42);
     let failure_serialized = serde_json::to_string_pretty(&failure_result).unwrap();
     let next_completion = runtime
         .apply(

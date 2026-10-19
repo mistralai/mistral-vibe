@@ -1,9 +1,9 @@
 [project]
 name = "mistral-vibe"
-version = "2.26.1"
+version = "3.0.0"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Mistral AI" }]
 keywords = [
@@ -20,7 +20,7 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Utilities",
@@ -243,7 +243,7 @@ build = [
 ]
 
 [tool.pyright]
-pythonVersion = "3.12"
+pythonVersion = "3.14"
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
 
@@ -254,8 +254,10 @@ venv = ".venv"
 [tool.ruff]
 include = ["build_backend/**/*.py", "vibe/**/*.py", "tests/**/*.py", "pyinstaller/unified_runtime.py"]
 line-length = 88
-target-version = "py312"
+target-version = "py314"
 preview = true
+# The public tree bundles the Local Harness runtime, which still supports Python 3.12.
+per-file-target-version = { "harness/**" = "py312" }
 
 [tool.ruff.format]
 skip-magic-trailing-comma = true

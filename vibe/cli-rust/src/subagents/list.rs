@@ -1,4 +1,4 @@
-//! Status-list state and interaction (Python `SubagentList` + app wiring).
+//! Status-list state and interaction.
 
 use std::collections::HashSet;
 
@@ -10,42 +10,34 @@ use crate::server::SessionStatus;
 use crate::subagents::is_active;
 use crate::subagents::view::{remember_scroll, restore_scroll, schedule_refresh};
 
-/// Python `_MAIN_SESSION_ID`: row 0, the main-conversation row.
+/// Row 0, the main-conversation row.
 pub const MAIN_SESSION_ID: &str = "\u{0}main";
-/// Rendered row cap (Python TCSS `#subagent-list { max-height: 7 }`).
+/// Rendered row cap.
 pub const MAX_ROWS: usize = 7;
 
-/// Python `SubagentList` navigation state; the rendered rows derive from it.
+/// List navigation state; the rendered rows derive from it.
 #[derive(Default)]
 pub struct ListState {
-    /// Python `_known_session_ids`: every id ever seen, for new-id detection.
+    /// Every id ever seen, for new-id detection.
     pub known_session_ids: HashSet<String>,
-    /// Python `_batch_session_ids`: children held listed until the batch ends.
+    /// Children held listed until the batch ends.
     pub batch_session_ids: HashSet<String>,
-    /// Python `_selected_session_id`: the viewed child, or `None` for main.
+    /// The viewed child, or `None` for main.
     pub selected_session_id: Option<String>,
-    /// Keyboard highlight row; 0 is the Main conversation row.
-    pub highlighted: usize,
+    /// Highlighted row (0 is the Main conversation row) and the viewport
+    /// (Python `ScrollView` wheel scrolling vs `scroll_to_highlight`).
+    pub options: crate::option_list::OptionList<crate::option_list::SingleAction>,
     /// Python `_mouse_session_id`: the row under the mouse, if any.
     pub mouse_session_id: Option<String>,
-    /// Whether the list owns keyboard focus (Python widget `has_focus`).
+    /// Whether the list owns keyboard focus.
     pub focused: bool,
-    /// Wheel-scrolled viewport top, until the highlight moves again (Python
-    /// `ScrollView` wheel scrolling vs `scroll_to_highlight`).
-    pub free_scroll: Option<usize>,
-    /// Viewport top painted by the latest frame, the wheel's base offset.
-    pub rendered_scroll: usize,
     /// Rows the list renders, recomputed on every state change (Python options).
     pub rows: Vec<PublicChildSession>,
-    /// Painted row rectangles and their row indices, for mouse hit testing.
-    pub row_areas: Vec<(ratatui::layout::Rect, usize)>,
-    /// Row the mouse button went down on; a click selects it on release.
-    pub press_row: Option<usize>,
     /// Painted widget area, used to anchor toasts while the input box is hidden.
     pub area: ratatui::layout::Rect,
 }
 
-/// Python `_active_batch`: hold children that were active in this batch listed
+/// Hold children that were active in this batch listed
 /// until the batch ends; brand-new ids join only while some child is active;
 /// the selected child stays listed. Passes idle children through.
 pub fn active_batch(
@@ -75,33 +67,30 @@ pub fn active_batch(
             batch.contains(&session.id)
                 || session.status == SessionStatus::Idle
                 // The viewed child stays listed whatever its status, so the
-                // read-only notice survives the child being killed. Python
-                // only keeps that guarantee while the child sits in the
-                // batch; pinning the selection here is a deliberate
-                // hardening of that behavior.
+                // read-only notice survives the child being killed, even once
+                // it left the batch.
                 || selected_session_id == Some(session.id.as_str())
         })
         .cloned()
         .collect()
 }
 
-/// Python `SubagentList.update_sessions`: batch-filter the rows, reconcile the
+/// Batch-filter the rows, reconcile the
 /// highlight, and hand focus back when the list empties while focused.
 pub(super) fn update_sessions(app: &mut App) {
     let subagents = &mut app.subagents;
     let previous_selected = subagents.list.selected_session_id.clone();
-    // Python captures the highlighted id before rebuilding the options, so it
-    // resolves against the previous rows and only then re-checks membership.
+    // Capture the highlighted id before rebuilding the rows, so it resolves
+    // against the previous rows and only then re-checks membership.
     let previous_highlighted = highlighted_id(&subagents.list, &subagents.list.rows);
     let rows = subagents.list_rows();
     let list = &mut subagents.list;
     let current_ids: HashSet<&str> = rows.iter().map(|row| row.id.as_str()).collect();
     if rows.is_empty() {
         let was_focused = list.focused;
-        list.highlighted = 0;
         list.mouse_session_id = None;
         // Python `clear_options` resets `scroll_y` with the emptied list.
-        list.free_scroll = None;
+        list.options.reset();
         list.rows = rows;
         if was_focused {
             focus_input(app);
@@ -113,8 +102,8 @@ pub(super) fn update_sessions(app: &mut App) {
             list.mouse_session_id = None;
         }
     }
-    // Python keeps the highlight when the selection did not change and the
-    // highlighted row still exists, else jumps to the selected row (or Main).
+    // Keep the highlight when the selection did not change and the highlighted
+    // row still exists, else jump to the selected row (or Main).
     let selected_id = list
         .selected_session_id
         .clone()
@@ -126,7 +115,7 @@ pub(super) fn update_sessions(app: &mut App) {
     } else {
         selected_id
     };
-    let previous_highlighted_row = list.highlighted;
+    let previous_highlighted_row = list.options.selected();
     // Python rebuilds the options (`clear_options` + `add_options`, which
     // resets `scroll_y`) whenever the id set changed; only a same-id batch
     // update keeps the wheel-scrolled viewport.
@@ -135,23 +124,25 @@ pub(super) fn update_sessions(app: &mut App) {
         let current_ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
         previous_ids != current_ids
     };
-    list.highlighted = if preferred == MAIN_SESSION_ID {
+    list.options.highlight(if preferred == MAIN_SESSION_ID {
         0
     } else {
         rows.iter()
             .position(|row| row.id == preferred)
             .map(|position| position + 1)
             .unwrap_or(0)
-    };
+    });
     // Python `scroll_to_highlight`: the wheel-scrolled viewport follows the
     // highlight again once the highlight itself moves.
-    if rows_changed || list.highlighted != previous_highlighted_row {
-        list.free_scroll = None;
+    if rows_changed {
+        list.options.reset_viewport();
+    } else if list.options.selected() != previous_highlighted_row {
+        list.options.follow();
     }
     list.rows = rows;
 }
 
-/// Python `_refresh_subagent_list`: the event-time list refresh.
+/// The event-time list refresh.
 pub fn refresh(app: &mut App) {
     if !app.subagents.status_list_enabled {
         if app.subagents.viewed_subagent_id.is_some() {
@@ -175,7 +166,7 @@ pub fn refresh(app: &mut App) {
     update_sessions(app);
 }
 
-/// Python `App._show_main_chat`: leave the child view and restore the composer.
+/// Leave the child view and restore the composer.
 pub fn show_main_chat(app: &mut App, focus_input_requested: bool) {
     if app.subagents.viewed_subagent_id.is_some() {
         app.quit.cancel_confirmation();
@@ -191,7 +182,7 @@ pub fn show_main_chat(app: &mut App, focus_input_requested: bool) {
     restore_scroll(app, None);
 }
 
-/// Python `App._show_subagent_chat`: open a child's read-only view.
+/// Open a child's read-only view.
 pub fn show_subagent_chat(app: &mut App, session_id: &str) {
     if !app.subagents.status_list_enabled {
         return;
@@ -200,7 +191,7 @@ pub fn show_subagent_chat(app: &mut App, session_id: &str) {
         remember_scroll(app);
     }
     app.subagents.viewed_subagent_id = Some(session_id.to_owned());
-    // Python `set_subagent_view(True)`: hide the composer, focus the list.
+    // Hide the composer, focus the list.
     crate::completion_manager::dismiss(app);
     app.subagents.list.focused = true;
     app.set_app_focus(false);
@@ -215,27 +206,27 @@ pub fn show_subagent_chat(app: &mut App, session_id: &str) {
     schedule_refresh(app);
 }
 
-/// Python `SubagentList.focus_first`: take focus on the Main row.
+/// Take focus on the Main row.
 pub fn focus_first(app: &mut App) -> bool {
     if app.subagents.list.rows.is_empty() {
         return false;
     }
     app.subagents.list.mouse_session_id = None;
-    app.subagents.list.highlighted = 0;
+    app.subagents.list.options.highlight(0);
     app.subagents.list.focused = true;
     app.set_app_focus(false);
     crate::selection::blur_composer(app);
     true
 }
 
-/// Python `SubagentList.Selected` → `App.on_subagent_list_selected`.
+/// A list row was selected: view that child, or go back to Main.
 pub fn select(app: &mut App, session_id: Option<String>) {
     if session_id == app.subagents.viewed_subagent_id {
         return;
     }
     match session_id {
         // Selecting Main from a child view acts like Esc: back to the main
-        // conversation with the input focused (Python keeps the list focused).
+        // conversation with the input focused.
         None => show_main_chat(app, true),
         Some(id) => {
             if !app
@@ -252,7 +243,7 @@ pub fn select(app: &mut App, session_id: Option<String>) {
     }
 }
 
-/// Keys the list owns while focused (Python `NavigableOptionList` bindings);
+/// Keys the list owns while focused;
 /// returns false so the app-level ladder (Esc, priority keys) can run.
 pub fn handle_list_key(app: &mut App, key: KeyEvent) -> bool {
     let down = match key.code {
@@ -260,92 +251,67 @@ pub fn handle_list_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Down | KeyCode::Char('j') => true,
         KeyCode::Home => {
             app.subagents.list.mouse_session_id = None;
-            app.subagents.list.free_scroll = None;
-            app.subagents.list.highlighted = 0;
+            app.subagents.list.options.select(0);
             return true;
         }
         KeyCode::End => {
             app.subagents.list.mouse_session_id = None;
-            app.subagents.list.free_scroll = None;
-            app.subagents.list.highlighted = app.subagents.list.rows.len();
+            let last = app.subagents.list.rows.len();
+            app.subagents.list.options.select(last);
             return true;
         }
-        // Python `action_page_up`/`action_page_down`: the highlight jumps by
+        // Page up/down: the highlight jumps by
         // about one visible page of options.
         KeyCode::PageUp | KeyCode::PageDown => {
             let total = app.subagents.list.rows.len() + 1;
             let page = MAX_ROWS.min(total);
             app.subagents.list.mouse_session_id = None;
-            app.subagents.list.free_scroll = None;
-            if key.code == KeyCode::PageDown {
-                app.subagents.list.highlighted =
-                    (app.subagents.list.highlighted + page).min(total - 1);
+            let options = &mut app.subagents.list.options;
+            options.select(if key.code == KeyCode::PageDown {
+                (options.selected() + page).min(total - 1)
             } else {
-                app.subagents.list.highlighted =
-                    app.subagents.list.highlighted.saturating_sub(page);
-            }
+                options.selected().saturating_sub(page)
+            });
             return true;
         }
         KeyCode::Enter => {
-            let highlighted = app.subagents.list.highlighted;
-            let session_id = if highlighted == 0 {
-                None
-            } else {
-                app.subagents
-                    .list
-                    .rows
-                    .get(highlighted - 1)
-                    .map(|row| row.id.clone())
-            };
+            let session_id = session_id_at(app, app.subagents.list.options.selected());
             select(app, session_id);
             return true;
         }
         _ => return false,
     };
     app.subagents.list.mouse_session_id = None;
-    app.subagents.list.free_scroll = None;
-    if down {
-        let last = app.subagents.list.rows.len();
-        if app.subagents.list.highlighted < last {
-            app.subagents.list.highlighted += 1;
-        }
-    } else if app.subagents.list.highlighted == 0 {
-        // Python posts `FocusInputRequested` only when nothing is viewed.
-        if app.subagents.list.selected_session_id.is_none() {
-            focus_input(app);
-        }
-    } else {
-        app.subagents.list.highlighted -= 1;
+    let total = app.subagents.list.rows.len() + 1;
+    let moved = app
+        .subagents
+        .list
+        .options
+        .step(down, total, false, |_| true);
+    // Python posts `FocusInputRequested` only when nothing is viewed.
+    if !down && !moved && app.subagents.list.selected_session_id.is_none() {
+        focus_input(app);
     }
     true
 }
 
-/// Give the composer back focus (Python `FocusInputRequested` → `focus_input`).
+/// Give the composer back focus.
 pub fn focus_input(app: &mut App) {
     app.subagents.list.focused = false;
     app.set_app_focus(true);
 }
 
-/// The wheel scrolls the viewport without moving the highlight (Python
-/// `OptionList` is a `ScrollView`; the highlight pins it again on its next move).
-pub fn wheel(app: &mut App, down: bool, step: usize) {
-    let total = app.subagents.list.rows.len() + 1;
-    let current = app
-        .subagents
-        .list
-        .free_scroll
-        .unwrap_or(app.subagents.list.rendered_scroll);
-    app.subagents.list.free_scroll = Some(if down {
-        (current + step).min(total - 1)
-    } else {
-        current.saturating_sub(step)
-    });
+/// The session a row stands for: `None` for Main, else the child at `index - 1`.
+pub fn session_id_at(app: &App, index: usize) -> Option<String> {
+    let index = index.checked_sub(1)?;
+    app.subagents.list.rows.get(index).map(|row| row.id.clone())
 }
 
 /// The id of the highlighted row: Main or the child at `index - 1`.
 fn highlighted_id(list: &ListState, rows: &[PublicChildSession]) -> Option<String> {
-    if list.highlighted == 0 {
+    if list.options.selected() == 0 {
         return Some(MAIN_SESSION_ID.to_owned());
     }
-    rows.get(list.highlighted - 1).map(|row| row.id.clone())
+    rows.get(list.options.selected() - 1)
+        .map(|row| row.id.clone())
 }

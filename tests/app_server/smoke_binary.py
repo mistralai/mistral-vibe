@@ -55,16 +55,14 @@ async def read_response(
         return response
 
 
-async def smoke_binary(binary: Path, *, experimental_harness: bool) -> None:
+async def smoke_binary(binary: Path) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         env = os.environ.copy()
         env["VIBE_HOME"] = str(Path(tmp) / ".vibe")
         env["VIBE_TEST_DISABLE_KEYRING"] = "1"
         env["MISTRAL_API_KEY"] = "smoke-test"
-        arguments = ["--experimental-harness"] if experimental_harness else []
         proc = await asyncio.create_subprocess_exec(
             str(binary),
-            *arguments,
             stdin=aio_subprocess.PIPE,
             stdout=aio_subprocess.PIPE,
             stderr=aio_subprocess.PIPE,
@@ -99,7 +97,7 @@ async def smoke_binary(binary: Path, *, experimental_harness: bool) -> None:
                 else:
                     print("PASS: app-server initialize")
 
-            if failure is None and experimental_harness:
+            if failure is None:
                 await send_message(
                     proc, {"jsonrpc": "2.0", "method": "initialized", "params": {}}
                 )
@@ -120,7 +118,7 @@ async def smoke_binary(binary: Path, *, experimental_harness: bool) -> None:
                 if not isinstance(session_id, str) or not session_id:
                     failure = f"unexpected session/start response: {response}"
                 else:
-                    print("PASS: experimental Harness session/start")
+                    print("PASS: Unified Harness session/start")
         except (TimeoutError, json.JSONDecodeError, RuntimeError) as error:
             failure = f"binary smoke test failed: {error}"
         finally:
@@ -146,7 +144,6 @@ def require_bundled_winpty(binary_dir: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("binary_dir", type=Path)
-    parser.add_argument("--experimental-harness", action="store_true")
     args = parser.parse_args()
 
     binary_dir = args.binary_dir
@@ -161,7 +158,7 @@ def main() -> None:
     else:
         binary.chmod(0o755)
 
-    asyncio.run(smoke_binary(binary, experimental_harness=args.experimental_harness))
+    asyncio.run(smoke_binary(binary))
 
 
 if __name__ == "__main__":

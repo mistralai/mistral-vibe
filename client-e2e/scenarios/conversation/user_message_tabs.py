@@ -7,10 +7,7 @@ from e2e.app_server.scenario import Timeline
 
 _PROMPT = "build:\n\tcargo build\n\tcargo test\na\tb"
 
-screen_contains = {
-    "python": ("        cargo build", "a       b"),
-    "rust": ("        cargo build", "a       b"),
-}
+screen_contains = ("        cargo build", "a       b")
 
 timeline: Timeline = [
     paste(_PROMPT),

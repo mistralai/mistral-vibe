@@ -1,5 +1,4 @@
-//! The shared onboarding panel chrome. Every screen that Python lays out with
-//! `onboarding.tcss` (`.onboarding-panel` > `.onboarding-chat` + heading +
+//! The shared onboarding panel chrome. Every panel screen (cat + heading +
 //! subtitle + body) renders through here, so the skeleton cannot drift:
 //!
 //! ```text
@@ -30,8 +29,7 @@ use crate::ui::theme;
 /// The chrome above the body: three cat rows, the title, the subtitle.
 const CHROME_ROWS: u16 = 5;
 
-/// Panel width for every panel screen (a deliberate divergence: Python's
-/// `#api-key-panel` is 76, but the wizard keeps one width).
+/// Panel width for every panel screen: the wizard keeps one width.
 pub(super) const PANEL_WIDTH: u16 = 70;
 
 /// One row of a panel body. Heights come from the row's content, so the
@@ -39,8 +37,7 @@ pub(super) const PANEL_WIDTH: u16 = 70;
 pub(super) enum Row {
     /// `lines` blank rows.
     Blank(u16),
-    /// A labeled input card (Python `.onboarding-card` input), three rows
-    /// tall; clicking it focuses its input, like Textual's `Input`.
+    /// A labeled input card, three rows tall; clicking it focuses its input.
     InputCard {
         input: OnboardingInput,
         focused: bool,
@@ -69,7 +66,7 @@ pub(super) enum Row {
         state: BrowserSignInState,
     },
     /// The wrapped sign-in-target warning, Enter highlighted wherever it
-    /// lands (Python `#sign-in-target-warning`).
+    /// lands.
     Warning(Vec<String>),
     /// The "copy this URL" help line under the step cards.
     UrlHelp,
@@ -89,7 +86,7 @@ pub(super) enum Hint {
 
 impl Row {
     /// The row's height in lines at the given content width: the message
-    /// rows (feedback, text) wrap to it like Python's Textual labels, the
+    /// rows (feedback, text) wrap to it, the
     /// fixed-geometry rows ignore it.
     fn height(&self, width: u16) -> u16 {
         match self {
@@ -110,11 +107,11 @@ impl Row {
     }
 }
 
-/// The subtitle line under the title; the two styles Python uses.
+/// The subtitle line under the title, in one of two styles.
 pub(super) enum Subtitle {
-    /// Bold foreground (Python `#auth-method-subtitle` and friends).
+    /// Bold foreground.
     Text(String),
-    /// Muted (Python `#browser-sign-in-subtitle`).
+    /// Muted.
     Muted(String),
 }
 
@@ -269,7 +266,7 @@ fn orange_title(f: &mut Frame, x: u16, y: u16, text: &str) {
     );
 }
 
-/// The current cat frame, as braille rows (Python `PetitChat`).
+/// The current cat frame, as braille rows.
 fn draw_petit_chat(f: &mut Frame, x: u16, y: u16, frame: &str) {
     for (offset, line) in frame.lines().enumerate() {
         f.buffer_mut().set_string(

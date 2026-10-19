@@ -151,7 +151,7 @@ pub fn release(app: &mut App) -> Release {
     let dragged = app.selection.dragged;
     app.selection.press = None;
     app.selection.dragged = false;
-    // Python only sets `_dragged` from the word/paragraph expansion path, so a
+    // Only the word/paragraph expansion path counts as a drag, so a
     // plain char drag leaves the chain alive and the next press still chains.
     app.selection
         .chain
@@ -159,7 +159,7 @@ pub fn release(app: &mut App) -> Release {
     match surface {
         Some(Surface::Composer) => {
             match composer::release(app) {
-                // Python `on_mouse_up`: no autocopy, no copy and no notice.
+                // Without autocopy there is no copy and no notice.
                 Some(text) if app.session.startup_config.autocopy_to_clipboard => {
                     crate::ui::notice::copied(app, &text);
                 }

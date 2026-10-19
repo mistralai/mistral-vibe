@@ -1,15 +1,15 @@
 ---
 name: vibe-rust-tui
-description: Ratatui UI conventions for the Mistral Vibe Rust CLI (vibe/cli-rust). Use when adding or changing any screen, list, picker, footer hint, keyboard shortcut, list navigation or scrolling, back/close behavior, search field, selection highlight, color, or onboarding/dialog copy in the Rust TUI.
+description: Ratatui UI conventions for the Mistral Vibe Rust CLI (vibe/cli-rust). Use when adding or changing any screen, list, picker, footer hint, keyboard shortcut, list navigation, scrolling or mouse clicks, back/close behavior, search field, selection highlight, color, or onboarding/dialog copy in the Rust TUI.
 metadata:
   display-name: Vibe Rust TUI
-  short-description: Hint, keyboard, navigation, search, list-cursor and color conventions for the Rust TUI
+  short-description: Hint, keyboard, navigation, mouse, search, list-cursor and color conventions for the Rust TUI
   default-prompt: Use $vibe-rust-tui to follow the Rust TUI hint, keyboard, navigation, search, list-cursor and color conventions.
 ---
 
 # Vibe Rust TUI
 
-UI conventions for `vibe/cli-rust/`. Every screen follows them so the TUI reads as one product. Process rules (porting from Python, scenarios, goldens) live in `migrate-cli-to-rust`; local code rules live in `vibe/cli-rust/AGENTS.md`.
+UI conventions for `vibe/cli-rust/`. Every screen follows them so the TUI reads as one product. Local code rules, scenarios and goldens live in `vibe/cli-rust/AGENTS.md` and `client-e2e/AGENTS.md`.
 
 ## Shortcut hints
 
@@ -25,14 +25,23 @@ UI conventions for `vibe/cli-rust/`. Every screen follows them so the TUI reads 
 
 - Every navigable list accepts `j`/`k` alongside `↑`/`↓` when no text field is focused. Match only plain keys (no Ctrl/Alt/Super) so `Ctrl+J`/`Ctrl+K` keep their editing meaning.
 - Show the navigation keys a screen actually handles: write `↑↓/jk` only where j/k are wired.
-- Edges: `↑↓`/`jk` (and `←→` across dialog options) wrap at both ends; PageUp/PageDown/Home/End clamp. Move through `list_nav::wrap`, or `list_nav::wrap_selectable` when some rows (section headers, notes, blanks) cannot take the cursor; never hand-roll `saturating_sub`/`min(len - 1)` for arrow moves. The only lists that do not wrap are the ones attached to the composer: Down past the newest queued prompt leaves queue mode, and Up at the top of the subagent list returns focus to the composer.
+- Edges: `↑↓`/`jk` (and `←→` across dialog options) wrap at both ends; PageUp/PageDown/Home/End clamp. Move an `OptionList` (`src/option_list.rs`) with `step(down, len, wrap, selectable)`, whose `selectable` skips rows (section headers, notes, blanks) that cannot take the cursor; `list_nav::wrap` is only for the onboarding's fixed two-choice screens. Never hand-roll `saturating_sub`/`min(len - 1)` for arrow moves. The only lists that do not wrap are the ones attached to the composer: Down past the newest queued prompt leaves queue mode, and Up at the top of the subagent list returns focus to the composer.
 - Back: Esc goes back exactly one level (field → list, detail → list, auth flow → its `/mcp` list) and closes only at the top level. Backspace edits text and is never a navigation key. A nested view's footer ends with `hints::BACK` (`Esc back`); a top-level view's footer ends with `hints::CLOSE` or `hints::CANCEL`.
 - Digits: a row's digit shortcut exists if and only if the row displays its number (`1. Trust folder`). Pressing it is the same as moving to the row and pressing Enter. Parse it with `list_nav::digit`; never accept digits on unnumbered rows, and never number rows that do not accept their digit.
 
 ## Scrolling
 
-- A scrolling list keeps the highlighted option in view through `ui/list_scroll.rs` `follow`, passing which lines are options; never write its own `scroll = selected` reconciliation. It moves the viewport the least and brings the option's non-selectable neighbours along: its section header above it, the list's leading lines for the first option, the trailing lines for the last one. Wrapping from the bottom back to the top therefore always shows the very top of the list.
-- Mouse-wheel scrolling sets the list's `free_scroll` and skips `follow` until the next keyboard move; it only clamps the offset.
+- A scrolling list is an `OptionList`: its renderer calls `layout(lines, area)` (the option on each line, `None` for headers) or `layout_rows(len, area)`, which keeps the highlight in view through `ui/list_scroll.rs` `follow` and records the click hit map; never write its own `scroll = selected` reconciliation. It moves the viewport the least and brings the option's non-selectable neighbours along: its section header above it, the list's leading lines for the first option, the trailing lines for the last one. Wrapping from the bottom back to the top therefore always shows the very top of the list.
+- The wheel and the scrollbar (`wheel`, `detach_at`) free the viewport until the next keyboard move (`step`, `select`); a freed viewport only clamps its offset. `highlight` moves the highlight without reattaching it.
+
+## Mouse
+
+- Every clickable list is an `OptionList<R>`: route its press, drag and release through `mouse::option_gesture` (it keeps text selection working inside the bottom app) or `OptionList::mouse`, and add it to `mouse::option_list` so it gets the wheel, scrollbar and hover. Never hit-test rows by hand.
+- The click rule `R` is part of the list's type and comes from the item's per-item actions, the keys that act on the highlighted item. Navigation, search, Esc and whole-list keys (`r` refresh or reload, Tab switching the save target) do not count.
+  - One action, choosing the item (tool approval, questions, `/theme`, `/plugins`, subagents, config choices, the remote project picker): `SingleAction`, one click confirms. A click yields the option index.
+  - Several actions (`/model` and `/thinking`: Enter or `s`; `/resume`: Enter or `d`; `/mcp`: Enter, `d` or `e`; `/config`: Enter or Ctrl+R): `MultiAction`, a click highlights and a click on the highlight does what Enter does. A click yields `Click::Highlight` or `Click::Confirm`; a highlight click moves like an arrow key (`/resume` previews).
+- A row's own click targets (the `/log-level` badges) are one action each, so a click on one acts at once.
+- The free-text row of a question is an input: a click places the caret and a click on its number toggles it in multi-select. It never submits.
 
 ## Searchable lists
 
@@ -57,6 +66,6 @@ UI conventions for `vibe/cli-rust/`. Every screen follows them so the TUI reads 
 
 ## Verification
 
-- Any change to a hint, a key, a list behavior (wrap, back, digits, scroll, search) or a selection style is user-visible: update the affected `client-e2e` scenarios (`screen_contains`, key sequences, mouse coordinates) and regenerate their goldens following `migrate-cli-to-rust`. A new behavior gets its own scenario (for example `mcp/mcp_wrap_scroll`).
-- Shared helpers carry their own unit tests (`tests/units/list_nav.rs`, `list_scroll.rs`, `search_field.rs`); extend them when a helper changes instead of testing the rule screen by screen.
+- Any change to a hint, a key, a list behavior (wrap, back, digits, scroll, search, clicks) or a selection style is user-visible: update the affected `client-e2e` scenarios (`screen_contains`, key sequences, mouse coordinates) and regenerate their goldens as described in `vibe/cli-rust/AGENTS.md`. A new behavior gets its own scenario (for example `mcp/mcp_wrap_scroll`).
+- Shared helpers carry their own unit tests (`tests/units/option_list.rs`, `option_clicks.rs`, `list_nav.rs`, `list_scroll.rs`, `search_field.rs`); extend them when a helper changes instead of testing the rule screen by screen.
 - `tests/units/color_literals.rs` guards the color and list-cursor rules. Do not add exemptions to make it pass: move the color into `src/ui/theme/` or route the bar through `list_cursor`.

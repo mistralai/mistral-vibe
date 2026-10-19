@@ -5,6 +5,6 @@ from __future__ import annotations
 from e2e.app_server.scenario import Timeline
 
 capture_startup = False
-screen_contains = {"rust": ("loop [schedule] [prompt]",)}
-screen_excludes = {"rust": ("Schedule a recurring prompt",)}
+screen_contains = ("loop [schedule] [prompt]",)
+screen_excludes = ("Schedule a recurring prompt",)
 timeline: Timeline = ["/loo", "\t"]

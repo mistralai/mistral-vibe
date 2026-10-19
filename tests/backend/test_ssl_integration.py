@@ -90,6 +90,9 @@ def _write_tls_material(tmp_path: Path) -> _TLSMaterial:
     now = datetime.now(UTC)
     ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Vibe test CA")])
+    # Strict RFC 5280 chain validation (the Python 3.13+ default for
+    # create_default_context) requires SKID/KeyUsage on the CA and AKID on the
+    # leaf, so the mock chain carries all three.
     ca_cert = (
         x509
         .CertificateBuilder()
@@ -100,6 +103,24 @@ def _write_tls_material(tmp_path: Path) -> _TLSMaterial:
         .not_valid_before(now - timedelta(minutes=1))
         .not_valid_after(now + timedelta(days=1))
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()),
+            critical=False,
+        )
         .sign(ca_key, hashes.SHA256())
     )
 
@@ -121,6 +142,10 @@ def _write_tls_material(tmp_path: Path) -> _TLSMaterial:
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(
             x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+            critical=False,
         )
         .sign(ca_key, hashes.SHA256())
     )

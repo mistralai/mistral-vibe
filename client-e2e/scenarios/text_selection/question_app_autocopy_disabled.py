@@ -23,8 +23,8 @@ handshake = {
 }
 capture_startup = False
 capture_steps = {1, 2}
-screen_contains = {"rust": ("Which color scheme do you prefer?",)}
-screen_excludes = {"rust": ("Copied",), "python": ("Copied",)}
+screen_contains = ("Which color scheme do you prefer?",)
+screen_excludes = ("Copied",)
 
 _QUESTIONS = [
     {

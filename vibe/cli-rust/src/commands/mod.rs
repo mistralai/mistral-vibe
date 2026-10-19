@@ -1,11 +1,13 @@
 //! Slash commands: the table, dispatch, and the heavy /stress command.
 
+pub mod branch;
 pub mod clear;
 #[allow(clippy::module_inception)]
 mod commands;
 pub mod compact;
 mod dispatch;
 pub mod event;
+pub mod leanstall;
 pub mod provider_auth;
 pub mod retry;
 pub mod retry_continuation;

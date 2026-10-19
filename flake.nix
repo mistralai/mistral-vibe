@@ -80,6 +80,26 @@
               ];
           });
 
+        # textual-speedups 0.2.1 ships no macOS x86_64 cp314 wheel, so there
+        # uv2nix builds it from the sdist; source builds need the maturin
+        # backend and the vendored Rust crates inside the Nix sandbox.
+        textual-speedups = prev.textual-speedups.overrideAttrs (old:
+          lib.optionalAttrs (old.passthru.format == "pyproject") {
+            cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+              inherit (old) pname version src;
+              # Matches textual-speedups 0.2.1 in nixpkgs; the sdist's
+              # Cargo.lock is identical to the upstream v0.2.1 tag.
+              hash = "sha256-Bz4ocEziOlOX4z5F9EDry99YofeGyxL/6OTIf/WEgK4=";
+            };
+            nativeBuildInputs = (old.nativeBuildInputs or [])
+              ++ final.resolveBuildSystem {maturin = [];}
+              ++ [
+                pkgs.rustPlatform.cargoSetupHook
+                pkgs.cargo
+                pkgs.rustc
+              ];
+          });
+
         # The wheel override applies only where the Harness lockfile at
         # harness/core is reachable: trees that ship it build the wheel;
         # trees that do not never build it, so the derivation stays plain
@@ -156,7 +176,7 @@
         inherit system;
       };
 
-      python = pkgs.python312;
+      python = pkgs.python314;
 
       # Crane builds the Rust CLI (vibe-rs) as its own derivation, so editing
       # its sources does not rebuild the Python wheel, and vice versa.
@@ -211,26 +231,12 @@
           venv = pythonSet.mkVirtualEnv "mistralai-vibe-env" workspace.deps.default;
           package = pythonSet.mistral-vibe;
         };
-
-        # Convenience alias: the full application with the Rust TUI forced
-        # via VIBE_CLI, so `nix build` and `nix run` both accept .#rustCli.
-        rustCli = pkgs.writeShellScriptBin "vibe" ''
-          export VIBE_CLI=rust
-          exec "${self.packages.${system}.default}/bin/vibe" "$@"
-        '';
       };
 
       apps = {
         default = {
           type = "app";
           program = "${self.packages.${system}.default}/bin/vibe";
-        };
-
-        # Same application, but the launcher picks the Rust TUI instead of
-        # the Python one.
-        rustCli = {
-          type = "app";
-          program = "${self.packages.${system}.rustCli}/bin/vibe";
         };
       };
 

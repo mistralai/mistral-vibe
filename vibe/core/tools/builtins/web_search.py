@@ -77,7 +77,7 @@ class WebSearch(
     @final
     async def run(
         self, args: WebSearchArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | WebSearchResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | WebSearchResult]:
         # Imported on first use: the mistralai SDK is heavy and would
         # otherwise load at CLI startup when the tool registry imports us.
         from mistralai.client import Mistral

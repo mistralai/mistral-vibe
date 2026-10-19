@@ -13,8 +13,10 @@ from mistralai_vibe_local_harness.session_protocol import (
     QueuedTurn,
     TurnEnqueueParams,
     TurnQueue,
+    TurnQueueEditState,
 )
 from mistralai_vibe_local_harness.vibe._errors import (
+    HarnessTurnQueueEditConflictError,
     HarnessTurnQueueFullError,
     HarnessTurnQueueIdempotencyConflictError,
     HarnessTurnQueueItemNotFoundError,
@@ -46,6 +48,12 @@ class TurnQueueSteerReceipt:
     turn_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class QueuedTurnEdit:
+    queue_item_id: str
+    edit_id: str
+
+
 class SessionTurnQueue:
     """Own queued input and process-local idempotency receipts for one Session."""
 
@@ -61,6 +69,8 @@ class SessionTurnQueue:
         self._item_id_factory = item_id_factory or _new_item_id
         self._items: list[QueuedTurnRecord] = []
         self._paused = False
+        self._edit: QueuedTurnEdit | None = None
+        self._finished_edit_ids: set[str] = set()
         self._idempotency: dict[str, QueuedTurnRecord] = {}
         # Keep successful receipts for the live Session so a retry after a
         # disconnect cannot submit the same queued content twice.
@@ -75,6 +85,11 @@ class SessionTurnQueue:
             items=[record.queued_turn.model_copy(deep=True) for record in self._items],
             paused=self._paused,
             max_items=self._max_items,
+            editing=(
+                TurnQueueEditState(queue_item_id=self._edit.queue_item_id)
+                if self._edit is not None
+                else None
+            ),
         )
 
     def enqueue(
@@ -118,6 +133,91 @@ class SessionTurnQueue:
         return TurnQueueEnqueueResult(record, duplicate=False)
 
     def replace(
+        self,
+        queue_item_id: str,
+        params: TurnEnqueueParams,
+        prepared_entries: Sequence[PreparedTurnEntry],
+    ) -> TurnQueueEnqueueResult:
+        self._reject_edit_conflict(queue_item_id)
+        return self._replace(queue_item_id, params, prepared_entries)
+
+    def start_edit(self, queue_item_id: str, edit_id: str) -> QueuedTurnEdit:
+        if edit_id in self._finished_edit_ids:
+            raise HarnessTurnQueueEditConflictError(queue_item_id)
+        self.require_record(queue_item_id)
+        edit = self._edit
+        if edit is not None and (
+            edit.queue_item_id != queue_item_id or edit.edit_id != edit_id
+        ):
+            raise HarnessTurnQueueEditConflictError(queue_item_id)
+
+        started = QueuedTurnEdit(queue_item_id=queue_item_id, edit_id=edit_id)
+        self._edit = started
+        return started
+
+    def save_edit(
+        self,
+        queue_item_id: str,
+        edit_id: str,
+        params: TurnEnqueueParams,
+        prepared_entries: Sequence[PreparedTurnEntry],
+    ) -> TurnQueueEnqueueResult:
+        self._require_edit(queue_item_id, edit_id)
+        result = self._replace(queue_item_id, params, prepared_entries)
+        self._edit = None
+        self._finished_edit_ids.add(edit_id)
+        return result
+
+    def cancel_edit(self, queue_item_id: str, edit_id: str) -> bool:
+        if edit_id in self._finished_edit_ids:
+            return False
+        edit = self._edit
+        if edit is None:
+            return False
+        if edit.queue_item_id != queue_item_id or edit.edit_id != edit_id:
+            raise HarnessTurnQueueEditConflictError(queue_item_id)
+        self._edit = None
+        self._finished_edit_ids.add(edit_id)
+        return True
+
+    def abandon_edit(self, queue_item_id: str, edit_id: str) -> bool:
+        edit = self._edit
+        if (
+            edit is not None
+            and edit.edit_id == edit_id
+            and edit.queue_item_id != queue_item_id
+        ):
+            return False
+        # A start still in transit must not recreate a disconnected edit.
+        self._finished_edit_ids.add(edit_id)
+        if edit is None or edit.edit_id != edit_id:
+            return False
+        self._edit = None
+        self.pause()
+        return True
+
+    def abandon_active_edit(self) -> bool:
+        edit = self._edit
+        if edit is None:
+            return False
+        return self.abandon_edit(edit.queue_item_id, edit.edit_id)
+
+    def _require_edit(self, queue_item_id: str, edit_id: str) -> QueuedTurnEdit:
+        edit = self._edit
+        if (
+            edit is None
+            or edit.queue_item_id != queue_item_id
+            or edit.edit_id != edit_id
+        ):
+            raise HarnessTurnQueueEditConflictError(queue_item_id)
+        return edit
+
+    def _reject_edit_conflict(self, queue_item_id: str) -> None:
+        edit = self._edit
+        if edit is not None and edit.queue_item_id == queue_item_id:
+            raise HarnessTurnQueueEditConflictError(queue_item_id)
+
+    def _replace(
         self,
         queue_item_id: str,
         params: TurnEnqueueParams,
@@ -185,6 +285,10 @@ class SessionTurnQueue:
             raise HarnessTurnQueueItemNotFoundError(queue_item_id)
         return record
 
+    def require_steerable_record(self, queue_item_id: str) -> QueuedTurnRecord:
+        self._reject_edit_conflict(queue_item_id)
+        return self.require_record(queue_item_id)
+
     def steer_receipt(self, queue_item_id: str) -> TurnQueueSteerReceipt | None:
         return self._steer_receipts.get(queue_item_id)
 
@@ -192,6 +296,7 @@ class SessionTurnQueue:
         self, record: QueuedTurnRecord, *, turn_id: str
     ) -> TurnQueueSteerReceipt:
         queue_item_id = record.queued_turn.id
+        self._reject_edit_conflict(queue_item_id)
         index = next(
             (
                 index
@@ -216,7 +321,11 @@ class SessionTurnQueue:
     def peek_next(self) -> QueuedTurnRecord | None:
         if self._paused or not self._items:
             return None
-        return self._items[0]
+        record = self._items[0]
+        edit = self._edit
+        if edit is not None and edit.queue_item_id == record.queued_turn.id:
+            return None
+        return record
 
     def pop_next(self) -> QueuedTurnRecord | None:
         if self.peek_next() is None:
@@ -226,6 +335,7 @@ class SessionTurnQueue:
         return record
 
     def remove(self, queue_item_id: str) -> bool:
+        self._reject_edit_conflict(queue_item_id)
         index = next(
             (
                 index
@@ -255,6 +365,7 @@ class SessionTurnQueue:
     def _reset_pause_if_empty(self) -> None:
         if not self._items:
             self._paused = False
+            self._edit = None
 
 
 def _new_item_id() -> str:
@@ -263,6 +374,7 @@ def _new_item_id() -> str:
 
 __all__ = [
     "PreparedTurnEntry",
+    "QueuedTurnEdit",
     "QueuedTurnRecord",
     "SessionTurnQueue",
     "TurnQueueEnqueueResult",

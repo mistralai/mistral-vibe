@@ -1,10 +1,4 @@
-"""Authentication parity: the same answers from both session backends.
-
-Everything here runs twice — once with the legacy runtime and once, under
-``--experimental-harness``, with the Unified one. A user must not be able to
-tell which backend answered from what the account banner shows, what
-``/whoami`` reports, or what a rejected key says.
-"""
+"""Public authentication behavior through the Unified Harness session backend."""
 
 from __future__ import annotations
 
@@ -97,13 +91,11 @@ def _identity() -> IdentityResult:
 
 @asynccontextmanager
 async def _connected(
-    experimental_harness: bool,
     *,
     account_gateway: AccountGateway | None = None,
     identity_gateway: IdentityGateway | None = None,
 ) -> AsyncIterator[BackendContractConnection]:
     connection = await connect_backend_contract_host(
-        experimental_harness,
         session_options=SessionOptions(),
         capabilities=ClientCapabilities(),
         account_gateway=account_gateway,
@@ -117,14 +109,12 @@ async def _connected(
 
 @pytest_asyncio.fixture
 async def unauthenticated_client(
-    experimental_harness: bool, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[AppServerClient]:
     """A connected client for a user with no resolvable Mistral key."""
     monkeypatch.delenv("MISTRAL_API_KEY")
     client = await connect_backend_contract_client(
-        experimental_harness,
-        session_options=SessionOptions(),
-        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(), capabilities=ClientCapabilities()
     )
     try:
         yield client
@@ -197,7 +187,6 @@ async def test_session_list_without_a_key_succeeds(unauthenticated_client) -> No
 )
 @pytest.mark.asyncio
 async def test_account_read_walks_the_status_ladder(
-    experimental_harness: bool,
     backend_contract_mistral_api: respx.Route,
     build_gateway: Callable[[], FakeAccountGateway],
     expected: AccountStatus,
@@ -208,7 +197,7 @@ async def test_account_read_walks_the_status_ladder(
     """
     # Prepare
     gateway = build_gateway()
-    async with _connected(experimental_harness, account_gateway=gateway) as connection:
+    async with _connected(account_gateway=gateway) as connection:
         session = await connection.host.open_session()
         try:
             # Do
@@ -223,9 +212,7 @@ async def test_account_read_walks_the_status_ladder(
 
 @pytest.mark.asyncio
 async def test_account_read_reports_a_missing_key_after_the_key_disappears(
-    experimental_harness: bool,
-    backend_contract_mistral_api: respx.Route,
-    monkeypatch: pytest.MonkeyPatch,
+    backend_contract_mistral_api: respx.Route, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """*Prepare*: An open session whose key is then removed.
     *Do*: Read the account.
@@ -236,7 +223,7 @@ async def test_account_read_reports_a_missing_key_after_the_key_disappears(
     """
     # Prepare
     gateway = FakeAccountGateway(_whoami("TEAM"))
-    async with _connected(experimental_harness, account_gateway=gateway) as connection:
+    async with _connected(account_gateway=gateway) as connection:
         session = await connection.host.open_session()
         try:
             monkeypatch.delenv("MISTRAL_API_KEY")
@@ -258,7 +245,6 @@ async def test_account_read_reports_a_missing_key_after_the_key_disappears(
 )
 @pytest.mark.asyncio
 async def test_account_read_projects_the_plan_and_teleport_eligibility(
-    experimental_harness: bool,
     backend_contract_mistral_api: respx.Route,
     plan_name: str,
     title: str,
@@ -275,7 +261,7 @@ async def test_account_read_projects_the_plan_and_teleport_eligibility(
     """
     # Prepare
     gateway = FakeAccountGateway(_whoami(plan_name))
-    async with _connected(experimental_harness, account_gateway=gateway) as connection:
+    async with _connected(account_gateway=gateway) as connection:
         session = await connection.host.open_session()
         try:
             # Do
@@ -297,11 +283,80 @@ async def test_account_read_projects_the_plan_and_teleport_eligibility(
         assert account.plan_offer.kind is AccountActionKind.UPGRADE_TO_PRO
 
 
+_PLANS_PAGE = (
+    "https://admin.mistral.ai/subscriptions/upgrade/plans"
+    "?return_to=https%3A%2F%2Fchat.mistral.ai"
+)
+
+
+@pytest.mark.parametrize(
+    ("build_gateway", "vibe_base_url", "plan_offer_url", "key_page"),
+    [
+        pytest.param(
+            lambda: FakeAccountGateway(
+                WhoAmIResult(plan_type=AccountPlanKind.API, plan_name="FREE")
+            ),
+            None,
+            _PLANS_PAGE,
+            "https://chat.mistral.ai/code/extensions?focus=key",
+            id="free-api-plan",
+        ),
+        pytest.param(
+            lambda: FakeAccountGateway(unauthorized=True),
+            None,
+            _PLANS_PAGE,
+            "https://chat.mistral.ai/code/extensions?focus=key",
+            id="rejected-key",
+        ),
+        pytest.param(
+            lambda: FakeAccountGateway(
+                WhoAmIResult(plan_type=AccountPlanKind.API, plan_name="FREE")
+            ),
+            "https://vibe.tenant.example/",
+            "https://vibe.tenant.example/code/extensions?focus=key",
+            "https://vibe.tenant.example/code/extensions?focus=key",
+            id="tenant",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_upgrade_offer_opens_the_plans_page_on_mistral_vibe_only(
+    backend_contract_mistral_api: respx.Route,
+    monkeypatch: pytest.MonkeyPatch,
+    build_gateway: Callable[[], FakeAccountGateway],
+    vibe_base_url: str | None,
+    plan_offer_url: str,
+    key_page: str,
+) -> None:
+    """*Prepare*: A session whose account offers an upgrade, on Mistral's Vibe
+    or on a tenant's.
+    *Do*: Read the account.
+    *Assert*: The plan offer opens the plans page on Mistral's Vibe only; the
+    rate-limit action keeps the key page.
+    """
+    # Prepare
+    if vibe_base_url is not None:
+        monkeypatch.setenv("VIBE_VIBE_BASE_URL", vibe_base_url)
+    async with _connected(account_gateway=build_gateway()) as connection:
+        session = await connection.host.open_session()
+        try:
+            # Do
+            account = await session.resources.account.read()
+        finally:
+            await session.close()
+
+    # Assert
+    assert account.plan_offer is not None
+    assert account.plan_offer.kind is AccountActionKind.UPGRADE_TO_PRO
+    assert account.plan_offer.url == plan_offer_url
+    assert account.rate_limit_action is not None
+    assert account.rate_limit_action.url == key_page
+
+
 @pytest.mark.parametrize("plan_name", ["F", "E"])
 @pytest.mark.parametrize("prompt_switching_to_pro_plan", [False, True])
 @pytest.mark.asyncio
 async def test_codestral_teleport_is_rejected_with_switch_key_guidance(
-    experimental_harness: bool,
     backend_contract_mistral_api: respx.Route,
     plan_name: str,
     prompt_switching_to_pro_plan: bool,
@@ -314,7 +369,7 @@ async def test_codestral_teleport_is_rejected_with_switch_key_guidance(
             prompt_switching_to_pro_plan=prompt_switching_to_pro_plan,
         )
     )
-    async with _connected(experimental_harness, account_gateway=gateway) as connection:
+    async with _connected(account_gateway=gateway) as connection:
         session = await connection.host.open_session()
         try:
             account = await session.resources.account.read()
@@ -347,7 +402,7 @@ async def test_codestral_teleport_is_rejected_with_switch_key_guidance(
 
 @pytest.mark.asyncio
 async def test_identity_read_projects_a_fetched_identity(
-    experimental_harness: bool, backend_contract_mistral_api: respx.Route
+    backend_contract_mistral_api: respx.Route,
 ) -> None:
     """*Prepare*: A session over an identity gateway holding a signed-in user.
     *Do*: Read the identity.
@@ -355,7 +410,7 @@ async def test_identity_read_projects_a_fetched_identity(
     """
     # Prepare
     gateway = FakeIdentityGateway(_identity())
-    async with _connected(experimental_harness, identity_gateway=gateway) as connection:
+    async with _connected(identity_gateway=gateway) as connection:
         session = await connection.host.open_session()
         try:
             # Do
@@ -377,7 +432,7 @@ async def test_identity_read_projects_a_fetched_identity(
 
 @pytest.mark.asyncio
 async def test_identity_read_is_silent_when_the_key_is_rejected(
-    experimental_harness: bool, backend_contract_mistral_api: respx.Route
+    backend_contract_mistral_api: respx.Route,
 ) -> None:
     """*Prepare*: A session over an identity gateway that rejects the key.
     *Do*: Read the identity.
@@ -385,7 +440,7 @@ async def test_identity_read_is_silent_when_the_key_is_rejected(
     """
     # Prepare
     gateway = FakeIdentityGateway(unauthorized=True)
-    async with _connected(experimental_harness, identity_gateway=gateway) as connection:
+    async with _connected(identity_gateway=gateway) as connection:
         session = await connection.host.open_session()
         try:
             # Do

@@ -199,7 +199,7 @@ fn an_unqueued_turn_like_retry_is_interrupted_once_it_starts_and_marked_once() {
 }
 
 #[test]
-fn a_pending_interrupt_stops_waiting_after_pythons_bound() {
+fn a_pending_interrupt_stops_waiting_after_its_bound() {
     let mut app = generating_app();
     app.queue.interrupt_on_start = Instant::now().checked_sub(Duration::from_secs(31));
     assert!(!mq::take_interrupt_on_start(&mut app), "stale interrupt");

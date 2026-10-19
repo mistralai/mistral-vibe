@@ -6,12 +6,11 @@ from e2e.app_server.events import assistant_msg, turn_completed, turn_started, u
 from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 expected_clipboard = "return value;"
 
 _PROMPT = "show one indented line"
 _ANSWER = "```\n    return value;\n```"
-_CLICK = "\x1b[<0;10;15M\x1b[<0;10;15m"
+_CLICK = "\x1b[<0;10;11M\x1b[<0;10;11m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

@@ -1,4 +1,4 @@
-//! Client-side event recording. Mirrors Python `TelemetryResource`.
+//! Client-side event recording.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -41,9 +41,14 @@ pub fn enqueue(
 
 /// Effect side: detached, so no caller ever waits on an analytics round-trip.
 pub fn send(client: &Arc<Client>, session_id: &str, event: TelemetryEvent) {
+    client.telemetry_spawned();
     let client = client.clone();
     let session_id = session_id.to_owned();
-    tokio::spawn(async move { deliver(&client, &session_id, event).await });
+    tokio::spawn(async move {
+        let answer = deliver(&client, &session_id, event);
+        client.telemetry_written();
+        answer.await;
+    });
 }
 
 /// Send what is still queued, concurrently, so the last actions (such as
@@ -59,8 +64,12 @@ pub async fn flush(
     futures::future::join_all(pending).await;
 }
 
-/// The only place that touches the wire.
-async fn deliver(client: &Client, session_id: &str, event: TelemetryEvent) {
+/// The only place that touches the wire: writes the frame, returns the wait for its answer.
+fn deliver(
+    client: &Client,
+    session_id: &str,
+    event: TelemetryEvent,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
     let name = event.name;
     let params = TelemetryRecordParams {
         session_id: session_id.to_owned(),
@@ -68,10 +77,18 @@ async fn deliver(client: &Client, session_id: &str, event: TelemetryEvent) {
         properties: event.properties,
         correlate_last_request: false,
     };
-    let Ok(value) = serde_json::to_value(params) else {
-        return;
-    };
-    if let Err(error) = client.request(method::TELEMETRY_RECORD, value).await {
+    let sent = serde_json::to_value(params)
+        .map_err(anyhow::Error::from)
+        .and_then(|value| client.send_now(method::TELEMETRY_RECORD, value));
+    async move {
+        let error = match sent {
+            Ok(answer) => match answer.await {
+                Ok(Ok(_)) => return,
+                Ok(Err(failure)) => failure.to_string(),
+                Err(_) => "response channel dropped".to_owned(),
+            },
+            Err(error) => error.to_string(),
+        };
         tracing::debug!(%error, name, "telemetry record failed");
     }
 }
@@ -103,6 +120,18 @@ pub fn user_cancelled_action(app: &App, action: &str) {
     );
 }
 
+/// Recorded client-side for the legacy harness only; unified records it server-side.
+pub fn session_branched(app: &App, source_session_id: &str, new_session_id: &str) {
+    record(
+        app,
+        event::SESSION_BRANCHED,
+        bmap(json!({
+            "source_session_id": source_session_id,
+            "new_session_id": new_session_id,
+        })),
+    );
+}
+
 pub fn voice_mode_toggled(app: &App, enabled: bool) {
     record(
         app,
@@ -111,7 +140,7 @@ pub fn voice_mode_toggled(app: &App, enabled: bool) {
     );
 }
 
-/// Python `_send_mention_telemetry`, queued once the prompt runs.
+/// The `@` mention event, queued once the prompt runs.
 pub fn at_mention_inserted(app: &App, mentions: Option<&Value>, message_id: &str) {
     if let Some(properties) = mention_properties(mentions, message_id) {
         record(app, event::AT_MENTION_INSERTED, properties);
@@ -125,7 +154,7 @@ pub fn record_mentions(tx: Option<&TelemetrySender>, mentions: Option<&Value>, m
     }
 }
 
-/// `vibe.at_mention_inserted` properties; `None` at zero mentions, like Python.
+/// `vibe.at_mention_inserted` properties; `None` at zero mentions.
 pub fn mention_properties(
     mentions: Option<&Value>,
     message_id: &str,
@@ -153,7 +182,7 @@ pub fn bmap(value: Value) -> BTreeMap<String, Value> {
     serde_json::from_value(value).unwrap_or_default()
 }
 
-/// Event names, identical to the Python emitters so the datalake sees one
+/// Event names, identical across every Vibe emitter so the datalake sees one
 /// stream per event regardless of which client produced it.
 pub mod event {
     pub const STARTUP: &str = "vibe.startup";
@@ -161,6 +190,7 @@ pub mod event {
     pub const AT_MENTION_INSERTED: &str = "vibe.at_mention_inserted";
     pub const USER_COPIED_TEXT: &str = "vibe.user_copied_text";
     pub const USER_CANCELLED_ACTION: &str = "vibe.user_cancelled_action";
+    pub const SESSION_BRANCHED: &str = "vibe.session_branched";
     pub const VOICE_MODE_TOGGLED: &str = "vibe.voice_mode_toggled";
     pub const TRANSCRIPTION_START: &str = "vibe.audio.transcription.start";
     pub const TRANSCRIPTION_CANCEL: &str = "vibe.audio.transcription.cancel_recording";

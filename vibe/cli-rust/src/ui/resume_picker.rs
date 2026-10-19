@@ -5,7 +5,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
 
-use super::{list_scroll, scrollbar, theme};
+use super::{scrollbar, theme};
 use crate::app::App;
 use crate::hints::{self, action};
 
@@ -40,22 +40,26 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
     f.buffer_mut()
         .set_string(area.x + 8, area.y + 1, cwd, theme::muted_style().bg(bg));
     let visible = area.height.saturating_sub(6) as usize;
-    reconcile_scroll(app, visible);
     let total = app.resume_picker.sessions.len();
+    let list_area = Rect::new(
+        area.x + 1,
+        area.y + 3,
+        area.width.saturating_sub(2),
+        visible as u16,
+    );
     let has_scrollbar = total > visible;
+    let gutter = if has_scrollbar { 7 } else { 6 };
+    let options = Rect::new(
+        area.x + 3,
+        list_area.y,
+        area.width.saturating_sub(gutter),
+        list_area.height,
+    );
+    let scroll = app.resume_picker.list.layout_rows(total, options);
     let row_right = area
         .x
         .saturating_add(area.width.saturating_sub(if has_scrollbar { 4 } else { 3 }));
-    crate::mouse::register_region(
-        app,
-        Rect::new(
-            area.x + 1,
-            area.y + 3,
-            area.width.saturating_sub(2),
-            visible as u16,
-        ),
-        crate::mouse::MouseTarget::ResumePicker,
-    );
+    crate::mouse::register_region(app, list_area, crate::mouse::MouseTarget::ResumePicker);
     if app.resume_picker.sessions.is_empty() {
         f.buffer_mut().set_string(
             area.x + 3,
@@ -68,12 +72,12 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
         .resume_picker
         .sessions
         .iter()
-        .skip(app.resume_picker.scroll)
+        .skip(scroll)
         .take(visible)
         .enumerate()
     {
         let y = area.y + 3 + row as u16;
-        let selected = app.resume_picker.scroll + row == app.resume_picker.selected;
+        let selected = scroll + row == app.resume_picker.list.selected();
         let text = if session.title.is_empty() {
             &session.preview
         } else {
@@ -93,26 +97,44 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
             None
         };
         if selected {
-            let gutter = if has_scrollbar { 7 } else { 6 };
-            let bar = Rect::new(area.x + 3, y, area.width.saturating_sub(gutter), 1);
-            super::list_cursor::paint(f, bar);
+            super::list_cursor::paint(
+                f,
+                Rect {
+                    y,
+                    height: 1,
+                    ..options
+                },
+            );
         }
         let (text_style, _) = super::list_cursor::styles_on(selected, bg);
         let muted = text_style.add_modifier(Modifier::DIM);
         f.buffer_mut().set_string(area.x + 3, y, time, muted);
         f.buffer_mut().set_string(area.x + 15, y, id, muted);
+        let locked = app.resume_picker.locked.contains(&session.id);
         let message = delete_message.unwrap_or(text);
         let message_x = area.x + 25;
-        let message_width = row_right.saturating_sub(message_x) as usize;
+        // The lock labels the row's trailing status, like the desktop's.
+        let lock_width = if locked { 10 } else { 0 };
+        let message_width = row_right
+            .saturating_sub(message_x)
+            .saturating_sub(lock_width) as usize;
         let message = crate::utils::text::ellipsize(message, message_width);
         f.buffer_mut()
             .set_stringn(message_x, y, &message, message_width, text_style);
-        // Python styles the `d` of "Press d again to delete" as a shortcut.
+        if locked {
+            f.buffer_mut()
+                .set_string(row_right.saturating_sub(10), y, "🔒 locked", muted);
+        }
+        // The `d` of "Press d again to delete" is styled as a shortcut.
         if let Some(offset) = message.strip_suffix(" again to delete").map(str::len) {
             let shortcut_x = message_x + offset as u16 - 1;
             if shortcut_x < row_right {
-                f.buffer_mut()
-                    .set_string(shortcut_x, y, "d", text_style.fg(theme::primary()));
+                f.buffer_mut().set_string(
+                    shortcut_x,
+                    y,
+                    "d",
+                    super::list_cursor::accent(text_style, theme::primary()),
+                );
             }
         }
     }
@@ -125,7 +147,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
             bar,
             total as u16,
             visible as u16,
-            app.resume_picker.scroll as u16,
+            scroll as u16,
         );
     }
     let help = [
@@ -152,22 +174,4 @@ fn relative_time(timestamp: u64) -> String {
         86_400..=604_799 => format!("{}d ago", seconds / 86_400),
         _ => format!("{}w ago", seconds / 604_800),
     }
-}
-
-/// Keep the highlighted session visible, the wheel's free scroll aside.
-fn reconcile_scroll(app: &mut App, visible: usize) {
-    if visible == 0 {
-        return;
-    }
-    let state = &mut app.resume_picker;
-    let total = state.sessions.len();
-    state.scroll = match state.free_scroll {
-        true => state.scroll.min(total.saturating_sub(visible)),
-        false => {
-            let selected = state.selected;
-            list_scroll::follow(state.scroll, visible, total, selected..selected + 1, |_| {
-                true
-            })
-        }
-    };
 }

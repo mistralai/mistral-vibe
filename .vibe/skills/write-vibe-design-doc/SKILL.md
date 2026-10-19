@@ -55,7 +55,7 @@ state a bounded assumption and continue.
 Trace the production path end to end across every affected boundary, such as:
 
 ```text
-CLI / Textual / ACP / client -> app server -> owning port -> runtime/backend
+Rust TUI / ACP / client -> app server -> owning port -> runtime/backend
                             -> effects/persistence -> public projection
 ```
 

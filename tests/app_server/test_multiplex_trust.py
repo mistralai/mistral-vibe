@@ -96,9 +96,7 @@ thinking = "off"
     monkeypatch.setattr(
         StdioJsonRpcTransport, "from_standard_streams", lambda: transport
     )
-    serving = asyncio.create_task(
-        serve_stdio(experimental_harness=True, multiplex=True)
-    )
+    serving = asyncio.create_task(serve_stdio(multiplex=True))
     try:
         yield MultiplexClient(peer)
     finally:

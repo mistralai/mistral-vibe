@@ -1,4 +1,4 @@
-//! 16-bit PCM WAV decoding (Python `decode_wav`).
+//! 16-bit PCM WAV decoding.
 
 const FORMAT_PCM: u16 = 1;
 const FORMAT_EXTENSIBLE: u16 = 0xFFFE;

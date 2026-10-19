@@ -12,6 +12,7 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import (
     TurnEnqueueParams,
+    TurnQueueEditSaveParams,
     TurnQueueReplaceParams,
     TurnStartParams,
     TurnSteerParams,
@@ -66,9 +67,9 @@ def prepare_loop_turn[ParamsT: TurnStartParams | TurnSteerParams](
     )
 
 
-def prepare_loop_queue[ParamsT: TurnEnqueueParams | TurnQueueReplaceParams](
-    params: ParamsT,
-) -> ParamsT:
+def prepare_loop_queue[
+    ParamsT: TurnEnqueueParams | TurnQueueEditSaveParams | TurnQueueReplaceParams
+](params: ParamsT) -> ParamsT:
     entries = []
     for entry in params.entries:
         if isinstance(entry, TurnUserInputEntry) and _is_loop_content(entry.content):

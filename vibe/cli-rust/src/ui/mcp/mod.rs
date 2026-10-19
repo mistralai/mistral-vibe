@@ -7,7 +7,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
 
-use super::{hint_line, list_scroll, scrollbar, search_field, theme};
+use super::{hint_line, scrollbar, search_field, theme};
 use crate::app::App;
 use crate::mcp::{help_text, rows};
 use layout::VisualLine;
@@ -31,7 +31,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
 fn visual_lines(app: &App, area: Rect) -> Vec<VisualLine> {
     let rows = rows::rows(&app.mcp);
     let width = area.width.saturating_sub(GUTTER) as usize;
-    let selected = app.mcp.selected;
+    let selected = app.mcp.list.selected();
     let lines = layout::lines(&rows, selected, width);
     if lines.len() <= visible_lines(lines.len(), area.height) {
         return lines;
@@ -46,7 +46,7 @@ fn box_height(app: &App, total: usize, area_height: u16) -> u16 {
 }
 
 /// Rows above the option list. The title always, plus the search row and the
-/// blank its `margin-bottom` leaves; Python hides both in the detail view.
+/// blank its `margin-bottom` leaves; the detail view hides both.
 fn header_height(app: &App) -> u16 {
     if rows::viewing_source(&app.mcp).is_some() {
         1
@@ -55,7 +55,7 @@ fn header_height(app: &App) -> u16 {
     }
 }
 
-/// Visible option lines: `min(count, 50vh)` (Textual `max-height: 50vh`).
+/// Visible option lines: `min(count, 50vh)`.
 fn visible_lines(total: usize, area_height: u16) -> usize {
     (area_height as usize / 2).min(total)
 }
@@ -91,17 +91,23 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, lines: &[VisualLine]) {
     }
     let visible = area.height.saturating_sub(header + 3) as usize;
     let top = area.y + 1 + header;
-    let offset = reconcile_scroll(app, lines, visible);
     let overflows = lines.len() > visible;
-    // Remember where each option landed so a click can route to its row.
-    app.mcp.list_area = Rect::new(
+    let list_area = Rect::new(
         area.x + 1,
         top,
         area.width.saturating_sub(2),
         visible as u16,
     );
-    crate::mouse::register_region(app, app.mcp.list_area, crate::mouse::MouseTarget::Mcp);
-    app.mcp.line_rows = lines.iter().map(|line| line.row).collect();
+    let options: Vec<_> = lines.iter().map(|line| line.option).collect();
+    let gutter = if overflows { SCROLLBAR_GUTTER } else { GUTTER };
+    let rows = Rect::new(
+        area.x + 3,
+        top,
+        area.width.saturating_sub(gutter),
+        visible as u16,
+    );
+    let offset = app.mcp.list.layout(&options, rows);
+    crate::mouse::register_region(app, list_area, crate::mouse::MouseTarget::Mcp);
 
     for (row, line) in lines.iter().skip(offset).take(visible).enumerate() {
         draw_line(f, area, top + row as u16, line, overflows);
@@ -134,26 +140,6 @@ fn draw_line(f: &mut Frame, area: Rect, y: u16, line: &VisualLine, overflows: bo
         f.buffer_mut().set_string(x, y, &span.content, span.style);
         x += span.content.chars().count() as u16;
     }
-}
-
-/// Keep the highlighted option visible, the wheel's free scroll aside.
-fn reconcile_scroll(app: &mut App, lines: &[VisualLine], visible: usize) -> usize {
-    let max = lines.len().saturating_sub(visible);
-    let offset = match app.mcp.free_scroll {
-        true => app.mcp.scroll.min(max),
-        false => {
-            let first = lines.iter().position(|line| line.highlighted);
-            let last = lines.iter().rposition(|line| line.highlighted);
-            let highlight = first
-                .zip(last)
-                .map_or(0..0, |(first, last)| first..last + 1);
-            list_scroll::follow(app.mcp.scroll, visible, lines.len(), highlight, |line| {
-                lines[line].selectable
-            })
-        }
-    };
-    app.mcp.scroll = offset;
-    offset
 }
 
 /// The search row under the title; the field owns its mouse like Python's `Input`.

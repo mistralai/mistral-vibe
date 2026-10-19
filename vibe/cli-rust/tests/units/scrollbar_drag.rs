@@ -41,6 +41,44 @@ fn scrollbar_drag_tracks_the_pointer_directly() {
 }
 
 #[test]
+fn scrollbar_drag_follows_sub_cell_pointer_rows() {
+    let mut app = App::default();
+    mouse::register_region(
+        &mut app,
+        Rect::new(0, 0, 11, 10),
+        mouse::MouseTarget::Transcript,
+    );
+    mouse::register_scrollbar(
+        &mut app,
+        mouse::MouseTarget::Transcript,
+        Rect::new(10, 0, 1, 10),
+        100,
+        10,
+        90,
+    );
+    mouse::route_at(
+        &mut app,
+        event(MouseEventKind::Down(MouseButton::Left), 10, 9),
+        9.5,
+    );
+    mouse::route_at(
+        &mut app,
+        event(MouseEventKind::Drag(MouseButton::Left), 10, 9),
+        9.125,
+    );
+
+    assert_eq!(app.view.scroll, 4);
+
+    mouse::route_at(
+        &mut app,
+        event(MouseEventKind::Drag(MouseButton::Left), 10, 8),
+        8.875,
+    );
+
+    assert_eq!(app.view.scroll, 6);
+}
+
+#[test]
 fn topmost_registered_scrollbar_owns_the_drag() {
     let mut app = App::default();
     let area = Rect::new(0, 0, 11, 10);

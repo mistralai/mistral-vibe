@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  PYTHON_VERSION: "3.12"
+  PYTHON_VERSION: "3.14"
 
 jobs:
   pre-commit:
@@ -60,6 +60,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      # `vibe` execs the Rust TUI, built from source in this checkout. Without
+      # voice: cpal needs ALSA/libasound, absent from the runner.
+      CARGO_BUILD_FLAGS: "--no-default-features"
 
     steps:
       - name: Checkout repository
@@ -84,6 +88,11 @@ jobs:
 
       - name: Sync dependencies
         run: uv sync --all-extras
+
+      # Built up front so the first `vibe` launch, in a test's pexpect timeout,
+      # does not pay for the release build.
+      - name: Build the Rust CLI
+        run: cargo build --release --locked --manifest-path vibe/cli-rust/Cargo.toml --bin vibe-rs $CARGO_BUILD_FLAGS
 
       - name: Verify CLI can start
         run: |
@@ -115,8 +124,8 @@ jobs:
           # needs ALSA/libasound, absent here); macOS/Windows ship voice via
           # CoreAudio/WASAPI. This gate builds the real wheel (non-editable, so
           # the combined build backend bundles both native components), installs
-          # it, then launches both the
-          # default Python mode and VIBE_CLI=rust from the installed artifact.
+          # it, then launches the installed `vibe` console script, which execs
+          # the bundled Rust TUI.
           - runner: ubuntu-22.04
             os: linux
             arch: x86_64
@@ -187,7 +196,7 @@ jobs:
             # Pin the wheel to the interpreter the smoke venv uses, like
             # release.yml's check-sdist: unpinned, uv builds with the runner's
             # ambient Python and a mismatched wheel cannot be installed.
-            uv build --python 3.12 --wheel dist/mistral_vibe-*.tar.gz --out-dir dist
+            uv build --python 3.14 --wheel dist/mistral_vibe-*.tar.gz --out-dir dist
           else
             uv build --wheel --out-dir dist
           fi
@@ -200,7 +209,7 @@ jobs:
           echo "Installing $wheel"
           uv pip install --python .smoke "$wheel"
 
-      - name: Smoke test default (Python) mode
+      - name: Smoke test vibe
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
@@ -219,18 +228,6 @@ jobs:
             python=".smoke/bin/python"
           fi
           "$python" scripts/ci/validate-combined-wheel.py
-
-      - name: Smoke test Rust mode (VIBE_CLI=rust)
-        shell: bash
-        env:
-          VIBE_CLI: rust
-        run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            vibe=".smoke/Scripts/vibe"
-          else
-            vibe=".smoke/bin/vibe"
-          fi
-          "$vibe" --version
 
   snapshot-tests:
     name: Snapshot Tests

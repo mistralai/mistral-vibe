@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import errno
 import functools
 import time
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final
 import urllib.parse
 
 import anyio.to_thread
@@ -14,15 +14,6 @@ import httpx
 import keyring
 import keyring.backends.fail
 import keyring.errors
-from mcp.client.auth import (
-    OAuthClientProvider,
-    OAuthFlowError,
-    OAuthTokenError,
-    TokenStorage,
-)
-from mcp.client.auth.oauth2 import OAuthContext
-from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
-from mcp.types import LATEST_PROTOCOL_VERSION
 from pydantic import AnyUrl, BaseModel, ConfigDict, ValidationError
 
 from vibe import __version__
@@ -36,6 +27,11 @@ from vibe.utils.keyring import (
     set_api_key_in_keyring,
 )
 
+# The MCP SDK is imported where used: its package import loads ~230 modules.
+if TYPE_CHECKING:
+    from mcp.client.auth import OAuthClientProvider, OAuthFlowError
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
 _USERNAME_PREFIX: Final = "mcp-oauth"
 _CLIENT_NAME: Final = "Mistral Vibe"
 _LOGIN_TIMEOUT_SECONDS: Final = 300.0
@@ -47,8 +43,6 @@ _CALLBACK_TIMEOUT_SECONDS: Final = 600.0
 _MCP_ACCEPT: Final = "application/json, text/event-stream"
 _MIN_REQUEST_LINE_PARTS: Final = 2
 _HEADER_TERMINATORS: Final = frozenset({b"\r\n", b"\n", b""})
-# OAuth 2.0 token-endpoint error signalling a permanently dead refresh token.
-_OAUTH_INVALID_GRANT: Final = "invalid_grant"
 _EXPIRED_TOKEN_TIME: Final = -1.0
 
 
@@ -267,10 +261,12 @@ class StoredOAuthTokens(BaseModel):
         return cls(**token.model_dump(), expires_at=expires_at)
 
     def to_token(self) -> OAuthToken:
+        from mcp.shared.auth import OAuthToken
+
         return OAuthToken.model_validate(self.model_dump(exclude={"expires_at"}))
 
 
-class KeyringTokenStorage(TokenStorage):
+class KeyringTokenStorage:
     def __init__(
         self,
         alias: str,
@@ -307,6 +303,8 @@ class KeyringTokenStorage(TokenStorage):
         self.token_expiry_time = None
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
+        from mcp.shared.auth import OAuthClientInformationFull
+
         info = await _kr_load(
             _kr_username(self._alias, "client_info"), OAuthClientInformationFull
         )
@@ -592,24 +590,6 @@ class _suppress_close_errors:
         )
 
 
-async def _classify_refresh_error(response: httpx.Response) -> tuple[str, bool]:
-    """Return a reason and whether the refresh failed permanently (invalid_grant)."""
-    try:
-        # body arrives unread in the httpx auth flow
-        await response.aread()
-        payload = response.json()
-    except (ValueError, httpx.HTTPError):
-        return f"HTTP {response.status_code}", False
-    if not isinstance(payload, dict):
-        return f"HTTP {response.status_code}", False
-    error = payload.get("error")
-    description = payload.get("error_description") or ""
-    reason = ": ".join(part for part in (error, description) if part) or (
-        f"HTTP {response.status_code}"
-    )
-    return reason, error == _OAUTH_INVALID_GRANT
-
-
 def unwrap_oauth_refresh_error(
     exc: BaseException,
 ) -> MCPOAuthInvalidGrant | MCPOAuthTransientRefreshError | OAuthFlowError | None:
@@ -618,124 +598,9 @@ def unwrap_oauth_refresh_error(
         return invalid_grant
     if (transient := first_of_type(exc, MCPOAuthTransientRefreshError)) is not None:
         return transient
+    from mcp.client.auth import OAuthFlowError
+
     return first_of_type(exc, OAuthFlowError)
-
-
-class _ServerIssuedSecretContext(OAuthContext):
-    """``OAuthContext`` that authenticates a server-issued client secret.
-
-    Some authorization servers (e.g. Supabase) accept a registration with
-    ``token_endpoint_auth_method="none"`` but register a confidential client
-    anyway: the response carries a ``client_secret`` while omitting the auth
-    method, and their token endpoint then rejects requests without client
-    authentication. RFC 7591 §2 defaults an omitted method to
-    ``client_secret_basic``, and RFC 6749 §2.3.1 requires servers that issue
-    a client password to support HTTP Basic, so pick the method from what the
-    server advertises in ``token_endpoint_auth_methods_supported`` and only
-    fall back to ``client_secret_post`` when Basic is not an option. The
-    derived value is per request, never persisted, so keyring entries saved
-    before this class existed (method absent or ``"none"``) self-heal.
-    """
-
-    def prepare_token_auth(
-        self, data: dict[str, str], headers: dict[str, str] | None = None
-    ) -> tuple[dict[str, str], dict[str, str]]:
-        client_info = self.client_info
-        if (
-            client_info is not None
-            and client_info.client_secret
-            and client_info.token_endpoint_auth_method in {None, "none"}
-        ):
-            client_info.token_endpoint_auth_method = self._secret_auth_method()
-        return super().prepare_token_auth(data, headers)
-
-    def _secret_auth_method(
-        self,
-    ) -> Literal["client_secret_basic", "client_secret_post"]:
-        supported = (
-            self.oauth_metadata.token_endpoint_auth_methods_supported
-            if self.oauth_metadata is not None
-            else None
-        )
-        if not supported or "client_secret_basic" in supported:
-            return "client_secret_basic"
-        if "client_secret_post" in supported:
-            return "client_secret_post"
-        return "client_secret_basic"
-
-
-class RefreshAwareOAuthClientProvider(OAuthClientProvider):
-    """Like ``OAuthClientProvider`` but only clears tokens on a genuine ``invalid_grant``."""
-
-    def __init__(
-        self,
-        server_url: str,
-        client_metadata: OAuthClientMetadata,
-        storage: KeyringTokenStorage,
-        *,
-        server_alias: str,
-        redirect_handler: Callable[[str], Awaitable[None]] | None = None,
-        callback_handler: Callable[[], Awaitable[tuple[str, str | None]]] | None = None,
-        client_metadata_url: str | None = None,
-    ) -> None:
-        super().__init__(
-            server_url=server_url,
-            client_metadata=client_metadata,
-            storage=storage,
-            redirect_handler=redirect_handler,
-            callback_handler=callback_handler,
-            client_metadata_url=client_metadata_url,
-        )
-        # The base class builds a plain OAuthContext; swap it for the one that
-        # authenticates a server-issued client secret on every token request.
-        self.context = _ServerIssuedSecretContext(
-            server_url=server_url,
-            client_metadata=client_metadata,
-            storage=storage,
-            redirect_handler=redirect_handler,
-            callback_handler=callback_handler,
-            client_metadata_url=client_metadata_url,
-        )
-        self._server_alias = server_alias
-        self._storage = storage
-
-    async def _initialize(self) -> None:
-        await super()._initialize()
-        self.context.token_expiry_time = self._storage.token_expiry_time
-
-    async def _handle_refresh_response(self, response: httpx.Response) -> bool:
-        """Two corrections over the base class implementation:
-        1. Only clear stored tokens on a genuine invalid_grant error.
-        2. Preserve the previous refresh_token if the server did not return one.
-        """
-        if response.status_code == httpx.codes.OK:
-            previous_refresh_token = (
-                self.context.current_tokens.refresh_token
-                if self.context.current_tokens
-                else None
-            )
-            refreshed = await super()._handle_refresh_response(response)
-            tokens = self.context.current_tokens
-            if (
-                not refreshed
-                or tokens is None
-                or tokens.refresh_token is not None
-                or previous_refresh_token is None
-            ):
-                return refreshed
-            tokens = tokens.model_copy(update={"refresh_token": previous_refresh_token})
-            self.context.current_tokens = tokens
-            await self.context.storage.set_tokens(tokens)
-            return True
-        reason, is_invalid_grant = await _classify_refresh_error(response)
-        if is_invalid_grant:
-            self.context.clear_tokens()
-            await self._storage.delete_tokens()
-            await self._storage.delete_client_info()
-            raise MCPOAuthInvalidGrant(server_alias=self._server_alias, reason=reason)
-        raise MCPOAuthTransientRefreshError(
-            server_alias=self._server_alias, reason=reason
-        )
 
 
 def build_oauth_provider(
@@ -750,6 +615,10 @@ def build_oauth_provider(
             "build_oauth_provider requires an OAuth-configured MCP server; "
             f"server {server.name!r} uses auth.type={type(auth).__name__}"
         )
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata
+
+    from vibe.core.auth._mcp_oauth_provider import RefreshAwareOAuthClientProvider
+
     redirect_uri = AnyUrl(f"http://127.0.0.1:{auth.redirect_port}/callback")
     scope = " ".join(s for s in auth.scopes if s) or None
     metadata = OAuthClientMetadata(
@@ -799,6 +668,8 @@ async def perform_oauth_login(
             "perform_oauth_login requires an OAuth-configured MCP server; "
             f"server {server.name!r} uses auth.type={type(auth).__name__}"
         )
+    from mcp.client.auth import OAuthFlowError, OAuthTokenError
+
     declared = dict(headers or {})
     try:
         try:
@@ -843,6 +714,8 @@ async def _attempt_oauth_login(
 
 
 def _initialize_message() -> dict[str, object]:
+    from mcp.types import LATEST_PROTOCOL_VERSION
+
     return {
         "jsonrpc": "2.0",
         "id": 1,

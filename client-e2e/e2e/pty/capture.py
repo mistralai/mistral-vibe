@@ -46,13 +46,8 @@ class CaptureSpec:
 # the keys that produced that state.
 _COMMIT_KEYS = frozenset({"\r", "\n", "\t", "\x1b"})
 
-# A lone Escape is ambiguous, and the two clients disagree on how to resolve it:
-# crossterm merges `ESC ESC` into one Escape, eating the release marker, while
-# Textual holds an Escape until more bytes arrive. Writing the Escape as the last
-# byte of its own read and the release marker after the client consumed it
-# satisfies both. The wait ends as soon as the client repaints, so only a client
-# that needs the release (Textual) pays it in full.
-_ESCAPE_DRAIN = 0.1
+# A raw Escape read together with the release key parses as `ESC ESC`, eating the release, so a batched Escape uses its CSI u form.
+_CSI_U_ESCAPE = "\x1b[27u"
 _OSC52 = b"\x1b]52;c;"
 
 
@@ -71,7 +66,7 @@ class _ClipboardCapture:
             payload = self.buffer[start + len(_OSC52) : end]
             try:
                 self.text = base64.b64decode(payload, validate=True).decode()
-            except (binascii.Error, UnicodeDecodeError):
+            except binascii.Error, UnicodeDecodeError:
                 pass
             self.buffer = self.buffer[end + 1 :]
         self.buffer = self.buffer[-(len(_OSC52) - 1) :]
@@ -155,25 +150,9 @@ def _send_step(
         return buffered
     hold, release = spec.batch_keys
     for batch in _batches(step):
-        if batch == "\x1b":
-            buffered = _write_escape(fd, clipboard, buffered, hold, release)
-        else:
-            _write_all(fd, f"{hold}{batch}{release}".encode())
+        keys = _CSI_U_ESCAPE if batch == "\x1b" else batch
+        _write_all(fd, f"{hold}{keys}{release}".encode())
         buffered = _settle(fd, terminal, clipboard, buffered, spec)
-    return buffered
-
-
-def _write_escape(
-    fd: int, clipboard: _ClipboardCapture, buffered: bytearray, hold: str, release: str
-) -> bytearray:
-    """Write a lone Escape, then release once the client has consumed it."""
-    _write_all(fd, f"{hold}\x1b".encode())
-    ready, _, _ = select.select([fd], [], [], _ESCAPE_DRAIN)
-    if fd in ready:
-        data = os.read(fd, 65536)
-        clipboard.feed(data)
-        buffered += data
-    _write_all(fd, release.encode())
     return buffered
 
 
@@ -319,7 +298,7 @@ def _terminate(pid: int, fd: int) -> None:
     ):
         try:
             target()
-        except (ProcessLookupError, PermissionError, OSError):
+        except ProcessLookupError, PermissionError, OSError:
             pass
     try:
         os.close(fd)
@@ -327,5 +306,5 @@ def _terminate(pid: int, fd: int) -> None:
         pass
     try:
         os.waitpid(pid, os.WNOHANG)
-    except (ChildProcessError, OSError):
+    except ChildProcessError, OSError:
         pass

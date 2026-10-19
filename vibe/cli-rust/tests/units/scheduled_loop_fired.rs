@@ -100,7 +100,7 @@ fn fired_loop_without_a_same_turn_prompt_renders_nothing() {
 }
 
 #[test]
-fn utc_format_matches_python_strftime() {
+fn utc_format() {
     assert_eq!(format_utc(1_787_593_260_000), "2026-08-24 17:41:00 UTC");
     assert_eq!(format_utc(0), "1970-01-01 00:00:00 UTC");
     assert_eq!(format_utc(951_782_400_000), "2000-02-29 00:00:00 UTC");

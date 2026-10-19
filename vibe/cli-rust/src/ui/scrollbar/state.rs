@@ -12,7 +12,7 @@ struct Geometry {
 
 #[derive(Clone, Copy)]
 struct Drag {
-    row: u16,
+    row: f64,
     position: usize,
 }
 
@@ -78,12 +78,13 @@ impl State {
             .is_some_and(|geometry| geometry.area.contains(at.into()))
     }
 
-    pub fn begin_drag(&mut self, at: (u16, u16)) -> bool {
+    /// Grab the thumb under `at`; `row` is the pointer row in fractional cells.
+    pub fn begin_drag(&mut self, at: (u16, u16), row: f64) -> bool {
         let Some(geometry) = self.geometry.filter(|geometry| geometry.hits_thumb(at)) else {
             return false;
         };
         self.drag = Some(Drag {
-            row: at.1,
+            row,
             position: geometry.position,
         });
         true
@@ -112,7 +113,7 @@ impl State {
         });
     }
 
-    /// Move one page toward `side` (Textual `scroll_page_up`/`down`) and return the new position.
+    /// Move one page toward `side` and return the new position.
     pub fn page(&mut self, side: Side) -> Option<usize> {
         let geometry = self.geometry.as_mut()?;
         let max = geometry.virtual_size.saturating_sub(geometry.window_size);
@@ -124,9 +125,9 @@ impl State {
         Some(geometry.position)
     }
 
-    pub fn drag_to(&self, row: u16) -> Option<usize> {
+    pub fn drag_to(&self, row: f64) -> Option<usize> {
         let (geometry, drag) = (self.geometry?, self.drag?);
-        let delta = f64::from(row) - f64::from(drag.row);
+        let delta = row - drag.row;
         let max = geometry.virtual_size.saturating_sub(geometry.window_size);
         let position = (drag.position as f64
             + delta * geometry.virtual_size as f64 / geometry.window_size as f64)

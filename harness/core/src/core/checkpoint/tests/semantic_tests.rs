@@ -101,6 +101,7 @@ fn pending_steering_and_ready_notifications_restore_without_semantic_loss() {
     let notifications = restored.notifications.pending().collect::<Vec<_>>();
     assert_eq!(notifications.len(), 1);
     assert_eq!(notifications[0].id, "notification-ready");
+    checkpoint["notifications"][0]["preceding_steers"] = json!(1);
     assert_eq!(recaptured, checkpoint);
 }
 

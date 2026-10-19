@@ -153,6 +153,7 @@ impl HarnessSession {
 
     pub(crate) fn inspect(&self) -> Inspection {
         let StateInspection {
+            has_pending_model_input,
             status,
             active_turn_id,
             last_turn_id,
@@ -160,6 +161,7 @@ impl HarnessSession {
             message_count,
         } = self.state.inspection();
         Inspection {
+            has_pending_model_input,
             protocol_version: STEP_PROTOCOL_VERSION,
             status,
             active_turn_id,
@@ -183,6 +185,7 @@ impl HarnessSession {
 /// wire command name and maps all other Core failures to `invalid_command`.
 fn core_rejection(error: CoreError, command_type: &'static str) -> HarnessCommandRejection {
     match error {
+        CoreError::QueueFull => HarnessCommandRejection::QueueFull,
         CoreError::InvalidState { state } => HarnessCommandRejection::InvalidState {
             command_type: command_type.to_string(),
             state,

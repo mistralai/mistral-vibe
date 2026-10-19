@@ -1,9 +1,9 @@
-//! Path scrubbing, a port of the Python `_HOME_RE` and `_PATH_RE` passes.
+//! Path scrubbing, the same `_HOME_RE` and `_PATH_RE` passes as the app server.
 
 pub const FILTERED: &str = "[Filtered]";
 
 /// Collapses a bare home root, then rewrites any remaining path to
-/// `[Filtered]/<basename>`. Same two ordered passes as the Python `scrub_paths`.
+/// `[Filtered]/<basename>`. Same two ordered passes as the server's `scrub_paths`.
 pub fn scrub_paths(value: &str) -> String {
     let home = replace_all(value, match_home_root);
     replace_all(&home, match_path)

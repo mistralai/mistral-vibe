@@ -11,12 +11,14 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let view = View {
         title: format!("MCP Server: {}", app.mcp_oauth.server_name),
         rows: rows(app),
-        selected: app.mcp_oauth.selected,
+        selected: app.mcp_oauth.list.selected(),
         detail: vec![(mcp_oauth::detail(app), false)],
         help: mcp_oauth::help_text(app),
     };
-    app.mcp_oauth.list_area =
-        auth_app::draw(app, f, area, &view, crate::mouse::MouseTarget::McpOAuth);
+    let list_area = auth_app::draw(app, f, area, &view, crate::mouse::MouseTarget::McpOAuth);
+    app.mcp_oauth
+        .list
+        .layout(&auth_app::option_lines(&view.rows), list_area);
 }
 
 fn rows(app: &App) -> Vec<Row> {

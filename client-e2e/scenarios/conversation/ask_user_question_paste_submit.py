@@ -18,7 +18,7 @@ handshake = {"callback/result": {"accepted": True}}
 capture_startup = False
 capture_steps = {1, 2, 3, 4, 5, 6, 7}
 request_methods = {"callback/result"}
-screen_excludes = {"rust": ("Junk answer",), "python": ("Junk answer",)}
+screen_excludes = ("Junk answer",)
 
 _QUESTION = "Which database should we use for this project?"
 _QUESTIONS = [

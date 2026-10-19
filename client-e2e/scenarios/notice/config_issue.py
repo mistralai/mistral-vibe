@@ -18,13 +18,7 @@ handshake = {
     }
 }
 
-# Python surfaces config issues through Textual `App.notify`, whose toast mounts
-# on a later frame and is not deterministically captured; Rust draws it inline.
-skip_terminal_parity = (
-    "python's Textual notify toast mounts async; rust draws it inline"
-)
-
 # A lone keystroke yields a settled frame; the startup toast is still up (10s).
 timeline: Timeline = ["a"]
 
-screen_contains = {"rust": ("Failed to load: bad frontmatter",)}
+screen_contains = ("Failed to load: bad frontmatter",)

@@ -1,4 +1,4 @@
-//! Session-exit summary formatting and the usage-baseline delta (Python `session_exit.py`).
+//! Session-exit summary formatting and the usage-baseline delta.
 
 use vibe_rs::server::TokenUsage;
 use vibe_rs::session_exit::{
@@ -22,7 +22,7 @@ fn summary(session_id: Option<&str>, usage: TokenUsage) -> SessionExitSummary {
 }
 
 #[test]
-fn usage_line_matches_python_with_thousands_separators() {
+fn usage_line_uses_thousands_separators() {
     assert_eq!(
         format_session_usage(TokenUsage {
             input_tokens: 1234567,

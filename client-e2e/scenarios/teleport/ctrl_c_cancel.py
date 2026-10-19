@@ -10,5 +10,5 @@ handshake = teleport_handshake()
 request_methods = METHODS
 timeline: Timeline = ["/teleport\r", "\x03"]
 
-screen_contains = {"rust": ("Teleport cancelled",)}
-screen_excludes = {"rust": ("again to quit",)}
+screen_contains = ("Teleport cancelled",)
+screen_excludes = ("again to quit",)

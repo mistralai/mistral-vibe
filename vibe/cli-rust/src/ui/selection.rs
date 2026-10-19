@@ -98,8 +98,8 @@ fn cache_and_copy(app: &mut App, f: &mut Frame, spans: &[RowSpan]) -> bool {
 }
 
 /// Highlight one row. A folded group header composites its label's
-/// `text-opacity: 55%` over the selection colors (Textual `TextOpacity`),
-/// while its marker indicator repaints with the raw selection style.
+/// `text-opacity: 55%` over the selection colors, while its marker
+/// indicator repaints with the raw selection style.
 fn paint_row(buf: &mut Buffer, chat: Rect, style: Style, (y, x0, x1): RowSpan) {
     if is_group_header(buf, chat, y) {
         let label = group_label_style();
@@ -128,9 +128,8 @@ fn is_group_header(buf: &Buffer, chat: Rect, y: u16) -> bool {
 
 /// The selected group-header label: the label's text-opacity blends its color
 /// toward the selection background, with ANSI themes resolving the selection
-/// colors through Textual's `ansi_theme_dark` (MONOKAI) or `ansi_theme_light`
-/// (ALABASTER) palette and folding the label's dim in (Python
-/// `TextOpacity.process_segments` over `ANSIToTruecolor`).
+/// colors through the `monokai` (dark) or `alabaster` (light) palette and
+/// folding the label's dim in.
 fn group_label_style() -> Style {
     use theme::fixed::{alabaster, monokai};
     use theme::DIM_FACTOR;
@@ -139,7 +138,7 @@ fn group_label_style() -> Style {
 
     let (bg, fg) = if theme::is_ansi() {
         // The theme's raw `screen-selection-*` colors, indexed into the palette
-        // Textual picks by dark vs light (`bright_blue`/`black` vs `cyan`/`bright_white`).
+        // picked by dark vs light (`bright_blue`/`black` vs `cyan`/`bright_white`).
         let (bg, selection_fg) = if theme::is_dark() {
             (monokai::BRIGHT_BLUE, monokai::BLACK)
         } else {

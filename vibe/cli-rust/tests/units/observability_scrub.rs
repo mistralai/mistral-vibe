@@ -1,6 +1,6 @@
 //! Path scrubbing and noise filtering for Sentry payloads.
 //!
-//! Expectations are the output of the Python `scrub_paths` on the same input,
+//! Expectations are the output of the app server's `scrub_paths` on the same input,
 //! captured by running both over a shared corpus.
 
 use sentry::protocol::{Event, Exception, Frame, Stacktrace};

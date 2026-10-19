@@ -1,5 +1,5 @@
 //! A compaction handoff moves the client onto the replacement session
-//! (Python `replace_state` on `session/compacted`).
+//! (`session/compacted`).
 
 use std::sync::Arc;
 

@@ -10,7 +10,7 @@ mod tools;
 
 use crate::core::wire::tool::ToolResult;
 pub(crate) use context::{ProgramContext, ResolvedProgramOperation};
-pub(crate) use descriptor::{ProgrammaticName, TypeScriptTool};
+pub(crate) use descriptor::{ProgrammaticName, ReplayOnlyTool, TypeScriptTool};
 pub(crate) use execution::{
     AcceptedProgramResult, ProgramAdvance, ProgramInput, ProgramTransition,
 };

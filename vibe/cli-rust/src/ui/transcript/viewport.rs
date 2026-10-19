@@ -82,6 +82,9 @@ pub(super) fn render(
     } = viewport;
     let viewport_bottom = area.y as i32 + area.height as i32;
     let document_top = top;
+    if let Some(hangs) = hangs.as_deref_mut() {
+        super::document::hang_cells(hangs, area, top, (banner.lines(), banner.folds()), false);
+    }
     top = place(
         frame,
         area,
@@ -138,7 +141,8 @@ pub(super) fn render(
             Some(markdown_cache),
         );
         if let Some(hangs) = hangs.as_deref_mut().filter(|_| content_visible) {
-            super::document::hang_cells(hangs, area, entry_y, &rendered, positioned.prewrapped);
+            let painted = (rendered.lines(), rendered.folds());
+            super::document::hang_cells(hangs, area, entry_y, painted, positioned.prewrapped);
         }
         let document_y = (entry_y - document_top) as u16;
         if content_visible {
@@ -204,7 +208,7 @@ pub(super) fn render(
     }
 }
 
-/// Paint Textual's hover style on the links under the pointer.
+/// Paint the hover style on the links under the pointer.
 fn hover(buffer: &mut Buffer, links: &[markdown::Link], mouse_position: Option<(u16, u16)>) {
     let Some(position) = mouse_position else {
         return;

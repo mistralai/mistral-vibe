@@ -16,10 +16,7 @@ from opentelemetry.trace import StatusCode
 import pytest
 import respx
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.constants import CHAT_COMPLETIONS_PATH
-from tests.mock.utils import mock_llm_chunk
-from tests.stubs.fake_backend import FakeBackend
 from vibe.core import tracing
 from vibe.core.config import (
     ModelConfig,
@@ -29,9 +26,8 @@ from vibe.core.config import (
 )
 from vibe.core.llm.backend.generic import GenericBackend
 from vibe.core.llm.exceptions import BackendError
-from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.tracing import agent_span, setup_tracing, tool_span
-from vibe.core.types import BaseEvent, FunctionCall, LLMMessage, Role, ToolCall
+from vibe.core.types import LLMMessage, Role
 
 
 class _CollectingExporter(SpanExporter):
@@ -983,71 +979,3 @@ class TestErrorIsolation:
 
         async with agent_span():
             pass
-
-
-class TestIntegration:
-    @staticmethod
-    async def _collect_events(agent_loop, prompt: str) -> list[BaseEvent]:
-        return [ev async for ev in agent_loop.act(prompt)]
-
-    @pytest.mark.asyncio
-    async def test_agent_turn_with_tool_call_produces_spans(
-        self, _otel_provider: _CollectingExporter
-    ) -> None:
-        tool_call = ToolCall(
-            id="call_1",
-            index=0,
-            function=FunctionCall(name="todo", arguments='{"action": "read"}'),
-        )
-        backend = FakeBackend([
-            [mock_llm_chunk(content="Let me check.", tool_calls=[tool_call])],
-            [mock_llm_chunk(content="Done.")],
-        ])
-        config = build_test_vibe_config(
-            enabled_tools=["todo"],
-            tools={"todo": BaseToolConfig(permission=ToolPermission.ALWAYS)},
-        )
-        agent_loop = build_test_agent_loop(config=config, backend=backend)
-
-        await self._collect_events(agent_loop, "What are my todos?")
-
-        spans = _otel_provider.spans
-        agent_spans = [s for s in spans if "invoke_agent" in s.name]
-        tool_spans = [s for s in spans if "execute_tool" in s.name]
-
-        assert len(agent_spans) == 1
-        assert len(tool_spans) == 1
-
-        agent = agent_spans[0]
-        tool = tool_spans[0]
-
-        # Parent-child relationship
-        assert tool.parent is not None
-        assert tool.parent.span_id == agent.context.span_id
-
-        # -- Agent span: name, status, and every attribute set by agent_span() --
-        assert agent.name == "invoke_agent mistral-vibe"
-        assert agent.status.status_code == StatusCode.OK
-        agent_attrs = dict(agent.attributes)
-        assert agent_attrs["gen_ai.operation.name"] == "invoke_agent"
-        assert agent_attrs["gen_ai.provider.name"] == "mistral_ai"
-        assert agent_attrs["gen_ai.agent.name"] == "mistral-vibe"
-        assert agent_attrs["gen_ai.request.model"] == "mistral-vibe-cli-latest"
-        assert agent_attrs["gen_ai.conversation.id"] == agent_loop.session_id
-
-        # -- Tool span: name, status, and every attribute set by tool_span() + set_tool_result() --
-        assert tool.name == "execute_tool todo"
-        assert tool.status.status_code == StatusCode.OK
-        tool_attrs = dict(tool.attributes)
-        assert tool_attrs["gen_ai.operation.name"] == "execute_tool"
-        assert tool_attrs["gen_ai.tool.name"] == "todo"
-        assert tool_attrs["gen_ai.tool.call.id"] == "call_1"
-        assert tool_attrs["gen_ai.tool.type"] == "function"
-        assert (
-            tool_attrs["gen_ai.tool.call.arguments"] == '{"action":"read","todos":null}'
-        )
-        assert tool_attrs["gen_ai.tool.call.result"] == (
-            "verb: Retrieved\ntodos: []\ntotal_count: 0\nmessage: Retrieved 0 todos"
-        )
-        # Conversation ID propagated via baggage from agent_span
-        assert tool_attrs["gen_ai.conversation.id"] == agent_loop.session_id

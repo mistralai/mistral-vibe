@@ -6,7 +6,7 @@ use crate::hints::{self, action, key, Hint};
 use crate::search_field;
 use crate::server::PluginCatalogEntry;
 
-/// One option of the list, as Python's `PluginsApp._refresh_view` adds them.
+/// One option of the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
     /// A selectable plugin, by index into the catalogue.
@@ -80,7 +80,7 @@ pub fn title(state: &State) -> String {
     }
 }
 
-/// The hint line as `(key, label)` pairs (Python `_LIST_VIEW_HELP` and friends).
+/// The hint line as `(key, label)` pairs.
 pub fn help(state: &State) -> Vec<Hint> {
     if viewing_entry(state).is_some() {
         return vec![("r", action::RELOAD), hints::BACK];

@@ -65,7 +65,7 @@ struct Builder {
     in_quote: bool,
     /// The open explicit link's index in `links`; autolinking must not run inside it.
     link: Option<usize>,
-    /// Saved `link` values for an open link or image, restored at its end; Textual's later spans win.
+    /// Saved `link` values for an open link or image, restored at its end; later spans win.
     link_saves: Vec<Option<usize>>,
     links: Vec<String>,
     code: Option<String>,

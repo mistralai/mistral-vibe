@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use vibe_rs::server::AgentType;
+use vibe_rs::server::{AgentSafety, AgentType};
 use vibe_rs::utils::startup_cache::{StartupConfig, MAX_AGE_SECONDS};
 
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -13,12 +13,12 @@ fn runtime(safety: &str) -> Value {
             "config": {
                 "theme": "ansi-dark",
                 "activeModel": {"displayName": "Medium", "thinking": "off"},
-                "defaultAgent": "plan",
+                "defaultAgent": "audit",
             },
             "activeAgent": {"name": "ask", "displayName": "Ask", "safety": "neutral"},
             "agents": [
                 {"name": "ask", "displayName": "Ask", "safety": "neutral"},
-                {"name": "plan", "displayName": "Plan", "safety": safety},
+                {"name": "audit", "displayName": "Audit", "safety": safety},
                 {"name": "explore", "displayName": "Explore", "agentType": "subagent"},
             ],
         }
@@ -34,7 +34,7 @@ fn config_with(server_version: &str, cached_at: i64) -> StartupConfig {
 #[test]
 fn projects_the_default_agent_and_the_cycleable_list() {
     let config = StartupConfig::from_runtime("1.0.0", &runtime("safe")).unwrap();
-    assert_eq!(config.default_agent, "plan");
+    assert_eq!(config.default_agent, "audit");
     assert_eq!(config.agents.len(), 3);
     assert_eq!(config.agents[2].agent_type, AgentType::Subagent);
 }
@@ -77,13 +77,15 @@ fn with_no_cache_the_builtins_are_cycleable() {
     let config = StartupConfig::default();
     assert_eq!(config.default_agent, "accept-edits");
     assert_eq!(config.agents.len(), 4);
+    assert_eq!(config.agents[2].name, "smart-approve");
+    assert_eq!(config.agents[2].safety, AgentSafety::Smart);
 }
 
 #[test]
 fn round_trips_through_the_cache_file_format() {
     let config = StartupConfig::from_runtime("1.0.0", &runtime("destructive")).unwrap();
     let raw = serde_json::to_string(&config).unwrap();
-    assert!(raw.contains("\"defaultAgent\":\"plan\""));
+    assert!(raw.contains("\"defaultAgent\":\"audit\""));
     assert!(raw.contains("\"cachedAt\":"));
     assert!(!raw.contains("activeAgent"));
     assert_eq!(serde_json::from_str::<StartupConfig>(&raw).unwrap(), config);

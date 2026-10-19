@@ -36,7 +36,7 @@ def _wrap_del_to_suppress(transport_cls: type[Any]) -> None:
     def _safe_del(self: object) -> None:
         try:
             original(self)
-        except (ValueError, OSError):
+        except ValueError, OSError:
             pass
 
     transport_cls.__del__ = _safe_del

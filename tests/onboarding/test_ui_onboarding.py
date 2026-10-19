@@ -23,8 +23,6 @@ from tests.browser_sign_in.stubs import (
     build_sign_in_process,
 )
 from tests.conftest import build_test_vibe_config
-from vibe.cli.textual_ui.shortcut_hints import SHORTCUT_STYLE
-from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import (
     AUTO_THEME,
     DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
@@ -67,6 +65,8 @@ from vibe.setup.onboarding.screens.custom_domain import CustomDomainScreen
 from vibe.setup.onboarding.screens.sign_in_target import SignInTargetScreen
 from vibe.setup.onboarding.screens.theme_selection import THEMES, ThemeSelectionScreen
 from vibe.setup.onboarding.screens.welcome import HIGHLIGHT_END, WelcomeScreen
+from vibe.setup.onboarding.shortcut_hints import SHORTCUT_STYLE
+from vibe.setup.onboarding.widgets.no_markup_static import NoMarkupStatic
 
 CONSOLE_URL = "https://console.mistral.ai"
 BROWSER_AUTH_API_URL = "https://console.mistral.ai/api"
@@ -198,10 +198,6 @@ def _saved_env_contents() -> str:
 
 def _browser_sign_in_step_cards(screen: Screen) -> list[Widget]:
     return list(screen.query(".browser-sign-in-step"))
-
-
-def _browser_sign_in_step_card(screen: Screen, index: int) -> Widget:
-    return _browser_sign_in_step_cards(screen)[index]
 
 
 def _active_browser_sign_in_step_card(screen: Screen) -> Widget:

@@ -203,15 +203,15 @@ fn history_shortcuts_do_not_reset_mcp_search_navigation() {
     let mut app = App::default();
     app.mcp.search.focused = true;
     app.mcp.search.query = "search".into();
-    app.mcp.selected = 2;
-    app.mcp.scroll = 1;
+    app.mcp.list.highlight(2);
+    app.mcp.list.detach_at(1);
     for ch in ['z', 'y'] {
         assert!(mcp::search::handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SUPER)
         ));
         assert_eq!(app.mcp.search.query, "search");
-        assert_eq!(app.mcp.selected, 2);
-        assert_eq!(app.mcp.scroll, 1);
+        assert_eq!(app.mcp.list.selected(), 2);
+        assert_eq!(app.mcp.list.scroll(), 1);
     }
 }

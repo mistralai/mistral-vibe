@@ -55,7 +55,7 @@ fn ctrl_letters_map_to_line_edit_actions() {
 }
 
 #[test]
-fn alt_word_aliases_match_textual() {
+fn alt_word_aliases() {
     let alt = KeyModifiers::ALT;
     let ctrl = KeyModifiers::CONTROL;
     assert_eq!(mapped(KeyCode::Char('b'), alt), Action::CursorWordLeft);
@@ -105,6 +105,14 @@ fn home_and_delete_map_plain() {
     );
     assert_eq!(
         mapped(KeyCode::Delete, KeyModifiers::NONE),
+        Action::DeleteRight
+    );
+    assert_eq!(
+        mapped(KeyCode::Backspace, KeyModifiers::SHIFT),
+        Action::DeleteLeft
+    );
+    assert_eq!(
+        mapped(KeyCode::Delete, KeyModifiers::SHIFT),
         Action::DeleteRight
     );
 }

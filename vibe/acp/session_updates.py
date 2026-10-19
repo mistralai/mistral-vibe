@@ -91,6 +91,7 @@ from vibe.app_server.models import (
     effect_input_json,
 )
 from vibe.user_content import UserBlobResource, UserResourceLink, UserTextResource
+from vibe.utils.io import normalize_edit_strings
 from vibe.utils.tool_presentation import ToolEffectKind
 
 type _AcpMessageChunk = UserMessageChunk | AgentMessageChunk
@@ -454,12 +455,15 @@ def _call_effect_content(
 ) -> list[ToolCallContentVariant] | None:
     match entry.detail:
         case FileEditEffectDetail(input=FileEditEffectInput() as value):
+            old_text, new_text = normalize_edit_strings(
+                value.old_string, value.new_string
+            )
             return [
                 FileEditToolCallContent(
                     type="diff",
                     path=value.file_path,
-                    old_text=value.old_string,
-                    new_text=value.new_string,
+                    old_text=old_text,
+                    new_text=new_text,
                 )
             ]
         case FileEditEffectDetail(input=FileEditEffectBatchInput() as value):
@@ -467,10 +471,13 @@ def _call_effect_content(
                 FileEditToolCallContent(
                     type="diff",
                     path=value.file_path,
-                    old_text=change.old_string,
-                    new_text=change.new_string,
+                    old_text=old_text,
+                    new_text=new_text,
                 )
-                for change in value.changes
+                for old_text, new_text in (
+                    normalize_edit_strings(change.old_string, change.new_string)
+                    for change in value.changes
+                )
             ]
         case FileWriteEffectDetail(input=FileWriteEffectInput() as value):
             return [
@@ -688,7 +695,13 @@ def _result_display_text(entry: PublicEffectEntry) -> str:
 
 def _effect_meta(entry: PublicEffectEntry) -> dict[str, JsonValue]:
     meta: dict[str, JsonValue] = {
-        "tool_name": entry.detail.tool_name,
+        "tool_name": {
+            "file_system.read_file": "read_file",
+            "file_system.write_file": "write_file",
+            "file_system.search_replace": "edit",
+            "file_system.bash": "bash",
+            "skill.read": "skill",
+        }.get(entry.detail.tool_name, entry.detail.tool_name),
         "effect_kind": entry.detail.kind.value,
     }
     match entry.detail:

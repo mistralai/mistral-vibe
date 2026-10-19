@@ -89,7 +89,7 @@ class Task(
 
     async def run(
         self, args: TaskArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | TaskResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | TaskResult]:
         if not ctx or not ctx.agent_manager:
             raise ToolError("Task tool requires agent_manager in context")
 

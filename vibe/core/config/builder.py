@@ -99,7 +99,7 @@ class ConfigBuilder[S: ConfigSchema]:
                     raw = data.model_dump()
                     if raw:
                         layer_dicts.append(_LayerData(name=layer.name, data=raw))
-                except (UntrustedLayerError, EmptyLayerError):
+                except UntrustedLayerError, EmptyLayerError:
                     continue
 
             merged, origins = self._merge_fields(self._schema, layer_dicts)

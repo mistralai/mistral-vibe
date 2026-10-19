@@ -6,6 +6,8 @@ from e2e.app_server.scenario import Timeline
 
 _ESCAPE = "\x1b[27u"
 
+request_methods = {"session/delete"}
+
 # Up moves off the current session (the picker preselects it, and the current
 # session cannot be deleted) onto the saved one.
 timeline: Timeline = ["/resume", "\r", "\x1b[A", "d", "d", _ESCAPE]

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from e2e.app_server.scenario import Timeline
 
-screen_contains = {"rust": ("Voice settings closed (no changes saved).",)}
-screen_excludes = {"rust": ("should not be pasted", "Voice Settings")}
+screen_contains = ("Voice settings closed (no changes saved).",)
+screen_excludes = ("should not be pasted", "Voice Settings")
 timeline: Timeline = [
     "/voice\r",
     "k",

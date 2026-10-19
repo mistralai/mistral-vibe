@@ -19,4 +19,4 @@ request_methods = METHODS
 
 timeline: Timeline = [resize(30, 40), "/plugins\r", "\r"]
 
-screen_contains = {"rust": ("末尾文字可",)}
+screen_contains = ("末尾文字可",)

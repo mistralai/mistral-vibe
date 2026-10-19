@@ -16,8 +16,7 @@ use super::IDLE_MARKER;
 
 pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: CommandEvent) {
     app.commit_finished();
-    let shell_completed = matches!(&command, CommandEvent::ShellCompleted { .. });
-    if shell_completed || app.session.shell_operation_id.is_none() {
+    if app.session.shell_operation_id.is_none() {
         app.view.command_loading = false;
     }
     let id = format!("rs-command-{}", app.view.transcript.revision());
@@ -27,6 +26,7 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
         }
         CommandEvent::Teleport(reply) => crate::teleport::apply_reply(app, client, *reply),
         CommandEvent::Plugins(event) => crate::plugins::apply_event(app, *event),
+        CommandEvent::Leanstall(event) => crate::commands::leanstall::apply_event(app, *event),
         CommandEvent::Result(text) => {
             local::add_command_result(&mut app.view.transcript, &id, &text)
         }
@@ -41,6 +41,17 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
                 &format!("Session renamed to \"{title}\"."),
             );
         }
+        CommandEvent::Branched {
+            old_session_id,
+            new_session_id,
+            harness,
+        } => crate::commands::branch::apply_branched(
+            app,
+            &id,
+            &old_session_id,
+            &new_session_id,
+            harness.as_deref(),
+        ),
         CommandEvent::Error(text) => local::add_command_error(&mut app.view.transcript, &id, &text),
         CommandEvent::Runtime(runtime, text) => {
             event_handler::apply_runtime_value(app, &runtime);
@@ -58,6 +69,9 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
             let plan = reads
                 .as_ref()
                 .and_then(|reads| post_ready::plan_title(&reads.account));
+            if let Some(reads) = &reads {
+                crate::startup::banners::show_plan_offer(app, &reads.account);
+            }
             cache_reads(app, reads);
             app.view.banner.set_account(plan, greeting);
         }
@@ -98,13 +112,16 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
         }
         CommandEvent::RetryStarted => {}
         CommandEvent::RetryFailed { error } => {
-            // No turn/completed will arrive; clear the busy state (Python _finalize_turn_ui).
+            // No turn/completed will arrive; clear the busy state.
             app.set_status(Status::Ready);
             // The interrupted retry never started, so no later turn inherits its interrupt.
             app.queue.interrupt_on_start = None;
-            // Python keeps the retry presentation after a failed attempt; re-offer /retry.
+            // The retry presentation survives a failed attempt; re-offer /retry.
             app.session.can_retry = true;
             local::add_command_error(&mut app.view.transcript, &id, &error);
+            app.terminal_notifier.set_error_message(&error);
+            app.terminal_notifier
+                .remember_completion(crate::program_status::ProgramState::Error);
         }
         CommandEvent::Whoami(reads) => {
             let text = simple::whoami_text(reads.as_ref().unwrap_or(&AccountReads::default()));
@@ -115,13 +132,7 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
             operation_id,
             error,
         } => {
-            if app.session.shell_operation_id.as_deref() == Some(operation_id.as_str()) {
-                app.session.shell_operation_id = None;
-                app.session.shell_started_at = None;
-                crate::terminal_notifier::restore_running(app);
-                app.session.shell_request_started = false;
-                app.session.shell_interrupt_requested = false;
-            }
+            crate::program_status::shell_completed_with_error(app, &operation_id, error.as_deref());
             if let Some(error) = error {
                 local::add_command_error(&mut app.view.transcript, &id, &error);
             }
@@ -151,7 +162,7 @@ pub(super) fn draw_synchronized(terminal: &mut crate::terminal::Tui, app: &mut A
 
     std::io::stdout().sync_update(|_| crate::terminal::draw(terminal, app))??;
     crate::pointer::sync(app);
-    crate::terminal_notifier::flush(&mut app.terminal_notifier);
+    crate::terminal_notifier::flush(app);
     Ok(())
 }
 
@@ -195,18 +206,28 @@ pub(super) fn redraw_frame(
 /// one-shot while work is still in flight. `settle_busy` widens the settle
 /// test to in-flight turns (the worktree gate's captures); `animating` keeps
 /// the marker withheld while a glide (an expansion scrolling into view) is
-/// still easing toward its target.
+/// still easing toward its target. A request whose replay frames are still
+/// on the way withholds it too: its notification wakes the loop again. So does
+/// queued telemetry, whose request is about to be sent.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn replay_marker(
     app: &App,
+    client: &Client,
     state: &mut super::keys::LoopState,
     replaying: bool,
     settle_busy: bool,
     animating: bool,
     mounting: bool,
     indexing: bool,
+    telemetry_queued: bool,
 ) {
-    if !replaying || !state.real_event_pending || state.marker_held || indexing {
+    if !replaying
+        || !state.real_event_pending
+        || state.marker_held
+        || indexing
+        || telemetry_queued
+        || client.owes_replay_frames()
+    {
         return;
     }
     let settled = if settle_busy {

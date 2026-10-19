@@ -1,4 +1,4 @@
-//! The API key screen (Python `ApiKeyScreen`): the key-generation link, the
+//! The API key screen: the key-generation link, the
 //! masked paste card, and the validation feedback.
 
 use ratatui::layout::Rect;
@@ -23,7 +23,7 @@ pub(super) fn draw(
     let input = wizard.api_key_input.clone();
     let provider = &wizard.context.provider;
     let provider_name = title_provider_name(&provider.name);
-    // Python `_compose_provider_link`: the key link exists only for the
+    // The key link exists only for the
     // mistral provider and points at the configured vibe base
     // (`{vibe_base_url}/code/extensions?focus=key`); the subtitle names the
     // provider it belongs to.
@@ -42,8 +42,8 @@ pub(super) fn draw(
     let subtitle = format!("Visit {help_name} to generate or copy your Vibe key");
     // The optional provider link sits two blank rows above the card; without
     // it the card follows the subtitle's single blank row. Unlike the
-    // custom-domain screen, the validation row is always reserved (Python's
-    // ever-present `#feedback` Static, empty when there is nothing to say),
+    // custom-domain screen, the validation row is always reserved (empty
+    // when there is nothing to say),
     // so the layout never shifts when a message appears; the docs rows keep
     // the two blank rows every panel screen uses after the last content row.
     let feedback = Row::Feedback(input.validation.clone());
@@ -77,7 +77,7 @@ pub(super) fn draw(
     );
 }
 
-/// The provider's display name, first letter uppercased (Python `provider.capitalize`).
+/// The provider's display name, first letter uppercased.
 fn title_provider_name(name: &str) -> String {
     let mut name = name.to_owned();
     if let Some(first) = name.get_mut(0..1) {

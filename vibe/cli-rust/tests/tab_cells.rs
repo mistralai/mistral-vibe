@@ -1,4 +1,4 @@
-//! Tab stops in composer cells follow Textual's TextArea (4 columns from the line start).
+//! Tab stops in composer cells: 4 columns from the line start.
 
 use vibe_rs::ui::tab_cells::{cells, cells_width, Cell};
 

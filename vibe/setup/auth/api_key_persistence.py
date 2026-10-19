@@ -7,7 +7,14 @@ import stat
 from dotenv import set_key, unset_key
 from keyring.errors import KeyringError, NoKeyringError, PasswordDeleteError
 
-from vibe.core.config import DEFAULT_PROVIDERS, ProviderConfig, VibeConfigSchema
+from vibe.core.config import (
+    DEFAULT_PROVIDERS,
+    EnvValueOrigin,
+    ProviderConfig,
+    VibeConfigSchema,
+    forget_env_value_origin,
+    record_env_value_origin,
+)
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.paths import GLOBAL_ENV_FILE
@@ -235,8 +242,13 @@ def persist_api_key(
         try:
             _save_api_key_to_env_file(env_key, api_key)
         except (OSError, ValueError) as err:
+            # Nothing persisted, so the value lives only in this process's
+            # environment; /status reports it as the process environment.
             return f"save_error:{err}"
+        else:
+            record_env_value_origin(env_key, api_key, EnvValueOrigin.VIBE_HOME_ENV_FILE)
     else:
+        record_env_value_origin(env_key, api_key, EnvValueOrigin.OS_KEYRING)
         # The key is safely stored in the keyring; drop any stale plaintext copy.
         try:
             _remove_api_key_from_env_file(env_key)
@@ -265,7 +277,7 @@ def remove_api_key(provider: ProviderConfig) -> None:
 
     try:
         delete_api_key_from_keyring(env_key)
-    except (NoKeyringError, PasswordDeleteError):
+    except NoKeyringError, PasswordDeleteError:
         # No keyring backend, or nothing stored to remove: both are no-ops for sign-out.
         pass
     except KeyringError as exc:
@@ -276,5 +288,6 @@ def remove_api_key(provider: ProviderConfig) -> None:
 
     _remove_api_key_from_env_file(env_key)
     os.environ.pop(env_key, None)
+    forget_env_value_origin(env_key)
     if keyring_error is not None:
         raise keyring_error

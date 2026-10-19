@@ -8,12 +8,10 @@ handshake = {
     "config/write": {"rejected": False, "failures": ["Settings are read-only"]}
 }
 request_methods = {"telemetry/record"}
-screen_contains = {
-    "rust": (
-        "Failed to apply: voice settings",
-        "Settings are read-only",
-        "Voice mode: On",
-    )
-}
-screen_excludes = {"rust": ("Voice mode disabled.",)}
+screen_contains = (
+    "Failed to apply: voice settings",
+    "Settings are read-only",
+    "Voice mode: On",
+)
+screen_excludes = ("Voice mode disabled.",)
 timeline: Timeline = ["/voice\r", " ", "\x1b", "/voice\r"]

@@ -4,6 +4,26 @@ use serde_json::Value;
 
 use crate::core::wire::content::ContentBlock;
 
+#[derive(Clone, Copy)]
+pub(crate) struct ProgramBudget {
+    pub(crate) budget_ms: u64,
+    pub(crate) elapsed_ms: u64,
+}
+
+impl ProgramBudget {
+    pub(crate) fn exhausted(self) -> bool {
+        self.elapsed_ms >= self.budget_ms
+    }
+
+    pub(crate) fn error(self) -> Value {
+        serde_json::json!({
+            "name": "ProgramBudgetExceeded",
+            "message": "run_typescript exceeded its elapsed-time budget.",
+            "details": {"budget_ms": self.budget_ms, "elapsed_ms": self.elapsed_ms},
+        })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ToolKind {

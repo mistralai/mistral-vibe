@@ -1,5 +1,5 @@
-//! The wizard's action handling and completion (Python `run_onboarding`'s
-//! exit match). Every write goes through the `setup/*` RPCs on the
+//! The wizard's action handling and completion. Every write goes through
+//! the `setup/*` RPCs on the
 //! initialized connection — nothing persists client-side (ADR 0016).
 
 use std::sync::Arc;
@@ -14,17 +14,17 @@ use super::context;
 use super::submit;
 use super::{Action, OnboardingState};
 
-/// How the wizard closed, mirroring the result cases of Python's `run_onboarding`.
+/// How the wizard closed.
 #[derive(Debug)]
 pub enum Close {
     Cancelled,
     /// The wizard's choices landed; the two continue-anyway warnings ride
-    /// along (Python prints them in every mode).
+    /// along (printed in every mode).
     Completed {
         warnings: Vec<String>,
     },
     /// `store-credential` answered `env_var_error`: nothing was saved, and
-    /// the run exits 1 (Python's `env_var_error` match).
+    /// the run exits 1.
     EnvVarError(String),
     /// The `setup/*` surface is absent (an old server): the wizard never
     /// falls back to local writes.
@@ -38,8 +38,7 @@ pub enum Close {
 
 /// Handle one wizard action. Async because the key submit talks to the
 /// app-server (`setup/store-credential`) and a non-default console first
-/// resolves tenant domains over HTTP (Python awaits `resolve_tenant_domains`
-/// inside `persist_credentials`); the wizard flow pauses redraws for at most
+/// resolves tenant domains over HTTP; the wizard flow pauses redraws for at most
 /// the whoami timeout.
 pub async fn handle_onboarding_action(
     wizard: &mut OnboardingState,
@@ -49,7 +48,7 @@ pub async fn handle_onboarding_action(
 ) -> Option<Close> {
     match action {
         Action::Cancel => {
-            // Python's browser sign-in `action_cancel` cancels the attempt
+            // Cancel any browser sign-in attempt
             // before the wizard closes.
             if let Some(previous) = sign_in_rx.take() {
                 previous.abort();
@@ -61,7 +60,7 @@ pub async fn handle_onboarding_action(
             let options = crate::theme_picker::options();
             if let Some(name) = options.get(idx) {
                 // Live preview only; the theme rides `setup/submit-choices`
-                // at completion (Python persists it once the wizard ends).
+                // at completion (persisted once the wizard ends).
                 crate::ui::theme::set_active(name);
                 wizard.theme_selected = true;
             }
@@ -98,7 +97,7 @@ pub async fn handle_onboarding_action(
             None
         }
         Action::AbortSignIn => {
-            // Python `action_manual`: cancel the attempt before the API key
+            // Manual entry: cancel the attempt before the API key
             // screen, or a browser completed in the background would submit
             // its key and close the wizard.
             if let Some(previous) = sign_in_rx.take() {
@@ -127,7 +126,7 @@ async fn submit_api_key(
     client: &Arc<Client>,
     api_key: &str,
 ) -> Option<Close> {
-    // Python `persist_api_key`'s telemetry `custom_domain` property: the
+    // The telemetry `custom_domain` property: the
     // wizard configured a non-default browser auth base.
     let custom_domain = context::configured_custom_domain(&wizard.context.provider).is_some();
     let outcome = match rpc::store_credential(
@@ -149,7 +148,7 @@ async fn submit_api_key(
     match outcome {
         rpc::StoreOutcome::EnvVarError { detail: name } => return Some(Close::EnvVarError(name)),
         rpc::StoreOutcome::SaveError { detail: error } => {
-            // Python `save_error`: warn and continue — the key lives in the
+            // `save_error`: warn and continue — the key lives in the
             // server process env for this run, so the session still
             // authenticates and the choices still submit.
             tracing::warn!(%error, "could not save API key");
@@ -160,7 +159,7 @@ async fn submit_api_key(
     submit_choices(wizard, client, api_key, &mut warnings).await
 }
 
-/// Python `persist_credentials`' config half: a non-default console resolves
+/// The credentials' config half: a non-default console resolves
 /// the tenant's own API and chat hosts from /whoami first (client-side: it
 /// needs only the API key), then the wizard's choices land through
 /// `setup/submit-choices` — the full choices every time, drift judged
@@ -172,7 +171,7 @@ async fn submit_choices(
     warnings: &mut Vec<String>,
 ) -> Option<Close> {
     if wizard.context.console_base_url != context::DEFAULT_CONSOLE_BASE_URL
-        // Python `persist_credentials` returns before `resolve_tenant_domains`
+        // Tenant domains are not re-resolved
         // when provider, console, and vibe URL still equal the config
         // snapshot: an unchanged on-prem run pays no extra authenticated
         // request and keeps its configured bases.
@@ -199,7 +198,7 @@ async fn submit_choices(
         }
     };
     if let rpc::SubmitOutcome::ProviderConfigError { failures } = outcome {
-        // Python `provider_config_error`: the key was saved, but the
+        // `provider_config_error`: the key was saved, but the
         // provider config write failed — surfaced, never swallowed.
         let error = failures.join("; ");
         tracing::warn!(%error, "could not persist provider config");
@@ -211,7 +210,7 @@ async fn submit_choices(
     })
 }
 
-/// Python `run_onboarding`'s exit match, folded into the round's verdict:
+/// The wizard's exit match, folded into the round's verdict:
 /// every terminal outcome prints inside — cancel exits 0, the failures
 /// exit 1, completion continues with its warnings riding along.
 pub fn onboarding_finished(close: Close) -> crate::setup::SetupVerdict {

@@ -28,6 +28,24 @@ from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.utils.merge import MergeStrategy
 
 _ROUTED_TEST_ALIAS = "target-testing-model-alias"
+
+
+def test_retired_settings_stay_loadable_and_are_deprecated_in_public_schema() -> None:
+    values = {
+        "displayed_workdir": "/old/display/path",
+        "context_warnings": True,
+        "raise_on_compaction_failure": True,
+    }
+    config = VibeConfigSchema.model_validate(values)
+    serialized = config.model_dump()
+    schema = VibeConfigSchema.model_json_schema()
+
+    for name, value in values.items():
+        assert serialized[name] == value
+        assert schema["properties"][name]["deprecated"] is True
+        assert "no effect" in schema["properties"][name]["description"]
+
+
 # The schema resolves unset thresholds to the floor, so the expected model
 # carries it explicitly.
 _ROUTED_TEST_MODEL = ModelConfig(
@@ -53,7 +71,7 @@ api_retry_max_elapsed_time = 120.0
 api_stream_idle_timeout = 600.0
 active_model = "codestral"
 disabled_tools = ["bash"]
-default_agent = "plan"
+default_agent = "ask"
 enabled_skills = ["search"]
 enable_otel = true
 
@@ -80,7 +98,7 @@ provider = "mistral"
     assert config.active_model == "codestral"
     assert config.models["codestral"].alias == "codestral"
     assert "bash" in config.disabled_tools
-    assert config.default_agent == "plan"
+    assert config.default_agent == "ask"
     assert "search" in config.enabled_skills
     assert config.enable_otel is True
 
@@ -111,9 +129,7 @@ def test_unknown_active_model_falls_back_to_default(
 
     assert config.active_model == ""
     assert config.get_active_model().alias == config.resolve_default_model_alias()
-    assert (
-        "Active model 'does-not-exist' is not in your configured models" in caplog.text
-    )
+    assert "Model 'does-not-exist' is not available" in caplog.text
 
 
 def test_unknown_active_model_uses_routed_default() -> None:
@@ -212,7 +228,7 @@ def test_unpinned_active_model_falls_back_to_first_configured_model(
     assert config.active_model == ""
     assert config.get_active_model().alias == "a"
     assert config.resolve_default_model_alias() == "a"
-    assert "is not in your configured models" not in caplog.text
+    assert "is not available" not in caplog.text
 
 
 def test_routed_default_model_resolves_when_unpinned() -> None:
@@ -523,7 +539,7 @@ def test_known_active_model_is_not_overridden(caplog: pytest.LogCaptureFixture) 
             "models": models,
         })
     assert config.active_model == "b"
-    assert "is not in your configured models" not in caplog.text
+    assert "is not available" not in caplog.text
 
 
 def test_allowed_model_names_filter_available_models() -> None:
@@ -565,6 +581,23 @@ def test_unknown_utility_model_emits_validation_warning() -> None:
     assert len(config.validation_warnings) == 1
     assert "does-not-exist" in config.validation_warnings[0]
     assert "smart_approve" in config.validation_warnings[0]
+
+
+def test_removed_plan_default_agent_emits_validation_warning() -> None:
+    config = VibeConfigSchema.model_validate({"default_agent": "plan"})
+
+    assert config.default_agent == "plan"
+    assert len(config.validation_warnings) == 1
+    assert (
+        "Default agent 'plan' is no longer built in" in (config.validation_warnings[0])
+    )
+    assert "'ask'" in config.validation_warnings[0]
+
+
+def test_builtin_default_agent_emits_no_validation_warning() -> None:
+    config = VibeConfigSchema.model_validate({"default_agent": "ask"})
+
+    assert config.validation_warnings == ()
 
 
 def test_get_utility_model_resolves_aliases_and_the_active_sentinel() -> None:

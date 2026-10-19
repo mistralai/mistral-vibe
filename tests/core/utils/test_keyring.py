@@ -4,13 +4,15 @@ import subprocess
 from threading import Event, Thread
 
 import keyring
-from keyring.errors import KeyringError, PasswordDeleteError
+from keyring.errors import KeyringError, NoKeyringError, PasswordDeleteError
 import pytest
 
 import vibe.utils.keyring as keyring_utils
 from vibe.utils.keyring import (
     delete_api_key_from_keyring,
     get_api_key_from_keyring,
+    keyring_read_failure,
+    probe_api_key_from_keyring,
     set_api_key_in_keyring,
 )
 
@@ -213,6 +215,192 @@ def test_get_prefers_current_service(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert get_api_key_from_keyring("CUSTOM_API_KEY") == "current-key"
     assert reads == [(_CURRENT_SERVICE, "CUSTOM_API_KEY")]
+
+
+def test_probe_reports_legacy_service_value_without_migrating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/status is read-only: a value found under a legacy service is reported
+    as-is, without the migration write a resolving read performs.
+    """
+    writes: list[tuple[str, str, str]] = []
+    deletes: list[tuple[str, str]] = []
+
+    def _get(service: str, username: str) -> str | None:
+        return "legacy-key" if service == _RELEASED_LEGACY_SERVICE else None
+
+    monkeypatch.setattr(keyring, "get_password", _get)
+    monkeypatch.setattr(
+        keyring,
+        "set_password",
+        lambda service, username, password: writes.append((
+            service,
+            username,
+            password,
+        )),
+    )
+    monkeypatch.setattr(
+        keyring,
+        "delete_password",
+        lambda service, username: deletes.append((service, username)),
+    )
+
+    assert probe_api_key_from_keyring("CUSTOM_API_KEY") == "legacy-key"
+    assert writes == []
+    assert deletes == []
+
+
+def test_probe_raises_when_the_keyring_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable keyring is an inspection failure, not a silent "no
+    credential": the caller that must distinguish the two gets the error.
+    """
+
+    def _get(service: str, username: str) -> str | None:
+        raise KeyringError("keychain locked")
+
+    monkeypatch.setattr(keyring, "get_password", _get)
+
+    with pytest.raises(KeyringError):
+        probe_api_key_from_keyring("CUSTOM_API_KEY")
+
+
+def test_probe_raises_on_a_cached_read_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    lookups: list[str] = []
+
+    def _get(service: str, username: str) -> str | None:
+        lookups.append(service)
+        raise KeyringError("keychain locked")
+
+    monkeypatch.setattr(keyring, "get_password", _get)
+    assert get_api_key_from_keyring("CUSTOM_API_KEY") is None
+
+    with pytest.raises(KeyringError, match="keychain locked"):
+        probe_api_key_from_keyring("CUSTOM_API_KEY")
+    assert lookups == [_CURRENT_SERVICE]
+
+
+def test_probe_serves_the_cached_value_without_touching_the_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_api_key_in_keyring("CUSTOM_API_KEY", "cached-key")
+
+    def _fail(service: str, username: str) -> str | None:
+        raise AssertionError("a cached answer must not touch the backend")
+
+    monkeypatch.setattr(keyring, "get_password", _fail)
+
+    assert probe_api_key_from_keyring("CUSTOM_API_KEY") == "cached-key"
+
+
+def test_probe_does_not_populate_the_cache_with_a_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/status must not change what a later model call sends: a probe miss is
+    never stored, so a key added after the probe is still found by resolution.
+    """
+    backend: dict[str, str | None] = {"value": None}
+    monkeypatch.setattr(
+        keyring, "get_password", lambda service, username: backend["value"]
+    )
+
+    assert probe_api_key_from_keyring("CUSTOM_API_KEY") is None
+
+    backend["value"] = "added-later"
+    assert get_api_key_from_keyring("CUSTOM_API_KEY") == "added-later"
+
+
+def test_probe_does_not_suppress_the_legacy_migration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A legacy value the probe reported must not be served from a cache the
+    probe never filled: the first resolving read still migrates it.
+    """
+    writes: list[tuple[str, str, str]] = []
+
+    def _get(service: str, username: str) -> str | None:
+        return "legacy-key" if service == _RELEASED_LEGACY_SERVICE else None
+
+    monkeypatch.setattr(keyring, "get_password", _get)
+    monkeypatch.setattr(
+        keyring,
+        "set_password",
+        lambda service, username, password: writes.append((
+            service,
+            username,
+            password,
+        )),
+    )
+    monkeypatch.setattr(keyring, "delete_password", lambda service, username: None)
+
+    assert probe_api_key_from_keyring("CUSTOM_API_KEY") == "legacy-key"
+
+    assert get_api_key_from_keyring("CUSTOM_API_KEY") == "legacy-key"
+    assert writes == [(_CURRENT_SERVICE, "CUSTOM_API_KEY", "legacy-key")]
+
+
+def test_probe_reads_no_credential_when_keyring_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disabled keyring is checked-and-empty, not unavailable: the source
+    is omitted from /status rather than marked `· unavailable`.
+    """
+    monkeypatch.setenv("VIBE_TEST_DISABLE_KEYRING", "1")
+
+    def _fail(service: str, username: str) -> str | None:
+        raise AssertionError("a disabled keyring must not touch the backend")
+
+    monkeypatch.setattr(keyring, "get_password", _fail)
+
+    assert probe_api_key_from_keyring("CUSTOM_API_KEY") is None
+
+
+def test_probe_reads_no_credential_when_no_keyring_backend_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host with no keyring backend is checked-and-empty, not unavailable:
+    the store cannot hold a key, so resolution and the view agree on "no key".
+    """
+
+    def _no_backend(service: str, username: str) -> str | None:
+        raise NoKeyringError("no recommended backend was available")
+
+    monkeypatch.setattr(keyring, "get_password", _no_backend)
+
+    assert probe_api_key_from_keyring("CUSTOM_API_KEY") is None
+
+
+def test_no_keyring_backend_is_not_recorded_as_a_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _no_backend(service: str, username: str) -> str | None:
+        raise NoKeyringError("no recommended backend was available")
+
+    monkeypatch.setattr(keyring, "get_password", _no_backend)
+
+    assert get_api_key_from_keyring("CUSTOM_API_KEY") is None
+    assert keyring_read_failure("CUSTOM_API_KEY") is None
+    assert probe_api_key_from_keyring("CUSTOM_API_KEY") is None
+
+
+def test_probe_treats_an_unloadable_backend_as_no_keyring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A backend that fails to import is a missing keyring, not a broken one."""
+
+    def _unloadable(service: str, username: str) -> str | None:
+        raise ImportError("No module named 'dbus")
+
+    monkeypatch.setattr(keyring, "get_password", _unloadable)
+
+    assert probe_api_key_from_keyring("CUSTOM_API_KEY") is None
+
+
+def test_probe_absent_value_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(keyring, "get_password", lambda service, username: None)
+
+    assert probe_api_key_from_keyring("CUSTOM_API_KEY") is None
 
 
 def test_get_skips_legacy_services_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -608,9 +796,163 @@ def test_macos_get_uses_security_find_password(monkeypatch: pytest.MonkeyPatch) 
                 "CUSTOM_API_KEY",
                 "-w",
             ],
-            {"text": True, "capture_output": True, "check": True},
+            {
+                "text": True,
+                "capture_output": True,
+                "check": True,
+                "timeout": keyring_utils.SECURITY_TIMEOUT_SECONDS,
+            },
         )
     ]
+
+
+def test_macos_get_gives_up_when_keychain_does_not_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeouts: list[object] = []
+    monkeypatch.setattr(keyring_utils, "_should_use_macos_security", lambda: True)
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        timeouts.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(args, keyring_utils.SECURITY_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(keyring_utils.subprocess, "run", _run)
+
+    assert get_api_key_from_keyring("CUSTOM_API_KEY") is None
+    assert timeouts == [keyring_utils.SECURITY_TIMEOUT_SECONDS]
+    failure = keyring_read_failure("CUSTOM_API_KEY")
+    assert failure is not None
+    assert "did not answer" in failure
+
+
+def test_a_keychain_timeout_fails_the_next_key_without_waiting_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    elapsed = [0.0]
+    real_monotonic = keyring_utils.time.monotonic
+    monkeypatch.setattr(
+        keyring_utils.time, "monotonic", lambda: real_monotonic() + elapsed[0]
+    )
+    monkeypatch.setattr(keyring_utils, "_should_use_macos_security", lambda: True)
+    read_keys: list[str] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        read_keys.append(args[args.index("-a") + 1])
+        raise subprocess.TimeoutExpired(args, keyring_utils.SECURITY_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(keyring_utils.subprocess, "run", _run)
+
+    assert get_api_key_from_keyring("MISTRAL_API_KEY") is None
+    assert get_api_key_from_keyring("FOO_API_KEY") is None
+    failure = keyring_read_failure("FOO_API_KEY")
+    assert failure is not None
+    assert "did not answer" in failure
+    assert read_keys == ["MISTRAL_API_KEY"]
+
+    elapsed[0] = keyring_utils.READ_FAILURE_TTL_SECONDS
+    assert get_api_key_from_keyring("FOO_API_KEY") is None
+    assert read_keys == ["MISTRAL_API_KEY", "FOO_API_KEY"]
+
+
+def test_failed_read_is_cached_and_shared_by_concurrent_readers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lookups: list[str] = []
+    in_backend = Event()
+    release = Event()
+    results: list[str | None] = []
+
+    def _locked(service: str, username: str) -> str | None:
+        lookups.append(service)
+        in_backend.set()
+        assert release.wait(timeout=5)
+        raise KeyringError("keychain locked")
+
+    monkeypatch.setattr(keyring, "get_password", _locked)
+
+    def _read() -> None:
+        results.append(get_api_key_from_keyring("CUSTOM_API_KEY"))
+
+    first = Thread(target=_read)
+    first.start()
+    assert in_backend.wait(timeout=5)
+    second = Thread(target=_read)
+    second.start()
+    release.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert get_api_key_from_keyring("CUSTOM_API_KEY") is None
+    assert results == [None, None]
+    assert lookups == [_CURRENT_SERVICE]
+    assert keyring_read_failure("CUSTOM_API_KEY") == "keychain locked"
+
+
+def test_probe_waits_for_an_in_flight_read_instead_of_starting_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lookups: list[str] = []
+    in_backend = Event()
+    release = Event()
+    probed: list[str | None] = []
+
+    def _slow(service: str, username: str) -> str | None:
+        lookups.append(service)
+        in_backend.set()
+        assert release.wait(timeout=5)
+        return "stored-key"
+
+    monkeypatch.setattr(keyring, "get_password", _slow)
+
+    reader = Thread(target=lambda: get_api_key_from_keyring("CUSTOM_API_KEY"))
+    reader.start()
+    assert in_backend.wait(timeout=5)
+    prober = Thread(
+        target=lambda: probed.append(probe_api_key_from_keyring("CUSTOM_API_KEY"))
+    )
+    prober.start()
+    release.set()
+    reader.join(timeout=5)
+    prober.join(timeout=5)
+
+    assert probed == ["stored-key"]
+    assert lookups == [_CURRENT_SERVICE]
+
+
+def test_probe_after_a_keychain_timeout_raises_without_waiting_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(keyring_utils, "_should_use_macos_security", lambda: True)
+    read_keys: list[str] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        read_keys.append(args[args.index("-a") + 1])
+        raise subprocess.TimeoutExpired(args, keyring_utils.SECURITY_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(keyring_utils.subprocess, "run", _run)
+
+    assert get_api_key_from_keyring("MISTRAL_API_KEY") is None
+    with pytest.raises(KeyringError, match="did not answer"):
+        probe_api_key_from_keyring("FOO_API_KEY")
+    assert read_keys == ["MISTRAL_API_KEY"]
+
+
+def test_a_probe_keychain_timeout_fails_the_next_read_without_waiting_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(keyring_utils, "_should_use_macos_security", lambda: True)
+    read_keys: list[str] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        read_keys.append(args[args.index("-a") + 1])
+        raise subprocess.TimeoutExpired(args, keyring_utils.SECURITY_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(keyring_utils.subprocess, "run", _run)
+
+    with pytest.raises(KeyringError, match="did not answer"):
+        probe_api_key_from_keyring("MISTRAL_API_KEY")
+    assert get_api_key_from_keyring("MISTRAL_API_KEY") is None
+    assert read_keys == ["MISTRAL_API_KEY"]
 
 
 def test_macos_get_returns_none_when_item_is_missing(

@@ -1,7 +1,7 @@
 use crate::core::error::CoreError;
 use crate::core::hooks::{
     CompletionHookOutput, HookCall, HookPoint, HookResult, PreAgentTurnOutput, PreLlmCallOutput,
-    hook_action_id, validate_keyed_context_messages,
+    hook_action_id,
 };
 use crate::core::require_action_id;
 use crate::core::step_protocol::Action;
@@ -228,10 +228,16 @@ impl PendingLifecycleHook {
     }
 }
 
-#[allow(clippy::large_enum_variant)]
 pub(in crate::core::turn) enum HookResolution {
-    RestoreTurn {
-        suspended: SuspendedTurn,
+    PreAgentSkip {
+        turn_id: String,
+        content: Vec<ContentBlock>,
+        reason: Vec<ContentBlock>,
+    },
+    PreAgentFailed {
+        turn_id: String,
+        content: Vec<ContentBlock>,
+        error: ProtocolError,
     },
     CommitPreAgentTurn {
         suspended: SuspendedTurn,
@@ -280,7 +286,10 @@ pub(in crate::core::turn) fn resolve_lifecycle_hook(
     match (pending, result) {
         (
             PendingLifecycleHook::PreAgentTurn {
-                turn_id, suspended, ..
+                turn_id,
+                user_content,
+                suspended,
+                ..
             },
             HookResult::PreAgentTurn(output),
         ) => match output {
@@ -294,7 +303,11 @@ pub(in crate::core::turn) fn resolve_lifecycle_hook(
             }
             PreAgentTurnOutput::Skip { reason } => {
                 validate_non_empty_content(&reason, "pre-agent hook skip reason")?;
-                Ok(HookResolution::RestoreTurn { suspended })
+                Ok(HookResolution::PreAgentSkip {
+                    turn_id,
+                    content: user_content,
+                    reason,
+                })
             }
         },
         (
@@ -303,17 +316,12 @@ pub(in crate::core::turn) fn resolve_lifecycle_hook(
                 ..
             },
             HookResult::PreLlmCall(output),
-        ) => {
-            if let PreLlmCallOutput::Continue { context_messages } = &output {
-                validate_keyed_context_messages(context_messages)?;
-            }
-            Ok(HookResolution::ResolveCompletion(
-                CompletionHookResolution::PreLlm {
-                    completion_action_id,
-                    output,
-                },
-            ))
-        }
+        ) => Ok(HookResolution::ResolveCompletion(
+            CompletionHookResolution::PreLlm {
+                completion_action_id,
+                output,
+            },
+        )),
         (
             PendingLifecycleHook::PostLlmCall {
                 completion_action_id,
@@ -355,9 +363,15 @@ pub(in crate::core::turn) fn resolve_failed_lifecycle_hook(
 ) -> Result<HookResolution, CoreError> {
     require_action_id(pending.action_id(), &action_id)?;
     match pending {
-        PendingLifecycleHook::PreAgentTurn { suspended, .. } => {
-            Ok(HookResolution::RestoreTurn { suspended })
-        }
+        PendingLifecycleHook::PreAgentTurn {
+            turn_id,
+            user_content,
+            ..
+        } => Ok(HookResolution::PreAgentFailed {
+            turn_id,
+            content: user_content,
+            error,
+        }),
         PendingLifecycleHook::PreLlmCall {
             completion_action_id,
             ..

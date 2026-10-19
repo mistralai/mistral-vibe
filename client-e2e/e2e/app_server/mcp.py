@@ -60,6 +60,16 @@ def sample_sources() -> list[dict[str, Any]]:
     ]
 
 
+def authenticated_sources() -> list[dict[str, Any]]:
+    """The sample catalog once `weather` finished its OAuth login."""
+    return [
+        server("weather", transport="http", tools=[tool("forecast", "Read a forecast")])
+        if source["name"] == "weather"
+        else source
+        for source in sample_sources()
+    ]
+
+
 SAMPLE_DISCOVERY_ERRORS = {"broken": "spawn failed: command not found"}
 
 
@@ -70,13 +80,19 @@ def handshake(
     connector_error: str | None = None,
     toggled: Sequence[Mapping[str, Any]] | None = None,
     manage_connectors_url: str | None = None,
+    private_connectors_hidden: bool = False,
 ) -> dict[str, Any]:
     """Publish `sources` as the MCP state; `toggled` is what `mcp/toggle` answers."""
     state = _state(sources, discovery_errors, connector_error)
     overrides: dict[str, Any] = {"runtime/read": {"runtime": {"mcp": state}}}
-    # Like the real server, only the connector catalog read carries the Studio link.
+    # Like the real server, only the connector catalog read carries these fields.
+    catalog: dict[str, Any] = {}
     if manage_connectors_url is not None:
-        overrides["connector_catalog/read"] = {"manageUrl": manage_connectors_url}
+        catalog["manageUrl"] = manage_connectors_url
+    if private_connectors_hidden:
+        catalog["privateConnectorsHidden"] = True
+    if catalog:
+        overrides["connector_catalog/read"] = catalog
     if toggled is not None:
         overrides["mcp/toggle"] = {
             "runtime": {"mcp": _state(toggled, discovery_errors, connector_error)}

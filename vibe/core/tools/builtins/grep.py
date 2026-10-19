@@ -139,7 +139,7 @@ class GrepMatch(BaseModel):
 
         try:
             line_num = int(line_str) if line_str else None
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             line_num = None
         return cls(path=str((base / file_path).resolve()), line=line_num)
 
@@ -212,7 +212,7 @@ class Grep(
 
     async def run(
         self, args: GrepArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | GrepResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | GrepResult]:
         backend = self._detect_backend()
         self._validate_args(args)
 

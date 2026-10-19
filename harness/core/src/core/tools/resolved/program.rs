@@ -118,7 +118,7 @@ impl AcceptedProgramGroups {
                 prompt: PromptContribution::Listed,
                 search_description: SELF_SEARCH_DESCRIPTION.to_string(),
                 connector_icon_url: configured_icon(&provided_groups, SELF_NAMESPACE),
-                tools: self_tools()
+                tools: self_tools(config.settings.tools.programmatic.max_sleep_ms)
                     .into_iter()
                     .map(ProgramTool::from_tool_binding)
                     .collect(),
@@ -142,7 +142,7 @@ impl AcceptedProgramGroups {
                 prompt: PromptContribution::DedicatedSection,
                 search_description: subagents::SEARCH_DESCRIPTION.to_string(),
                 connector_icon_url: configured_icon(&provided_groups, subagents::NAMESPACE),
-                tools: subagent_program_tools(),
+                tools: subagent_program_tools(&config.settings.tools.subagents),
             });
         }
 
@@ -295,9 +295,10 @@ fn background_process_program_tools() -> Vec<ProgramTool> {
         .collect()
 }
 
-fn subagent_program_tools() -> Vec<ProgramTool> {
+fn subagent_program_tools(mode: &subagents::Mode) -> Vec<ProgramTool> {
     subagents::tools()
         .into_iter()
+        .filter(|spec| mode.supports(spec.name))
         .map(|spec| ProgramTool {
             runtime_name: spec.name.sandbox_name().to_string(),
             function_name: spec.name.function_name().to_string(),

@@ -16,10 +16,6 @@ from textual.timer import Timer
 from textual.widgets import Static
 from textual.worker import Worker
 
-from vibe.cli.clipboard import NATIVE_COPY_HINT
-from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
-from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
-from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ProviderConfig
 from vibe.core.telemetry.types import LaunchContext
 from vibe.observability.logging import logger
@@ -33,7 +29,11 @@ from vibe.setup.auth import (
     BrowserSignInStatusChanged,
 )
 from vibe.setup.onboarding.base import OnboardingScreen
+from vibe.setup.onboarding.clipboard import NATIVE_COPY_HINT
 from vibe.setup.onboarding.gradient_text import GRADIENT_COLORS, append_gradient_text
+from vibe.setup.onboarding.shortcut_hints import shortcut, shortcut_hint
+from vibe.setup.onboarding.widgets.no_markup_static import NoMarkupStatic
+from vibe.setup.onboarding.widgets.petit_chat import PetitChat
 
 PENDING_HINT = (
     f"Press {shortcut('m')} to enter API key manually - {shortcut('Esc')} to cancel"

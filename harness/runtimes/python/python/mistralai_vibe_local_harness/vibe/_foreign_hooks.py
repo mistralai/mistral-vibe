@@ -24,7 +24,8 @@ from collections.abc import Awaitable, Callable, Mapping
 import contextlib
 from dataclasses import dataclass
 import json
-from pathlib import Path
+import os
+import sys
 from typing import Any
 
 from mistralai_vibe_local_harness.protocol import (
@@ -53,11 +54,14 @@ from mistralai_vibe_local_harness.vibe._hook_matcher import (
     selects_tool,
 )
 from mistralai_vibe_local_harness.vibe._local_actions import (
+    AcceptOrRetryPostAgentHandler,
     HookContext,
     HookNoticeData,
-    PostAgentTurnHookHandler,
     ToolScopedHook,
 )
+from mistralai_vibe_local_harness.vibe._processes._backend import TerminalBackendError
+from mistralai_vibe_local_harness.vibe._processes._windows import WindowsTerminalBackend
+from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
 from mistralai_vibe_local_harness.vibe._sandbox_helper import kill
 
 _DEFAULT_TIMEOUT_S = 60.0
@@ -389,17 +393,19 @@ async def _feed_stdin_and_wait(
     await process.wait()
 
 
-async def _run_command(command: str, cwd: Path, timeout_s: float, stdin: bytes) -> str:
-    """Spawn ``command`` in ``cwd`` with ``stdin``; return stdout text.
+async def _run_command(
+    command: str, config: LocalRuntimeAdapterConfig, timeout_s: float, stdin: bytes
+) -> str:
+    """Spawn ``command`` in the session cwd with ``stdin``; return stdout text.
 
     Raises on any failure (spawn error, timeout, non-zero exit); the caller maps that to
     the point's fail action.
 
-    The command runs through the platform shell, matching the legacy executor: a
-    ``hooks.toml`` command is a shell line, and real ones use pipes, ``&&``, redirects,
-    globs and ``$VAR``. Splitting it into argv instead would leave most of them exiting
-    non-zero or -- worse -- exiting *zero* with the metacharacters passed through as
-    literal arguments, whose non-JSON stdout a non-strict hook maps to allow-and-continue.
+    The command runs through a shell: a ``hooks.toml`` command is a shell line, and real
+    ones use pipes, ``&&``, redirects, globs and ``$VAR``. Splitting it into argv instead
+    would leave most of them exiting non-zero or -- worse -- exiting *zero* with the
+    metacharacters passed through as literal arguments, whose non-JSON stdout a
+    non-strict hook maps to allow-and-continue.
 
     ``start_new_session`` puts the command in its own process group so a timeout tears
     down the whole tree; a hook that spawns children would otherwise orphan them.
@@ -407,15 +413,8 @@ async def _run_command(command: str, cwd: Path, timeout_s: float, stdin: bytes) 
     if not command.strip():
         raise _HookCommandError("hook command is empty")
     try:
-        process = await asyncio.create_subprocess_shell(
-            command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(cwd),
-            start_new_session=True,
-        )
-    except OSError as error:
+        process = await _spawn_hook_command(command, config)
+    except (OSError, TerminalBackendError) as error:
         raise _HookCommandError(f"failed to start: {error}") from None
     try:
         stdout_bytes, stderr_bytes, _ = await asyncio.wait_for(
@@ -444,6 +443,35 @@ async def _run_command(command: str, cwd: Path, timeout_s: float, stdin: bytes) 
     return stdout_bytes.decode("utf-8", errors="replace")
 
 
+async def _spawn_hook_command(
+    command: str, config: LocalRuntimeAdapterConfig
+) -> asyncio.subprocess.Process:
+    # On native Windows a hook runs in the session's shell, as the bash tool does;
+    # the platform shell there is cmd.exe, which runs neither POSIX nor PowerShell.
+    pipe = asyncio.subprocess.PIPE
+    cwd = str(config.workspace.cwd)
+    match config.command_environment:
+        case "git_bash" | "powershell" if sys.platform == "win32":
+            backend = WindowsTerminalBackend(config.command_environment)
+            shell = backend.resolve_shell(config.shell, {**os.environ, **config.env})
+            return await asyncio.create_subprocess_exec(
+                *backend.command_argv(shell, command, interactive=False),
+                stdin=pipe,
+                stdout=pipe,
+                stderr=pipe,
+                cwd=cwd,
+            )
+        case _:
+            return await asyncio.create_subprocess_shell(
+                command,
+                stdin=pipe,
+                stdout=pipe,
+                stderr=pipe,
+                cwd=cwd,
+                start_new_session=True,
+            )
+
+
 def build_pre_tool_call_handler(
     *,
     name: str,
@@ -462,9 +490,7 @@ def build_pre_tool_call_handler(
         try:
             payload = _stdin_payload(hook_input, context)
             stdin = json.dumps(payload).encode("utf-8")
-            stdout = await _run_command(
-                command, context.config.workspace.cwd, timeout_s, stdin
-            )
+            stdout = await _run_command(command, context.config, timeout_s, stdin)
         except Exception as error:
             # Any execution failure maps to the point's fail action, never an exception.
             result, notice = _fail(
@@ -657,9 +683,7 @@ def build_post_tool_call_handler(
         try:
             payload = _post_tool_payload(hook_input, context)
             stdin = json.dumps(payload).encode("utf-8")
-            stdout = await _run_command(
-                command, context.config.workspace.cwd, timeout_s, stdin
-            )
+            stdout = await _run_command(command, context.config, timeout_s, stdin)
         except Exception as error:
             # Any execution failure maps to the point's fail action, never an exception.
             new_result, notice = _post_tool_fail(
@@ -744,16 +768,14 @@ def build_post_agent_turn_handler(
     command: str,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
     strict: bool = False,
-) -> PostAgentTurnHookHandler:
+) -> AcceptOrRetryPostAgentHandler:
     async def handler(
         _hook_input: RustCompletionHookInput, context: HookContext
     ) -> RustPostAgentTurnHookResult:
         try:
             payload = _post_agent_payload(context)
             stdin = json.dumps(payload).encode("utf-8")
-            stdout = await _run_command(
-                command, context.config.workspace.cwd, timeout_s, stdin
-            )
+            stdout = await _run_command(command, context.config, timeout_s, stdin)
         except Exception as error:
             # A failed review hook always accepts the turn, but the reason still
             # reaches the notice line so a broken hook is visible.
@@ -771,4 +793,5 @@ def build_post_agent_turn_handler(
         )
         return result
 
-    return handler
+    # A foreign hook's stdout can only accept or ask for a retry, never replace.
+    return AcceptOrRetryPostAgentHandler(handler)

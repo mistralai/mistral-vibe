@@ -1,4 +1,4 @@
-//! `vibe.voice_mode_toggled` for `/config` writes (Python `_persist_voice_settings`).
+//! `vibe.voice_mode_toggled` for `/config` writes.
 
 use crate::app::App;
 use crate::config_fields::{ConfigField, Loaded};

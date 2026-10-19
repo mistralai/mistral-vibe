@@ -1,0 +1,16 @@
+[
+ {
+  "method": "mcp_catalog/add",
+  "params": {
+   "allowInsecureHttp": true,
+   "name": "docs",
+   "scopes": [
+    "read",
+    "write"
+   ],
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "transport": "http",
+   "url": "http://192.168.0.8:3002/mcp"
+  }
+ }
+]

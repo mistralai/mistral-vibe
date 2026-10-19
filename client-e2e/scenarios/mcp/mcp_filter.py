@@ -10,5 +10,5 @@ request_methods = {"telemetry/record"}
 
 timeline: Timeline = ["/mcp\r", "/", "GH", "\x1b[B", "\r", "\x1b", "/zz"]
 
-screen_contains = {"rust": ("No matching MCP servers or connectors", "GHzz")}
-screen_excludes = {"rust": ("Local MCP Servers", "Available Connectors")}
+screen_contains = ("No matching MCP servers or connectors", "GHzz")
+screen_excludes = ("Local MCP Servers", "Available Connectors")

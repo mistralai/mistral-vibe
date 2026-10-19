@@ -11,6 +11,6 @@ handshake = {
     }
 }
 request_methods = METHODS
-screen_contains = {"rust": ("Failed to read proxy settings: Permission denied",)}
-screen_excludes = {"rust": ("Proxy setup opened...", "Proxy Configuration")}
+screen_contains = ("Failed to read proxy settings: Permission denied",)
+screen_excludes = ("Proxy setup opened...", "Proxy Configuration")
 timeline: Timeline = ["/proxy-setup\r"]

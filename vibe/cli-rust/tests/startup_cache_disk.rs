@@ -29,11 +29,11 @@ fn runtime() -> Value {
             "config": {
                 "theme": "ansi-dark",
                 "activeModel": {"displayName": "Medium", "thinking": "off"},
-                "defaultAgent": "plan",
+                "defaultAgent": "audit",
             },
             "agents": [
                 {"name": "ask", "displayName": "Ask", "safety": "neutral"},
-                {"name": "plan", "displayName": "Plan", "safety": "safe"},
+                {"name": "audit", "displayName": "Audit", "safety": "safe"},
             ],
         }
     })

@@ -102,8 +102,9 @@ def test_supported_session_lists_and_reads(tmp_path: Path) -> None:
     rows = store.list_sessions()
     assert [row.id for row in rows] == [SESSION_ID]
     assert rows[0].harness == "legacy"
-    assert rows[0].preview == "run the tests"
+    assert rows[0].preview == ""
     assert rows[0].cwd == "/workspace"
+    assert store.with_previews(rows)[0].preview == "run the tests"
 
     response = store.read_session(_read_params(SESSION_ID))
     assert response is not None

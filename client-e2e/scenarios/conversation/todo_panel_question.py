@@ -53,10 +53,8 @@ timeline: Timeline = [
 
 # The panel keeps its column and the pinned row keeps its line, while the question
 # app owns the input box: `▶ 1/3 · Pick the database` is the row's summary.
-screen_contains = {
-    "rust": (
-        "Todos · 1/3 done",
-        "Which database should we use",
-        "1/3 · Pick the database",
-    )
-}
+screen_contains = (
+    "Todos · 1/3 done",
+    "Which database should we use",
+    "1/3 · Pick the database",
+)

@@ -23,8 +23,12 @@ permission rule reads.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from pathlib import Path
+from dataclasses import dataclass, replace
+from functools import partial
+import os
+from pathlib import Path, PureWindowsPath
 import re
+import tempfile
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel
@@ -36,6 +40,8 @@ from vibe.app_server._cron import CRON_TOOL_NAME
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.tools.base import BaseTool
+from vibe.core.tools.builtins._shell_permission_analysis import redirect_writes
+from vibe.core.tools.builtins.windows_shell import windows_redirect_writes
 from vibe.core.tools.manager import NoSuchToolError, ToolManager
 from vibe.core.tools.models import (
     ApprovedRule,
@@ -67,6 +73,12 @@ RUST_BUILTIN_TOOL_SOURCES: dict[RustRuntimeBuiltinToolName, frozenset[str]] = {
     "process.list": _SHELL_TOOL_SOURCES,
     "process.stop": _SHELL_TOOL_SOURCES,
 }
+
+# Builtins that run a shell command, whose redirects can write files.
+_SHELL_COMMAND_BUILTINS: frozenset[RustRuntimeBuiltinToolName] = frozenset({
+    "file_system.bash",
+    "process.start",
+})
 
 # Process calls whose authority the ``process.start`` gate already settled.
 # The reads only ever observe a process this session started, and a stop only
@@ -226,6 +238,121 @@ _FALLBACK_SCOPES: dict[
 }
 
 
+type CommandEnvironment = Literal["unix", "git_bash", "powershell"]
+"""The one shell a session runs every command in."""
+
+
+@dataclass(frozen=True, slots=True)
+class ShellWrites:
+    """Where a shell command's redirects write, as far as Vibe can place them."""
+
+    paths: tuple[Path, ...] = ()
+    """Files placed exactly, resolved."""
+
+    unplaced: tuple[str, ...] = ()
+    """Targets from a root, as written, that cannot be placed before the command
+    runs: the spelling needs the shell to read it, or names no fixed file."""
+
+
+def shell_writes(
+    command: str,
+    *,
+    environment: CommandEnvironment,
+    path_space: PathSpace = "host",
+    process_env: Mapping[str, str] | None = None,
+) -> ShellWrites:
+    """Where ``command``'s redirects write from a root, read as ``environment`` does.
+
+    A target is placed only where its spelling has one meaning on this host:
+    nothing the command does first (a ``cd``, a ``HOME``, a variable) can move
+    it, and no mapping Vibe does not know stands between it and the file. Every
+    other target from a root is unplaced. Relative, ``~`` and expansion-led
+    targets are in neither: they are left to the classifier.
+
+    ``process_env``: the variables a ``process.start`` sets for its shell.
+    """
+    match environment:
+        case "powershell":
+            writes = windows_redirect_writes(command)
+            place = _powershell_path
+        case "git_bash":
+            writes = redirect_writes(command, drive_paths=True)
+            temp_moved = any(
+                name.casefold() in _TEMP_VARIABLES for name in process_env or {}
+            )
+            place = partial(_git_bash_path, temp_moved=temp_moved)
+        case "unix":
+            writes = redirect_writes(command)
+            place = sandbox_path if path_space == "sandbox" else _host_path
+    paths: list[Path] = []
+    unplaced: list[str] = []
+    for write in writes:
+        path = None if write.path is None else place(write.path)
+        if path is None:
+            unplaced.append(write.spelling)
+        else:
+            paths.append(path)
+    return ShellWrites(tuple(dict.fromkeys(paths)), tuple(dict.fromkeys(unplaced)))
+
+
+def _host_path(target: str) -> Path:
+    """``target`` as the file it opens, following this host's links."""
+    try:
+        return Path(target).resolve()
+    except OSError, RuntimeError:
+        return Path(os.path.normpath(target))
+
+
+def _powershell_path(target: str) -> Path | None:
+    """A drive- or share-rooted ``target``; ``None`` for any other spelling.
+
+    ``\\x`` and ``/x`` are on whichever drive is current when it runs, ``C:x``
+    under that drive's current directory, and a ``\\\\?\\`` or ``\\\\.\\`` device
+    path skips the normalisation every other path goes through.
+    """
+    windows = windows_drive_path(target)
+    return None if windows is None else _host_path(windows)
+
+
+def _git_bash_path(target: str, *, temp_moved: bool) -> Path | None:
+    """``target`` as Git Bash opens it, where that is fixed; else ``None``."""
+    windows = git_bash_windows_path(target, temp_moved=temp_moved)
+    return None if windows is None else _host_path(windows)
+
+
+def windows_drive_path(target: str) -> str | None:
+    """``target`` if it names a file from a drive or share root, else ``None``."""
+    pure = PureWindowsPath(target)
+    if not (pure.drive and pure.root) or pure.drive.startswith(_DEVICE_PREFIXES):
+        return None
+    return target
+
+
+_DEVICE_PREFIXES = ("\\\\?\\", "\\\\.\\")
+# The variables a Windows or MSYS runtime may read its temporary directory from.
+_TEMP_VARIABLES = frozenset({"tmp", "temp", "tmpdir"})
+_MSYS_DRIVE = re.compile(r"/([A-Za-z])(?=/|$)")
+_DRIVE_ROOT = re.compile(r"[A-Za-z]:[\\/]")
+
+
+def git_bash_windows_path(target: str, *, temp_moved: bool) -> str | None:
+    """The Windows path Git Bash opens for ``target``, where that is fixed.
+
+    Git Bash mounts each drive at ``/<letter>`` and its ``/tmp`` at the
+    temporary directory, unless the process moves ``TMP``, ``TEMP`` or
+    ``TMPDIR``. Any other POSIX path lies under a mount Vibe does not read, and
+    with ``..`` in it the mount it ends up under depends on how the runtime
+    folds it.
+    """
+    if ".." in re.split(r"[\\/]", target):
+        return None
+    if drive := _MSYS_DRIVE.match(target):
+        return f"{drive.group(1).upper()}:{target[drive.end() :] or '/'}"
+    if target == "/tmp" or target.startswith("/tmp/"):
+        return None if temp_moved else tempfile.gettempdir() + target[len("/tmp") :]
+    return target if _DRIVE_ROOT.match(target) else None
+
+
 class UnifiedPermissionResolver:
     """Answers the Runtime's ``ask`` with Vibe's per-call permission rules.
 
@@ -243,6 +370,7 @@ class UnifiedPermissionResolver:
         provided_names: ProvidedToolNames | None = None,
         *,
         path_space: PathSpace = "host",
+        command_environment: CommandEnvironment = "unix",
     ) -> None:
         self._tools = tools
         self._store = store
@@ -251,6 +379,9 @@ class UnifiedPermissionResolver:
         # The session workspace's: sandbox paths name files the host's file
         # system cannot resolve, so they are normalized instead.
         self._path_space: PathSpace = path_space
+        # The shell every command of the session runs in, so the one whose
+        # reading of a command's redirects counts.
+        self._command_environment: CommandEnvironment = command_environment
 
     @property
     def store(self) -> PermissionStore:
@@ -267,7 +398,26 @@ class UnifiedPermissionResolver:
         available = self._tools.available_tools
         return tuple(sorted(name for name in sources if name in available))
 
-    async def resolve(  # noqa: PLR0911 - explicit deny/ask/allow ladder
+    async def resolve(
+        self, builtin: str, arguments: Mapping[str, Any]
+    ) -> PermissionOutcome:
+        """Decide one call, and say where a shell command it asks about writes.
+
+        The harness sends a shell write to the user when it lands outside the
+        writable roots or cannot be placed, so every ``ask`` about a shell
+        command carries its redirects from a root -- whichever branch asked.
+        """
+        outcome = await self._decide(builtin, arguments)
+        if outcome.decision != "ask" or builtin not in _SHELL_COMMAND_BUILTINS:
+            return outcome
+        writes = self._shell_writes(arguments)
+        return replace(
+            outcome,
+            shell_write_paths=writes.paths,
+            unplaced_shell_writes=writes.unplaced,
+        )
+
+    async def _decide(  # noqa: PLR0911 - explicit deny/ask/allow ladder
         self, builtin: str, arguments: Mapping[str, Any]
     ) -> PermissionOutcome:
         """Decide one call the way ``AgentLoop._should_execute_tool`` would.
@@ -358,6 +508,19 @@ class UnifiedPermissionResolver:
             )
         return PermissionOutcome(decision="allow", authorized_path=authorized_path)
 
+    def _shell_writes(self, arguments: Mapping[str, Any]) -> ShellWrites:
+        """Where the command's redirects write, read by the shell that runs it."""
+        command = arguments.get("command")
+        if not isinstance(command, str):
+            return ShellWrites()
+        env = arguments.get("env")
+        return shell_writes(
+            command,
+            environment=self._command_environment,
+            path_space=self._path_space,
+            process_env=env if isinstance(env, Mapping) else None,
+        )
+
     def _resolve_provided_tool(self, route: str) -> PermissionOutcome:
         """A provided tool has no call-scoped rules, so its permission is the verdict."""
         name = self._provided_names.resolve(route)
@@ -401,7 +564,7 @@ class UnifiedPermissionResolver:
                 try:
                     tool = self._tools.get(name)
                     tool_cwd = Path(tool.cwd).resolve()
-                except (NoSuchToolError, ValueError, OSError):
+                except NoSuchToolError, ValueError, OSError:
                     continue
                 try:
                     cwd_path = Path(cwd).expanduser()
@@ -409,7 +572,7 @@ class UnifiedPermissionResolver:
                         cwd_path = tool_cwd / cwd_path
                     if cwd_path.resolve() == tool_cwd:
                         return None
-                except (ValueError, OSError):
+                except ValueError, OSError:
                     continue
         for name in self.vibe_tool_names(builtin):
             context = self._context_for(
@@ -467,7 +630,7 @@ class UnifiedPermissionResolver:
         try:
             tool = self._tools.get(name)
             return tool, type(tool).validate_arguments(translate(arguments))
-        except (NoSuchToolError, ValueError):
+        except NoSuchToolError, ValueError:
             # Arguments the tool would itself reject. Its own validation will
             # fail the call; deciding permission off a guess would be worse.
             return None
@@ -497,7 +660,7 @@ class UnifiedPermissionResolver:
                 if not path.is_absolute():
                     path = tool.cwd / path
                 return path.resolve()
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 return None
         return None
 
@@ -647,6 +810,9 @@ class UnifiedPermissionResolver:
 __all__ = [
     "ALLOWLIST_EXEMPTED_BUILTINS",
     "RUST_BUILTIN_TOOL_SOURCES",
+    "CommandEnvironment",
     "ProvidedToolNames",
+    "ShellWrites",
     "UnifiedPermissionResolver",
+    "shell_writes",
 ]

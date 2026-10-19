@@ -1,5 +1,5 @@
-//! The wizard renders on the theme background: Textual fills every screen cell
-//! with `$background` and its `Input` widgets render on it, so `Clear`-ed
+//! The wizard renders on the theme background: every screen cell is filled
+//! with `$background` and the inputs render on it, so `Clear`-ed
 //! areas (input cards, the welcome box) must repaint the theme background
 //! instead of leaving the terminal default.
 

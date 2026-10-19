@@ -1,7 +1,7 @@
-//! `sanitize_tenant_url` (Python `_sanitize_tenant_url`): strict https, a
+//! `sanitize_tenant_url`: strict https, a
 //! host, no `..` in the raw path, trailing slashes stripped. `url::Url::parse`
 //! normalizes `..` away, so the check runs on the raw string between host
-//! and query/fragment — the Python `urlparse` parity that was the root cause
+//! and query/fragment — that normalization was the root cause
 //! of the original bug (Item 1).
 
 use vibe_rs::setup::auth::whoami::sanitize_tenant_url;

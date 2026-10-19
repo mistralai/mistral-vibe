@@ -9,7 +9,7 @@ use crate::app::App;
 use crate::server::{method, Client, PublicSessionState};
 
 /// Ask whether rewinding to `messages[index]` would restore files; the panel
-/// opens on the answer (Python `_select_rewind_widget`).
+/// opens on the answer.
 pub(super) fn select(
     app: &mut App,
     client: &Arc<Client>,
@@ -43,7 +43,7 @@ pub(super) fn select(
     });
 }
 
-/// Send the rewind itself (Python `_execute_rewind`).
+/// Send the rewind itself.
 pub(super) fn confirm(app: &mut App, client: &Arc<Client>, inplace: bool) {
     let (Some(session_id), Some(entry_id), Some(tx)) = (
         app.session.session_id.clone(),

@@ -9,4 +9,4 @@ handshake = mcp_handshake(sample_sources())
 
 timeline: Timeline = ["/mcp weather\r"]
 
-screen_contains = {"rust": ("Local MCP Servers", "needs auth")}
+screen_contains = ("Local MCP Servers", "needs auth")

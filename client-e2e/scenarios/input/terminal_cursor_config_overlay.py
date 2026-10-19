@@ -7,4 +7,4 @@ from e2e.app_server.scenario import Timeline
 timeline: Timeline = ["/config\r"]
 
 # Dead-key and IME previews draw at the terminal cursor: never under the modal's rows.
-screen_cursor = {"rust": (39, 0)}
+screen_cursor = (39, 0)

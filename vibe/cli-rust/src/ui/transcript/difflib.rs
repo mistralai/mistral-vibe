@@ -1,4 +1,4 @@
-//! Port of the Python `difflib` subset `render_edit_diff` relies on.
+//! Port of the Python `difflib` subset the edit diff relies on.
 
 use std::collections::HashMap;
 

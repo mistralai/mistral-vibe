@@ -55,7 +55,7 @@ impl Drop for RestoreEnv {
 
 /// ADR 0015: `SSL_CERT_FILE` and `SSL_CERT_DIR` certificates load additively
 /// in front of the policy roots, unparsable files are skipped, and an empty
-/// value counts as unset like Python's truthiness check.
+/// value counts as unset.
 #[test]
 fn custom_roots_load_from_ssl_cert_file_and_dir() {
     let dir = tempfile::tempdir().unwrap();
@@ -76,13 +76,13 @@ fn custom_roots_load_from_ssl_cert_file_and_dir() {
     );
     assert_eq!(custom_root_certificates().len(), 1);
 
-    // Empty values count as unset, like Python's `if ssl_cert_file or ...`.
+    // Empty values count as unset.
     let _empty = RestoreEnv::set("SSL_CERT_DIR", "");
     let _unset = RestoreEnv::unset("SSL_CERT_FILE");
     assert!(custom_root_certificates().is_empty());
 
     // A c_rehash-style CApath is made of hashed symlinks to the real
-    // certificates; OpenSSL — and Python through it — loads them, so entries
+    // certificates; OpenSSL loads them, so entries
     // that resolve to a regular file must load too, while a symlink to a
     // directory still does not.
     let hashed = tempfile::tempdir().unwrap();

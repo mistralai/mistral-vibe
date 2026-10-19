@@ -2,28 +2,28 @@
  {
   "method": "session/turn/enqueue",
   "params": {
-   "idempotencyKey": "<client-message-id>",
-   "sessionId": "00000000-0000-4000-8000-000000000001",
    "entries": [
     {
      "annotations": {},
      "content": [
       {
-       "type": "text",
-       "text": "hi"
+       "text": "hi",
+       "type": "text"
       }
      ],
      "entryId": "<client-message-id>",
      "role": "user"
     }
-   ]
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
   }
  },
  {
   "method": "feedback/shouldShow",
   "params": {
-   "sessionId": "00000000-0000-4000-8000-000000000001",
-   "pendingUserMessages": 1
+   "pendingUserMessages": 1,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
   }
  }
 ]

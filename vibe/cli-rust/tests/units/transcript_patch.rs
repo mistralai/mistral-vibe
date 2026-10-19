@@ -188,7 +188,7 @@ fn shell_effects_stay_standalone() {
 }
 
 #[test]
-fn skill_effects_group_and_expand_like_python() {
+fn skill_effects_group_and_expand() {
     let mut transcript = Transcript::default();
     for id in ["skill-1", "skill-2"] {
         transcript.add(&json!({"entry": {

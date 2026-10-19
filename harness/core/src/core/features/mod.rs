@@ -2,6 +2,7 @@ pub(super) mod background_processes;
 pub(super) mod compaction;
 pub(super) mod file_system;
 pub(super) mod large_output;
+pub(super) mod model_wait;
 pub(super) mod notifications;
 pub(super) mod permissions;
 pub(super) mod programmatic_tool_calling;

@@ -1,4 +1,4 @@
-//! The wizard's headless auth half (Python `vibe/setup/auth`): browser
+//! The wizard's headless auth half: browser
 //! sign-in, tenant resolution, and the `setup/*` RPC calls. The client
 //! never persists anything itself — the app-server owns every write.
 

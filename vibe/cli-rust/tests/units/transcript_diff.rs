@@ -1,11 +1,11 @@
-//! Unified-diff hunks pinned to Python difflib fixtures, plus diff helpers.
+//! Unified-diff hunks pinned to difflib fixtures, plus diff helpers.
 
 use vibe_rs::server::FileEditEffectOutput;
 use vibe_rs::ui::transcript::{
     gutter_width, language, occurrences, render_edit_diff, unified_diff, DiffOccurrence, Hunk,
 };
 
-/// `(prefix, text)` rows of a hunk, as Python `unified_diff` lines carry them.
+/// `(prefix, text)` rows of a hunk, as difflib `unified_diff` lines carry them.
 fn rows(hunk: &Hunk) -> Vec<(char, &str)> {
     hunk.rows
         .iter()
@@ -46,7 +46,7 @@ fn single_line_change_keeps_two_context_lines() {
 fn all_removed_lines_pair_with_an_empty_new_range() {
     let hunks = unified_diff(&["x", "y", "z"], &[], 2);
     assert_eq!(hunks.len(), 1);
-    // Python header: `@@ -1,3 +0,0 @@`.
+    // Expected header: `@@ -1,3 +0,0 @@`.
     assert_eq!(hunks[0].old_start, 1);
     assert_eq!(hunks[0].new_start, 0);
     assert_eq!(rows(&hunks[0]), vec![('-', "x"), ('-', "y"), ('-', "z")]);
@@ -56,7 +56,7 @@ fn all_removed_lines_pair_with_an_empty_new_range() {
 fn all_added_lines_pair_with_an_empty_old_range() {
     let hunks = unified_diff(&[], &["x", "y"], 2);
     assert_eq!(hunks.len(), 1);
-    // Python header: `@@ -0,0 +1,2 @@`.
+    // Expected header: `@@ -0,0 +1,2 @@`.
     assert_eq!(hunks[0].old_start, 0);
     assert_eq!(hunks[0].new_start, 1);
     assert_eq!(rows(&hunks[0]), vec![('+', "x"), ('+', "y")]);
@@ -66,7 +66,7 @@ fn all_added_lines_pair_with_an_empty_old_range() {
 fn inserts_carry_the_old_line_numbering() {
     let hunks = unified_diff(&["a", "b", "c"], &["a", "x", "b", "c"], 2);
     assert_eq!(hunks.len(), 1);
-    // Python header: `@@ -1,3 +1,4 @@`.
+    // Expected header: `@@ -1,3 +1,4 @@`.
     assert_eq!(hunks[0].old_start, 1);
     assert_eq!(hunks[0].new_start, 1);
     assert_eq!(
@@ -87,7 +87,7 @@ fn distant_changes_split_into_two_hunks() {
 
     let hunks = unified_diff(&old_refs, &new_refs, 2);
     assert_eq!(hunks.len(), 2, "the middle context splits the hunks");
-    // Python headers: `@@ -1,4 +1,4 @@` and `@@ -7,4 +7,4 @@`.
+    // Expected headers: `@@ -1,4 +1,4 @@` and `@@ -7,4 +7,4 @@`.
     assert_eq!((hunks[0].old_start, hunks[0].new_start), (1, 1));
     assert_eq!((hunks[1].old_start, hunks[1].new_start), (7, 7));
     assert_eq!(

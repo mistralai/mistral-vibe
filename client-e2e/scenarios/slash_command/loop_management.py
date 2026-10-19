@@ -36,5 +36,5 @@ timeline: Timeline = [
     assistant_msg("I will cancel the remaining tasks."),
     turn_completed(),
 ]
-screen_contains = {"rust": ("/loop cancel all", "I will cancel the remaining tasks.")}
-screen_excludes = {"rust": ("Cancelled 2 scheduled loop(s).", "not implemented")}
+screen_contains = ("/loop cancel all", "I will cancel the remaining tasks.")
+screen_excludes = ("Cancelled 2 scheduled loop(s).", "not implemented")

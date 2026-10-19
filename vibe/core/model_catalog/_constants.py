@@ -6,9 +6,12 @@ MODEL_CATALOG_PATH: Final = "/model-catalog"
 
 MODEL_CATALOG_SURFACE: Final = "vibe-code"
 
-# Matches EVAL_REQUEST_TIMEOUT_SECONDS so a first-ever fetch holds the first
-# turn no longer than an experiment eval.
+# Matches EVAL_REQUEST_TIMEOUT_SECONDS, per connection phase.
 MODEL_CATALOG_TIMEOUT_SECONDS: Final = 5.0
+
+# The HTTP timeout above bounds each connection phase, not the request, so the
+# wait on a fetch is capped on its own.
+MODEL_CATALOG_WAIT_CAP_SECONDS: Final = 5.0
 
 # A catalog this old may advertise retired models. Longer than the
 # experiment-eval TTL because a model list moves far less than a variant.

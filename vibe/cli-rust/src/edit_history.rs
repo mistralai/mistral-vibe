@@ -1,4 +1,4 @@
-//! Bounded composer checkpoints, with Textual-style edit batching.
+//! Bounded composer checkpoints, with time- and size-batched edits.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};

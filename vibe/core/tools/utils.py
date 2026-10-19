@@ -110,7 +110,7 @@ def _resolve_display_target(path_str: str, cwd: Path) -> Path | None:
         if not path.is_absolute():
             path = cwd / path
         return Path(os.path.normpath(path))
-    except (ValueError, OSError):
+    except ValueError, OSError:
         return None
 
 
@@ -175,7 +175,7 @@ def is_path_within_workdir(
     workspace = workspace or ambient_workspace()
     try:
         resolved = _make_absolute(path_str, workspace.cwd).resolve()
-    except (ValueError, OSError):
+    except ValueError, OSError:
         return False
     return workspace.allows(resolved)
 

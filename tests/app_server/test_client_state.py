@@ -28,7 +28,6 @@ def _snapshot(mcp: MCPState) -> RuntimeSnapshot:
             connectors=SimpleNamespace(),
             mcp=mcp,
             bypass_tool_permissions=False,
-            experimental_harness=False,
         ),
     )
 
@@ -58,6 +57,14 @@ def test_apply_runtime_prefers_snapshot_manage_url() -> None:
     client.apply_runtime(_snapshot(MCPState(manage_connectors_url=incoming)))
 
     assert client.mcp.manage_connectors_url == incoming
+
+
+def test_apply_runtime_carries_private_connectors_hidden() -> None:
+    client = _client(MCPState(private_connectors_hidden=True))
+
+    client.apply_runtime(_snapshot(MCPState()))
+
+    assert client.mcp.private_connectors_hidden is True
 
 
 def test_apply_runtime_on_bootstrap_has_no_manage_url() -> None:

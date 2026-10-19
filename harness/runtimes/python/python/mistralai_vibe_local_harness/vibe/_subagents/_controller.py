@@ -13,7 +13,9 @@ from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from pydantic import JsonValue, ValidationError
 
+from mistralai_vibe_local_harness._deprecated_tools import deprecated_tool_failure
 from mistralai_vibe_local_harness.protocol import (
+    DEPRECATED_RUNTIME_BUILTIN_TOOL_NAMES,
     RustEvent,
     RustFailTurnEvent,
     RustHarnessNotification,
@@ -29,6 +31,12 @@ from mistralai_vibe_local_harness.vibe._observability import (
     record_subagent_operation,
 )
 from mistralai_vibe_local_harness.vibe._storage import RuntimeStateV3
+from mistralai_vibe_local_harness.vibe._subagents._core_adapter import (
+    CORE_AGENT_TOOL_NAMES,
+    controller_action,
+    core_failure,
+    core_list_output,
+)
 from mistralai_vibe_local_harness.vibe._subagents._host import (
     ChildSessionHandle,
     ChildSessionHost,
@@ -81,7 +89,6 @@ from mistralai_vibe_local_harness.vibe._subagents._notifications import (
     pending_notification,
 )
 from mistralai_vibe_local_harness.vibe._subagents._operations import (
-    SUBAGENT_TOOL_NAMES,
     AgentInput,
     ListInput,
     MessageInput,
@@ -224,71 +231,49 @@ class SubagentController:
     ) -> None:
         # The ceiling is durable state every live child was admitted under.
         # A plugin re-pin must not silently change it, so a drift there is
-        # refused; ``reconfigure_subagents`` updates it explicitly via
-        # ``update_policy_ceiling`` instead.
-        if not _same_enforced_policy(self._policy_ceiling, policy_ceiling):
-            raise ValueError(
-                "cannot rebind subagent agent types under a different policy ceiling"
-            )
+        # refused; live policy changes use ``reconfigure_agent_types`` instead.
         async with self._graph_lock:
+            if not _same_enforced_policy(self._policy_ceiling, policy_ceiling):
+                raise ValueError(
+                    "cannot rebind subagent agent types under a different policy ceiling"
+                )
             self._bindings = dict(bindings)
 
-    async def update_policy_ceiling(
-        self, policy_ceiling: ResolvedSubagentPolicyCeiling
+    async def reconfigure_agent_types(
+        self,
+        bindings: Mapping[str | None, ResolvedChildSessionBinding],
+        policy_ceiling: ResolvedSubagentPolicyCeiling,
     ) -> None:
-        """Replace the enforced policy ceiling.
+        """Apply parent policy and child bindings without exposing mixed digests.
 
-        Used when the parent's adapter config changes mid-session (e.g. an
-        agent mode switch): the ceiling's ``approval_bypass`` follows the
-        parent's, and the new bindings (already rebound by the caller) carry
-        the matching ``bypass_approval`` and ``tool_modes``.
+        Update every existing child, including idle and reserved children. If
+        the Host cannot find a child, retain its stored digests so recovery
+        continues to fail closed rather than claiming an unapplied policy.
         """
-        if self._policy_ceiling == policy_ceiling:
-            return
-        self._policy_ceiling = policy_ceiling
-        async with self._graph_lock:
-            state = self._subagents()
-            state = state.model_copy(
+        async with self._turn_admission_lock, self._graph_lock:
+            previous = self._subagents()
+            state = previous.model_copy(
                 update={"policy_ceiling": policy_ceiling}, deep=True
             )
-            await self._commit(state)
-
-    async def reconfigure_children(self) -> None:
-        """Push the live approval policy into every existing child session.
-
-        Called when the parent's adapter config changes mid-session (e.g. an
-        agent mode switch): the child's ``bypass_approval`` and ``tool_modes``
-        were frozen at spawn time from the binding, and a mode switch on the
-        parent must propagate so the child stops (or starts) prompting.
-
-        The child record's ``template_digest`` and ``policy_ceiling_digest``
-        are updated to match the new binding so ``_binding`` does not reject
-        the child on its next interaction.
-
-        Every existing child is reconfigured, not just running ones: idle,
-        reserved, and turn-failed children also need their stored digests
-        updated so they remain reusable after a mode switch. The child host's
-        ``reconfigure_child`` returns ``False`` when it cannot update the
-        child (e.g. the session was evicted from memory and storage is
-        unavailable); in that case the parent record is left untouched so the
-        child's persisted metadata still matches on restore.
-        """
-        async with self._graph_lock:
-            state = self._subagents()
-            changed = False
-            for name, child in list(state.children.items()):
-                binding = self._bindings.get(child.agent_type)
-                if binding is None:
-                    continue
-                reconfigured = await self._child_host.reconfigure_child(
-                    ChildSessionHandle(session_id=child.child_session_id), binding
-                )
-                if not reconfigured:
-                    continue
-                if (
-                    child.template_digest != binding.template_digest
-                    or child.policy_ceiling_digest != binding.policy_ceiling_digest
-                ):
+            attempted: list[
+                tuple[str, ChildSessionHandle, ResolvedChildSessionBinding]
+            ] = []
+            try:
+                for name, child in list(state.children.items()):
+                    binding = bindings.get(child.agent_type)
+                    if binding is None:
+                        continue
+                    handle = ChildSessionHandle(session_id=child.child_session_id)
+                    previous_binding = self._bindings.get(child.agent_type)
+                    if previous_binding is None:
+                        continue
+                    attempted.append((name, handle, previous_binding))
+                    reconfigured = await self._child_host.reconfigure_child(
+                        handle, binding
+                    )
+                    if not reconfigured:
+                        attempted.pop()
+                        continue
                     state.children[name] = child.model_copy(
                         update={
                             "template_digest": binding.template_digest,
@@ -296,12 +281,71 @@ class SubagentController:
                         },
                         deep=True,
                     )
-                    changed = True
-            if changed:
-                await self._commit(state)
+                if state != previous:
+                    await self._commit(state)
+            except BaseException as exc:
+                # A cancelled write may have committed before raising. Restore
+                # both stores, including the child whose update raised.
+                for name, handle, previous_binding in reversed(attempted):
+                    try:
+                        restored = await self._child_host.reconfigure_child(
+                            handle, previous_binding
+                        )
+                        if restored:
+                            previous.children[name] = previous.children[
+                                name
+                            ].model_copy(
+                                update={
+                                    "template_digest": previous_binding.template_digest,
+                                    "policy_ceiling_digest": previous_binding.policy_ceiling_digest,
+                                },
+                                deep=True,
+                            )
+                    except BaseException as rollback_error:
+                        exc.add_note(
+                            f"Failed to restore child {handle.session_id}: {rollback_error}"
+                        )
+                try:
+                    await self._commit(previous)
+                except BaseException as rollback_error:
+                    exc.add_note(
+                        f"Failed to restore parent subagent state: {rollback_error}"
+                    )
+                raise
+            self._policy_ceiling = policy_ceiling
+            self._bindings = dict(bindings)
 
-    def handles(self, action: RustRuntimeBuiltinToolCallAction) -> bool:
-        return action.call.name in SUBAGENT_TOOL_NAMES
+    def handles(
+        self, action: RustRuntimeBuiltinToolCallAction, *, recovering: bool = False
+    ) -> bool:
+        return action.call.name in CORE_AGENT_TOOL_NAMES or (
+            action.call.name in DEPRECATED_RUNTIME_BUILTIN_TOOL_NAMES
+        )
+
+    async def execute_core_action(
+        self, action: RustRuntimeBuiltinToolCallAction, *, recovering: bool
+    ) -> RustEvent:
+        if action.call.name in DEPRECATED_RUNTIME_BUILTIN_TOOL_NAMES:
+            return deprecated_tool_failure(action)
+        try:
+            adapted = controller_action(action)
+        except ValueError as exc:
+            return core_failure(action, "agents_invalid_arguments", str(exc))
+        event = await self.execute(adapted, recovering=recovering)
+        if isinstance(event, RustToolSucceededEvent):
+            if action.call.name == "agents.list":
+                return _result_event(action, core_list_output(self._subagents()))
+            output = event.result.structured_content
+            if isinstance(output, dict) and output.get("type") == "error":
+                error = output.get("error")
+                message = error if isinstance(error, str) else "Agent operation failed"
+                code, separator, detail = message.partition(": ")
+                return core_failure(
+                    action,
+                    code if separator else "agents_operation_failed",
+                    detail if separator else message,
+                )
+        return event
 
     async def reconcile_actions(self, pending_action_ids: frozenset[str]) -> None:
         """Prune consumed receipts and finish effects abandoned by Core."""
@@ -545,9 +589,7 @@ class SubagentController:
                 "subagent_recovery_unsafe",
                 "Abandoned child command has an invalid durable phase",
             )
-        handle = await self._open_child(
-            child, self._binding(child), require_existing=True
-        )
+        handle = await self._open_current_child(agent_name, require_existing=True)
         await self._child_host.acknowledge_child_command(
             handle, operation_key=action_id
         )
@@ -640,21 +682,24 @@ class SubagentController:
         receipt: SubagentOperationReceipt | None,
     ) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
         match action.call.name:
-            case "subagent.list":
+            case "agents.list":
                 ListInput.model_validate(action.call.arguments)
                 return await self._list(), {}
-            case "subagent.spawn":
+            case "agents.spawn":
                 request = SpawnInput.model_validate(action.call.arguments)
                 return await self._spawn(action, request, receipt)
+            # Deprecated: `subagent.wait` and `subagent.stop` are replay-only;
+            # use standalone `wait`. `stop` has no replacement.
             case "subagent.wait":
                 request = WaitInput.model_validate(action.call.arguments)
                 return await self._wait(action, request, receipt), {}
-            case "subagent.send_message":
+            case "agents.send_message":
                 request = MessageInput.model_validate(action.call.arguments)
                 return await self._send(action, request, receipt), {}
-            case "subagent.interrupt":
+            case "agents.interrupt":
                 request = AgentInput.model_validate(action.call.arguments)
                 return await self._interrupt(action, request, receipt), {}
+            # Deprecated: replay-only, see `subagent.wait` above.
             case "subagent.stop":
                 request = AgentInput.model_validate(action.call.arguments)
                 return await self._stop(action, request, receipt), {}
@@ -695,16 +740,18 @@ class SubagentController:
         request: SpawnInput,
         receipt: SubagentOperationReceipt | None,
     ) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
-        binding = self._bindings.get(request.agent_type)
-        if binding is None:
-            return error_output(
-                failure(
-                    "subagent_type_not_found", "Unknown subagent type", retryable=False
-                )
-            ), {}
         async with self._name_locks[request.agent_name], self._turn_admission_lock:
             if receipt is None:
                 async with self._graph_lock:
+                    binding = self._bindings.get(request.agent_type)
+                    if binding is None:
+                        return error_output(
+                            failure(
+                                "subagent_type_not_found",
+                                "Unknown subagent type",
+                                retryable=False,
+                            )
+                        ), {}
                     state = self._subagents()
                     if request.agent_name in state.children:
                         return error_output(
@@ -751,6 +798,7 @@ class SubagentController:
                     )
                     state.children[request.agent_name] = ChildSessionRecord(
                         agent_name=request.agent_name,
+                        admission_sequence=state.next_operation_sequence,
                         agent_type=request.agent_type,
                         child_session_id=child_id,
                         spawn_action_id=action.action_id,
@@ -766,7 +814,7 @@ class SubagentController:
                 )
             else:
                 receipt_state = _active_receipt(receipt)
-            output = await self._resume_spawn(action, request, binding, receipt_state)
+            output = await self._resume_spawn(action, request, receipt_state)
             annotations = (
                 self._spawn_annotations(request.agent_name)
                 if output["type"] == "success"
@@ -778,7 +826,6 @@ class SubagentController:
         self,
         action: RustRuntimeBuiltinToolCallAction,
         request: SpawnInput,
-        binding: ResolvedChildSessionBinding,
         receipt_state: ActiveSubagentReceiptState,
     ) -> dict[str, JsonValue]:
         replay = _terminal_receipt_output(receipt_state)
@@ -793,8 +840,7 @@ class SubagentController:
             raise UnsafeSubagentRecovery(
                 "subagent_recovery_unsafe", "Spawn receipt target changed"
             )
-        record = self._require_child(request.agent_name)
-        child = await self._open_child(record, binding)
+        child = await self._open_current_child(request.agent_name)
         if isinstance(receipt_state, PreparedReceipt):
             try:
                 admission = await self._child_host.start_child_turn(
@@ -898,7 +944,7 @@ class SubagentController:
         immediate = _stored_outcome(child, target.generation)
         try:
             outcome = immediate or await self._child_host.wait_for_child_generation(
-                await self._open_child(child, self._binding(child)),
+                await self._open_current_child(request.agent_name),
                 target.generation,
                 max(0, target.deadline_unix_ms - _now_milliseconds()),
             )
@@ -986,7 +1032,7 @@ class SubagentController:
                 "subagent_recovery_unsafe", "Send target changed"
             )
         child = self._require_child(request.agent_name)
-        handle = await self._open_child(child, self._binding(child))
+        handle = await self._open_current_child(request.agent_name)
         if isinstance(receipt_state, PreparedReceipt):
             if not isinstance(target, SendIntentTarget):
                 raise UnsafeSubagentRecovery(
@@ -1077,7 +1123,7 @@ class SubagentController:
                     "subagent_recovery_unsafe", "Interrupt target changed"
                 )
             child = self._require_child(request.agent_name)
-            handle = await self._open_child(child, self._binding(child))
+            handle = await self._open_current_child(request.agent_name)
             if isinstance(receipt_state, PreparedReceipt):
                 admission = await self._child_host.interrupt_child(
                     handle, target=target, operation_key=action.action_id
@@ -1196,9 +1242,8 @@ class SubagentController:
         if isinstance(target, CloseRunningTarget) and not isinstance(
             receipt_state, CloseCleanupStartedReceipt
         ):
-            handle = await self._open_child(
-                child,
-                self._binding(child),
+            handle = await self._open_current_child(
+                request.agent_name,
                 require_existing=not isinstance(child.state, DeletingIdleChild),
             )
             receipt_state = await self._finish_running_close(
@@ -1381,8 +1426,7 @@ class SubagentController:
         self, agent_name: str, generation: ChildGenerationRef
     ) -> None:
         try:
-            child = self._require_child(agent_name)
-            handle = await self._open_child(child, self._binding(child))
+            handle = await self._open_current_child(agent_name)
             outcome = await self._child_host.wait_for_child_generation(
                 handle, generation.generation, 2_147_483_647
             )
@@ -1475,6 +1519,17 @@ class SubagentController:
             for handle in reversed(opened):
                 await self._child_host.unload_child(handle)
             raise
+
+    async def _open_current_child(
+        self, agent_name: str, *, require_existing: bool | None = None
+    ) -> ChildSessionHandle:
+        # Reconfiguration changes Host metadata as well as the parent record.
+        # Keep both stable through opening, then release before waiting on a Turn.
+        async with self._graph_lock:
+            child = self._require_child(agent_name)
+            return await self._open_child(
+                child, self._binding(child), require_existing=require_existing
+            )
 
     async def _open_child(
         self,
@@ -1853,16 +1908,18 @@ def _operation_name(
     action_name: str,
 ) -> Literal["list", "spawn", "wait", "send_message", "interrupt", "close"]:
     match action_name:
-        case "subagent.list":
+        case "agents.list":
             return "list"
-        case "subagent.spawn":
+        case "agents.spawn":
             return "spawn"
+        # Deprecated: replay-only; `wait` is now standalone.
         case "subagent.wait":
             return "wait"
-        case "subagent.send_message":
+        case "agents.send_message":
             return "send_message"
-        case "subagent.interrupt":
+        case "agents.interrupt":
             return "interrupt"
+        # Deprecated: replay-only; `stop` has no replacement.
         case "subagent.stop":
             return "close"
         case _:

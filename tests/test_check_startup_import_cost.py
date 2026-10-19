@@ -85,8 +85,8 @@ def test_load_config_parses_commands_with_budgets(tmp_path: Path) -> None:
         "budget = 68\n"
         "\n"
         "[[commands]]\n"
-        'label = "VibeApp"\n'
-        'code = "from vibe.cli.textual_ui.app import VibeApp"\n'
+        'label = "app server"\n'
+        'code = "import vibe.app_server.stdio"\n'
     )
 
     config = mod._load_config(_write_config(tmp_path, content))

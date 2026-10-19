@@ -29,15 +29,10 @@ impl CompactionProjection {
         tools: &[ToolDefinition],
         budget: CompactionBudget,
     ) -> Result<CompactionProjectionFit, CoreError> {
-        // Keyed hook context is redelivered after compaction, so the summary must not freeze it.
         let mut messages = if canonical_messages.is_empty() {
             vec![generated_system]
         } else {
-            canonical_messages
-                .iter()
-                .filter(|stored| stored.context_key().is_none())
-                .cloned()
-                .collect()
+            canonical_messages.to_vec()
         };
         messages.push(prompt_message(extra_instructions));
         Self::restore(messages, 0)?.fit_to_budget(tools, budget)
@@ -83,8 +78,12 @@ impl CompactionProjection {
         let Some(token_threshold) = budget.token_threshold else {
             return Ok(CompactionProjectionFit::Fitted(self));
         };
-        if estimate_model_input_tokens(&self.messages, tools, budget.image_delivery)?
-            < token_threshold
+        if estimate_model_input_tokens(
+            &self.messages,
+            tools,
+            budget.image_delivery,
+            budget.image_cost,
+        )? < token_threshold
         {
             return Ok(CompactionProjectionFit::Fitted(self));
         }
@@ -99,8 +98,12 @@ impl CompactionProjection {
         while lower <= upper {
             let removed = lower + (upper - lower) / 2;
             let candidate = remove_oldest_history(&self.messages, removed)?;
-            if estimate_model_input_tokens(&candidate, tools, budget.image_delivery)?
-                < token_threshold
+            if estimate_model_input_tokens(
+                &candidate,
+                tools,
+                budget.image_delivery,
+                budget.image_cost,
+            )? < token_threshold
             {
                 fitted = Some(candidate);
                 upper = removed.saturating_sub(1);
@@ -119,6 +122,7 @@ impl CompactionProjection {
             tools,
             token_threshold,
             budget.image_delivery,
+            budget.image_cost,
         )? {
             self.messages = fitted;
             return Ok(CompactionProjectionFit::Fitted(self));

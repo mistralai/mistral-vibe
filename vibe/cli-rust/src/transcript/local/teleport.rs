@@ -4,12 +4,12 @@ use super::{add_message, Transcript};
 
 pub const TELEPORTING: &str = "Teleporting...";
 
-/// Mount a `&<prompt>` echo (Python `TeleportUserMessage`).
+/// Mount a `&<prompt>` echo.
 pub fn add_teleport_prompt(transcript: &mut Transcript, id: &str, text: &str) {
     add_message(transcript, id, "teleport_user", text);
 }
 
-/// Mount the teleport status row (Python `TeleportMessage`), spinning.
+/// Mount the teleport status row, spinning.
 pub fn add_teleport_status(transcript: &mut Transcript, id: &str) {
     transcript.add(&serde_json::json!({
         "entry": {

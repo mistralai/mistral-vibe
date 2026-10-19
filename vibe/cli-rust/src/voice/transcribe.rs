@@ -1,4 +1,4 @@
-//! Realtime transcription over WebSocket (Python `MistralTranscribeClient`).
+//! Realtime transcription over WebSocket.
 
 use base64::Engine as _;
 use futures::{SinkExt, StreamExt};

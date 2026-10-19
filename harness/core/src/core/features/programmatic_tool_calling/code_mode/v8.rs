@@ -39,6 +39,7 @@ use crate::core::features::programmatic_tool_calling::model::PartialEvaluation;
 use crate::core::features::programmatic_tool_calling::model::ToolState;
 #[cfg(test)]
 use crate::core::features::programmatic_tool_calling::model::{ToolFunction, ToolKind};
+#[cfg(test)]
 use crate::core::step_protocol::DeterminismContext;
 
 static INITIALIZE_V8: Once = Once::new();
@@ -48,7 +49,7 @@ const MAX_HEAP_BYTES: usize = 16 * 1024 * 1024;
 /// Largest program source that is evaluated, measured in V8's string
 /// representation. The source embeds every replayed tool result. A larger
 /// source cannot fit in the heap, so it fails before an isolate is created.
-const MAX_SOURCE_BYTES: usize = MAX_HEAP_BYTES;
+pub(crate) const MAX_SOURCE_BYTES: usize = MAX_HEAP_BYTES;
 /// How far the near-heap-limit callback raises the heap limit each time it
 /// runs. After one raise, V8 can allocate the source string and the parser's
 /// copy of its largest string literal before it checks the limit again, so a
@@ -119,6 +120,21 @@ struct ExecutionWatchdog {
     thread: Option<thread::JoinHandle<()>>,
 }
 
+struct StoppedProgram(TypeScriptRunResult);
+
+fn stop_program_at_budget<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    args: v8::FunctionCallbackArguments<'s>,
+    _return_value: v8::ReturnValue<'s>,
+) {
+    let result = deno_core::serde_v8::from_v8::<TypeScriptRunResult>(scope, args.get(0))
+        .unwrap_or_else(|error| error_result("SerializationError", error.to_string()));
+    scope.set_slot(StoppedProgram(result));
+    // A JavaScript exception can be caught and retried indefinitely. This
+    // cooperative boundary exits the disposable isolate with its captured result.
+    scope.thread_safe_handle().terminate_execution();
+}
+
 impl ExecutionWatchdog {
     fn start(isolate_handle: v8::IsolateHandle, timeout: Duration) -> Self {
         let (stop_tx, stop_rx) = mpsc::channel();
@@ -159,59 +175,20 @@ macro_rules! v8_exception_result {
 }
 
 pub(super) fn evaluate(request: EvaluationRequest<'_>) -> Result<TypeScriptRunResult, String> {
-    run_typescript(
-        request.partial_evaluation,
-        request.tools,
-        request.execution_id,
-        request.determinism,
-        request.max_program_effects,
-        request.max_program_operations,
-    )
-}
-
-fn run_typescript(
-    partial_evaluation: &PartialEvaluation,
-    tools: &[TypeScriptTool],
-    execution_id: &str,
-    determinism: DeterminismContext,
-    max_program_effects: u32,
-    max_program_operations: u32,
-) -> Result<TypeScriptRunResult, String> {
-    run_typescript_with_timeout(
-        partial_evaluation,
-        tools,
-        execution_id,
-        determinism,
-        max_program_effects,
-        max_program_operations,
-        DEFAULT_TIMEOUT,
-    )
+    run_typescript_with_timeout(request, DEFAULT_TIMEOUT)
 }
 
 fn run_typescript_with_timeout(
-    partial_evaluation: &PartialEvaluation,
-    tools: &[TypeScriptTool],
-    execution_id: &str,
-    determinism: DeterminismContext,
-    max_program_effects: u32,
-    max_program_operations: u32,
+    request: EvaluationRequest<'_>,
     timeout: Duration,
 ) -> Result<TypeScriptRunResult, String> {
-    let transpiled = match transpile(&partial_evaluation.code) {
+    let transpiled = match transpile(&request.partial_evaluation.code) {
         Ok(code) => code,
         Err(error) => return Ok(error_result("SyntaxError", error)),
     };
-    let mut evaluation = partial_evaluation.clone();
-    for _ in 0..=max_program_operations {
-        let source = match build_source(
-            &evaluation,
-            tools,
-            execution_id,
-            &transpiled,
-            determinism,
-            max_program_effects,
-            max_program_operations,
-        ) {
+    let mut evaluation = request.partial_evaluation.clone();
+    for _ in 0..=request.max_program_operations {
+        let source = match build_source(&evaluation, &request, &transpiled) {
             Ok(source) => source,
             Err(error) => return Ok(error_result("SerializationError", error)),
         };
@@ -230,7 +207,11 @@ fn run_typescript_with_timeout(
         let mut isolate = HeapLimitedIsolate::new(isolate, &heap_limit_monitor);
         let _watchdog = ExecutionWatchdog::start(isolate_handle, timeout);
         let result = execute(isolate.isolate_mut(), &source);
+        let stopped = isolate.isolate_mut().remove_slot::<StoppedProgram>();
         let heap_limit_reached = isolate.limit_reached();
+        if let Some(StoppedProgram(result)) = stopped {
+            return Ok(result);
+        }
         if heap_limit_reached {
             return Ok(memory_limit_result(evaluation.tool_state));
         }
@@ -241,7 +222,8 @@ fn run_typescript_with_timeout(
         else {
             return Ok(result);
         };
-        let validation = reject_invalid_pending_tools(&mut partial_evaluation.tool_state, tools);
+        let validation =
+            reject_invalid_pending_tools(&mut partial_evaluation.tool_state, request.tools);
         if !validation.rejected_any || validation.has_valid_pending {
             return Ok(TypeScriptRunResult::PartialEvaluation { partial_evaluation });
         }
@@ -534,18 +516,15 @@ fn calls_main(expression: &Expr) -> bool {
 
 fn build_source(
     partial_evaluation: &PartialEvaluation,
-    tools: &[TypeScriptTool],
-    execution_id: &str,
+    request: &EvaluationRequest<'_>,
     transpiled: &str,
-    determinism: DeterminismContext,
-    max_program_effects: u32,
-    max_program_operations: u32,
 ) -> Result<String, String> {
     let previous =
         serde_json::to_string(&partial_evaluation.tool_state).map_err(|error| error.to_string())?;
     let input =
         serde_json::to_string(&partial_evaluation.input).map_err(|error| error.to_string())?;
-    let tool_bindings = tools
+    let tool_bindings = request
+        .tools
         .iter()
         .map(|tool| SandboxToolBinding {
             runtime_name: &tool.name,
@@ -554,25 +533,35 @@ fn build_source(
         })
         .collect::<Vec<_>>();
     let tool_bindings = serde_json::to_string(&tool_bindings).map_err(|error| error.to_string())?;
+    let replay_only_tools =
+        serde_json::to_string(request.replay_only_tools).map_err(|error| error.to_string())?;
     let original_code =
         serde_json::to_string(&partial_evaluation.code).map_err(|error| error.to_string())?;
-    let execution_id = serde_json::to_string(execution_id).map_err(|error| error.to_string())?;
+    let execution_id =
+        serde_json::to_string(request.execution_id).map_err(|error| error.to_string())?;
     let transpiled = serde_json::to_string(transpiled).map_err(|error| error.to_string())?;
-    let time_unix_ms = determinism.time_unix_ms.to_string();
-    let random_seed = determinism.random_seed.to_string();
-    let max_program_effects = max_program_effects.to_string();
-    let max_program_operations = max_program_operations.to_string();
+    let time_unix_ms = request.determinism.time_unix_ms.to_string();
+    let random_seed = request.determinism.random_seed.to_string();
+    let max_program_effects = request.max_program_effects.to_string();
+    let max_program_operations = request.max_program_operations.to_string();
+    let budget_error = if request.budget.exhausted() {
+        request.budget.error().to_string()
+    } else {
+        "null".to_string()
+    };
 
     render_template(&[
         ("__PREVIOUS_OPERATIONS__", &previous),
         ("__INPUT__", &input),
         ("__TOOL_BINDINGS__", &tool_bindings),
+        ("__REPLAY_ONLY_TOOLS__", &replay_only_tools),
         ("__EXECUTION_ID__", &execution_id),
         ("__ORIGINAL_CODE__", &original_code),
         ("__TIME_UNIX_MS__", &time_unix_ms),
         ("__RANDOM_SEED__", &random_seed),
         ("__MAX_PROGRAM_EFFECTS__", &max_program_effects),
         ("__MAX_PROGRAM_OPERATIONS__", &max_program_operations),
+        ("__BUDGET_ERROR__", &budget_error),
         ("__USER_PROGRAM__", &transpiled),
     ])
 }
@@ -628,6 +617,26 @@ fn execute(isolate: &mut v8::OwnedIsolate, source: &str) -> Result<TypeScriptRun
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
     v8::tc_scope!(let try_catch, scope);
+
+    let global = context.global(try_catch);
+    let Some(name) = v8::String::new(try_catch, "__harnessStopAtBudget") else {
+        return Ok(error_result(
+            "V8Error",
+            "could not allocate the budget-stop binding",
+        ));
+    };
+    let Some(stop) = v8::Function::new(try_catch, stop_program_at_budget) else {
+        return Ok(error_result(
+            "V8Error",
+            "could not construct the budget-stop binding",
+        ));
+    };
+    if global.set(try_catch, name.into(), stop.into()) != Some(true) {
+        return Ok(error_result(
+            "V8Error",
+            "could not install the budget-stop binding",
+        ));
+    }
 
     let Some(source) = v8::String::new(try_catch, source) else {
         return Ok(error_result(
@@ -782,12 +791,16 @@ const RUNTIME_TEMPLATE: &str = r#"
   const __previous = __PREVIOUS_OPERATIONS__;
   const __input = __INPUT__;
   const __toolBindings = __TOOL_BINDINGS__;
+  const __replayOnlyTools = __REPLAY_ONLY_TOOLS__;
   const __executionId = __EXECUTION_ID__;
   const __originalCode = __ORIGINAL_CODE__;
   const __timeUnixMs = __TIME_UNIX_MS__;
   const __randomSeed = __RANDOM_SEED__;
   const __maxProgramEffects = __MAX_PROGRAM_EFFECTS__;
   const __maxProgramOperations = __MAX_PROGRAM_OPERATIONS__;
+  const __budgetError = __BUDGET_ERROR__;
+  const __stopAtBudget = globalThis.__harnessStopAtBudget;
+  delete globalThis.__harnessStopAtBudget;
   const __output = [];
   const __stdout = [];
   const __stderr = [];
@@ -950,11 +963,23 @@ const RUNTIME_TEMPLATE: &str = r#"
 
   function __checkProgramOperationBudget() {
     if (__index >= __maxProgramOperations) {
+      __checkElapsedBudget();
       throw new Error("run_typescript exceeded maxProgramOperations (" + String(__maxProgramOperations) + ").");
     }
   }
 
-  function __callTool(name, argsInput) {
+  function __checkElapsedBudget() {
+    if (__budgetError === null) return;
+    __stopAtBudget({
+      type: "code_result",
+      stdout: __stdout.length > 0 ? __stdout.join("\n") : undefined,
+      stderr: __stderr.length > 0 ? __stderr.join("\n") : undefined,
+      tool_state: __output.filter(Boolean),
+      result: { type: "error", error: __budgetError },
+    });
+  }
+
+  function __callTool(name, argsInput, rejectionMessage) {
     if (__stepDepth > 0) {
       return __OriginalPromiseReject(new Error(
         "Tool calls are not allowed inside step(). Call tools before or after step()."));
@@ -974,13 +999,22 @@ const RUNTIME_TEMPLATE: &str = r#"
         __output.push(lookup.state);
         __index += 1;
         if (lookup.state.type === "resolved_tool") return __OriginalPromiseResolve(lookup.state.result);
+        // A denied pre-Hook operation is a program stop, not a catchable tool failure.
+        if (lookup.state.error?.name === "ProgramBudgetExceeded") __checkElapsedBudget();
         return __OriginalPromiseReject(__deserializeError(lookup.state.error));
       }
       if (lookup.type === "mismatch") __diverged = true;
     }
 
+    if (rejectionMessage !== undefined) {
+      const error = new Error(rejectionMessage);
+      error.name = "deprecated_tool";
+      return __OriginalPromiseReject(error);
+    }
+
     // Keep a pending batch to operations reached before the scheduled close.
     // Later microtask branches are speculative until replay has real results.
+    __checkElapsedBudget();
     if (__pendingBatchClosed) {
       __consumeExternalEffectBudget();
       return new __OriginalPromise(() => {});
@@ -1024,6 +1058,7 @@ const RUNTIME_TEMPLATE: &str = r#"
       if (lookup.type === "mismatch") __diverged = true;
     }
 
+    __checkElapsedBudget();
     const operationIndex = __index;
     const outputIndex = __output.length;
     __index += 1;
@@ -1092,6 +1127,12 @@ const RUNTIME_TEMPLATE: &str = r#"
     const functionName = binding.function_name;
     if (!tools[namespace]) tools[namespace] = {};
     tools[namespace][functionName] = (args) => __callTool(binding.runtime_name, args);
+  }
+  for (const descriptor of __replayOnlyTools) {
+    const namespace = descriptor.programmatic_name.namespace;
+    const functionName = descriptor.programmatic_name.name;
+    if (!tools[namespace]) tools[namespace] = {};
+    tools[namespace][functionName] = (args) => __callTool(descriptor.name, args, descriptor.rejection_message);
   }
   for (const namespace of Object.keys(tools)) Object.freeze(tools[namespace]);
   Object.freeze(tools);
@@ -1311,6 +1352,7 @@ const RUNTIME_TEMPLATE: &str = r#"
   } catch (error) {
     __collected = { type: "error", error: __serializeError(error) };
   }
+  if (__budgetError !== null) __collected = { type: "error", error: __budgetError };
 
   const __stdoutText = __stdout.length > 0 ? __joinStdout("\n") : undefined;
   const __stderrText = __stderr.length > 0 ? __joinStderr("\n") : undefined;
@@ -1334,6 +1376,43 @@ const RUNTIME_TEMPLATE: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::features::programmatic_tool_calling::model::ProgramBudget;
+
+    fn build_request<'a>(
+        partial_evaluation: &'a PartialEvaluation,
+        tools: &'a [TypeScriptTool],
+        execution_id: &'a str,
+    ) -> EvaluationRequest<'a> {
+        EvaluationRequest {
+            partial_evaluation,
+            tools,
+            replay_only_tools: &[],
+            execution_id,
+            determinism: determinism(),
+            max_program_effects: 128,
+            max_program_operations: 1024,
+            budget: ProgramBudget {
+                budget_ms: 60_000,
+                elapsed_ms: 0,
+            },
+        }
+    }
+
+    fn run_typescript(
+        partial_evaluation: &PartialEvaluation,
+        tools: &[TypeScriptTool],
+        execution_id: &str,
+        determinism: DeterminismContext,
+        max_program_effects: u32,
+        max_program_operations: u32,
+    ) -> Result<TypeScriptRunResult, String> {
+        evaluate(EvaluationRequest {
+            determinism,
+            max_program_effects,
+            max_program_operations,
+            ..build_request(partial_evaluation, tools, execution_id)
+        })
+    }
 
     fn determinism() -> DeterminismContext {
         DeterminismContext {
@@ -3431,12 +3510,11 @@ async function main() {
         assert!(matches!(syntax, TypeScriptRunResult::Error { .. }));
 
         let timeout = run_typescript_with_timeout(
-            &partial("async function main() { while (true) {} }"),
-            &[],
-            "run",
-            determinism(),
-            128,
-            1024,
+            build_request(
+                &partial("async function main() { while (true) {} }"),
+                &[],
+                "run",
+            ),
             Duration::from_millis(25),
         );
         assert_eq!(
@@ -3487,12 +3565,7 @@ async function main() {
 
         // Do
         let result = run_typescript_with_timeout(
-            &memory_exhausting_program,
-            &[],
-            "run",
-            determinism(),
-            128,
-            1024,
+            build_request(&memory_exhausting_program, &[], "run"),
             Duration::from_secs(2),
         );
         let subsequent_result = run(
@@ -3581,12 +3654,8 @@ async function main() {
         );
         let source = build_source(
             &replay,
-            &tools,
-            "fetch",
+            &build_request(&replay, &tools, "fetch"),
             &transpile(&replay.code).unwrap(),
-            determinism(),
-            128,
-            1024,
         )
         .unwrap();
         assert!(

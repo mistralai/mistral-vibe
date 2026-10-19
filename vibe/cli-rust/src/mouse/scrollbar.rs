@@ -82,12 +82,12 @@ pub(super) fn contains_track(app: &App, at: (u16, u16)) -> bool {
         .is_some_and(|state| state.contains(at))
 }
 
-pub(super) fn begin(app: &mut App, at: (u16, u16)) -> bool {
+pub(super) fn begin(app: &mut App, at: (u16, u16), row: f64) -> bool {
     let Some((target, mut state)) = scrollbar_at(app, at) else {
         cancel(app);
         return false;
     };
-    if !state.begin_drag(at) {
+    if !state.begin_drag(at, row) {
         cancel(app);
         return false;
     }
@@ -104,7 +104,7 @@ pub(super) fn begin(app: &mut App, at: (u16, u16)) -> bool {
     true
 }
 
-/// Page toward a track click outside the thumb (Textual `ScrollUp`/`ScrollDown`) and hold it.
+/// Page toward a track click outside the thumb and hold it.
 pub(super) fn begin_track(app: &mut App, at: (u16, u16)) -> bool {
     let Some((target, state)) = scrollbar_at(app, at) else {
         return false;
@@ -179,7 +179,7 @@ fn page(app: &mut App, track: &mut Track) {
     apply_position(app, track.target, position, max);
 }
 
-pub(super) fn drag(app: &mut App, row: u16) -> bool {
+pub(super) fn drag(app: &mut App, row: f64) -> bool {
     let Some(mut drag) = app.view.mouse.scrollbars.drag else {
         return false;
     };
@@ -227,6 +227,10 @@ fn transcript_scroll(position: usize, max: usize) -> u16 {
 
 fn apply_position(app: &mut App, target: MouseTarget, position: usize, max: usize) {
     let position = position.min(max);
+    if let Some(list) = super::option_list(app, target) {
+        list.detach_at(position);
+        return;
+    }
     match target {
         MouseTarget::Transcript => {
             let scroll = transcript_scroll(position, max);
@@ -237,66 +241,19 @@ fn apply_position(app: &mut App, target: MouseTarget, position: usize, max: usiz
             app.completion.scroll = position;
             app.completion.reveal = false;
         }
-        MouseTarget::ThemePicker => {
-            app.theme_picker.scroll = position;
-            app.theme_picker.free_scroll = true;
-        }
-        MouseTarget::ModelPicker => {
-            app.model_picker.scroll = position;
-            app.model_picker.free_scroll = true;
-        }
-        MouseTarget::ResumePicker => {
-            app.resume_picker.scroll = position;
-            app.resume_picker.free_scroll = true;
-        }
-        MouseTarget::RemoteProject => {
-            app.vibe_code_project.scroll = position;
-            app.vibe_code_project.free_scroll = true;
-        }
-        MouseTarget::Mcp => {
-            app.mcp.scroll = position;
-            app.mcp.free_scroll = true;
-        }
-        MouseTarget::Plugins => {
-            app.plugins.scroll = position;
-            app.plugins.free_scroll = true;
-        }
-        MouseTarget::Config => {
-            app.config_screen.scroll = position;
-            app.config_screen.free_scroll = true;
-        }
-        MouseTarget::ConfigEditor => {
-            if let Some(edit) = app.config_screen.edit.as_mut() {
-                edit.scroll = Some(position);
-            }
-        }
         MouseTarget::Approval => app.approval.detail_scroll = position,
-        MouseTarget::Question => app
-            .question_app
-            .viewport
-            .detach_at(u16::try_from(position).unwrap_or(u16::MAX)),
         MouseTarget::Trust => app.trust.scroll = position,
         MouseTarget::ProxySetup => {
             app.proxy_setup.scroll = position;
             app.proxy_setup.free_scroll = true;
         }
+        // The console's scrollbar position is its top line; the console's
+        // scroll offset counts up from the bottom, like the transcript's.
+        MouseTarget::DebugConsole => {
+            app.debug_console.scroll = transcript_scroll(position, max);
+        }
         // The wizard's theme preview reads the live drag position itself
         // (`drag_scroll`): its scroll state is not app-owned.
-        MouseTarget::Blocked
-        | MouseTarget::Toast
-        | MouseTarget::Composer
-        | MouseTarget::Loading
-        | MouseTarget::LogLevelPicker
-        | MouseTarget::BottomApp
-        | MouseTarget::McpOAuth
-        | MouseTarget::ConnectorAuth
-        | MouseTarget::BottomBar
-        | MouseTarget::TodoRow
-        | MouseTarget::TodoSidebar
-        | MouseTarget::SubagentList
-        | MouseTarget::OnboardingPreview
-        | MouseTarget::OnboardingThemeList
-        | MouseTarget::OnboardingLinks
-        | MouseTarget::OnboardingInputs => {}
+        _ => {}
     }
 }

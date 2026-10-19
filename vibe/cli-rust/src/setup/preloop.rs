@@ -1,6 +1,5 @@
-//! The probe-negative normal launch's pre-loop wizard round (Python
-//! `require_api_key_or_onboarding`: a keyless run's wizard paints
-//! instantly — Python's needs no server): the wizard opens UNSEEDED,
+//! The probe-negative normal launch's pre-loop wizard round (a keyless
+//! run's wizard paints instantly, before the server answers): the wizard opens UNSEEDED,
 //! the boot (spawn, initialize, `setup/status`) overlaps behind the
 //! welcome screen, and the flow's welcome gate holds every choice until
 //! the seed lands. The boot's answer ends the round either way: a missing
@@ -36,7 +35,7 @@ pub struct PreloopBoot {
     /// The `initialize` version the retried handshake skips re-running.
     pub server_version: Option<String>,
     /// The wizard's continue-anyway warnings, owed on the real terminal
-    /// before the loop repaints (Python prints them in every mode).
+    /// before the loop repaints (they print in every mode).
     pub warning: Option<String>,
 }
 

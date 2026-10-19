@@ -1,4 +1,4 @@
-//! Mouse pointer shape (Kitty OSC 22), mirroring Textual's `pointer` CSS.
+//! Mouse pointer shape (Kitty OSC 22).
 
 use std::io::Write;
 
@@ -9,9 +9,9 @@ use crate::selection;
 pub enum Shape {
     #[default]
     Default,
-    /// Hand: something a click acts on (Python `pointer: pointer`).
+    /// Hand: something a click acts on.
     Pointer,
-    /// I-beam: editable or selectable text (Python `pointer: text`).
+    /// I-beam: editable or selectable text.
     Text,
     /// Closed hand while the transcript scrollbar thumb is being dragged.
     Grabbing,
@@ -49,7 +49,7 @@ pub fn shape(app: &App) -> Shape {
     if app.view.mouse.is_dragging_scrollbar() {
         return Shape::Grabbing;
     }
-    // A drag in flight owns the pointer (Python `Screen._selecting`).
+    // A drag in flight owns the pointer.
     if app.selection.drag.is_some() {
         return Shape::Text;
     }
@@ -86,7 +86,7 @@ pub fn shape(app: &App) -> Shape {
         if project.search_area.contains(position) || project.branch_area.contains(position) {
             return Shape::Text;
         }
-        return if project.selectable_index_at(at).is_some() {
+        return if project.list.index_at(at).is_some() {
             Shape::Pointer
         } else if app.view.bottom_app_selection_region.contains(at) {
             Shape::Text

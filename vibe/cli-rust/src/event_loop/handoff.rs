@@ -34,7 +34,7 @@ impl Lent<'_> {
         let Lent { handoff, paused } = self;
         handoff.guard.resume()?;
         drop(paused);
-        handoff.terminal.clear()
+        crate::terminal::repaint(handoff.terminal)
     }
 
     /// The run is ending: re-enter for teardown, keep the reader off for post-TUI prompts.

@@ -41,9 +41,8 @@ handshake = {
 env = {"HOME": "/home/e2e-user"}
 
 client_args = ("--continue",)
-# Both clients settle on the resumed transcript only after the attach; the
-# startup frames differ by design (rust attaches in-handshake), so the step
-# capture after typing `x` carries the comparison.
+# The client attaches in-handshake, so the step capture after typing `x`
+# carries the comparison.
 capture_startup = False
 
 _ATTACHED_ROWS = (
@@ -51,13 +50,8 @@ _ATTACHED_ROWS = (
     "┝ attached image: /opt/data/charts.png",
     "└ attached image: pasted-chart.png",
 )
-_PYTHON_ATTACHED_ROWS = (
-    "└ attached image: ~/pics/cat.png",
-    "└ attached image: /opt/data/charts.png",
-    "└ attached image: pasted-chart.png",
-)
 
-screen_contains = {"rust": _ATTACHED_ROWS, "python": _PYTHON_ATTACHED_ROWS}
+screen_contains = _ATTACHED_ROWS
 
 _CAT_URL = "file:///home/e2e-user/pics/cat.png"
 _CHARTS_URL = "file:///opt/data/charts.png"
@@ -68,16 +62,11 @@ def _click(column: int, row: int) -> str:
     return f"\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m"
 
 
-# The Rust attachment links occupy adjacent rows.
-expected_actions = {
-    "rust": [Action("open_url", _CAT_URL), Action("open_url", _CHARTS_URL)],
-    "python": [Action("open_url", _CAT_URL)],
-}
+# The attachment links occupy adjacent rows.
+expected_actions = [Action("open_url", _CAT_URL), Action("open_url", _CHARTS_URL)]
 
 timeline: Timeline = [
     "x",
-    _click(25, 13),  # rust: the `~/pics/cat.png` link; python: the prompt row
-    _click(
-        25, 14
-    ),  # rust: the `/opt/data/charts.png` link; python: the `~/pics/cat.png` link
+    _click(25, 9),  # the `~/pics/cat.png` link
+    _click(25, 10),  # the `/opt/data/charts.png` link
 ]

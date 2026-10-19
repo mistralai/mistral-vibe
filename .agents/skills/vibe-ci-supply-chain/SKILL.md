@@ -15,7 +15,7 @@ Conventions for git workflow, CI configuration, and supply-chain security in Vib
 
 CI gates cold-start module count via `vibe/scripts/check_startup_import_cost.py` (budgets in `vibe/scripts/startup_import_cost.vibe.toml`).
 
-- When a change touches imports or module structure on the path of `import vibe` or `from vibe.cli.textual_ui.app import VibeApp`, run `cd vibe && uv run scripts/check_startup_import_cost.py` and confirm the count stays within budget.
+- When a change touches imports or module structure on the path of `import vibe`, the `vibe` launcher (`vibe.cli.launcher`) or `vibe.app_server.stdio`, run `cd vibe && uv run scripts/check_startup_import_cost.py` and confirm the count stays within budget.
 - **Verify, do not bump.** An overshoot is a regression to investigate (lazy import, drop the dependency, defer the import) — not a reason to raise the budget. Only widen for a deliberate, PR-justified increase, and set to observed count + ~10% headroom, never the exact count.
 
 ## Git

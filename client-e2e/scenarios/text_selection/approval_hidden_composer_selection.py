@@ -20,7 +20,6 @@ env = {
 }
 handshake = {"callback/result": {"accepted": True}}
 capture_startup = False
-clipboard_clients = {"rust"}
 clipboard_contains = ("answer line 25",)
 
 _SHIFT_ENTER = "\x1b[13;2u"
@@ -28,7 +27,7 @@ _ANSWER = " ".join(f"answer line {number}" for number in range(1, 31))
 _COMMAND = {"command": "echo hello"}
 
 # Press on a row the 18-line composer covered before the approval hid it, then drag up into the answer.
-_DRAG = "\x1b[<0;60;22M\x1b[<32;3;18M\x1b[<0;3;18m"
+_DRAG = "\x1b[<0;60;18M\x1b[<32;3;14M\x1b[<0;3;14m"
 
 # Two inline pastes: a paste over ten lines would collapse into a placeholder.
 _HALF = "\n".join(f"draft line {number}" for number in range(1, 10))

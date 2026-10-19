@@ -20,7 +20,7 @@ use crate::core::features::skills::{self, SkillDefinition};
 use crate::core::features::tool_discovery::{
     self, SearchRequest, ToolDiscovery, ToolDiscoveryResult,
 };
-use crate::core::features::{file_system, large_output};
+use crate::core::features::{file_system, large_output, subagents};
 use crate::core::step_protocol::ToolDefinition;
 use crate::core::tools::external::{
     ExternalTool, ExternalToolCall, RuntimeBuiltinToolName, ToolTarget,
@@ -91,6 +91,7 @@ impl ResolvedTools {
             target,
             ToolTarget::RuntimeBuiltin {
                 name: RuntimeBuiltinToolName::FileSystemSearchReplace
+                    | RuntimeBuiltinToolName::SelfWait
             }
         ) {
             let input_schema = self
@@ -193,7 +194,9 @@ fn validate_tool_groups(config: &HarnessConfig) -> Result<(), CoreError> {
                 ),
             ));
         }
-        if assembly::RESERVED_TOOL_NAMESPACES.contains(&group.name.as_str()) {
+        if assembly::RESERVED_TOOL_NAMESPACES.contains(&group.name.as_str())
+            || subagents::retired_namespaces().contains(&group.name)
+        {
             return Err(CoreError::invalid_configuration(
                 "tool_groups",
                 format!("tool group name {:?} is reserved", group.name),

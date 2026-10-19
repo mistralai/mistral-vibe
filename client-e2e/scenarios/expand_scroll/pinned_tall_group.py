@@ -11,7 +11,7 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-screen_rows = {"rust": {1: "⏷ Ran 40 commands"}}
+screen_rows = {1: "⏷ Ran 40 commands"}
 
 _PROMPT = "run many commands"
 
@@ -27,6 +27,6 @@ timeline: Timeline = [
     *(bash(f"echo step {index:02d}", f"step {index:02d}") for index in range(1, 41)),
     assistant_msg("Done."),
     turn_completed(),
-    # SGR row 15 hits the collapsed group header.
-    _click(15),
+    # SGR row 11 hits the collapsed group header.
+    _click(11),
 ]

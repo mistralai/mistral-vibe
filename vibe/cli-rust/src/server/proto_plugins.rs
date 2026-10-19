@@ -1,4 +1,4 @@
-//! Plugin catalogue wire types (Python `PluginCatalogState` in `vibe/app_server/models.py`).
+//! Plugin catalogue wire types (`PluginCatalogState` in `vibe/app_server/models.py`).
 
 use serde::Deserialize;
 

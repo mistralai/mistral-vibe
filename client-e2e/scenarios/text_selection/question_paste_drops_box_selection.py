@@ -19,9 +19,8 @@ env = {
 handshake = {"callback/result": {"accepted": True}}
 capture_startup = False
 capture_steps = {3, 4}
-clipboard_clients = {"rust"}
 expected_clipboard = "Which color scheme do you prefer?"
-screen_contains = {"rust": ("violet",)}
+screen_contains = ("violet",)
 
 _QUESTIONS = [
     {

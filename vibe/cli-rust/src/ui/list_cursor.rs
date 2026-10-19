@@ -18,6 +18,11 @@ pub(crate) fn style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+/// A text field's caret on the bar: the bar colors reversed, so its row stays a bar.
+pub(crate) fn caret() -> Style {
+    style().add_modifier(Modifier::REVERSED)
+}
+
 /// Paint the cursor bar across `area`.
 pub(crate) fn paint(f: &mut Frame, area: Rect) {
     f.buffer_mut().set_style(area, style());
@@ -41,9 +46,17 @@ pub(crate) fn styles(highlighted: bool) -> (Style, Style) {
 /// The current-value marker's style over a row's text style.
 pub(crate) fn marker_style(base: Style, current: bool) -> Style {
     match current {
-        true => base.fg(current_color()),
+        true => accent(base, current_color()),
         false => base,
     }
+}
+
+/// `base` in `color`, except on the bar, whose text stays the bar's own color.
+pub(crate) fn accent(base: Style, color: Color) -> Style {
+    if base.bg == Some(theme::block_cursor_bg()) {
+        return base;
+    }
+    base.fg(color)
 }
 
 /// The current-value marker's color: Rich's `green` (Textual terminal palette).

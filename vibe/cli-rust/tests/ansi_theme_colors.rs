@@ -1,16 +1,17 @@
-//! Textual-compatible semantic bindings for both ANSI themes.
+//! Semantic color bindings for both ANSI themes.
 
 use ratatui::style::Color;
 use vibe_rs::ui::theme;
 
 #[test]
-fn semantic_colors_follow_textual() {
+fn semantic_colors_match_theme_bindings() {
     theme::prepare_active("ansi-dark", "ansi-dark");
     assert_eq!(theme::toast_background(), Color::Black);
     assert_eq!(theme::selection_bg(), Color::LightBlue);
     assert_eq!(theme::selection_fg(), Color::Black);
     assert_eq!(theme::link_hover_style().fg, Some(Color::Black));
     assert_eq!(theme::link_hover_style().bg, Some(Color::LightBlue));
+    assert_eq!(theme::block_hover_bg(Color::Reset), Color::Black);
 
     theme::prepare_active("ansi-light", "ansi-light");
     assert_eq!(theme::toast_background(), Color::Gray);
@@ -18,6 +19,14 @@ fn semantic_colors_follow_textual() {
     assert_eq!(theme::selection_fg(), Color::White);
     assert_eq!(theme::link_hover_style().fg, Some(Color::Gray));
     assert_eq!(theme::link_hover_style().bg, Some(Color::LightBlue));
+    assert_eq!(theme::block_hover_bg(Color::Reset), Color::Gray);
+
+    theme::prepare_active("textual-dark", "textual-dark");
+    let textual_dark_bg = Color::Rgb(0x12, 0x12, 0x12);
+    assert_eq!(
+        theme::block_hover_bg(textual_dark_bg),
+        Color::Rgb(0x29, 0x29, 0x29)
+    );
 
     for (name, expected) in [
         ("atom-one-dark", Color::Rgb(0x61, 0x68, 0x78)),

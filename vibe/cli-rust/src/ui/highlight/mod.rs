@@ -1,4 +1,4 @@
-//! Syntax highlighting: syntect grammars painted with Textual's token palette.
+//! Syntax highlighting: syntect grammars painted with the theme's token palette.
 
 use crate::ui::theme::syntax as palette;
 

@@ -11,6 +11,7 @@ from vibe.core.git.worktree.record import (
     HOLDERS_DIR_NAME,
     RECORD_FILENAME,
     RECOVERY_FILENAME,
+    REMOVING_HOLDER,
     WorktreeClaim,
     WorktreeRecord,
     WorktreeRecordError,
@@ -46,9 +47,7 @@ def test_record_round_trips(tmp_path: Path) -> None:
     assert loaded.branch_created is True
     assert loaded.base_commit is None
     assert loaded.claimed_at == record.claimed_at
-    assert loaded.reap_requested is False
-    assert loaded.reap_requests == {}
-    assert loaded.reap_cancellations == set()
+    assert loaded.session_dirs == set()
 
 
 def test_record_keeps_base_commit(tmp_path: Path) -> None:
@@ -96,20 +95,35 @@ def test_record_ignores_unknown_future_fields(tmp_path: Path) -> None:
     assert _claim().read() is not None
 
 
-def test_record_defaults_existing_claims_to_no_pending_reap(tmp_path: Path) -> None:
+def test_a_record_from_before_sessions_joined_reads_with_none(tmp_path: Path) -> None:
     _claim().write(_record(repo_root=tmp_path))
     target = _claim().directory / RECORD_FILENAME
     payload = json.loads(target.read_text(encoding="utf-8"))
-    del payload["reap_requested"]
-    del payload["reap_requests"]
-    del payload["reap_cancellations"]
+    del payload["session_dirs"]
+    payload["reap_requested"] = True
     target.write_text(json.dumps(payload), encoding="utf-8")
 
     loaded = _claim().read()
     assert loaded is not None
-    assert loaded.reap_requested is False
-    assert loaded.reap_requests == {}
-    assert loaded.reap_cancellations == set()
+    assert loaded.session_dirs == set()
+    assert loaded.reap_requested is True
+
+
+def test_a_record_reads_without_the_fields_an_older_version_wrote(
+    tmp_path: Path,
+) -> None:
+    _claim().write(_record(repo_root=tmp_path))
+    target = _claim().directory / RECORD_FILENAME
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["reap_requests"] = {"session-a": "request-a"}
+    payload["reap_cancellations"] = ["request-b"]
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert _claim().read() is not None
+
+
+def test_the_trash_is_not_a_claim() -> None:
+    assert WorktreeClaim.locate(WorktreeClaim.trash_root() / "bucket" / "name") is None
 
 
 def test_missing_record_reads_as_absent() -> None:
@@ -249,6 +263,29 @@ def test_holder_lock_is_reference_counted(tmp_path: Path) -> None:
     assert _claim().holders() == frozenset({"session-a"})
     _claim().remove_holder("session-a")
     assert _claim().holders() == frozenset()
+
+
+@pytest.mark.parametrize("holder_id", [".starting", REMOVING_HOLDER])
+def test_sessions_cannot_release_internal_holders(holder_id: str) -> None:
+    with pytest.raises(WorktreeRecordError, match="Reserved"):
+        _claim().add_holder(holder_id)
+    with pytest.raises(WorktreeRecordError, match="Reserved"):
+        _claim().remove_holder(holder_id)
+
+
+def test_removal_claim_excludes_new_holders_and_cleans_up(tmp_path: Path) -> None:
+    claim = _claim()
+    claim.write(_record(repo_root=tmp_path))
+    with claim.removing() as acquired:
+        assert acquired is True
+        assert claim.holders() == frozenset()
+        with pytest.raises(WorktreeRecordError, match="being removed"):
+            claim.add_holder("session-a")
+        with claim.removing() as another:
+            assert another is False
+    claim.add_holder("session-a")
+    assert claim.holders() == {"session-a"}
+    claim.remove_holder("session-a")
 
 
 def test_starting_marker_is_exclusive_and_live_only_while_held(tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-//! `/proxy-setup` drafts and app-server persistence, mirroring Python's ProxySetupApp.
+//! `/proxy-setup` drafts and app-server persistence.
 
 use std::sync::Arc;
 
@@ -70,7 +70,7 @@ impl ProxySetupApp {
         }
     }
 
-    /// Up/Down wrap around the inputs (Python `action_focus_next`/`_previous`).
+    /// Up/Down wrap around the inputs.
     pub fn move_focus(&mut self, down: bool) {
         let len = self.inputs.len();
         if len == 0 {
@@ -79,7 +79,7 @@ impl ProxySetupApp {
         self.focus((self.focused + if down { 1 } else { len - 1 }) % len);
     }
 
-    /// Focusing an input selects its text, like Textual's `select_on_focus`.
+    /// Focusing an input selects its text.
     pub fn focus(&mut self, index: usize) {
         if let Some(input) = self.inputs.get_mut(index) {
             self.focused = index;
@@ -193,7 +193,7 @@ fn cancel(app: &mut App) {
     );
 }
 
-/// Enter writes every change, even none, as Python's `_save_and_close` does.
+/// Enter writes every change, even none.
 fn save(app: &mut App, client: &Arc<Client>) {
     let (Some(session_id), Some(tx)) = (app.session.session_id.clone(), app.command_tx.clone())
     else {

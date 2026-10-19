@@ -27,6 +27,10 @@ from pydantic import AnyUrl
 import pytest
 import respx
 
+from vibe.core.auth._mcp_oauth_provider import (
+    RefreshAwareOAuthClientProvider,
+    _ServerIssuedSecretContext,
+)
 from vibe.core.auth.mcp_oauth import (
     Fingerprint,
     KeyringTokenStorage,
@@ -39,8 +43,6 @@ from vibe.core.auth.mcp_oauth import (
     MCPOAuthLoginFailed,
     MCPOAuthPortInUse,
     MCPOAuthTransientRefreshError,
-    RefreshAwareOAuthClientProvider,
-    _ServerIssuedSecretContext,
     build_oauth_provider,
     delete_oauth_credentials,
     perform_oauth_login,

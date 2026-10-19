@@ -2,20 +2,20 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Python `configure_ssl_context`'s module global: the effective `enable_system_trust_store`.
+/// The effective `enable_system_trust_store`.
 static USE_SYSTEM_TRUST_STORE: AtomicBool = AtomicBool::new(false);
 
-/// Python `configure_ssl_context`: set the trust policy for Vibe-owned HTTPS clients.
+/// Set the trust policy for Vibe-owned HTTPS clients.
 pub fn configure_tls_trust(enable_system_trust_store: bool) {
     USE_SYSTEM_TRUST_STORE.store(enable_system_trust_store, Ordering::Relaxed);
 }
 
-/// The two branches of Python `build_ssl_context`.
+/// The two trust-store choices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TlsTrustStore {
-    /// Python's `certifi` bundle: the compiled-in Mozilla root set.
+    /// The compiled-in Mozilla root set.
     BundledWebPki,
-    /// Python's `truststore.SSLContext`: the operating system trust store.
+    /// The operating system trust store.
     System,
 }
 
@@ -47,7 +47,7 @@ pub fn apply_tls_trust_for(
     }
 }
 
-/// The compiled-in Mozilla root set, the analog of Python's certifi bundle.
+/// The compiled-in Mozilla root set.
 fn bundled_root_certificates() -> impl Iterator<Item = reqwest::Certificate> {
     webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().map(|cert| {
         reqwest::Certificate::from_der(cert.as_ref()).expect("bundled roots are valid DER")

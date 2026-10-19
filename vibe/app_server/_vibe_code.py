@@ -8,11 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import uuid4
 
-from vibe.app_server._execution import (
-    SessionExecution,
-    SessionExecutionKind,
-    cancel_tasks,
-)
+from vibe.app_server._execution import cancel_tasks
 from vibe.app_server._model import ProtocolModel
 from vibe.app_server.models import (
     AccountActionKind,
@@ -36,7 +32,6 @@ from vibe.app_server.models import (
     VibeCodeRepository,
 )
 from vibe.app_server.protocol import TeleportEventParams, TeleportStartParams
-from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.config import VibeConfigSchema
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import (
@@ -58,7 +53,6 @@ from vibe.core.teleport.types import (
     TeleportSummarizingContextEvent,
     TeleportYieldEvent,
 )
-from vibe.core.types import Role
 from vibe.core.vibe_code_project import (
     ProjectPickerContext,
     VibeCodeProject as CoreVibeCodeProject,
@@ -77,7 +71,6 @@ if TYPE_CHECKING:
     from vibe.core.teleport.git import GitRepoInfo
 
 type Notify = Callable[[str, ProtocolModel], Awaitable[None]]
-type ReadAccount = Callable[[], Awaitable[AccountView]]
 
 
 @runtime_checkable
@@ -539,7 +532,7 @@ class VibeCodeController:
                         response = TeleportPushResponseEvent(approved=approved)
         except asyncio.CancelledError:
             raise
-        except (TeleportError, ServiceTeleportError) as exc:
+        except ServiceTeleportError as exc:
             code = (
                 "saved_project_stale"
                 if is_saved_project_stale_error(str(exc))
@@ -714,100 +707,3 @@ def _teleport_event(operation_id: str, event: object) -> TeleportEvent:
             return TeleportComplete(operation_id=operation_id, url=url)
         case _:
             raise VibeCodeError(f"Unknown teleport event: {type(event).__name__}")
-
-
-class LegacyVibeCodeSession:
-    """VibeCodeSession backed by a legacy AgentLoop and SessionExecution."""
-
-    def __init__(
-        self,
-        agent_loop: AgentLoop,
-        execution: SessionExecution,
-        read_account: ReadAccount,
-    ) -> None:
-        self._agent_loop = agent_loop
-        self._execution = execution
-        self._read_account = read_account
-        self._summarizer = _LegacyTeleportSummarizer(agent_loop)
-        self._active_teleport: str | None = None
-
-    @property
-    def config(self) -> VibeConfigSchema:
-        return self._agent_loop.config
-
-    @property
-    def cwd(self) -> Path:
-        return self._agent_loop.cwd
-
-    @property
-    def session_id(self) -> str:
-        return self._agent_loop.session_id
-
-    @property
-    def telemetry_client(self) -> TelemetryClient:
-        return self._agent_loop.telemetry_client
-
-    @property
-    def launch_context(self) -> LaunchContext | None:
-        return self._agent_loop.launch_context
-
-    @property
-    def summarizer(self) -> TeleportContextSummarizer:
-        return self._summarizer
-
-    async def read_account(self) -> AccountView:
-        return await self._read_account()
-
-    def session_message_count(self) -> int:
-        return max(len(self._agent_loop.messages) - 1, 0)
-
-    def has_conversation_history(self) -> bool:
-        return any(
-            message.role is not Role.system for message in self._agent_loop.messages
-        )
-
-    def require_idle(self) -> None:
-        self._execution.require_idle()
-
-    def begin_teleport(self, operation_id: str) -> None:
-        self._active_teleport = operation_id
-        self._execution.begin(SessionExecutionKind.TELEPORT, operation_id)
-
-    def finish_teleport(self, operation_id: str) -> None:
-        if self._active_teleport == operation_id:
-            self._active_teleport = None
-        active = self._execution.active
-        if active is not None and active.id == operation_id:
-            self._execution.finish(active)
-
-    def teleport_events(
-        self,
-        prompt: str | None,
-        *,
-        project_id: str | None = None,
-        project_picker: ProjectPickerTelemetryPayload | None = None,
-    ) -> AsyncGenerator[TeleportYieldEvent, TeleportPushResponseEvent | None]:
-        return self._agent_loop.teleport_to_vibe_code(
-            prompt, project_id=project_id, project_picker=project_picker
-        )
-
-
-class _LegacyTeleportSummarizer:
-    """TeleportContextSummarizer backed by a live AgentLoop."""
-
-    def __init__(self, loop: AgentLoop) -> None:
-        self._loop = loop
-
-    def resolve_prompt(self, prompt: str | None) -> str:
-        return self._loop._resolve_teleport_prompt(prompt)
-
-    def should_summarize(self, prompt: str | None) -> bool:
-        return self._loop._should_summarize_teleport_context(prompt)
-
-    def context_messages(self, prompt: str | None) -> list:
-        return self._loop._teleport_context_messages(prompt)
-
-    async def summarize(self, messages: list, prompt: str | None) -> str:
-        return await self._loop._summarize_teleport_context(
-            prompt=prompt, resolved_prompt=self._loop._resolve_teleport_prompt(prompt)
-        )

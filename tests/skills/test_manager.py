@@ -456,7 +456,7 @@ class TestSkillModelInvocable:
         assert skill is not None
         assert skill.model_invocable is False
         assert manager.get_model_invocable_skill("explicit-only") is None
-        assert manager.parse_skill_command("/explicit-only") is not None
+        assert skill.user_invocable is True
 
     def test_openai_policy_disables_model_invocation(self, skills_dir: Path) -> None:
         skill_dir = create_skill(skills_dir, "openai-explicit-only")
@@ -472,7 +472,7 @@ class TestSkillModelInvocable:
 
         assert skill is not None
         assert skill.model_invocable is False
-        assert manager.parse_skill_command("/openai-explicit-only") is not None
+        assert skill.user_invocable is True
 
     @pytest.mark.parametrize(
         "metadata",
@@ -496,61 +496,8 @@ class TestSkillModelInvocable:
 
         assert skill is not None
         assert skill.model_invocable is False
-        assert manager.parse_skill_command("/invalid-openai-policy") is not None
+        assert skill.user_invocable is True
         assert manager.config_issues[0].file == metadata_path
-
-
-class TestParseSkillCommand:
-    def test_plain_text_returns_none(self, skill_manager: SkillManager) -> None:
-        assert skill_manager.parse_skill_command("hello world") is None
-
-    def test_unknown_skill_returns_none(self, skill_manager: SkillManager) -> None:
-        assert skill_manager.parse_skill_command("/nonexistent") is None
-
-    def test_slash_only_returns_none(self, skill_manager: SkillManager) -> None:
-        assert skill_manager.parse_skill_command("/") is None
-
-    def test_parses_skill_without_args(
-        self, skills_dir: Path, skill_config: VibeConfigSchema
-    ) -> None:
-        create_skill(skills_dir, "my-skill", body="Do the thing.")
-        manager = SkillManager(lambda: skill_config)
-
-        parsed = manager.parse_skill_command("/my-skill")
-        assert parsed is not None
-        assert parsed.name == "my-skill"
-        assert "Do the thing." in parsed.content
-        assert parsed.extra_instructions is None
-
-    def test_parses_skill_with_args(
-        self, skills_dir: Path, skill_config: VibeConfigSchema
-    ) -> None:
-        create_skill(skills_dir, "my-skill", body="Do the thing.")
-        manager = SkillManager(lambda: skill_config)
-
-        parsed = manager.parse_skill_command("/my-skill fix the bug")
-        assert parsed is not None
-        assert parsed.name == "my-skill"
-        assert parsed.extra_instructions == "fix the bug"
-
-    def test_case_insensitive(
-        self, skills_dir: Path, skill_config: VibeConfigSchema
-    ) -> None:
-        create_skill(skills_dir, "my-skill", body="Do the thing.")
-        manager = SkillManager(lambda: skill_config)
-
-        parsed = manager.parse_skill_command("/MY-SKILL")
-        assert parsed is not None
-        assert parsed.name == "my-skill"
-
-    def test_non_user_invocable_skill_returns_none(
-        self, skills_dir: Path, skill_config: VibeConfigSchema
-    ) -> None:
-        create_skill(skills_dir, "hidden-skill", user_invocable=False)
-        manager = SkillManager(lambda: skill_config)
-
-        assert manager.get_skill("hidden-skill") is not None
-        assert manager.parse_skill_command("/hidden-skill") is None
 
 
 class TestSkillManagerConfigIssues:
@@ -584,30 +531,6 @@ class TestSkillManagerConfigIssues:
             for i in manager.config_issues
         } == {(broken_dir_a / "SKILL.md", True), (broken_dir / "SKILL.md", True)}
         assert "good-skill" in manager.available_skills
-
-
-class TestParseSkillCommandExtras:
-    def test_without_args(
-        self, skills_dir: Path, skill_config: VibeConfigSchema
-    ) -> None:
-        create_skill(skills_dir, "my-skill", body="Do the thing.")
-        manager = SkillManager(lambda: skill_config)
-
-        parsed = manager.parse_skill_command("/my-skill")
-        assert parsed is not None
-        assert parsed.name == "my-skill"
-        assert parsed.content == "Do the thing."
-        assert parsed.extra_instructions is None
-
-    def test_with_args(self, skills_dir: Path, skill_config: VibeConfigSchema) -> None:
-        create_skill(skills_dir, "my-skill", body="Do the thing.")
-        manager = SkillManager(lambda: skill_config)
-
-        parsed = manager.parse_skill_command("/my-skill fix the bug")
-        assert parsed is not None
-        assert parsed.name == "my-skill"
-        assert parsed.content == "Do the thing."
-        assert parsed.extra_instructions == "fix the bug"
 
 
 class TestRegistrySkillDiscovery:

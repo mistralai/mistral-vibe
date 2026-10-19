@@ -6,7 +6,6 @@ from e2e.app_server.events import paste, turn_completed, turn_started, user_msg
 from e2e.app_server.scenario import Timeline, resize
 
 env = {"SSH_TTY": "/dev/pts/0"}
-clipboard_clients = {"rust"}
 
 _MESSAGE = (
     "PR watch tick for PR #60946 (https://github.com/example/project/pull/60946) on branch"
@@ -26,9 +25,9 @@ _MESSAGE = (
     "\n"
     "</vibe-scratchpad>"
 )
-# Drag from the banner's last row past the message's closing separator (1-based SGR).
+# Drag from the banner's `Type /help` text past the message's closing separator (1-based SGR).
 # At 106 columns the tag's closing `>` wraps alone onto a content row, not a prompt marker.
-_SELECT = "\x1b[<0;1;8M\x1b[<32;106;29M\x1b[<0;106;29m"
+_SELECT = "\x1b[<0;14;4M\x1b[<32;106;25M\x1b[<0;106;25m"
 expected_clipboard = f"Type /help for more information\n{_MESSAGE}"
 
 timeline: Timeline = [

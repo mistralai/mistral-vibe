@@ -3,6 +3,10 @@ from __future__ import annotations
 from pydantic import JsonValue, ValidationError
 import pytest
 
+from vibe.app_server._effect_output_cap import (
+    EFFECT_OUTPUT_TEXT_MAX_CHARS,
+    TRUNCATION_MARKER,
+)
 from vibe.app_server._patch import apply_json_patch
 from vibe.app_server._projector import EventProjector
 from vibe.app_server.events import (
@@ -25,7 +29,9 @@ from vibe.app_server.events import (
 from vibe.app_server.models import (
     ApprovalCallbackDetail,
     CompletedEffectState,
+    EffectResultDisplay,
     IdleSessionStatus,
+    OpenCallbackState,
     PublicCallbackEntry,
     PublicChildSession,
     PublicEffectEntry,
@@ -42,13 +48,13 @@ from vibe.app_server.models import (
     PublicTurnQueue,
     PublicTurnStatus,
     ResourceContentBlock,
+    RunningEffectState,
     RunningSessionStatus,
     TextContentBlock,
     TokenUsage,
 )
 from vibe.app_server.protocol import (
     ChildSessionUpdatedParams,
-    HistoryEntryAddedParams,
     JsonPatchOperation,
     MCPAuthRequiredParams,
     Notification,
@@ -499,13 +505,13 @@ def _read_call() -> ToolCallEvent:
     )
 
 
-def _read_result() -> ToolResultEvent:
+def _read_result(content: str = "hello") -> ToolResultEvent:
     event = ToolResultEvent(
         tool_call_id="tool-1",
         tool_name="read_file",
         tool_class=ReadFile,
         result=ReadFileResult(
-            file_path="README.md", content="hello", num_lines=1, start_line=1
+            file_path="README.md", content=content, num_lines=1, start_line=1
         ),
         duration=0.25,
     )
@@ -554,38 +560,78 @@ def test_tool_is_one_public_lifecycle_entry() -> None:
     assert reduced.state.output["content"] == "hello"
 
 
-def test_callback_entry_is_emitted_before_related_effect_is_blocked() -> None:
+def test_completed_tool_with_huge_output_is_capped() -> None:
     projector = EventProjector("session-1", "turn-1")
     projector.project(_read_call())
 
-    updates = projector.open_callback(
-        "callback-1",
-        ApprovalCallbackDetail(
-            effect=projector.effect_detail("tool-1"), related_entry_id="tool-1"
-        ),
-        "Allow read_file?",
+    projector.project(_read_result("x" * (EFFECT_OUTPUT_TEXT_MAX_CHARS * 2)))
+
+    entry = projector.history[0]
+    assert isinstance(entry, PublicEffectEntry)
+    assert isinstance(entry.state, CompletedEffectState)
+    assert isinstance(entry.state.output, dict)
+    assert entry.state.output["content"] == (
+        f"{'x' * EFFECT_OUTPUT_TEXT_MAX_CHARS}{TRUNCATION_MARKER}"
     )
 
-    assert [update.method for update in updates] == [
-        "history/entryAdded",
-        "history/entryUpdated",
-    ]
-    assert isinstance(updates[0].params, HistoryEntryAddedParams)
-    assert updates[0].params.entry.type == "callback"
+
+def test_streamed_tool_output_stops_at_the_cap() -> None:
+    projector = EventProjector("session-1", "turn-1")
+    projector.project(_read_call())
+    chunk = "x" * (EFFECT_OUTPUT_TEXT_MAX_CHARS // 2 + 1)
+
+    for _ in range(3):
+        projector.project(
+            ToolStreamEvent(tool_call_id="tool-1", tool_name="read_file", message=chunk)
+        )
+
+    entry = projector.history[0]
+    assert isinstance(entry, PublicEffectEntry)
+    assert isinstance(entry.state, RunningEffectState)
+    assert entry.state.output_text == (
+        f"{'x' * EFFECT_OUTPUT_TEXT_MAX_CHARS}{TRUNCATION_MARKER}"
+    )
+
+
+def test_directly_completed_effect_is_capped() -> None:
+    projector = EventProjector("session-1", "turn-1")
+    projector.project(_read_call())
+
+    projector.complete_effect(
+        "tool-1",
+        CompletedEffectState(
+            output={"stdout": "x" * (EFFECT_OUTPUT_TEXT_MAX_CHARS * 2)},
+            output_text="x" * (EFFECT_OUTPUT_TEXT_MAX_CHARS * 2),
+            display=EffectResultDisplay(success=True, message="done"),
+        ),
+    )
+
+    entry = projector.history[0]
+    assert isinstance(entry, PublicEffectEntry)
+    assert isinstance(entry.state, CompletedEffectState)
+    capped = f"{'x' * EFFECT_OUTPUT_TEXT_MAX_CHARS}{TRUNCATION_MARKER}"
+    assert entry.state.output_text == capped
+    assert entry.state.output == {"stdout": capped}
 
 
 def test_paged_history_and_callback_redelivery_share_one_identity_index() -> None:
     projector = EventProjector("session-1", "turn-1")
     projector.project(_read_call())
-    projector.open_callback(
-        "callback-1",
-        ApprovalCallbackDetail(
+    callback = PublicCallbackEntry(
+        id="callback:callback-1",
+        session_id="session-1",
+        turn_id="turn-1",
+        callback_id="callback-1",
+        title="Allow read_file?",
+        generation_status=PublicEntryGenerationStatus.IN_PROGRESS,
+        created_at=1,
+        updated_at=1,
+        detail=ApprovalCallbackDetail(
             effect=projector.effect_detail("tool-1"), related_entry_id="tool-1"
         ),
-        "Allow read_file?",
+        state=OpenCallbackState(),
+        related_entry_id="tool-1",
     )
-    callback = projector.history[-1]
-    assert isinstance(callback, PublicCallbackEntry)
     projection = _projection()
     projection.state.active_callbacks.append(callback)
 

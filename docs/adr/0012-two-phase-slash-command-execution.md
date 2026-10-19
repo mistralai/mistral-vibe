@@ -2,15 +2,15 @@
 
 ## Decision
 
-The app server queue contains structured user turns only. The Textual client
-does not keep a second queue for slash commands, shell commands, or deferred
-settings writes.
+The Runtime-owned accepted queue, exposed through the app server, contains
+structured user turns only. App-server modules enforce product command policy.
+The terminal client does not keep a second queue for slash commands, shell
+commands or deferred settings writes.
 
 Slash commands have two execution policies:
 
-- Commands with `side_channel=True` may run immediately while an agent turn or
-  shell command is active. `SideChannelController` allows one such command at a
-  time.
+- Commands marked `side_channel` may run immediately while an agent turn or
+  shell command is active. Only one such command runs at a time.
 - All other slash commands require an idle session. If the user submits one
   while busy, the client keeps the text in the input and shows a warning.
 
@@ -24,8 +24,9 @@ the result. There is no deferred client-side persistence queue.
 
 ## Rationale
 
-The app server is the single owner of turn ordering. A second Textual queue for
-commands and shell work duplicated scheduling rules and forced the UI to keep a
+Runtime is the single owner of accepted turn ordering; the app server enforces
+command policy through its session capabilities. A second client-side queue for
+commands and shell work duplicates scheduling rules and forces the UI to keep a
 drain task, command barriers, discard callbacks, and picker coordination.
 
 Rejecting non-side-channel commands while busy makes the behavior explicit and
@@ -49,7 +50,7 @@ queued-message UI.
 
 ## Agent Guidance
 
-- Add `side_channel=True` only when the command is safe during an active turn or
+- Mark a command `side_channel` only when it is safe during an active turn or
   shell command.
 - Keep lifecycle commands such as `/clear`, `/compact`, `/rewind`, `/resume`,
   and `/retry` on the idle-only path.

@@ -23,7 +23,7 @@ def _state_path() -> Path:
 def load_seen() -> dict[str, int]:
     try:
         data = json.loads(read_safe(_state_path()).text)
-    except (FileNotFoundError, OSError, ValueError):
+    except FileNotFoundError, OSError, ValueError:
         return {}
     if not isinstance(data, dict):
         return {}

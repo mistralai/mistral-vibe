@@ -19,7 +19,7 @@ pub(super) fn pad_line(mut spans: Vec<Span<'static>>, pad: usize) -> Line<'stati
     Line::from(all)
 }
 
-/// Greedy word-wrap styled characters to `width`, like Textual's `divide_line`.
+/// Greedy word-wrap styled characters to `width`.
 pub(crate) fn wrap_chars(chars: &[Sc], width: usize) -> Vec<Vec<Sc>> {
     let width = width.max(1);
     let mut rows = Vec::new();
@@ -118,7 +118,7 @@ impl WordWidths {
     }
 }
 
-/// Textual collapses whitespace runs per text token, never across tokens.
+/// Whitespace runs collapse per text token, never across tokens.
 pub(super) fn collapse_ws(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {

@@ -718,7 +718,7 @@ async def test_migrate_config_layers_renames_default_agent_to_ask(
     path = tmp_working_directory / random_config_file_name()
     path.write_text(
         'default_agent = "default"\n'
-        'enabled_agents = ["default", "plan"]\n'
+        'enabled_agents = ["default", "auto-approve"]\n'
         'disabled_agents = ["default"]\n'
         'installed_agents = ["default", "lean"]\n'
     )
@@ -729,7 +729,7 @@ async def test_migrate_config_layers_renames_default_agent_to_ask(
     with path.open("rb") as file:
         persisted = tomllib.load(file)
     assert persisted["default_agent"] == "ask"
-    assert persisted["enabled_agents"] == ["ask", "plan"]
+    assert persisted["enabled_agents"] == ["ask", "auto-approve"]
     assert persisted["disabled_agents"] == ["ask"]
     assert persisted["installed_agents"] == ["ask", "lean"]
 
@@ -739,7 +739,7 @@ async def test_migrate_config_layers_pins_default_agent_when_accept_edits_exclud
     tmp_working_directory: Path,
 ) -> None:
     path = tmp_working_directory / random_config_file_name()
-    path.write_text('enabled_agents = ["default", "plan"]\n')
+    path.write_text('enabled_agents = ["default", "auto-approve"]\n')
     layer = UserConfigLayer(path=path)
 
     await migrate_config_layers([layer])
@@ -747,7 +747,7 @@ async def test_migrate_config_layers_pins_default_agent_when_accept_edits_exclud
     with path.open("rb") as file:
         persisted = tomllib.load(file)
     assert persisted["default_agent"] == "ask"
-    assert persisted["enabled_agents"] == ["ask", "plan"]
+    assert persisted["enabled_agents"] == ["ask", "auto-approve"]
 
 
 @pytest.mark.asyncio

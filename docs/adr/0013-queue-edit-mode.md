@@ -9,9 +9,8 @@ highlighted while the input remains focused and locked.
 In selection mode:
 
 - Up and Down move between queued prompts.
-- Backspace removes the selected prompt through
-  `session/turn/queue/remove`; the Rust CLI also binds Ctrl+C, the Python
-  CLI Delete.
+- Backspace or Ctrl+C removes the selected prompt through
+  `session/turn/queue/remove`.
 - Enter loads the selected prompt into the input for editing.
 - Escape exits queue mode and restores the original draft.
 
@@ -38,7 +37,7 @@ prompt together. This restores the pre-turn-queue "send them all at once"
 behaviour without changing the server queue, which still promotes one item at a
 time — the desktop app keeps turn-by-turn delivery.
 
-Each queued prompt still has its own `UserMessage` widget, so queue selection can
+Each queued prompt still has its own transcript entry, so queue selection can
 navigate, edit, and remove prompts individually; edit and remove re-`replace`
 the merged item with the remaining prompts. On resume the merged item is one
 combined user history entry, so a resumed queue shows the prompts as a single
@@ -56,7 +55,7 @@ ID. The server uses the content already stored in the queue. The client does
 not remove the item, call ordinary `turn/steer`, or rebuild the item after an
 error.
 
-The queued widgets remain pending and keep their positions while the request
+The queued entries remain pending and keep their positions while the request
 is in flight. A matching user `history/entryAdded` event with
 `source = turn_steer` marks them sent in place. Because the event stream is
 processed sequentially, output accepted before that history entry stays above
@@ -71,80 +70,70 @@ re-enqueues an uncertain request.
 
 ## State ownership
 
-`ChatInputBody` owns the selection and edit state machine. It receives three
-callbacks from `VibeApp` through `ChatInputContainer`:
-
-- `queue_edit_active_getter` reports whether an agent turn is active and queued
-  prompts are available.
-- `queue_items_getter` returns `(queue_index, content)` pairs in FIFO order.
-- `queue_selected_index_getter` resolves the highlighted widget to its current
-  queue index, or returns `None` after that prompt starts.
-
-`VibeApp` owns the highlighted widget reference and the `queue-selected` CSS
-class. `QueueController` maps app-server queue IDs to pending `UserMessage`
-widgets and performs replace, remove, and Unified queued-steer requests. None
-of these classes owns turn scheduling or reconstructs server-owned queue
-content.
+`QueueController` (`vibe/cli-rust/src/message_queue.rs`) owns the queued
+prompts and the selection and edit state machine: the highlighted prompt, the
+edit and consumed-edit state, and the draft saved when queue mode opened. It maps
+app-server queue IDs to pending transcript entries and performs replace,
+remove, and Unified queued-steer requests. The chat input and transcript only
+render that state. None of them owns turn scheduling or reconstructs
+server-owned queue content.
 
 ## Input locking
 
-Selection mode sets `read_only=True`, hides the cursor, and intercepts the
-navigation, edit, remove, and escape keys before `TextArea` handles them. Edit
-mode unlocks the input and loads the selected prompt.
+Selection mode locks the chat input read-only, hides the caret, and intercepts
+the navigation, edit, remove, and escape keys before any editing key handles
+them. Edit mode unlocks the input and loads the selected prompt.
 
-The app-level Escape binding is disabled while queue mode is active so Escape
-can reach `ChatTextArea` and cancel the selection or edit.
+While queue mode is active, the queue key handler runs before the app-level
+Escape binding, so Escape cancels the selection or edit instead of
+interrupting the turn.
 
 ## Key hints
 
-In the Rust CLI, while queue selection or editing is active and the composer
-receives keys, its controls replace the loading line's turn hints (interrupt,
-steer, cancel last queued message) for exactly as long as the mode lasts. Hints
+While queue selection or editing is active and the composer receives keys, its
+controls replace the loading line's turn hints (interrupt, steer, cancel last
+queued message) for exactly as long as the mode lasts. Hints
 are derived from the same state the keys dispatch on at render time, never shown
 on a timer: a turn hint is offered only when its key would perform that action
-(for example, Enter to steer only on an empty, steerable input). The Python CLI
-still shows the selection controls as a timed notice.
+(for example, Enter to steer only on an empty, steerable input).
 
 ## Promotion races
 
 The app server can promote the oldest queued prompt while the user is selecting
 or editing it. Numeric queue indices then shift, so the UI tracks the selected
-prompt by widget identity.
+prompt by its transcript entry ID.
 
 - If a selected prompt starts, the next navigation re-reads the queue and moves
   selection to the nearest surviving prompt.
 - If an edited prompt starts while the user is typing, the UI keeps the text and
   asks whether to submit it as a new prompt or discard it.
-- The edit handler resolves the captured widget again after prompt preparation.
-  If the prompt started during that await, it uses the same copy-on-write path.
+- Saving an edit resolves the selected entry ID again before sending. If the
+  prompt has started by then, it uses the same copy-on-write path.
 
 ## Rationale
 
 Selection before editing avoids changing queued text accidentally and lets the
-user delete a prompt without loading it into the input. Widget identity avoids
+user delete a prompt without loading it into the input. Entry identity avoids
 editing or deleting the wrong prompt when FIFO promotion changes numeric
 indices.
 
-Keeping the UI state separate from `HistoryManager` also avoids mixing
+Keeping the UI state separate from the input history also avoids mixing
 persistent input history with temporary app-server queue entries.
 
 ## Agent Guidance
 
 - Queue selection applies only to app-server-backed prompts.
 - Re-prepare edited prompts so file mentions and images match the new text.
-- Resolve edits and removals by widget identity immediately before sending the
-  app-server request.
-- Keep queued widgets pinned until the matching steering history entry arrives;
+- Resolve edits and removals by transcript entry ID immediately before sending
+  the app-server request.
+- Keep queued entries pinned until the matching steering history entry arrives;
   do not infer steering from assistant output or subagent completion.
 - Reconcile an uncertain queued-steer request from the session snapshot; never
   re-enqueue it from client state.
-- Keep `ChatInputBody` and `ChatInputContainer` independent of
-  `QueueController`; use the callbacks above.
-- Keep the `queue-selected` CSS class in `VibeApp`, which owns the selected
-  widget reference.
-- In the Rust CLI, derive key hints from the predicates their key handlers
-  use; do not show queue-mode hints through timed notices. The Python CLI still
-  shows the selection controls as a timed notice.
+- Keep queue selection and edit state in `QueueController`; the chat input and
+  transcript only render it.
+- Derive key hints from the predicates their key handlers use; do not show
+  queue-mode hints through timed notices.
 
 ## Flag To User When
 
@@ -152,5 +141,5 @@ persistent input history with temporary app-server queue entries.
 - An edit bypasses `queue/replace` or a removal bypasses `queue/remove`.
 - Unified queued steering is split into client-side remove and steer requests.
 - A delivery heuristic depends on assistant messages or subagent completion.
-- A cached numeric index is used after an `await` without re-resolving the
-  selected widget.
+- A cached numeric index is used after the queue may have changed without
+  re-resolving the selected entry.

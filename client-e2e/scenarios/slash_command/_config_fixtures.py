@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 AUTO_COMPACT_HANDSHAKE = {
     "config/fields/read": {
         "fields": [
@@ -26,3 +28,34 @@ AUTO_COMPACT_HANDSHAKE = {
         "targets": ["user-toml", "project-toml", "overrides"],
     }
 }
+
+TARGETS = ["user-toml", "project-toml", "overrides"]
+
+
+def field(
+    name: str,
+    kind: str,
+    value: Any,
+    *,
+    layers: list[tuple[str, Any]] | None = None,
+    choices: list[str] | None = None,
+) -> dict[str, Any]:
+    """One popular `/config` row; `layers` lists its layer values, highest first."""
+    return {
+        "name": name,
+        "kind": kind,
+        "value": value,
+        "description": "",
+        "path": f"/{name}",
+        "popular": True,
+        "enumChoices": choices or [],
+        "valueLabels": {},
+        "layerValues": [
+            {"layer": layer, "value": v} for layer, v in layers or [("default", value)]
+        ],
+    }
+
+
+def fields_read(*fields: dict[str, Any]) -> dict[str, Any]:
+    """A `config/fields/read` answer listing only `fields`."""
+    return {"fields": list(fields), "targets": TARGETS}

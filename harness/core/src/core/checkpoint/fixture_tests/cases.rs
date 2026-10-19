@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use serde_json::{Value, json};
 
 use super::{CONFIG_SECRET, FixtureCase};
@@ -46,10 +44,6 @@ pub(super) fn fixture_cases() -> Vec<FixtureCase> {
         FixtureCase {
             file_name: "between-turn-manual-compaction.json",
             state: between_turn_manual_compaction_state(),
-        },
-        FixtureCase {
-            file_name: "active-keyed-context.json",
-            state: keyed_context_state(),
         },
         FixtureCase {
             file_name: "active-hook-pre-agent.json",
@@ -149,12 +143,15 @@ fn idle_history_notifications_state() -> HarnessState {
         content: vec![text_block("notification attachment")],
     };
     state.notifications = NotificationState::try_from_parts_with_delivery(
-        vec![pending],
+        vec![crate::core::features::notifications::AdmittedNotification {
+            notification: pending,
+            preceding_steers: 0,
+        }],
         true,
-        BTreeSet::from([
+        vec![
             "notification-pending".to_string(),
             "notification-received".to_string(),
-        ]),
+        ],
     )
     .unwrap();
     state
@@ -193,7 +190,6 @@ fn awaiting_completion_state(purpose: CompletionPurpose) -> HarnessState {
                 crate::core::action_id::compaction("checkpoint-fixture-task", 3),
                 turn_id.clone(),
                 iterations,
-                Vec::new(),
                 compaction_projection.expect("compaction fixture has a projection"),
             ),
         },
@@ -206,15 +202,6 @@ fn awaiting_completion_state(purpose: CompletionPurpose) -> HarnessState {
         model_input_ready: false,
         queued: QueuedTurn::Empty,
     });
-    state
-}
-
-fn keyed_context_state() -> HarnessState {
-    let mut state = awaiting_completion_state(CompletionPurpose::Agent);
-    state.context.push(StoredMessage::keyed_injection(
-        "github".to_string(),
-        Message::user_text("GitHub is connected."),
-    ));
     state
 }
 
@@ -383,6 +370,7 @@ fn fixture_projection(state: &HarnessState, extra_instructions: &str) -> Compact
         CompactionBudget {
             token_threshold: state.config.settings.context.compaction.token_threshold(),
             image_delivery: state.config.settings.context.image_delivery.compaction,
+            image_cost: state.config.settings.context.image_token_cost,
         },
     )
     .expect("fixture compaction projection can be estimated");
@@ -582,8 +570,13 @@ fn program_execution(message_count: usize) -> ToolExecution {
             json!({ "code": fixture_program_code() }),
         ),
         state: ToolExecutionState::ProgramPending {
-            execution: ProgramExecution::restore(fixture_program_code().to_string(), operations, 0)
-                .unwrap(),
+            execution: ProgramExecution::restore(
+                fixture_program_code().to_string(),
+                operations,
+                0,
+                None,
+            )
+            .unwrap(),
         },
     }
 }

@@ -1,4 +1,4 @@
-//! The update notifier (Python `cli/update_notifier`): update cache, gateway,
+//! The update notifier: update cache, gateway,
 //! and the update use-case.
 
 pub mod brew_oracle;

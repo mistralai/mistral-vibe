@@ -53,6 +53,7 @@ from mistralai_vibe_local_harness.vibe._ssl import build_ssl_context
 from mistralai_vibe_local_harness.vibe.adapters._correlation import correlation_hook
 from mistralai_vibe_local_harness.vibe.adapters._provider_failure import (
     IncompleteProviderStream,
+    ProviderRefusal,
     until_connection_lost,
 )
 from mistralai_vibe_local_harness.vibe.adapters._retry import (
@@ -93,6 +94,10 @@ _REASONING_PAYLOADS_META_KEY = "vibe_reasoning_payloads"
 # The finish reason OpenAI-compatible providers, Mistral among them, report when
 # they abort a generation part way.
 _ABORTED_FINISH_REASON = "error"
+
+# The stop reason the Anthropic Messages API reports, with HTTP 200, when the
+# model declines a request.
+_REFUSAL_STOP_REASON = "refusal"
 
 # A completion is only interpretable next to the request knobs that decided it:
 # which model answered, what reasoning effort it was given, and how many tools it
@@ -321,6 +326,10 @@ async def _complete_once(
             f"Model stream from {provider.name} ({model}) ended with the error "
             "finish reason."
         )
+    if accumulated.stop is not None and accumulated.stop.reason == _REFUSAL_STOP_REASON:
+        raise ProviderRefusal(
+            category=accumulated.stop.category, explanation=accumulated.stop.explanation
+        )
     return _to_completion_result(
         accumulated.model_copy(update={"usage": usage if has_usage else None})
     )
@@ -519,6 +528,12 @@ def _to_completion_result(chunk: LLMChunk) -> RustCompletionResult:
         parts.append(RustTextContentBlock(text=" "))
 
     finish_reason = _finish_reason(chunk, has_tool_calls=bool(message.tool_calls))
+    if finish_reason == "other" and chunk.stop is not None:
+        # `other` alone cannot say what ended the generation; the provider's value can.
+        logger.warning(
+            "Provider stop reason %r has no completion finish reason; reporting 'other'",
+            chunk.stop.reason,
+        )
     return RustCompletionResult(
         parts=parts, finish_reason=finish_reason, usage=_token_usage(chunk)
     )

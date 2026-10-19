@@ -1,4 +1,4 @@
-//! Wire types for the Vibe app-server JSON-RPC subset used by the PoC.
+//! Wire types for the Vibe app-server JSON-RPC subset used by the TUI.
 
 use std::collections::BTreeMap;
 
@@ -11,7 +11,7 @@ use super::images::ImageAttachment;
 /// History entries any session read asks for, everywhere.
 pub const HISTORY_LIMIT: u32 = 200;
 
-/// Methods this PoC issues. Everything else on the server is intentionally unused.
+/// Methods this client issues. Everything else on the server is intentionally unused.
 pub mod method {
     pub const INITIALIZE: &str = "initialize";
     pub const INITIALIZED: &str = "initialized";
@@ -21,7 +21,9 @@ pub mod method {
     pub const SESSION_HISTORY_LIST: &str = "session/history/list";
     pub const SESSION_STOP: &str = "session/stop";
     pub const SESSION_RESUME: &str = "session/resume";
+    pub const SESSION_CONTINUE: &str = "session/continue";
     pub const SESSION_DELETE: &str = "session/delete";
+    pub const SESSION_LEASE_SUBSCRIBE: &str = "session/lease/subscribe";
     pub const SESSION_READY_WAIT: &str = "session/ready/wait";
     pub const RUNTIME_READ: &str = "runtime/read";
     pub const CONFIG_READ: &str = "config/read";
@@ -32,11 +34,11 @@ pub mod method {
     pub const WORKSPACE_TRUST_DECISION: &str = "workspace/trust/decision";
     /// Untrusted local config folders the client warns about once per folder.
     pub const WORKSPACE_TRUST_UNTRUSTED_CONFIG: &str = "workspace/trust/untrustedConfig";
-    /// Queue a user turn (Python `session.enqueue_turn`).
+    /// Queue a user turn.
     pub const TURN_ENQUEUE: &str = "session/turn/enqueue";
-    /// Start a turn immediately, bypassing the queue (Python `session.act`).
+    /// Start a turn immediately, bypassing the queue.
     pub const TURN_START: &str = "turn/start";
-    /// Drop a queued prompt that has not been promoted yet (Python `remove_queued_turn`).
+    /// Drop a queued prompt that has not been promoted yet.
     pub const TURN_QUEUE_REMOVE: &str = "session/turn/queue/remove";
     /// Rewrite a queued prompt in place, keeping its id and FIFO position.
     pub const TURN_QUEUE_REPLACE: &str = "session/turn/queue/replace";
@@ -46,33 +48,41 @@ pub mod method {
     pub const TURN_QUEUE_RESUME: &str = "session/turn/queue/resume";
     /// Start a fresh conversation while retaining the current session attachment.
     pub const SESSION_HISTORY_CLEAR: &str = "session/history/clear";
-    /// Switch the session's agent (Python `AgentResource.switch`).
+    /// Switch the session's agent.
     pub const SESSION_AGENT_UPDATE: &str = "session/agent/update";
     /// Whether rewinding to a history entry would restore files on disk.
     pub const SESSION_REWIND_READ: &str = "session/rewind/read";
     /// Truncate the conversation at a user entry, optionally restoring files.
     pub const SESSION_REWIND: &str = "session/rewind";
-    /// Cancel the in-progress turn (Python `session.interrupt`).
+    /// Copy the session into a new one, attached or left on disk (`/branch`).
+    pub const SESSION_FORK: &str = "session/fork";
+    /// Cancel the in-progress turn.
     pub const TURN_INTERRUPT: &str = "turn/interrupt";
-    /// Compact conversation history by summarizing (Python `session/compact`).
+    /// Compact conversation history by summarizing.
     pub const SESSION_COMPACT: &str = "session/compact";
     /// Run or interrupt a user-entered `!` command.
     pub const SESSION_SHELL_COMMAND: &str = "session/shellCommand";
     /// Read the config field views the `/config` settings screen renders.
     pub const CONFIG_FIELDS_READ: &str = "config/fields/read";
+    /// Read the whole effective config the session runs with, credentials redacted.
+    pub const CONFIG_EFFECTIVE_READ: &str = "config/effective/read";
     /// Persist a config change (e.g. the theme picker sets `/theme`).
     pub const CONFIG_WRITE: &str = "config/write";
-    /// Re-read config and runtime after a change (Python `_reload_config`).
+    /// Persist a saved model/thinking pick; a running turn parks it instead of refusing it.
+    pub const CONFIG_MODEL_WRITE: &str = "config/model/write";
+    /// Re-read config and runtime after a change.
     pub const CONFIG_RELOAD: &str = "config/reload";
-    /// Read the proxy variables `/proxy-setup` edits (Python `read_proxy`).
+    /// Read the proxy variables `/proxy-setup` edits.
     pub const CONFIG_PROXY_READ: &str = "config/proxy/read";
-    /// Persist the changed proxy variables (Python `update_proxy`).
+    /// Persist the changed proxy variables.
     pub const CONFIG_PROXY_WRITE: &str = "config/proxy/write";
-    /// The pre-session setup surface (Python app-server `_setup.py`).
+    /// The pre-session setup surface (app-server `_setup.py`).
     pub const SETUP_STATUS: &str = "setup/status";
     pub const SETUP_STORE_CREDENTIAL: &str = "setup/store-credential";
     pub const SETUP_SUBMIT_CHOICES: &str = "setup/submit-choices";
     pub const SESSION_LOG_READ: &str = "session/log/read";
+    /// Live session logs paged into the `/debug` console.
+    pub const DIAGNOSTICS_LOGS_READ: &str = "diagnostics/logs/read";
     pub const SESSION_RENAME: &str = "session/rename";
     pub const IDENTITY_READ: &str = "identity/read";
     pub const ACCOUNT_READ: &str = "account/read";
@@ -86,7 +96,7 @@ pub mod method {
     pub const CONNECTOR_TOGGLE: &str = "connector_catalog/toggle";
     /// The connector catalog; the only answer carrying the Studio `manageUrl`.
     pub const CONNECTOR_CATALOG_READ: &str = "connector_catalog/read";
-    /// Re-fetch the workspace connector catalog (Python `refresh_connectors`).
+    /// Re-fetch the workspace connector catalog.
     pub const CONNECTOR_CATALOG_REFRESH: &str = "connector_catalog/refresh";
     pub const MCP_ADD: &str = "mcp_catalog/add";
     pub const MCP_REMOVE: &str = "mcp_catalog/remove";
@@ -100,6 +110,9 @@ pub mod method {
     pub const PLUGIN_CATALOG_READ: &str = "plugin_catalog/read";
     /// Re-pin the session's plugins (`/reload-plugins`).
     pub const PLUGIN_RELOAD: &str = "plugin/reload";
+    /// Install or uninstall an `install_required` agent such as `lean`.
+    pub const AGENTS_INSTALL: &str = "agents/install";
+    pub const AGENTS_UNINSTALL: &str = "agents/uninstall";
     /// Client -> server: the semantic answer to a `callback/call` request.
     pub const CALLBACK_RESULT: &str = "callback/result";
     /// Ask the server-owned feedback resource whether the prompt is eligible.
@@ -110,25 +123,27 @@ pub mod method {
     pub const TELEMETRY_RECORD: &str = "telemetry/record";
     /// Ask the narration resource for the spoken summary of a finished turn.
     pub const NARRATION_SUMMARIZE: &str = "narration/summarize";
-    /// Remove a managed worktree (Python `WorkspaceWorktreeRemoveParams`).
+    /// Remove a managed worktree (app-server `WorkspaceWorktreeRemoveParams`).
     pub const WORKSPACE_WORKTREE_REMOVE: &str = "workspace/git/worktrees/remove";
 }
 
 /// Callback kinds the client advertises at `initialize` and knows how to answer.
 pub const CALLBACK_KINDS: [&str; 2] = ["approval", "user_input"];
 
-/// Server -> client request methods this PoC answers.
+/// Server -> client request methods this client answers.
 pub mod server_method {
     /// The server asks the client to resolve an open callback (e.g. approval).
     pub const CALLBACK_CALL: &str = "callback/call";
 }
 
-/// Server -> client notification methods this PoC reduces.
+/// Server -> client notification methods this client reduces.
 pub mod notification {
     pub const SERVER_DISCONNECTED: &str = "__server_disconnected";
     /// Client-synthesized: a `callback/result` denial was rejected by the server
     /// (sent by the deny watcher, reduced by the headless consumer).
     pub const CALLBACK_RESULT_FAILED: &str = "__callback_result_failed";
+    /// Replay-server only: every frame a request released has been written.
+    pub const REPLAY_DRAINED: &str = "replay/drained";
     pub const RUNTIME_UPDATED: &str = "runtime/updated";
     pub const SESSION_SNAPSHOT: &str = "session/snapshot";
     pub const SESSION_UPDATED: &str = "session/updated";
@@ -143,21 +158,27 @@ pub mod notification {
     pub const SESSION_COMPACTED: &str = "session/compacted";
     /// A child (subagent) session was added or changed.
     pub const CHILD_SESSION_UPDATED: &str = "session/childSessionUpdated";
-    /// The session's context was cleared and replaced (Python `SessionContextCleared`).
+    /// The session's context was cleared and replaced.
     pub const SESSION_CONTEXT_CLEARED: &str = "session/contextCleared";
-    /// Operational warning pushed by the server (Python `ServerWarning`).
+    /// Operational warning pushed by the server.
     pub const WARNING: &str = "warning";
-    /// Operational error pushed by the server (Python `ServerError`).
+    /// Operational error pushed by the server.
     pub const ERROR: &str = "error";
-    /// A turn is retrying after a transient failure (Python `TurnRetrying`).
+    /// A turn is retrying after a transient failure.
     pub const TURN_RETRYING: &str = "turn/retrying";
     /// URL to open while an `mcp_catalog/login` request is in flight.
     pub const MCP_AUTH_URL: &str = "mcp_catalog/authUrl";
+    /// The `--agent-socket` server aborted the run, with its message.
+    pub const AGENT_SOCKET_ABORTED: &str = "agentSocket/aborted";
     /// Compatibility duplicate the catalog publishes alongside the canonical
-    /// notification; consumed without acting on it, like the Python client.
+    /// notification; consumed without acting on it.
     pub const MCP_AUTH_URL_LEGACY: &str = "mcp/authUrl";
     /// Progress of a `vibeCode/teleport/start` operation.
     pub const TELEPORT_EVENT: &str = "vibeCode/teleport/event";
+    /// A session lease was acquired or released; `leaseHolder` is null on release.
+    pub const SESSION_LEASE_UPDATED: &str = "session/lease/updated";
+    /// The server's lease watch died; held locks can no longer be trusted.
+    pub const SESSION_LEASE_ENDED: &str = "session/lease/ended";
 }
 
 // JSON-RPC envelopes.
@@ -245,6 +266,24 @@ impl RpcError {
                 == Some("configuration")
     }
 
+    /// The `data.harnessCode` the app-server attaches to a mapped harness error.
+    pub fn harness_code(&self) -> Option<&str> {
+        self.data
+            .as_ref()
+            .and_then(|d| d.get("harnessCode"))
+            .and_then(Value::as_str)
+    }
+
+    /// Whether this is a session-busy conflict (`conflict` + `harnessCode == "session_busy"`).
+    pub fn is_session_busy(&self) -> bool {
+        self.code() == "conflict" && self.harness_code() == Some("session_busy")
+    }
+
+    /// Whether the peer does not know the method (an older app-server).
+    pub fn is_method_not_found(&self) -> bool {
+        matches!(self.code().as_str(), "method_not_found" | "-32601")
+    }
+
     /// Construct a synthetic error for transport/serialization failures.
     pub fn synthetic(code: &str, message: &str) -> Self {
         Self {
@@ -268,16 +307,16 @@ pub struct InitializeParams {
 #[serde(rename_all = "camelCase")]
 pub struct ClientInfo {
     pub name: String,
-    /// Python `ClientInfo.entrypoint`: `programmatic` in headless mode, `cli`
+    /// App-server `ClientInfo.entrypoint`: `programmatic` in headless mode, `cli`
     /// for the TUI. Drives analytics launch-context (ADR 0008).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<String>,
     pub version: String,
-    /// Python `ClientInfo.title`: the human-facing client name, `None` when the
+    /// App-server `ClientInfo.title`: the human-facing client name, `None` when the
     /// surface has none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Python `ClientInfo.terminal_emulator`: the detected host terminal, one
+    /// App-server `ClientInfo.terminal_emulator`: the detected host terminal, one
     /// of `terminal_detect`'s `TerminalEmulator` values.
     pub terminal_emulator: String,
 }
@@ -298,8 +337,8 @@ pub struct SessionStartParams {
     pub history_limit: u32,
 }
 
-/// Python `WorktreeInput` (protocol.py): create-or-reuse a named worktree,
-/// or let the server name one from the prompt. Field order matches the Python
+/// `WorktreeInput` (app-server `protocol.py`): create-or-reuse a named worktree,
+/// or let the server name one from the prompt. Field order matches the server
 /// models so the wire shape is identical.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -314,7 +353,7 @@ pub enum WorktreeInput {
     },
 }
 
-/// Fields of the Python `AgentConfig` / `SessionOptions` the client sends at
+/// Fields of the app-server `AgentConfig` the client sends at
 /// `session/start`. Only `cwd` is set in interactive mode; headless mode sets
 /// the budget and tool-filter fields.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -364,9 +403,9 @@ pub struct TurnEnqueueParams {
     pub entries: Vec<TurnInputEntry>,
 }
 
-/// `turn/start` params (Python `TurnStartParams`): start a turn immediately,
+/// `turn/start` params (app-server `TurnStartParams`): start a turn immediately,
 /// bypassing the queue. `injected` suppresses the user-message projection.
-/// Null fields match Python's wire format (protocol.py:1852).
+/// Null fields match the server's wire format.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnStartParams {
@@ -491,8 +530,8 @@ pub struct TelemetryRecordParams {
     pub correlate_last_request: bool,
 }
 
-/// Python `NarrationSummarizeParams`; the optional fields go out as `null`,
-/// like the Python protocol model serializes them.
+/// App-server `NarrationSummarizeParams`; the optional fields go out as `null`,
+/// like the server's protocol model serializes them.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NarrationSummarizeParams {
@@ -503,7 +542,22 @@ pub struct NarrationSummarizeParams {
     pub message_id: Option<String>,
 }
 
-/// Python `NarrationSummarizeResponse`: `summary` is absent or null when the
+/// `config/effective/read` params (app-server `ConfigEffectiveReadParams`).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigEffectiveReadParams {
+    pub session_id: String,
+}
+
+/// `config/effective/read` response (app-server `ConfigEffectiveReadResponse`):
+/// the whole config the session runs with, credentials redacted.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigEffectiveReadResponse {
+    pub config: Value,
+}
+
+/// App-server `NarrationSummarizeResponse`: `summary` is absent or null when the
 /// server has nothing to speak.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -529,10 +583,10 @@ pub struct PublicSessionState {
     pub turns: Option<Vec<Value>>,
     #[serde(default)]
     pub turn_queue: Option<Value>,
-    /// Provider retry in flight (Python `PublicRetryState`); `None` when idle.
+    /// Provider retry in flight (app-server `PublicRetryState`); `None` when idle.
     #[serde(default)]
     pub retrying: Option<PublicRetryState>,
-    /// Child (subagent) sessions in creation order (Python `child_sessions`).
+    /// Child (subagent) sessions in creation order.
     #[serde(default)]
     pub child_sessions: Vec<crate::server::PublicChildSession>,
 }
@@ -587,7 +641,7 @@ pub struct PublicSession {
     pub token_usage: Option<TokenUsage>,
 }
 
-/// A history entry, typed by its `type` discriminator (Python `PublicHistoryEntry`).
+/// A history entry, typed by its `type` discriminator (app-server `PublicHistoryEntry`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum HistoryEntry {
@@ -597,7 +651,7 @@ pub enum HistoryEntry {
     Callback(CallbackEntry),
     Checkpoint(CheckpointEntry),
     Notice(NoticeEntry),
-    /// Client-owned marker mounted after a cancelled turn; no Python equivalent.
+    /// Client-owned marker mounted after a cancelled turn; never sent by the server.
     Interrupt(InterruptEntry),
     #[serde(other)]
     Unknown,
@@ -609,7 +663,7 @@ impl HistoryEntry {
         serde_json::from_value(value.clone()).unwrap_or(Self::Unknown)
     }
 
-    /// Python `generation_status == "in_progress"`: the entry is still streaming.
+    /// `generation_status == "in_progress"`: the entry is still streaming.
     pub fn in_progress(&self) -> bool {
         matches!(self.generation_status(), Some("in_progress"))
     }
@@ -620,6 +674,7 @@ impl HistoryEntry {
             Self::Reasoning(e) => e.generation_status.as_deref(),
             Self::Effect(e) => e.generation_status.as_deref(),
             Self::Callback(e) => e.generation_status.as_deref(),
+            Self::Checkpoint(e) => e.generation_status.as_deref(),
             _ => None,
         }
     }
@@ -697,11 +752,16 @@ pub struct CallbackState {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CheckpointEntry {
+    #[serde(default)]
+    pub generation_status: Option<String>,
     #[serde(default)]
     pub kind: String,
     #[serde(default)]
     pub message: Option<String>,
+    #[serde(default)]
+    pub details: Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -781,7 +841,7 @@ pub struct WorktreeRemoveResponse {
     pub holders: Option<u32>,
 }
 
-/// `workspace/trust/untrustedConfig` response (Python `WorkspaceUntrustedConfigResponse`).
+/// `workspace/trust/untrustedConfig` response (app-server `WorkspaceUntrustedConfigResponse`).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceUntrustedConfigResponse {

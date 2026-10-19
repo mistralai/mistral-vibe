@@ -1,33 +1,30 @@
-//! `/mcp add` argument parsing (Python `parse_mcp_add_args`).
+//! `/mcp add` argument parsing.
 
 pub const MCP_ADD_USAGE: &str = "Usage: /mcp add <url> [--name <alias>] [--scope <scope> ...] [--transport <http|streamable-http>] [--no-login] [--allow-insecure-http]";
 
-/// Long help for `/mcp add --help`, matching Python's `MCP_ADD_HELP`.
+/// Long help for `/mcp add --help`; `<` is escaped so Markdown does not drop
+/// the placeholders as HTML.
 pub fn add_help() -> String {
     format!(
-        "{MCP_ADD_USAGE}\n\nOAuth-only shortcut for hosted MCP servers.\nDefaults to streamable-http; pass --transport http for servers documented with\nHTTP transport.\nPass --allow-insecure-http to allow a plaintext http:// URL on a non-localhost\nhost, such as a server on the LAN.\nFor API-key/static auth, edit config.toml."
+        "{}\n\nOAuth-only shortcut for hosted MCP servers.\nDefaults to streamable-http; pass --transport http for servers documented with\nHTTP transport.\nPass --allow-insecure-http to allow a plaintext http:// URL on a non-localhost\nhost, such as a server on the LAN.\nFor API-key/static auth, run in a shell:\nvibe mcp add NAME --url URL --api-key-env VAR",
+        MCP_ADD_USAGE.replace('<', "\\<")
     )
 }
 
-/// Parsed MCP add arguments, shared by argv and the slash command.
-#[derive(Debug, clap::Args)]
+/// Parsed `/mcp add` slash-command arguments.
+#[derive(Debug)]
 pub struct AddArgs {
     /// Hosted MCP server URL.
     pub url: String,
     /// Server alias (defaults to a name derived from the URL).
-    #[arg(long)]
     pub name: Option<String>,
-    /// OAuth scope. Repeat the flag for multiple scopes.
-    #[arg(long = "scope")]
+    /// OAuth scopes.
     pub scopes: Vec<String>,
     /// Remote MCP transport.
-    #[arg(long, default_value = "streamable-http", value_parser = parse_transport)]
     pub transport: String,
-    /// Persist without starting browser login.
-    #[arg(long = "no-login", action = clap::ArgAction::SetFalse)]
+    /// Start browser login after persisting.
     pub login: bool,
     /// Allow plaintext HTTP to non-localhost hosts; credentials are unencrypted.
-    #[arg(long)]
     pub allow_insecure_http: bool,
 }
 
@@ -118,7 +115,7 @@ fn option_value(
     }
 }
 
-/// Whitespace split honoring single and double quotes (Python `shlex.split`).
+/// Whitespace split honoring single and double quotes, shell-style.
 fn split_args(raw_args: &str) -> Result<Vec<String>, String> {
     let mut tokens = Vec::new();
     let mut token = String::new();

@@ -1,4 +1,4 @@
-"""Remote-project busy parity."""
+"""Remote-project picker while busy."""
 
 from __future__ import annotations
 

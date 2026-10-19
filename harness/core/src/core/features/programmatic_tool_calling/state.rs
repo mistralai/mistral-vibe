@@ -6,8 +6,9 @@ use crate::core::action_id;
 use crate::core::error::CoreError;
 use crate::core::features::permissions::GrantKey;
 use crate::core::features::programmatic_tool_calling::ProgrammaticName;
+use crate::core::features::programmatic_tool_calling::execution::serialized_len;
 use crate::core::features::programmatic_tool_calling::model::{
-    PartialEvaluation, ToolFunction, ToolKind, ToolState,
+    PartialEvaluation, ProgramBudget, ToolFunction, ToolKind, ToolState,
 };
 use crate::core::hooks::{HookCall, HookPoint, hook_action_id};
 use crate::core::step_protocol::Action;
@@ -48,18 +49,21 @@ pub(crate) struct ProgramExecution {
     partial_evaluation: PartialEvaluation,
     pending_operations: Vec<PendingProgramOperation>,
     round: u32,
+    started_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug)]
 pub(super) struct ProgramContinuation {
     pub(super) partial_evaluation: PartialEvaluation,
     pub(super) round: u32,
+    pub(super) started_at_unix_ms: Option<u64>,
 }
 
 impl ProgramContinuation {
     pub(super) fn after_round(
         partial_evaluation: PartialEvaluation,
         round: u32,
+        started_at_unix_ms: Option<u64>,
     ) -> Result<Self, CoreError> {
         let round = round
             .checked_add(1)
@@ -67,6 +71,7 @@ impl ProgramContinuation {
         Ok(Self {
             partial_evaluation,
             round,
+            started_at_unix_ms,
         })
     }
 }
@@ -149,9 +154,14 @@ pub(crate) struct ProgramCapture {
     source: String,
     operations: Vec<ProgramOperationRecord>,
     round: u32,
+    started_at_unix_ms: Option<u64>,
 }
 
 impl ProgramCapture {
+    pub(crate) fn started_at_unix_ms(&self) -> Option<u64> {
+        self.started_at_unix_ms
+    }
+
     pub(crate) fn source(&self) -> &str {
         &self.source
     }
@@ -218,7 +228,17 @@ pub(super) fn resolve_tool_state(
     let ToolState::Pending { kind, id, function } = operation.clone() else {
         unreachable!();
     };
-    *operation = match result {
+    *operation = settled_tool_state(kind, id, function, result);
+    Ok(())
+}
+
+fn settled_tool_state(
+    kind: ToolKind,
+    id: String,
+    function: ToolFunction,
+    result: ToolResult,
+) -> ToolState {
+    match result {
         ToolResult::Failure {
             content,
             structured_content,
@@ -261,20 +281,41 @@ pub(super) fn resolve_tool_state(
                 content: retained_program_content(content),
             }
         }
-    };
-    Ok(())
+    }
 }
 
 impl ProgramExecution {
+    pub(super) fn budget_at(&mut self, now_unix_ms: u64, budget_ms: u64) -> ProgramBudget {
+        // V1 checkpoints written before elapsed budgets have no recorded start.
+        let started_at = *self.started_at_unix_ms.get_or_insert(now_unix_ms);
+        ProgramBudget {
+            budget_ms,
+            elapsed_ms: now_unix_ms.saturating_sub(started_at),
+        }
+    }
+
+    /// Like `budget_at`, but read-only: a program with no recorded start has
+    /// spent nothing yet.
+    pub(super) fn peek_budget_at(&self, now_unix_ms: u64, budget_ms: u64) -> ProgramBudget {
+        ProgramBudget {
+            budget_ms,
+            elapsed_ms: self
+                .started_at_unix_ms
+                .map_or(0, |started_at| now_unix_ms.saturating_sub(started_at)),
+        }
+    }
+
     pub(super) fn new(
         partial_evaluation: PartialEvaluation,
         pending_operations: Vec<PendingProgramOperation>,
         round: u32,
+        started_at_unix_ms: u64,
     ) -> Self {
         Self {
             partial_evaluation,
             pending_operations,
             round,
+            started_at_unix_ms: Some(started_at_unix_ms),
         }
     }
 
@@ -356,6 +397,42 @@ impl ProgramExecution {
                 }
                 _ => None,
             })
+    }
+
+    /// Bytes held for replay once `call` holds `result`: whole while it awaits a
+    /// post-tool hook, otherwise only what replay keeps of it.
+    pub(super) fn held_result_bytes(
+        &self,
+        call: &ExternalToolCall,
+        result: &ToolResult,
+        awaiting_post_hook: bool,
+    ) -> usize {
+        let mut incoming = serialized_len(result);
+        let mut held = 0;
+        for operation in &self.partial_evaluation.tool_state {
+            match operation {
+                ToolState::Pending { kind, id, function }
+                    if *id == call.call_id && !awaiting_post_hook =>
+                {
+                    incoming = serialized_len(&settled_tool_state(
+                        kind.clone(),
+                        id.clone(),
+                        function.clone(),
+                        result.clone(),
+                    ));
+                }
+                ToolState::Pending { .. } => {}
+                settled => held += serialized_len(settled),
+            }
+        }
+        for operation in &self.pending_operations {
+            if let ProgramOperationStage::AwaitingPostHook { result, .. } = &operation.stage
+                && operation.call.action_id != call.action_id
+            {
+                held += serialized_len(result);
+            }
+        }
+        held + incoming
     }
 
     pub(super) fn continue_after_pre_hook(
@@ -542,6 +619,7 @@ impl ProgramExecution {
         Ok(Some(ProgramContinuation::after_round(
             self.partial_evaluation.clone(),
             self.round,
+            self.started_at_unix_ms,
         )?))
     }
 
@@ -664,6 +742,7 @@ impl ProgramExecution {
             source: self.partial_evaluation.code.clone(),
             operations,
             round: self.round,
+            started_at_unix_ms: self.started_at_unix_ms,
         })
     }
 
@@ -671,6 +750,7 @@ impl ProgramExecution {
         source: String,
         operations: Vec<ProgramOperationRecord>,
         round: u32,
+        started_at_unix_ms: Option<u64>,
     ) -> Result<Self, String> {
         let mut operation_ids = HashSet::new();
         let mut tool_state = Vec::with_capacity(operations.len());
@@ -761,6 +841,7 @@ impl ProgramExecution {
             },
             pending_operations,
             round,
+            started_at_unix_ms,
         })
     }
 }
@@ -1151,6 +1232,7 @@ mod tests {
                     pending: Box::new(pending),
                 }],
                 0,
+                None,
             )
             .unwrap_err()
         };
@@ -1186,6 +1268,7 @@ mod tests {
                     value: Value::Null,
                 }],
                 0,
+                None,
             )
             .unwrap_err()
             .contains("at least one operation")
@@ -1199,6 +1282,7 @@ mod tests {
                 pending: Box::new(PendingProgramRecord::Pending { call: call.clone() }),
             }],
             u32::MAX,
+            None,
         )
         .unwrap();
         let overflow = max_round

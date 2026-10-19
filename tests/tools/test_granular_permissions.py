@@ -1010,8 +1010,7 @@ class TestCollectOutsideDirs:
         dirs = _collect_outside_dirs(["cat /c/Users/victim/secret.txt"])
         assert len(dirs) >= 1
 
-    def test_posix_escaped_space_path_stays_single_token(self, monkeypatch):
-        monkeypatch.setattr(bash_module, "is_windows", lambda: False)
+    def test_escaped_space_path_stays_single_token(self, monkeypatch):
         seen_paths: list[str] = []
 
         def is_within_workdir(path: str, **_kwargs) -> bool:
@@ -1032,7 +1031,6 @@ class TestCollectOutsideDirs:
             seen_paths.append(path)
             return False
 
-        monkeypatch.setattr(bash_module, "is_windows", lambda: True)
         monkeypatch.setattr(paths, "is_windows", lambda: True)
         monkeypatch.setattr(bash_module, "is_path_within_workdir", is_within_workdir)
 
@@ -1042,14 +1040,24 @@ class TestCollectOutsideDirs:
         assert len(dirs) == 1
 
     @pytest.mark.parametrize(
-        "path", [r"C:\Users\victim\secret.txt", r"src\..\..\outside\file"]
+        ("command", "path"),
+        [
+            (r"cat 'C:\Users\victim\secret.txt'", r"C:\Users\victim\secret.txt"),
+            (r'cat "src\..\..\outside\file"', r"src\..\..\outside\file"),
+            ("cat x#y /outside/secret", "/outside/secret"),
+            (r"cat x\ #y /outside/secret", "/outside/secret"),
+            (r"cat \"x /outside/secret \"", "/outside/secret"),
+        ],
     )
-    def test_backslash_path_detected(self, path, monkeypatch):
-        # Backslash paths are a Windows concern; a POSIX shell would consume the
-        # backslashes as escapes, so detection only applies under is_windows().
-        monkeypatch.setattr(bash_module, "is_windows", lambda: True)
-        monkeypatch.setattr(
-            bash_module, "is_path_within_workdir", lambda _, **_kwargs: False
-        )
-        dirs = _collect_outside_dirs([f"cat {path}"])
-        assert len(dirs) >= 1
+    def test_path_check_sees_the_tokens_git_bash_runs(self, command, path, monkeypatch):
+        seen_paths: list[str] = []
+
+        def is_within_workdir(path: str, **_kwargs) -> bool:
+            seen_paths.append(path)
+            return False
+
+        monkeypatch.setattr(bash_module, "is_path_within_workdir", is_within_workdir)
+
+        _collect_outside_dirs([command])
+
+        assert path in seen_paths

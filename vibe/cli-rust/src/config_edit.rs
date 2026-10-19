@@ -5,12 +5,13 @@ mod input;
 use std::sync::Arc;
 
 use crate::server::Client;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::app::App;
 use crate::config::{self, ConfigField};
+use crate::option_list::{OptionList, SingleAction};
 
 pub const MAX_VISIBLE_CHOICES: usize = 14;
 
@@ -19,11 +20,12 @@ pub struct ConfigEdit {
     pub draft: String,
     pub cursor: usize,
     pub input_width: Option<u16>,
-    /// First visible row of the choice list or the text editor, once rendered.
-    pub scroll: Option<usize>,
+    /// First visible row of the text editor.
+    pub scroll: usize,
     pub target: usize,
     pub error: Option<String>,
-    pub choice_regions: Vec<(ratatui::layout::Rect, usize)>,
+    /// Highlighted choice and the choice-list viewport.
+    pub list: OptionList<SingleAction>,
 }
 
 pub fn open(app: &mut App, field: ConfigField) {
@@ -32,15 +34,16 @@ pub fn open(app: &mut App, field: ConfigField) {
     if !choices.is_empty() && !choices.contains(&draft) {
         draft.clone_from(&choices[0]);
     }
+    let selected = choices.iter().position(|choice| *choice == draft);
     app.config_screen.edit = Some(ConfigEdit {
         cursor: draft.len(),
         input_width: None,
         draft,
-        scroll: None,
+        scroll: 0,
         target: default_target(&field, &app.config_screen.targets),
         field,
         error: None,
-        choice_regions: Vec::new(),
+        list: OptionList::new(selected.unwrap_or_default()),
     });
 }
 
@@ -94,7 +97,8 @@ pub fn handle_key(
             if !choices.is_empty() =>
         {
             let down = matches!(key.code, KeyCode::Down | KeyCode::Char('j'));
-            let index = crate::list_nav::wrap(choice_index(edit, &choices), choices.len(), down);
+            edit.list.step(down, choices.len(), true, |_| true);
+            let index = edit.list.selected();
             select_choice(edit, &choices, index);
         }
         _ => {}
@@ -115,33 +119,27 @@ pub fn wheel(app: &mut App, delta: isize) {
     if choices.is_empty() {
         return;
     }
-    if let Some(scroll) = edit.scroll.as_mut() {
-        *scroll = scroll.saturating_add_signed(delta);
+    if edit.list.free_scroll() {
+        edit.list.wheel(delta > 0, delta.unsigned_abs());
         return;
     }
-    let index = choice_index(edit, &choices)
+    let index = edit
+        .list
+        .selected()
         .saturating_add_signed(delta)
         .min(choices.len() - 1);
     select_choice(edit, &choices, index);
 }
 
-pub fn click(app: &mut App, column: u16, row: u16) -> bool {
+/// A click on a choice picks it; returns whether to commit.
+pub fn mouse(app: &mut App, event: MouseEvent) -> bool {
     let Some(edit) = app.config_screen.edit.as_mut() else {
         return false;
     };
-    let choices = choices(&edit.field);
-    if choices.is_empty() {
-        return false;
-    }
-    let Some(index) = edit
-        .choice_regions
-        .iter()
-        .find(|(rect, _)| rect.contains((column, row).into()))
-        .map(|(_, index)| *index)
-    else {
+    let Some(index) = edit.list.mouse(event) else {
         return false;
     };
-    select_choice(edit, &choices, index);
+    select_choice(edit, &choices(&edit.field), index);
     true
 }
 
@@ -163,18 +161,11 @@ pub fn choices(field: &ConfigField) -> Vec<String> {
     }
 }
 
-pub(crate) fn choice_index(edit: &ConfigEdit, choices: &[String]) -> usize {
-    choices
-        .iter()
-        .position(|choice| choice == &edit.draft)
-        .unwrap_or(0)
-}
-
 fn select_choice(edit: &mut ConfigEdit, choices: &[String], index: usize) {
     if let Some(choice) = choices.get(index) {
         edit.draft.clone_from(choice);
         edit.cursor = edit.draft.len();
-        edit.scroll = None;
+        edit.list.select(index);
     }
 }
 

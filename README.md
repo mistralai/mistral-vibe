@@ -1,7 +1,7 @@
 # Mistral Vibe
 
 [![PyPI Version](https://img.shields.io/pypi/v/mistral-vibe)](https://pypi.org/project/mistral-vibe)
-[![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/release/python-3120/)
+[![Python Version](https://img.shields.io/badge/python-3.14%2B-blue)](https://www.python.org/downloads/release/python-3140/)
 [![CI Status](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml/badge.svg)](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/mistralai/mistral-vibe)](https://github.com/mistralai/mistral-vibe/blob/main/LICENSE)
 
@@ -66,7 +66,6 @@ pip install mistral-vibe
   - [Interactive Mode](#interactive-mode)
   - [Trust Folder System](#trust-folder-system)
   - [Programmatic Mode](#programmatic-mode)
-  - [TUI Implementations](#tui-implementations)
 - [Voice Mode](#voice-mode)
 - [Slash Commands](#slash-commands)
   - [Built-in Slash Commands](#built-in-slash-commands)
@@ -96,7 +95,7 @@ pip install mistral-vibe
 - **Interactive Chat**: A conversational AI agent that understands your requests and breaks down complex tasks.
 - **Powerful Toolset**: A suite of tools for file manipulation, code searching, version control, and command execution, right from the chat prompt.
   - Read, write, and patch files (`read`, `write_file`, `edit`).
-  - Execute shell commands, with managed shell sessions, polling, and stdin helpers available during rollout.
+  - Execute shell commands, with managed shell sessions, polling, and stdin helpers.
   - Recursively search code with `grep` (with `ripgrep` support).
   - Manage a `todo` list to track the agent's work.
   - Ask interactive questions to gather user input (`ask_user_question`).
@@ -116,24 +115,23 @@ pip install mistral-vibe
 Vibe comes with several built-in agent profiles, each designed for different use cases:
 
 - **`ask`**: Requires approval for tool executions.
-- **`plan`**: Read-only agent for exploration and planning. Auto-approves safe tools like `grep` and `read`.
 - **`accept-edits`**: The default agent. Auto-approves file edits only (`write_file`, `edit`). Useful for code refactoring.
 - **`auto-approve`**: Auto-approves all tool executions. Use with caution.
 
 Use the `--agent` flag to select a different agent:
 
 ```bash
-vibe --agent plan
+vibe --agent ask
 ```
 
 To change the default agent used when `--agent` is not passed, set
 `default_agent` in your `config.toml`:
 
 ```toml
-default_agent = "plan"
+default_agent = "ask"
 ```
 
-Valid values are `ask`, `plan`, `accept-edits`, `auto-approve`,
+Valid values are `ask`, `accept-edits`, `auto-approve`,
 `lean` (only when listed in `installed_agents`), or the name of any
 custom agent file in `~/.vibe/agents/` or the project's `.vibe/agents/`
 directory. Subagents such as `explore` are not accepted.
@@ -158,8 +156,8 @@ The `task` tool allows the agent to delegate work to subagents:
 
 Create custom subagents by adding `agent_type = "subagent"` to your agent configuration. Vibe comes with a built-in subagent called `explore`, a read-only subagent for codebase exploration and skill loading used internally for delegation.
 
-When the Unified Harness is active, the interactive prompt shows each known
-subagent's name, type, live status, and latest measured context size. Opening a
+The interactive prompt shows each known subagent's name, type, live status, and
+latest measured context size. Opening a
 subagent also shows its active status above the prompt and its context use in the
 bottom-right gauge. With an empty or locally edited prompt, press Down from its
 last line to focus the list;
@@ -250,18 +248,19 @@ Most modern terminals should work, but older or minimal terminal emulators may h
 
 ### Interactive Mode
 
-Simply run `vibe` to enter the interactive chat loop.
+Simply run `vibe` to enter the interactive chat loop. The terminal UI is a native
+Rust binary (`vibe-rs`) bundled with the package.
 
 - **Multi-line Input**: Press `Ctrl+J` or `Shift+Enter` for select terminals to insert a newline.
-- **Input Cursor**: The main input cursor blinks by default. Set `cursor_blink = false` in `config.toml` for a steady cursor. Changes apply without restarting through `/config` or `/reload` in both Python and Rust terminals.
+- **Input Cursor**: The main input cursor blinks by default. Set `cursor_blink = false` in `config.toml` for a steady cursor. Changes apply without restarting through `/config` or `/reload`.
 - **File Paths**: Reference files in your prompt using the `@` symbol for smart autocompletion (e.g., `> Read the file @src/agent.py`). A bare `@` quickly lists immediate non-hidden entries; after a path character, Git workspaces suggest tracked and non-ignored files. Pasting a standalone existing absolute or home-relative file or folder also creates a mention.
 - **Shell Commands**: Prefix any command with `!` to execute it directly in your shell, bypassing the agent (e.g., `> !ls -l`).
 - **External Editor**: Press `Ctrl+G` to edit your current input in an external editor.
 - **Tool Output Toggle**: Press `Ctrl+O` to toggle the tool output view.
 - **Todo View Toggle**: Press `Ctrl+T` to toggle the todo list view.
 - **Debug Console**: Press `Ctrl+\` to toggle the debug console.
-- **Agent Selection**: Press `Shift+Tab` to cycle through agents (ask, plan, ...).
-- **Queueing**: Prompts submitted while the agent is working are queued by the app server. Empty `Enter` or `Ctrl+Enter` steers the queued prompts into the active turn; on Unified Harness sessions, this atomically consumes the stored queue item. `Ctrl+C` removes the newest queued prompt. `Escape` interrupts the active turn and pauses remaining prompts, and `Enter` resumes a paused queue. Shell commands and non-side-channel slash commands require an idle session.
+- **Agent Selection**: Press `Shift+Tab` to cycle through agents (ask, accept-edits, ...).
+- **Queueing**: Prompts submitted while the agent is working are queued by the app server. Empty `Enter` or `Ctrl+Enter` atomically consumes the stored queue item and steers it into the active turn. `Ctrl+C` removes the newest queued prompt. `Escape` interrupts the active turn and pauses remaining prompts, and `Enter` resumes a paused queue. Shell commands and non-side-channel slash commands require an idle session.
 - **Exit**: Type `/exit`, `exit`, `quit`, `:q`, or `:quit` in the input box, or press `Ctrl+C` / `Ctrl+D` twice within ~1 second. Set `ask_confirmation_on_exit = false` (or toggle it in `/config`) to make `Ctrl+D` quit on the first press; `Ctrl+C` always requires confirmation.
 
 ### Copying & Text Selection
@@ -334,10 +333,8 @@ vibe --prompt-file task.md --auto-approve --time-limit 1800 --output-dir out/
 | `0` | `finished` | The agent finished. |
 | `1` | `usage_error`, `config_error` | The run could not start as asked. |
 | `2` | `infrastructure_failure` | The model API (after retries) or the runtime failed. |
-| `3` | `turn_limit`, `token_limit`, `price_limit`, `deadline`, `terminated`, `length`, `refusal` | The agent stopped without finishing: a limit or a model refusal; score what it left. `length` means the conversation or the last answer hit a model token limit: the context window, or the output-token cap (`max_output_tokens` on the model). |
+| `3` | `turn_limit`, `token_limit`, `price_limit`, `deadline`, `terminated`, `length`, `refusal` | The agent stopped without finishing; score what it left. `length` means the conversation or the last answer hit a model token limit: the context window, or the output-token cap (`max_output_tokens` on the model). `refusal` means the model declined to answer. |
 | `4` | `aborted` | The `--agent-socket` server aborted the run (experimental, see below); `error.message` in `export.json` is the server's message. |
-
-A model refusal ends the run as `refusal`, exit `3`; `error` in `export.json` has the code `refusal`, and its message gives the refusal's category and explanation when the model sends them. Only the legacy runtime (`--legacy-harness`) reports a refusal as one.
 
 #### Agent Socket (`--agent-socket`, experimental)
 
@@ -511,28 +508,6 @@ stops the run as SIGTERM does and exits 4, with the outcome `aborted` and the
 server's message as `error.message` in `export.json`. Vibe gives the abort no
 meaning of its own; the message is for whoever reads the export.
 
-### TUI Implementations
-
-The `vibe` command starts through a small launcher that picks the terminal
-client from the `VIBE_CLI` environment variable:
-
-- `VIBE_CLI=rust vibe` starts the Rust TUI.
-- `VIBE_CLI=python vibe` runs the legacy Python (Textual) TUI.
-- With `VIBE_CLI` unset (or set to any other value), `vibe` runs the legacy
-  Python TUI.
-
-The commands above use POSIX shell syntax, where the assignment only applies
-to that command. On Windows, set the variable for the session instead:
-
-- PowerShell: `$env:VIBE_CLI = "python"; vibe` (unset with
-  `Remove-Item Env:VIBE_CLI`)
-- cmd: `set VIBE_CLI=python`, then run `vibe` (unset with `set VIBE_CLI=`)
-
-When the `VIBE_CLI` environment variable is set to `rust`, every `vibe`
-invocation selects the Rust client. To run a nested command (e.g.
-`vibe mcp add ...`) with the legacy Python client instead, set `VIBE_CLI` to
-`python` for that invocation.
-
 ## Voice Mode
 
 > [!WARNING]
@@ -577,8 +552,8 @@ Use `/mcp` or `/connectors` to browse configured MCP servers and workspace
 connectors. The browser starts on the first item; press Up or Left to focus its
 fuzzy search bar, then Up again to wrap to the last item.
 
-With the Unified Harness, `/loop every two minutes check the build` asks the
-model to schedule a recurring prompt. Calendar requests such as `/loop weekdays
+`/loop every two minutes check the build` asks the model to schedule a recurring
+prompt. Calendar requests such as `/loop weekdays
 at 9am review CI` work too, using the machine's local timezone. Ask the model to
 list or cancel schedules; `/loop` has no TUI management subcommands. Requests
 submitted while busy join the normal prompt queue. Schedules survive resume,
@@ -623,7 +598,7 @@ Skills are defined in directories with a `SKILL.md` file containing metadata in 
 name: code-review
 description: Perform automated code reviews
 license: MIT
-compatibility: Python 3.12+
+compatibility: Python 3.14+
 user-invocable: true
 allowed-tools:
   - read
@@ -683,6 +658,11 @@ disabled_skills = ["experimental-*"]
 Skills support the same pattern matching as tools (exact names, glob patterns, and regex).
 
 ## Configuration
+
+`displayed_workdir`, `context_warnings` and `raise_on_compaction_failure` are
+deprecated. Existing configuration files still load these fields, but they have
+no effect on Unified execution. Remove them from user, project and managed
+configuration.
 
 ### Configuration File Location
 
@@ -948,13 +928,11 @@ for the complete command reference. `vibe mcp remove <name>` removes the server
 from the user configuration. Removing an OAuth server also deletes its stored
 tokens, client information, and configuration fingerprint when available.
 
-With `VIBE_CLI` set to `rust`, shell `mcp add` uses the OAuth-only
-`/mcp add` syntax: `vibe mcp add https://mcp.linear.app/mcp --name linear
---no-login`. It accepts `--scope` (repeatable), `--transport`, and
-`--allow-insecure-http`; without `--no-login`, it starts browser login. Both
-`add` and `remove NAME` update the user configuration without opening a chat
-session. For stdio or static-auth additions, set `VIBE_CLI` to `python` and run
-`vibe mcp add` with the flags above.
+Add local stdio servers with `vibe mcp add NAME --transport stdio --command
+COMMAND`, repeatable `--arg VALUE` (use `--arg=-y` for flags), and
+`--env NAME=VALUE`. The legacy `vibe mcp add URL --name NAME` form is also
+accepted. Both `add` and
+`remove NAME` update the user configuration without opening a chat session.
 
 Hosted OAuth MCP servers can also be added from inside Vibe:
 
@@ -1150,6 +1128,10 @@ vibe --resume abc123
 ```
 
 Session logging must be enabled in your configuration for these features to work.
+
+Historical imports support Vibe 2.0+ session folders containing `meta.json` and
+`messages.jsonl`. Vibe 1.x sessions saved as a single JSON file are no longer
+supported.
 
 The first user message pins the resolved model to that session. Resuming keeps
 the pinned model even if your configured default changes. `/model` uses the

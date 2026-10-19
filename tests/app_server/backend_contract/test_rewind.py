@@ -350,7 +350,6 @@ async def test_fork_rewind_attaches_a_truncated_child_and_keeps_the_source_whole
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_session: AppServerSession,
-    experimental_harness: bool,
 ) -> None:
     backend_contract_mistral_api.mock(
         side_effect=[
@@ -377,9 +376,7 @@ async def test_fork_rewind_attaches_a_truncated_child_and_keeps_the_source_whole
     # would read it: from storage, once this connection has let go of it.
     await backend_contract_persistent_session.close()
     connection = await connect_backend_contract_host(
-        experimental_harness,
-        session_options=SessionOptions(),
-        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(), capabilities=ClientCapabilities()
     )
     try:
         source = await connection.host.read_session(source_session_id)
@@ -494,15 +491,11 @@ async def test_fork_rewind_of_the_only_message_yields_an_empty_child(
 
 
 def _write_file_tool_call(
-    experimental_harness: bool,
-    target: Path,
-    content: str,
-    *,
-    call_id: str = "call_write",
+    target: Path, content: str, *, call_id: str = "call_write"
 ) -> dict[str, Any]:
     """One model write of ``target``, in the backend's own tool vocabulary."""
     name = "write_file"
-    path_key = "path" if experimental_harness else "file_path"
+    path_key = "path"
     return {
         "id": call_id,
         "index": 0,
@@ -513,25 +506,10 @@ def _write_file_tool_call(
     }
 
 
-def _overwrite_tool_call(
-    experimental_harness: bool, target: Path, original: str, content: str
-) -> dict[str, Any]:
-    """One model overwrite of ``target``.
-
-    The harness write replaces existing files (and reports the replaced text),
-    while the legacy write refuses them, so the legacy leg overwrites through
-    ``edit`` instead: the user-visible contract is the same either way.
-    """
-    if experimental_harness:
-        name = "write_file"
-        arguments: dict[str, Any] = {"path": str(target), "content": content}
-    else:
-        name = "edit"
-        arguments = {
-            "file_path": str(target),
-            "old_string": original,
-            "new_string": content,
-        }
+def _overwrite_tool_call(target: Path, content: str) -> dict[str, Any]:
+    """One model overwrite of ``target``."""
+    name = "write_file"
+    arguments: dict[str, Any] = {"path": str(target), "content": content}
     return {
         "id": "call_overwrite",
         "index": 0,
@@ -543,23 +521,18 @@ def _overwrite_tool_call(
 async def test_in_place_rewind_restores_a_file_the_rewound_turn_created(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
-    experimental_harness: bool,
     tmp_path: Path,
 ) -> None:
     target = tmp_path / "created.txt"
     backend_contract_mistral_api.mock(
         side_effect=[
             backend_contract_mistral_response(
-                "",
-                tool_calls=[
-                    _write_file_tool_call(experimental_harness, target, "created")
-                ],
+                "", tool_calls=[_write_file_tool_call(target, "created")]
             ),
             backend_contract_mistral_response("Done."),
         ]
     )
     connection = await connect_backend_contract_host(
-        experimental_harness,
         session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
         capabilities=ClientCapabilities(),
     )
@@ -586,7 +559,6 @@ async def test_in_place_rewind_restores_a_file_the_rewound_turn_created(
 async def test_in_place_rewind_restores_a_file_the_rewound_turn_overwrote(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
-    experimental_harness: bool,
     tmp_path: Path,
 ) -> None:
     target = tmp_path / "config.yaml"
@@ -594,21 +566,12 @@ async def test_in_place_rewind_restores_a_file_the_rewound_turn_overwrote(
     backend_contract_mistral_api.mock(
         side_effect=[
             backend_contract_mistral_response(
-                "",
-                tool_calls=[
-                    _overwrite_tool_call(
-                        experimental_harness,
-                        target,
-                        "key: original",
-                        "key: overwritten",
-                    )
-                ],
+                "", tool_calls=[_overwrite_tool_call(target, "key: overwritten")]
             ),
             backend_contract_mistral_response("Done."),
         ]
     )
     connection = await connect_backend_contract_host(
-        experimental_harness,
         session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
         capabilities=ClientCapabilities(),
     )
@@ -637,7 +600,6 @@ async def test_in_place_rewind_restores_a_file_the_rewound_turn_overwrote(
 async def test_a_fork_restores_files_of_the_turns_it_inherited(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
-    experimental_harness: bool,
     tmp_path: Path,
 ) -> None:
     inherited = tmp_path / "inherited.txt"
@@ -645,25 +607,19 @@ async def test_a_fork_restores_files_of_the_turns_it_inherited(
     backend_contract_mistral_api.mock(
         side_effect=[
             backend_contract_mistral_response(
-                "",
-                tool_calls=[
-                    _write_file_tool_call(experimental_harness, inherited, "first")
-                ],
+                "", tool_calls=[_write_file_tool_call(inherited, "first")]
             ),
             backend_contract_mistral_response("Done."),
             backend_contract_mistral_response(
                 "",
                 tool_calls=[
-                    _write_file_tool_call(
-                        experimental_harness, rewound, "second", call_id="call_second"
-                    )
+                    _write_file_tool_call(rewound, "second", call_id="call_second")
                 ],
             ),
             backend_contract_mistral_response("Done."),
         ]
     )
     connection = await connect_backend_contract_host(
-        experimental_harness,
         session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
         capabilities=ClientCapabilities(),
     )
@@ -690,3 +646,49 @@ async def test_a_fork_restores_files_of_the_turns_it_inherited(
         assert rewound.read_text(encoding="utf-8") == "second"
     finally:
         await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_after_rewinding_past_a_compaction_is_answered_below_its_message(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_completion: Callable[[str], httpx.Response],
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    # The rewind rebuilds the conversation from its compacted transcript. The
+    # next answer must not replace one kept from before the compaction.
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_mistral_response("Second answer"),
+            backend_contract_mistral_response("Third answer"),
+            backend_contract_mistral_response("Fourth answer"),
+            backend_contract_mistral_completion("<summary>Four turns</summary>"),
+            backend_contract_mistral_response("Fifth answer"),
+            backend_contract_mistral_response("Sixth answer"),
+        ]
+    )
+    for index, prompt in enumerate(("First", "Second", "Third", "Fourth"), start=1):
+        await _act(backend_contract_persistent_session, prompt, f"user-{index}")
+    await backend_contract_persistent_session.compact()
+    await _act(backend_contract_persistent_session, "Fifth", "user-5")
+
+    await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "Fifth"),
+        restore_files=False,
+        inplace=True,
+    )
+    await _act(backend_contract_persistent_session, "Sixth", "user-6")
+
+    assert _texts(backend_contract_persistent_session) == [
+        "First",
+        "First answer",
+        "Second",
+        "Second answer",
+        "Third",
+        "Third answer",
+        "Fourth",
+        "Fourth answer",
+        "Sixth",
+        "Sixth answer",
+    ]

@@ -7,8 +7,8 @@ from e2e.app_server.scenario import Timeline
 
 _PROMPT = " ".join(["word"] * 20) + " " + "界" * 60 + " ❤️ end"
 
-screen_contains = {"rust": ("\n  " + "界" * 59, "\n  界 ❤")}
-screen_excludes = {"rust": ("\n界", "failed")}
+screen_contains = ("\n  " + "界" * 59, "\n  界 ❤")
+screen_excludes = ("\n界", "failed")
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

@@ -7,7 +7,9 @@ const GIT_BASH_DESCRIPTION: &str = r#"Use `bash` to run a one-off Git Bash comma
 
 - Each command runs independently in a fresh, stateless Git Bash process.
 - Use POSIX shell syntax and Unix-style command chaining, redirects, variables, and quoting, not PowerShell or cmd.exe syntax.
+- Write Windows drives as `/c/...` with forward slashes, never `C:\...`.
 - Standard output and standard error are captured separately. Read `returncode` to determine whether the command succeeded.
+- Do not discard stderr (`2>/dev/null`) on exploratory commands like `find` or `ls`: an empty result would then hide a wrong path.
 - Use `timeout_seconds` to control how long the command may run.
 - Prefer `read_file`, `write_file`, and `edit` over shell equivalents when they can perform the operation directly."#;
 
