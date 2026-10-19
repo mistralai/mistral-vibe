@@ -65,6 +65,17 @@ _NO_SDK_RETRIES = RetryConfig(
     strategy="none", backoff=BackoffStrategy(0, 0, 0, 0), retry_connection_errors=False
 )
 
+# Mistral rejects greedy sampling (temperature 0) unless top_p is explicitly 1.
+_GREEDY_SAMPLING_TOP_P = 1.0
+
+
+def _mistral_top_p(temperature: float, top_p: float | None) -> float | None:
+    if top_p is not None:
+        return top_p
+    if temperature == 0.0:
+        return _GREEDY_SAMPLING_TOP_P
+    return None
+
 
 type ReasoningEffort = Literal["none", "high"]
 
@@ -112,8 +123,8 @@ async def execute_mistral_completion(
         }
         if reasoning_effort := _THINKING_TO_REASONING_EFFORT.get(route.thinking):
             kwargs["reasoning_effort"] = reasoning_effort
-        if route.top_p is not None:
-            kwargs["top_p"] = route.top_p
+        if (effective_top_p := _mistral_top_p(route.temperature, route.top_p)) is not None:
+            kwargs["top_p"] = effective_top_p
         if (max_tokens := config.output_token_cap(route)) is not None:
             kwargs["max_tokens"] = max_tokens
         if metadata:
