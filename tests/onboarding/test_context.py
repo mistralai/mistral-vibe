@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+from vibe.core.config import DEFAULT_PROVIDERS
 from vibe.setup.onboarding.context import (
+    OnboardingContext,
     _normalize_origin,
     browser_auth_account_base,
     browser_auth_requires_origin_rewrite,
@@ -10,6 +12,23 @@ from vibe.setup.onboarding.context import (
     is_valid_custom_domain,
     resolve_browser_auth_urls,
 )
+
+
+@pytest.mark.parametrize("variable", ["VIBE_MODELS", "VIBE_PROVIDERS", "vibe_models"])
+def test_invalid_catalog_env_preserves_onboarding_settings(
+    variable, monkeypatch, caplog
+):
+    monkeypatch.setenv(variable, "private-invalid-catalog")
+    monkeypatch.setenv("VIBE_THEME", "dracula")
+    monkeypatch.setenv("VIBE_CONSOLE_BASE_URL", "https://console.example.com")
+
+    context = OnboardingContext.load()
+
+    assert context.theme == "dracula"
+    assert context.console_base_url == "https://console.example.com"
+    assert context.provider == DEFAULT_PROVIDERS[0]
+    assert variable.upper() in caplog.text
+    assert "private-invalid-catalog" not in caplog.text
 
 
 def test_resolve_browser_auth_urls_bare_domain_adds_scheme_and_api() -> None:

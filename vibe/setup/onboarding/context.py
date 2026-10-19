@@ -197,16 +197,17 @@ def _load_onboarding_env_payload_for_fields(
         and (active_model := _find_env_value("VIBE_ACTIVE_MODEL")) is not None
     ):
         payload["active_model"] = active_model
-    if (
-        "providers" in field_names
-        and (providers := _find_env_value("VIBE_PROVIDERS")) is not None
-    ):
-        payload["providers"] = _ONBOARDING_LIST_ADAPTER.validate_json(providers)
-    if (
-        "models" in field_names
-        and (models := _find_env_value("VIBE_MODELS")) is not None
-    ):
-        payload["models"] = _ONBOARDING_LIST_ADAPTER.validate_json(models)
+    for field_name in ("providers", "models"):
+        env_name = f"VIBE_{field_name.upper()}"
+        if field_name not in field_names or not (value := _find_env_value(env_name)):
+            continue
+        try:
+            payload[field_name] = _ONBOARDING_LIST_ADAPTER.validate_json(value)
+        except ValidationError:
+            logger.warning(
+                "Ignoring unparseable %s environment value: expected a JSON array",
+                env_name,
+            )
     if (
         "vibe_base_url" in field_names
         and (vibe_base_url := _find_env_value("VIBE_VIBE_BASE_URL")) is not None

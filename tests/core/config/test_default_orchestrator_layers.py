@@ -39,6 +39,23 @@ def _project_vibe_dir(tmp_working_directory: Path) -> Path:
 
 class TestBothTomlLayersInstalled:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("variable", ["VIBE_MODELS", "VIBE_PROVIDERS"])
+    async def test_invalid_catalog_env_preserves_user_config(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch, variable: str
+    ) -> None:
+        _write_user_config(config_dir, {"theme": "dracula"})
+        before = await build_default_orchestrator()
+        monkeypatch.setenv(variable, "not-json")
+        monkeypatch.setenv("VIBE_ENABLE_TELEMETRY", "false")
+
+        after = await build_default_orchestrator()
+
+        assert after.config.models == before.config.models
+        assert after.config.providers == before.config.providers
+        assert after.config.theme == "dracula"
+        assert after.config.enable_telemetry is False
+
+    @pytest.mark.asyncio
     async def test_project_overrides_user_scalar(
         self, config_dir: Path, tmp_working_directory: Path
     ) -> None:

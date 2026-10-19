@@ -166,6 +166,9 @@ The configuration file uses TOML format. When it does not exist, Vibe uses its
 built-in defaults and creates a sparse file on the first persisted setting.
 Settings can also be overridden via environment variables with the `VIBE_`
 prefix (e.g., `VIBE_ACTIVE_MODEL=my-local-model`).
+`VIBE_MODELS` and `VIBE_PROVIDERS` must contain JSON. If either contains
+malformed JSON, Vibe logs a warning and ignores that value, preserving the
+other environment overrides and configuration layers.
 
 Custom prompt IDs are resolved from project-local `.vibe/prompts/` first, then
 from `~/.vibe/prompts/`, and finally from the built-in bundled prompts.

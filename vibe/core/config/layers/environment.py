@@ -2,12 +2,37 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, create_model
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, TypeAdapter, ValidationError, create_model
+from pydantic.fields import FieldInfo
+from pydantic_settings import (
+    BaseSettings,
+    EnvSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 from vibe.core.config.fingerprint import create_dict_fingerprint
 from vibe.core.config.layer import ConfigLayer, RawConfig
 from vibe.core.config.types import LayerConfigSnapshot
+from vibe.observability.logging import logger
+
+_JSON_ADAPTER = TypeAdapter(Any)
+
+
+class _CatalogEnvSettingsSource(EnvSettingsSource):
+    def prepare_field_value(
+        self, field_name: str, field: FieldInfo, value: Any, value_is_complex: bool
+    ) -> Any:
+        if field_name in {"models", "providers"} and isinstance(value, str):
+            try:
+                _JSON_ADAPTER.validate_json(value)
+            except ValidationError:
+                logger.warning(
+                    "Ignoring unparseable VIBE_%s environment value: expected JSON",
+                    field_name.upper(),
+                )
+                value = None
+        return super().prepare_field_value(field_name, field, value, value_is_complex)
 
 
 class _EnvBase(BaseSettings):
@@ -18,6 +43,22 @@ class _EnvBase(BaseSettings):
         env_ignore_empty=True,
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (
+            init_settings,
+            _CatalogEnvSettingsSource(settings_cls),
+            dotenv_settings,
+            file_secret_settings,
+        )
 
 
 class EnvironmentLayer(ConfigLayer[RawConfig]):

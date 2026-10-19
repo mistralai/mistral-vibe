@@ -668,6 +668,12 @@ configuration.
 
 Vibe is configured via a `config.toml` file. It looks for this file first in `./.vibe/config.toml` and then falls back to `~/.vibe/config.toml`.
 
+### Environment Overrides
+
+`VIBE_MODELS` and `VIBE_PROVIDERS` configuration overrides must contain JSON.
+Malformed JSON in either variable is ignored with a warning; other environment
+overrides and the remaining configuration layers still apply.
+
 ### Theme
 
 The default `auto` theme follows the terminal background when it can be detected, then the operating-system light/dark preference. Choose another theme with `/theme` or set it explicitly:

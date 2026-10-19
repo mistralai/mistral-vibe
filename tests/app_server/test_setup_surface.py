@@ -39,6 +39,23 @@ async def _status(client: AppServerClient) -> SetupStatusResponse:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("variable", ["VIBE_MODELS", "VIBE_PROVIDERS"])
+async def test_setup_status_ignores_malformed_catalog_env(monkeypatch, variable):
+    monkeypatch.setenv(variable, "not-json")
+    monkeypatch.setenv("VIBE_THEME", "dracula")
+    client, client_transport, server_transport = await setup_client()
+    try:
+        response = await _status(client)
+    finally:
+        await client_transport.close()
+        await server_transport.close()
+
+    assert response.provider.name == "mistral"
+    assert response.active_model == "devstral-latest"
+    assert response.theme == "dracula"
+
+
+@pytest.mark.asyncio
 async def test_setup_status_seeds_the_wizard_from_the_resolved_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

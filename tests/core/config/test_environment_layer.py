@@ -5,8 +5,47 @@ from unittest.mock import patch
 
 import pytest
 
+from vibe.core.config.layer import LayerImplementationError
 from vibe.core.config.layers.environment import EnvironmentLayer
 from vibe.core.config.vibe_schema import VibeConfigSchema
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variable", ["VIBE_MODELS", "VIBE_PROVIDERS", "vibe_models"])
+async def test_invalid_catalog_json_preserves_other_env_values(variable, caplog):
+    value = "private-invalid-catalog"
+    env = {variable: value, "VIBE_ENABLE_TELEMETRY": "false"}
+    with patch.dict(os.environ, env, clear=True):
+        data = await EnvironmentLayer(schema=VibeConfigSchema).load()
+        assert os.environ[variable] == value
+
+    assert data.model_dump() == {"enable_telemetry": False}
+    assert variable.upper() in caplog.text
+    assert value not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_invalid_catalog_json_preserves_nested_model_override():
+    env = {
+        "VIBE_MODELS": "not-json",
+        "VIBE_MODELS__CUSTOM__NAME": "custom-model",
+        "VIBE_MODELS__CUSTOM__PROVIDER": "mistral",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        data = await EnvironmentLayer(schema=VibeConfigSchema).load()
+    assert data.model_dump()["models"]["custom"]["name"] == "custom-model"
+
+
+@pytest.mark.asyncio
+async def test_corrected_catalog_env_is_loaded_on_reload():
+    with patch.dict(os.environ, {"VIBE_MODELS": "not-json"}, clear=True):
+        layer = EnvironmentLayer(schema=VibeConfigSchema)
+        assert (await layer.load()).model_dump() == {}
+        os.environ["VIBE_MODELS"] = (
+            '{"custom": {"name": "custom-model", "provider": "mistral"}}'
+        )
+        data = await layer.load(force=True)
+    assert data.model_dump()["models"]["custom"]["name"] == "custom-model"
 
 
 @pytest.mark.asyncio
@@ -71,3 +110,30 @@ async def test_fingerprint_changes_when_env_changes() -> None:
 @pytest.mark.asyncio
 async def test_always_trusted() -> None:
     assert await EnvironmentLayer(schema=VibeConfigSchema).resolve_trust() is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("VIBE_MODELS", '"not-a-catalog"'),
+        ("VIBE_MODELS", "[]"),
+        ("VIBE_MODELS", "{}"),
+        ("VIBE_TOOLS", "not-json"),
+        ("VIBE_ENABLE_TELEMETRY", "not-a-boolean"),
+        ("VIBE_MODELS__CUSTOM__EXTRA_BODY", "not-json"),
+    ],
+)
+async def test_other_invalid_overrides_still_fail_validation(variable, value):
+    with patch.dict(os.environ, {variable: value}, clear=True):
+        with pytest.raises(LayerImplementationError):
+            await EnvironmentLayer(schema=VibeConfigSchema).load()
+
+
+@pytest.mark.asyncio
+async def test_empty_model_env_is_ignored_without_warning(caplog):
+    value = ""
+    with patch.dict(os.environ, {"VIBE_MODELS": value}, clear=True):
+        data = await EnvironmentLayer(schema=VibeConfigSchema).load()
+    assert data.model_dump() == {}
+    assert "Ignoring unparseable" not in caplog.text
