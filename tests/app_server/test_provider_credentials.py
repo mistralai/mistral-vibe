@@ -8,7 +8,8 @@ the Unified path sending a header the legacy path stopped sending.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import asyncio
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import PropertyMock, patch
 
 import keyring
@@ -448,6 +449,37 @@ async def test_a_credential_says_which_source_it_came_from(
     assert isinstance(from_keyring, ProviderCredentialSnapshot)
     assert from_env.api_key_source == "env var PRIMARY_KEY"
     assert from_keyring.api_key_source == "the keyring"
+
+
+@pytest.mark.asyncio
+async def test_each_session_resolves_its_own_credentials_before_the_process_key() -> (
+    None
+):
+    """*Prepare*: Three services on one config: two with credentials of their
+    own for the provider's variable, one without.
+    *Do*: Resolve all three at once.
+    *Assert*: Each with credentials sends its own, named as the run's; the
+    other sends the process's key.
+    """
+    # Prepare
+    orchestrator = _orchestrator(_config(_provider("primary")))
+    first = ProviderCredentialService(
+        orchestrator, credentials={"PRIMARY_KEY": "run-a-secret"}
+    )
+    second = ProviderCredentialService(
+        orchestrator, credentials={"PRIMARY_KEY": "run-b-secret"}
+    )
+    plain = ProviderCredentialService(orchestrator)
+
+    # Do
+    results = await asyncio.gather(first.resolve(), second.resolve(), plain.resolve())
+
+    # Assert
+    assert all(isinstance(result, ProviderCredentialSnapshot) for result in results)
+    tokens = [cast(ProviderCredentialSnapshot, result).token for result in results]
+    assert tokens == ["run-a-secret", "run-b-secret", "primary-secret"]
+    first_result = cast(ProviderCredentialSnapshot, results[0])
+    assert first_result.api_key_source == "the run's credential PRIMARY_KEY"
 
 
 @pytest.mark.asyncio

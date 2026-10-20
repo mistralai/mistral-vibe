@@ -1,26 +1,27 @@
 //! Async JSON-RPC client over the Vibe app-server stdio transport.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::child::ChildHandle;
+pub use super::pending::Pending;
 use crate::server::Request;
 use crate::server::RpcError;
 
 mod replay;
 mod stub;
+mod wire;
+
+pub(crate) use wire::write_lines;
+pub use wire::Writer;
 
 /// Maximum notifications buffered (channel capacity). A full channel backpressures the reader.
-const MAX_PENDING_NOTIFICATIONS: usize = 512;
+pub(crate) const MAX_PENDING_NOTIFICATIONS: usize = 512;
 
 /// A server -> client notification (method + params); the reducer lives in the TUI.
 #[derive(Debug, Clone)]
@@ -29,7 +30,6 @@ pub struct Notification {
     pub params: Value,
 }
 
-pub type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RequestFailure>>>>>;
 /// The session the deny path falls back to when a callback omits `sessionId`.
 pub type ActiveSession = Arc<Mutex<Option<String>>>;
 
@@ -84,7 +84,8 @@ pub struct Client {
     server_pid: AtomicU32,
 }
 
-/// How to launch the backend; defaults to `uv run --quiet vibe-app-server`.
+/// How to launch the backend; defaults to `uv run --quiet --python
+/// cpython>=3.12+gil vibe-app-server`.
 #[derive(Clone)]
 pub struct Launch {
     pub program: String,
@@ -96,16 +97,26 @@ pub struct Launch {
 /// wheel install and a source checkout run the same backend.
 pub const DEFAULT_APP_SERVER_ARGS: &[&str] = &[];
 
+/// uv python request forcing a GIL build of a supported CPython: uv may select a
+/// free-threaded build, for which the locked dependencies ship no wheels.
+pub const UV_PYTHON_REQUEST: &str = "cpython>=3.12+gil";
+
 impl Default for Launch {
     fn default() -> Self {
         // Source checkout: run the app-server through uv from the project root.
         Self {
             program: "uv".into(),
-            args: ["run", "--quiet", "vibe-app-server"]
-                .into_iter()
-                .map(str::to_owned)
-                .chain(DEFAULT_APP_SERVER_ARGS.iter().map(|s| (*s).to_owned()))
-                .collect(),
+            args: [
+                "run",
+                "--quiet",
+                "--python",
+                UV_PYTHON_REQUEST,
+                "vibe-app-server",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(DEFAULT_APP_SERVER_ARGS.iter().map(|s| (*s).to_owned()))
+            .collect(),
             cwd: None,
         }
     }
@@ -121,96 +132,12 @@ impl Client {
         mpsc::Receiver<Notification>,
         watch::Receiver<bool>,
     )> {
-        let mut cmd = Command::new(&launch.program);
-        cmd.args(&launch.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            // Never inherited: the TUI owns the terminal, and anything the child
-            // writes there corrupts cells ratatui does not know it must repaint.
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        // The child gets its own process group: the terminal sends Ctrl-C to
-        // the whole foreground group, and a SIGINT landing on the app-server
-        // mid-shutdown aborts it with a traceback. We drive its lifetime over
-        // stdin instead.
-        #[cfg(unix)]
-        cmd.process_group(0);
-        if let Some(cwd) = &launch.cwd {
-            cmd.current_dir(cwd);
-        }
-        // The app-server child loads ~/.vibe/.env itself (python-dotenv); the
-        // keys this client's non-interpolating parser set would shadow the
-        // child's own values, so strip exactly those.
-        for key in crate::credentials::dotenv::dotenv_set_keys() {
-            cmd.env_remove(&key);
-        }
-
-        let mut child = ChildHandle::spawn(&mut cmd)
-            .with_context(|| format!("failed to spawn `{}`", launch.program))?;
-
-        let stdin = child.child.stdin.take().context("child stdin missing")?;
-        let stdout = child.child.stdout.take().context("child stdout missing")?;
-        if let Some(stderr) = child.child.stderr.take() {
-            tokio::spawn(super::stderr::drain(stderr));
-        }
-
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-        let next_id = Arc::new(AtomicU64::new(1));
-        let shutdown_requested = Arc::new(AtomicBool::new(false));
-        let deny_callbacks = Arc::new(AtomicBool::new(false));
-        let active_session: ActiveSession = Arc::new(Mutex::new(None));
-        let (to_writer, mut writer_rx) = mpsc::unbounded_channel::<Option<String>>();
-        let (notif_tx, notif_rx) = mpsc::channel::<Notification>(MAX_PENDING_NOTIFICATIONS);
-        let (crash_tx, crash_rx) = watch::channel(false);
-
-        // Writer task: single owner of stdin, preserves frame order. The
-        // unbounded queue keeps `send_now` synchronous so frame order follows
-        // event-handling order. `None` is the close sentinel: it drops stdin so
-        // the server sees EOF; the reader task holds a sender clone until the
-        // child exits, so waiting for all senders to drop would deadlock.
-        tokio::spawn(async move {
-            let mut stdin = stdin;
-            while let Some(Some(line)) = writer_rx.recv().await {
-                if stdin.write_all(line.as_bytes()).await.is_err() {
-                    break;
-                }
-                if stdin.write_all(b"\n").await.is_err() {
-                    break;
-                }
-                let _ = stdin.flush().await;
-            }
-        });
-
-        // Reader task: route each line and answer server-initiated requests.
-        super::reader::spawn(
-            stdout,
-            pending.clone(),
-            notif_tx.clone(),
-            to_writer.clone(),
-            crash_tx,
-            shutdown_requested.clone(),
-            next_id.clone(),
-            deny_callbacks.clone(),
-            active_session.clone(),
-        );
-
-        Ok((
-            Client {
-                next_id,
-                to_writer,
-                pending,
-                notif_tx,
-                shutdown_requested,
-                deny_callbacks,
-                active_session,
-                replay_drained: AtomicU64::new(0),
-                unsent_telemetry: AtomicU64::new(0),
-                server_pid: AtomicU32::new(0),
-            },
-            child,
-            notif_rx,
-            crash_rx,
-        ))
+        let (child, stdin, stdout) = ChildHandle::launch(&launch, &[], &[])?;
+        let (to_writer, writer_rx) = mpsc::unbounded_channel::<Option<String>>();
+        // Single owner of stdin, so frame order follows event-handling order.
+        wire::write_lines(stdin, writer_rx);
+        let (client, notif_rx, crash_rx) = Client::wire(stdout, to_writer);
+        Ok((client, child, notif_rx, crash_rx))
     }
 
     /// Send a typed request and await its result payload.
@@ -234,12 +161,7 @@ impl Client {
         params: Value,
     ) -> Result<oneshot::Receiver<Result<Value, RequestFailure>>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = oneshot::channel();
-        self.pending
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .insert(id, tx);
-
+        let rx = self.pending.register(id);
         let frame = serde_json::to_string(&Request::call(id, method, params))?;
         self.to_writer
             .send(Some(frame))

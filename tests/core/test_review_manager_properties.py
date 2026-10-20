@@ -20,7 +20,7 @@ import random
 from tests.stubs.fake_checkpoint_capture import FakeCheckpointCapture, FileSnapshot
 from vibe.core.checkpoints import Checkpointer, FileState
 from vibe.core.review import AllTarget, ReviewManager, ScopeTarget
-from vibe.core.types import LLMMessage, MessageList, Role
+from vibe.core.types import LLMMessage, Role
 
 FILES = ["a.txt", "b.txt", "c.txt"]
 
@@ -106,7 +106,7 @@ class _Bundle:
     flat surface this suite drives. Production wires them separately.
     """
 
-    def __init__(self, messages: MessageList) -> None:
+    def __init__(self, messages: list[LLMMessage]) -> None:
         checkpointer = Checkpointer()
         recorder = FakeCheckpointCapture(checkpointer, messages)
         review = ReviewManager(checkpointer)
@@ -118,14 +118,14 @@ class _Bundle:
         self.revert_review = review.revert_review
 
 
-def _fresh_manager() -> tuple[_Bundle, MessageList]:
-    messages = MessageList([LLMMessage(role=Role.system, content="system")])
+def _fresh_manager() -> tuple[_Bundle, list[LLMMessage]]:
+    messages = [LLMMessage(role=Role.system, content="system")]
     return _Bundle(messages), messages
 
 
 def _replay(
     tmp: Path, originals: dict[str, str], turns: list[Turn]
-) -> tuple[_Bundle, MessageList]:
+) -> tuple[_Bundle, list[LLMMessage]]:
     """Recreate the session on disk: seed originals, then run each turn as the
     manager would (grow messages so turn ids differ, capture pre via snapshots /
     carry-forward, write the edit, seal).

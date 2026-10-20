@@ -42,7 +42,7 @@ class ClaudeProjectSource:
             configuration = _ClaudeConfiguration.model_validate_json(
                 self._config_path.read_text()
             )
-        except OSError, ValidationError:
+        except (OSError, ValidationError):
             return []
         projects: list[ClaudeProject] = []
         for workspace_path in sorted(configuration.projects):

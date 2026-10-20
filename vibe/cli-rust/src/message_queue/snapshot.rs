@@ -7,6 +7,14 @@ use crate::app::App;
 use crate::server::{ContentBlock, ImageAttachment};
 use crate::transcript::local;
 
+/// Replace the local queue with a resumed session's own, paused items included.
+pub fn adopt(app: &mut App, queue: Option<&Value>) {
+    app.queue.clear();
+    if let Some(queue) = queue {
+        sync(app, queue);
+    }
+}
+
 /// Missing prompts are retained because a promotion removes an item before `turn/started`.
 pub fn sync(app: &mut App, queue: &Value) {
     app.queue.paused = queue

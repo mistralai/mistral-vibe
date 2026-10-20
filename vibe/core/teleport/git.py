@@ -208,7 +208,7 @@ class GitRepository:
                     repo, remote, (f"+refs/heads/*:refs/remotes/{remote}/*",)
                 )
             )
-        except TimeoutError, ValueError, GitCommandError:
+        except (TimeoutError, ValueError, GitCommandError):
             pass
 
     async def _get_diff(self, repo: Repo) -> str:
@@ -235,7 +235,7 @@ class GitRepository:
 
         try:
             return await self._executor.run(get_full_diff)
-        except TimeoutError, GitCommandError, OSError:
+        except (TimeoutError, GitCommandError, OSError):
             return ""
 
     async def _branch_contains(self, repo: Repo, commit: str, remote: str) -> bool:
@@ -244,7 +244,7 @@ class GitRepository:
                 lambda: repo.git.branch("-r", "--contains", commit)
             )
             return any(ln.strip().startswith(f"{remote}/") for ln in out.splitlines())
-        except TimeoutError, GitCommandError:
+        except (TimeoutError, GitCommandError):
             return False
 
     async def _rev_list_count(self, repo: Repo, ref_range: str) -> int | None:
@@ -253,14 +253,14 @@ class GitRepository:
                 lambda: repo.git.rev_list("--count", ref_range)
             )
             return int(out)
-        except TimeoutError, GitCommandError, ValueError:
+        except (TimeoutError, GitCommandError, ValueError):
             return None
 
     async def _ref_exists(self, repo: Repo, ref: str) -> bool:
         try:
             await self._executor.run(lambda: repo.git.rev_parse("--verify", ref))
             return True
-        except TimeoutError, GitCommandError:
+        except (TimeoutError, GitCommandError):
             return False
 
     async def _get_remote_default_branch(self, repo: Repo, remote: str) -> str | None:
@@ -268,7 +268,7 @@ class GitRepository:
             ref = repo.remotes[remote].refs.HEAD.reference.name
             if await self._ref_exists(repo, ref):
                 return ref
-        except KeyError, IndexError, TypeError, AttributeError:
+        except (KeyError, IndexError, TypeError, AttributeError):
             pass
         return None
 
@@ -282,7 +282,7 @@ class GitRepository:
                 if info.flags & info.ERROR:
                     return False
             return True
-        except TimeoutError, ValueError, GitCommandError:
+        except (TimeoutError, ValueError, GitCommandError):
             return False
 
     @staticmethod

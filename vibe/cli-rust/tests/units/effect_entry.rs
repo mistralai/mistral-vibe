@@ -70,21 +70,6 @@ fn has_body_counts_output_fallback_text_and_warnings() {
 }
 
 #[test]
-fn body_renders_error_reason_and_output_text_fallback() {
-    let base = json!({"kind": "shell", "display": {"verb": "Ran"}});
-    let effect = |state: Value| effect(json!({"detail": base, "state": state}));
-
-    let failed = effect(json!({"status": "failed", "error": {"message": "boom"}}));
-    assert_eq!(body(&failed), ["Error: boom"]);
-
-    let skipped = effect(json!({"status": "skipped", "reason": "hook deny"}));
-    assert_eq!(body(&skipped), ["Skipped: hook deny"]);
-
-    let fallback = effect(json!({"status": "completed", "outputText": "deny reason"}));
-    assert_eq!(body(&fallback), ["deny reason"]);
-}
-
-#[test]
 fn agent_tools_count_as_subagent_effects_under_both_namespaces() {
     // `subagent.` is the deprecated pre-rename prefix of `agents.`.
     for tool_name in ["agents.send_message", "subagent.send_message"] {

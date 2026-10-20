@@ -120,10 +120,14 @@ class ClientSessionState:
         output_tokens = max(
             0, current.output_tokens - self._usage_baseline.output_tokens
         )
+        cached_input_tokens = max(
+            0, current.cached_input_tokens - self._usage_baseline.cached_input_tokens
+        )
         return TokenUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=input_tokens + output_tokens,
+            cached_input_tokens=cached_input_tokens,
         )
 
     def _current_usage(self) -> TokenUsage:

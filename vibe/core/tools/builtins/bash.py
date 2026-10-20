@@ -1,23 +1,14 @@
 from __future__ import annotations
 
-import asyncio
-from collections.abc import AsyncGenerator
 from pathlib import Path
 import shlex
-from typing import ClassVar, final
+from typing import ClassVar
 
 from pydantic import BaseModel, Field, computed_field
 
 from vibe.core.scratchpad import is_scratchpad_path
 from vibe.core.tools.arity import build_session_pattern
-from vibe.core.tools.base import (
-    BaseTool,
-    BaseToolConfig,
-    BaseToolState,
-    InvokeContext,
-    ToolError,
-    ToolPermission,
-)
+from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState, ToolPermission
 from vibe.core.tools.builtins._shell_command_policy import (
     analyze_shell_command_policy,
     git_repository_identity,
@@ -29,31 +20,25 @@ from vibe.core.tools.builtins._shell_permission_analysis import (
     ShellPermissionAnalysis,
     analyze_shell_command,
 )
-from vibe.core.tools.io_port import ShellCommandRequest
 from vibe.core.tools.permissions import (
     PermissionContext,
     PermissionScope,
     RequiredPermission,
 )
-from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import (
     ambient_workspace,
     is_path_within_workdir,
     resolve_tool_path,
     shell_path_scope_root,
 )
-from vibe.core.types import ToolResultEvent, ToolStreamEvent
-from vibe.core.utils import kill_async_subprocess
-from vibe.core.utils.shell import spawn_shell_command, uses_posix_shell
+from vibe.core.utils.shell import uses_posix_shell
 from vibe.core.workspace import Workspace
 from vibe.permissions import (
     PathGrantScope,
     path_grant_pattern,
     path_grant_pattern_matches,
 )
-from vibe.utils.io import decode_console_safe
 from vibe.utils.paths import normalize_windows_path
-from vibe.utils.tool_presentation import ToolEffectKind
 
 
 def _extract_commands(command: str) -> list[str]:
@@ -400,13 +385,24 @@ def needs_exact_command_scope(
     )
 
 
+NATIVE_DEFAULT_TIMEOUT_SECONDS = 300
+"""Seconds the native shell tools give a command when neither the call nor the
+configuration says. Only these tools use it: the unified harness has its own default,
+and an unset `default_timeout` is not passed to it."""
+
+
 class BashToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ASK
     max_output_bytes: int = Field(
         default=16_000, description="Maximum bytes to capture from stdout and stderr."
     )
-    default_timeout: int = Field(
-        default=300, description="Default timeout for commands in seconds."
+    default_timeout: int | None = Field(
+        default=None,
+        description=(
+            "Seconds a command may run when the call gives no timeout. Unset, the"
+            f" native shell tool uses {NATIVE_DEFAULT_TIMEOUT_SECONDS} and the unified"
+            " harness its own default."
+        ),
     )
     allowlist: list[str] = Field(
         default_factory=_get_default_allowlist,
@@ -424,6 +420,11 @@ class BashToolConfig(BaseToolConfig):
         default=["sudo"],
         description="Command prefixes that always ASK regardless of arity approval.",
     )
+
+    @property
+    def native_default_timeout(self) -> int:
+        """Seconds a native shell tool gives a command whose call has no timeout."""
+        return self.default_timeout or NATIVE_DEFAULT_TIMEOUT_SECONDS
 
 
 class BashArgs(BaseModel):
@@ -450,56 +451,13 @@ class CapturedShellResult(BaseModel):
         return self.exit_code
 
 
-def completed_shell_result(
-    *, command: str, stdout: str, stderr: str, exit_code: int, shell: str = ""
-) -> CapturedShellResult:
-    if exit_code != 0:
-        message = f"Command failed: {command!r}\nReturn code: {exit_code}"
-        if stderr:
-            message += f"\nStderr: {stderr}"
-        if stdout:
-            message += f"\nStdout: {stdout}"
-        raise ToolError(message)
-
-    return CapturedShellResult(
-        command=command, shell=shell, exit_code=exit_code, stdout=stdout, stderr=stderr
-    )
-
-
-class Bash(
-    BaseTool[BashArgs, CapturedShellResult, BashToolConfig, BaseToolState],
-    ToolUIData[BashArgs, CapturedShellResult],
-):
-    effect_kind = ToolEffectKind.SHELL
+class Bash(BaseTool[BashArgs, CapturedShellResult, BashToolConfig, BaseToolState]):
     shell_rollout: ClassVar[str | None] = "legacy"
     # Command prefixes and typed path grants are what a shell reads back.
     allowlist_scopes: ClassVar[frozenset[PermissionScope]] = frozenset({
         PermissionScope.COMMAND_PATTERN,
         PermissionScope.OUTSIDE_DIRECTORY,
     })
-
-    @classmethod
-    def format_call_display(cls, args: BashArgs) -> ToolCallDisplay:
-        return ToolCallDisplay(
-            summary=f"bash: {args.command}",
-            verb="Running",
-            message=args.command,
-            settled_verb="Ran",
-            settled_message=args.command,
-        )
-
-    @classmethod
-    def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
-        if not isinstance(event.result, CapturedShellResult):
-            return ToolResultDisplay(
-                success=False, message=event.error or event.skip_reason or "No result"
-            )
-
-        return ToolResultDisplay(success=True, verb="Ran", message=event.result.command)
-
-    @classmethod
-    def get_status_text(cls) -> str:
-        return "Running command"
 
     @staticmethod
     def _build_command_required_permission(
@@ -732,80 +690,3 @@ class Bash(
         return PermissionContext(
             permission=ToolPermission.ASK, required_permissions=required
         )
-
-    @final
-    def _build_timeout_error(self, command: str, timeout: int) -> ToolError:
-        return ToolError(f"Command timed out after {timeout}s: {command!r}")
-
-    async def run(
-        self, args: BashArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | CapturedShellResult]:
-        timeout = args.timeout or self.config.default_timeout
-        max_bytes = self.config.max_output_bytes
-
-        if (
-            ctx is not None
-            and ctx.tool_io is not None
-            and ctx.tool_io.supports_terminal
-            and ctx.session_id is not None
-        ):
-            try:
-                result = await ctx.tool_io.run_shell(
-                    ShellCommandRequest(
-                        session_id=ctx.session_id,
-                        tool_call_id=ctx.tool_call_id,
-                        command=args.command,
-                        cwd=self.cwd,
-                        timeout=timeout,
-                        max_output_bytes=max_bytes,
-                    )
-                )
-            except TimeoutError:
-                raise self._build_timeout_error(args.command, timeout) from None
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                raise ToolError(
-                    f"Error running command {args.command!r}: {exc}"
-                ) from exc
-            yield completed_shell_result(
-                command=args.command,
-                stdout=result.stdout[:max_bytes],
-                stderr=result.stderr[:max_bytes],
-                exit_code=result.returncode,
-            )
-            return
-
-        proc = None
-        try:
-            proc = await spawn_shell_command(args.command, cwd=self.cwd)
-
-            try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
-                )
-            except TimeoutError:
-                await kill_async_subprocess(proc)
-                raise self._build_timeout_error(args.command, timeout)
-
-            stdout = (
-                decode_console_safe(stdout_bytes)[:max_bytes] if stdout_bytes else ""
-            )
-            stderr = (
-                decode_console_safe(stderr_bytes)[:max_bytes] if stderr_bytes else ""
-            )
-
-            yield completed_shell_result(
-                command=args.command,
-                stdout=stdout,
-                stderr=stderr,
-                exit_code=proc.returncode or 0,
-            )
-
-        except ToolError, asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            raise ToolError(f"Error running command {args.command!r}: {exc}") from exc
-        finally:
-            if proc is not None:
-                await kill_async_subprocess(proc)

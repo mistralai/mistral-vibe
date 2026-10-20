@@ -204,17 +204,6 @@ fn a_failed_replacement_allows_the_prompt_to_be_edited_again() {
 }
 
 #[test]
-fn editing_a_snapshot_prompt_restores_file_mentions() {
-    let mut app = App::default();
-    message_queue::sync(&mut app, &queued_turn());
-    app.queue.selected = Some("message-1".to_owned());
-
-    message_queue::edit_selected(&mut app);
-
-    assert_eq!(app.chat_input.input, "@/tmp/diagram.png inspect");
-}
-
-#[test]
 fn editing_does_not_duplicate_an_existing_image_mention() {
     let mut app = App::default();
     message_queue::sync(&mut app, &queued_turn());

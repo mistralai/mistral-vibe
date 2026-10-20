@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Conventions for AI agents and humans contributing to **Mistral Vibe** — a CLI coding assistant: a Rust terminal UI over a Python 3.14+ app server managed with `uv`.
+Conventions for AI agents and humans contributing to **Mistral Vibe** — a CLI coding assistant: a Rust terminal UI over a Python 3.12+ app server managed with `uv`.
 
 Layout: Unified Harness Core and Runtime are external dependencies that execute and persist sessions; `vibe/app_server` hosts sessions and exposes product features and RPCs; `vibe/core` retains shared config, tool, permission and other utilities; `vibe/cli-rust` is the terminal UI (Rust, Ratatui), a thin client over `vibe-app-server`; `vibe/cli` holds the `vibe` launcher that execs it and the audio helpers `vibe/acp` uses; `vibe/acp` bridges to the Agent Client Protocol; `vibe/setup` holds auth and the Textual onboarding wizard behind `vibe-acp --setup`. Tests live in `tests/` with autouse fixtures in `conftest.py` and test doubles in `tests/stubs/`.
 

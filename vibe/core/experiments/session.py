@@ -12,6 +12,7 @@ from vibe.core.experiments.cache import (
 )
 from vibe.core.experiments.manager import ExperimentManager
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
+from vibe.core.experiments.wait import mark_experiments_eval_failed
 from vibe.core.identity import IdentityResult, fetch_identity
 from vibe.core.telemetry.send import get_mistral_provider_and_api_key
 from vibe.core.utils import get_platform_id
@@ -139,10 +140,14 @@ async def initialize_experiments(
         # Remote eval failed (network / 4xx-5xx / invalid payload). The manager
         # is fail-open and stayed empty, so nothing changed — don't trigger a
         # prompt refresh. We still surface user_plan for early telemetry events.
+        mark_experiments_eval_failed()
         return False, user_plan
-    if attributes.userId is not None:
-        # Without the hash attribute the response carries no assignment, and
-        # caching that empty result would overwrite a good entry.
+    if attributes.userId is None:
+        # Without the hash attribute the response carries no assignment:
+        # caching it would overwrite a good entry, and a later session gains
+        # nothing by waiting for another one.
+        mark_experiments_eval_failed()
+    else:
         try:
             store_cached_eval_response(config, state)
         except Exception:

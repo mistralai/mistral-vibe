@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import suppress
+from dataclasses import replace
 from http import HTTPStatus
 import json
 import logging
@@ -23,6 +24,7 @@ from mistralai_vibe_local_harness.protocol import (
 from mistralai_vibe_local_harness.vibe._credentials import (
     ProviderAuthRequired,
     ProviderCredentialResult,
+    ProviderCredentialSnapshot,
     ProviderRejectionReason,
 )
 from mistralai_vibe_local_harness.vibe._runtime_config import (
@@ -31,6 +33,7 @@ from mistralai_vibe_local_harness.vibe._runtime_config import (
     CompletionPurpose,
     LocalModelRoute,
     LocalRuntimeAdapterConfig,
+    MalformedToolCallsTelemetry,
     ProviderRetry,
     ProviderStreamDelta,
     RequestSentTelemetry,
@@ -42,6 +45,9 @@ from mistralai_vibe_local_harness.vibe.adapters._provider_failure import (
     ProviderFailure,
     ProviderRefusal,
     read_provider_failure,
+)
+from mistralai_vibe_local_harness.vibe.adapters._tool_call_finish import (
+    MalformedToolCalls,
 )
 from mistralai_vibe_local_harness.vibe.adapters.generic import (
     execute_generic_completion,
@@ -198,7 +204,7 @@ class _ProvisionalDeltaEmitter:
             )
 
 
-async def execute_completion(
+async def execute_completion(  # noqa: PLR0914 - one local per step of the call's setup and report
     action: RustLLMCallAction,
     messages: list[RustMessage],
     tools: list[RustToolDefinition],
@@ -208,10 +214,16 @@ async def execute_completion(
 ) -> RustCompletionSucceededEvent | RustCompletionFailedEvent:
     turn_id = action.turn_id
 
-    route = (
-        config.compaction_model
-        if action.purpose == "compaction"
-        else config.active_model
+    compaction = action.purpose == "compaction"
+    # A standalone compaction request carries the history as a transcript and
+    # runs without tools and without reasoning, so it shares nothing with the
+    # in-context request that failed and cannot be answered from its cache.
+    standalone = compaction and action.request == "standalone"
+    route = _request_route(action, config)
+    if standalone:
+        tools = []
+    config = _with_request_output_cap(
+        config, route, messages, tools, compaction=compaction
     )
     image_error = _validate_image_support(messages, route)
     if image_error is not None:
@@ -243,11 +255,15 @@ async def execute_completion(
         else None
     )
 
+    reasoning_watch = _reasoning_watch(action, config)
+
     async def on_retry(retry: ProviderRetry | None) -> None:
         # Only a real retry restarts the projection; a ``None`` payload is the
         # "recovered" signal the adapters send once an attempt succeeds.
         if retry is not None and emitter is not None:
             await emitter.restart()
+        if retry is not None and reasoning_watch is not None:
+            reasoning_watch.restart()
         if retry_sink is None or turn_id is None:
             return
         try:
@@ -257,10 +273,20 @@ async def execute_completion(
 
     retry_observer = (
         on_retry
-        if (retry_sink is not None and turn_id is not None) or emitter is not None
+        if (retry_sink is not None and turn_id is not None)
+        or emitter is not None
+        or reasoning_watch is not None
         else None
     )
-    on_delta = emitter.observe if emitter is not None else None
+    on_delta = (
+        emitter.observe
+        if emitter is not None
+        else reasoning_watch.observe
+        if reasoning_watch is not None
+        else None
+    )
+    malformed = MalformedToolCalls()
+    succeeded = False
     try:
         if config.backend == "mistral":
             result = await execute_mistral_completion(
@@ -268,8 +294,13 @@ async def execute_completion(
                 tools,
                 config,
                 credential,
-                route,
-                stream=action.purpose == "agent",
+                # The standalone request turns reasoning off below instead of
+                # through the route, so a route without reasoning sends none.
+                config.compaction_model if standalone else route,
+                # Watching reasoning needs the stream; other compaction calls
+                # wait for the whole answer.
+                stream=action.purpose == "agent" or reasoning_watch is not None,
+                disable_reasoning=standalone,
                 metadata=(
                     config.completion_metadata(action.purpose, action.iteration)
                     if config.completion_metadata is not None
@@ -277,6 +308,7 @@ async def execute_completion(
                 ),
                 on_retry=retry_observer,
                 on_delta=on_delta,
+                malformed=malformed,
             )
         elif config.backend == "generic":
             result = await execute_generic_completion(
@@ -287,44 +319,206 @@ async def execute_completion(
                 route=route,
                 on_retry=retry_observer,
                 on_delta=on_delta,
+                malformed=malformed,
             )
         else:
             raise ValueError(f"Unsupported completion backend: {config.backend}")
+        succeeded = True
     except Exception as exc:
-        elapsed_s = time.perf_counter() - started
         if isinstance(exc, ProviderRefusal) and emitter is not None:
             # Text streamed before a refusal is not an answer. Withdraw it, as a
             # retry does, instead of letting the failed turn settle it.
             await emitter.restart()
-        rejection = credential_rejection(read_provider_failure(exc))
-        if rejection is None:
-            failure = (
-                _refusal_event(action, exc, provider=config.provider, route=route)
-                if isinstance(exc, ProviderRefusal)
-                else _stream_failed_event(
-                    action, exc, provider=config.provider, route=route
-                )
-            )
-            return _logged_failure(action, failure, elapsed_s=elapsed_s)
-        # Tell the credential's owner what the borrower observed, so the
-        # material just refused is not re-sent on the next turn.
-        await config.credentials.reject(
-            observed_revision=credential.revision, reason=rejection
-        )
-        return _logged_failure(
+        return await _call_failure(
             action,
-            _unauthorized_event(
-                action,
-                rejection,
-                credential.api_key_source,
-                details=_failure_details(action, config.provider, route, exc),
-            ),
-            elapsed_s=elapsed_s,
+            exc,
+            config,
+            credential,
+            route,
+            elapsed_s=time.perf_counter() - started,
         )
     finally:
         if emitter is not None:
             await emitter.aclose()
+        _report_malformed_tool_calls(
+            action, config, route, malformed, succeeded=succeeded
+        )
     return RustCompletionSucceededEvent(action_id=action.action_id, result=result)
+
+
+async def _call_failure(
+    action: RustLLMCallAction,
+    exc: Exception,
+    config: LocalRuntimeAdapterConfig,
+    credential: ProviderCredentialSnapshot,
+    route: LocalModelRoute,
+    *,
+    elapsed_s: float,
+) -> RustCompletionFailedEvent:
+    """Type a provider call's failure, and report a refused credential."""
+    if isinstance(exc, CompactionReasoningLimitExceeded):
+        return _logged_failure(
+            action,
+            _reasoning_limit_event(action, exc, provider=config.provider, route=route),
+            elapsed_s=elapsed_s,
+        )
+    rejection = credential_rejection(read_provider_failure(exc))
+    if rejection is None:
+        failure = (
+            _refusal_event(action, exc, provider=config.provider, route=route)
+            if isinstance(exc, ProviderRefusal)
+            else _stream_failed_event(
+                action, exc, provider=config.provider, route=route
+            )
+        )
+        return _logged_failure(action, failure, elapsed_s=elapsed_s)
+    # Tell the credential's owner what the borrower observed, so the
+    # material just refused is not re-sent on the next turn.
+    await config.credentials.reject(
+        observed_revision=credential.revision, reason=rejection
+    )
+    return _logged_failure(
+        action,
+        _unauthorized_event(
+            action,
+            rejection,
+            credential.api_key_source,
+            details=_failure_details(action, config.provider, route, exc),
+        ),
+        elapsed_s=elapsed_s,
+    )
+
+
+def _reasoning_watch(
+    action: RustLLMCallAction, config: LocalRuntimeAdapterConfig
+) -> _ReasoningWatch | None:
+    """Watch an in-context compaction request's reasoning, if a limit is set.
+
+    The standalone request is not watched: it already runs without reasoning.
+    """
+    limit_tokens = config.compaction_reasoning_limit_tokens
+    if (
+        action.purpose != "compaction"
+        or action.request == "standalone"
+        or limit_tokens is None
+    ):
+        return None
+    return _ReasoningWatch(limit_tokens)
+
+
+class CompactionReasoningLimitExceeded(Exception):
+    """An in-context compaction request reasoned past its limit.
+
+    Raised from the stream observer, so the provider call stops reading the
+    stream and closes it. The call is not retried: Core answers the failure
+    with the standalone request, which runs without reasoning.
+    """
+
+    def __init__(self, limit_tokens: int, estimated_tokens: int) -> None:
+        super().__init__(
+            f"Compaction reasoning reached about {estimated_tokens} tokens, past "
+            f"the {limit_tokens}-token limit; abandoned for the standalone request."
+        )
+        self.limit_tokens = limit_tokens
+        self.estimated_tokens = estimated_tokens
+
+
+class _ReasoningWatch:
+    """Stop an in-context compaction request that keeps reasoning.
+
+    A summary needs little reasoning. A request that reasons for tens of
+    thousands of tokens is spending its output budget on the conversation
+    rather than summarizing it, so it is abandoned early instead of running to
+    the output cap.
+    """
+
+    def __init__(self, limit_tokens: int) -> None:
+        self._limit_tokens = limit_tokens
+        self._reasoning_bytes = 0
+
+    def restart(self) -> None:
+        self._reasoning_bytes = 0
+
+    async def observe(self, delta: ProviderStreamDelta) -> None:
+        self._reasoning_bytes += len(delta.reasoning.encode())
+        estimated_tokens = _approximate_tokens(self._reasoning_bytes)
+        if estimated_tokens > self._limit_tokens:
+            raise CompactionReasoningLimitExceeded(self._limit_tokens, estimated_tokens)
+
+
+def _request_route(
+    action: RustLLMCallAction, config: LocalRuntimeAdapterConfig
+) -> LocalModelRoute:
+    """The model route one Core request runs on.
+
+    Compaction runs on the compaction route. The in-context request takes the
+    compaction policy's thinking when it sets one; the standalone request runs
+    without reasoning.
+    """
+    if action.purpose != "compaction":
+        return config.active_model
+    route = config.compaction_model
+    if action.request == "standalone":
+        return replace(route, thinking="off")
+    thinking = config.compaction_thinking
+    if thinking is None or thinking == route.thinking:
+        return route
+    return replace(route, thinking=thinking)
+
+
+def _with_request_output_cap(
+    config: LocalRuntimeAdapterConfig,
+    route: LocalModelRoute,
+    messages: list[RustMessage],
+    tools: list[RustToolDefinition],
+    *,
+    compaction: bool,
+) -> LocalRuntimeAdapterConfig:
+    """The config whose output cap fits this request.
+
+    Adapters read the cap through ``output_token_cap``, so the request's cap
+    replaces ``max_tokens`` for this call only.
+    """
+    cap = config.request_output_token_cap(
+        route,
+        estimated_input_tokens=estimate_input_tokens(messages, tools),
+        compaction=compaction,
+    )
+    if cap is None or cap == config.output_token_cap(route):
+        return config
+    return replace(config, max_tokens=cap)
+
+
+# Images are sent as base64 but billed by size, not by encoded length. A fixed
+# estimate keeps one screenshot from looking like hundreds of thousands of
+# tokens; it is in the range providers charge for a large image.
+_IMAGE_TOKEN_ESTIMATE = 1_600
+_APPROX_BYTES_PER_TOKEN = 4
+
+
+def estimate_input_tokens(
+    messages: list[RustMessage], tools: list[RustToolDefinition]
+) -> int:
+    """Estimate a request's input tokens the way Core estimates its budget.
+
+    Counts the serialized messages and tools at about four bytes per token,
+    with each image counted at a fixed estimate instead of its encoded data.
+    """
+    serialized_bytes = 0
+    images = 0
+    for message in messages:
+        serialized_bytes += len(message.model_dump_json(exclude_none=True).encode())
+        for block in message.content:
+            if isinstance(block, RustImageContentBlock):
+                images += 1
+                serialized_bytes -= len(block.data)
+    for tool in tools:
+        serialized_bytes += len(tool.model_dump_json(exclude_none=True).encode())
+    return _approximate_tokens(serialized_bytes) + images * _IMAGE_TOKEN_ESTIMATE
+
+
+def _approximate_tokens(byte_count: int) -> int:
+    return -(-max(byte_count, 0) // _APPROX_BYTES_PER_TOKEN)
 
 
 def _validate_image_support(
@@ -413,6 +607,41 @@ def _emit_request_sent(
     )
 
 
+def _report_malformed_tool_calls(
+    action: RustLLMCallAction,
+    config: LocalRuntimeAdapterConfig,
+    route: LocalModelRoute,
+    malformed: MalformedToolCalls,
+    *,
+    succeeded: bool,
+) -> None:
+    """Report the repairs one completion needed to the Host's telemetry sink.
+
+    Runs once the completion has ended, so a sink error is logged rather than
+    raised: it must not replace the completion's own result.
+    """
+    sink = config.malformed_tool_calls_sink
+    if sink is None or not malformed:
+        return
+    try:
+        sink(
+            MalformedToolCallsTelemetry(
+                model=route.model,
+                backend=config.backend,
+                api_style=config.api_style,
+                purpose=action.purpose,
+                iteration=action.iteration,
+                reasons=tuple(sorted(malformed.reasons)),
+                nb_unusable_attempts=malformed.unusable_attempts,
+                nb_dropped_tool_calls=malformed.dropped_tool_calls,
+                succeeded=succeeded,
+                turn_id=action.turn_id,
+            )
+        )
+    except Exception:
+        logger.warning("Could not report malformed tool calls", exc_info=True)
+
+
 def credential_rejection(failure: ProviderFailure) -> ProviderRejectionReason | None:
     """Why the provider refused the credential, when the failure says it did."""
     if failure.response is None:
@@ -499,6 +728,27 @@ def _stream_failed_event(
     )
 
 
+def _reasoning_limit_event(
+    action: RustLLMCallAction,
+    exc: CompactionReasoningLimitExceeded,
+    *,
+    provider: str,
+    route: LocalModelRoute,
+) -> RustCompletionFailedEvent:
+    details = _failure_details(action, provider, route, exc)
+    details["reasoningLimitTokens"] = exc.limit_tokens
+    details["estimatedReasoningTokens"] = exc.estimated_tokens
+    return RustCompletionFailedEvent(
+        action_id=action.action_id,
+        error=RustProtocolError(
+            code="compaction_reasoning_limit_exceeded",
+            message=str(exc),
+            retryable=False,
+            details=details,
+        ),
+    )
+
+
 def _refusal_event(
     action: RustLLMCallAction,
     refusal: ProviderRefusal,
@@ -546,7 +796,9 @@ def _failure_details(
 
 __all__ = [
     "INVALID_API_KEY_MESSAGE",
+    "CompactionReasoningLimitExceeded",
     "credential_rejection",
+    "estimate_input_tokens",
     "execute_completion",
     "invalid_api_key_message",
 ]

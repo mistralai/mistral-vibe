@@ -44,7 +44,7 @@ def _detect_macos_dark() -> bool | None:
             text=True,
             timeout=_OS_APPEARANCE_TIMEOUT_SECONDS,
         )
-    except OSError, subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return False
@@ -60,7 +60,7 @@ def _detect_windows_dark() -> bool | None:
         ) as key:
             value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
         return value == 0
-    except OSError, ImportError:
+    except (OSError, ImportError):
         return None
 
 
@@ -72,7 +72,7 @@ def _detect_linux_dark() -> bool | None:
             text=True,
             timeout=_OS_APPEARANCE_TIMEOUT_SECONDS,
         )
-    except OSError, subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return None
@@ -119,7 +119,7 @@ def _detect_terminal_dark_posix() -> bool | None:
             return None
         os.write(fd, _OSC11_QUERY)
         response = _read_osc11_response(fd)
-    except OSError, termios.error:
+    except (OSError, termios.error):
         return None
     finally:
         try:
@@ -188,7 +188,7 @@ def _detect_terminal_dark_windows() -> bool | None:
                     break
             if not _is_complete_osc11_response(response):
                 time.sleep(0.01)
-    except AttributeError, ImportError, OSError, ValueError:
+    except (AttributeError, ImportError, OSError, ValueError):
         return None
 
     return _classify_osc11_response(response)
@@ -215,7 +215,7 @@ def _classify_osc11_response(response: bytes) -> bool | None:
 def _parse_hex_component(raw: bytes) -> float | None:
     try:
         return int(raw, 16) / (16 ** len(raw) - 1)
-    except ValueError, ZeroDivisionError:
+    except (ValueError, ZeroDivisionError):
         return None
 
 

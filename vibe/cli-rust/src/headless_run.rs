@@ -14,6 +14,10 @@ pub use turn_counter::TurnCounter;
 /// How long a run may take to wind down once it ends or is stopped.
 pub const STOP_GRACE_SECONDS: f64 = 10.0;
 
+/// The part of the grace a stopped run keeps for its report: stopping the
+/// turn and the subagents may not use it, so the report can still read them.
+pub const REPORT_GRACE_SECONDS: f64 = 3.0;
+
 /// Raised when SIGTERM arrives before the run is listening for it.
 #[derive(Debug)]
 pub struct RunTerminated;
@@ -195,6 +199,7 @@ impl HeadlessRun {
             },
             final_response: None,
             session_dir: None,
+            subagents: Vec::new(),
         })
     }
 
@@ -203,14 +208,24 @@ impl HeadlessRun {
     /// client drop kill the app-server's process group and the caller's
     /// Sentry flush run.
     pub fn finish(&self, report: RunReport) -> u8 {
-        if let Some(ref dir) = self.output_dir {
-            self.write_export(dir, &report);
+        if let Err(error) = self.export(&report) {
+            eprintln!("Error: {error}");
         }
         report.result.outcome.exit_code()
     }
 
-    fn write_export(&self, output_dir: &Path, report: &RunReport) {
-        use crate::run_export::{copy_journal, write_run_export, RunExport};
+    /// Write the export if output_dir is set: its path, or why it could not be written.
+    pub fn export(&self, report: &RunReport) -> Result<Option<PathBuf>, String> {
+        let Some(dir) = self.output_dir.as_deref() else {
+            return Ok(None);
+        };
+        self.write_export(dir, report)
+            .map(Some)
+            .map_err(|e| format!("could not write the run export: {e}"))
+    }
+
+    fn write_export(&self, output_dir: &Path, report: &RunReport) -> std::io::Result<PathBuf> {
+        use crate::run_export::{copy_journal, export_subagents, write_run_export, RunExport};
 
         let journal_dir = report.session_dir.as_ref().and_then(|sd| {
             if sd.is_dir() {
@@ -235,11 +250,9 @@ impl HeadlessRun {
             ended_at: iso_now(),
             limits: self.stop.limits().clone(),
             exit_code: report.result.outcome.exit_code(),
+            subagents: export_subagents(output_dir, &report.subagents),
         };
-
-        if let Err(e) = write_run_export(output_dir, &export) {
-            eprintln!("Error: could not write the run export: {e}");
-        }
+        write_run_export(output_dir, &export)
     }
 }
 

@@ -132,34 +132,6 @@ fn esc_on_auth_method_goes_back_to_theme() {
 }
 
 #[test]
-fn esc_on_browser_sign_in_goes_back_to_sign_in_target() {
-    let mut state = OnboardingState {
-        screen: Screen::BrowserSignIn,
-        ..OnboardingState::default()
-    };
-    state.browser_sign_in.variant = vibe_rs::setup::wizard::SignInVariant::Pending;
-    let action = screens::handle_key(&mut state, esc());
-    assert!(matches!(action, Some(Action::AbortSignIn)));
-    assert_eq!(state.screen, Screen::SignInTarget);
-}
-
-#[test]
-fn esc_on_browser_sign_in_restores_the_launch_context() {
-    // A typo'd domain reached the sign-in screen and mutated the context.
-    let mut state = OnboardingState {
-        screen: Screen::BrowserSignIn,
-        ..OnboardingState::default()
-    };
-    state.browser_sign_in.variant = vibe_rs::setup::wizard::SignInVariant::Pending;
-    state.context.provider.browser_auth_base_url = Some("https://typo.example".into());
-    state.context.console_base_url = "https://typo.example".into();
-
-    let action = screens::handle_key(&mut state, esc());
-    assert!(matches!(action, Some(Action::AbortSignIn)));
-    assert_eq!(state.context, state.config);
-}
-
-#[test]
 fn the_manual_key_path_keeps_the_attempted_domain() {
     // Switching to the API key screen manually cancels the
     // attempt but keeps the configured domain — the pasted key is for that

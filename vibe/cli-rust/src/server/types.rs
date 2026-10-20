@@ -25,6 +25,12 @@ pub mod method {
     pub const SESSION_DELETE: &str = "session/delete";
     pub const SESSION_LEASE_SUBSCRIBE: &str = "session/lease/subscribe";
     pub const SESSION_READY_WAIT: &str = "session/ready/wait";
+    /// Experimental: wait until no subagent of the session has a turn running.
+    pub const SESSION_SUBAGENTS_WAIT: &str = "session/subagents/wait";
+    /// Experimental: interrupt every running subagent of the session.
+    pub const SESSION_SUBAGENTS_INTERRUPT: &str = "session/subagents/interrupt";
+    /// Experimental: what each subagent of the session did.
+    pub const SESSION_SUBAGENTS_READ: &str = "session/subagents/read";
     pub const RUNTIME_READ: &str = "runtime/read";
     pub const CONFIG_READ: &str = "config/read";
     pub const WORKSPACE_PROMPT_PREPARE: &str = "workspace/prompt/prepare";
@@ -98,6 +104,8 @@ pub mod method {
     pub const CONNECTOR_CATALOG_READ: &str = "connector_catalog/read";
     /// Re-fetch the workspace connector catalog.
     pub const CONNECTOR_CATALOG_REFRESH: &str = "connector_catalog/refresh";
+    /// Create the connection a no-auth connector needs, then re-fetch the catalog.
+    pub const CONNECTOR_CONNECT: &str = "connector_catalog/connect";
     pub const MCP_ADD: &str = "mcp_catalog/add";
     pub const MCP_REMOVE: &str = "mcp_catalog/remove";
     pub const MCP_LOGIN: &str = "mcp_catalog/login";

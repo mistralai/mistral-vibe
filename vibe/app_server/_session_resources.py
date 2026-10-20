@@ -78,8 +78,6 @@ from vibe.app_server.protocol import (
     WorkspaceTrustDecisionParams,
     WorkspaceTrustStatusParams,
     WorkspaceTrustStatusResponse,
-    WorkspaceUntrustedConfigParams,
-    WorkspaceUntrustedConfigResponse,
 )
 from vibe.app_server.review import ReviewOwner, ReviewTarget
 
@@ -189,15 +187,6 @@ class SessionResource:
                 break
             cursor = response.next_cursor
         return sessions
-
-    async def resolve_continue_session(self, cwd: str | None = None) -> str | None:
-        """The session `--continue` resumes, resolved server-side (pointer-first)."""
-        client = await self._connection.connect()
-        response = validate_wire(
-            SessionListResponse,
-            await client.request("session/list", SessionListParams(cwd=cwd)),
-        )
-        return response.continue_session_id
 
     @property
     def history_before_cursor(self) -> str | None:
@@ -574,20 +563,6 @@ class WorkspaceResource:
                 "workspace/trust/decision",
                 WorkspaceTrustDecisionParams(
                     session_id=self._state.session_id, cwd=cwd, decision=decision
-                ),
-            ),
-        )
-
-    async def untrusted_config_dirs(
-        self, cwd: str | None = None
-    ) -> WorkspaceUntrustedConfigResponse:
-        client = await self._connection.connect()
-        return validate_wire(
-            WorkspaceUntrustedConfigResponse,
-            await client.request(
-                "workspace/trust/untrustedConfig",
-                WorkspaceUntrustedConfigParams(
-                    cwd=cwd or self._state.state.session.cwd
                 ),
             ),
         )

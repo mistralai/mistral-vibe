@@ -79,9 +79,12 @@ pub(crate) fn tool() -> ToolSpec {
 }
 
 pub(crate) fn direct_tool<'a>(
+    mode: super::Mode,
     skills: impl IntoIterator<Item = &'a SkillDefinition>,
 ) -> Option<DirectToolSpec> {
-    skills.into_iter().next()?;
+    if !mode.exposes(skills) {
+        return None;
+    }
     Some(DirectToolSpec {
         name: ToolName::Read,
         description: DESCRIPTION,

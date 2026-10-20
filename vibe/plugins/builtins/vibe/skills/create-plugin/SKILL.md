@@ -82,6 +82,7 @@ connectors), add an `ai.mistral.vibe` extension to `plugin.json`:
   "extensions": {
     "ai.mistral.vibe": {
       "schemaVersion": 1,
+      "displayName": "My Plugin",
       "toolNamespace": "myPlugin",
       "toolOverrides": {
         "lookup": {
@@ -101,6 +102,9 @@ from the plugin name. It must not be one of the reserved namespaces:
 
 `vibe` is reserved for built-in plugins shipped with the CLI; user plugins
 must choose a different namespace.
+
+`displayName` is an optional title of 1 to 100 characters; the plugin `name`
+stays its identity.
 
 `toolOverrides` rename or restrict tool exposure. Each key matches a discovered
 tool name from MCP servers or connectors. `exposure` is one of

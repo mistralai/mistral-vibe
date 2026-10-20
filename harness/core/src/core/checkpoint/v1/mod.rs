@@ -10,7 +10,7 @@ use crate::core::model_context::ModelContext;
 use crate::core::state::{ActivePhase, HarnessState, TurnState};
 use crate::core::step_protocol::Action;
 use crate::core::tools::execution::{ToolBatch, ToolExecution, ToolExecutionState};
-use crate::core::turn::{PendingLifecycleHook, SuspendedTurn};
+use crate::core::turn::PendingLifecycleHook;
 use crate::core::wire::message::tool_calls_from_parts;
 use crate::core::wire::message::{Message, StoredMessageSource};
 use crate::core::wire::tool::ToolCall;
@@ -138,14 +138,6 @@ fn validate_restored_state(state: &HarnessState) -> Result<(), String> {
             ActivePhase::AwaitingHook { pending } => {
                 validate_hook_binding_ids(pending.hook_binding_ids())?;
                 insert_pending_action_id(&mut pending_action_ids, pending.action_id())?;
-                if let PendingLifecycleHook::PreAgentTurn { suspended, .. } = pending
-                    && let SuspendedTurn::Terminal { turn_id, .. } = suspended
-                    && state.last_finished_turn_id.as_deref() != Some(turn_id)
-                {
-                    return Err(
-                        "pre-agent previous turn does not match the last finished turn".to_string(),
-                    );
-                }
             }
             ActivePhase::AwaitingToolBatch { batch, .. } => {
                 validate_tool_batch_context(state, batch)?;

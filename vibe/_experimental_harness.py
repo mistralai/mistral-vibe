@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 from collections.abc import Callable
 from importlib import import_module, util
 from typing import cast
@@ -60,20 +59,6 @@ def require_experimental_harness() -> None:
             f"the runtime host is incompatible: {type(candidate).__name__} "
             "has no configure_hook_handlers"
         )
-
-
-def add_smart_approve_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--smart-approve",
-        action="store_true",
-        default=False,
-        help=(
-            "Classify each tool call and auto-run the safe ones, prompting "
-            "only for risky ones."
-            if experimental_harness_available()
-            else argparse.SUPPRESS
-        ),
-    )
 
 
 def create_experimental_harness_host() -> object:

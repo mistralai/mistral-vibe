@@ -184,6 +184,28 @@ async def test_deep_merge_preserves_nested_tool_fields_across_layers() -> None:
 
 
 @pytest.mark.asyncio
+async def test_deep_merge_records_the_entries_each_layer_defines() -> None:
+    builder = ConfigBuilder(DeepMergeSchema)
+    builder.add_layer(
+        FakeRawLayer(
+            name="base", data={"tools": {"grep": {}, "bash": {"permission": "ask"}}}
+        )
+    )
+    builder.add_layer(FakeRawLayer(name="untouched", data={}))
+    builder.add_layer(
+        FakeRawLayer(name="override", data={"tools": {"bash": {"allowlist": []}}})
+    )
+
+    config = await builder.build()
+
+    assert config.defined_entries_by_layer("tools") == {
+        "base": ("grep", "bash"),
+        "override": ("bash",),
+    }
+    assert config.origin_of("tools") == "override"
+
+
+@pytest.mark.asyncio
 async def test_models_before_validator_runs_before_merge() -> None:
     class ModelMergeSchema(ConfigSchema):
         models: Annotated[

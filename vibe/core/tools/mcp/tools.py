@@ -2,36 +2,22 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 import contextlib
-from dataclasses import dataclass
 from datetime import timedelta
 import hashlib
-import inspect
 import os
 from pathlib import Path
 import threading
 from typing import TYPE_CHECKING, Any, ClassVar, TextIO
 
 import httpx
-from pydantic import BaseModel, ConfigDict, field_validator
 
 from vibe import __version__
-from vibe.core.tools.base import (
-    BaseTool,
-    BaseToolConfig,
-    BaseToolState,
-    InvokeContext,
-    ToolError,
-)
+from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
 from vibe.core.tools.mcp.authorization import (
-    MCPAuthorizationProvider,
-    MCPAuthorizationRef,
     MCPAuthorizationRequired,
-    MCPAuthorizationRequiredSink,
     MCPAuthorizationSnapshot,
 )
 from vibe.core.tools.remote import MCPTool, MCPToolResult, RemoteTool, _OpenArgs
-from vibe.core.tools.ui import ToolResultDisplay
-from vibe.core.types import ToolStreamEvent
 from vibe.observability.logging import logger
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 from vibe.utils.io import decode_console_safe
@@ -40,8 +26,6 @@ from vibe.utils.io import decode_console_safe
 if TYPE_CHECKING:
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters
-    from vibe.core.tools.mcp_sampling import MCPSamplingHandler
-    from vibe.core.types import ToolResultEvent
 
 
 # Mirrors MCP's default Streamable HTTP timeout values while avoiding an import from
@@ -77,51 +61,6 @@ async def _mcp_stderr_capture() -> AsyncGenerator[TextIO]:
         else:
             os.close(r)
             os.close(w)
-
-
-@dataclass(frozen=True)
-class MCPHttpAuthorizationRuntime:
-    provider: MCPAuthorizationProvider
-    reference: MCPAuthorizationRef
-    required_sink: MCPAuthorizationRequiredSink | None = None
-
-
-class _MCPContentBlock(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    text: str | None = None
-
-
-class _MCPResultIn(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    structuredContent: dict[str, Any] | None = None
-    content: list[_MCPContentBlock] | None = None
-
-    @field_validator("structuredContent", mode="before")
-    @classmethod
-    def _normalize_structured(cls, v: Any) -> dict[str, Any] | None:
-        if v is None:
-            return None
-        if isinstance(v, dict):
-            return v
-        dump = getattr(v, "model_dump", None)
-        if callable(dump):
-            try:
-                v = dump()
-            except Exception:
-                return None
-        return v if isinstance(v, dict) else None
-
-
-def _parse_call_result(server: str, tool: str, result_obj: Any) -> MCPToolResult:
-    parsed = _MCPResultIn.model_validate(result_obj)
-    if (structured := parsed.structuredContent) is not None:
-        return MCPToolResult(server=server, tool=tool, text=None, structured=structured)
-
-    blocks = parsed.content or []
-    parts = [b.text for b in blocks if isinstance(b.text, str)]
-    text = "\n".join(parts) if parts else None
-    return MCPToolResult(server=server, tool=tool, text=text, structured=None)
 
 
 def create_vibe_mcp_http_client(
@@ -164,55 +103,12 @@ async def list_tools_http(
                 return [RemoteTool.model_validate(t) for t in tools_resp.tools]
 
 
-async def call_tool_http(
-    url: str,
-    tool_name: str,
-    arguments: dict[str, Any],
-    *,
-    headers: dict[str, str] | None = None,
-    auth: httpx.Auth | None = None,
-    startup_timeout_sec: float | None = None,
-    tool_timeout_sec: float | None = None,
-    sampling_callback: MCPSamplingHandler | None = None,
-) -> MCPToolResult:
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
-
-    init_timeout = (
-        timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
-    )
-    call_timeout = timedelta(seconds=tool_timeout_sec) if tool_timeout_sec else None
-    async with create_vibe_mcp_http_client(headers, auth=auth) as http_client:
-        async with streamable_http_client(url, http_client=http_client) as (
-            read,
-            write,
-            _,
-        ):
-            async with ClientSession(
-                read,
-                write,
-                read_timeout_seconds=init_timeout,
-                sampling_callback=sampling_callback,
-            ) as session:
-                await session.initialize()
-                result = await session.call_tool(
-                    tool_name, arguments, read_timeout_seconds=call_timeout
-                )
-                return _parse_call_result(url, tool_name, result)
-
-
 def create_mcp_http_proxy_tool_class(
     *,
     url: str,
     remote: RemoteTool,
     alias: str | None = None,
     server_hint: str | None = None,
-    headers: dict[str, str] | None = None,
-    auth: httpx.Auth | None = None,
-    authorization_runtime: MCPHttpAuthorizationRuntime | None = None,
-    startup_timeout_sec: float | None = None,
-    tool_timeout_sec: float | None = None,
-    sampling_enabled: bool = True,
 ) -> type[BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState]]:
     from urllib.parse import urlparse
 
@@ -232,17 +128,8 @@ def create_mcp_http_proxy_tool_class(
             + (f"\nHint: {server_hint}" if server_hint else "")
         )
         _server_name: ClassVar[str] = computed_alias
-        _mcp_url: ClassVar[str] = url
         _remote_name: ClassVar[str] = remote.name
         _input_schema: ClassVar[dict[str, Any]] = remote.input_schema
-        _headers: ClassVar[dict[str, str]] = dict(headers or {})
-        _auth: ClassVar[httpx.Auth | None] = auth
-        _authorization_runtime: ClassVar[MCPHttpAuthorizationRuntime | None] = (
-            authorization_runtime
-        )
-        _startup_timeout_sec: ClassVar[float | None] = startup_timeout_sec
-        _tool_timeout_sec: ClassVar[float | None] = tool_timeout_sec
-        _sampling_enabled: ClassVar[bool] = sampling_enabled
 
         @classmethod
         def get_name(cls) -> str:
@@ -252,125 +139,8 @@ def create_mcp_http_proxy_tool_class(
         def get_parameters(cls) -> dict[str, Any]:
             return dict(cls._input_schema)
 
-        async def run(
-            self, args: _OpenArgs, ctx: InvokeContext | None = None
-        ) -> AsyncGenerator[ToolStreamEvent | MCPToolResult]:
-            try:
-                sampling_callback = (
-                    ctx.sampling_callback if ctx and self._sampling_enabled else None
-                )
-                payload = args.model_dump(exclude_none=True)
-                if self._authorization_runtime is None:
-                    yield await self._call_remote(payload, sampling_callback)
-                    return
-                yield await self._call_authorized(payload, sampling_callback)
-            except Exception as exc:
-                if isinstance(exc, ToolError):
-                    raise
-                raise ToolError(f"MCP call failed: {exc}") from exc
-
-        @classmethod
-        async def _call_authorized(
-            cls, payload: dict[str, Any], sampling_callback: MCPSamplingHandler | None
-        ) -> MCPToolResult:
-            runtime = cls._authorization_runtime
-            if runtime is None:
-                return await cls._call_remote(payload, sampling_callback)
-            authorization = await runtime.provider.resolve(runtime.reference)
-            if isinstance(authorization, MCPAuthorizationRequired):
-                await _publish_authorization_required(runtime, authorization)
-                raise ToolError(
-                    f"MCP server '{cls._server_name}' needs re-authentication."
-                )
-            try:
-                return await cls._call_remote(
-                    payload, sampling_callback, headers=dict(authorization.headers)
-                )
-            except Exception as exc:
-                if not is_authorization_rejection(exc):
-                    raise
-                replacement = await runtime.provider.reject(
-                    runtime.reference,
-                    observed_connection_revision=authorization.connection_revision,
-                    reason="http_unauthorized",
-                )
-                if (
-                    isinstance(replacement, MCPAuthorizationSnapshot)
-                    and replacement.connection_revision
-                    != authorization.connection_revision
-                ):
-                    try:
-                        return await cls._call_remote(
-                            payload,
-                            sampling_callback,
-                            headers=dict(replacement.headers),
-                        )
-                    except Exception as retry_exc:
-                        if not is_authorization_rejection(retry_exc):
-                            raise
-                        replacement = await runtime.provider.reject(
-                            runtime.reference,
-                            observed_connection_revision=(
-                                replacement.connection_revision
-                            ),
-                            reason="http_unauthorized",
-                        )
-                required = authorization_required_result(
-                    replacement,
-                    observed_connection_revision=authorization.connection_revision,
-                )
-                await _publish_authorization_required(runtime, required)
-                raise ToolError(
-                    f"MCP server '{cls._server_name}' rejected authentication."
-                ) from exc
-
-        @classmethod
-        async def _call_remote(
-            cls,
-            payload: dict[str, Any],
-            sampling_callback: MCPSamplingHandler | None,
-            *,
-            headers: dict[str, str] | None = None,
-        ) -> MCPToolResult:
-            return await call_tool_http(
-                cls._mcp_url,
-                cls._remote_name,
-                payload,
-                headers=headers if headers is not None else cls._headers,
-                auth=cls._auth,
-                startup_timeout_sec=cls._startup_timeout_sec,
-                tool_timeout_sec=cls._tool_timeout_sec,
-                sampling_callback=sampling_callback,
-            )
-
-        @classmethod
-        def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
-            if not isinstance(event.result, MCPToolResult):
-                return ToolResultDisplay(
-                    success=False,
-                    message=event.error or event.skip_reason or "No result",
-                )
-
-            return ToolResultDisplay(
-                success=event.result.ok, verb="Ran", message=event.result.tool
-            )
-
-        @classmethod
-        def get_status_text(cls) -> str:
-            return f"Calling MCP tool {remote.name}"
-
     MCPHttpProxyTool.__name__ = f"MCP_{computed_alias}__{remote.name}"
     return MCPHttpProxyTool
-
-
-async def _publish_authorization_required(
-    runtime: MCPHttpAuthorizationRuntime, required: MCPAuthorizationRequired
-) -> None:
-    if runtime.required_sink is None:
-        return
-    result = runtime.required_sink(runtime.reference.server_name, required)
-    if inspect.isawaitable(result):
-        await result
 
 
 def authorization_required_result(
@@ -410,13 +180,11 @@ async def enter_stdio_session(
     params: StdioServerParameters,
     *,
     init_timeout: timedelta | None,
-    sampling_callback: MCPSamplingHandler | None = None,
 ) -> ClientSession:
     """Enter the stderr-capture, stdio_client, and ClientSession contexts on *stack*.
 
     The caller owns ``stack`` and decides when to close it. Returns an initialized
-    session. The one-shot helpers close the stack immediately; the connection pool
-    keeps it open for the session lifetime.
+    session.
     """
     from mcp import ClientSession
     from mcp.client.stdio import stdio_client
@@ -424,12 +192,7 @@ async def enter_stdio_session(
     errlog = await stack.enter_async_context(_mcp_stderr_capture())
     read, write = await stack.enter_async_context(stdio_client(params, errlog=errlog))
     session = await stack.enter_async_context(
-        ClientSession(
-            read,
-            write,
-            read_timeout_seconds=init_timeout,
-            sampling_callback=sampling_callback,
-        )
+        ClientSession(read, write, read_timeout_seconds=init_timeout)
     )
     await session.initialize()
     return session
@@ -450,46 +213,12 @@ async def list_tools_stdio(
         return [RemoteTool.model_validate(t) for t in tools_resp.tools]
 
 
-async def call_tool_stdio(
-    command: list[str],
-    tool_name: str,
-    arguments: dict[str, Any],
-    *,
-    env: dict[str, str] | None = None,
-    cwd: str | None = None,
-    startup_timeout_sec: float | None = None,
-    tool_timeout_sec: float | None = None,
-    sampling_callback: MCPSamplingHandler | None = None,
-) -> MCPToolResult:
-    params = build_stdio_params(command, env=env, cwd=cwd)
-    init_timeout = (
-        timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
-    )
-    call_timeout = timedelta(seconds=tool_timeout_sec) if tool_timeout_sec else None
-    async with contextlib.AsyncExitStack() as stack:
-        session = await enter_stdio_session(
-            stack,
-            params,
-            init_timeout=init_timeout,
-            sampling_callback=sampling_callback,
-        )
-        result = await session.call_tool(
-            tool_name, arguments, read_timeout_seconds=call_timeout
-        )
-        return _parse_call_result("stdio:" + " ".join(command), tool_name, result)
-
-
 def create_mcp_stdio_proxy_tool_class(
     *,
     command: list[str],
     remote: RemoteTool,
     alias: str | None = None,
     server_hint: str | None = None,
-    env: dict[str, str] | None = None,
-    cwd: str | None = None,
-    startup_timeout_sec: float | None = None,
-    tool_timeout_sec: float | None = None,
-    sampling_enabled: bool = True,
 ) -> type[BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState]]:
     def _alias_from_command(cmd: list[str]) -> str:
         prog = Path(cmd[0]).name.replace(".", "_") if cmd else "mcp"
@@ -511,14 +240,8 @@ def create_mcp_stdio_proxy_tool_class(
             + (f"\nHint: {server_hint}" if server_hint else "")
         )
         _server_name: ClassVar[str] = computed_alias
-        _stdio_command: ClassVar[list[str]] = command
         _remote_name: ClassVar[str] = remote.name
         _input_schema: ClassVar[dict[str, Any]] = remote.input_schema
-        _env: ClassVar[dict[str, str] | None] = env
-        _cwd: ClassVar[str | None] = cwd
-        _startup_timeout_sec: ClassVar[float | None] = startup_timeout_sec
-        _tool_timeout_sec: ClassVar[float | None] = tool_timeout_sec
-        _sampling_enabled: ClassVar[bool] = sampling_enabled
 
         @classmethod
         def get_name(cls) -> str:
@@ -527,56 +250,6 @@ def create_mcp_stdio_proxy_tool_class(
         @classmethod
         def get_parameters(cls) -> dict[str, Any]:
             return dict(cls._input_schema)
-
-        async def run(
-            self, args: _OpenArgs, ctx: InvokeContext | None = None
-        ) -> AsyncGenerator[ToolStreamEvent | MCPToolResult]:
-            try:
-                sampling_callback = (
-                    ctx.sampling_callback if ctx and self._sampling_enabled else None
-                )
-                payload = args.model_dump(exclude_none=True)
-                pool = ctx.mcp_pool if ctx else None
-                if pool is not None:
-                    yield await pool.call_tool(
-                        command=self._stdio_command,
-                        tool_name=self._remote_name,
-                        arguments=payload,
-                        env=self._env,
-                        cwd=self._cwd,
-                        startup_timeout_sec=self._startup_timeout_sec,
-                        tool_timeout_sec=self._tool_timeout_sec,
-                        sampling_callback=sampling_callback,
-                    )
-                    return
-                yield await call_tool_stdio(
-                    self._stdio_command,
-                    self._remote_name,
-                    payload,
-                    env=self._env,
-                    cwd=self._cwd,
-                    startup_timeout_sec=self._startup_timeout_sec,
-                    tool_timeout_sec=self._tool_timeout_sec,
-                    sampling_callback=sampling_callback,
-                )
-            except Exception as exc:
-                raise ToolError(f"MCP stdio call failed: {exc!r}") from exc
-
-        @classmethod
-        def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
-            if not isinstance(event.result, MCPToolResult):
-                return ToolResultDisplay(
-                    success=False,
-                    message=event.error or event.skip_reason or "No result",
-                )
-
-            return ToolResultDisplay(
-                success=event.result.ok, verb="Ran", message=event.result.tool
-            )
-
-        @classmethod
-        def get_status_text(cls) -> str:
-            return f"Calling MCP tool {remote.name}"
 
     MCPStdioProxyTool.__name__ = f"MCP_STDIO_{computed_alias}__{remote.name}"
     return MCPStdioProxyTool

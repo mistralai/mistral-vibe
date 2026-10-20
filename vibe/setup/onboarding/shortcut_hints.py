@@ -12,9 +12,3 @@ def shortcut(key: str) -> str:
 
 def shortcut_hint(markup: str) -> Content:
     return Content.from_markup(markup)
-
-
-def with_status(status: str | None, hint: Content) -> Content:
-    if not status:
-        return hint
-    return Content(status + "  ") + hint

@@ -195,6 +195,8 @@ class StreamingMockServer:
         ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         self.requests: list[ChatCompletionsRequestPayload] = []
+        # Each request's Authorization header, in the order of ``requests``.
+        self.authorizations: list[str | None] = []
         self._lock = threading.Lock()
         self._chunk_factory = chunk_factory
         self._status_factory = status_factory
@@ -227,6 +229,7 @@ class StreamingMockServer:
 
                 with parent._lock:
                     parent.requests.append(payload)
+                    parent.authorizations.append(self.headers.get("Authorization"))
                     request_index = len(parent.requests) - 1
 
                 status = (

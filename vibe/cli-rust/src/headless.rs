@@ -2,14 +2,17 @@
 //!
 //! The lifecycle is split into focused modules: `drive` races the work
 //! against the stop requests, `session` opens the session, `turn` runs the
-//! turn loop, `report` assembles the export, `config` builds the agent
-//! config. This module keeps the public entry point.
+//! turn loop, `subagents` waits for, stops and reads the subagents, `report`
+//! assembles the export, `config` builds the agent config. This module keeps
+//! the public entry point.
 
 mod config;
 mod drive;
+mod open;
 mod pre_turn;
 mod report;
 mod session;
+mod subagents;
 mod turn;
 mod usage;
 
@@ -17,12 +20,13 @@ use crate::cli::HeadlessOptions;
 use crate::headless_run::HeadlessRun;
 use crate::headless_startup::print_keyring_preflight;
 use crate::run_export::RunOutcome;
-use crate::server::{signal, Launch};
+use crate::server::{signal, Connect, Launch};
 
 pub use config::{agent_config, build_disabled_tools, turn_id_from};
-pub use drive::{stopped_report, turn_error_outcome};
+pub use drive::{drive, stopped_report, turn_error_outcome};
+pub use open::open_failure;
 pub use report::final_outcome;
-pub use session::open_failure;
+pub use subagents::{read_subagents, stop_subagents, subagent_report, wait_for_subagents};
 pub use usage::UsageBaseline;
 
 /// Entry point: spawn app-server, send one turn, print output, write the
@@ -66,12 +70,9 @@ pub async fn run(
 
     print_keyring_preflight();
 
-    let report = drive::drive(&options, cwd, launch, &stop).await;
+    let report = drive::drive(&options, cwd, Connect::Spawn(launch), &stop).await;
 
-    // Print the final response, then the error or the stop outcome.
-    if let Some(ref response) = report.final_response {
-        println!("{response}");
-    }
+    // The final output is already written; say why the run did not finish.
     if let Some(ref error) = report.result.error {
         eprintln!("Error: {}", error.message);
     } else if report.result.outcome != RunOutcome::Finished {

@@ -153,7 +153,7 @@ fn shared_only_key_greys_out_connectors_that_need_a_login() {
     let app = shared_only_app();
     let blocked: Vec<(String, bool, bool, String)> = source_rows(&app)
         .into_iter()
-        .map(|row| (row.name, row.blocked, row.awaits_auth, row.status))
+        .map(|row| (row.name, row.blocked, row.action.is_some(), row.status))
         .collect();
     assert_eq!(
         blocked,
@@ -178,7 +178,10 @@ fn connector_needing_a_login_is_not_blocked_for_personal_keys() {
         json!({}),
     ));
     assert!(!source_rows(&app)[0].blocked);
-    assert!(source_rows(&app)[0].awaits_auth);
+    assert_eq!(
+        source_rows(&app)[0].action,
+        Some(rows::SourceAction::ConnectorAuth)
+    );
 }
 
 #[test]
@@ -486,6 +489,109 @@ fn help_offers_connect_only_for_sources_enter_hands_to_auth() {
     assert_eq!(mcp::help_text(&app)[1].1, "connect");
 }
 
+/// DeepWiki is connecting; weather and wiki still need a login and a connection.
+fn unusable_runtime() -> Value {
+    let needs_auth = json!({"status": "needs_auth", "tools": []});
+    let needs_connect = json!({"status": "needs_connect", "tools": []});
+    runtime(
+        vec![
+            source("weather", "server", needs_auth),
+            source("deepwiki", "connector", needs_connect.clone()),
+            source("wiki", "connector", needs_connect),
+        ],
+        json!({}),
+    )
+}
+
+fn connecting_app() -> (App, tokio::sync::mpsc::Receiver<mcp::Event>) {
+    let mut app = open_app(&unusable_runtime());
+    let rx = with_channel(&mut app);
+    app.mcp.connecting = Some("deepwiki".to_owned());
+    (app, rx)
+}
+
+fn view(app: &mut App, name: &str, kind: MCPSourceKind) {
+    app.mcp.viewing_name = Some(name.to_owned());
+    app.mcp.viewing_kind = Some(kind);
+}
+
+fn notes(app: &App) -> Vec<String> {
+    rows::rows(&app.mcp)
+        .into_iter()
+        .filter_map(|row| match row {
+            Row::Note(note) => Some(note),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn pending_action_names_the_flow_each_unusable_source_starts() {
+    let (app, _rx) = connecting_app();
+    let actions: Vec<_> = app
+        .mcp
+        .state
+        .sources
+        .iter()
+        .map(|source| rows::pending_action(&app.mcp.state, source))
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            Some(rows::SourceAction::McpOAuth),
+            Some(rows::SourceAction::Connect),
+            Some(rows::SourceAction::Connect),
+        ]
+    );
+}
+
+#[test]
+fn only_the_connector_in_flight_reads_connecting() {
+    let (mut app, _rx) = connecting_app();
+    view(&mut app, "deepwiki", MCPSourceKind::Connector);
+    assert_eq!(notes(&app), ["Connecting..."]);
+    view(&mut app, "wiki", MCPSourceKind::Connector);
+    assert_eq!(notes(&app), ["Not connected"]);
+}
+
+#[test]
+fn a_connect_in_flight_does_not_block_another_source_login() {
+    let (mut app, mut rx) = connecting_app();
+    view(&mut app, "weather", MCPSourceKind::Server);
+    mcp::apply_runtime(&mut app, &unusable_runtime());
+    drain(&mut app, &mut rx);
+    assert!(app.mcp_oauth.open);
+    assert_eq!(app.mcp_oauth.server_name, "weather");
+}
+
+#[test]
+fn a_failed_connect_leaves_another_viewed_connector_alone() {
+    let (mut app, _rx) = connecting_app();
+    view(&mut app, "wiki", MCPSourceKind::Connector);
+    app.mcp.connecting = Some("wiki".to_owned());
+    let failed = mcp::Event::ConnectFailed {
+        name: "deepwiki".to_owned(),
+        message: "Could not connect DeepWiki (HTTP 503).".to_owned(),
+    };
+    mcp::apply_event(&mut app, &Arc::new(Client::stub()), failed);
+    assert_eq!(app.mcp.viewing_name.as_deref(), Some("wiki"));
+    assert_eq!(app.mcp.connecting.as_deref(), Some("wiki"));
+    assert_eq!(app.overlays.toasts.len(), 1);
+}
+
+#[test]
+fn a_failed_connect_returns_from_its_own_view() {
+    let (mut app, _rx) = connecting_app();
+    view(&mut app, "deepwiki", MCPSourceKind::Connector);
+    let failed = mcp::Event::ConnectFailed {
+        name: "deepwiki".to_owned(),
+        message: "Could not connect DeepWiki (HTTP 503).".to_owned(),
+    };
+    mcp::apply_event(&mut app, &Arc::new(Client::stub()), failed);
+    assert_eq!(app.mcp.viewing_name, None);
+    assert_eq!(app.mcp.connecting, None);
+}
+
 fn open_named(query: &str) -> App {
     let gmail = source("gm_9c1b", "connector", json!({"displayName": "Gmail"}));
     let state = serde_json::from_value(json!({"sources": [gmail]})).unwrap();
@@ -498,13 +604,6 @@ fn open_named(query: &str) -> App {
     };
     mcp::apply_event(&mut app, &Arc::new(Client::stub()), event);
     app
-}
-
-#[test]
-fn named_open_resolves_the_shown_display_name() {
-    let app = open_named("gmail");
-    assert_eq!(app.mcp.viewing_name.as_deref(), Some("gm_9c1b"));
-    assert_eq!(rows::title(&app.mcp), "Connector: Gmail");
 }
 
 #[test]

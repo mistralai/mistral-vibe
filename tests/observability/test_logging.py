@@ -20,6 +20,7 @@ from vibe.observability.logging import (
     get_effective_log_level,
     get_log_level_chain,
     get_session_override,
+    headless_run,
     init_file_logging,
     set_config_log_level,
     set_log_level,
@@ -100,6 +101,30 @@ class TestStructuredFormatter:
 
         assert "\n" not in output
         assert "Line one\\nLine two\\nLine three" in output
+
+    def test_format_names_the_headless_run(self) -> None:
+        """*Prepare*: A record logged while a headless run's id is set, an id
+        with a newline in it.
+        *Do*: Format it.
+        *Assert*: The line names the run, on one line.
+        """
+        record = logging.LogRecord(
+            name="test_logger",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Run started",
+            args=(),
+            exc_info=None,
+        )
+        token = headless_run.set("run-1\nforged")
+        try:
+            output = StructuredLogFormatter().format(record)
+        finally:
+            headless_run.reset(token)
+
+        assert "\n" not in output
+        assert output.endswith("run=run-1\\nforged Run started")
 
     def test_format_escapes_newlines_in_exception(self) -> None:
         formatter = StructuredLogFormatter()

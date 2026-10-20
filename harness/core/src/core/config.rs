@@ -5,11 +5,15 @@ use serde_json::Value;
 use crate::core::capabilities::HarnessCapabilitySet;
 use crate::core::capabilities::PluginContextDefinition;
 use crate::core::features::background_processes;
-use crate::core::features::compaction::CompactionPolicy;
+use crate::core::features::compaction::{CompactionFallback, CompactionPolicy};
+use crate::core::features::file_system;
 use crate::core::features::large_output;
 pub(crate) use crate::core::features::notifications::Settings as NotificationSettings;
+pub(crate) use crate::core::features::output_limit_recovery::Settings as OutputLimitRecovery;
 use crate::core::features::programmatic_tool_calling;
+use crate::core::features::skills;
 use crate::core::features::subagents;
+use crate::core::prompt::PromptSettings;
 use crate::core::tools::command_environment::CommandEnvironment;
 
 use crate::core::features::permissions::PermissionPolicy;
@@ -77,12 +81,16 @@ impl ToolGroupDefinition {
 #[serde(deny_unknown_fields)]
 pub(crate) struct TurnSettings {
     pub max_iterations: Option<u32>,
+    #[serde(default, skip_serializing_if = "OutputLimitRecovery::is_disabled")]
+    pub output_limit_recovery: OutputLimitRecovery,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ContextSettings {
     pub compaction: CompactionPolicy,
+    #[serde(default, skip_serializing_if = "CompactionFallback::is_resend")]
+    pub compaction_fallback: CompactionFallback,
     pub notifications: NotificationSettings,
     #[serde(default, skip_serializing_if = "ImageDeliverySettings::is_native")]
     pub image_delivery: ImageDeliverySettings,
@@ -149,7 +157,11 @@ pub(crate) struct ToolSettings {
     pub large_output: large_output::Policy,
     pub subagents: subagents::Mode,
     pub background_processes: background_processes::Mode,
+    #[serde(default, skip_serializing_if = "file_system::Mode::is_enabled")]
+    pub file_system: file_system::Mode,
     pub command_environment: CommandEnvironment,
+    #[serde(default, skip_serializing_if = "skills::Mode::is_when_configured")]
+    pub skills: skills::Mode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionPolicy>,
 }
@@ -160,6 +172,13 @@ pub(crate) struct HarnessSettings {
     pub turn: TurnSettings,
     pub context: ContextSettings,
     pub tools: ToolSettings,
+    /// Internal and unstable. Omitted means Core's default prompts.
+    #[serde(
+        default,
+        deserialize_with = "crate::core::prompt::deserialize_prompt_override",
+        skip_serializing_if = "PromptSettings::is_default"
+    )]
+    pub prompts: PromptSettings,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -199,9 +218,11 @@ pub(crate) fn validate_settings(settings: &HarnessSettings) -> Result<(), CoreEr
             "settings.turn.max_iterations must be greater than zero",
         ));
     }
+    settings.turn.output_limit_recovery.validate()?;
     settings.context.compaction.validate()?;
     settings.context.notifications.validate()?;
     settings.tools.programmatic.validate()?;
+    settings.prompts.validate()?;
     if settings.tools.max_wait_ms == 0 {
         return Err(CoreError::invalid_configuration(
             "settings.tools.max_wait_ms",
@@ -215,6 +236,46 @@ pub(crate) fn validate_settings(settings: &HarnessSettings) -> Result<(), CoreEr
         return Err(CoreError::invalid_configuration(
             "settings.tools.background_processes",
             "background processes require an enabled command environment",
+        ));
+    }
+    validate_file_system(&settings.tools)?;
+    validate_programmatic_dependents(&settings.tools)
+}
+
+fn validate_file_system(tools: &ToolSettings) -> Result<(), CoreError> {
+    if tools.file_system.is_enabled() {
+        return Ok(());
+    }
+    if tools.command_environment.is_enabled() {
+        return Err(CoreError::invalid_configuration(
+            "settings.tools.file_system",
+            "an enabled command environment requires the file system tools",
+        ));
+    }
+    if matches!(tools.large_output, large_output::Policy::Filesystem { .. }) {
+        return Err(CoreError::invalid_configuration(
+            "settings.tools.file_system",
+            "the filesystem large-output policy requires the file system tools",
+        ));
+    }
+    Ok(())
+}
+
+/// Background processes and subagents are only callable from `run_typescript`.
+fn validate_programmatic_dependents(tools: &ToolSettings) -> Result<(), CoreError> {
+    if tools.programmatic.is_enabled() {
+        return Ok(());
+    }
+    if tools.subagents.is_enabled() {
+        return Err(CoreError::invalid_configuration(
+            "settings.tools.programmatic.mode",
+            "subagents require programmatic tool calling",
+        ));
+    }
+    if tools.background_processes.is_enabled() {
+        return Err(CoreError::invalid_configuration(
+            "settings.tools.programmatic.mode",
+            "background processes require programmatic tool calling",
         ));
     }
     Ok(())
@@ -385,6 +446,28 @@ mod tests {
             initial_state(config).unwrap_err().detail(),
             "direct tool name \"bash\" conflicts with a built-in tool"
         );
+
+        let skill_tool_config = |skills: skills::Mode| {
+            let mut skill_config = crate::core::testing::config();
+            skill_config.settings.tools.skills = skills;
+            skill_config.capabilities.tool_groups = vec![ToolGroupDefinition {
+                name: "client".to_string(),
+                description: String::new(),
+                metadata: None,
+                icon_url: None,
+                tools: vec![direct_tool("skill")],
+            }];
+            skill_config
+        };
+        for reserved in [skills::Mode::Enabled, skills::Mode::WhenConfigured] {
+            assert_eq!(
+                initial_state(skill_tool_config(reserved))
+                    .unwrap_err()
+                    .detail(),
+                "direct tool name \"skill\" conflicts with a built-in tool"
+            );
+        }
+        assert!(initial_state(skill_tool_config(skills::Mode::Disabled)).is_ok());
     }
 
     #[test]

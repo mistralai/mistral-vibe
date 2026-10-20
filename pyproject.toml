@@ -1,9 +1,9 @@
 [project]
 name = "mistral-vibe"
-version = "3.0.0"
+version = "3.0.1"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Mistral AI" }]
 keywords = [
@@ -20,6 +20,8 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -131,8 +133,8 @@ dependencies = [
 [project.optional-dependencies]
 # Opt-in for aarch64 Linux, where upstream publishes no miniaudio wheel. The
 # default install needs no C++ toolchain; uv tool install "mistral-vibe[voice-aarch64]"
-# resolves the prebuilt manylinux wheel the release CI publishes to Gemfury
-# (see the miniaudio-aarch64 job in vibe-release-gemfury.yaml).
+# resolves the prebuilt manylinux wheel the release CI publishes to Artifact Registry
+# (see the miniaudio-aarch64 job in vibe-release-internal.yaml).
 voice-aarch64 = ["miniaudio>=1.59"]
 
 [project.urls]
@@ -243,7 +245,7 @@ build = [
 ]
 
 [tool.pyright]
-pythonVersion = "3.14"
+pythonVersion = "3.12"
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
 
@@ -254,10 +256,8 @@ venv = ".venv"
 [tool.ruff]
 include = ["build_backend/**/*.py", "vibe/**/*.py", "tests/**/*.py", "pyinstaller/unified_runtime.py"]
 line-length = 88
-target-version = "py314"
+target-version = "py312"
 preview = true
-# The public tree bundles the Local Harness runtime, which still supports Python 3.12.
-per-file-target-version = { "harness/**" = "py312" }
 
 [tool.ruff.format]
 skip-magic-trailing-comma = true

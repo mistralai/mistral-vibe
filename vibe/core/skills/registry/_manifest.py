@@ -86,7 +86,7 @@ def _load(path: Path) -> SkillManifest:
     try:
         with path.open("rb") as f:
             data = tomllib.load(f)
-    except FileNotFoundError, OSError, tomllib.TOMLDecodeError:
+    except (FileNotFoundError, OSError, tomllib.TOMLDecodeError):
         return SkillManifest()
     try:
         return SkillManifest.model_validate(data)

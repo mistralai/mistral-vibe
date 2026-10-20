@@ -176,21 +176,6 @@ fn typing_and_backspace_retick_the_free_text_row_in_multi_select() {
 }
 
 #[test]
-fn enter_on_the_focused_row_still_submits() {
-    let mut harness = Harness::new(focused_other(question("Choose", false)));
-    harness.app.question_app.open = true;
-    harness.type_text("draft");
-
-    harness.press(KeyCode::Enter, KeyModifiers::NONE);
-
-    assert_eq!(
-        harness.app.question_app.answers.get(&0),
-        Some(&("draft".into(), true))
-    );
-    assert!(!harness.app.question_app.open);
-}
-
-#[test]
 fn up_and_down_still_move_rows_while_the_row_is_focused() {
     let mut harness = Harness::new(focused_other(question("Choose", false)));
 

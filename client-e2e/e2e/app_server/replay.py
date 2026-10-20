@@ -17,12 +17,14 @@ from e2e.app_server.scenario import Scenario
 
 _CONNECTOR_REVISION = "connector-revision-1"
 
+_AUTH_ACTIONS = {"needs_auth": "oauth", "needs_connect": "no_auth_connect"}
 # A disabled connector is a selection, not a catalog readiness state.
 _READINESS = {
     "connected": "ready",
     "disabled": "ready",
     "needs_auth": "needs_auth",
     "needs_setup": "needs_setup",
+    "needs_connect": "needs_connect",
     "unavailable": "unavailable",
 }
 
@@ -105,9 +107,7 @@ def _connector_catalog(runtime: dict[str, Any]) -> dict[str, Any]:
                     "alias": source["name"],
                     "displayName": source["name"],
                     "readiness": _READINESS.get(source.get("status", ""), "ready"),
-                    "authAction": "oauth"
-                    if source.get("status") == "needs_auth"
-                    else "none",
+                    "authAction": _AUTH_ACTIONS.get(source.get("status", ""), "none"),
                     "tools": [
                         {"name": tool["name"], "description": tool.get("description")}
                         for tool in source.get("tools", [])
@@ -184,6 +184,7 @@ def _derive_runtime_responses(
                 "mcp/logout",
                 "connector_catalog/refresh",
                 "connector_catalog/toggle",
+                "connector_catalog/connect",
             )
         },
     }

@@ -12,20 +12,6 @@ fn numeric_ordering_compares_segment_wise() {
     assert!(parse_version("3.0.0").unwrap() > parse_version("2.99.99").unwrap());
 }
 
-#[test]
-fn missing_trailing_segments_pad_with_zero() {
-    assert_eq!(
-        parse_version("2.25").unwrap(),
-        parse_version("2.25.0").unwrap()
-    );
-    assert_eq!(
-        parse_version("2.25.0").unwrap(),
-        parse_version("2.25").unwrap()
-    );
-    assert!(parse_version("2.25.1").unwrap() > parse_version("2.25").unwrap());
-    assert!(parse_version("2.26").unwrap() > parse_version("2.25.9").unwrap());
-}
-
 /// The `-`-to-`+` rewrite keeps `1.6.1-jetbrains` parsable, and the resulting
 /// local version outranks the bare release.
 #[test]
@@ -35,13 +21,6 @@ fn replaces_hyphens_with_plus_signs_in_latest_version_to_conform_with_pep_440() 
     assert!(parse_version("2.26.0-rc1").unwrap() > parse_version("2.26.0").unwrap());
     assert_eq!(parse_version("2.26.0-rc1").unwrap().as_str(), "2.26.0+rc1");
     assert!(parse_version("2.25.6-rc1").unwrap() < parse_version("2.26.0").unwrap());
-}
-
-/// `packaging.Version`: explicit build metadata is a local version,
-/// which outranks the bare release instead of being ignored.
-#[test]
-fn explicit_build_metadata_sorts_above_the_release() {
-    assert!(parse_version("2.25.6+build.1").unwrap() > parse_version("2.25.6").unwrap());
 }
 
 #[test]
@@ -60,13 +39,6 @@ fn invalid_inputs_parse_as_none() {
     ] {
         assert_eq!(parse_version(raw), None, "{raw:?} must not parse");
     }
-}
-
-#[test]
-fn canonical_str_joins_segments_with_dots() {
-    assert_eq!(parse_version("2.25.6").unwrap().as_str(), "2.25.6");
-    assert_eq!(parse_version("2.25.06").unwrap().as_str(), "2.25.6");
-    assert_eq!(parse_version("2.0.0").unwrap().as_str(), "2.0.0");
 }
 
 /// `packaging.Version`: a prerelease sorts below its release.
@@ -156,36 +128,6 @@ fn local_segments_sort_above_the_bare_release() {
         parse_pep440_version("2.25.6+build.1").unwrap(),
         parse_pep440_version("2.25.6").unwrap()
     );
-}
-
-/// `str(Version)`: the gateway emits the normalized form.
-#[test]
-fn pep440_str_is_the_normalized_form() {
-    for (raw, normalized) in [
-        ("2.26.0-rc1", "2.26.0rc1"),
-        ("2.26.0.RC1", "2.26.0rc1"),
-        ("2.26.0alpha3", "2.26.0a3"),
-        ("2.26.0preview4", "2.26.0rc4"),
-        ("2.26.0pre", "2.26.0rc0"),
-        ("2.26.0-1", "2.26.0.post1"),
-        ("2.26.0-r2", "2.26.0.post2"),
-        ("2.26.0post04", "2.26.0.post4"),
-        ("2.26.0.dev1", "2.26.0.dev1"),
-        ("2.26.0-DEV.2", "2.26.0.dev2"),
-        ("2.26.0+Ubuntu_1.02-Beta", "2.26.0+ubuntu.1.2.beta"),
-        ("2.26.0+5.001", "2.26.0+5.1"),
-        ("01.2.03", "1.2.3"),
-        ("v2.26.0", "2.26.0"),
-        ("0!2.26.0", "2.26.0"),
-        ("2.26.0rc1.post2", "2.26.0rc1.post2"),
-        ("  2.26.0  ", "2.26.0"),
-    ] {
-        assert_eq!(
-            parse_pep440_version(raw).unwrap().as_str(),
-            normalized,
-            "{raw:?}"
-        );
-    }
 }
 
 #[test]

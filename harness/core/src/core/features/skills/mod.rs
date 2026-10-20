@@ -8,13 +8,45 @@ use serde_json::Value;
 
 use crate::core::helpers::normalized_similarity_score;
 
-pub(crate) use prompt::{
-    AUTONOMY_ACTIVITY, IDENTITY_GUIDANCE, catalog_prompt_section, rules_prompt_section,
-};
+pub(crate) use prompt::{catalog_prompt_section, rules_prompt_section};
 pub(crate) use tools::{ToolName, direct_tool, is_direct_name, tool};
 
 pub(crate) const NAMESPACE: &str = "skill";
 const MAX_SKILL_NAME_SUGGESTIONS: usize = 3;
+
+/// Whether the Session exposes the `skill` tool and its rules.
+///
+/// `WhenConfigured` exposes them only while the catalog is not empty. It is the
+/// default, so settings recorded before this field existed keep their behavior.
+/// `Enabled` exposes them even with an empty catalog, so the tool set does not
+/// change when skills appear later. `Disabled` exposes nothing and rejects a
+/// non-empty catalog.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum Mode {
+    Disabled,
+    #[default]
+    WhenConfigured,
+    Enabled,
+}
+
+impl Mode {
+    pub(crate) fn is_when_configured(&self) -> bool {
+        matches!(self, Self::WhenConfigured)
+    }
+
+    pub(crate) fn is_disabled(&self) -> bool {
+        matches!(self, Self::Disabled)
+    }
+
+    pub(crate) fn exposes<'a>(self, skills: impl IntoIterator<Item = &'a SkillDefinition>) -> bool {
+        match self {
+            Self::Disabled => false,
+            Self::WhenConfigured => skills.into_iter().next().is_some(),
+            Self::Enabled => true,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct SkillDefinition {

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::model::RunExport;
 use super::redact::redact_metadata_config;
-use super::{EXPORT_FILENAME, JOURNAL_DIRNAME, METADATA_FILENAME};
+use super::{EXPORT_FILENAME, JOURNAL_DIRNAME, METADATA_FILENAME, SUBAGENTS_DIRNAME};
 
 /// Partial-write files the session writer can leave behind. They hold
 /// unredacted config, so they never enter the export.
@@ -47,20 +47,64 @@ fn replace_file(staged: &Path, path: &Path) -> std::io::Result<()> {
 /// The copy's config snapshot is redacted as the export's is, since the
 /// output directory is shared more widely than the session directory.
 pub fn copy_journal(session_dir: &Path, output_dir: &Path) -> std::io::Result<String> {
-    let target = output_dir.join(JOURNAL_DIRNAME);
-    let staged = output_dir.join(format!(".{JOURNAL_DIRNAME}.tmp"));
-    let previous = output_dir.join(format!(".{JOURNAL_DIRNAME}.old"));
+    replace_dir(output_dir, JOURNAL_DIRNAME, |staged| {
+        copy_session(session_dir, staged)
+    })?;
+    Ok(JOURNAL_DIRNAME.to_owned())
+}
+
+/// Copy each subagent's session directory under `subagents/<session id>`,
+/// staged, redacted and swapped in as one as `copy_journal` does; returns
+/// each one's directory relative to the output directory. With none to copy,
+/// an earlier export's `subagents/` goes.
+pub fn copy_subagent_journals(
+    session_dirs: &[(String, PathBuf)],
+    output_dir: &Path,
+) -> std::io::Result<Vec<(String, String)>> {
+    if session_dirs.is_empty() {
+        let target = output_dir.join(SUBAGENTS_DIRNAME);
+        recover_previous_journal(
+            &output_dir.join(format!(".{SUBAGENTS_DIRNAME}.old")),
+            &target,
+        )?;
+        if target.exists() {
+            std::fs::remove_dir_all(&target)?;
+        }
+        return Ok(Vec::new());
+    }
+    replace_dir(output_dir, SUBAGENTS_DIRNAME, |staged| {
+        std::fs::create_dir_all(staged)?;
+        for (session_id, session_dir) in session_dirs {
+            copy_session(session_dir, &staged.join(session_id))?;
+        }
+        Ok(())
+    })?;
+    Ok(session_dirs
+        .iter()
+        .map(|(id, _)| (id.clone(), format!("{SUBAGENTS_DIRNAME}/{id}")))
+        .collect())
+}
+
+/// Stage `name` in the output directory and swap it in over the previous
+/// one. A failed copy removes its staging directory, which may hold an
+/// unredacted snapshot.
+fn replace_dir(
+    output_dir: &Path,
+    name: &str,
+    stage: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let target = output_dir.join(name);
+    let staged = output_dir.join(format!(".{name}.tmp"));
+    let previous = output_dir.join(format!(".{name}.old"));
     recover_previous_journal(&previous, &target)?;
     if staged.exists() {
         std::fs::remove_dir_all(&staged)?;
     }
-    if let Err(error) = stage_and_swap(session_dir, &staged, &target, &previous) {
-        // A failed copy removes its staging directory, which may hold an
-        // unredacted snapshot.
+    let swapped = stage(&staged).and_then(|()| swap_in(&staged, &target, &previous));
+    if swapped.is_err() {
         let _ = std::fs::remove_dir_all(&staged);
-        return Err(error);
     }
-    Ok(JOURNAL_DIRNAME.to_owned())
+    swapped
 }
 
 /// Settle a journal an earlier, crashed copy left aside: with a journal in
@@ -78,17 +122,11 @@ fn recover_previous_journal(previous: &Path, target: &Path) -> std::io::Result<(
     }
 }
 
-/// Copy the session into the staging directory, redact its config snapshot,
-/// and swap it in over the target.
-fn stage_and_swap(
-    session_dir: &Path,
-    staged: &Path,
-    target: &Path,
-    previous: &Path,
-) -> std::io::Result<()> {
-    copy_dir_recursive(session_dir, staged)?;
-    redact_metadata_config(&staged.join(METADATA_FILENAME));
-    swap_in(staged, target, previous)
+/// Copy a session directory and redact its config snapshot.
+fn copy_session(session_dir: &Path, target: &Path) -> std::io::Result<()> {
+    copy_dir_recursive(session_dir, target)?;
+    redact_metadata_config(&target.join(METADATA_FILENAME));
+    Ok(())
 }
 
 /// Rename the staged copy over the target. The previous journal is set

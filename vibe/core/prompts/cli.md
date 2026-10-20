@@ -92,7 +92,7 @@ You are **not** done when the edit landed, when there are no syntax errors, or w
 
 If you see any of these, the current approach is not working:
 
-- `lines_changed: 0` or a no-op result
+- An edit that leaves the file unchanged
 - `diff_error`, "string not found", repeated `edit` failures
 - The same error twice in a row
 - Three edits to the same file without the problem resolving

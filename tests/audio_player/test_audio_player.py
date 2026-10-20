@@ -9,7 +9,7 @@ import pytest
 
 try:
     import miniaudio as ma
-except OSError, ImportError:
+except (OSError, ImportError):
     pytest.skip("miniaudio library not available", allow_module_level=True)
 
 from vibe.cli.audio_player.audio_player import AudioPlayer

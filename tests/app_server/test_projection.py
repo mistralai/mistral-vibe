@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+import tomllib
+
 import pytest
+import tomli_w
 
 from tests.conftest import build_test_vibe_config
 from vibe.app_server._effect_output_cap import (
@@ -120,6 +125,120 @@ def test_model_config_view_defaults_thinking_levels_for_older_clients() -> None:
 
     assert list(view.thinking_levels) == list(THINKING_LEVELS)
     assert view.auto_compact_threshold is None
+    assert view.source is None
+
+
+def _mistral_model(alias: str) -> dict[str, str]:
+    return {"name": alias, "provider": "mistral", "alias": alias}
+
+
+@pytest.mark.asyncio
+async def test_config_view_groups_models_by_their_highest_priority_source(
+    config_dir: Path,
+) -> None:
+    """Admin, GrowthBook, catalog (in catalog order), session, then local models.
+
+    A model several layers define is one row, in the group of its highest
+    defining layer. A setting without ``name`` and ``provider`` defines
+    nothing: a user or admin tweak never moves a catalog or GrowthBook model,
+    and the thinking level a pick writes for the session never moves the
+    picked model.
+    """
+    from vibe.core.config import build_default_orchestrator
+    from vibe.core.config.layers.admin import AdminConfigLayer
+    from vibe.core.config.layers.growthbook import GrowthbookLayer
+    from vibe.core.config.layers.model_catalog import apply_model_catalog
+    from vibe.core.experiments.active import ExperimentName
+    from vibe.core.model_catalog import parse_model_catalog_response
+
+    orchestrator = await build_default_orchestrator({
+        "models": [
+            _mistral_model("session-model"),
+            # What a /model pick writes for the session.
+            {"alias": "mistral-medium-3.5", "thinking": "off"},
+        ]
+    })
+    admin = orchestrator.get_layer(AdminConfigLayer.NAME)
+    assert isinstance(admin, AdminConfigLayer)
+    admin.restore({
+        "models": [
+            _mistral_model("admin-model"),
+            {"alias": "zai-glm-5-3", "temperature": 0.1},
+        ]
+    })
+    growthbook = orchestrator.get_layer(GrowthbookLayer.NAME)
+    assert isinstance(growthbook, GrowthbookLayer)
+    growthbook.set_variants({
+        ExperimentName.CLI_EXTRA_MODELS.value: json.dumps([
+            _mistral_model("growthbook-model")
+        ])
+    })
+    catalog = parse_model_catalog_response({
+        "models": [
+            {
+                "id": model_id,
+                "label": model_id,
+                "capabilities": {"function_calling": True},
+            }
+            for model_id in ("zai-glm-5-3", "mistral-large-3", "mistral-medium-latest")
+        ]
+    })
+    assert catalog is not None
+    await apply_model_catalog(orchestrator, catalog)
+    config_file = config_dir / "config.toml"
+    user_config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    user_config.update(
+        # Unpinned: the fixture's pin names a model this list replaces.
+        active_model="",
+        models=[
+            _mistral_model("local-model"),
+            {"name": "zai-glm-5-3", "temperature": 0.9},
+            {"alias": "growthbook-model", "temperature": 0.5},
+        ],
+    )
+    config_file.write_text(tomli_w.dumps(user_config), encoding="utf-8")
+    await orchestrator.reload()
+
+    config = orchestrator.config
+    view = project_config_view(config)
+
+    assert [(model.alias, model.source) for model in view.models] == [
+        ("admin-model", "admin"),
+        ("growthbook-model", "growthbook"),
+        ("zai-glm-5-3", "catalog"),
+        ("mistral-large-3", "catalog"),
+        ("mistral-medium-latest", "catalog"),
+        ("session-model", "project"),
+        ("local-model", "local"),
+        ("mistral-medium-3.5", "local"),
+    ]
+    # Display only: the settings still apply.
+    assert config.models["zai-glm-5-3"].temperature == 0.1
+    assert config.models["mistral-medium-3.5"].thinking == "off"
+    assert view.active_model.source == "local"
+    serialized = view.model_dump(mode="json", by_alias=True)
+    assert serialized["models"][0]["source"] == "admin"
+
+
+@pytest.mark.asyncio
+async def test_config_view_lists_a_host_supplied_user_config_as_local() -> None:
+    from vibe.core.config import VibeConfigSchema
+    from vibe.core.config.builder import ConfigBuilder
+    from vibe.core.config.layers.default import DefaultConfigLayer
+    from vibe.core.config.layers.user import SuppliedUserConfigLayer
+
+    builder = ConfigBuilder(VibeConfigSchema)
+    builder.add_layers([
+        DefaultConfigLayer(schema=VibeConfigSchema),
+        SuppliedUserConfigLayer(data={"models": [_mistral_model("host-model")]}),
+    ])
+
+    view = project_config_view(await builder.build())
+
+    assert [(model.alias, model.source) for model in view.models] == [
+        ("host-model", "local"),
+        ("mistral-medium-3.5", "local"),
+    ]
 
 
 def test_config_view_carries_each_model_compaction_threshold() -> None:
@@ -314,3 +433,49 @@ async def test_apply_cached_experiment_variants_noop_on_cold_cache(
     await _apply_cached_experiment_variants(orchestrator)
 
     assert not orchestrator.config.routed_default_model
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "opt_out",
+    [
+        {"enable_telemetry": True, "experiments": {"enable": False}},
+        {"enable_telemetry": False},
+    ],
+    ids=["experiments-off", "telemetry-off"],
+)
+async def test_a_cached_system_prompt_variant_is_not_applied_when_experiments_are_off(
+    monkeypatch: pytest.MonkeyPatch, opt_out: dict[str, object]
+) -> None:
+    """An evaluation run turns experiments off, so a system prompt variant cached
+    by an earlier interactive session must not change its prompt.
+    """
+    from vibe.app_server._runtime import _apply_cached_experiment_variants
+    from vibe.core.config import build_default_orchestrator
+    from vibe.core.experiments import cache
+    from vibe.core.experiments.active import ExperimentName
+    from vibe.core.experiments.models import EvalResponse
+
+    monkeypatch.setattr(
+        "vibe.core.telemetry.send.mistral_credential_cache_key",
+        lambda _config: "user-abc",
+    )
+    interactive = await build_default_orchestrator({"enable_telemetry": True})
+    default_prompt = interactive.config.system_prompt_id
+    variant = "cli_2026-08_v3"
+    assert variant != default_prompt
+    cache.store_cached_eval_response(
+        interactive.config,
+        EvalResponse.model_validate({
+            "features": {
+                ExperimentName.SYSTEM_PROMPT.value: {"rules": [{"force": variant}]}
+            }
+        }),
+    )
+    await _apply_cached_experiment_variants(interactive)
+    assert interactive.config.system_prompt_id == variant
+
+    evaluation = await build_default_orchestrator(opt_out)
+    await _apply_cached_experiment_variants(evaluation)
+
+    assert evaluation.config.system_prompt_id == default_prompt

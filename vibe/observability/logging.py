@@ -12,6 +12,7 @@ import re
 from typing import Any
 
 from vibe.config_values import DEFAULT_LOG_LEVEL
+from vibe.utils.secrets import redact
 
 logger = logging.getLogger("vibe")
 
@@ -20,6 +21,10 @@ logger = logging.getLogger("vibe")
 app_server_channel: ContextVar[str | None] = ContextVar(
     "app_server_channel", default=None
 )
+
+# The id of the headless run a record belongs to, in a process serving many runs.
+# Inherited the same way, so a run's records name it.
+headless_run: ContextVar[str | None] = ContextVar("headless_run", default=None)
 
 # The experimental Unified Harness Runtime logs under its own top-level logger, which
 # propagates to the root rather than to "vibe". Route it to the same file handler so
@@ -54,12 +59,14 @@ class StructuredLogFormatter(logging.Formatter):
         message = encode_log_message(record.getMessage())
         if (channel := app_server_channel.get()) is not None:
             message = f"channel={channel} {message}"
+        if (run := headless_run.get()) is not None:
+            message = f"run={encode_log_message(run)} {message}"
 
         line = f"{timestamp} {ppid} {pid} {level} {message}"
         if record.exc_info:
             exc_text = encode_log_message(self.formatException(record.exc_info))
             line = f"{line} {exc_text}"
-        return line
+        return redact(line)
 
 
 class OwnerOnlyRotatingFileHandler(RotatingFileHandler):

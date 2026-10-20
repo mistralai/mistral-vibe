@@ -72,7 +72,7 @@ pub struct RunError {
     pub code: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -112,6 +112,55 @@ pub struct RunResult {
     pub warnings: Option<Vec<RunWarning>>,
 }
 
+/// Where a subagent was when the run ended: `Interrupted` is idle after an
+/// interrupted turn, `Unknown` a state this version does not know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunSubagentStatus {
+    Running,
+    Idle,
+    Interrupted,
+    Failed,
+    Closed,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One subagent the session spawned. `usage`, `cost_usd` and `steps` are its
+/// own, and the run's count none of them. `model` is the provider model its
+/// agent called, if exactly one. `cost_usd` is priced at the rates of
+/// `pricing_model`, a configured alias: its own model's, or the root
+/// session's when its model is unknown, as `pricing_fallback` says.
+/// `journal_dir` is relative to the output directory.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RunSubagent {
+    pub session_id: String,
+    pub parent_session_id: String,
+    pub root_session_id: String,
+    pub agent_name: String,
+    pub agent_type: Option<String>,
+    pub spawn_action_id: String,
+    pub spawn_call_id: Option<String>,
+    pub status: RunSubagentStatus,
+    #[serde(default)]
+    pub model: Option<String>,
+    pub usage: Option<RunUsage>,
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub pricing_model: Option<String>,
+    #[serde(default)]
+    pub pricing_fallback: bool,
+    pub steps: Option<u64>,
+    pub journal_dir: Option<String>,
+}
+
+/// A subagent as the run read it, with the store its journal is copied from.
+#[derive(Clone, Debug)]
+pub struct SubagentReport {
+    pub subagent: RunSubagent,
+    pub session_dir: Option<PathBuf>,
+}
+
 /// The full export written to `export.json`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunExport {
@@ -125,6 +174,9 @@ pub struct RunExport {
     pub limits: RunLimits,
     /// Computed from the outcome.
     pub exit_code: u8,
+    /// Left out of the export when the session spawned none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagents: Option<Vec<RunSubagent>>,
 }
 
 /// The report a headless run produces: the result plus the final response
@@ -134,6 +186,7 @@ pub struct RunReport {
     pub result: RunResult,
     pub final_response: Option<String>,
     pub session_dir: Option<PathBuf>,
+    pub subagents: Vec<SubagentReport>,
 }
 
 /// Why a Turn ended before the agent finished, read one way for every client.

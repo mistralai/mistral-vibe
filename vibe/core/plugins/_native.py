@@ -166,6 +166,9 @@ class _VibePluginExtension(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
 
     schema_version: Literal[1] = Field(alias="schemaVersion")
+    display_name: str | None = Field(
+        default=None, alias="displayName", min_length=1, max_length=100
+    )
     tool_namespace: str | None = Field(
         default=None, alias="toolNamespace", pattern=_TYPESCRIPT_IDENTIFIER_PATTERN
     )
@@ -387,6 +390,8 @@ class PluginDescriptor:
     manifest_digest: str
     content_digest: str
     author: str | None = None
+    # Presentation only (ai.mistral.vibe extension); `name` stays the identity.
+    display_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -867,6 +872,7 @@ class PluginResolver:
             author=author_display_name(
                 manifest.author.name if manifest.author is not None else None
             ),
+            display_name=extension.display_name if extension is not None else None,
         )
         skills = self._load_skills(descriptor)
         mcp_servers = self._load_mcp_servers(descriptor)

@@ -90,3 +90,21 @@ fn a_model_switch_swaps_the_cat_sprite() {
     banner.sync_model_variant(&config("Medium", "off", json!({})));
     assert_eq!(width(&banner), classic);
 }
+
+#[test]
+fn every_cat_keeps_the_text_at_column_14() {
+    for model in ["Medium", "Mistral Large 3"] {
+        let config = config(model, "off", json!({}));
+        let mut banner = Banner::default();
+        banner.sync_model_variant(&config);
+        assert!(
+            banner
+                .chat_frame()
+                .lines()
+                .all(|row| row.chars().count() < 14),
+            "{model}"
+        );
+        let info: String = text(&banner, &config)[1].chars().skip(14).collect();
+        assert!(info.starts_with("Mistral Vibe"), "{model}: {info}");
+    }
+}

@@ -278,3 +278,6 @@ fn format_elapsed(seconds: u64) -> String {
     let (hours, mins) = (minutes / 60, minutes % 60);
     format!("{hours}h{mins}m{secs}s")
 }
+
+#[cfg(test)]
+mod tests;

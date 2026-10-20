@@ -36,6 +36,7 @@ from vibe.app_server.protocol import (
     AppServerResponseError,
     ConnectorAuthReadParams,
     ConnectorAuthReadResponse,
+    ConnectorCatalogConnectParams,
     ConnectorCatalogMutationResponse,
     ConnectorCatalogReadParams,
     ConnectorCatalogReadResponse,
@@ -70,10 +71,6 @@ from vibe.app_server.protocol import (
     SkillsInstalledParams,
     SkillsInstalledResponse,
     SkillsRemoveParams,
-    SkillsSetAliasParams,
-    SkillsSetEnabledParams,
-    SkillsSetLatestParams,
-    SkillsSetVersionParams,
     SkillsUpdatesParams,
     SkillsUpdatesResponse,
     SkillsVersionsParams,
@@ -89,8 +86,6 @@ from vibe.app_server.protocol import (
     VibeCodeProjectCreateResponse,
     VibeCodeProjectRecoverParams,
     VibeCodeProjectRecoverResponse,
-    VibeCodeProjectSelectParams,
-    VibeCodeProjectSelectResponse,
     VibeCodeProjectsLoadMoreParams,
     VibeCodeProjectsLoadMoreResponse,
     VibeCodeProjectsOpenParams,
@@ -244,50 +239,11 @@ class SkillsResource:
             ),
         )
 
-    async def set_version(
-        self, name: str, version: int, scope: str = "global"
-    ) -> list[SkillSummary]:
-        return await self._mutate(
-            "skills/setVersion",
-            SkillsSetVersionParams(
-                session_id=self._state.session_id,
-                name=name,
-                version=version,
-                scope=scope,
-            ),
-        )
-
-    async def set_latest(self, name: str, scope: str = "global") -> list[SkillSummary]:
-        return await self._mutate(
-            "skills/setLatest",
-            SkillsSetLatestParams(
-                session_id=self._state.session_id, name=name, scope=scope
-            ),
-        )
-
-    async def set_alias(
-        self, name: str, alias: str, scope: str = "global"
-    ) -> list[SkillSummary]:
-        return await self._mutate(
-            "skills/setAlias",
-            SkillsSetAliasParams(
-                session_id=self._state.session_id, name=name, alias=alias, scope=scope
-            ),
-        )
-
     async def remove(self, name: str, scope: str = "global") -> list[SkillSummary]:
         return await self._mutate(
             "skills/remove",
             SkillsRemoveParams(
                 session_id=self._state.session_id, name=name, scope=scope
-            ),
-        )
-
-    async def set_enabled(self, name: str, enabled: bool) -> list[SkillSummary]:
-        return await self._mutate(
-            "skills/setEnabled",
-            SkillsSetEnabledParams(
-                session_id=self._state.session_id, name=name, enabled=enabled
             ),
         )
 
@@ -379,13 +335,28 @@ class MCPResource:
         return runtime.mcp
 
     async def refresh_connectors(self) -> MCPState:
+        return await self._mutate_connectors(
+            "connector_catalog/refresh",
+            ConnectorCatalogRefreshParams(session_id=self._state.session_id),
+        )
+
+    async def connect_connector(self, name: str) -> MCPState:
+        return await self._mutate_connectors(
+            "connector_catalog/connect",
+            ConnectorCatalogConnectParams(
+                session_id=self._state.session_id, alias=name
+            ),
+        )
+
+    # An unchanged catalog answers with no runtime, so the state stands.
+    async def _mutate_connectors(
+        self,
+        method: Literal["connector_catalog/refresh", "connector_catalog/connect"],
+        params: ProtocolModel,
+    ) -> MCPState:
         client = await self._connection.connect()
         response = validate_wire(
-            ConnectorCatalogMutationResponse,
-            await client.request(
-                "connector_catalog/refresh",
-                ConnectorCatalogRefreshParams(session_id=self._state.session_id),
-            ),
+            ConnectorCatalogMutationResponse, await client.request(method, params)
         )
         if response.runtime is not None:
             self._state.apply_runtime(response.runtime)
@@ -663,24 +634,6 @@ class VibeCodeResource:
                     picker_id=picker_id,
                     name=name,
                     default_branch=default_branch,
-                ),
-            ),
-        )
-        return response.view, response.project
-
-    async def select_project(
-        self, project_id: str
-    ) -> tuple[VibeCodePickerView, VibeCodeProject]:
-        picker_id = self._require_picker_id()
-        client = await self._connection.connect()
-        response = validate_wire(
-            VibeCodeProjectSelectResponse,
-            await client.request(
-                "vibeCode/projects/select",
-                VibeCodeProjectSelectParams(
-                    session_id=self._state.session_id,
-                    picker_id=picker_id,
-                    project_id=project_id,
                 ),
             ),
         )

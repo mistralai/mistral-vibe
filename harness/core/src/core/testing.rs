@@ -13,8 +13,8 @@ pub(crate) use serde_json::Value;
 pub(crate) use serde_json::json;
 
 pub(crate) use crate::core::action_id::{
-    compaction as compaction_action_id, completion as completion_action_id,
-    hook as derived_hook_action_id,
+    compaction as compaction_action_id, compaction_attempt as compaction_attempt_action_id,
+    completion as completion_action_id, hook as derived_hook_action_id,
 };
 pub(crate) use crate::core::capabilities::{HookBinding, HookSelector};
 pub(crate) use crate::core::config::{
@@ -25,7 +25,7 @@ pub(crate) use crate::core::config::{
 pub(crate) use crate::core::error::CoreError;
 pub(crate) use crate::core::features::background_processes::Mode as BackgroundProcessMode;
 pub(crate) use crate::core::features::compaction::{
-    CompactionBudget, CompactionPolicy, CompactionTrigger,
+    CompactionBudget, CompactionFallback, CompactionPolicy, CompactionTrigger,
 };
 pub(crate) use crate::core::features::large_output::Policy as LargeOutputPolicy;
 pub(crate) use crate::core::features::notifications::{
@@ -135,6 +135,7 @@ pub(crate) fn advance(mut state: HarnessState, command: HarnessCommand) -> Resul
                     action_id,
                     call_id,
                     result,
+                    ..
                 } => Some(AcceptedToolResult {
                     turn_id: turn_id.clone(),
                     action_id: action_id.clone(),
@@ -269,9 +270,11 @@ pub(crate) fn config() -> HarnessConfig {
         settings: HarnessSettings {
             turn: TurnSettings {
                 max_iterations: Some(8),
+                output_limit_recovery: Default::default(),
             },
             context: ContextSettings {
                 compaction: CompactionPolicy::Disabled,
+                compaction_fallback: CompactionFallback::Standalone,
                 image_delivery: ImageDeliverySettings::default(),
                 notifications: crate::core::features::notifications::Settings {
                     pending_count: 1000,
@@ -284,6 +287,8 @@ pub(crate) fn config() -> HarnessConfig {
                 max_wait_ms: 3_600_000,
                 model_wait: Default::default(),
                 programmatic: ProgrammaticToolSettings {
+                    mode: Default::default(),
+                    sleep: Default::default(),
                     max_effects: 128,
                     max_operations: 1024,
                     max_elapsed_ms: 60_000,
@@ -292,9 +297,12 @@ pub(crate) fn config() -> HarnessConfig {
                 large_output: crate::core::features::large_output::Policy::Disabled,
                 subagents: SubagentMode::enabled(),
                 background_processes: BackgroundProcessMode::Disabled,
+                file_system: Default::default(),
+                skills: Default::default(),
                 command_environment: CommandEnvironment::Unix,
                 permissions: None,
             },
+            prompts: Default::default(),
         },
         capabilities: Default::default(),
         skill_catalog_fingerprint: None,
@@ -334,6 +342,10 @@ pub(crate) fn add_tool_hook(
             }],
         },
     });
+}
+
+pub(crate) fn tool_action_id(origin: &str, operation_id: &str) -> String {
+    crate::core::action_id::tool(origin, operation_id)
 }
 
 pub(crate) fn rebuild_hook_binding_index(state: &mut HarnessState) {

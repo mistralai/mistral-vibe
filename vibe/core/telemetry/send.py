@@ -364,12 +364,6 @@ class TelemetryClient:
             payload["parent_session_id"] = parent_session_id
         self.send_telemetry_event("vibe.compaction_failed", payload)
 
-    def send_slash_command_used(
-        self, command: str, command_type: Literal["builtin", "skill"]
-    ) -> None:
-        payload = {"command": command.lstrip("/"), "command_type": command_type}
-        self.send_telemetry_event("vibe.slash_command_used", payload)
-
     def send_new_session(
         self, has_agents_md: bool, nb_skills: int, nb_mcp_servers: int, nb_models: int
     ) -> None:
@@ -442,25 +436,42 @@ class TelemetryClient:
         }
         self.send_telemetry_event("vibe.request_sent", payload)
 
+    def send_tool_call_detected(
+        self,
+        *,
+        model: str,
+        backend: str,
+        api_style: str,
+        call_type: TelemetryCallType,
+        reasons: list[str],
+        nb_unusable_attempts: int,
+        nb_dropped_tool_calls: int,
+        status: Literal["success", "error"],
+        message_id: str | None = None,
+    ) -> None:
+        """Record one model request whose responses broke the tool call contract.
+
+        Sent once per request, when it ends, and only when the runtime had to
+        repair at least one response. Carries counts and closed values only:
+        never tool names, arguments, or response text.
+        """
+        payload = {
+            "model": model,
+            "backend": backend,
+            "api_style": api_style,
+            "call_source": "vibe_code",
+            "call_type": call_type,
+            "message_id": message_id,
+            "reasons": reasons,
+            "nb_unusable_attempts": nb_unusable_attempts,
+            "nb_dropped_tool_calls": nb_dropped_tool_calls,
+            "status": status,
+        }
+        self.send_telemetry_event("vibe.tool_call.detected", payload)
+
     def send_ready(self, *, init_duration_ms: int) -> None:
         payload = {"init_duration_ms": init_duration_ms}
         self.send_telemetry_event("vibe.ready", payload)
-
-    def send_at_mention_inserted(
-        self,
-        *,
-        nb_mentions: int,
-        context_types: dict[str, int],
-        file_extensions: dict[str, int] | None,
-        message_id: str | None,
-    ) -> None:
-        payload: dict[str, Any] = {
-            "nb_mentions": nb_mentions,
-            "context_types": context_types,
-            "file_extensions": file_extensions,
-            "message_id": message_id,
-        }
-        self.send_telemetry_event("vibe.at_mention_inserted", payload)
 
     def send_user_rating_feedback(self, rating: int, model: str) -> None:
         self.send_telemetry_event(

@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from acp.schema import AuthenticateResponse
 import httpx
+import keyring
 import pytest
 
 from vibe.acp.agent import VibeAcpAgent as VibeAcpAgentLoop
@@ -216,6 +218,11 @@ def require_auth_meta(response: Any, method_id: str) -> dict[str, Any]:
 
 
 class TestACPAuthenticateCustomDomain:
+    @pytest.fixture(autouse=True)
+    def _signed_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # browser-auth signs in only when no key is available for the tenant.
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+
     @pytest.mark.asyncio
     async def test_start_uses_custom_domain_for_browser_auth_urls(self) -> None:
         captured: list[ProviderConfig] = []
@@ -786,6 +793,181 @@ class TestACPAuthenticateCustomDomain:
         assert request.provider.api_base == "https://api.acme.internal/v1"
         assert request.console_base_url == "https://connector.acme.internal:443"
         assert request.vibe_base_url == "https://chat.acme.internal"
+
+
+def build_acme_provider() -> ProviderConfig:
+    return build_mistral_provider(
+        browser_auth_base_url="https://console.acme.internal",
+        browser_auth_api_base_url="https://console.acme.internal/api",
+    )
+
+
+class TestACPBrowserAuthWithExistingKey:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("provider", "arguments"),
+        [
+            pytest.param(build_mistral_provider(), {}, id="default-no-arguments"),
+            pytest.param(
+                build_mistral_provider(),
+                {"signInTarget": "mistral"},
+                id="default-mistral-target",
+            ),
+            pytest.param(
+                build_acme_provider(),
+                {"signInTarget": "custom", "domain": "console.acme.internal"},
+                id="custom-same-domain",
+            ),
+            pytest.param(
+                build_acme_provider(),
+                {"signInTarget": "custom", "domain": "https://console.acme.internal/"},
+                id="custom-same-domain-normalized",
+            ),
+            pytest.param(
+                build_mistral_provider(
+                    browser_auth_base_url="https://console.acme.internal/",
+                    browser_auth_api_base_url="https://console.acme.internal/api/",
+                ),
+                {"signInTarget": "custom", "domain": "console.acme.internal"},
+                id="hand-written-config-urls",
+            ),
+            pytest.param(
+                build_acme_provider().model_copy(
+                    update={"browser_auth_allow_origin_rewrite": True}
+                ),
+                {"signInTarget": "custom", "domain": "console.acme.internal"},
+                id="configured-origin-rewrite-flag",
+            ),
+            pytest.param(
+                build_acme_provider(),
+                {"domain": "console.other.internal"},
+                id="domain-without-target-is-ignored",
+            ),
+        ],
+    )
+    async def test_skips_sign_in_for_the_tenant_the_key_belongs_to(
+        self, provider: ProviderConfig, arguments: dict[str, Any]
+    ) -> None:
+        acp_agent_loop, _, api_key_persister, credentials_persister = (
+            build_acp_agent_with_credentials_persister(provider=provider)
+        )
+
+        response = await acp_agent_loop.authenticate("browser-auth", **arguments)
+
+        assert response == AuthenticateResponse()
+        assert api_key_persister.saved == []
+        assert credentials_persister.saved == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("provider", "arguments", "expected_urls"),
+        [
+            pytest.param(
+                build_acme_provider(),
+                {"signInTarget": "custom", "domain": "console.other.internal"},
+                (
+                    "https://console.other.internal",
+                    "https://console.other.internal/api",
+                ),
+                id="other-custom-domain",
+            ),
+            pytest.param(
+                build_mistral_provider(),
+                {"signInTarget": "custom", "domain": "console.acme.internal"},
+                ("https://console.acme.internal", "https://console.acme.internal/api"),
+                id="default-to-custom-domain",
+            ),
+            pytest.param(
+                build_acme_provider(),
+                {
+                    "signInTarget": "custom",
+                    "domain": "console.acme.internal",
+                    "apiBaseUrl": "https://proxy.acme.internal/api",
+                },
+                ("https://console.acme.internal", "https://proxy.acme.internal/api"),
+                id="same-domain-other-api-base",
+            ),
+        ],
+    )
+    async def test_signs_in_when_another_tenant_is_requested(
+        self,
+        provider: ProviderConfig,
+        arguments: dict[str, Any],
+        expected_urls: tuple[str, str],
+    ) -> None:
+        acp_agent_loop, _, api_key_persister = build_acp_agent(provider=provider)
+
+        response = await acp_agent_loop.authenticate("browser-auth", **arguments)
+
+        assert require_auth_meta(response, "browser-auth")["status"] == "completed"
+        assert [
+            (signed_in.browser_auth_base_url, signed_in.browser_auth_api_base_url)
+            for signed_in, _ in api_key_persister.saved
+        ] == [expected_urls]
+
+    @pytest.mark.asyncio
+    async def test_skips_sign_in_when_key_is_only_in_keyring(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        monkeypatch.setattr(
+            keyring, "get_password", lambda service, username: "keyring-key"
+        )
+        acp_agent_loop, _, api_key_persister = build_acp_agent()
+
+        response = await acp_agent_loop.authenticate("browser-auth")
+
+        assert response == AuthenticateResponse()
+        assert api_key_persister.saved == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("arguments", "error"),
+        [
+            ({"signInTarget": "elsewhere"}, "Unsupported sign-in target"),
+            (
+                {"signInTarget": "custom", "domain": "not a domain"},
+                "Invalid custom sign-in domain",
+            ),
+            (
+                {
+                    "signInTarget": "custom",
+                    "domain": "console.acme.internal",
+                    "apiBaseUrl": "not a url",
+                },
+                "Invalid custom sign-in API base URL",
+            ),
+        ],
+    )
+    async def test_still_rejects_invalid_arguments(
+        self, arguments: dict[str, Any], error: str
+    ) -> None:
+        acp_agent_loop, _, _ = build_acp_agent(provider=build_acme_provider())
+
+        with pytest.raises(InvalidRequestError, match=error):
+            await acp_agent_loop.authenticate("browser-auth", **arguments)
+
+    @pytest.mark.asyncio
+    async def test_still_rejects_provider_without_browser_sign_in(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LLAMACPP_API_KEY", "llamacpp-key")
+        acp_agent_loop, _, _ = build_acp_agent(provider=build_unsupported_provider())
+
+        with pytest.raises(
+            InvalidRequestError, match="Browser sign-in is not available"
+        ):
+            await acp_agent_loop.authenticate("browser-auth")
+
+    @pytest.mark.asyncio
+    async def test_delegated_sign_in_still_starts(self) -> None:
+        acp_agent_loop, _, _ = build_acp_agent()
+
+        response = await acp_agent_loop.authenticate(
+            "browser-auth-delegated", action="start"
+        )
+
+        assert "attemptId" in require_auth_meta(response, "browser-auth-delegated")
 
 
 class TestACPAuthStatusCustomDomain:

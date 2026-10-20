@@ -12,6 +12,7 @@ from vibe.core.config.layer import (
     UntrustedLayerError,
 )
 from vibe.core.config.layers._base import BaseTomlConfigLayer
+from vibe.core.config.layers.user import SuppliedUserConfigLayer
 from vibe.core.config.patch import ConfigPatch, ReplaceOperationPatch
 from vibe.core.utils import name_matches
 
@@ -32,14 +33,16 @@ DROPPED_TOOL_OPTIONS: dict[str, tuple[str, ...]] = {
 
 
 async def migrate_config_layers(layers: Iterable[ConfigLayer[RawConfig]]) -> None:
-    loaded: list[tuple[BaseTomlConfigLayer, dict[str, Any]]] = []
+    loaded: list[
+        tuple[BaseTomlConfigLayer | SuppliedUserConfigLayer, dict[str, Any]]
+    ] = []
     for layer in layers:
-        if not isinstance(layer, BaseTomlConfigLayer):
+        if not isinstance(layer, (BaseTomlConfigLayer, SuppliedUserConfigLayer)):
             continue
 
         try:
             data = (await layer.load()).model_dump()
-        except EmptyLayerError, UntrustedLayerError:
+        except (EmptyLayerError, UntrustedLayerError):
             continue
         loaded.append((layer, data))
 

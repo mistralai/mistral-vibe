@@ -79,17 +79,6 @@ fn the_cell_size_reply_reads_as_width_and_height() {
 }
 
 #[test]
-fn whole_pixel_cells_ignore_the_leftover_pixels() {
-    let grid = Grid {
-        width: 1009,
-        height: 819,
-        ..GRID
-    };
-
-    assert_eq!(grid.cell(), (10, 20));
-}
-
-#[test]
 fn pixel_reports_need_window_cells_matching_the_probed_cell_size() {
     let leftover = Grid {
         width: 1009,

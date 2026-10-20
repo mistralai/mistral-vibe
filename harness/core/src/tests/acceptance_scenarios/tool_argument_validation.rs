@@ -74,7 +74,7 @@ fn invalid_direct_provided_tool_arguments_return_to_model_context_without_dispat
     )];
 
     // Do
-    let error = schema_error("7 is not of type \"string\"");
+    let error = schema_error("at /customer_id: 7 is not of type \"string\"");
     let retry = runtime
         .apply(
             tool_call_completion(action_id(&first_completion), calls.clone()),
@@ -104,6 +104,54 @@ fn invalid_direct_provided_tool_arguments_return_to_model_context_without_dispat
 }
 
 ///
+/// *Prepare*: A turn has the direct Runtime-owned `read_file` tool, which rejects unknown fields.
+/// *Do*: The model calls it with `file_path` instead of `path`.
+/// *Assert*: The error lists the fields the tool accepts and names the one the model most likely meant.
+///
+#[test]
+fn unknown_tool_argument_names_the_allowed_fields_and_the_likely_one() {
+    // Prepare
+    let turn_id = "turn-unknown-argument";
+    let mut runtime = SynchronousRuntime::new(config());
+    let first_completion = runtime.start_turn(turn_id, "read the file");
+    let calls = vec![tool_call(
+        "unknown-argument-call",
+        "read_file",
+        json!({"file_path": "notes.txt"}),
+    )];
+
+    // Do
+    let error = schema_error(
+        "Additional properties are not allowed ('file_path' was unexpected). Allowed fields: path, offset, limit. Use \"path\" instead of \"file_path\".",
+    );
+    let retry = runtime
+        .apply(
+            tool_call_completion(action_id(&first_completion), calls.clone()),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(assistant_tool_calls_committed(
+                    turn_id,
+                    &first_completion,
+                    &calls,
+                ))
+                .observe(tool_execution_started(turn_id, "unknown-argument-call"))
+                .observe(tool_execution_finished(
+                    turn_id,
+                    "unknown-argument-call",
+                    invalid_tool_call_result(&error),
+                )),
+        )
+        .only_action();
+
+    // Assert
+    let expected_messages = [
+        model_assistant_tool_calls(&calls),
+        model_invalid_tool_call("unknown-argument-call", "read_file", &error),
+    ];
+    runtime.assert_last_model_message_update(&retry, "append", &expected_messages);
+}
+
+///
 /// *Prepare*: A turn has the direct Runtime-owned `read_file` tool.
 /// *Do*: The model supplies a numeric path that violates the compiled filesystem schema.
 /// *Assert*: Core emits only the retry model Action and never dispatches a Runtime built-in Action.
@@ -121,7 +169,7 @@ fn invalid_direct_runtime_builtin_arguments_return_to_model_context_without_disp
     )];
 
     // Do
-    let error = schema_error("7 is not of type \"string\"");
+    let error = schema_error("at /path: 7 is not of type \"string\"");
     let retry = runtime
         .apply(
             tool_call_completion(action_id(&first_completion), calls.clone()),
@@ -182,7 +230,7 @@ fn invalid_direct_call_does_not_enter_a_matching_pre_tool_hook() {
     )];
 
     // Do
-    let error = schema_error("7 is not of type \"string\"");
+    let error = schema_error("at /path: 7 is not of type \"string\"");
     let retry = runtime
         .apply(
             tool_call_completion(action_id(&first_completion), calls.clone()),
@@ -230,7 +278,7 @@ fn mixed_valid_and_invalid_batch_dispatches_valid_work_and_preserves_result_orde
             json!({"path": "valid.txt"}),
         ),
     ];
-    let invalid_error = schema_error("7 is not of type \"string\"");
+    let invalid_error = schema_error("at /path: 7 is not of type \"string\"");
     let valid_action = runtime
         .apply(
             tool_call_completion(action_id(&first_completion), calls.clone()),

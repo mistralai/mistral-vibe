@@ -26,7 +26,7 @@ from mistralai_vibe_local_harness.vibe import (
 from vibe.core.config.models import MissingAPIKeyError
 from vibe.core.types import Backend
 from vibe.observability.logging import logger
-from vibe.utils.api_keys import resolve_api_key_with_origin
+from vibe.utils.api_keys import resolve_api_key_with_origin, session_credentials
 from vibe.utils.keyring import keyring_read_failure
 
 if TYPE_CHECKING:
@@ -61,8 +61,12 @@ class ProviderCredentialService:
         orchestrator: ConfigOrchestrator[VibeConfigSchema],
         *,
         select_provider: ProviderSelector | None = None,
+        credentials: Mapping[str, str] | None = None,
     ) -> None:
         self._orchestrator = orchestrator
+        # The session's own keys, by environment variable name, ahead of the
+        # process's: one process may serve runs that each bring a key.
+        self._credentials = credentials
         # Which provider a resolution targets. Defaults to the session's active
         # provider; a caller can bind a second service to a different provider
         # (e.g. the Mistral utility provider for background title generation).
@@ -96,7 +100,9 @@ class ProviderCredentialService:
         if not provider.api_key_env_var and not provider.uses_vertex:
             return _snapshot(provider, None, {}, api_key_source=None)
 
-        snapshot = await asyncio.to_thread(_resolve_snapshot, provider)
+        snapshot = await asyncio.to_thread(
+            _resolve_snapshot, provider, self._credentials
+        )
         if snapshot is None:
             env_var = provider.api_key_env_var or "MISTRAL_API_KEY"
             error = MissingAPIKeyError(
@@ -130,7 +136,9 @@ class ProviderCredentialService:
         except ValueError:
             return
 
-        current = await asyncio.to_thread(_resolve_snapshot, provider)
+        current = await asyncio.to_thread(
+            _resolve_snapshot, provider, self._credentials
+        )
         if current is not None and current.revision != observed_revision:
             # A refresh already replaced the material this rejection names.
             # Discarding the new credential would force a re-authentication
@@ -163,12 +171,19 @@ def _active_provider(config: VibeConfigSchema) -> ProviderConfig:
     return config.get_provider_for_model(config.get_active_model())
 
 
-def _resolve_snapshot(provider: ProviderConfig) -> ProviderCredentialSnapshot | None:
+def _resolve_snapshot(
+    provider: ProviderConfig, credentials: Mapping[str, str] | None = None
+) -> ProviderCredentialSnapshot | None:
     """Resolve one credential for ``provider``, or ``None`` when none exists.
+
+    ``credentials``, when given, resolve before the process's own keys.
 
     Runs in a thread: key resolution touches the keyring and the filesystem,
     and the Vertex path performs a blocking token refresh.
     """
+    if credentials:
+        with session_credentials(credentials):
+            return _resolve_snapshot(provider)
     if provider.uses_vertex:
         # Vertex ignores the configured key and mints a Google ADC token,
         # refreshed process-wide, so "no key configured" is never the answer

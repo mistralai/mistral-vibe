@@ -36,11 +36,17 @@ fn config_with_post_llm_hook() -> HarnessConfig {
 }
 
 fn input(input_id: u64, command: Value) -> HarnessInput {
+    input_at(input_id, input_id, command)
+}
+
+/// An input whose clock reads `time_offset_ms` after the test epoch, for a
+/// restored session that renumbers inputs but keeps the original clock.
+fn input_at(input_id: u64, time_offset_ms: u64, command: Value) -> HarnessInput {
     serde_json::from_value(json!({
         "protocol_version": 1,
         "input_id": input_id,
         "determinism": {
-            "time_unix_ms": 1_700_000_000_000_u64 + input_id,
+            "time_unix_ms": 1_700_000_000_000_u64 + time_offset_ms,
             "random_seed": input_id,
         },
         "command": command,

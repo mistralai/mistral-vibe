@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable, Mapping, Sequence, Set as AbstractSet
-from dataclasses import dataclass, field
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+    Set as AbstractSet,
+)
+from dataclasses import dataclass, field, replace
 from enum import StrEnum, auto
 import hashlib
 import json
@@ -41,6 +48,7 @@ from vibe.app_server._provided_tools import vibe_tool_groups
 from vibe.app_server._session_backend_port import SessionBackendHost
 from vibe.app_server._session_backend_services import SessionBackendServices
 from vibe.app_server._session_model import active_model_is_pinned
+from vibe.app_server._session_spawn import spawn_models
 from vibe.app_server._skills import discover_session_skills
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.client_tools import ClientToolHandler
@@ -109,7 +117,7 @@ from vibe.core.system_prompt import (
 )
 from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.telemetry.types import LaunchContext
-from vibe.core.tools.manager import ToolManager
+from vibe.core.tools.manager import FailedToolFile, ToolManager
 from vibe.core.tools.models import ToolPermission
 from vibe.core.tools.permissions import PermissionStore
 from vibe.core.utils import get_windows_bash_path, is_windows
@@ -120,6 +128,12 @@ from vibe.utils.http import get_server_url_from_api_base
 from vibe.utils.paths import is_dangerous_directory
 
 _SHORT_SESSION_ID_LENGTH = 8
+# A tool result past about 16,000 characters is saved to a file, and the model
+# gets its first and last 4,000 or so with the file's path. The Harness Core
+# counts about four characters a token. The gap between the two keeps a result
+# just over the threshold from being saved for little gain.
+_LARGE_OUTPUT_MAX_TOKENS = 4_000
+_LARGE_OUTPUT_VISIBLE_TOKENS = 2_000
 type _CommandEnvironmentMode = Literal["unix", "git_bash", "powershell"]
 
 
@@ -290,6 +304,10 @@ def _build_launch_context_from_services(
     )
 
 
+def session_spawner_for(services: SessionBackendServices) -> SessionSpawner | None:
+    return services if services.client_capabilities().session_spawn else None
+
+
 def _auto_titles_enabled(config: VibeConfigSchema, entrypoint: str) -> bool:
     """Only interactive clients get background titles: terminal, desktop, and
     the VS Code extension's ACP surface (its sessions list renders titles).
@@ -367,9 +385,11 @@ if TYPE_CHECKING:
     from vibe.app_server._mcp_auth import MCPAuthenticationService
     from vibe.app_server._plugin_mcp import PluginMCPCatalog
     from vibe.app_server._plugins import SessionPlugins, UnifiedPluginProvider
+    from vibe.app_server._process_settings import ProcessSettings
     from vibe.app_server._sandbox_skills import SandboxSkills
     from vibe.app_server._sandbox_workspace import SandboxWorkspaceContext
     from vibe.app_server._session_backend_port import ResolvedMCPCatalog
+    from vibe.app_server._session_spawn import SessionSpawner
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedReadContext,
         UnifiedSessionContext,
@@ -542,6 +562,10 @@ class LocalHarnessOptions:
     # Vibe's own. Internal: nothing on the wire declares them. Requires the
     # Unified Harness.
     client_tools: ClientTools | None = field(default=None, kw_only=True)
+    # The user config to read in place of the user config file, as the parsed
+    # TOML document. Saves to it stay in memory. Internal: an embedding host
+    # serving many runs gives each its own.
+    user_config: Mapping[str, Any] | None = field(default=None, kw_only=True)
     # Project instructions the embedding host gives every session, shown to
     # the model ahead of the project's AGENTS.md docs. Requires the Unified
     # Harness.
@@ -678,8 +702,11 @@ class HarnessProcess:
         shared: bool = False,
         sandbox: SandboxAdapter | None = None,
         client_tools: ClientTools | None = None,
+        user_config: Mapping[str, Any] | None = None,
         project_instructions: str | None = None,
         agent_socket: AgentSocketMount | None = None,
+        credentials: Mapping[str, str] | None = None,
+        process_settings: ProcessSettings | None = None,
     ) -> None:
         from vibe.app_server._mcp_auth import MCPAuthenticationService
         from vibe.app_server._plugins import packaged_builtin_plugin_roots
@@ -689,6 +716,12 @@ class HarnessProcess:
         # The agent server's sandbox, tools and instructions, when the
         # handshake succeeded; otherwise every session open reports its failure.
         self._agent_socket = agent_socket
+        # A run's own API keys, by environment variable name: they resolve
+        # before this process's, for its model calls only.
+        self._credentials = credentials
+        # What this process applies to every run, which a session's config
+        # must agree with.
+        self._process_settings = process_settings
         if agent_socket is not None and agent_socket.agent_socket is not None:
             sandbox = agent_socket.agent_socket.sandbox
             client_tools = agent_socket.agent_socket.client_tools()
@@ -705,6 +738,8 @@ class HarnessProcess:
         self.harness_files = harness_files or HarnessFilesManager(
             sources=("user",) if sandbox is not None else ("user", "project")
         )
+        if user_config is not None:
+            self.harness_files = replace(self.harness_files, user_config=user_config)
         self._sandbox = sandbox
         # The tool helper's crashes in a row in the sandbox, counted across
         # this process's sessions, as they share the sandbox. Made with the
@@ -776,9 +811,23 @@ class HarnessProcess:
 
         if self._agent_socket is not None:
             self._agent_socket.subscribe(services.notify)
+
+        def build_session_context(
+            options: SessionOptions,
+            *,
+            require_api_key: bool = True,
+            entrypoint: AgentEntrypoint = "cli",
+        ) -> Awaitable[UnifiedSessionContext]:
+            return self.build_unified_session_context(
+                options,
+                require_api_key=require_api_key,
+                entrypoint=entrypoint,
+                session_spawner=session_spawner_for(services),
+            )
+
         return adapt_harness_host(
             host,
-            self.build_unified_session_context,
+            build_session_context,
             services,
             pin_session_options=None
             if self._agent_socket is None
@@ -871,12 +920,14 @@ class HarnessProcess:
         *,
         require_api_key: bool = True,
         entrypoint: AgentEntrypoint = "cli",
+        session_spawner: SessionSpawner | None = None,
     ) -> UnifiedSessionContext:
         from mistralai_vibe_local_harness import HarnessSession
         from mistralai_vibe_local_harness.protocol import (
             RustAutomaticCompactionPolicy,
             RustContextSettings,
             RustDisabledCompactionPolicy,
+            RustDisabledOutputLimitRecovery,
             RustDisabledRuntimeToolFeature,
             RustEnabledAgentTools,
             RustEnabledModelWait,
@@ -889,6 +940,7 @@ class HarnessProcess:
             RustPowerShellCommandEnvironment,
             RustProgrammaticToolSettings,
             RustProvidedToolDefinition,
+            RustRetryOutputLimitRecovery,
             RustToolGroupDefinition,
             RustToolSettings,
             RustTurnSettings,
@@ -913,8 +965,10 @@ class HarnessProcess:
 
         # Import the provider service after loading the bundled Harness package.
         from vibe.app_server._provider_credentials import ProviderCredentialService
+        from vibe.app_server._subagent_runs import SubagentSteps
         from vibe.app_server._unified_harness_backend_adapter import (
             CorrelationIdHolder,
+            MalformedToolCallsQueue,
             RequestSentQueue,
             UnifiedRuntimeDerivation,
             UnifiedSessionContext,
@@ -938,6 +992,7 @@ class HarnessProcess:
             supports_images: bool,
             top_p: float | None = None,
             max_output_tokens: int | None = None,
+            context_window: int | None = None,
         ) -> LocalModelRoute:
             route_kwargs: dict[str, object] = {
                 "model": model,
@@ -951,6 +1006,7 @@ class HarnessProcess:
                 "supports_images": supports_images,
                 "top_p": top_p,
                 "max_output_tokens": max_output_tokens,
+                "context_window": context_window,
             }
             for name, value in optional_fields.items():
                 if name in route_fields:
@@ -964,6 +1020,10 @@ class HarnessProcess:
             compaction_supports_images: bool,
         ) -> RustContextSettings:
             context_kwargs: dict[str, object] = {"compaction": compaction}
+            # The local Runtime shapes the standalone compaction request, so
+            # Core may fall back to it after a failed in-context attempt.
+            if "compaction_fallback" in context_settings_fields:
+                context_kwargs["compaction_fallback"] = "standalone"
             if "image_delivery" in context_settings_fields:
                 context_kwargs["image_delivery"] = {
                     "agent": "native" if agent_supports_images else "resource_link",
@@ -1050,7 +1110,9 @@ class HarnessProcess:
         # Constructed once per session rather than per derivation: it holds the
         # set of revisions a provider has refused, and a service rebuilt on
         # every derivation would forget them and re-send a rejected key.
-        credentials = ProviderCredentialService(config_orchestrator)
+        credentials = ProviderCredentialService(
+            config_orchestrator, credentials=self._credentials
+        )
 
         # A route's endpoint is fixed at derivation, so its key is pinned to the
         # same provider. Per session, like ``credentials``, so rejection memory
@@ -1060,7 +1122,9 @@ class HarnessProcess:
         def credentials_for(provider_name: str) -> ProviderCredentialService:
             if provider_name not in utility_credentials:
                 utility_credentials[provider_name] = ProviderCredentialService(
-                    config_orchestrator, select_provider=_named_provider(provider_name)
+                    config_orchestrator,
+                    select_provider=_named_provider(provider_name),
+                    credentials=self._credentials,
                 )
             return utility_credentials[provider_name]
 
@@ -1072,6 +1136,10 @@ class HarnessProcess:
         # Same lifetime and sharing as ``correlation``: the completion adapter
         # appends each request's shape here, the adapter drains it to telemetry.
         request_sent = RequestSentQueue()
+        malformed_tool_calls = MalformedToolCallsQueue()
+        # The root and its subagents share the sink: it counts each subagent's
+        # agent model calls for ``session/subagents/read``.
+        subagent_steps = SubagentSteps()
 
         if require_api_key:
             config_orchestrator.config.require_active_provider_api_key()
@@ -1235,7 +1303,9 @@ class HarnessProcess:
                 harness_files=harness_files,
             )
             available_tools = set(derived_tools.available_tools)
-            bypass_approval = options.auto_approve or config.bypass_tool_permissions
+            bypass_approval = _effective_bypass_tool_permissions(
+                config, options.auto_approve
+            )
             # Recomputed on every derivation (including switch_agent) so entering or
             # leaving smart-approve mid-session re-derives the gate live.
             smart_approve = agents.active_profile.name == BuiltinAgentName.SMART_APPROVE
@@ -1282,6 +1352,12 @@ class HarnessProcess:
                         *agent_types.issues,
                         *([prompt_issue] if prompt_issue is not None else []),
                         *_hook_config_issues(hook_result),
+                        *_custom_tool_issues(derived_tools.failed_custom_tool_files),
+                        *(
+                            self._process_settings.issues(config)
+                            if self._process_settings is not None
+                            else []
+                        ),
                     ],
                     skills=skills.catalogue,
                     tools=available_tools,
@@ -1303,7 +1379,18 @@ class HarnessProcess:
                         project_instructions=self._project_instructions,
                     ),
                     settings=RustHarnessSettings(
-                        turn=RustTurnSettings(max_iterations=max_iterations),
+                        turn=RustTurnSettings(
+                            max_iterations=max_iterations,
+                            # A cut-off answer is discarded and asked for again
+                            # with feedback, at most this many times a turn.
+                            output_limit_recovery=(
+                                RustRetryOutputLimitRecovery(
+                                    max_retries=config.output_limit_retries
+                                )
+                                if config.output_limit_retries > 0
+                                else RustDisabledOutputLimitRecovery()
+                            ),
+                        ),
                         context=core_context_settings(
                             compaction=compaction_policy,
                             agent_supports_images=active_model.supports_images,
@@ -1311,9 +1398,9 @@ class HarnessProcess:
                         ),
                         tools=RustToolSettings(
                             # The local Runtime answers `self.wait` from committed
-                            # Session input (steering and process completions).
-                            # Core offers the direct `wait` tool only when
-                            # subagents or background processes are enabled.
+                            # Session input (steering, child results, process
+                            # completions). Core offers the direct `wait` tool only
+                            # when subagents or background processes are enabled.
                             model_wait=RustEnabledModelWait(),
                             programmatic=RustProgrammaticToolSettings(
                                 max_effects=128,
@@ -1322,7 +1409,7 @@ class HarnessProcess:
                                 max_sleep_ms=30_000,
                             ),
                             subagents=(
-                                RustEnabledAgentTools()
+                                RustEnabledAgentTools(conversation_forking=False)
                                 if config.enable_subagents
                                 else RustDisabledRuntimeToolFeature()
                             ),
@@ -1332,7 +1419,10 @@ class HarnessProcess:
                                 else RustDisabledRuntimeToolFeature()
                             ),
                             command_environment=command_environment,
-                            large_output=RustFilesystemLargeOutputPolicy(),
+                            large_output=RustFilesystemLargeOutputPolicy(
+                                max_output_tokens=_LARGE_OUTPUT_MAX_TOKENS,
+                                model_visible_output_tokens=_LARGE_OUTPUT_VISIBLE_TOKENS,
+                            ),
                         ),
                     ),
                     capabilities=RustHarnessCapabilitySet(
@@ -1363,6 +1453,11 @@ class HarnessProcess:
                                 available_tools,
                                 enabled_tools=config.enabled_tools,
                                 disabled_tools=config.disabled_tools,
+                                session_spawn=(
+                                    spawn_models(config)
+                                    if session_spawner is not None
+                                    else None
+                                ),
                             ),
                             # The client chose these; the tool filters are for
                             # Vibe's own.
@@ -1392,6 +1487,7 @@ class HarnessProcess:
                         supports_images=active_model.supports_images,
                         top_p=active_model.top_p,
                         max_output_tokens=active_model.max_output_tokens,
+                        context_window=active_model.max_context_length,
                     ),
                     active_agent=agents.active_profile.name,
                     compaction_model=local_model_route(
@@ -1401,6 +1497,7 @@ class HarnessProcess:
                         supports_images=compaction_model.supports_images,
                         top_p=compaction_model.top_p,
                         max_output_tokens=compaction_model.max_output_tokens,
+                        context_window=compaction_model.max_context_length,
                     ),
                     title_model=title_model if auto_title_enabled else None,
                     title_prompt=title_prompt,
@@ -1422,6 +1519,15 @@ class HarnessProcess:
                     # the turn's model, which matches the turn's provider.
                     classifier_model=classifier_model_config.name,
                     max_tokens=settings.max_tokens,
+                    # 0 is how a TOML file turns each of these off.
+                    compaction_max_output_tokens=(
+                        config.compaction_max_output_tokens or None
+                    ),
+                    compaction_thinking=config.compaction_thinking,
+                    compaction_reasoning_limit_tokens=(
+                        config.compaction_reasoning_limit_tokens or None
+                    ),
+                    output_token_reserve=config.output_token_reserve,
                     thinking=active_model.thinking,
                     reasoning_field_name=provider.reasoning_field_name,
                     emits_finish_reason=provider.emits_finish_reason,
@@ -1432,6 +1538,7 @@ class HarnessProcess:
                     # 0 is how a TOML file turns the limit off.
                     stream_idle_timeout_s=config.api_stream_idle_timeout or None,
                     retry_max_elapsed_time_s=config.api_retry_max_elapsed_time,
+                    enable_system_trust_store=config.enable_system_trust_store,
                     workspace=workspace,
                     # The library environment goes on top: a plugin that declares a
                     # Python or Node library is only usable if the search paths
@@ -1473,7 +1580,8 @@ class HarnessProcess:
                     permission_resolver=permission_resolver.resolve,
                     skills=skills.model_payloads,
                     correlation_id_sink=correlation.record,
-                    request_sent_sink=request_sent.record,
+                    request_sent_sink=subagent_steps.counting(request_sent.record),
+                    malformed_tool_calls_sink=malformed_tool_calls.record,
                     sandbox=sandbox,
                     helper_crashes=helper_crashes,
                 ),
@@ -1531,6 +1639,7 @@ class HarnessProcess:
             permissions=permission_resolver,
             provided_names=provided_names,
             client_tools=self._client_tools,
+            session_spawner=session_spawner,
             hooks=hooks,
             mcp_catalog=mcp_catalog,
             mcp_authorization_provider=self.mcp_authentication,
@@ -1559,6 +1668,8 @@ class HarnessProcess:
             ),
             correlation=correlation,
             request_sent=request_sent,
+            malformed_tool_calls=malformed_tool_calls,
+            subagent_steps=subagent_steps,
         )
 
     def _session_cwd(self, options: SessionOptions) -> Path:
@@ -1598,6 +1709,8 @@ class HarnessProcess:
         config_orchestrator = await build_default_orchestrator(
             overrides, harness_files=harness_files
         )
+        if self._process_settings is not None:
+            self._process_settings.check(config_orchestrator.config)
         await _apply_cached_experiment_variants(config_orchestrator)
         await apply_cached_model_catalog(config_orchestrator)
         # Every session crosses this config build, and the unified harness
@@ -1805,6 +1918,20 @@ def _hook_config_issues(result: HookConfigResult) -> list[ConfigIssue]:
     ]
 
 
+def _custom_tool_issues(failed: Iterable[FailedToolFile]) -> list[ConfigIssue]:
+    return [
+        ConfigIssue(
+            file=str(tool_file.path),
+            message=(
+                f"Custom tool `{tool_file.path.stem}` was not loaded"
+                f" ({tool_file.error}). Custom tools are being deprecated:"
+                " ask Vibe to help you replace it with a skill."
+            ),
+        )
+        for tool_file in failed
+    ]
+
+
 def _user_hook_names(harness_files: HarnessFilesManager) -> set[str]:
     """Names of hooks that come from ``~/.vibe/hooks.toml``, after project-first dedup.
 
@@ -1857,6 +1984,20 @@ def _foreign_hook_definitions(
     ]
 
 
+def _effective_bypass_tool_permissions(
+    config: VibeConfigSchema, requested: bool
+) -> bool:
+    """Resolve the tool-approval bypass from the session flag and the config.
+
+    ``requested`` is the session-wide ``--auto-approve``/``--yolo`` option and
+    ``config.bypass_tool_permissions`` covers the config path (including the
+    auto-approve agent's profile override). A policy setting that disables the
+    auto-approve mode (``enable_auto_approve = false``) clamps both: the flag is
+    a request, not a right.
+    """
+    return (requested or config.bypass_tool_permissions) and config.enable_auto_approve
+
+
 def build_runtime_snapshot(
     options: SessionOptions,
     config_orchestrator: ConfigOrchestrator[VibeConfigSchema],
@@ -1900,6 +2041,18 @@ def build_unified_runtime_snapshot(
     active, available = project_agent_summaries(
         agents.active_profile, agents.available_agents.values()
     )
+    runtime_issues = list(issues)
+    if auto_approve and not config.enable_auto_approve:
+        runtime_issues.append(
+            ConfigIssue(
+                file="--auto-approve",
+                message=(
+                    "Auto-approve was requested (--auto-approve/--yolo) but the mode "
+                    "is disabled (enable_auto_approve = false); approval prompts stay "
+                    "on."
+                ),
+            )
+        )
     return RuntimeSnapshot(
         config=project_config_view(
             config,
@@ -1919,11 +2072,13 @@ def build_unified_runtime_snapshot(
             cached_input_price_per_million=active_model.cached_input_price,
         ),
         context_window=active_model.auto_compact_threshold,
-        issues=list(issues),
+        issues=runtime_issues,
         hooks_count=hooks_count,
         connectors=ConnectorCounts(),
         mcp=MCPState(),
-        bypass_tool_permissions=auto_approve or config.bypass_tool_permissions,
+        bypass_tool_permissions=_effective_bypass_tool_permissions(
+            config, auto_approve
+        ),
     )
 
 

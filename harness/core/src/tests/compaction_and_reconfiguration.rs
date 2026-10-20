@@ -80,7 +80,7 @@ fn message_text(message: &Value) -> &str {
 }
 
 ///
-/// *Prepare*: Two identical sessions request manual compaction and then retry after the same failure.
+/// *Prepare*: Two identical sessions request manual compaction, fail both of its attempts, and then retry.
 /// *Do*: Read each compaction Action ID from the serialized Step Protocol transitions.
 /// *Assert*: Core emits stable opaque UUIDs, and each compaction attempt receives a distinct ID.
 ///
@@ -96,26 +96,85 @@ fn compaction_action_ids_are_deterministic_opaque_uuids() {
     let first_action_id = dispatched_action_id(&first_requested).to_string();
     let second_action_id = dispatched_action_id(&second_requested).to_string();
 
-    accepted_value(first.apply(input(
+    let first_fallback = accepted_value(first.apply(input(
         2,
         completion_failed(&first_action_id, "summary failed"),
     )));
-    accepted_value(second.apply(input(
+    let second_fallback = accepted_value(second.apply(input(
         2,
         completion_failed(&second_action_id, "summary failed"),
     )));
+    let first_fallback_action_id = dispatched_action_id(&first_fallback).to_string();
+    let second_fallback_action_id = dispatched_action_id(&second_fallback).to_string();
+    accepted_value(first.apply(input(
+        3,
+        completion_failed(&first_fallback_action_id, "summary failed"),
+    )));
+    accepted_value(second.apply(input(
+        3,
+        completion_failed(&second_fallback_action_id, "summary failed"),
+    )));
 
-    let first_retried = accepted_value(first.apply(input(3, compact("retry"))));
-    let second_retried = accepted_value(second.apply(input(3, compact("retry"))));
+    let first_retried = accepted_value(first.apply(input(4, compact("retry"))));
+    let second_retried = accepted_value(second.apply(input(4, compact("retry"))));
     let first_retry_action_id = dispatched_action_id(&first_retried).to_string();
     let second_retry_action_id = dispatched_action_id(&second_retried).to_string();
 
     // Assert
     Uuid::parse_str(&first_action_id).expect("initial compaction action ID is a UUID");
+    Uuid::parse_str(&first_fallback_action_id).expect("fallback compaction action ID is a UUID");
     Uuid::parse_str(&first_retry_action_id).expect("retry compaction action ID is a UUID");
     assert_eq!(first_action_id, second_action_id);
+    assert_eq!(first_fallback_action_id, second_fallback_action_id);
     assert_eq!(first_retry_action_id, second_retry_action_id);
+    assert_ne!(first_action_id, first_fallback_action_id);
     assert_ne!(first_action_id, first_retry_action_id);
+    assert_ne!(first_fallback_action_id, first_retry_action_id);
+}
+
+///
+/// *Prepare*: A manual compaction checkpoint in the shape earlier releases captured while resending the in-context request: attempt 1 and no request kind.
+/// *Do*: Restore it, resynchronize the pending Action, and return an invalid summary.
+/// *Assert*: The restored Action is the in-context second attempt, and its invalid summary falls back to the standalone request.
+///
+#[test]
+fn earlier_in_context_retry_checkpoint_restores_and_then_falls_back() {
+    // Prepare
+    let mut session = HarnessSession::create(config()).expect("session creates");
+    let requested = accepted_value(session.apply(input(1, compact("keep file paths"))));
+    let first_action = dispatched_action(&requested).clone();
+    let mut checkpoint = checkpoint_value(&session);
+    let projection = &mut checkpoint["turn"]["projection"];
+    assert!(projection.get("request").is_none());
+    projection["attempt"] = json!(1);
+    let decoded = decode_checkpoint(&checkpoint.to_string()).expect("checkpoint decodes");
+
+    // Do
+    let mut restored = HarnessSession::restore(config(), decoded, 0).expect("checkpoint restores");
+    let retry_action_id =
+        crate::core::testing::compaction_attempt_action_id(dispatched_action_id(&requested), 2);
+    let refreshed = accepted_value(restored.apply(input(
+        1,
+        json!({
+            "type": "completion_model_input_resync_requested",
+            "action_id": retry_action_id,
+        }),
+    )));
+    let fallback = accepted_value(restored.apply(input(
+        2,
+        completion(&retry_action_id, json!([{"type": "text", "text": ""}])),
+    )));
+
+    // Assert
+    let retry_action = &refreshed["transition"]["next"]["directives"][0]["action"];
+    assert!(retry_action.get("request").is_none());
+    assert_eq!(retry_action["attempt"], 2);
+    assert_eq!(model_messages(retry_action), model_messages(&first_action));
+    let fallback_action = dispatched_action(&fallback);
+    assert_eq!(fallback_action["request"], "standalone");
+    assert_eq!(fallback_action["attempt"], 3);
+    assert!(serialized_messages(fallback_action).contains("keep file paths"));
+    assert!(serialized_messages(fallback_action).contains("conversation_transcript"));
 }
 
 ///
@@ -230,7 +289,7 @@ fn manual_compaction_survives_restore_and_replaces_model_context() {
 
 ///
 /// *Prepare*: A manual compaction is pending over an existing context message.
-/// *Do*: Fail it, retry compaction with new instructions, and accept the retry summary.
+/// *Do*: Fail its in-context and standalone attempts, retry compaction with new instructions, and accept the retry summary.
 /// *Assert*: Failure returns to idle with prior context preserved, and the retry replaces the stale prompt before succeeding.
 ///
 #[test]
@@ -250,29 +309,37 @@ fn failed_manual_compaction_preserves_context_and_can_be_retried() {
         ),
     )));
     let requested = accepted_value(session.apply(input(3, compact("first attempt"))));
-    let failed_action_id = dispatched_action_id(&requested).to_string();
+    let in_context_action_id = dispatched_action_id(&requested).to_string();
 
     // Do
-    let failed = accepted_value(session.apply(input(
+    let fallback = accepted_value(session.apply(input(
         4,
+        completion_failed(&in_context_action_id, "summary failed"),
+    )));
+    let failed_action_id = dispatched_action_id(&fallback).to_string();
+    let failed = accepted_value(session.apply(input(
+        5,
         completion_failed(&failed_action_id, "summary failed"),
     )));
-    let retried = accepted_value(session.apply(input(5, compact("retry without tool calls"))));
+    let retried = accepted_value(session.apply(input(6, compact("retry without tool calls"))));
     let retry_action = dispatched_action(&retried);
     let retry_action_id = retry_action["action_id"]
         .as_str()
         .expect("retry action has an ID")
         .to_string();
     let compacted = accepted_value(session.apply(input(
-        6,
+        7,
         summary_completion(&retry_action_id, "retry summary"),
     )));
     let next_turn = accepted_value(session.apply(input(
-        7,
+        8,
         user_message("turn-after-retry", "continue", "queue"),
     )));
 
     // Assert
+    assert!(dispatched_action(&requested).get("request").is_none());
+    assert_eq!(dispatched_action(&fallback)["request"], "standalone");
+    assert_eq!(fallback["transition"]["turn"]["status"], "compacting");
     assert_eq!(failed["transition"]["turn"]["status"], "idle");
     assert_eq!(failed["transition"]["next"]["type"], "none");
     assert_eq!(

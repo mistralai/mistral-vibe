@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 import hashlib
 import importlib.util
 import inspect
@@ -20,11 +21,8 @@ from vibe.core.config.harness_files import (
 from vibe.core.paths import DEFAULT_TOOL_DIR
 from vibe.core.tools.base import BaseTool, BaseToolConfig, ToolPermission
 from vibe.core.tools.remote import MCPTool
-from vibe.core.tools.terminal_runtime import TerminalRuntime
-from vibe.core.types import AvailableFunction
 from vibe.core.utils import is_windows, name_matches, run_sync
 from vibe.observability.logging import logger
-from vibe.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
@@ -40,7 +38,7 @@ def _try_canonical_module_name(path: Path) -> str | None:
     """
     try:
         parts = path.resolve().parts
-    except OSError, ValueError:
+    except (OSError, ValueError):
         return None
 
     package_indices = [
@@ -75,14 +73,25 @@ def _compute_module_name(path: Path) -> str:
     return f"vibe_tools_discovered_{stem}_{path_hash}"
 
 
-type _DiscoveredTools = tuple[tuple[type[BaseTool], bool], ...]
+@dataclass(frozen=True, slots=True)
+class FailedToolFile:
+    path: Path
+    error: str
+
+
+@dataclass(frozen=True, slots=True)
+class _DiscoveredTools:
+    tools: tuple[tuple[type[BaseTool], bool], ...] = ()
+    failed_custom_files: tuple[FailedToolFile, ...] = ()
+
 
 # Every derivation of every session in the process discovers tools again. A tool
 # module stays imported once loaded (see ``_load_tools_from_file``), so what a
 # search path yields is fixed by the tool files it lists. Keyed on that listing
 # rather than the directory mtime, whose coarse granularity on Linux can hide a
 # file added in the same tick as the previous scan. Bounded because each
-# worktree brings its own project tool paths.
+# worktree brings its own project tool paths. A failed import is not cached so a
+# fixed file loads on the next scan.
 _discovered_tools: LRUCache[Path, tuple[tuple[Path, ...], _DiscoveredTools]] = LRUCache(
     maxsize=256
 )
@@ -95,16 +104,26 @@ def _discover_tools_in(base: Path, builtin_dir: Path) -> _DiscoveredTools:
     elif base.name.endswith(".py") and base.is_file():
         files = (base,)
     else:
-        return ()
+        return _DiscoveredTools()
     with _discovered_tools_lock:
         cached = _discovered_tools.get(base)
     if cached is not None and cached[0] == files:
         return cached[1]
-    discovered = tuple(
-        (tool, not path.resolve().is_relative_to(builtin_dir))
-        for path in files
-        for tool in ToolManager._load_tools_from_file(path) or ()
-    )
+    tools: list[tuple[type[BaseTool], bool]] = []
+    failed: list[FailedToolFile] = []
+    for path in files:
+        is_custom = not path.resolve().is_relative_to(builtin_dir)
+        try:
+            loaded = ToolManager._load_tools_from_file(path) or ()
+        except Exception as exc:
+            logger.warning("Failed to load tools from %s: %s", path, exc)
+            if is_custom:
+                failed.append(FailedToolFile(path, f"{type(exc).__name__}: {exc}"))
+            continue
+        tools.extend((tool, is_custom) for tool in loaded)
+    discovered = _DiscoveredTools(tuple(tools), tuple(failed))
+    if failed:
+        return discovered
     with _discovered_tools_lock:
         _discovered_tools[base] = (files, discovered)
     return discovered
@@ -133,13 +152,11 @@ class ToolManager:
         cwd: Path | None = None,
         harness_files: HarnessFilesManager | None = None,
         scratchpad_dir: Path | None = None,
-        terminal_runtime: TerminalRuntime | None = None,
     ) -> None:
         self._config_getter = config_getter
         self._cwd = (cwd or Path.cwd()).resolve()
         self._harness_files = harness_files or get_harness_files_manager()
         self._scratchpad_dir = scratchpad_dir
-        self.terminal_runtime = terminal_runtime or TerminalRuntime()
         self._permission_getter = permission_getter
         self._local_managed_shell_runtime_enabled = local_managed_shell_runtime_enabled
         self._mcp_registry = mcp_registry
@@ -158,9 +175,6 @@ class ToolManager:
             self._search_paths
         ):
             self._register_discovered_tool_variant(tool_class, is_custom=is_custom)
-        self._tool_descriptions: dict[str, str] = dict(
-            self._iter_tool_descriptions(self._search_paths)
-        )
         if not defer_mcp:
             self.integrate_all()
 
@@ -199,8 +213,7 @@ class ToolManager:
 
         A search path is either a directory of tool files (``<dir>/*.py``, e.g.
         ``.vibe/tools/``) or a single ``.py`` file. Tool files sit directly in
-        the directory — the same flat layout as the builtins and as the sibling
-        ``prompts/*.md`` descriptions (see ``_iter_tool_descriptions``).
+        the directory — the same flat layout as the builtins.
         """
         for tool_class, _ in ToolManager._iter_tool_classes_with_origin(search_paths):
             yield tool_class
@@ -211,7 +224,16 @@ class ToolManager:
     ) -> Iterator[tuple[type[BaseTool], bool]]:
         builtin_dir = DEFAULT_TOOL_DIR.path.resolve()
         for base in search_paths:
-            yield from _discover_tools_in(base, builtin_dir)
+            yield from _discover_tools_in(base, builtin_dir).tools
+
+    @property
+    def failed_custom_tool_files(self) -> list[FailedToolFile]:
+        builtin_dir = DEFAULT_TOOL_DIR.path.resolve()
+        return [
+            failed
+            for base in self._search_paths
+            for failed in _discover_tools_in(base, builtin_dir).failed_custom_files
+        ]
 
     @staticmethod
     def _load_tools_from_file(file_path: Path) -> list[type[BaseTool]] | None:
@@ -234,7 +256,8 @@ class ToolManager:
             try:
                 spec.loader.exec_module(module)
             except Exception:
-                return
+                del sys.modules[module_name]
+                raise
 
         # Builtin tool modules import shared base classes (e.g. BashOutput) from
         # sibling files; drop those re-exports so they are not registered twice
@@ -254,40 +277,6 @@ class ToolManager:
                 continue
             tools.append(tool_obj)
         return tools
-
-    @staticmethod
-    def _iter_tool_descriptions(search_paths: list[Path]) -> Iterator[tuple[str, str]]:
-        """Yield ``(tool_name, description)`` from ``prompts/<name>.md`` files in
-        the tool search paths.
-
-        Every tool directory pairs implementations with their descriptions the
-        same way the builtins do — ``<tools-dir>/*.py`` alongside
-        ``<tools-dir>/prompts/*.md`` (the very layout ``get_tool_prompt`` reads).
-        So ``.vibe/tools/prompts/weather.md`` describes a custom ``weather`` tool
-        and ``.vibe/tools/prompts/bash.md`` re-describes the builtin ``bash``.
-
-        Keyed by file stem (the tool name); later search paths win, matching
-        ``.py`` override precedence. A ``.py`` search-path entry is matched
-        against the ``prompts/`` dir beside it.
-        """
-        for base in search_paths:
-            if base.is_dir():
-                prompts_dir = base / "prompts"
-            elif base.name.endswith(".py"):
-                prompts_dir = base.parent / "prompts"
-            else:
-                continue
-            if not prompts_dir.is_dir():
-                continue
-            for md_path in sorted(prompts_dir.glob("*.md")):
-                try:
-                    text = read_safe(md_path).text
-                except OSError:
-                    continue
-                # Yield the raw text (matching get_full_description), but skip
-                # blank files so they fall back instead of blanking a tool.
-                if text.strip():
-                    yield md_path.stem, text
 
     @staticmethod
     def discover_tool_defaults(
@@ -529,14 +518,6 @@ class ToolManager:
     def _is_remote_tool_class(tool_cls: type[BaseTool]) -> TypeGuard[type[MCPTool]]:
         return issubclass(tool_cls, MCPTool)
 
-    def integrate_mcp(self, *, raise_on_failure: bool = False) -> None:
-        """Discover and register MCP tools (sync wrapper).
-
-        Idempotent: subsequent calls after a successful integration are
-        no-ops to avoid redundant MCP discovery.
-        """
-        run_sync(self._integrate_mcp_async(raise_on_failure=raise_on_failure))
-
     async def _integrate_mcp_async(self, *, raise_on_failure: bool = False) -> None:
         """Async MCP discovery — canonical implementation."""
         if self._mcp_integrated:
@@ -574,21 +555,6 @@ class ToolManager:
             self._all_tools.pop(key, None)
             self._instances.pop(key, None)
 
-    def _purge_mcp_state(self) -> None:
-        """Remove stale MCP tool classes and cached instances."""
-        stale_keys = [
-            name
-            for name, cls in self._all_tools.items()
-            if self._is_remote_tool_class(cls) and not cls.is_connector()
-        ]
-        for key in stale_keys:
-            self._all_tools.pop(key, None)
-            self._instances.pop(key, None)
-
-    def integrate_connectors(self, *, force_refresh: bool = False) -> None:
-        """Discover and register connector tools (sync wrapper)."""
-        run_sync(self.integrate_connectors_async(force_refresh=force_refresh))
-
     async def integrate_connectors_async(self, *, force_refresh: bool = False) -> None:
         """Discover and register connector tools — canonical implementation.
 
@@ -612,19 +578,6 @@ class ToolManager:
             self._all_tools.update(connector_tools)
         logger.info(f"Connector integration registered {len(connector_tools)} tools")
 
-    async def refresh_remote_tools_async(self) -> None:
-        """Force MCP and connector re-discovery for the current config."""
-        with self._lock:
-            if self._mcp_registry is not None:
-                self._mcp_registry.clear()
-            self._purge_mcp_state()
-            self._mcp_integrated = False
-            self._purge_connector_state()
-            if self._connector_registry is not None:
-                self._connector_registry.clear()
-
-        await self._integrate_all_async(force_refresh=True)
-
     def suspend_mcp(self, name: str, tool_name: str | None = None) -> None:
         """Withdraw one source or remote tool before reducing its authority."""
         with self._lock:
@@ -639,10 +592,6 @@ class ToolManager:
             for key in stale_keys:
                 self._all_tools.pop(key, None)
                 self._instances.pop(key, None)
-
-    def refresh_remote_tools(self) -> None:
-        """Sync wrapper for :meth:`refresh_remote_tools_async`."""
-        run_sync(self.refresh_remote_tools_async())
 
     def integrate_all(
         self, *, raise_on_mcp_failure: bool = False, force_refresh: bool = False
@@ -680,27 +629,6 @@ class ToolManager:
 
         if isinstance(connector_result, BaseException):
             logger.warning(f"Connector integration failed: {connector_result}")
-
-    def available_tool_specs(self) -> list[AvailableFunction]:
-        """Model-facing definitions for every available tool: name, resolved
-        description, and parameters.
-
-        The description comes from a ``<tools-dir>/prompts/<name>.md`` file when
-        present (builtin defaults, custom-tool descriptions, and user/project
-        overrides all live there), falling back to the tool's own description
-        (e.g. MCP/connector tools set it inline). Both the LLM tool formatter and
-        the session logger consume this so a tool always looks the same to the
-        model and in the logs.
-        """
-        return [
-            AvailableFunction(
-                name=name,
-                description=self._tool_descriptions.get(name)
-                or cls.get_full_description(),
-                parameters=cls.get_parameters(),
-            )
-            for name, cls in self.available_tools.items()
-        ]
 
     def get_tool_config(
         self, tool_name: str, *, default_permission: ToolPermission = ToolPermission.ASK
@@ -748,7 +676,6 @@ class ToolManager:
             cwd=self._cwd,
             harness_files=self._harness_files,
             scratchpad_dir=self._scratchpad_dir,
-            terminal_runtime=self.terminal_runtime,
         )
         self._instances[tool_name] = instance
         return instance

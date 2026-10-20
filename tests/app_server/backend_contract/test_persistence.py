@@ -169,14 +169,13 @@ async def test_cleared_replacement_becomes_resumable_after_its_first_turn(
 @pytest.mark.asyncio
 async def test_compaction_keeps_the_public_session_and_history(
     backend_contract_mistral_api: respx.Route,
-    backend_contract_mistral_completion: Callable[[str], httpx.Response],
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_session: AppServerSession,
 ) -> None:
     backend_contract_mistral_api.mock(
         side_effect=[
             backend_contract_mistral_response("Before compaction"),
-            backend_contract_mistral_completion(
+            backend_contract_mistral_response(
                 "<summary>First turn completed</summary>"
             ),
         ]
@@ -210,7 +209,6 @@ async def test_compaction_keeps_the_public_session_and_history(
 @pytest.mark.asyncio
 async def test_unified_compaction_responds_before_checkpoint_notifications(
     backend_contract_mistral_api: respx.Route,
-    backend_contract_mistral_completion: Callable[[str], httpx.Response],
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
     monkeypatch: pytest.MonkeyPatch,
@@ -223,7 +221,7 @@ async def test_unified_compaction_responds_before_checkpoint_notifications(
     backend_contract_mistral_api.mock(
         side_effect=[
             backend_contract_mistral_response("Before compaction"),
-            backend_contract_mistral_completion("<summary>Ordered summary</summary>"),
+            backend_contract_mistral_response("<summary>Ordered summary</summary>"),
         ]
     )
     session = await backend_contract_persistent_connection.host.open_session()
@@ -346,14 +344,13 @@ async def test_compaction_provider_failure_is_typed(
 @pytest.mark.asyncio
 async def test_compaction_survives_a_new_host_with_the_same_public_identity(
     backend_contract_mistral_api: respx.Route,
-    backend_contract_mistral_completion: Callable[[str], httpx.Response],
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
 ) -> None:
     backend_contract_mistral_api.mock(
         side_effect=[
             backend_contract_mistral_response("Before compaction"),
-            backend_contract_mistral_completion(
+            backend_contract_mistral_response(
                 "<summary>First turn completed</summary>"
             ),
         ]

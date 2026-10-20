@@ -46,7 +46,16 @@ pub(crate) fn reduce(
             state,
             TurnEvent::UserMessage {
                 turn_id,
-                content: crate::core::helpers::render_agent_message(message)?,
+                content: crate::core::helpers::render_agent_message(
+                    message,
+                    &state.config.settings.prompts.agent_messages,
+                    state
+                        .config
+                        .settings
+                        .tools
+                        .subagents
+                        .messages_resume_idle_children(),
+                )?,
                 mode,
             },
             determinism,

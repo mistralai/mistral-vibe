@@ -44,7 +44,7 @@ pub(super) fn paint(app: &mut App, f: &mut Frame) {
 /// The list under `target` that Python draws as a Textual `OptionList`.
 fn list(app: &mut App, target: MouseTarget) -> Option<&dyn OptionView> {
     match target {
-        MouseTarget::Approval | MouseTarget::Question => None,
+        MouseTarget::Approval | MouseTarget::Question | MouseTarget::SubagentList => None,
         MouseTarget::McpOAuth => Some(&app.mcp_oauth.list),
         MouseTarget::ConnectorAuth => Some(&app.connector_auth.list),
         _ => mouse::option_list(app, target).map(|list| &*list),

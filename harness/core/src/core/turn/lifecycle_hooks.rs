@@ -5,21 +5,11 @@ use crate::core::hooks::{
 };
 use crate::core::require_action_id;
 use crate::core::step_protocol::Action;
-use crate::core::turn::TurnOutcome;
 use crate::core::wire::completion::CompletionCandidate;
 use crate::core::wire::content::ContentBlock;
 use crate::core::wire::content::validate_non_empty_content;
 use crate::core::wire::message::{Message, StoredMessage};
 use crate::core::wire::tool::ProtocolError;
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum SuspendedTurn {
-    Idle,
-    Terminal {
-        turn_id: String,
-        outcome: TurnOutcome,
-    },
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum PendingLifecycleHook {
@@ -28,7 +18,6 @@ pub(crate) enum PendingLifecycleHook {
         hook_binding_ids: Vec<String>,
         turn_id: String,
         user_content: Vec<ContentBlock>,
-        suspended: SuspendedTurn,
     },
     PreLlmCall {
         action_id: String,
@@ -53,7 +42,6 @@ impl PendingLifecycleHook {
     pub(in crate::core::turn) fn pre_agent_turn(
         turn_id: String,
         user_content: Vec<ContentBlock>,
-        suspended: SuspendedTurn,
         hook_binding_ids: Vec<String>,
     ) -> Result<Self, CoreError> {
         if hook_binding_ids.is_empty() {
@@ -66,7 +54,6 @@ impl PendingLifecycleHook {
             hook_binding_ids,
             turn_id,
             user_content,
-            suspended,
         })
     }
 
@@ -240,7 +227,6 @@ pub(in crate::core::turn) enum HookResolution {
         error: ProtocolError,
     },
     CommitPreAgentTurn {
-        suspended: SuspendedTurn,
         turn_id: String,
         message: StoredMessage,
     },
@@ -288,7 +274,6 @@ pub(in crate::core::turn) fn resolve_lifecycle_hook(
             PendingLifecycleHook::PreAgentTurn {
                 turn_id,
                 user_content,
-                suspended,
                 ..
             },
             HookResult::PreAgentTurn(output),
@@ -296,7 +281,6 @@ pub(in crate::core::turn) fn resolve_lifecycle_hook(
             PreAgentTurnOutput::Continue { user_content } => {
                 validate_non_empty_content(&user_content, "pre-agent hook user content")?;
                 Ok(HookResolution::CommitPreAgentTurn {
-                    suspended,
                     turn_id,
                     message: StoredMessage::visible(Message::user(user_content)),
                 })

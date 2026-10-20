@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 import errno
 import json
+import logging
 import os
 from pathlib import Path
 import pty
@@ -24,9 +25,13 @@ from mistralai_vibe_local_harness.vibe._processes._backend import (
 from mistralai_vibe_local_harness.vibe._sandbox_helper import (
     ProcessTree,
     ShellNotFoundError,
+    closed_input,
+    login_shell,
     resolve_posix_shell,
     stop_process_trees,
 )
+
+logger = logging.getLogger("vibe.unified_harness.processes")
 
 _HELPER_FAILURE_STAGES = {
     "request",
@@ -123,6 +128,13 @@ class PosixTerminal:
         os.close(self._master_fd)
 
 
+def _after_login_profile(
+    shell: str, env: dict[str, str], command: str
+) -> tuple[dict[str, str], str]:
+    login = login_shell(shell, env, on_failure=logger.warning)
+    return login.env, login.command(command)
+
+
 class PosixTerminalBackend:
     """Runs background processes in pseudo-terminals on this POSIX host.
 
@@ -145,16 +157,26 @@ class PosixTerminalBackend:
     ) -> PosixTerminal:
         if shell is None:
             raise TerminalBackendError("no shell was resolved")
+        # The login profile is read once, not by a login shell per process;
+        # the command first sources the functions and aliases it defined.
+        env, command = _after_login_profile(shell, env, command)
         master_fd, slave_fd = pty.openpty()
         request_read, request_write = os.pipe()
         status_read, status_write = os.pipe()
         process: subprocess.Popen[bytes] | None = None
+        # The helper's own standard streams are unused: it reports through the
+        # status pipe and gives the shell the terminal. They are pipes with no
+        # other end, not /dev/null, which a command may have deleted.
+        helper_stdin = helper_output = -1
         try:
+            helper_stdin = closed_input()
+            output_read, helper_output = os.pipe()
+            os.close(output_read)
             process = subprocess.Popen(
                 _helper_argv(request_read, status_write, slave_fd),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdin=helper_stdin,
+                stdout=helper_output,
+                stderr=helper_output,
                 close_fds=True,
                 pass_fds=(request_read, status_write, slave_fd),
             )
@@ -166,7 +188,7 @@ class PosixTerminalBackend:
                 {
                     "version": 1,
                     "shell": shell,
-                    "argv": [shell, "-lc", command],
+                    "argv": [shell, "-c", command],
                     "cwd": str(cwd),
                     "env": env,
                 },
@@ -198,6 +220,8 @@ class PosixTerminalBackend:
                 status_read,
                 status_write,
                 slave_fd,
+                helper_stdin,
+                helper_output,
             ):
                 if descriptor >= 0:
                     os.close(descriptor)

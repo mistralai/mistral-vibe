@@ -650,7 +650,7 @@ class _RecordingConnection:
                 await self.client.request(
                     "session/stop", SessionStopParams(session_id=session_id)
                 )
-            except AppServerResponseError, RuntimeError:
+            except (AppServerResponseError, RuntimeError):
                 pass
         await self.client.close()
         await self.process.close()

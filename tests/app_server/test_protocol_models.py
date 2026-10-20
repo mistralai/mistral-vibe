@@ -202,6 +202,14 @@ def test_public_session_serializes_nullable_bumped_at() -> None:
     assert session.model_dump(mode="json")["bumpedAt"] == 42
 
 
+def test_public_session_without_bumped_at_ranks_by_created_at() -> None:
+    session = PublicSession(
+        id="session-1", status=IdleSessionStatus(), created_at=7, updated_at=99
+    )
+
+    assert session.model_dump(mode="json")["bumpedAt"] == 7
+
+
 @pytest.mark.parametrize("harness", ["legacy", "unified"])
 def test_public_session_harness_field_accepts_provenance(harness: str) -> None:
     session = PublicSession(
@@ -283,6 +291,12 @@ def test_session_start_wraps_vibe_configuration_in_agent_config() -> None:
         "historyLimit": 100,
         "idempotencyKey": None,
         "kind": "normal",
+        "title": None,
+        "model": None,
+        "reasoningEffort": None,
+        "sessionOnly": False,
+        "firstTurn": None,
+        "startedBySessionId": None,
     }
 
 
@@ -302,6 +316,36 @@ def test_initialize_accepts_the_desktop_entrypoint_off_the_wire() -> None:
 
     assert params.client_info.entrypoint == "desktop"
     assert params.client_info.name == "vibe_desktop"
+
+
+def test_initialize_ignores_capabilities_this_server_does_not_know() -> None:
+    """A client may declare a capability ahead of the servers that use it."""
+    params = validate_wire(
+        InitializeParams,
+        {
+            "clientInfo": {"name": "vibe_desktop", "version": "1.2.3"},
+            "capabilities": {
+                "callbackKinds": ["approval"],
+                "sessionSpawn": True,
+                "aCapabilityFromTheFuture": {"enabled": True},
+            },
+        },
+    )
+
+    assert params.capabilities.callback_kinds == ["approval"]
+    assert params.capabilities.session_spawn is True
+    assert "aCapabilityFromTheFuture" not in params.capabilities.model_dump(
+        by_alias=True
+    )
+    # Only the extension point is lenient: the handshake itself stays strict.
+    with pytest.raises(ValidationError):
+        validate_wire(
+            InitializeParams,
+            {
+                "clientInfo": {"name": "vibe_desktop", "version": "1.2.3"},
+                "unknownTopLevelField": True,
+            },
+        )
 
 
 def test_page_request_uses_canonical_pagination_shape() -> None:
@@ -913,12 +957,13 @@ def test_validate_backend_wire_ignores_unknown_fields() -> None:
 
     result = validate_backend_wire(
         TokenUsage,
-        {"inputTokens": 1, "outputTokens": 2, "totalTokens": 3, "cachedInputTokens": 4},
+        {"inputTokens": 1, "outputTokens": 2, "totalTokens": 3, "newHarnessField": 4},
     )
 
     assert result.input_tokens == 1
     assert result.output_tokens == 2
     assert result.total_tokens == 3
+    assert result.cached_input_tokens == 0
 
 
 def test_validate_backend_wire_respects_model_defaults() -> None:

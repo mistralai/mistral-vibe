@@ -300,7 +300,7 @@ def test_no_executable_stack(binary_dir: Path) -> None:
     (SELinux enforcing on Fedora, RHEL, etc.). Symptom:
 
       [PYI-9483:ERROR] Failed to load Python shared library
-        '.../libpython3.14.so.1.0': cannot enable executable stack
+        '.../libpython3.12.so.1.0': cannot enable executable stack
         as shared object requires: Invalid argument
     """
     if platform.system() != "Linux":

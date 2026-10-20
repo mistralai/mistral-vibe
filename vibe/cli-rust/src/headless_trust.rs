@@ -5,15 +5,13 @@ use serde_json::{json, Value};
 
 use crate::server::{method, Client};
 
-pub async fn warn_if_untrusted(client: &Client, cwd: Option<&str>) -> Result<()> {
+/// The warning for an untrusted workspace, if `cwd` is one.
+pub async fn untrusted_warning(client: &Client, cwd: Option<&str>) -> Result<Option<String>> {
     let resp = client
         .request(method::WORKSPACE_TRUST_STATUS, json!({ "cwd": cwd }))
         .await
         .context("workspace/trust/status")?;
-    if let Some(warning) = warning_from(&resp) {
-        eprintln!("{warning}");
-    }
-    Ok(())
+    Ok(warning_from(&resp))
 }
 
 /// Keeps first-seen order when merging detected + repo-detected files.

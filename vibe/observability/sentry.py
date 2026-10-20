@@ -7,6 +7,7 @@ import re
 from typing import TYPE_CHECKING, Any, cast
 
 from vibe import __version__
+from vibe.utils.secrets import redact
 
 if TYPE_CHECKING:
     from sentry_sdk.types import Event, Hint
@@ -135,7 +136,21 @@ def _scrub_pii(event: Event) -> None:
 
     event_dict.pop("breadcrumbs", None)
     for key, value in event_dict.items():
-        event_dict[key] = scrub_paths(value)
+        event_dict[key] = scrub_paths(_redact_secrets(value))
+
+
+def _redact_secrets(value: Any) -> Any:
+    match value:
+        case str():
+            return redact(value)
+        case dict():
+            return {key: _redact_secrets(item) for key, item in value.items()}
+        case list():
+            return [_redact_secrets(item) for item in value]
+        case tuple():
+            return tuple(_redact_secrets(item) for item in value)
+        case _:
+            return value
 
 
 def _before_send(event: Event, hint: Hint) -> Event | None:

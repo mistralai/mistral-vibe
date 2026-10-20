@@ -63,12 +63,12 @@ jobs:
         if: ${{ matrix.os != 'linux' }}
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.14"
+          python-version: "3.12"
 
       - name: Install Python (Linux)
         if: ${{ matrix.os == 'linux' }}
         shell: bash
-        run: uv python install 3.14
+        run: uv python install 3.12
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -171,13 +171,13 @@ jobs:
       # uv unpacks the sdist into a clean temporary directory before building.
       # Pin the build to the interpreter the smoke venv below validates on:
       # unpinned, uv uses the runner's ambient Python and ubuntu-22.04's 3.10
-      # produces a cp310 wheel the 3.14 venv refuses to install. ci.yml's
+      # produces a cp310 wheel the 3.12 venv refuses to install. ci.yml's
       # build-install-smoke sdist legs mirror this job; keep both in sync.
       - name: Build and validate wheel from sdist
         shell: bash
         run: |
-          uv build --python 3.14 --wheel "$RUNNER_TEMP"/sdist/*.tar.gz --out-dir "$RUNNER_TEMP/wheel"
-          uv venv --python 3.14 "$RUNNER_TEMP/smoke"
+          uv build --python 3.12 --wheel "$RUNNER_TEMP"/sdist/*.tar.gz --out-dir "$RUNNER_TEMP/wheel"
+          uv venv --python 3.12 "$RUNNER_TEMP/smoke"
           uv pip install --python "$RUNNER_TEMP/smoke/bin/python" "$RUNNER_TEMP"/wheel/*.whl
           "$RUNNER_TEMP/smoke/bin/python" scripts/ci/validate-combined-wheel.py
           "$RUNNER_TEMP/smoke/bin/vibe" --version

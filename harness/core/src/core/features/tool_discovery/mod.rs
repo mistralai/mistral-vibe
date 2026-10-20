@@ -28,18 +28,6 @@ pub(crate) const MAX_SUMMARY_RESULT_COUNT: usize = 20;
 #[cfg(feature = "benchmark")]
 pub(crate) use benchmark::run as run_benchmark;
 
-const SEARCH_TOOL_FUNCTIONS_DESCRIPTION: &str = r#"Discover callable tool functions for run_typescript.
-
-Use mode="best_match" first with a capability query; it returns up to 20 ranked exact function names, without declarations.
-If a returned name fits, call mode="details" with that exact name before using it.
-Use mode="all_connector_capabilities" with connectors set to exact connector names only when best_match returned moreCandidatesAvailable: true and no candidate fits, or when explicitly listing a connector inventory.
-
-For query, use short tool-capability keywords, not the full user request.
-If the user shares a URL from an online service, first check whether there is a connector for that service. Include the service name or domain plus the needed operation in the best_match query, for example "google docs open url", before falling back to generic web URL tools.
-For named connector + capability requests, pass both connectors and query in one best_match call.
-If no returned function name matches after the available discovery path, answer unsupported instead of probing adjacent tools.
-Treat auth as unavailable only when connector guidance or a tool error says so."#;
-
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SearchMode {
@@ -189,10 +177,10 @@ impl ToolDiscovery {
     }
 }
 
-pub(crate) fn direct_tool() -> ToolDefinition {
+pub(crate) fn direct_tool(description: &str) -> ToolDefinition {
     ToolDefinition {
         name: SEARCH_TOOL_FUNCTIONS_NAME.to_string(),
-        description: SEARCH_TOOL_FUNCTIONS_DESCRIPTION.to_string(),
+        description: description.to_owned(),
         parameters: SearchRequest::tool_schema(),
     }
 }

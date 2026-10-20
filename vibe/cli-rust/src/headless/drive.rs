@@ -5,17 +5,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio::time::Instant;
+use tracing::Instrument;
 
 use super::report::build_report;
 use super::session::run_session;
+use super::subagents::stop_subagents;
 use super::turn::{finalize_output, TurnEnd};
 use super::usage::UsageBaseline;
 use crate::cli::{HeadlessOptions, OutputFormat};
 use crate::headless_output::Output;
-use crate::headless_run::{StopRequests, STOP_GRACE_SECONDS};
-use crate::run_export::{RunError, RunOutcome, RunReport, TurnStop};
-use crate::server::{method, ChildHandle, Client, Launch};
+use crate::headless_run::{StopRequests, REPORT_GRACE_SECONDS, STOP_GRACE_SECONDS};
+use crate::run_export::{RunError, RunOutcome, RunReport, RunWarning, TurnStop};
+use crate::server::{method, Client, Connect, Connection, Notification};
 
 /// How the run's work ended: the turn's end, or a failure before the turn.
 pub(super) enum WorkEnd {
@@ -28,32 +31,31 @@ pub(super) enum WorkEnd {
 #[derive(Default)]
 pub(super) struct RunState {
     pub(super) client: Option<Arc<Client>>,
-    // Held so the work task's end does not kill the app-server's process
-    // group before the report is read and the session is stopped.
-    pub(super) child: Option<ChildHandle>,
+    // Held so the work task's end does not end the app-server's side of the
+    // run before the report is read and the session is stopped.
+    pub(super) connection: Option<Connection>,
+    // Held too: an unreceived notification stops the client, and the report's requests with it.
+    pub(super) notifications: Option<Arc<AsyncMutex<mpsc::Receiver<Notification>>>>,
     pub(super) session_id: Option<String>,
     pub(super) turn_id: Option<String>,
     pub(super) config: Option<Value>,
     pub(super) usage_baseline: UsageBaseline,
+    pub(super) warnings: Vec<RunWarning>,
 }
 
 /// Drive one headless run to its report: one work task raced against one
 /// stop request, one grace period to wind down, and the report returned
 /// rather than the process exited.
-pub(super) async fn drive(
+pub async fn drive(
     options: &HeadlessOptions,
     cwd: Option<String>,
-    launch: Launch,
+    connect: Connect,
     stop: &Arc<StopRequests>,
 ) -> RunReport {
     let state = Arc::new(Mutex::new(RunState::default()));
-    let mut work = tokio::spawn(run_session(
-        options.clone(),
-        cwd,
-        launch,
-        stop.clone(),
-        state.clone(),
-    ));
+    let mut work = tokio::spawn(
+        run_session(options.clone(), cwd, connect, stop.clone(), state.clone()).in_current_span(),
+    );
 
     // Race the work against the first stop request.
     enum Race {
@@ -103,18 +105,28 @@ pub(super) async fn drive(
                 None,
             ),
         },
+        // Stopped before the session opened: nothing to wind down, and the
+        // connection's drop ends whatever the work started.
+        Race::Stopped(outcome) if state.lock().unwrap().session_id.is_none() => {
+            work.abort();
+            let _ = (&mut work).await;
+            stopped_report(outcome, false, None)
+        }
         Race::Stopped(outcome) => {
-            // Interrupt the turn, let the work settle within the grace, and
-            // report the requested outcome whatever happens.
-            stop_turn(&state, grace_ends).await;
-            let remaining = grace_ends.saturating_duration_since(Instant::now());
-            let settled = tokio::time::timeout(remaining, &mut work)
+            // Stop the turn and the subagents, keeping REPORT_GRACE_SECONDS for the report.
+            let stop_ends = grace_ends - Duration::from_secs_f64(REPORT_GRACE_SECONDS);
+            stop_turn(&state, stop_ends).await;
+            // Before the work, which may wait on them, and after, for any it spawned meanwhile.
+            let reason = format!("the run stopped: {outcome}");
+            stop_run_subagents(&state, &reason, stop_ends).await;
+            let settled = tokio::time::timeout_at(stop_ends, &mut work)
                 .await
                 .ok()
                 .and_then(|end| end.ok());
             if settled.is_none() {
                 work.abort();
             }
+            stop_run_subagents(&state, &reason, stop_ends).await;
             // The work finalizes its own output when it ends on its own, so a
             // stopped run finalizes once: here only when the work did not,
             // so `--output json` writes the history exactly once.
@@ -127,7 +139,7 @@ pub(super) async fn drive(
         }
     };
 
-    build_report(
+    let report = build_report(
         &state,
         stop,
         outcome,
@@ -136,7 +148,25 @@ pub(super) async fn drive(
         final_response,
         grace_ends,
     )
-    .await
+    .await;
+    close_app_server(&state).await;
+    report
+}
+
+/// End the run's own app-server as the TUI and the run server end theirs:
+/// close its stdin so it shuts down on its own, wait for it within the
+/// shutdown grace, then kill its tree. The process then exits after its
+/// app-server, not before it, and has reaped it. A shared app-server's
+/// channel just closes, as its guard drops.
+async fn close_app_server(state: &Arc<Mutex<RunState>>) {
+    let (client, connection) = {
+        let mut state = state.lock().unwrap();
+        (state.client.clone(), state.connection.take())
+    };
+    if let (Some(client), Some(Connection::Child(child))) = (client, connection) {
+        client.close_stdin().await;
+        child.wait_with_grace().await;
+    }
 }
 
 /// The outcome of a turn that ended on its own: an interrupted turn means
@@ -209,6 +239,17 @@ async fn stop_turn(state: &Arc<Mutex<RunState>>, grace_ends: Instant) {
         ),
     )
     .await;
+}
+
+/// Interrupt the session's running subagents and let them settle, by `ends`.
+async fn stop_run_subagents(state: &Arc<Mutex<RunState>>, reason: &str, ends: Instant) {
+    let (client, session_id) = {
+        let state = state.lock().unwrap();
+        (state.client.clone(), state.session_id.clone())
+    };
+    if let (Some(client), Some(session_id)) = (client, session_id) {
+        stop_subagents(&client, &session_id, reason, ends).await;
+    }
 }
 
 /// The final response of a stopped run: whatever the history holds. The

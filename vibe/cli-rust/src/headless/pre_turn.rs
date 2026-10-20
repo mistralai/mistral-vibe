@@ -8,10 +8,10 @@ use tokio::sync::mpsc;
 
 use super::drive::WorkEnd;
 use super::usage::UsageBaseline;
-use crate::cli::{HeadlessOptions, HeadlessSession};
+use crate::cli::{HeadlessOptions, HeadlessSession, OutputFormat};
 use crate::headless_run::StopRequests;
-use crate::headless_trust::warn_if_untrusted;
-use crate::run_export::RunOutcome;
+use crate::headless_trust::untrusted_warning;
+use crate::run_export::{RunOutcome, RunWarning};
 use crate::server::{method, Client, ConfigEffectiveReadParams, Notification};
 
 /// A reopened session's earlier runs neither spend this run's budgets nor count in its export.
@@ -28,22 +28,40 @@ pub(super) async fn usage_baseline(
         .map_err(|error| WorkEnd::Failed(RunOutcome::InfrastructureFailure, format!("{error:#}")))
 }
 
-/// Warn if the workspace is untrusted; a sandboxed workspace has no trust state here.
-pub(super) async fn warn_if_host_untrusted(
+/// Warn if the workspace is untrusted, and return the warning for the export;
+/// a sandboxed workspace, or a run with no host directory, has no trust state here.
+pub(super) async fn host_trust_warning(
     client: &Arc<Client>,
     options: &HeadlessOptions,
     session_cwd: Option<&str>,
     cwd: Option<&str>,
-) -> Result<(), WorkEnd> {
-    if options.agent_socket.is_some() && crate::agent_socket::sandboxed(session_cwd, cwd) {
-        return Ok(());
+) -> Result<Option<RunWarning>, WorkEnd> {
+    if options.agent_socket.is_some()
+        && (cwd.is_none() || crate::agent_socket::sandboxed(session_cwd, cwd))
+    {
+        return Ok(None);
     }
-    warn_if_untrusted(client, cwd).await.map_err(|error| {
+    let warning = untrusted_warning(client, cwd).await.map_err(|error| {
         WorkEnd::Failed(
             RunOutcome::InfrastructureFailure,
             format!("workspace/trust/status: {error:#}"),
         )
-    })
+    })?;
+    Ok(warning.map(|message| {
+        report_warning(&options.output, &message);
+        RunWarning {
+            message,
+            source: None,
+        }
+    }))
+}
+
+/// A warning the run goes on despite: in the log, and on stderr unless the run is silent.
+pub(super) fn report_warning(format: &OutputFormat, warning: &str) {
+    tracing::warn!("{warning}");
+    if *format != OutputFormat::Silent {
+        eprintln!("{warning}");
+    }
 }
 
 /// An abort the server sent before the turn ends the run before the model is called.

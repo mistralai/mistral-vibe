@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from vibe.core.config.harness_files._paths import (
     GLOBAL_AGENTS_DIR,
@@ -33,6 +34,11 @@ class HarnessFilesManager:
     _session_root: Path | None = None
     trust_store: TrustedFoldersManager = field(
         default_factory=lambda: trusted_folders_manager, compare=False, repr=False
+    )
+    # The user config an embedding host supplies for its sessions, read in
+    # place of the user config file. Changes saved to it stay in memory.
+    user_config: Mapping[str, Any] | None = field(
+        default=None, compare=False, repr=False
     )
 
     def for_session(
@@ -211,7 +217,7 @@ class HarnessFilesManager:
         try:
             stripped = read_safe(path).text.strip()
             return stripped if stripped else ""
-        except FileNotFoundError, OSError:
+        except (FileNotFoundError, OSError):
             return ""
 
     def _collect_agents_md(
@@ -236,7 +242,7 @@ class HarnessFilesManager:
                 stripped = read_safe(path).text.strip()
                 if stripped:
                     docs.append((current, stripped))
-            except FileNotFoundError, OSError:
+            except (FileNotFoundError, OSError):
                 pass
             if current == stop:
                 break
@@ -257,7 +263,7 @@ class HarnessFilesManager:
         """
         try:
             resolved = file_path.resolve()
-        except ValueError, OSError:
+        except (ValueError, OSError):
             return []
         for root in self.project_roots:
             if resolved.is_relative_to(root):

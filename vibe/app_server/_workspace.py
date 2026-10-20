@@ -39,7 +39,7 @@ from vibe.user_content import UserTextResource
 from vibe.utils.images import MAX_IMAGES_PER_MESSAGE
 from vibe.utils.io import BoundedReadResult, read_lines_safe, read_lines_safe_async
 
-_MENTIONED_FILE_MAX_BYTES = 50 * 1024
+_MENTIONED_FILE_MAX_BYTES = 64_000
 _MENTIONED_FILE_LINE_LIMIT = 2000
 _MENTIONED_FILE_MAX_FILES = 8
 _TRUNCATED_FILE_NOTE = "\n\n[File mention truncated to fit context limits.]"

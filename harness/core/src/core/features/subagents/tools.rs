@@ -24,6 +24,22 @@ struct SpawnInput {
 
 #[derive(JsonSchema)]
 #[schemars(deny_unknown_fields)]
+struct ConversationSpawnInput {
+    #[schemars(flatten)]
+    spawn: SpawnInput,
+    #[schemars(
+        default = "default_fork_turns",
+        regex(pattern = r"^(all|none|0*[1-9][0-9]*)$")
+    )]
+    fork_turns: String,
+}
+
+fn default_fork_turns() -> String {
+    "none".into()
+}
+
+#[derive(JsonSchema)]
+#[schemars(deny_unknown_fields)]
 struct MessageInput {
     #[schemars(length(min = 1))]
     agent_path: String,
@@ -135,30 +151,35 @@ impl ToolName {
         }
     }
 
-    fn spec(self) -> ToolSpec {
+    fn spec(self, conversation_forking: bool, prompts: &super::Prompts) -> ToolSpec {
         let (description, input_schema, output_schema) = match self {
             Self::ListConfigs => (
-                "List available named configurations, sorted by name. Omit config_name when spawning a generic child that inherits this agent's configuration.",
+                prompts.list_configs.clone(),
                 ListInput::tool_schema(),
                 ConfigsOutput::tool_schema(),
             ),
             Self::List => (
-                "List admitted direct children in creation order. Provisional spawns are not listed.",
+                prompts.list.clone(),
                 ListInput::tool_schema(),
                 ListOutput::tool_schema(),
             ),
+            Self::Spawn if conversation_forking => (
+                prompts.spawn_with_conversation.clone(),
+                ConversationSpawnInput::tool_schema(),
+                OperationResult::tool_schema(),
+            ),
             Self::Spawn => (
-                "Create an independent child and admit its first message, without waiting for completion. name is a single path segment unique for the lifetime of this parent Session and cannot be reused. Omit config_name to inherit this agent's configuration.",
+                prompts.spawn.clone(),
                 SpawnInput::tool_schema(),
                 OperationResult::tool_schema(),
             ),
             Self::SendMessage => (
-                "Send a message to an agent path. Admission does not imply consumption or a reply.",
+                prompts.send_message.clone(),
                 MessageInput::tool_schema(),
                 OperationResult::tool_schema(),
             ),
             Self::Interrupt => (
-                "Interrupt a direct child's exact current Turn without closing its Session.",
+                prompts.interrupt.clone(),
                 AgentInput::tool_schema(),
                 OperationResult::tool_schema(),
             ),
@@ -174,11 +195,36 @@ impl ToolName {
 
 pub(crate) struct ToolSpec {
     pub(crate) name: ToolName,
-    pub(crate) description: &'static str,
+    pub(crate) description: String,
     pub(crate) input_schema: Value,
     pub(crate) output_schema: Value,
 }
 
-pub(crate) fn tools() -> Vec<ToolSpec> {
-    ToolName::ALL.into_iter().map(ToolName::spec).collect()
+pub(crate) fn tools(conversation_forking: bool, prompts: &super::Prompts) -> Vec<ToolSpec> {
+    ToolName::ALL
+        .into_iter()
+        .map(|name| name.spec(conversation_forking, prompts))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omitted_fork_turns_advertises_a_fresh_child_conversation() {
+        let spawn = tools(
+            true,
+            &crate::core::prompt::PromptSettings::default().agent_tools,
+        )
+        .into_iter()
+        .find(|spec| matches!(spec.name, ToolName::Spawn))
+        .unwrap();
+
+        assert_eq!(
+            spawn.input_schema["properties"]["fork_turns"]["default"],
+            "none"
+        );
+        assert!(spawn.description.contains("none (default"));
+    }
 }

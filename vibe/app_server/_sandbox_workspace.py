@@ -13,6 +13,8 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+import re
+import secrets
 import shlex
 from typing import TYPE_CHECKING
 
@@ -37,17 +39,14 @@ if TYPE_CHECKING:
     from vibe.core.config import ProjectContextConfig
 
 AGENTS_MD_MAX_BYTES = 1024 * 1024
-_GIT_TIMEOUT_CAP_SECONDS = 10.0
+_SANDBOX_GIT_TIMEOUT_SECONDS = 10.0
+_GIT_COMMANDS = 3
 # Where a trusted workspace keeps the project sources the host loads: config,
 # agents, skills, tools, hooks, plugins and prompts. Only its skills are read
 # from a sandbox.
 _PROJECT_DIR = ".vibe"
 _READ_PROJECT_SOURCES = (".vibe/skills",)
 _PROJECT_SOURCES_TIMEOUT_SECONDS = 10.0
-
-
-class _GitCommandFailedError(Exception):
-    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,28 +85,54 @@ async def read_sandbox_workspace_context(
 async def sandbox_git_status(
     sandbox: SandboxAdapter, config: ProjectContextConfig, *, cwd: Path
 ) -> str:
-    """The git metadata section, as the host renders it for a local repository."""
-    timeout = min(config.timeout_seconds, _GIT_TIMEOUT_CAP_SECONDS)
+    """The git metadata section, as the host renders it for a local repository.
+
+    The git commands run in one sandbox call, with a time limit of
+    ``_SANDBOX_GIT_TIMEOUT_SECONDS`` rather than ``config.timeout_seconds``:
+    that is sized for git on the host, and one round trip to a sandbox can
+    take longer by itself.
+    """
     branch_args, remote_args, log_args = git_metadata_args(config.default_commit_count)
+    marker = f"vibe-git-{secrets.token_hex(8)}"
+    script = "; ".join(
+        f"{_git_command(args)}; printf '\\n{marker} %s\\n' \"$?\""
+        for args in (branch_args, remote_args, log_args)
+    )
     try:
-        branch, remote, log = await asyncio.gather(
-            _run_git(sandbox, branch_args, cwd=cwd, timeout=timeout),
-            _run_git(sandbox, remote_args, cwd=cwd, timeout=timeout),
-            _run_git(sandbox, log_args, cwd=cwd, timeout=timeout),
-            return_exceptions=True,
-        )
-        for result in (branch, log):
-            if isinstance(result, BaseException):
-                raise result
-        has_origin_master = isinstance(remote, str) and bool(remote.strip())
-        assert isinstance(branch, str) and isinstance(log, str)
-        return format_git_context(branch.strip(), has_origin_master, log)
+        result = await sandbox.execute(script, str(cwd), _SANDBOX_GIT_TIMEOUT_SECONDS)
     except TimeoutError:
         return GIT_TIMEOUT_MESSAGE
-    except _GitCommandFailedError:
-        return GIT_UNAVAILABLE_MESSAGE
     except SANDBOX_FAILURES as exc:
         raise SandboxUnavailableError(f"Sandbox failed to run git: {exc}") from exc
+    outputs = _split_git_outputs(result.stdout, marker)
+    if outputs is None:
+        return GIT_UNAVAILABLE_MESSAGE
+    branch, remote, log = outputs
+    if branch is None or log is None:
+        return GIT_UNAVAILABLE_MESSAGE
+    return format_git_context(branch.strip(), remote, log)
+
+
+def _git_command(args: list[str]) -> str:
+    # The same overrides the host applies: no fsmonitor hook from the
+    # repository's own config, and no optional locks.
+    return shlex.join(["git", "-c", "core.fsmonitor=", "--no-optional-locks", *args])
+
+
+def _split_git_outputs(
+    stdout: str, marker: str
+) -> tuple[str | None, str | None, str | None] | None:
+    """Each command's output, or None for one that failed; None as a whole
+    when the output is not the three commands' (the shell did not run them).
+    """
+    parts = re.split(rf"\n{re.escape(marker)} (\d+)\n", stdout)
+    if len(parts) != _GIT_COMMANDS * 2 + 1:
+        return None
+    outputs = [
+        output if code == "0" else None
+        for output, code in zip(parts[0:-1:2], parts[1::2], strict=True)
+    ]
+    return outputs[0], outputs[1], outputs[2]
 
 
 async def find_sandbox_subdirectory_agents_md(
@@ -237,18 +262,6 @@ async def _read_agents_md(sandbox: SandboxAdapter, directory: Path) -> str:
     if raw is None:
         return ""
     return decode_safe(raw).text.strip()
-
-
-async def _run_git(
-    sandbox: SandboxAdapter, args: list[str], *, cwd: Path, timeout: float
-) -> str:
-    # The same overrides the host applies: no fsmonitor hook from the
-    # repository's own config, and no optional locks.
-    command = shlex.join(["git", "-c", "core.fsmonitor=", "--no-optional-locks", *args])
-    result = await sandbox.execute(command, str(cwd), timeout)
-    if result.exit_code != 0:
-        raise _GitCommandFailedError(result.stderr)
-    return result.stdout
 
 
 __all__ = [

@@ -1499,6 +1499,35 @@ class TestOnboardingContextResolution:
         assert context.provider.name == "custom-provider"
         assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
 
+    def test_load_ignores_an_unparseable_env_list_and_keeps_toml_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        with (tmp_path / "config.toml").open("wb") as file:
+            tomli_w.dump(
+                {
+                    "active_model": "custom-model",
+                    "providers": [_custom_provider_payload()],
+                    "models": [_custom_model_payload()],
+                },
+                file,
+            )
+        monkeypatch.setenv("VIBE_MODELS", "mistral-large-latest,mistral-medium-latest")
+        monkeypatch.setenv("VIBE_PROVIDERS", "mistral")
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+
+        with caplog.at_level("WARNING"):
+            context = OnboardingContext.load()
+
+        assert context.provider.name == "custom-provider"
+        assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
+        assert "Ignoring unparseable VIBE_MODELS environment value" in caplog.text
+        assert "mistral-large-latest" not in caplog.text
+
     def test_load_preserves_explicit_provider_override_when_toml_is_invalid(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1635,7 +1664,7 @@ class TestOnboardingContextResolution:
 
         assert context.provider.name == "mistral"
 
-    def test_load_falls_back_when_onboarding_env_payload_is_invalid(
+    def test_load_ignores_unparseable_onboarding_env_providers(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         reset_harness_files_manager()

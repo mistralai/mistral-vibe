@@ -42,8 +42,8 @@ pub struct SourceRow {
     pub symbol: &'static str,
     pub connected: bool,
     pub status: String,
-    /// Enter hands the source to its auth flow (help reads `Connect`).
-    pub awaits_auth: bool,
+    /// What Enter starts for a source not usable yet (help reads `Connect`).
+    pub action: Option<SourceAction>,
     /// Greyed out: the `shared_only` API key can't use a personal connection.
     pub blocked: bool,
 }
@@ -73,7 +73,7 @@ impl Row {
 /// The rows of the current view: the source list, or one source's tools.
 pub fn rows(app: &MCPApp) -> Vec<Row> {
     match viewing_source(app) {
-        Some(source) => detail_rows(&app.state, source),
+        Some(source) => detail_rows(app, source),
         None => list_rows(&app.state, &app.search.query),
     }
 }
@@ -98,11 +98,29 @@ pub fn find_source<'a>(
     }
 }
 
-/// Needs auth, bootstrapped and not blocked; a bootstrap error shows in the detail view instead.
-pub fn awaits_auth(state: &MCPState, source: &MCPSourceSummary) -> bool {
-    source.status == MCPSourceStatus::NeedsAuth
-        && source.error.is_none()
-        && !scope::blocked(state, source)
+/// The flow that makes a source usable, started when its detail view opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceAction {
+    /// MCP OAuth for a server.
+    McpOAuth,
+    /// The connector authorization broker: an OAuth or credentials setup URL.
+    ConnectorAuth,
+    /// Create the user's connection for a no-auth connector.
+    Connect,
+}
+
+/// The pending action of a bootstrapped, unblocked source; a bootstrap error shows
+/// in the detail view instead.
+pub fn pending_action(state: &MCPState, source: &MCPSourceSummary) -> Option<SourceAction> {
+    if source.error.is_some() || scope::blocked(state, source) {
+        return None;
+    }
+    match (source.status, source.kind) {
+        (MCPSourceStatus::NeedsAuth, MCPSourceKind::Server) => Some(SourceAction::McpOAuth),
+        (MCPSourceStatus::NeedsAuth, MCPSourceKind::Connector) => Some(SourceAction::ConnectorAuth),
+        (MCPSourceStatus::NeedsConnect, _) => Some(SourceAction::Connect),
+        _ => None,
+    }
 }
 
 /// Title line: `MCP Servers[ & Connectors]`, or `MCP Server: name` in detail view.
@@ -237,13 +255,14 @@ fn add_source_group(
             symbol,
             connected,
             status,
-            awaits_auth: awaits_auth(state, source),
+            action: pending_action(state, source),
             blocked,
         }));
     }
 }
 
-fn detail_rows(state: &MCPState, source: &MCPSourceSummary) -> Vec<Row> {
+fn detail_rows(app: &MCPApp, source: &MCPSourceSummary) -> Vec<Row> {
+    let state = &app.state;
     if let Some(error) = &source.error {
         return vec![
             Row::Note("Failed to bootstrap".to_owned()),
@@ -251,11 +270,19 @@ fn detail_rows(state: &MCPState, source: &MCPSourceSummary) -> Vec<Row> {
         ];
     }
     if scope::blocked(state, source) {
-        return vec![scope::blocked_hint()];
+        return vec![scope::blocked_hint(source)];
     }
     match source.status {
         // The auth flows own these views; the browser shows no options for them.
         MCPSourceStatus::NeedsAuth => return Vec::new(),
+        MCPSourceStatus::NeedsConnect => {
+            let note = if app.connecting.as_ref() == Some(&source.name) {
+                "Connecting..."
+            } else {
+                "Not connected"
+            };
+            return vec![Row::Note(note.to_owned())];
+        }
         MCPSourceStatus::NeedsSetup => {
             return vec![Row::Hint {
                 before: "Set up credentials in the Mistral dashboard, then press ".to_owned(),

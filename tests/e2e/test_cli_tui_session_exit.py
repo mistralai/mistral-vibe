@@ -64,7 +64,7 @@ def _saved_session_has_usage(
     for projection_path in session_root.glob("*/generations/*/projection-state.json"):
         try:
             state = json.loads(read_safe(projection_path).text)
-        except OSError, json.JSONDecodeError:
+        except (OSError, json.JSONDecodeError):
             continue
 
         usage = (state.get("snapshot") or {}).get("session", {}).get("tokenUsage")

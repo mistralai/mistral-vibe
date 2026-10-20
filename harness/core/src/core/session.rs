@@ -1,13 +1,14 @@
 use crate::core::checkpoint::Checkpoint;
 use crate::core::config::HarnessConfig;
+use crate::core::conversation::ConversationSeed;
 use crate::core::error::CoreError;
-use crate::core::state::{HarnessState, StateInspection};
+use crate::core::state::{ActivePhase, ActiveTurn, HarnessState, StateInspection, TurnState};
 use crate::core::step_protocol::Action;
 use crate::core::step_protocol::{
     HarnessApplyResult, HarnessCommand, HarnessCommandRejection, HarnessInput, Inspection,
     STEP_PROTOCOL_VERSION, SessionTransition, invalid_command,
 };
-use crate::core::wire::message::Message;
+use crate::core::wire::message::{Message, StoredMessage};
 use crate::core::{advance_in_place, initial_state_with_history};
 
 mod delivery;
@@ -26,13 +27,57 @@ impl HarnessSession {
         Self::create_with_history(config, Vec::new())
     }
 
+    #[cfg(any(test, feature = "benchmark"))]
     pub(crate) fn create_with_history(
         config: HarnessConfig,
         initial_history: Vec<Message>,
     ) -> Result<Self, String> {
-        let state = initial_state_with_history(config, initial_history)
+        Self::create_with_conversation(config, initial_history, None)
+    }
+
+    pub(crate) fn create_with_conversation(
+        config: HarnessConfig,
+        initial_history: Vec<Message>,
+        conversation: Option<ConversationSeed>,
+    ) -> Result<Self, String> {
+        if conversation.is_some() && !initial_history.is_empty() {
+            return Err("initial history and conversation seed cannot both be supplied".into());
+        }
+        let imported = conversation.map(ConversationSeed::import).transpose()?;
+        let initial_history = imported.as_ref().map_or(initial_history, |messages| {
+            messages.iter().map(|item| item.message.clone()).collect()
+        });
+        let mut state = initial_state_with_history(config, initial_history)
             .map_err(|error| error.detail().to_string())?;
+        if let Some(imported) = imported {
+            let mut messages = state.context.messages().to_vec();
+            messages.retain(StoredMessage::is_generated_system);
+            messages.extend(imported);
+            state.context = crate::core::model_context::ModelContext::new(messages);
+        }
         Ok(Self::from_state(state))
+    }
+
+    pub(crate) fn export_conversation(&self, fork_turns: &str) -> Result<ConversationSeed, String> {
+        let finished_results = match &self.state.turn {
+            TurnState::Active(ActiveTurn {
+                phase: ActivePhase::AwaitingToolBatch { batch },
+                ..
+            }) => batch.completed_messages(),
+            _ => Vec::new(),
+        };
+        crate::core::conversation::export(
+            self.state.context.messages(),
+            fork_turns,
+            &finished_results,
+            &self
+                .state
+                .config
+                .settings
+                .prompts
+                .agent_messages
+                .inherited_pending_call,
+        )
     }
 
     /// Restores Core continuation state and resumes the Runtime's input sequence.
@@ -100,7 +145,7 @@ impl HarnessSession {
                     compaction: self.state.pending_compaction().map(|pending| {
                         CompactionInputSource {
                             action_id: pending.action_id(),
-                            messages: pending.projection().messages(),
+                            messages: pending.projection().model_messages(),
                         }
                     }),
                     image_delivery: self.state.config.settings.context.image_delivery,
@@ -128,7 +173,7 @@ impl HarnessSession {
                     compaction: self.state.pending_compaction().map(|pending| {
                         CompactionInputSource {
                             action_id: pending.action_id(),
-                            messages: pending.projection().messages(),
+                            messages: pending.projection().model_messages(),
                         }
                     }),
                     image_delivery: self.state.config.settings.context.image_delivery,
@@ -210,11 +255,42 @@ mod tests {
     use super::*;
     use crate::core::UserMessageMode;
     use crate::core::config::{ProvidedToolDefinition, ProvidedToolExposure, ToolGroupDefinition};
+    use crate::core::conversation::{ConversationMessage, ConversationSource};
     use crate::core::step_protocol::{
         DeterminismContext, HarnessActionDirective, HarnessApplyResult, HarnessConfigurationChange,
         HarnessInput, HarnessNextAction, ModelMessageUpdate, ModelToolCatalogUpdate,
     };
     use crate::core::wire::content::ContentBlock;
+
+    /// *Prepare*: A valid, nonempty conversation seed and valid, nonempty initial history.
+    /// *Do*: Create a session with both.
+    /// *Assert*: Creation is refused for supplying both, not for an invalid input, so the
+    /// child's history has one source.
+    #[test]
+    fn creation_rejects_both_a_conversation_seed_and_initial_history() {
+        // Prepare
+        let seed = ConversationSeed {
+            messages: vec![ConversationMessage {
+                message: Message::user_text("inherited request"),
+                turn_index: Some(0),
+                source: ConversationSource::History,
+            }],
+        };
+        let initial_history = vec![Message::user_text("plain initial history")];
+
+        // Do
+        let result = HarnessSession::create_with_conversation(
+            crate::core::testing::config(),
+            initial_history,
+            Some(seed),
+        );
+
+        // Assert
+        assert_eq!(
+            result.err().as_deref(),
+            Some("initial history and conversation seed cannot both be supplied")
+        );
+    }
 
     fn input(input_id: u64, command: HarnessCommand) -> HarnessInput {
         HarnessInput {

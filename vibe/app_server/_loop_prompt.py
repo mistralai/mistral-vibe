@@ -27,7 +27,12 @@ LOOP_INSTRUCTIONS = (
     "schedule in natural language and use the cron tool: interval_seconds for "
     "fixed frequencies, or a five-field cron expression for calendar schedules "
     "in the machine's local timezone. Schedule the prompt rather than executing "
-    "it now. Use the tool also to list or cancel schedules when requested. "
+    "it now. Write the scheduled prompt in two parts: a short title on the "
+    "first line naming the loop (a few words, not a full sentence), then a line "
+    "break, then the full instruction, written as a clear, human-readable text "
+    "shown to the user as-is every time the loop fires. The first line is "
+    "displayed in the UI as the loop's name. Use the tool also "
+    "to list or cancel schedules when requested. "
     "Ask the user if their intent is unclear.\n"
     "</loop_instructions>"
 )

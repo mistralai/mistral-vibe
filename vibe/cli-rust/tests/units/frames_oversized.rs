@@ -1,8 +1,5 @@
 //! An oversized frame fails only the request it answers; framing resumes after it.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
 use tokio::sync::{mpsc, oneshot};
 use vibe_rs::server::frames::{dropped, Dropped, Frames, MAX_FRAME};
 use vibe_rs::server::{Pending, RequestFailure};
@@ -18,9 +15,9 @@ struct Peer {
 }
 
 fn peer_waiting_on(id: u64) -> Peer {
-    let (tx, response) = oneshot::channel();
     let (writer, written) = mpsc::unbounded_channel();
-    let pending: Pending = Arc::new(Mutex::new(HashMap::from([(id, tx)])));
+    let pending = Pending::default();
+    let response = pending.register(id);
     Peer {
         pending,
         response,
@@ -58,7 +55,7 @@ fn oversized_response_fails_its_request_and_later_frames_still_route() {
         peer.response.try_recv(),
         Ok(Err(RequestFailure::FrameTooLarge(len))) if len > MAX_FRAME
     ));
-    assert!(peer.pending.lock().unwrap().is_empty());
+    assert!(peer.pending.is_empty());
     assert!(peer.written.try_recv().is_err());
 }
 

@@ -104,6 +104,7 @@ class LocalHarnessHost:
                 shared=self._shared,
                 sandbox=options.sandbox,
                 client_tools=options.client_tools,
+                user_config=options.user_config,
                 project_instructions=options.project_instructions,
             )
             self._process_options = options
@@ -118,4 +119,6 @@ class LocalHarnessHost:
                 "A LocalHarnessHost serves one sandbox, one set of client tools "
                 "and one set of project instructions"
             )
+        if options.user_config is not started.user_config:
+            raise RuntimeError("A LocalHarnessHost serves one user config")
         return self._process

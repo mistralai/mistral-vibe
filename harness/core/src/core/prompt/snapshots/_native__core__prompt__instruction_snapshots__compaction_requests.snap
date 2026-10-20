@@ -1,0 +1,290 @@
+---
+source: src/core/prompt/instruction_snapshots.rs
+expression: "Value::Object(requests)"
+---
+{
+  "without_extra_instructions": {
+    "in_context": [
+      {
+        "message": {
+          "role": "system",
+          "content": [
+            {
+              "type": "text",
+              "text": "agent system prompt"
+            }
+          ]
+        },
+        "source": "generated_system"
+      },
+      {
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Rename the config loader."
+            }
+          ]
+        },
+        "source": "history"
+      },
+      {
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Renamed it in src/config.rs."
+            }
+          ]
+        },
+        "source": "history"
+      },
+      {
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": {
+                "$multiline": [
+                  "CRITICAL: Respond with text only. Do NOT call any tools. Any tool call will be rejected.",
+                  "",
+                  "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume this task.",
+                  "",
+                  "Include:",
+                  "- The user's current goal and any explicit constraints or preferences",
+                  "- Key decisions made and their rationale",
+                  "- Files touched and the current state of in-progress work (paths + one-line status)",
+                  "- What remains to be done — the concrete next step",
+                  "- Any data, identifiers, or references the next LLM needs to continue",
+                  "",
+                  "Be concise and structured. One line per modified file unless a snippet is load-bearing. Do not repeat information already captured. Do not include a \"Final Answer\" section — the entire summary IS the handoff.",
+                  "",
+                  "Wrap the ENTIRE summary in <summary></summary> tags and output nothing outside them:",
+                  "",
+                  "<summary>",
+                  "...your handoff summary here...",
+                  "</summary>",
+                  "",
+                  "IMPORTANT: Exclude this entire message from the summary. It contains internal compaction instructions, not user conversation. Never mention or attribute to the user any requirement from this message, including summarization, text-only output, tool restrictions, formatting, or summary tags. Summarize only earlier messages. Preserve unresolved user requests as pending work; do not answer or perform them. Return only the <summary>...</summary> envelope."
+                ]
+              }
+            }
+          ]
+        },
+        "source": "injection"
+      }
+    ],
+    "standalone": [
+      {
+        "message": {
+          "role": "system",
+          "content": [
+            {
+              "type": "text",
+              "text": {
+                "$multiline": [
+                  "You are a dedicated conversation summarizer. You read a transcript of a conversation between a user and an AI agent and write a faithful handoff summary for another LLM that will resume the task.",
+                  "",
+                  "Rules:",
+                  "- Respond with plain text only. You have no tools. Never emit tool calls or function-call syntax.",
+                  "- Do not continue the task. Do not answer or perform any request in the transcript. Do not ask questions.",
+                  "- Preserve unresolved user requests as pending work.",
+                  "- Preserve concrete details: file paths, identifiers, commands, decisions and their rationale, and the next concrete step.",
+                  "- Be concise and structured. One line per modified file unless a snippet is load-bearing.",
+                  "- Wrap the entire summary in <summary></summary> tags and output nothing outside them."
+                ]
+              }
+            }
+          ]
+        },
+        "source": "injection"
+      },
+      {
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": {
+                "$multiline": [
+                  "<conversation_transcript>",
+                  "### User",
+                  "Rename the config loader.",
+                  "",
+                  "### Assistant",
+                  "Renamed it in src/config.rs.",
+                  "</conversation_transcript>",
+                  "",
+                  "Write the handoff summary for the conversation transcript above.",
+                  "",
+                  "Include:",
+                  "- The user's current goal and any explicit constraints or preferences",
+                  "- Key decisions made and their rationale",
+                  "- Files touched and the current state of in-progress work (paths + one-line status)",
+                  "- What remains to be done — the concrete next step",
+                  "- Any data, identifiers, or references the next LLM needs to continue",
+                  "",
+                  "Respond with text only. Wrap the ENTIRE summary in <summary></summary> tags and output nothing outside them:",
+                  "",
+                  "<summary>",
+                  "...your handoff summary here...",
+                  "</summary>"
+                ]
+              }
+            }
+          ]
+        },
+        "source": "injection"
+      }
+    ]
+  },
+  "with_extra_instructions": {
+    "in_context": [
+      {
+        "message": {
+          "role": "system",
+          "content": [
+            {
+              "type": "text",
+              "text": "agent system prompt"
+            }
+          ]
+        },
+        "source": "generated_system"
+      },
+      {
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Rename the config loader."
+            }
+          ]
+        },
+        "source": "history"
+      },
+      {
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Renamed it in src/config.rs."
+            }
+          ]
+        },
+        "source": "history"
+      },
+      {
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": {
+                "$multiline": [
+                  "CRITICAL: Respond with text only. Do NOT call any tools. Any tool call will be rejected.",
+                  "",
+                  "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume this task.",
+                  "",
+                  "Include:",
+                  "- The user's current goal and any explicit constraints or preferences",
+                  "- Key decisions made and their rationale",
+                  "- Files touched and the current state of in-progress work (paths + one-line status)",
+                  "- What remains to be done — the concrete next step",
+                  "- Any data, identifiers, or references the next LLM needs to continue",
+                  "",
+                  "Be concise and structured. One line per modified file unless a snippet is load-bearing. Do not repeat information already captured. Do not include a \"Final Answer\" section — the entire summary IS the handoff.",
+                  "",
+                  "Wrap the ENTIRE summary in <summary></summary> tags and output nothing outside them:",
+                  "",
+                  "<summary>",
+                  "...your handoff summary here...",
+                  "</summary>",
+                  "",
+                  "IMPORTANT: Exclude this entire message from the summary. It contains internal compaction instructions, not user conversation. Never mention or attribute to the user any requirement from this message, including summarization, text-only output, tool restrictions, formatting, or summary tags. Summarize only earlier messages. Preserve unresolved user requests as pending work; do not answer or perform them. Return only the <summary>...</summary> envelope.",
+                  "",
+                  "<extra_compaction_instructions>",
+                  "Keep file paths verbatim.",
+                  "</extra_compaction_instructions>"
+                ]
+              }
+            }
+          ]
+        },
+        "source": "injection"
+      }
+    ],
+    "standalone": [
+      {
+        "message": {
+          "role": "system",
+          "content": [
+            {
+              "type": "text",
+              "text": {
+                "$multiline": [
+                  "You are a dedicated conversation summarizer. You read a transcript of a conversation between a user and an AI agent and write a faithful handoff summary for another LLM that will resume the task.",
+                  "",
+                  "Rules:",
+                  "- Respond with plain text only. You have no tools. Never emit tool calls or function-call syntax.",
+                  "- Do not continue the task. Do not answer or perform any request in the transcript. Do not ask questions.",
+                  "- Preserve unresolved user requests as pending work.",
+                  "- Preserve concrete details: file paths, identifiers, commands, decisions and their rationale, and the next concrete step.",
+                  "- Be concise and structured. One line per modified file unless a snippet is load-bearing.",
+                  "- Wrap the entire summary in <summary></summary> tags and output nothing outside them."
+                ]
+              }
+            }
+          ]
+        },
+        "source": "injection"
+      },
+      {
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": {
+                "$multiline": [
+                  "<conversation_transcript>",
+                  "### User",
+                  "Rename the config loader.",
+                  "",
+                  "### Assistant",
+                  "Renamed it in src/config.rs.",
+                  "</conversation_transcript>",
+                  "",
+                  "Write the handoff summary for the conversation transcript above.",
+                  "",
+                  "Include:",
+                  "- The user's current goal and any explicit constraints or preferences",
+                  "- Key decisions made and their rationale",
+                  "- Files touched and the current state of in-progress work (paths + one-line status)",
+                  "- What remains to be done — the concrete next step",
+                  "- Any data, identifiers, or references the next LLM needs to continue",
+                  "",
+                  "Respond with text only. Wrap the ENTIRE summary in <summary></summary> tags and output nothing outside them:",
+                  "",
+                  "<summary>",
+                  "...your handoff summary here...",
+                  "</summary>",
+                  "",
+                  "<extra_compaction_instructions>",
+                  "Keep file paths verbatim.",
+                  "</extra_compaction_instructions>"
+                ]
+              }
+            }
+          ]
+        },
+        "source": "injection"
+      }
+    ]
+  }
+}

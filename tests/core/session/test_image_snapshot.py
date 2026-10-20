@@ -6,11 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from vibe.core.session.image_snapshot import (
-    ImageSnapshotError,
-    snapshot_image,
-    snapshot_image_bytes,
-)
+from vibe.core.session.image_snapshot import ImageSnapshotError, snapshot_image
 from vibe.core.types import FileImageSource, InlineImageSource
 from vibe.utils.images import MAX_IMAGE_BYTES
 
@@ -83,52 +79,9 @@ def test_snapshot_image_normalizes_jpg_to_jpeg_mime(tmp_path: Path) -> None:
     assert att.mime_type == "image/jpeg"
 
 
-def test_snapshot_image_bytes_inlines_when_session_dir_is_none() -> None:
-    att = snapshot_image_bytes(
-        PNG_BYTES, alias="pasted.png", mime_type="image/png", session_dir=None
-    )
-
-    assert isinstance(att.source, InlineImageSource)
-    assert att.source.data == base64.b64encode(PNG_BYTES).decode("ascii")
-    assert att.alias == "pasted.png"
-    assert att.mime_type == "image/png"
-
-
-def test_snapshot_image_bytes_writes_file_when_session_dir_is_set(
-    tmp_path: Path,
-) -> None:
-    session_dir = tmp_path / "session"
-
-    att = snapshot_image_bytes(
-        PNG_BYTES, alias="pasted.png", mime_type="image/png", session_dir=session_dir
-    )
-
-    digest = hashlib.sha1(PNG_BYTES, usedforsecurity=False).hexdigest()
-    assert isinstance(att.source, FileImageSource)
-    assert att.source.path == (session_dir / "attachments" / f"{digest}.png").resolve()
-    assert att.source.path.read_bytes() == PNG_BYTES
-
-
-def test_snapshot_image_bytes_rejects_unsupported_mime() -> None:
-    with pytest.raises(ImageSnapshotError):
-        snapshot_image_bytes(
-            PNG_BYTES, alias="x", mime_type="image/tiff", session_dir=None
-        )
-
-
 def test_snapshot_image_rejects_oversized_file(tmp_path: Path) -> None:
     src = tmp_path / "big.png"
     src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * MAX_IMAGE_BYTES)
 
     with pytest.raises(ImageSnapshotError):
         snapshot_image(src, alias="big.png", session_dir=None)
-
-
-def test_snapshot_image_bytes_rejects_oversized_data() -> None:
-    with pytest.raises(ImageSnapshotError):
-        snapshot_image_bytes(
-            b"x" * (MAX_IMAGE_BYTES + 1),
-            alias="big.png",
-            mime_type="image/png",
-            session_dir=None,
-        )

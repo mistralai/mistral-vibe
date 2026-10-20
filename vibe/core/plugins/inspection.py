@@ -388,7 +388,7 @@ def _isolated_plugin_root(root: Path) -> Iterator[Path]:
         staged_root.parent.mkdir(parents=True)
         try:
             staged_root.symlink_to(root, target_is_directory=True)
-        except NotImplementedError, OSError:
+        except (NotImplementedError, OSError):
             try:
                 shutil.copytree(root, staged_root, symlinks=True)
             except OSError as error:

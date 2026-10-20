@@ -194,7 +194,7 @@ def _lazy_findings(path: Path) -> list[Finding]:
         return []
     try:
         source = path.read_text(encoding="utf-8")
-    except OSError, UnicodeDecodeError:
+    except (OSError, UnicodeDecodeError):
         return []
     try:
         tree = ast.parse(source, filename=str(path))

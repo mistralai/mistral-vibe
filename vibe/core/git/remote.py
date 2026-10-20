@@ -86,7 +86,7 @@ def _remote_urls(remote: Remote) -> Iterator[str]:
     config_reader = getattr(remote, "config_reader", None)
     try:
         raw_url = config_reader.get("url") if config_reader is not None else None
-    except AttributeError, NoOptionError, NoSectionError, TypeError, ValueError:
+    except (AttributeError, NoOptionError, NoSectionError, TypeError, ValueError):
         raw_url = None
     if isinstance(raw_url, str):
         seen.add(raw_url)

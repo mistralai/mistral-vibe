@@ -651,7 +651,6 @@ async def test_a_fork_restores_files_of_the_turns_it_inherited(
 @pytest.mark.asyncio
 async def test_a_turn_after_rewinding_past_a_compaction_is_answered_below_its_message(
     backend_contract_mistral_api: respx.Route,
-    backend_contract_mistral_completion: Callable[[str], httpx.Response],
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_session: AppServerSession,
 ) -> None:
@@ -663,7 +662,7 @@ async def test_a_turn_after_rewinding_past_a_compaction_is_answered_below_its_me
             backend_contract_mistral_response("Second answer"),
             backend_contract_mistral_response("Third answer"),
             backend_contract_mistral_response("Fourth answer"),
-            backend_contract_mistral_completion("<summary>Four turns</summary>"),
+            backend_contract_mistral_response("<summary>Four turns</summary>"),
             backend_contract_mistral_response("Fifth answer"),
             backend_contract_mistral_response("Sixth answer"),
         ]

@@ -18,6 +18,7 @@ from pydantic import (
     model_validator,
 )
 
+from vibe.config_values import ThinkingLevel
 from vibe.core.agents.models import REMOVED_BUILTIN_AGENTS, BuiltinAgentName
 from vibe.core.config._defaults import (
     AUTO_COMPACT_WINDOW_RATIO,
@@ -28,11 +29,15 @@ from vibe.core.config._defaults import (
     DEFAULT_API_TIMEOUT,
     DEFAULT_API_WRITE_TIMEOUT,
     DEFAULT_AUTO_COMPACT_THRESHOLD,
+    DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
+    DEFAULT_COMPACTION_REASONING_LIMIT_TOKENS,
     DEFAULT_CONSOLE_BASE_URL,
     DEFAULT_MISTRAL_API_ENV_KEY,
     DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
     DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
     DEFAULT_MISTRAL_SERVER_URL,
+    DEFAULT_OUTPUT_LIMIT_RETRIES,
+    DEFAULT_OUTPUT_TOKEN_RESERVE,
     DEFAULT_THEME,
     DEFAULT_VIBE_BASE_URL,
     UNSET_AUTO_COMPACT_THRESHOLD,
@@ -272,25 +277,31 @@ def _non_empty(items: list[Any]) -> list[Any]:
     return items
 
 
+def _defines_model(payload: object) -> bool:
+    """Whether a ``models`` entry is a whole model, not a setting on another one.
+
+    Without ``name`` and ``provider`` the entry cannot validate on its own: it
+    adjusts a model some layer defines, like ``[models.<id>]`` or a field-only
+    write.
+    """
+    return not isinstance(payload, Mapping) or {"name", "provider"} <= payload.keys()
+
+
 def _without_orphan_model_overrides(
     data: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
     """Drop model overrides that no layer completes, and name them.
 
-    An entry that cannot validate on its own — missing ``name`` or
-    ``provider``, like ``[models.<id>]`` or a field-only write — overrides a
-    model defined elsewhere. When nothing defines that model (a retired
-    catalog model, an ended experiment, a typo) it cannot validate; it is
-    left out so the rest of the config still loads, and applies again if
-    the model returns.
+    A merged entry that is still not a whole model (``_defines_model``) only
+    adjusts a model nothing defines (a retired catalog model, an ended
+    experiment, a typo); it cannot validate, so it is left out for the rest of
+    the config to load, and applies again if the model returns.
     """
     models = data.get("models")
     if not isinstance(models, Mapping):
         return data, []
     orphans = [
-        alias
-        for alias, payload in models.items()
-        if isinstance(payload, Mapping) and not {"name", "provider"} <= payload.keys()
+        alias for alias, payload in models.items() if not _defines_model(payload)
     ]
     if not orphans:
         return data, []
@@ -315,6 +326,26 @@ def _normalize_tool_configs(v: Any) -> dict[str, dict[str, Any]]:
     return {name: cfg if isinstance(cfg, dict) else {} for name, cfg in v.items()}
 
 
+def _reject_shell_timeouts_above_their_maximum(
+    tools: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """A shell tool's `default_timeout` set above its `max_timeout_seconds` is a
+    configuration error, not a value to lower quietly.
+    """
+    for name, settings in tools.items():
+        default = settings.get("default_timeout")
+        maximum = settings.get("max_timeout_seconds")
+        if not isinstance(default, int | float) or not isinstance(maximum, int | float):
+            continue
+        if default > maximum:
+            raise ValueError(
+                f"tools.{name}: default_timeout {default:g} is above"
+                f" max_timeout_seconds {maximum:g}. Lower default_timeout or raise"
+                " max_timeout_seconds."
+            )
+    return tools
+
+
 def _coerce_routed_model_config(v: str) -> ModelConfig | None:
     try:
         return ModelConfig.model_validate_json(v)
@@ -332,7 +363,7 @@ def _coerce_routed_extra_models(v: Any) -> list[ModelConfig]:
     if isinstance(v, str):
         try:
             v = json.loads(v)
-        except json.JSONDecodeError, TypeError:
+        except (json.JSONDecodeError, TypeError):
             return []
     if not isinstance(v, list):
         return []
@@ -388,9 +419,21 @@ class VibeConfigSchema(ConfigSchema):
         return tuple(self._validation_warnings)
 
     @classmethod
-    def validate_merged(cls, data: dict[str, Any], *, origins: dict[str, str]) -> Self:
+    def defines_entry(cls, key: str, payload: Any) -> bool:
+        return key != "models" or _defines_model(payload)
+
+    @classmethod
+    def validate_merged(
+        cls,
+        data: dict[str, Any],
+        *,
+        origins: dict[str, str],
+        defined_entries: dict[str, dict[str, tuple[str, ...]]],
+    ) -> Self:
         data, orphans = _without_orphan_model_overrides(data)
-        config = super().validate_merged(data, origins=origins)
+        config = super().validate_merged(
+            data, origins=origins, defined_entries=defined_entries
+        )
         # The missing-pin warning already named a pinned orphan: one notice
         # per model, not one per config value. Only the fallback's own alias
         # is skipped — a pin that resolves through a catalog alias fires no
@@ -531,6 +574,7 @@ class VibeConfigSchema(ConfigSchema):
         dict[str, dict[str, Any]],
         WithDeepMerge(),
         BeforeValidator(_normalize_tool_configs),
+        AfterValidator(_reject_shell_timeouts_above_their_maximum),
     ] = Field(default_factory=dict)
     tool_paths: Annotated[
         list[Path], WithConcatMerge(), BeforeValidator(_expand_paths)
@@ -638,6 +682,16 @@ class VibeConfigSchema(ConfigSchema):
         description=(
             "Make smart-approve the default mode (implies it is available). "
             "Set by the vibe_cli_smart_approve_default experiment."
+        ),
+    )
+    enable_auto_approve: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
+        description=(
+            "Allow the auto-approve (YOLO) mode: the 'auto-approve' agent and the "
+            "--auto-approve/--yolo flag. When false, no agent with the 'yolo' safety "
+            "level is available and the flag and bypass_tool_permissions are ignored "
+            "(per-tool permissions still apply). Intended for admin-managed "
+            "(enterprise) config to forbid auto-approving tool calls."
         ),
     )
 
@@ -797,6 +851,50 @@ class VibeConfigSchema(ConfigSchema):
         description=(
             "Seconds of silence after the model starts answering before the "
             "response counts as stalled. 0 disables the limit. Unified harness only."
+        ),
+    )
+    compaction_max_output_tokens: Annotated[int, WithReplaceMerge()] = Field(
+        default=DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
+        ge=0,
+        description=(
+            "Output token cap for compaction requests, below any model or session "
+            "cap. 0 leaves compaction at the same cap as other requests. Unified "
+            "harness only."
+        ),
+    )
+    compaction_thinking: Annotated[ThinkingLevel | None, WithReplaceMerge()] = Field(
+        default=None,
+        description=(
+            "Thinking level for the first compaction request. Unset keeps the "
+            "compaction model's own level. The fallback request always runs "
+            "without reasoning. Unified harness only."
+        ),
+    )
+    compaction_reasoning_limit_tokens: Annotated[int, WithReplaceMerge()] = Field(
+        default=DEFAULT_COMPACTION_REASONING_LIMIT_TOKENS,
+        ge=0,
+        description=(
+            "Approximate reasoning tokens after which the first compaction "
+            "request is abandoned for a fallback request without tools or "
+            "reasoning. 0 disables the limit. Unified harness only."
+        ),
+    )
+    output_limit_retries: Annotated[int, WithReplaceMerge()] = Field(
+        default=DEFAULT_OUTPUT_LIMIT_RETRIES,
+        ge=0,
+        description=(
+            "Answers cut off at the output token limit that a turn discards and "
+            "asks again for, with feedback asking for a shorter response. 0 ends "
+            "the turn on the first cut-off answer. Unified harness only."
+        ),
+    )
+    output_token_reserve: Annotated[int, WithReplaceMerge()] = Field(
+        default=DEFAULT_OUTPUT_TOKEN_RESERVE,
+        ge=0,
+        description=(
+            "Tokens kept free when a request's output cap is clipped to the room "
+            "its input leaves in the model's context window. Clipping needs the "
+            "model's max_context_length. Unified harness only."
         ),
     )
     api_connect_timeout: Annotated[float, WithReplaceMerge()] = (

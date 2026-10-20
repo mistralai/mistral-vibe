@@ -79,25 +79,6 @@ async fn command_during_ready_is_not_deferred() {
     );
 }
 
-/// `flush_pending` clears the pending list.
-#[tokio::test]
-async fn flush_pending_clears_deferred_commands() {
-    let mut app = App::default();
-    app.session.status = Status::Ready;
-    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
-
-    app.pending_commands.push("/help".to_owned());
-    app.pending_commands.push("/status".to_owned());
-
-    submission::flush_pending(&mut app, &client, &config_tx);
-
-    assert!(
-        app.pending_commands.is_empty(),
-        "pending commands should be flushed"
-    );
-}
-
 /// `flush_pending` actually executes the deferred commands: `/help` adds its
 /// output to the transcript, proving the replay path works end-to-end.
 #[tokio::test]

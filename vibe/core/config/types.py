@@ -8,11 +8,6 @@ from typing import Annotated, Any
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
 
-@dataclass(frozen=True, slots=True)
-class ConfigOrigin:
-    layer_name: str
-
-
 class ConflictStrategy(StrEnum):
     CANCEL = auto()  # abort on conflict (default)
     REPLACE = auto()  # force-overwrite, discard external changes

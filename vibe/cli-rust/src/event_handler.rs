@@ -206,10 +206,10 @@ fn apply_ready(
     app.view
         .transcript
         .set_show_reasoning(startup::read_show_thinking_nodes(&runtime));
-    message_queue::reconcile_snapshot(app, client, &state);
     // The picker can resume before the handshake finishes, and that session
     // wins: the one started here is only what Esc would fall back to.
     if !app.session.resumed {
+        message_queue::reconcile_snapshot(app, client, &state);
         app.set_session_id(state.session.id.clone());
         app.subagents.seed_snapshot(state.child_sessions.clone());
         subagents::refresh(app);

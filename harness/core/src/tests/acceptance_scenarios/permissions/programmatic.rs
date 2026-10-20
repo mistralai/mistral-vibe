@@ -1,11 +1,13 @@
 use super::*;
 use crate::core::testing::{ToolOrigin, effect_id_for_operation, typescript_execution_id};
 
-fn programmatic_permission_denial_committed(
+fn programmatic_permission_result_committed(
     turn_id: &str,
     parent_call_id: &str,
     round: u32,
     operation_index: u32,
+    path: &str,
+    result: Value,
 ) -> Value {
     let operation_id = format!(
         "{}:tool:{operation_index}",
@@ -14,8 +16,13 @@ fn programmatic_permission_denial_committed(
     let action = json!({
         "action_id": effect_id_for_operation(ToolOrigin::Programmatic, &operation_id),
         "call_id": operation_id,
+        "call": {
+            "type": "runtime_builtin",
+            "name": "file_system.read_file",
+            "arguments": {"path": path},
+        },
     });
-    tool_result_committed(turn_id, &action, permission_denied_failure())
+    tool_result_committed(turn_id, &action, result)
 }
 
 #[test]
@@ -24,7 +31,7 @@ fn allows_programmatic_tool_call_with_runtime_dispatch() {
     let call_id = "program-allowed-read";
     let source =
         "async function main() { return tools.file_system.read_file({ path: 'public.txt' }); }";
-    let mut runtime = runtime_with_read_file_policy("allow", "deny");
+    let mut runtime = runtime_with_read_file_permission_policy("allow", "deny");
     let first_completion = runtime.start_turn(turn_id, "Read the public file.");
 
     runtime
@@ -174,7 +181,7 @@ fn does_not_run_post_tool_hook_when_programmatic_tool_approval_is_rejected() {
         .only_action();
     let denial = json!({
         "code": "permission_denied",
-        "reason": PERMISSION_DENIED_REASON,
+        "reason": APPROVAL_REJECTED_REASON,
     });
     let model_denial = denial.to_string();
     let outer_result = run_typescript_success(denial);
@@ -184,8 +191,13 @@ fn does_not_run_post_tool_hook_when_programmatic_tool_approval_is_rejected() {
             approval_completed(&approval, "reject"),
             running(turn_id)
                 .dispatch(llm_call(1))
-                .observe(programmatic_permission_denial_committed(
-                    turn_id, call_id, 0, 0,
+                .observe(programmatic_permission_result_committed(
+                    turn_id,
+                    call_id,
+                    0,
+                    0,
+                    "secrets.txt",
+                    approval_rejected_failure(),
                 ))
                 .observe(tool_execution_finished(turn_id, call_id, outer_result)),
         )
@@ -230,6 +242,11 @@ fn does_not_run_post_tool_hook_when_programmatic_tool_approval_times_out() {
     let operation = json!({
         "action_id": effect_id_for_operation(ToolOrigin::Programmatic, &operation_id),
         "call_id": operation_id,
+        "call": {
+            "type": "runtime_builtin",
+            "name": "file_system.read_file",
+            "arguments": {"path": "secrets.txt"},
+        },
     });
     let approval = runtime
         .complete_with_typescript_program(
@@ -242,17 +259,17 @@ fn does_not_run_post_tool_hook_when_programmatic_tool_approval_times_out() {
         .only_action();
     let failure = json!({
         "type": "failure",
-        "content": [{"type": "text", "text": "Tool approval timed out."}],
+        "content": [{"type": "text", "text": "Tool approval timed out: nobody approved or rejected this call in time, so it did not run. Treat it as rejected. Do not retry the same call right away."}],
         "error": {
             "code": "approval_failed",
-            "message": "Tool approval timed out.",
+            "message": "Tool approval timed out: nobody approved or rejected this call in time, so it did not run. Treat it as rejected. Do not retry the same call right away.",
             "retryable": false,
             "details": null,
         },
     });
     let program_result = json!({
         "code": "approval_failed",
-        "reason": "Tool approval timed out.",
+        "reason": "Tool approval timed out: nobody approved or rejected this call in time, so it did not run. Treat it as rejected. Do not retry the same call right away.",
     });
     let model_result = program_result.to_string();
     let outer_result = run_typescript_success(program_result);
@@ -449,8 +466,13 @@ async function main() {
             approval_completed(&second_approval, "reject"),
             running(turn_id)
                 .dispatch(llm_call(1))
-                .observe(programmatic_permission_denial_committed(
-                    turn_id, call_id, 0, 1,
+                .observe(programmatic_permission_result_committed(
+                    turn_id,
+                    call_id,
+                    0,
+                    1,
+                    "shared.txt",
+                    approval_rejected_failure(),
                 ))
                 .observe(tool_execution_finished(
                     turn_id,
@@ -823,7 +845,7 @@ fn rejects_programmatic_tool_call_with_permission_denied() {
     let turn_id = "turn-denied-programmatic-tool";
     let call_id = "program-denied-read";
     let source = "async function main() { try { await tools.file_system.read_file({ path: 'secrets.txt' }); return 'unexpected'; } catch (error) { return { code: error.name, reason: error.message }; } }";
-    let mut runtime = runtime_with_read_file_policy("deny", "allow");
+    let mut runtime = runtime_with_read_file_permission_policy("deny", "allow");
     let first_completion = runtime.start_turn(turn_id, "Read the secret file.");
 
     let denial = json!({
@@ -838,8 +860,13 @@ fn rejects_programmatic_tool_call_with_permission_denied() {
             running(turn_id)
                 .dispatch(llm_call(1))
                 .observe(tool_execution_started(turn_id, call_id))
-                .observe(programmatic_permission_denial_committed(
-                    turn_id, call_id, 0, 0,
+                .observe(programmatic_permission_result_committed(
+                    turn_id,
+                    call_id,
+                    0,
+                    0,
+                    "secrets.txt",
+                    permission_denied_failure(),
                 ))
                 .observe(tool_execution_finished(turn_id, call_id, outer_result)),
         )
@@ -875,7 +902,7 @@ async function main() {
     return denialCount;
 }
 "#;
-    let mut runtime = runtime_with_read_file_policy("deny", "allow");
+    let mut runtime = runtime_with_read_file_permission_policy("deny", "allow");
     let first_completion = runtime.start_turn(turn_id, "Try every read.");
 
     let outer_result = run_typescript_success(json!(100));
@@ -884,8 +911,13 @@ async function main() {
             .dispatch(llm_call(1))
             .observe(tool_execution_started(turn_id, call_id)),
         |expected, index| {
-            expected.observe(programmatic_permission_denial_committed(
-                turn_id, call_id, index, index,
+            expected.observe(programmatic_permission_result_committed(
+                turn_id,
+                call_id,
+                index,
+                index,
+                "secrets.txt",
+                permission_denied_failure(),
             ))
         },
     );
@@ -939,8 +971,13 @@ fn skips_post_tool_hook_for_denied_programmatic_tool_call() {
             running(turn_id)
                 .dispatch(llm_call(1))
                 .observe(tool_execution_started(turn_id, call_id))
-                .observe(programmatic_permission_denial_committed(
-                    turn_id, call_id, 0, 0,
+                .observe(programmatic_permission_result_committed(
+                    turn_id,
+                    call_id,
+                    0,
+                    0,
+                    "secrets.txt",
+                    permission_denied_failure(),
                 ))
                 .observe(tool_execution_finished(turn_id, call_id, outer_result)),
         )
@@ -1087,8 +1124,13 @@ fn rejects_programmatic_tool_call_when_pre_hook_supplies_denied_arguments() {
             ),
             running(turn_id)
                 .dispatch(llm_call(1))
-                .observe(programmatic_permission_denial_committed(
-                    turn_id, call_id, 0, 0,
+                .observe(programmatic_permission_result_committed(
+                    turn_id,
+                    call_id,
+                    0,
+                    0,
+                    "secrets.txt",
+                    permission_denied_failure(),
                 ))
                 .observe(tool_execution_finished(turn_id, call_id, outer_result)),
         )
@@ -1147,8 +1189,13 @@ async function main() {
                     json!({"path": "public.txt"}),
                 ))
                 .observe(tool_execution_started(turn_id, call_id))
-                .observe(programmatic_permission_denial_committed(
-                    turn_id, call_id, 0, 0,
+                .observe(programmatic_permission_result_committed(
+                    turn_id,
+                    call_id,
+                    0,
+                    0,
+                    "secrets.txt",
+                    permission_denied_failure(),
                 )),
         )
         .only_action();
@@ -1192,7 +1239,7 @@ async function main() {
     );
 }
 "#;
-    let mut runtime = runtime_with_read_file_policy("deny", "allow");
+    let mut runtime = runtime_with_read_file_permission_policy("deny", "allow");
     let first_completion = runtime.start_turn(turn_id, "Read every file you can.");
 
     let program_result = json!(["permission_denied", "permission_denied"]);
@@ -1204,11 +1251,21 @@ async function main() {
             running(turn_id)
                 .dispatch(llm_call(1))
                 .observe(tool_execution_started(turn_id, call_id))
-                .observe(programmatic_permission_denial_committed(
-                    turn_id, call_id, 0, 0,
+                .observe(programmatic_permission_result_committed(
+                    turn_id,
+                    call_id,
+                    0,
+                    0,
+                    "secrets.txt",
+                    permission_denied_failure(),
                 ))
-                .observe(programmatic_permission_denial_committed(
-                    turn_id, call_id, 0, 1,
+                .observe(programmatic_permission_result_committed(
+                    turn_id,
+                    call_id,
+                    0,
+                    1,
+                    "credentials.txt",
+                    permission_denied_failure(),
                 ))
                 .observe(tool_execution_finished(turn_id, call_id, outer_result)),
         )

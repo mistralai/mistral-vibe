@@ -364,7 +364,7 @@ class MCPAuthenticationService(MCPAuthorizationProvider):
                 self._advance_descriptor(server.name)
                 self._advance_connection(server.name)
                 return self._required(server.name, "expired")
-            except MCPOAuthTransientRefreshError, OAuthFlowError, MCPOAuthError:
+            except (MCPOAuthTransientRefreshError, OAuthFlowError, MCPOAuthError):
                 return self._required(server.name, "expired")
             tokens = await storage.get_tokens()
             if tokens is None:

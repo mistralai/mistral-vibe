@@ -4,7 +4,7 @@ use super::cases::{checkpoint_with_turn, restorable_active_tool_checkpoint};
 use crate::core::checkpoint::{Checkpoint, decode_checkpoint};
 use crate::core::features::compaction::{
     CompactionBudget, CompactionProjection, CompactionProjectionFit, CompactionTrigger,
-    PendingCompaction,
+    NewestToolExchange, PendingCompaction,
 };
 use crate::core::testing::config;
 use crate::core::{
@@ -86,6 +86,7 @@ fn compaction_projection(state: &crate::core::HarnessState) -> CompactionProject
             image_delivery: state.config.settings.context.image_delivery.compaction,
             image_cost: state.config.settings.context.image_token_cost,
         },
+        NewestToolExchange::Keep,
     )
     .expect("test compaction projection can be estimated");
     let CompactionProjectionFit::Fitted(projection) = projection else {
@@ -237,33 +238,9 @@ fn restore_rejects_noncanonical_turn_identities() {
         }]
     });
 
-    let mut previous_turn = checkpoint_with_turn(json!({
-        "type": "active",
-        "turn_id": "turn-new",
-        "iterations": 0,
-        "phase": {
-            "type": "awaiting_hook",
-            "pending": {
-                "hook": "pre_agent_turn",
-                "hook_binding_ids": ["binding-1"],
-                "user_content": [{ "type": "text", "text": "start" }],
-                "previous_turn": {
-                    "type": "terminal",
-                    "turn_id": "turn-previous",
-                    "outcome": { "type": "rejected", "reason": "no" }
-                }
-            }
-        },
-        "queued": { "type": "empty" },
-        "pending_steer": [],
-        "model_input_ready": false
-    }));
-    previous_turn["last_finished_turn_id"] = json!("turn-other");
-
     for (label, value) in [
         ("empty terminal identity", terminal),
         ("empty queued identity", queued),
-        ("mismatched previous turn", previous_turn),
     ] {
         let checkpoint = decode_checkpoint(&value.to_string()).unwrap();
         assert!(checkpoint.restore(config()).is_err(), "restored {label}");

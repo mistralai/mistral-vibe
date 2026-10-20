@@ -91,16 +91,6 @@ class SessionNotFoundError(VibeRequestError):
         )
 
 
-class SessionLoadError(VibeRequestError):
-    code = INVALID_PARAMS
-
-    def __init__(self, session_id: str, detail: str) -> None:
-        super().__init__(
-            message=f"Failed to load session {session_id}: {detail}",
-            data={"session_id": session_id},
-        )
-
-
 class RateLimitError(VibeRequestError):
     code = RATE_LIMITED
 

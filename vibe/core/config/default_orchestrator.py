@@ -18,7 +18,7 @@ from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.layers.model_catalog import ModelCatalogLayer
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.layers.project import ProjectConfigLayer
-from vibe.core.config.layers.user import UserConfigLayer
+from vibe.core.config.layers.user import SuppliedUserConfigLayer, UserConfigLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.utils.http import configure_ssl_context
@@ -41,14 +41,12 @@ async def build_default_orchestrator(
     their sources are enabled, so a trusted project config inherits unspecified
     values from the user config and both TOML layers override GrowthBook
     assignments. The default persistence target is the user layer, otherwise a
-    trusted project layer, otherwise an ephemeral fallback.
+    trusted project layer, otherwise an ephemeral fallback. When the harness
+    files carry a ``user_config``, it stands in for the user TOML, and saves to
+    it stay in memory.
     """
     manager = harness_files or get_harness_files_manager()
-    user_layer = (
-        UserConfigLayer(path=manager.user_config_file)
-        if "user" in manager.sources
-        else None
-    )
+    user_layer = _user_layer(manager) if "user" in manager.sources else None
     project_layer = (
         ProjectConfigLayer(
             path=manager.cwd or Path.cwd(), trust_store=manager.trust_store
@@ -94,6 +92,12 @@ async def build_default_orchestrator(
         enable_system_trust_store=orchestrator.config.enable_system_trust_store,
     )
     return orchestrator
+
+
+def _user_layer(manager: HarnessFilesManager) -> ConfigLayer[RawConfig]:
+    if manager.user_config is None:
+        return UserConfigLayer(path=manager.user_config_file)
+    return SuppliedUserConfigLayer(data=manager.user_config)
 
 
 async def build_user_config_orchestrator() -> ConfigOrchestrator[VibeConfigSchema]:

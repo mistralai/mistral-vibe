@@ -116,7 +116,7 @@ def _cached_tokens(usage: object | None) -> int:
     )
     try:
         return int(value or 0)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return 0
 
 

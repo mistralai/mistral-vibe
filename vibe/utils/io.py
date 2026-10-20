@@ -126,7 +126,7 @@ def _decode(
     for encoding in _get_candidate_encodings(raw, preferred):
         try:
             return raw.decode(encoding), encoding
-        except LookupError, UnicodeDecodeError, ValueError:
+        except (LookupError, UnicodeDecodeError, ValueError):
             pass
     errors = "strict" if raise_on_error else "replace"
     return raw.decode("utf-8", errors=errors), "utf-8"
@@ -168,7 +168,7 @@ def encode_safe(text: str, *, encoding: str = "utf-8", newline: str = "\n") -> b
     body = text if newline == "\n" else text.replace("\n", newline)
     try:
         return body.encode(encoding)
-    except LookupError, UnicodeError:
+    except (LookupError, UnicodeError):
         return body.encode("utf-8")
 
 

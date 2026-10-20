@@ -153,6 +153,7 @@ from vibe.app_server.models import (
     ApprovalDecision,
     ApprovalDecisionType,
     ImageAttachment,
+    MCPState,
     MentionStats,
     PathGrantScope,
     PublicCallbackEntry,
@@ -466,20 +467,11 @@ class VibeAcpAgent(AcpAgent):
         del protocol_version, kwargs
         self.client_capabilities = client_capabilities
         self.client_info = client_info
-        delegated = bool(
-            client_capabilities
-            and client_capabilities.field_meta
-            and client_capabilities.field_meta.get("browser-auth-delegated") is True
-        )
+        delegated = self._client_meta_flag("browser-auth-delegated")
         auth_methods: list[EnvVarAuthMethod | TerminalAuthMethod | Any] = [
             *self._auth.browser_methods(delegated=delegated)
         ]
-        supports_terminal = bool(
-            client_capabilities
-            and client_capabilities.field_meta
-            and client_capabilities.field_meta.get("terminal-auth") is True
-        )
-        if supports_terminal:
+        if self._client_meta_flag("terminal-auth"):
             command = sys.executable
             args = (
                 ["--setup"]
@@ -657,6 +649,15 @@ class VibeAcpAgent(AcpAgent):
             )
             if not page.data:
                 raise RuntimeError("History pagination did not advance")
+
+    # Opt-ins a client sends in its initialize `_meta`.
+    def _client_meta_flag(self, name: str) -> bool:
+        capabilities = self.client_capabilities
+        return bool(
+            capabilities
+            and capabilities.field_meta
+            and capabilities.field_meta.get(name) is True
+        )
 
     def _supports_user_input(self) -> bool:
         capabilities = self.client_capabilities
@@ -1669,7 +1670,7 @@ class VibeAcpAgent(AcpAgent):
             match method:
                 case "connectors/list":
                     listing = self._connectors_request(ConnectorsListRequest, params)
-                    response = ConnectorsListResponse.from_state(
+                    response = self._connector_list(
                         await self._connectors_resource(listing.session_id).read()
                     )
                 case "connectors/authUrl":
@@ -1678,6 +1679,13 @@ class VibeAcpAgent(AcpAgent):
                         url=await self._connectors_resource(
                             auth.session_id
                         ).connector_auth_url(auth.name)
+                    )
+                case "connectors/connect":
+                    connect = self._connectors_request(ConnectorRequest, params)
+                    response = self._connector_list(
+                        await self._connectors_resource(
+                            connect.session_id
+                        ).connect_connector(connect.name)
                     )
                 case "connectors/refresh":
                     refresh = self._connectors_request(ConnectorsRefreshRequest, params)
@@ -1691,10 +1699,10 @@ class VibeAcpAgent(AcpAgent):
                             failures.append(exc)
                     if len(failures) == len(refresh.names):
                         raise failures[0]
-                    response = ConnectorsListResponse.from_state(resource.state)
+                    response = self._connector_list(resource.state)
                 case "connectors/toggle":
                     toggle = self._connectors_request(ConnectorsToggleRequest, params)
-                    response = ConnectorsListResponse.from_state(
+                    response = self._connector_list(
                         await self._connectors_resource(toggle.session_id).toggle(
                             toggle.name,
                             source="connector",
@@ -1707,6 +1715,13 @@ class VibeAcpAgent(AcpAgent):
         except AppServerResponseError as exc:
             raise InvalidRequestError(exc.error.message) from exc
         return response.model_dump(mode="json")
+
+    # Opted into at initialize, like terminal auth: older clients reject the
+    # `needs_connect` reachability they have no action for.
+    def _connector_list(self, state: MCPState) -> ConnectorsListResponse:
+        return ConnectorsListResponse.from_state(
+            state, client_can_connect=self._client_meta_flag("connectors-connect")
+        )
 
     def _connectors_resource(self, session_id: str) -> MCPResource:
         return self._get_session(session_id).app_server.resources.mcp
@@ -1767,6 +1782,7 @@ class VibeAcpAgent(AcpAgent):
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             total_tokens=usage.total_tokens,
+            cached_read_tokens=usage.cached_input_tokens or None,
         )
 
     def _send_usage_update(self, session: AcpSession) -> None:

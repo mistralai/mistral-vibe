@@ -7,10 +7,11 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::report::compute_session_cost;
+use super::subagents::wait_for_subagents;
 use super::usage::UsageBaseline;
 use crate::cli::OutputFormat;
 use crate::headless_history::read_history;
-use crate::headless_output::{last_assistant_text, turn_entries, Output};
+use crate::headless_output::Output;
 use crate::headless_run::{StopRequests, TurnCounter};
 use crate::run_export::{turn_stop_from_turn, RunOutcome, TurnStop};
 use crate::server::{notification, Client, Notification};
@@ -109,6 +110,8 @@ pub(super) async fn run_turn_loop(
                 }
             }
             notification::TURN_COMPLETED if matches_turn(&notification.params, turn_id) => {
+                // The run ends once its subagents do, so the export sees how each ended.
+                wait_for_subagents(client, notifications, session_id, stop).await;
                 let turn = notification.params.pointer("/turn").unwrap_or(&Value::Null);
                 let status = turn.get("status").and_then(Value::as_str).unwrap_or("");
                 if status == "failed" {
@@ -159,8 +162,8 @@ pub(super) async fn run_turn_loop(
     }
 }
 
-/// Finalize output after a turn ends: write JSON to stdout for JSON format,
-/// or extract the last assistant text for TEXT format. A write failure fails
+/// Finalize output after a turn ends: write the history for JSON format, or
+/// the turn's last assistant text for TEXT format. A write failure fails
 /// the run: reporting `Finished` with no result delivered would score a run
 /// that produced nothing.
 pub(super) async fn finalize_output(
@@ -179,17 +182,9 @@ pub(super) async fn finalize_output(
     let entries = read_history(client, session_id)
         .await
         .map_err(|error| format!("read session history: {error:#}"))?;
-    match format {
-        OutputFormat::Json => {
-            // Write the full history as JSON.
-            output
-                .finalize(entries)
-                .map(|_| None)
-                .map_err(|error| format!("write final JSON output: {error}"))
-        }
-        // TEXT answers with the turn's last assistant message.
-        _ => Ok(last_assistant_text(&turn_entries(&entries, turn_id))),
-    }
+    output
+        .finalize(entries, turn_id)
+        .map_err(|error| format!("write final output: {error}"))
 }
 
 fn matches_turn(params: &Value, turn_id: &str) -> bool {

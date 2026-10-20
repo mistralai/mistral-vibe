@@ -3,17 +3,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections.abc import Sequence
+from contextlib import ExitStack
 from pathlib import Path
 import sys
 from typing import TYPE_CHECKING
 
 from vibe._experimental_harness import ExperimentalHarnessUnavailableError
-from vibe.app_server._runtime import (
-    HarnessProcess,
-    HarnessServer,
-    create_harness_server,
-)
-from vibe.app_server.multiplex import serve_multiplexed
+from vibe.app_server._runtime import HarnessProcess, create_harness_server
+from vibe.app_server.multiplex import ChannelOpen, ChannelServer, serve_multiplexed
 from vibe.app_server.transport import (
     BinaryLineReader,
     BinaryLineWriter,
@@ -39,15 +36,49 @@ async def serve_stdio(
     multiplex: bool = False,
     additional_builtin_plugin_roots: Sequence[Path] = (),
     agent_socket: AgentSocketMount | None = None,
+    end_on_sigterm: bool = False,
 ) -> None:
-    transport = (
+    """``end_on_sigterm``: SIGTERM ends the input as its end does; the process
+    exits once serving has wound down. For the process's own server only.
+    """
+    transport: JsonRpcTransport = (
         StdioJsonRpcTransport.from_standard_streams()
         if reader is None or writer is None
         else StdioJsonRpcTransport(reader, writer)
     )
+    with ExitStack() as stack:
+        if end_on_sigterm:
+            from vibe.app_server._termination import ending_on_sigterm
+
+            transport = stack.enter_context(ending_on_sigterm(transport))
+        await _serve(
+            transport,
+            multiplex=multiplex,
+            additional_builtin_plugin_roots=additional_builtin_plugin_roots,
+            agent_socket=agent_socket,
+        )
+
+
+async def _serve(
+    transport: JsonRpcTransport,
+    *,
+    multiplex: bool,
+    additional_builtin_plugin_roots: Sequence[Path],
+    agent_socket: AgentSocketMount | None,
+) -> None:
     if multiplex:
 
-        async def create_channel(channel: JsonRpcTransport) -> HarnessServer:
+        async def create_channel(
+            channel: JsonRpcTransport, options: ChannelOpen | None
+        ) -> ChannelServer:
+            if options is not None:
+                from vibe.app_server._run_channel import RunChannelServer
+
+                return RunChannelServer(
+                    channel,
+                    options,
+                    additional_builtin_plugin_roots=additional_builtin_plugin_roots,
+                )
             harness_files = HarnessFilesManager(
                 sources=("user", "project"),
                 trust_store=trusted_folders_manager.for_session(),
@@ -161,6 +192,7 @@ def main() -> None:
                 multiplex=args.multiplex,
                 additional_builtin_plugin_roots=args.additional_builtin_plugin_roots,
                 agent_socket=agent_socket,
+                end_on_sigterm=True,
             )
         )
     except ExperimentalHarnessUnavailableError as e:
@@ -190,7 +222,7 @@ def _neutralize_stdout() -> None:
         return
     try:
         os.dup2(devnull, sys.stdout.fileno())
-    except OSError, ValueError:
+    except (OSError, ValueError):
         pass
     finally:
         os.close(devnull)

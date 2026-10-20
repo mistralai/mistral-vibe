@@ -9,12 +9,15 @@ through a provided-tool executor like Vibe's own. The executor awaits the
 host's runner: its ``output`` is the tool result, and its ``error``, an
 exception or no answer within the timeout is a tool error the model reads.
 The tool call's own history entry records the call and its result.
+
+Subagents call client tools too. Each call names its caller, the session
+that made it, so the client can tell a subagent's call from its root's.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 import json
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -79,15 +82,35 @@ class ClientToolDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class ClientToolCaller:
+    """The session that made a call. A root session has no parent, no name
+    and no agent; a subagent names its parent, its own name and the agent it
+    runs as.
+    """
+
+    session_id: str
+    root_session_id: str
+    parent_session_id: str | None = None
+    name: str | None = None
+    agent_type: str | None = None
+
+
+type ClientToolCallerResolver = Callable[[str], Awaitable[ClientToolCaller]]
+"""Finds the caller for a session ID."""
+
+
+@dataclass(frozen=True, slots=True)
 class ClientToolCall:
     """One call of a client tool. ``call_id`` is unique to the call;
-    ``name`` is ``namespace.name``.
+    ``name`` is ``namespace.name``. ``caller`` is ``None`` when Vibe could
+    not tell who made the call.
     """
 
     call_id: str
     name: str
     input: JsonValue
     tool_call_id: str
+    caller: ClientToolCaller | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,19 +176,30 @@ class ClientProvidedTools:
                 + ", ".join(clashes)
             )
 
-    def executor_factory(self) -> ProvidedToolExecutorFactory:
-        def build(_session_id: str) -> ProvidedToolExecutor:
+    def executor_factory(
+        self, resolve_caller: ClientToolCallerResolver | None = None
+    ) -> ProvidedToolExecutorFactory:
+        """Build one executor per session. ``resolve_caller`` names the
+        session on its calls; it runs on the session's first call.
+        """
+
+        def build(session_id: str) -> ProvidedToolExecutor:
+            caller: ClientToolCaller | None = None
+
             async def execute(
                 action: RustProvidedToolCallAction,
             ) -> RustToolSucceededEvent | RustToolFailedEvent:
-                return await self._call(action)
+                nonlocal caller
+                if caller is None and resolve_caller is not None:
+                    caller = await _resolve(resolve_caller, session_id)
+                return await self._call(action, caller)
 
             return execute
 
         return build
 
     async def _call(
-        self, action: RustProvidedToolCallAction
+        self, action: RustProvidedToolCallAction, caller: ClientToolCaller | None
     ) -> RustToolSucceededEvent | RustToolFailedEvent:
         tools = self._tools
         name = f"{action.call.group_name}.{action.call.tool_name}"
@@ -176,6 +210,7 @@ class ClientProvidedTools:
             name=name,
             input=dict(action.call.arguments),
             tool_call_id=action.call_id,
+            caller=caller,
         )
         deadline = asyncio.timeout(tools.timeout)
         try:
@@ -203,6 +238,19 @@ class ClientProvidedTools:
                 details=result.error.details,
             )
         return _succeeded(action, result)
+
+
+async def _resolve(
+    resolve_caller: ClientToolCallerResolver, session_id: str
+) -> ClientToolCaller | None:
+    try:
+        return await resolve_caller(session_id)
+    except Exception:
+        # The call still runs: a client that needs its caller refuses it.
+        logger.warning(
+            "Could not tell which session called a client tool", exc_info=True
+        )
+        return None
 
 
 def check_client_tools(tools: Sequence[ClientToolDefinition]) -> None:
@@ -284,6 +332,8 @@ __all__ = [
     "DEFAULT_NAMESPACE",
     "ClientProvidedTools",
     "ClientToolCall",
+    "ClientToolCaller",
+    "ClientToolCallerResolver",
     "ClientToolDeclarationError",
     "ClientToolDefinition",
     "ClientToolError",

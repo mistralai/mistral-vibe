@@ -15,7 +15,7 @@ export VIBE_APP_SERVER_CWD = .
 # VIBE_APP_SERVER_CWD); the guard only activates when that checkout exists.
 HARNESS_SRC ?=
 HARNESS_EDITABLE = $(if $(HARNESS_SRC),$(if $(wildcard $(HARNESS_SRC)/pyproject.toml),--with-editable $(HARNESS_SRC) ,),)
-start run release profile-stress: export VIBE_APP_SERVER_CMD = uv run --quiet $(HARNESS_EDITABLE)vibe-app-server
+start run release profile-stress: export VIBE_APP_SERVER_CMD = uv run --quiet --python cpython>=3.12+gil $(HARNESS_EDITABLE)vibe-app-server
 
 # Set QUIET=1 for quiet test output: nextest prints only failures and the
 # summary, and the golden pytest run gets -q.
@@ -73,9 +73,10 @@ clean:
 sweep:          ## Delete incremental sessions older than 7 days
 	[ ! -d vibe/cli-rust/target/debug/incremental ] || find vibe/cli-rust/target/debug/incremental -maxdepth 1 -mindepth 1 -type d -mtime +7 -exec rm -rf {} +
 
-test_rust:      ## Rust tests via cargo-nextest, fast gate before client-e2e
+test_rust:      ## Rust tests: pure `units` in one libtest process, the rest via cargo-nextest
 	@cargo nextest --version >/dev/null 2>&1 || { echo "cargo-nextest missing: cargo install cargo-nextest --locked --version 0.9.146"; exit 1; }
-	cargo nextest run $(M) $(TEST_CARGO_FLAGS) $(NEXTEST_QUIET)
+	cargo nextest run $(M) $(TEST_CARGO_FLAGS) -E 'not binary(units)' $(NEXTEST_QUIET)
+	cargo test $(M) $(TEST_CARGO_FLAGS) --test units $(QUIET_FLAGS)
 
 test: build_test test_rust  ## Rust tests, then golden snapshots
 	rm -rf client-e2e/goldens/_live

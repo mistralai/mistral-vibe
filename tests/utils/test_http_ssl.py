@@ -6,12 +6,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from vibe.utils import http as http_module
-from vibe.utils.http import build_ssl_context, configure_ssl_context
+from vibe.utils.http import build_ssl_context, configure_ssl_context, pin_ssl_context
 
 
 @pytest.fixture(autouse=True)
 def _clear_ssl_cache(monkeypatch):
     monkeypatch.setattr(http_module, "_use_system_trust_store", False)
+    monkeypatch.setattr(http_module, "_pinned", False)
     build_ssl_context.cache_clear()
     yield
     build_ssl_context.cache_clear()
@@ -36,6 +37,16 @@ def test_build_ssl_context_uses_certifi_by_default(monkeypatch):
         build_ssl_context()
 
     create_default_context.assert_called_once_with(cafile="/certifi.pem")
+
+
+def test_build_ssl_context_validates_certifi_chains_strictly(monkeypatch):
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+
+    ctx = build_ssl_context()
+
+    assert ctx.verify_flags & ssl.VERIFY_X509_STRICT
+    assert ctx.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN
 
 
 def test_build_ssl_context_uses_system_trust_store_when_configured(monkeypatch):
@@ -143,3 +154,35 @@ def test_build_ssl_context_no_custom_certs(monkeypatch):
         build_ssl_context()
 
     mock_ctx.load_verify_locations.assert_not_called()
+
+
+def test_a_pinned_trust_store_ignores_later_configs(monkeypatch):
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    pin_ssl_context(enable_system_trust_store=True)
+
+    configure_ssl_context(enable_system_trust_store=False)
+
+    mock_ctx = MagicMock(spec=ssl.SSLContext)
+    with (
+        patch(
+            "vibe.utils.http.truststore.SSLContext", return_value=mock_ctx
+        ) as truststore_context,
+        patch("vibe.utils.http.ssl.create_default_context") as create_default_context,
+    ):
+        assert build_ssl_context() is mock_ctx
+    truststore_context.assert_called_once_with(ssl.PROTOCOL_TLS_CLIENT)
+    create_default_context.assert_not_called()
+
+
+def test_pinning_again_changes_the_trust_store(monkeypatch):
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    pin_ssl_context(enable_system_trust_store=True)
+    build_ssl_context()
+
+    pin_ssl_context(enable_system_trust_store=False)
+
+    mock_ctx = MagicMock(spec=ssl.SSLContext)
+    with patch("vibe.utils.http.ssl.create_default_context", return_value=mock_ctx):
+        assert build_ssl_context() is mock_ctx

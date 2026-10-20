@@ -214,17 +214,6 @@ fn pasting_over_the_whole_prompt_opens_the_mode() {
     assert_eq!(app.chat_input.input, "model");
 }
 
-#[test]
-fn a_literal_leading_slash_opens_no_command_menu() {
-    let mut app = App::default();
-    app.chat_input.input = "/he".to_owned();
-    app.chat_input.cursor = 3;
-
-    vibe_rs::completion_manager::input_changed(&mut app);
-
-    assert!(!vibe_rs::completion_manager::is_open(&app));
-}
-
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }

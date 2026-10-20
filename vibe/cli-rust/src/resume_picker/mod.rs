@@ -256,7 +256,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             // summary still in flight.
             crate::turn_summary::on_turn_end(app, client);
             crate::turn_summary::cancel(app);
-            app.queue.clear();
+            crate::message_queue::adopt(app, state.turn_queue.as_ref());
             // Reset the subagent views; the resumed state owns its own children.
             crate::subagents::reset_views(app);
             app.subagents.seed_snapshot(state.child_sessions.clone());

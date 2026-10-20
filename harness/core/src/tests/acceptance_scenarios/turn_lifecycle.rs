@@ -242,6 +242,124 @@ fn final_iteration_tool_call_runs_then_stops_with_a_limit_reason() {
     );
 }
 
+///
+/// *Prepare*: A turn allows a single model iteration.
+/// *Do*: The model writes text next to its tool call, and the tool result arrives.
+/// *Assert*: The turn stops at the limit and its output is that text alone, as a final
+/// answer would carry it: no tool call and no tool result.
+///
+#[test]
+fn iteration_limit_output_is_the_latest_assistant_text() {
+    // Prepare
+    let turn_id = "turn-iteration-limit-with-text";
+    let mut harness_config = config();
+    harness_config.settings.turn.max_iterations = Some(1);
+    let mut runtime = SynchronousRuntime::new(harness_config);
+    let completion = runtime.start_turn(turn_id, "read the file");
+    let arguments = json!({"path": "notes.txt"});
+    let call = tool_call("call-final", "read_file", arguments.clone());
+    let text = json!({"type": "text", "text": "Reading the notes next."});
+    let mut candidate = tool_calls_candidate(std::slice::from_ref(&call));
+    candidate["message"]["content"]
+        .as_array_mut()
+        .expect("candidate content is a list")
+        .insert(0, text.clone());
+
+    // Do
+    let mut parts = vec![text.clone()];
+    parts.push(call);
+    let tool = runtime
+        .apply(
+            json!({
+                "type": "completion_succeeded",
+                "action_id": action_id(&completion),
+                "result": {"parts": parts, "finish_reason": "tool_call", "usage": null},
+            }),
+            running(turn_id)
+                .dispatch(runtime_tool("file_system.read_file", arguments))
+                .observe(json!({
+                    "type": "assistant_message_committed",
+                    "turn_id": turn_id,
+                    "action_id": action_id(&completion),
+                    "candidate": candidate,
+                }))
+                .observe(tool_execution_started(turn_id, "call-final")),
+        )
+        .only_action();
+    let tool_result = file_read_success(&tool, "the file body");
+
+    // Assert
+    runtime.apply(
+        tool_result.clone(),
+        completed(turn_id, vec![text.clone()])
+            .observe_tool_result(&tool, &tool_result)
+            .observe(tool_execution_finished(
+                turn_id,
+                "call-final",
+                tool_result["result"].clone(),
+            ))
+            .observe(turn_completed_at_iteration_limit(turn_id, vec![text])),
+    );
+}
+
+///
+/// *Prepare*: The model wrote text next to a tool call, and the tool is running.
+/// *Do*: Interrupt the turn.
+/// *Assert*: The interrupted turn reports that text alone as its output: no tool call and no
+/// tool result.
+///
+#[test]
+fn interrupted_turn_output_is_the_latest_assistant_text() {
+    // Prepare
+    let turn_id = "turn-interrupted-with-text";
+    let reason = "user pressed stop";
+    let mut runtime = SynchronousRuntime::new(config());
+    let completion = runtime.start_turn(turn_id, "read the file");
+    let arguments = json!({"path": "notes.txt"});
+    let call = tool_call("call-running", "read_file", arguments.clone());
+    let text = json!({"type": "text", "text": "Reading the notes next."});
+    let mut candidate = tool_calls_candidate(std::slice::from_ref(&call));
+    candidate["message"]["content"]
+        .as_array_mut()
+        .expect("candidate content is a list")
+        .insert(0, text.clone());
+    let tool = runtime
+        .apply(
+            json!({
+                "type": "completion_succeeded",
+                "action_id": action_id(&completion),
+                "result": {"parts": [text.clone(), call], "finish_reason": "tool_call", "usage": null},
+            }),
+            running(turn_id)
+                .dispatch(runtime_tool("file_system.read_file", arguments))
+                .observe(json!({
+                    "type": "assistant_message_committed",
+                    "turn_id": turn_id,
+                    "action_id": action_id(&completion),
+                    "candidate": candidate,
+                }))
+                .observe(tool_execution_started(turn_id, "call-running")),
+        )
+        .only_action();
+
+    // Do / Assert
+    runtime.apply(
+        json!({
+            "type": "interrupt",
+            "expected_turn_id": turn_id,
+            "reason": reason,
+        }),
+        interrupted(turn_id, reason)
+            .observe(json!({
+                "type": "turn_interrupted",
+                "turn_id": turn_id,
+                "reason": reason,
+                "output": [text],
+            }))
+            .observe(action_abandoned(turn_id, &tool, "interrupt")),
+    );
+}
+
 #[test]
 fn completes_final_answer_at_iteration_limit_without_a_stop_reason() {
     let turn_id = "turn-final-answer-at-iteration-limit";

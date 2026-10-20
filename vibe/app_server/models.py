@@ -434,6 +434,8 @@ class TokenUsage(ProtocolModel):
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    # The part of ``input_tokens`` the provider served from its prompt cache.
+    cached_input_tokens: int = 0
 
 
 class AgentStatsSnapshot(ProtocolModel):
@@ -484,6 +486,7 @@ class AgentStatsSnapshot(ProtocolModel):
             input_tokens=self.session_prompt_tokens,
             output_tokens=self.session_completion_tokens,
             total_tokens=self.session_total_llm_tokens,
+            cached_input_tokens=self.session_cached_tokens,
         )
 
 
@@ -775,6 +778,7 @@ class MCPSourceStatus(StrEnum):
     ENABLED = auto()
     NEEDS_AUTH = auto()
     NEEDS_SETUP = auto()
+    NEEDS_CONNECT = auto()
     UNAVAILABLE = auto()
 
 
@@ -854,23 +858,6 @@ class SessionLogSummary(ProtocolModel):
     path: str | None = None
     title: str | None = None
     needs_initial_auto_title: bool = False
-
-
-class SavedSessionSummary(ProtocolModel):
-    session_id: str
-    cwd: str
-    parent_session_id: str | None = None
-    title: str | None = None
-    end_time: str | None = None
-    preview: str = ""
-
-    @property
-    def option_id(self) -> str:
-        return self.session_id
-
-    @property
-    def short_id(self) -> str:
-        return self.session_id[:8]
 
 
 class PendingEffectState(ProtocolModel):
@@ -1228,6 +1215,18 @@ class PublicSession(ProtocolModel):
     token_usage: TokenUsage | None = None
     context_usage: TokenUsage | None = None
     harness: Literal["legacy", "unified"] | None = None
+    # Scheduled loops persisted for this session. The additive default keeps
+    # old clients and old servers working (ADR 0014).
+    loops: list[ScheduledLoop] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _default_bumped_at(self) -> Self:
+        # A session that has not started a user turn yet ranks by its creation.
+        # Clients that each picked their own fallback ranked it differently
+        # depending on the endpoint that answered, so the session moved.
+        if self.bumped_at is None:
+            self.bumped_at = self.created_at
+        return self
 
 
 class PublicChildSession(ProtocolModel):
@@ -1361,11 +1360,3 @@ class ScheduledLoop(ProtocolModel):
     interval_seconds: int | None = None
     cron: str | None = Field(default=None, exclude_if=lambda value: value is None)
     next_fire_at: float
-
-
-class CompactionDetails(ProtocolModel):
-    current_context_tokens: int | None = None
-    threshold: int | None = None
-    summary_length: int | None = None
-    old_session_id: str | None = None
-    new_session_id: str | None = None

@@ -26,6 +26,28 @@ class SpawnedVibeProcessFixture(Protocol):
 
 
 VIBE_EXECUTABLE = str(Path(sys.executable).with_name("vibe"))
+# The Rust CLI a test runs, set by the `rust_cli` fixture.
+RUST_CLI_ENV = "VIBE_E2E_RUST_CLI"
+
+
+def run_rust_vibe(
+    cwd: Path, args: Sequence[str], *, timeout: float = 60
+) -> subprocess.CompletedProcess[str]:
+    """Run the Rust CLI in `cwd` to completion, on this checkout's app server."""
+    env = os.environ.copy()
+    executable = env.pop(RUST_CLI_ENV)
+    env["VIBE_APP_SERVER_BIN"] = str(Path(sys.executable).with_name("vibe-app-server"))
+    for name in ("VIBE_APP_SERVER_CMD", "VIBE_APP_SERVER_CWD", "VIBE_CLI"):
+        env.pop(name, None)
+    return subprocess.run(
+        [executable, *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+        check=False,
+    )
 
 
 def run_vibe_headless(
@@ -158,6 +180,28 @@ def poll_until(predicate: Callable[[], bool], timeout: float, message: str) -> N
 # a pty nobody reads eventually stalls the app's event loop: it stops handling input,
 # never dispatches the turn, and the request the caller is waiting for never arrives.
 # The startup burst alone is ~26KB against a 64KB Linux pty buffer.
+def still_running(pids: Sequence[int], timeout: float = 15.0) -> list[int]:
+    """Those of `pids` still running after up to `timeout` seconds; a zombie,
+    which only waits for its parent to reap it, has ended.
+    """
+    deadline = time.monotonic() + timeout
+    while (running := [pid for pid in pids if _running(pid)]) and (
+        time.monotonic() < deadline
+    ):
+        time.sleep(0.05)
+    return running
+
+
+def _running(pid: int) -> bool:
+    state = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
 def wait_for_request_count_while_draining_child_output(
     child: pexpect.spawn,
     captured: io.StringIO,

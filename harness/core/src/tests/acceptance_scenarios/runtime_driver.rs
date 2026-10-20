@@ -19,6 +19,36 @@ pub(super) enum ExpectedDirective {
     Refresh { action: Value },
 }
 
+/// Replaces the `stack` of each uncaught `run_typescript` error with
+/// [`PROGRAM_ERROR_STACK`]. V8 stack frames carry evaluator line numbers, so
+/// scenarios check that a stack is present, not its frames.
+fn without_program_error_stacks(observations: &Value) -> Value {
+    let mut observations = observations.clone();
+    for observation in observations.as_array_mut().into_iter().flatten() {
+        let Some(blocks) = observation
+            .pointer_mut("/result/content")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for block in blocks {
+            let Some(mut error) = block
+                .get("text")
+                .and_then(Value::as_str)
+                .and_then(|text| text.strip_prefix("run_typescript failed: "))
+                .and_then(|error| serde_json::from_str::<Value>(error).ok())
+            else {
+                continue;
+            };
+            if error.get("stack").is_some_and(Value::is_string) {
+                error["stack"] = json!(PROGRAM_ERROR_STACK);
+                block["text"] = json!(format!("run_typescript failed: {error}"));
+            }
+        }
+    }
+    observations
+}
+
 /// Returns the stable fields of an agent completion Action.
 pub(super) fn llm_call(iteration: u64) -> Value {
     json!({
@@ -28,11 +58,24 @@ pub(super) fn llm_call(iteration: u64) -> Value {
     })
 }
 
-/// Returns the stable fields of a compaction completion Action.
+/// Returns the stable fields of an in-context compaction completion Action,
+/// which omits `request`.
 pub(super) fn compaction_call(trigger: &str, iteration: u64, attempt: u64) -> Value {
     json!({
         "type": "llm_call",
         "purpose": "compaction",
+        "trigger": trigger,
+        "attempt": attempt,
+        "iteration": iteration,
+    })
+}
+
+/// Returns the stable fields of a standalone compaction completion Action.
+pub(super) fn standalone_compaction_call(trigger: &str, iteration: u64, attempt: u64) -> Value {
+    json!({
+        "type": "llm_call",
+        "purpose": "compaction",
+        "request": "standalone",
         "trigger": trigger,
         "attempt": attempt,
         "iteration": iteration,
@@ -290,6 +333,26 @@ impl SynchronousRuntime {
             .expect("Core checkpoint serializes")
     }
 
+    pub(super) fn export_conversation(&self, fork_turns: &str) -> Value {
+        serde_json::to_value(
+            self.session
+                .export_conversation(fork_turns)
+                .expect("conversation exports"),
+        )
+        .expect("conversation serializes")
+    }
+
+    pub(super) fn new_with_conversation(config: HarnessConfig, seed: Value) -> Self {
+        let mut runtime = Self::new(config.clone());
+        runtime.session = HarnessSession::create_with_conversation(
+            config,
+            Vec::new(),
+            Some(serde_json::from_value(seed).expect("conversation seed decodes")),
+        )
+        .expect("conversation imports");
+        runtime
+    }
+
     /// Loads a frozen checkpoint and adopts its already-issued Actions as a Host would.
     pub(super) fn from_checkpoint(
         config: HarnessConfig,
@@ -517,7 +580,7 @@ impl SynchronousRuntime {
         assert_eq!(transition["protocol_version"], 1);
         assert_eq!(transition["input_id"], input_id);
         assert_eq!(
-            transition["observations"],
+            without_program_error_stacks(&transition["observations"]),
             Value::Array(expected.observations),
             "transition observations differ"
         );

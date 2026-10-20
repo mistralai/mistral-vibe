@@ -152,21 +152,6 @@ fn a_dismissed_toast_drops_its_selection_and_region() {
 }
 
 #[test]
-fn copying_toast_text_keeps_leading_transcript_chrome_glyphs() {
-    let mut app = App::default();
-    app.show_toast(
-        "> /path failed".to_owned(),
-        ToastSeverity::Warning,
-        TOAST_SECS,
-    );
-    redraw(&mut app);
-
-    drag_from_start(&mut app, 13);
-
-    assert_eq!(selected_text(&app), Some("> /path failed"));
-}
-
-#[test]
 fn a_selection_follows_its_toast_when_a_newer_one_shifts_the_rack() {
     let mut app = drawn();
     drag_from_start(&mut app, 4);

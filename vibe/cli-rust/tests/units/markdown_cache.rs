@@ -43,8 +43,8 @@ fn rendered_text(prepared: &PreparedMarkdown) -> String {
         .join("\n")
 }
 
-fn table_with_cell(bytes: usize) -> String {
-    format!("| Value |\n|---|\n| {} |", "x".repeat(bytes))
+fn rows_of(bytes: usize) -> LinkedLines {
+    LinkedLines::from(vec![ratatui::text::Line::from("x".repeat(bytes))])
 }
 
 #[test]
@@ -127,34 +127,33 @@ fn prepared_markdown_cache_evicts_old_entries_at_its_bound() {
 
 #[test]
 fn prepared_markdown_cache_evicts_old_entries_at_its_byte_bound() {
-    let source = table_with_cell(MAX_MARKDOWN_CACHE_BYTES / 100);
+    let entry_bytes = MAX_MARKDOWN_CACHE_BYTES / 8;
     let mut cache = MarkdownCache::default();
-    let first = cache.prepare(0, 1, u16::MAX, 0, || source.clone());
-    let hit = cache.prepare(0, 1, u16::MAX, 0, || source.clone());
+    let first = cache.prepare_lines(0, 1, 80, 0, || rows_of(entry_bytes));
+    let hit = cache.prepare_lines(0, 1, 80, 0, || rows_of(entry_bytes));
     assert!(Arc::ptr_eq(&first, &hit));
 
-    for entry in 1..MAX_MARKDOWN_CACHE_ENTRIES {
-        cache.prepare(entry, 1, u16::MAX, 0, || source.clone());
+    for entry in 1..8 {
+        cache.prepare_lines(entry, 1, 80, 0, || rows_of(entry_bytes));
     }
 
     assert!(!Arc::ptr_eq(
         &first,
-        &cache.prepare(0, 1, u16::MAX, 0, || source.clone())
+        &cache.prepare_lines(0, 1, 80, 0, || rows_of(entry_bytes))
     ));
 }
 
 #[test]
 fn oversized_prepared_markdown_is_not_retained() {
-    let source = table_with_cell(MAX_MARKDOWN_CACHE_BYTES / 2);
     let calls = Cell::new(0);
     let mut cache = MarkdownCache::default();
-    let first = cache.prepare(0, 1, u16::MAX, 0, || {
+    let first = cache.prepare_lines(0, 1, 80, 0, || {
         calls.set(calls.get() + 1);
-        source.clone()
+        rows_of(MAX_MARKDOWN_CACHE_BYTES + 1)
     });
-    let second = cache.prepare(0, 1, u16::MAX, 0, || {
+    let second = cache.prepare_lines(0, 1, 80, 0, || {
         calls.set(calls.get() + 1);
-        source.clone()
+        rows_of(MAX_MARKDOWN_CACHE_BYTES + 1)
     });
 
     assert!(!Arc::ptr_eq(&first, &second));

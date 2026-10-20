@@ -5,7 +5,7 @@ use crate::core::action_id;
 use crate::core::features::permissions::GrantKey;
 use crate::core::features::programmatic_tool_calling::RUN_TYPESCRIPT_NAME;
 use crate::core::features::programmatic_tool_calling::{
-    PendingProgramRecord, ProgramCapture, ProgramExecution, ProgramFunctionRecord,
+    PendingProgramRecord, ProgramCapture, ProgramClock, ProgramExecution, ProgramFunctionRecord,
     ProgramOperationRecord,
 };
 use crate::core::hooks::HookPoint;
@@ -28,9 +28,19 @@ use super::tool::{
 pub(super) struct CheckpointProgramExecution {
     operations: Vec<CheckpointProgramOperation>,
     round: u32,
-    // Earlier V1 checkpoints establish their program start on the first resumed input.
+    // Earlier V1 checkpoints start the time budget on the next program round.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     started_at_unix_ms: Option<u64>,
+    /// Time-budget pauses that finished: approval and hook waits.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    paused_ms: u64,
+    /// Start of the current pause while an operation waits for an approval or a hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paused_since_unix_ms: Option<u64>,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl CheckpointProgramExecution {
@@ -48,7 +58,9 @@ impl CheckpointProgramExecution {
         Ok(Self {
             operations,
             round: capture.round(),
-            started_at_unix_ms: capture.started_at_unix_ms(),
+            started_at_unix_ms: capture.clock().started_at_unix_ms,
+            paused_ms: capture.clock().paused_ms,
+            paused_since_unix_ms: capture.clock().paused_since_unix_ms,
         })
     }
 
@@ -59,7 +71,16 @@ impl CheckpointProgramExecution {
             .into_iter()
             .map(CheckpointProgramOperation::restore)
             .collect::<Result<Vec<_>, _>>()?;
-        ProgramExecution::restore(source, operations, self.round, self.started_at_unix_ms)
+        ProgramExecution::restore(
+            source,
+            operations,
+            self.round,
+            ProgramClock {
+                started_at_unix_ms: self.started_at_unix_ms,
+                paused_ms: self.paused_ms,
+                paused_since_unix_ms: self.paused_since_unix_ms,
+            },
+        )
     }
 }
 
@@ -215,6 +236,10 @@ enum CheckpointProgramExternalExecution {
     },
     Pending {
         call: CheckpointExternalTool,
+        /// For a sleep: its length after pre-tool hooks, before Core fit it to
+        /// the time budget. Earlier V1 checkpoints do not record it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested_sleep_seconds: Option<f64>,
     },
     AwaitingPostHook {
         hook_binding_ids: Vec<String>,
@@ -257,8 +282,12 @@ impl CheckpointProgramExternalExecution {
                 programmatic_name: CheckpointProgrammaticName::capture(programmatic_name),
                 call: CheckpointExternalTool::capture(&call.call),
             },
-            PendingProgramRecord::Pending { call } => Self::Pending {
+            PendingProgramRecord::Pending {
+                call,
+                requested_sleep_seconds,
+            } => Self::Pending {
                 call: CheckpointExternalTool::capture(&call.call),
+                requested_sleep_seconds: *requested_sleep_seconds,
             },
             PendingProgramRecord::AwaitingPostHook {
                 call,
@@ -307,7 +336,7 @@ impl CheckpointProgramExternalExecution {
                     ));
                 }
             }
-            PendingProgramRecord::Pending { call } => {
+            PendingProgramRecord::Pending { call, .. } => {
                 validate_program_function_target(function, call)?;
                 capture_external_tool_call(call, operation_id, ToolOrigin::Programmatic)?;
             }
@@ -379,7 +408,10 @@ impl CheckpointProgramExternalExecution {
                     }),
                 }
             }
-            Self::Pending { call } => ProgramOperationRecord::ExternalPending {
+            Self::Pending {
+                call,
+                requested_sleep_seconds,
+            } => ProgramOperationRecord::ExternalPending {
                 pending: Box::new(PendingProgramRecord::Pending {
                     call: restore_external_tool_call(
                         call,
@@ -387,6 +419,7 @@ impl CheckpointProgramExternalExecution {
                         ToolOrigin::Programmatic,
                         invocation_name.clone(),
                     ),
+                    requested_sleep_seconds,
                 }),
                 id,
                 function,

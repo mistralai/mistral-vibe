@@ -82,6 +82,31 @@ class SessionTelemetry:
             attachment_counts=attachment_counts,
         )
 
+    def record_tool_call_detected(
+        self,
+        *,
+        model: str,
+        backend: str,
+        api_style: str,
+        call_type: TelemetryCallType,
+        reasons: list[str],
+        nb_unusable_attempts: int,
+        nb_dropped_tool_calls: int,
+        status: Literal["success", "error"],
+        message_id: str | None = None,
+    ) -> None:
+        self._client.send_tool_call_detected(
+            model=model,
+            backend=backend,
+            api_style=api_style,
+            call_type=call_type,
+            reasons=reasons,
+            nb_unusable_attempts=nb_unusable_attempts,
+            nb_dropped_tool_calls=nb_dropped_tool_calls,
+            status=status,
+            message_id=message_id,
+        )
+
     def record_tool_call_finished(
         self,
         *,

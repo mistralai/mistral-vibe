@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::core::error::CoreError;
-use crate::core::features::compaction::CompactionTrigger;
+use crate::core::features::compaction::{CompactionRequestKind, CompactionTrigger};
 use crate::core::features::permissions::GrantKey;
 use crate::core::features::permissions::PublicArguments;
 use crate::core::hooks::HookCall;
@@ -27,6 +27,10 @@ pub(crate) enum CompletionActionKind {
         compaction_id: String,
         trigger: CompactionTrigger,
         attempt: u32,
+        /// Omitted for the in-context request, so a Runtime that predates the
+        /// standalone fallback still reads every first compaction request.
+        #[serde(default, skip_serializing_if = "CompactionRequestKind::is_in_context")]
+        request: CompactionRequestKind,
     },
 }
 

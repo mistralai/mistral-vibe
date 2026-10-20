@@ -1,13 +1,10 @@
 //! A scripted app-server double for the wizard's `setup/*` surface: every
 //! request is recorded (method + params) and answered per the script, so
 //! the five-outcome contract and the old-server skew pin end to end.
-//! Included per test binary via `#[path]`; the `#[ignore]` entry points
-//! live at the including binary's top level so `--exact` names stay stable.
+//! The `#[ignore]` entry points live in the calling test module, which
+//! passes their `test_name!` to `spawn`.
 
-#[path = "status.rs"]
-mod status;
-
-use status::default_status;
+use super::status::default_status;
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 

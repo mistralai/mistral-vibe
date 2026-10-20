@@ -1,19 +1,19 @@
 use super::*;
 
-fn model_permission_denied(call_id: &str, name: &str) -> Value {
+fn model_permission_failure(call_id: &str, name: &str, reason: &str) -> Value {
     json!({
         "role": "tool",
         "tool_call_id": call_id,
         "name": name,
         "outcome": "failure",
-        "content": [{"type": "text", "text": PERMISSION_DENIED_REASON}],
+        "content": [{"type": "text", "text": reason}],
     })
 }
 
 #[test]
 fn allows_direct_tool_call_with_runtime_dispatch() {
     let turn_id = "turn-allowed-direct-tool";
-    let mut runtime = runtime_with_read_file_policy("allow", "deny");
+    let mut runtime = runtime_with_read_file_permission_policy("allow", "deny");
     let first_completion = runtime.start_turn(turn_id, "Read this text file.");
     let calls = vec![tool_call(
         "allowed-read",
@@ -42,7 +42,7 @@ fn allows_direct_tool_call_with_runtime_dispatch() {
 #[test]
 fn denies_direct_tool_call_with_model_visible_failure_without_runtime_dispatch() {
     let turn_id = "turn-denied-direct-tool";
-    let mut runtime = runtime_with_read_file_policy("deny", "allow");
+    let mut runtime = runtime_with_read_file_permission_policy("deny", "allow");
     let first_completion = runtime.start_turn(turn_id, "Read this text file if you can.");
     let calls = vec![tool_call(
         "denied-read",
@@ -62,6 +62,12 @@ fn denies_direct_tool_call_with_model_visible_failure_without_runtime_dispatch()
                     &calls,
                 ))
                 .observe(tool_execution_started(turn_id, "denied-read"))
+                .observe(direct_permission_result_committed(
+                    turn_id,
+                    "denied-read",
+                    json!({"path": "secrets.txt"}),
+                    failure.clone(),
+                ))
                 .observe(tool_execution_finished(turn_id, "denied-read", failure)),
         )
         .only_action();
@@ -71,7 +77,7 @@ fn denies_direct_tool_call_with_model_visible_failure_without_runtime_dispatch()
         "append",
         &[
             model_assistant_tool_calls(&calls),
-            model_permission_denied("denied-read", "read_file"),
+            model_permission_failure("denied-read", "read_file", PERMISSION_DENIED_REASON),
         ],
     );
 }
@@ -120,6 +126,12 @@ fn skips_post_tool_hook_for_denied_direct_tool_call() {
                     turn_id,
                     "denied-read-with-post-hook",
                 ))
+                .observe(direct_permission_result_committed(
+                    turn_id,
+                    "denied-read-with-post-hook",
+                    json!({"path": "secrets.txt"}),
+                    failure.clone(),
+                ))
                 .observe(tool_execution_finished(
                     turn_id,
                     "denied-read-with-post-hook",
@@ -133,7 +145,11 @@ fn skips_post_tool_hook_for_denied_direct_tool_call() {
         "append",
         &[
             model_assistant_tool_calls(&calls),
-            model_permission_denied("denied-read-with-post-hook", "read_file"),
+            model_permission_failure(
+                "denied-read-with-post-hook",
+                "read_file",
+                PERMISSION_DENIED_REASON,
+            ),
         ],
     );
 }
@@ -141,7 +157,7 @@ fn skips_post_tool_hook_for_denied_direct_tool_call() {
 #[test]
 fn keeps_pending_approval_for_direct_tool_call_usable_after_checkpoint_restore() {
     let turn_id = "turn-approval-required-direct-tool";
-    let mut runtime = runtime_with_read_file_policy("ask", "allow");
+    let mut runtime = runtime_with_read_file_permission_policy("ask", "allow");
     let first_completion = runtime.start_turn(turn_id, "Read this text file if permitted.");
     let calls = vec![tool_call(
         "approval-required-read",
@@ -258,7 +274,7 @@ fn runs_post_tool_hook_after_approved_direct_tool_call_completes() {
 #[test]
 fn resolves_identical_direct_tool_approvals_independently() {
     let turn_id = "turn-parallel-identical-direct-approvals";
-    let mut runtime = runtime_with_read_file_policy("ask", "allow");
+    let mut runtime = runtime_with_read_file_permission_policy("ask", "allow");
     let first_completion = runtime.start_turn(turn_id, "Read the same text file twice.");
     let calls = vec![
         tool_call(
@@ -322,7 +338,7 @@ fn resolves_identical_direct_tool_approvals_independently() {
 #[test]
 fn keeps_direct_tool_approval_usable_after_steering() {
     let turn_id = "turn-steered-direct-approval";
-    let mut runtime = runtime_with_read_file_policy("ask", "allow");
+    let mut runtime = runtime_with_read_file_permission_policy("ask", "allow");
     let first_completion = runtime.start_turn(turn_id, "Read this text file if permitted.");
     let calls = vec![tool_call(
         "steered-approval-read",
@@ -359,7 +375,7 @@ fn keeps_direct_tool_approval_usable_after_steering() {
 fn interrupt_abandons_all_pending_direct_approvals() {
     let turn_id = "turn-interrupted-direct-approvals";
     let reason = "user stopped the turn";
-    let mut runtime = runtime_with_read_file_policy("ask", "allow");
+    let mut runtime = runtime_with_read_file_permission_policy("ask", "allow");
     let first_completion = runtime.start_turn(turn_id, "Read both files if permitted.");
     let calls = vec![
         tool_call(
@@ -412,7 +428,7 @@ fn interrupt_abandons_all_pending_direct_approvals() {
 #[test]
 fn rejects_tool_result_targeting_direct_approval_action() {
     let turn_id = "turn-tool-result-for-direct-approval";
-    let mut runtime = runtime_with_read_file_policy("ask", "allow");
+    let mut runtime = runtime_with_read_file_permission_policy("ask", "allow");
     let first_completion = runtime.start_turn(turn_id, "Read this text file if permitted.");
     let calls = vec![tool_call(
         "approval-pending-read",
@@ -451,7 +467,7 @@ fn rejects_tool_result_targeting_direct_approval_action() {
 #[test]
 fn rejects_approval_result_targeting_direct_tool_action() {
     let turn_id = "turn-approval-result-for-direct-tool";
-    let mut runtime = runtime_with_read_file_policy("ask", "allow");
+    let mut runtime = runtime_with_read_file_permission_policy("ask", "allow");
     let first_completion = runtime.start_turn(turn_id, "Read this text file if permitted.");
     let calls = vec![tool_call(
         "tool-pending-read",
@@ -506,7 +522,7 @@ fn rejects_approval_result_targeting_direct_tool_action() {
 #[test]
 fn rejects_repeated_direct_approval_result_without_redispatching_tool() {
     let turn_id = "turn-repeated-direct-approval-result";
-    let mut runtime = runtime_with_read_file_policy("ask", "allow");
+    let mut runtime = runtime_with_read_file_permission_policy("ask", "allow");
     let first_completion = runtime.start_turn(turn_id, "Read this text file if permitted.");
     let calls = vec![tool_call(
         "replayed-approval-read",
@@ -578,13 +594,19 @@ fn rejects_direct_tool_approval_without_running_post_tool_hook() {
             [expected_approval("rejected-read")],
         )
         .only_action();
-    let failure = permission_denied_failure();
+    let failure = approval_rejected_failure();
 
     let retry = runtime
         .apply(
             reject(&approval_action),
             running(turn_id)
                 .dispatch(llm_call(1))
+                .observe(direct_permission_result_committed(
+                    turn_id,
+                    "rejected-read",
+                    json!({"path": "secrets.txt"}),
+                    failure.clone(),
+                ))
                 .observe(tool_execution_finished(turn_id, "rejected-read", failure)),
         )
         .only_action();
@@ -594,7 +616,7 @@ fn rejects_direct_tool_approval_without_running_post_tool_hook() {
         "append",
         &[
             model_assistant_tool_calls(&calls),
-            model_permission_denied("rejected-read", "read_file"),
+            model_permission_failure("rejected-read", "read_file", APPROVAL_REJECTED_REASON),
         ],
     );
 }
@@ -637,10 +659,10 @@ fn times_out_direct_tool_approval_without_running_post_tool_hook() {
         .only_action();
     let failure = json!({
         "type": "failure",
-        "content": [{"type": "text", "text": "Tool approval timed out."}],
+        "content": [{"type": "text", "text": "Tool approval timed out: nobody approved or rejected this call in time, so it did not run. Treat it as rejected. Do not retry the same call right away."}],
         "error": {
             "code": "approval_failed",
-            "message": "Tool approval timed out.",
+            "message": "Tool approval timed out: nobody approved or rejected this call in time, so it did not run. Treat it as rejected. Do not retry the same call right away.",
             "retryable": false,
             "details": null,
         },
@@ -655,6 +677,12 @@ fn times_out_direct_tool_approval_without_running_post_tool_hook() {
             }),
             running(turn_id)
                 .dispatch(llm_call(1))
+                .observe(direct_permission_result_committed(
+                    turn_id,
+                    "timed-out-read",
+                    json!({"path": "secrets.txt"}),
+                    failure.clone(),
+                ))
                 .observe(tool_execution_finished(turn_id, "timed-out-read", failure)),
         )
         .only_action();
@@ -669,7 +697,7 @@ fn times_out_direct_tool_approval_without_running_post_tool_hook() {
                 "tool_call_id": "timed-out-read",
                 "name": "read_file",
                 "outcome": "failure",
-                "content": [{"type": "text", "text": "Tool approval timed out."}],
+                "content": [{"type": "text", "text": "Tool approval timed out: nobody approved or rejected this call in time, so it did not run. Treat it as rejected. Do not retry the same call right away."}],
             }),
         ],
     );
@@ -752,6 +780,12 @@ fn denies_direct_tool_call_when_pre_hook_supplies_denied_arguments() {
             ),
             running(turn_id)
                 .dispatch(llm_call(1))
+                .observe(direct_permission_result_committed(
+                    turn_id,
+                    "rewritten-read",
+                    json!({"path": "secrets.txt"}),
+                    failure.clone(),
+                ))
                 .observe(tool_execution_finished(turn_id, "rewritten-read", failure)),
         )
         .only_action();
@@ -761,7 +795,7 @@ fn denies_direct_tool_call_when_pre_hook_supplies_denied_arguments() {
         "append",
         &[
             model_assistant_tool_calls(&calls),
-            model_permission_denied("rewritten-read", "read_file"),
+            model_permission_failure("rewritten-read", "read_file", PERMISSION_DENIED_REASON),
         ],
     );
 }
@@ -905,6 +939,12 @@ fn resolves_allowed_and_denied_direct_tool_calls_independently() {
                 ))
                 .observe(tool_execution_started(turn_id, "denied-batch-read"))
                 .observe(tool_execution_started(turn_id, "allowed-batch-read"))
+                .observe(direct_permission_result_committed(
+                    turn_id,
+                    "denied-batch-read",
+                    json!({"path": "secrets.txt"}),
+                    failure.clone(),
+                ))
                 .observe(tool_execution_finished(
                     turn_id,
                     "denied-batch-read",
@@ -928,7 +968,7 @@ fn resolves_allowed_and_denied_direct_tool_calls_independently() {
         "append",
         &[
             model_assistant_tool_calls(&calls),
-            model_permission_denied("denied-batch-read", "read_file"),
+            model_permission_failure("denied-batch-read", "read_file", PERMISSION_DENIED_REASON),
             model_tool_text("allowed-batch-read", "read_file", "public contents"),
         ],
     );

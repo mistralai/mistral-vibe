@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use crate::server::{Client, MCPSourceKind};
+use crate::server::Client;
 
-use super::rows::{self, Row};
+use super::rows::{self, Row, SourceAction};
 use super::{add_result, reconcile_selection, Event};
 use crate::app::App;
 use crate::option_list::Click;
@@ -51,40 +51,46 @@ pub fn select(app: &mut App) {
     app.mcp.viewing_kind = Some(row.kind);
     app.mcp.list.reset();
     reconcile_selection(app);
-    request_auth(app);
+    request_action(app);
 }
 
-/// The detail view asks for MCP OAuth or connector auth for a source awaiting auth.
-pub(super) fn request_auth(app: &mut App) {
-    if !rows::viewing_source(&app.mcp)
-        .is_some_and(|source| rows::awaits_auth(&app.mcp.state, source))
-    {
+/// The detail view asks to start the viewed source's pending action.
+pub(super) fn request_action(app: &mut App) {
+    if viewing_action(app).is_none() {
         return;
     }
     let Some(tx) = app.mcp.tx.clone() else {
         return;
     };
     app.commit_started();
-    if tx.try_send(Event::AuthRequested).is_err() {
+    if tx.try_send(Event::ActionRequested).is_err() {
         app.commit_finished();
     }
 }
 
-/// Hand the viewed source to its auth flow, unless the user left that view meanwhile.
-pub(super) fn hand_off_auth(app: &mut App, client: &Arc<Client>) {
+/// Start the viewed source's pending action, unless the user left that view meanwhile.
+pub(super) fn hand_off(app: &mut App, client: &Arc<Client>) {
     if !app.mcp.open {
         return;
     }
-    let Some(source) =
-        rows::viewing_source(&app.mcp).filter(|source| rows::awaits_auth(&app.mcp.state, source))
-    else {
+    let Some((name, action)) = viewing_action(app) else {
         return;
     };
-    let (name, kind) = (source.name.clone(), source.kind);
-    match kind {
-        MCPSourceKind::Server => crate::mcp_oauth::open(app, client, name),
-        MCPSourceKind::Connector => crate::connector_auth::open(app, client, name),
+    match action {
+        SourceAction::McpOAuth => crate::mcp_oauth::open(app, client, name),
+        SourceAction::ConnectorAuth => crate::connector_auth::open(app, client, name),
+        SourceAction::Connect => super::connect::start(app, client, name),
     }
+}
+
+/// The viewed source's pending action; a connector already connecting has none.
+fn viewing_action(app: &App) -> Option<(String, SourceAction)> {
+    let source = rows::viewing_source(&app.mcp)?;
+    if app.mcp.connecting.as_ref() == Some(&source.name) {
+        return None;
+    }
+    let action = rows::pending_action(&app.mcp.state, source)?;
+    Some((source.name.clone(), action))
 }
 
 /// Move the highlight to the next selectable row, wrapping at the ends.

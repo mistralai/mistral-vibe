@@ -1,6 +1,8 @@
 use crate::core::error::CoreError;
 use std::collections::BTreeSet;
 
+use crate::core::config::OutputLimitRecovery;
+use crate::core::features::output_limit_recovery;
 use crate::core::features::programmatic_tool_calling::is_private_wrapper;
 use crate::core::hooks::{CompletionHookOutput, HookPoint, PreLlmCallOutput};
 use crate::core::step_protocol::DeterminismContext;
@@ -50,14 +52,30 @@ impl<'a> CandidateContext<'a> {
 pub(in crate::core::turn) struct CandidateTurn {
     iterations: u32,
     max_iterations: Option<u32>,
+    output_limit_recovery: OutputLimitRecovery,
+    output_limit_retries: u32,
 }
 
 impl CandidateTurn {
-    pub(in crate::core::turn) fn new(iterations: u32, max_iterations: Option<u32>) -> Self {
+    pub(in crate::core::turn) fn new(
+        iterations: u32,
+        max_iterations: Option<u32>,
+        output_limit_recovery: OutputLimitRecovery,
+        output_limit_retries: u32,
+    ) -> Self {
         Self {
             iterations,
             max_iterations,
+            output_limit_recovery,
+            output_limit_retries,
         }
+    }
+
+    fn has_iteration_for_retry(&self) -> bool {
+        let next_iteration = self.iterations + 1;
+        !self
+            .max_iterations
+            .is_some_and(|max_iterations| next_iteration >= max_iterations)
     }
 }
 
@@ -100,6 +118,9 @@ pub(in crate::core::turn) enum CompletionResolution {
         action_id: String,
         next_iteration: u32,
         feedback: StoredMessage,
+        /// The discarded candidate reached the output token limit, so the
+        /// retry counts against the turn's output limit recovery budget.
+        output_limit: bool,
     },
     Finish(CompletionFinish),
     Accept(AcceptedCompletion),
@@ -148,7 +169,13 @@ pub(in crate::core::turn) fn resolve_completion(
 ) -> Result<CompletionTransition, CoreError> {
     match event {
         CompletionEvent::Succeeded { action_id, result } => {
-            let candidate = parse_completion_result(result)?;
+            let mut candidate = parse_completion_result(result)?;
+            if recovers_from_output_limit(&context.turn, &candidate) {
+                return Ok(CompletionTransition {
+                    resolution: output_limit_retry(&context, action_id, &candidate),
+                });
+            }
+            settle_cut_off_tool_calls(&mut candidate);
             let resolution = if context.hooks.post_llm_binding_ids.is_empty() {
                 resolve_after_post_llm(&context, action_id, candidate)?
             } else {
@@ -278,7 +305,55 @@ fn resolve_retry(
         action_id,
         next_iteration,
         feedback,
+        output_limit: false,
     })
+}
+
+/// A completion cut off at the output limit is unfinished: either an answer
+/// that stops mid-sentence or a tool call whose arguments stop mid-value.
+/// While the turn has recovery budget and an iteration to spend, discard it
+/// before any Hook sees it and ask for a shorter response.
+fn recovers_from_output_limit(turn: &CandidateTurn, candidate: &CompletionCandidate) -> bool {
+    candidate.finish_reason == CompletionFinishReason::Length
+        && turn
+            .output_limit_recovery
+            .allows_retry(turn.output_limit_retries)
+        && turn.has_iteration_for_retry()
+}
+
+fn output_limit_retry(
+    context: &CandidateContext<'_>,
+    action_id: String,
+    candidate: &CompletionCandidate,
+) -> CompletionResolution {
+    let cut_off_tool = candidate
+        .message
+        .tool_calls()
+        .into_iter()
+        .last()
+        .map(|call| call.name);
+    let output_tokens = candidate.usage.as_ref().map(|usage| usage.output_tokens);
+    CompletionResolution::Retry {
+        action_id,
+        next_iteration: context.turn.iterations + 1,
+        feedback: StoredMessage::injected(Message::user(output_limit_recovery::feedback(
+            cut_off_tool.as_deref(),
+            output_tokens,
+        ))),
+        output_limit: true,
+    }
+}
+
+/// Without recovery, a completion cut off inside a tool call keeps its tool
+/// calls: each runs or reports its own argument error, as for any tool call
+/// finish. Its finish reason becomes `tool_call` so the candidate stays a
+/// well-formed tool call completion.
+fn settle_cut_off_tool_calls(candidate: &mut CompletionCandidate) {
+    if candidate.finish_reason == CompletionFinishReason::Length
+        && !candidate.message.tool_calls().is_empty()
+    {
+        candidate.finish_reason = CompletionFinishReason::ToolCall;
+    }
 }
 
 fn resolve_rejection(
@@ -426,6 +501,8 @@ pub(in crate::core::turn) fn parse_completion_result(
             ));
         }
         CompletionFinishReason::ToolCall => {}
+        // The output limit can stop a completion while it writes a tool call.
+        CompletionFinishReason::Length => {}
         _ if has_tool_call => {
             return Err(CoreError::invalid_command(
                 "only tool_call finish may contain a tool call",

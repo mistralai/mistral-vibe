@@ -81,6 +81,8 @@ enum CheckpointMessageSource {
 pub(super) struct CheckpointStoredMessage {
     message: CheckpointMessage,
     source: CheckpointMessageSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    turn_index: Option<u64>,
 }
 
 impl CheckpointStoredMessage {
@@ -99,6 +101,7 @@ impl CheckpointStoredMessage {
         Ok(Self {
             message: CheckpointMessage::capture(&message.message),
             source,
+            turn_index: message.turn_index,
         })
     }
 
@@ -109,6 +112,7 @@ impl CheckpointStoredMessage {
             .map_err(|error| error.detail().to_string())?;
         Ok(StoredMessage {
             message,
+            turn_index: self.turn_index,
             source: match self.source {
                 CheckpointMessageSource::History => StoredMessageSource::History,
                 CheckpointMessageSource::Injection => StoredMessageSource::Injection,

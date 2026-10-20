@@ -303,7 +303,7 @@ def _process_exit_descriptor(pid: int) -> tuple[int, Callable[[], None]] | None:
 def _holder_process_id(diagnostic_path: Path) -> int | None:
     try:
         diagnostic = json.loads(diagnostic_path.read_bytes())
-    except OSError, ValueError:
+    except (OSError, ValueError):
         return None
     if not isinstance(diagnostic, dict):
         return None

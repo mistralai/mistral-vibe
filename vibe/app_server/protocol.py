@@ -127,6 +127,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "connectors/read",
     "connectors/refresh",
     "connector_catalog/auth/request",
+    "connector_catalog/connect",
     "connector_catalog/read",
     "connector_catalog/refresh",
     "connector_catalog/toggle",
@@ -206,6 +207,9 @@ SERVER_METHODS: tuple[str, ...] = (
     "session/shellCommand",
     "session/start",
     "session/stop",
+    "session/subagents/interrupt",
+    "session/subagents/read",
+    "session/subagents/wait",
     "session/title/update",
     "session/turns/list",
     "setup/status",
@@ -260,6 +264,17 @@ SERVER_METHODS: tuple[str, ...] = (
     "workspace/trust/untrustedConfig",
     "workspace/trust/status",
 )
+
+EXPERIMENTAL_SERVER_METHODS: frozenset[str] = frozenset({
+    "session/subagents/interrupt",
+    "session/subagents/read",
+    "session/subagents/wait",
+})
+"""Advertised methods whose shapes may still change in a minor release.
+
+A client that calls one should tolerate its removal: the method is then
+absent from the ``initialize`` method list, and a call fails as unknown.
+"""
 
 
 class EmptyResponse(ProtocolModel):
@@ -417,9 +432,26 @@ class SessionKind(StrEnum):
     EPHEMERAL = auto()
 
 
+class SessionStartTurn(ProtocolModel):
+    message: list[ContentBlock] = Field(min_length=1)
+    client_user_message_id: str | None = None
+
+
 class SessionStartParams(SessionOpenParams):
     idempotency_key: str | None = None
     kind: SessionKind = SessionKind.NORMAL
+    # Applied before the first turn, as the matching mid-session changes are.
+    title: str | None = Field(default=None, min_length=1)
+    model: str | None = None
+    reasoning_effort: str | None = None
+    # As on `config/model/write`: otherwise the model and level also become
+    # the user's default.
+    session_only: bool = False
+    first_turn: SessionStartTurn | None = None
+    # The session that started this one to hand it first_turn. The new session
+    # cannot start sessions until the user writes to it, so started sessions
+    # cannot chain on their own.
+    started_by_session_id: str | None = None
 
 
 class SessionStartResponse(EventWatermarkResponse):
@@ -508,6 +540,126 @@ class SessionStopParams(ProtocolModel):
 
 class SessionStopResponse(ProtocolModel):
     closed: bool = True
+
+
+class SessionSubagentsWaitParams(ProtocolModel):
+    """Experimental: wait until no subagent of the session has a turn running.
+
+    Starts no turn of the session's own: a subagent's late result stays
+    queued for it.
+    """
+
+    session_id: str
+    timeout_ms: int = Field(ge=0, le=86_400_000)
+
+
+class SubagentRef(ProtocolModel):
+    session_id: str
+    name: str
+    agent_type: str | None = None
+
+
+class SessionSubagentsWaitResponse(ProtocolModel):
+    """``settled`` is false when the timeout ran out first; ``running`` lists
+    the subagents still running then.
+    """
+
+    settled: bool
+    running: list[SubagentRef] = Field(default_factory=list)
+
+
+class SessionSubagentsInterruptParams(ProtocolModel):
+    """Experimental: interrupt every running subagent of the session.
+
+    ``reason`` becomes the interrupted turn's reason. Does not wait for the
+    subagents to settle; ``session/subagents/wait`` does.
+    """
+
+    session_id: str
+    reason: str = Field(min_length=1)
+
+
+class SubagentInterruptOutcome(StrEnum):
+    INTERRUPTED = "interrupted"
+    NOT_RUNNING = "notRunning"
+    FAILED = "failed"
+
+
+class SubagentInterruptResult(ProtocolModel):
+    """One subagent that was running. ``notRunning``: it ended on its own
+    first. ``failed``: the interrupt raised ``error``, and the subagent may
+    still be running.
+    """
+
+    session_id: str
+    name: str
+    outcome: SubagentInterruptOutcome
+    error: str | None = None
+
+
+class SessionSubagentsInterruptResponse(ProtocolModel):
+    results: list[SubagentInterruptResult] = Field(default_factory=list)
+
+
+class SessionSubagentsReadParams(ProtocolModel):
+    """Experimental: what each subagent of the session did, in spawn order.
+
+    Each store read is given up when ``timeoutMs`` runs out: the subagent is
+    still listed, without the fields that read would have filled.
+    """
+
+    session_id: str
+    timeout_ms: int = Field(default=5_000, ge=0, le=600_000)
+
+
+class SubagentRunStatus(StrEnum):
+    RUNNING = "running"
+    IDLE = "idle"
+    INTERRUPTED = "interrupted"
+    FAILED = "failed"
+    CLOSED = "closed"
+    UNKNOWN = "unknown"
+
+
+class SubagentUsage(ProtocolModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+    total_tokens: int = 0
+
+
+class SubagentRun(ProtocolModel):
+    """One subagent of the session.
+
+    ``spawnCallId`` is the model's tool call that spawned it. ``sessionDir``
+    is its store, when one is on disk. ``model`` is the provider model its
+    agent called, absent unless this process saw it call exactly one.
+    ``usage`` and ``costUsd`` are absent when its store could not be read in
+    time or is gone. ``costUsd`` is priced at the rates of ``pricingModel``,
+    a configured model's alias: the subagent's own model, or the root's when
+    that is unknown, and ``pricingFallback`` is then true. ``steps`` counts
+    its agent model calls this process saw, absent when none.
+    """
+
+    session_id: str
+    parent_session_id: str
+    root_session_id: str
+    name: str
+    agent_type: str | None = None
+    spawn_action_id: str
+    spawn_call_id: str | None = None
+    status: SubagentRunStatus
+    session_dir: str | None = None
+    model: str | None = None
+    usage: SubagentUsage | None = None
+    cost_usd: float | None = None
+    pricing_model: str | None = None
+    pricing_fallback: bool = False
+    steps: int | None = None
+
+
+class SessionSubagentsReadResponse(ProtocolModel):
+    subagents: list[SubagentRun] = Field(default_factory=list)
 
 
 class SessionListParams(ProtocolModel):
@@ -1109,6 +1261,8 @@ class ModelConfigWriteParams(ProtocolModel):
     session_id: str
     model_alias: str | None = None
     reasoning_effort: str | None = None
+    # Otherwise the pick also becomes the user's default, as a picker's does.
+    session_only: bool = False
 
 
 class ConfigWriteParams(ProtocolModel):
@@ -1373,8 +1527,12 @@ class ConnectorCatalogToolView(ProtocolModel):
 class ConnectorCatalogEntryView(ProtocolModel):
     alias: str
     display_name: str
-    readiness: Literal["ready", "needs_auth", "needs_setup", "unavailable"]
-    auth_action: Literal["none", "oauth", "credentials_setup", "unknown"]
+    readiness: Literal[
+        "ready", "needs_auth", "needs_setup", "needs_connect", "unavailable"
+    ]
+    auth_action: Literal[
+        "none", "oauth", "credentials_setup", "no_auth_connect", "unknown"
+    ]
     tools: list[ConnectorCatalogToolView] = Field(default_factory=list)
     diagnostic: str | None = None
 
@@ -1401,7 +1559,14 @@ class SessionConnectorToolView(ProtocolModel):
 class SessionConnectorSourceView(ProtocolModel):
     alias: str
     display_name: str
-    status: Literal["disabled", "connected", "needs_auth", "needs_setup", "unavailable"]
+    status: Literal[
+        "disabled",
+        "connected",
+        "needs_auth",
+        "needs_setup",
+        "needs_connect",
+        "unavailable",
+    ]
     tools: list[SessionConnectorToolView] = Field(default_factory=list)
     error: str | None = None
 
@@ -1447,6 +1612,11 @@ class ConnectorCatalogToggleParams(ProtocolModel):
 
 
 class ConnectorCatalogAuthRequestParams(ProtocolModel):
+    session_id: str
+    alias: str
+
+
+class ConnectorCatalogConnectParams(ProtocolModel):
     session_id: str
     alias: str
 
@@ -2273,6 +2443,55 @@ class CallbackCallParams(ProtocolModel):
 class CallbackCallResponse(ProtocolModel):
     callback_id: str
     accepted: bool = True
+
+
+SESSION_SPAWN_METHOD = "session/spawn"
+"""The server request asking a client that advertised ``sessionSpawn`` to start
+a new session of its own and run ``prompt`` in it."""
+
+
+class SessionSpawnNewWorktree(ProtocolModel):
+    kind: Literal["new_worktree"] = "new_worktree"
+
+
+class SessionSpawnManagedWorktree(ProtocolModel):
+    kind: Literal["managed_worktree"] = "managed_worktree"
+    path: str = Field(min_length=1)
+
+
+class SessionSpawnDirectory(ProtocolModel):
+    """The parent's directory, which is not a worktree Vibe manages."""
+
+    kind: Literal["directory"] = "directory"
+    path: str = Field(min_length=1)
+
+
+type SessionSpawnCheckout = Annotated[
+    SessionSpawnNewWorktree | SessionSpawnManagedWorktree | SessionSpawnDirectory,
+    Field(discriminator="kind"),
+]
+
+
+class SessionSpawnParams(ProtocolModel):
+    parent_session_id: str
+    prompt: str = Field(min_length=1)
+    title: str | None = Field(default=None, min_length=1)
+    checkout: SessionSpawnCheckout
+    # Stable across replays of one tool call.
+    idempotency_key: str = Field(min_length=1)
+    # The parent's unless the user asked for others; no level means the
+    # model's default.
+    model: str
+    reasoning_effort: str | None = None
+    approval_policy: str
+
+
+class SessionSpawnResponse(ProtocolModel):
+    session_id: str
+    title: str | None = None
+    # The client's own id and address for the session, opaque to the server.
+    client_session_id: str | None = None
+    url: str | None = None
 
 
 class CallbackResultError(ProtocolModel):

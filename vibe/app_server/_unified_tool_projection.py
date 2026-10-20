@@ -361,6 +361,10 @@ class _ProcessWriteResult(_SourceModel):
 class _ProcessOutputEnvelope(_SourceModel):
     """Wraps a process result with the tool name so ProcessResultWidget can branch."""
 
+    # The projectors build it by field name; without this, aliased fields such
+    # as `processId` are dropped as extras and serialized as null.
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
     tool_name: str
     process_id: Annotated[str | None, Field(default=None, alias="processId")] = None
     status: str | None = None
@@ -442,7 +446,7 @@ def _project_effect(
     elif isinstance(state, CompletedEffectState):
         try:
             state = projected.project_result(state)
-        except TypeError, ValueError, ValidationError:
+        except (TypeError, ValueError, ValidationError):
             return entry
     return entry.model_copy(update={"detail": projected.detail, "state": state})
 
@@ -497,7 +501,7 @@ def _project_call(
             return path_projector(detail, display_roots)
         if projector is not None:
             return projector(detail)
-    except TypeError, ValueError, ValidationError:
+    except (TypeError, ValueError, ValidationError):
         return None
     label = _TOOL_LABELS.get(detail.tool_name)
     if label is not None:

@@ -278,6 +278,87 @@ class TestAgentManager:
         assert manager.active_profile.name == "ask"
         assert caplog.text == ""
 
+    def test_auto_approve_agent_available_by_default(
+        self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        manager = AgentManager(load_orchestrator(build_config()))
+
+        assert "auto-approve" in manager.available_agents
+        assert "auto-approve" in manager.get_agent_order()
+
+    def test_disabling_auto_approve_mode_hides_the_agent(
+        self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        """enable_auto_approve = false removes the yolo agent from the picker/cycle."""
+        config = build_config(enable_auto_approve=False)
+        manager = AgentManager(load_orchestrator(config))
+
+        assert "auto-approve" not in manager.available_agents
+        assert "auto-approve" not in manager.get_agent_order()
+
+    def test_disabling_auto_approve_mode_wins_over_enabled_agents(
+        self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        """The policy flag outranks enabled_agents, unlike disabled_agents."""
+        config = build_config(
+            enable_auto_approve=False,
+            enabled_agents=["auto-approve", "ask", "accept-edits"],
+        )
+        manager = AgentManager(load_orchestrator(config))
+
+        assert "auto-approve" not in manager.available_agents
+        assert "ask" in manager.available_agents
+
+    def test_initial_agent_auto_approve_rejected_when_mode_disabled(
+        self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        config = build_config(enable_auto_approve=False)
+        with pytest.raises(
+            ValueError, match="auto-approve mode is disabled"
+        ) as exc_info:
+            AgentManager(load_orchestrator(config), initial_agent="auto-approve")
+
+        assert "admin-managed" not in str(exc_info.value)
+
+    def test_switching_to_auto_approve_rejected_when_mode_disabled(
+        self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        config = build_config(enable_auto_approve=False)
+        manager = AgentManager(load_orchestrator(config), initial_agent="ask")
+
+        with pytest.raises(ValueError, match="auto-approve mode is disabled"):
+            manager.switch_profile("auto-approve")
+
+    def test_custom_yolo_agent_hidden_when_mode_disabled(
+        self,
+        tmp_path: Path,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        """The mode gate keys on the safety level, so custom yolo agents are covered."""
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "reckless.toml").write_text('safety = "yolo"\n', encoding="utf-8")
+
+        enabled_manager = AgentManager(
+            load_orchestrator(build_config(agent_paths=[agents_dir]))
+        )
+        assert "reckless" in enabled_manager.available_agents
+
+        config = build_config(enable_auto_approve=False, agent_paths=[agents_dir])
+        manager = AgentManager(load_orchestrator(config))
+        assert "reckless" not in manager.available_agents
+
     def test_removed_plan_default_agent_starts_on_ask(
         self,
         caplog: pytest.LogCaptureFixture,

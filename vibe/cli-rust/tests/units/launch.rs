@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use vibe_rs::server::DEFAULT_APP_SERVER_ARGS;
+use vibe_rs::server::{DEFAULT_APP_SERVER_ARGS, UV_PYTHON_REQUEST};
 use vibe_rs::startup::resolve_launch;
 
 fn cwd() -> Option<PathBuf> {
@@ -88,8 +88,32 @@ fn cmd_wins_over_bin() {
 fn blank_cmd_and_bin_fall_back_to_default() {
     let launch = resolve_launch(Some("   ".into()), Some("".into()), None, false, cwd());
     assert_eq!(launch.program, "uv");
-    assert_eq!(launch.args, vec!["run", "--quiet", "vibe-app-server",]);
+    assert_eq!(
+        launch.args,
+        vec![
+            "run",
+            "--quiet",
+            "--python",
+            UV_PYTHON_REQUEST,
+            "vibe-app-server",
+        ]
+    );
     assert_eq!(launch.cwd, cwd());
+}
+
+#[test]
+fn default_launch_pins_a_gil_build_of_a_supported_python() {
+    // uv selects free-threaded Python builds without an explicit request,
+    // and the locked dependencies ship no free-threaded wheels.
+    let launch = resolve_launch(None, None, None, false, cwd());
+    let python = launch
+        .args
+        .windows(2)
+        .find(|pair| pair[0] == "--python")
+        .map(|pair| pair[1].clone());
+    assert_eq!(python.as_deref(), Some(UV_PYTHON_REQUEST));
+    assert!(UV_PYTHON_REQUEST.ends_with("+gil"));
+    assert!(UV_PYTHON_REQUEST.contains(">=3.12"));
 }
 
 #[test]

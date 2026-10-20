@@ -233,7 +233,7 @@ class ConfigLayer[S: BaseModel](ABC):
                     data=self.validate_output(snapshot.data),
                     fingerprint=snapshot.fingerprint,
                 )
-            except ConcurrencyConflictError, ConfigStorageError:
+            except (ConcurrencyConflictError, ConfigStorageError):
                 raise
             except Exception as e:
                 raise LayerImplementationError(
@@ -274,7 +274,7 @@ class ConfigLayer[S: BaseModel](ABC):
 
         try:
             new_fingerprint = await self._save_to_store(validated_new_data)
-        except NotImplementedError, ConfigStorageError:
+        except (NotImplementedError, ConfigStorageError):
             raise
         except Exception as e:
             raise LayerImplementationError(self.name, "_save_to_store") from e

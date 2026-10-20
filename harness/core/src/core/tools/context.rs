@@ -55,6 +55,10 @@ impl<'a> ToolContext<'a> {
         self.tools.search_with_summary(request)
     }
 
+    pub(crate) fn programmatic_enabled(&self) -> bool {
+        self.tools.programmatic_enabled()
+    }
+
     pub(crate) fn large_output_policy(&self) -> &large_output::Policy {
         self.tools.large_output_policy()
     }
@@ -79,6 +83,9 @@ impl<'a> ToolContext<'a> {
         let Some(policy) = self.permission_policy else {
             return PermissionResolution::Allow;
         };
+        if !call.call.is_permission_checked() {
+            return PermissionResolution::Allow;
+        }
 
         match policy.evaluate(call) {
             PermissionDecision::Allow => PermissionResolution::Allow,

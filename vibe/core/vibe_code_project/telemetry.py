@@ -13,7 +13,7 @@ from vibe.core.vibe_code_project.selection import (
 )
 
 if TYPE_CHECKING:
-    from vibe.core.vibe_code_project.picker_service import HeadlessProjectResolution
+    pass
 
 
 def build_project_picker_telemetry(
@@ -32,30 +32,6 @@ def build_project_picker_telemetry(
         "project_multi_repo_match_count": count_multi_repo_matches(projects, repo_url),
         "saved_project_link_cleared": saved_project_link_cleared,
         "project_repo_remote_changed": project_repo_remote_changed,
-    }
-
-
-def build_headless_project_telemetry(
-    resolution: HeadlessProjectResolution,
-) -> ProjectPickerTelemetryPayload:
-    return {
-        "project_picker_shown": False,
-        "project_selection_source": resolution.source,
-        "project_candidate_count_loaded": resolution.candidate_count_loaded,
-        "project_multi_repo_match_count": resolution.multi_repo_match_count,
-        "saved_project_link_cleared": resolution.saved_project_link_cleared,
-        "project_repo_remote_changed": resolution.project_repo_remote_changed,
-    }
-
-
-def build_project_resolution_failed_telemetry() -> ProjectPickerTelemetryPayload:
-    return {
-        "project_picker_shown": False,
-        "project_selection_source": "cancelled",
-        "project_candidate_count_loaded": 0,
-        "project_multi_repo_match_count": 0,
-        "saved_project_link_cleared": False,
-        "project_repo_remote_changed": False,
     }
 
 

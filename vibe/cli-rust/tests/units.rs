@@ -8,6 +8,8 @@ fn isolate_host_clipboard() {
 
 #[path = "units/agent_socket.rs"]
 mod agent_socket;
+#[path = "units/agent_switching.rs"]
+mod agent_switching;
 #[path = "units/app_server_crash.rs"]
 mod app_server_crash;
 #[path = "units/approval_keys.rs"]
@@ -112,6 +114,8 @@ mod history_wrapped_recall;
 mod image_placeholders;
 #[path = "units/image_prompt.rs"]
 mod image_prompt;
+#[path = "units/incomplete_stream_retry.rs"]
+mod incomplete_stream_retry;
 #[path = "units/inline_images.rs"]
 mod inline_images;
 #[path = "units/input_edit_keys.rs"]
@@ -136,6 +140,8 @@ mod linked_lines_gaps;
 mod list_nav;
 #[path = "units/list_scroll.rs"]
 mod list_scroll;
+#[path = "units/loading_frames.rs"]
+mod loading_frames;
 #[path = "units/loading_startup.rs"]
 mod loading_startup;
 #[path = "units/long_paste.rs"]
@@ -170,6 +176,8 @@ mod message_queue_serialization;
 mod misc_state;
 #[path = "units/mode_indicator.rs"]
 mod mode_indicator;
+#[path = "units/model_enforcement.rs"]
+mod model_enforcement;
 #[path = "units/model_picker.rs"]
 mod model_picker;
 #[path = "units/mouse_pixels.rs"]
@@ -260,8 +268,14 @@ mod queue_feedback_session;
 mod queue_hints;
 #[path = "units/queue_images.rs"]
 mod queue_images;
+#[path = "units/queue_paused_after_interrupt.rs"]
+mod queue_paused_after_interrupt;
+#[path = "units/queue_selection_flow.rs"]
+mod queue_selection_flow;
 #[path = "units/queue_spacer.rs"]
 mod queue_spacer;
+#[path = "units/queue_steer_failures.rs"]
+mod queue_steer_failures;
 #[path = "units/quit_confirmation.rs"]
 mod quit_confirmation;
 #[path = "units/quit_manager_state.rs"]
@@ -280,10 +294,16 @@ mod resume_attempts;
 mod resume_lease_lock;
 #[path = "units/resume_picker_delete.rs"]
 mod resume_picker_delete;
+#[path = "units/resume_picker_exits.rs"]
+mod resume_picker_exits;
+#[path = "units/resume_picker_outcomes.rs"]
+mod resume_picker_outcomes;
 #[path = "units/retry_presentation.rs"]
 mod retry_presentation;
 #[path = "units/retry_snapshot_merge.rs"]
 mod retry_snapshot_merge;
+#[path = "units/rewind.rs"]
+mod rewind;
 #[path = "units/rpc_contract.rs"]
 mod rpc_contract;
 #[path = "units/rpc_error_frame.rs"]
@@ -292,6 +312,8 @@ mod rpc_error_frame;
 mod rpc_error_session_busy;
 #[path = "units/run_export.rs"]
 mod run_export;
+#[path = "units/run_export_subagents.rs"]
+mod run_export_subagents;
 #[path = "units/runtime_refresh.rs"]
 mod runtime_refresh;
 #[path = "units/scheduled_loop_fired.rs"]
@@ -327,12 +349,16 @@ mod startup_resume_intent;
 #[path = "units/stress_command.rs"]
 mod stress_command;
 
+#[path = "units/subagent_click.rs"]
+mod subagent_click;
 #[path = "units/subagent_list.rs"]
 mod subagent_list;
 #[path = "units/subagent_sessions.rs"]
 mod subagent_sessions;
 #[path = "units/subagent_transcript.rs"]
 mod subagent_transcript;
+#[path = "units/subagent_view_keys.rs"]
+mod subagent_view_keys;
 #[path = "units/telemetry_events.rs"]
 mod telemetry_events;
 #[path = "units/teleport_input.rs"]
@@ -377,6 +403,8 @@ mod tts_request;
 mod turn_counter;
 #[path = "units/turn_error_message.rs"]
 mod turn_error_message;
+#[path = "units/unsolicited_turn.rs"]
+mod unsolicited_turn;
 #[path = "units/update_brew_oracle.rs"]
 mod update_brew_oracle;
 #[path = "units/update_prompt.rs"]

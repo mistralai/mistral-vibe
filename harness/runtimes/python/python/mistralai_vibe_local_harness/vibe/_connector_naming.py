@@ -178,6 +178,8 @@ def _source_status(  # noqa: PLR0911 - one return per source status
         return "needs_auth"
     if connector.auth_action == "credentials_setup":
         return "needs_setup"
+    if connector.auth_action == "no_auth_connect":
+        return "needs_connect"
     return "unavailable"
 
 

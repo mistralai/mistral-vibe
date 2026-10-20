@@ -114,6 +114,22 @@ async fn run() -> Result<std::process::ExitCode> {
     if let Some(vibe_rs::cli::CliCommand::Mcp { command }) = &cli.command {
         return Ok(vibe_rs::mcp_command::run(command, launch).await);
     }
+    if let Some(vibe_rs::cli::CliCommand::RunServer {
+        max_runs,
+        runs_per_app_server,
+    }) = &cli.command
+    {
+        let options = vibe_rs::run_server::ServerOptions {
+            max_runs: max_runs.map(|n| n as usize),
+            runs_per_app_server: *runs_per_app_server as usize,
+        };
+        let invocation = invocation_cwd.clone().or_else(|| cwd.clone());
+        let invocation = invocation.unwrap_or_default();
+        let code =
+            vibe_rs::run_server::run(options, launch, Some(cwd_text.clone()), invocation).await;
+        // A pending stdin read holds a blocking thread the runtime's drop would wait for.
+        std::process::exit(code.into());
+    }
 
     // The forced check runs after the workdir switch and
     // before anything interactive (and without the pre-ready Sentry init).

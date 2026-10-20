@@ -42,11 +42,7 @@ class FakeConnectorRegistry(ConnectorRegistry):
             tool_map: dict[str, type[BaseTool]] = {}
             for remote in tools:
                 proxy_cls = create_connector_proxy_tool_class(
-                    connector_name=connector_name,
-                    connector_alias=alias,
-                    connector_id=connector_id,
-                    remote=remote,
-                    api_key="fake-key",
+                    connector_alias=alias, remote=remote
                 )
                 tool_map[proxy_cls.get_name()] = proxy_cls
             self._cache[connector_id] = tool_map

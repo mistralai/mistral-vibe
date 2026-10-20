@@ -57,7 +57,7 @@ def _load_latest_session_entries() -> tuple[str, list[dict[str, object]]] | None
             manifests, key=lambda path: (path.stat().st_mtime, path.name)
         )
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return None
     session_id = metadata.get("session_id")
     if not isinstance(session_id, str):
@@ -70,7 +70,7 @@ def _load_latest_session_entries() -> tuple[str, list[dict[str, object]]] | None
                     (latest / "chunks" / f"{chunk}.json").read_text(encoding="utf-8")
                 )
             )
-        except OSError, json.JSONDecodeError:
+        except (OSError, json.JSONDecodeError):
             return None
     return session_id, entries
 

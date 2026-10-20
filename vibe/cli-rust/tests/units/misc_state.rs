@@ -3,7 +3,6 @@
 use serde_json::json;
 use vibe_rs::app::App;
 use vibe_rs::completion_manager as completion;
-use vibe_rs::config::{self, ConfigField};
 use vibe_rs::config_fields::{format_value, parse};
 use vibe_rs::input_modes::InputMode;
 use vibe_rs::utils::history_manager::HistoryManager;
@@ -163,55 +162,6 @@ fn slash_accept_replaces_the_typed_prefix() {
     assert!(!completion::is_open(&app), "accepting closes the popup");
     assert_eq!(app.completion.selected, 0);
 }
-
-fn field(name: &str, popular: bool) -> ConfigField {
-    ConfigField {
-        name: name.into(),
-        popular,
-        path: name.into(),
-        raw_value: json!("x"),
-        kind: "string".into(),
-        writable: true,
-        overridden: false,
-        enum_choices: vec![],
-        description: String::new(),
-        value_labels: Default::default(),
-        layers: vec![],
-    }
-}
-
-#[test]
-fn config_screen_filter_resolves_fields_by_name_popular_first() {
-    let mut app = App::default();
-    app.config_screen.fields = vec![
-        field("alpha", false),
-        field("Theme", true),
-        field("beta_theme", true),
-        field("gamma", false),
-    ];
-
-    let all: Vec<&str> = config::filtered(&app)
-        .iter()
-        .map(|field| field.name.as_str())
-        .collect();
-    assert_eq!(
-        all,
-        ["Theme", "beta_theme", "alpha", "gamma"],
-        "popular first"
-    );
-
-    app.config_screen.search.query = "theme".into();
-    let found: Vec<&str> = config::filtered(&app)
-        .iter()
-        .map(|field| field.name.as_str())
-        .collect();
-    assert_eq!(
-        found,
-        ["Theme", "beta_theme"],
-        "case-insensitive name match"
-    );
-}
-
 fn config_field_wire() -> serde_json::Value {
     json!({
         "fields": [

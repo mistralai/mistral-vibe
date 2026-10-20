@@ -1,6 +1,5 @@
 //! Callback kinds stay advertised and require a semantic answer from the UI.
 
-use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
@@ -224,7 +223,7 @@ async fn approval_callback_is_acknowledged_and_forwarded_without_auto_approval()
     // `notif_tx`), so the receiver is unused; the sender still wires `DenyWiring`.
     let (notification_tx, _notifications) = mpsc::channel(1);
     let (writer_tx, mut writer) = mpsc::unbounded_channel();
-    let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+    let pending = Pending::default();
     let active_session: ActiveSession = Arc::new(Mutex::new(None));
     let next_request_id = AtomicU64::new(1);
     let callback = json!({
@@ -270,7 +269,7 @@ async fn approval_callback_is_acknowledged_and_forwarded_without_auto_approval()
 async fn denial_without_session_id_falls_back_to_the_active_session() {
     let (notification_tx, _notifications) = mpsc::channel(1);
     let (writer_tx, mut writer) = mpsc::unbounded_channel();
-    let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+    let pending = Pending::default();
     let active_session: ActiveSession = Arc::new(Mutex::new(Some("session-live".to_owned())));
     let next_request_id = AtomicU64::new(1);
     // Tolerated older backend shape: no `sessionId` (ADR 0014).
@@ -308,5 +307,5 @@ async fn denial_without_session_id_falls_back_to_the_active_session() {
     );
     // The deny result is registered so a rejection is delivered, not dropped.
     let deny_id = deny["id"].as_u64().unwrap();
-    assert!(pending.lock().unwrap().contains_key(&deny_id));
+    assert!(pending.take(deny_id).is_some());
 }

@@ -8,7 +8,7 @@ from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.layers.model_catalog import ModelCatalogLayer
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.layers.project import ProjectConfigLayer
-from vibe.core.config.layers.user import UserConfigLayer
+from vibe.core.config.layers.user import SuppliedUserConfigLayer, UserConfigLayer
 
 __all__ = [
     "AgentProfileLayer",
@@ -19,5 +19,6 @@ __all__ = [
     "ModelCatalogLayer",
     "OverridesLayer",
     "ProjectConfigLayer",
+    "SuppliedUserConfigLayer",
     "UserConfigLayer",
 ]

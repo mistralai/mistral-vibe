@@ -43,16 +43,23 @@ async def spawn_shell_command(
             cwd=cwd,
         )
 
-    return await asyncio.create_subprocess_shell(
-        command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        stdin=asyncio.subprocess.DEVNULL,
-        env=env,
-        cwd=cwd,
-        executable=os.environ.get("SHELL"),
-        start_new_session=True,
-    )
+    # Empty input from a pipe whose write end is closed, not /dev/null, which a
+    # command may have deleted.
+    stdin, writer = os.pipe()
+    os.close(writer)
+    try:
+        return await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=stdin,
+            env=env,
+            cwd=cwd,
+            executable=os.environ.get("SHELL"),
+            start_new_session=True,
+        )
+    finally:
+        os.close(stdin)
 
 
 def _shell_environment() -> dict[str, str]:

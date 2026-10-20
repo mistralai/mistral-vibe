@@ -10,6 +10,24 @@ fn invalid_permission_pattern_is_rejected() {
     assert!(PermissionPattern::new("[").is_err());
 }
 
+#[test]
+fn deserialization_rejects_rule_without_decision() {
+    let policy = serde_json::json!({
+        "default": "allow",
+        "rules": [{
+            "tools": ["linear.*"],
+            "allowlist": [],
+            "denylist": [],
+            "sensitive": [],
+        }],
+    });
+
+    let error = serde_json::from_value::<PermissionPolicy>(policy)
+        .expect_err("a permission rule without a decision must be rejected");
+
+    assert!(error.to_string().contains("missing field `decision`"));
+}
+
 fn build_permission_pattern(source: &str) -> PermissionPattern {
     PermissionPattern::new(source).unwrap()
 }

@@ -25,7 +25,7 @@ pub(crate) struct ToolBinding {
 }
 
 pub(crate) fn direct_routes(config: &HarnessConfig) -> Vec<(String, ToolTarget)> {
-    let mut routes = file_system::tools(config.settings.tools.command_environment)
+    let mut routes = file_system_specs(config)
         .into_iter()
         .map(|spec| {
             (
@@ -44,13 +44,15 @@ pub(crate) fn direct_routes(config: &HarnessConfig) -> Vec<(String, ToolTarget)>
             },
         ));
     }
-    let skill_name = skills::ToolName::Read;
-    routes.push((
-        skill_name.direct_name().to_string(),
-        ToolTarget::RuntimeBuiltin {
-            name: skill_name.runtime_tool(),
-        },
-    ));
+    if !config.settings.tools.skills.is_disabled() {
+        let skill_name = skills::ToolName::Read;
+        routes.push((
+            skill_name.direct_name().to_string(),
+            ToolTarget::RuntimeBuiltin {
+                name: skill_name.runtime_tool(),
+            },
+        ));
+    }
     routes.extend(config.tool_groups().flat_map(|group| {
         group
             .tools
@@ -67,6 +69,21 @@ pub(crate) fn direct_routes(config: &HarnessConfig) -> Vec<(String, ToolTarget)>
             })
     }));
     routes
+}
+
+/// The file system tool specs the Session exposes, or none when disabled.
+fn file_system_specs(config: &HarnessConfig) -> Vec<file_system::ToolSpec> {
+    if !config.settings.tools.file_system.is_enabled() {
+        return Vec::new();
+    }
+    file_system::tools(config.settings.tools.command_environment)
+}
+
+fn session_filesystem_tools(config: &HarnessConfig) -> Vec<ToolBinding> {
+    if !config.settings.tools.file_system.is_enabled() {
+        return Vec::new();
+    }
+    filesystem_tools(config.settings.tools.command_environment)
 }
 
 fn filesystem_tools(environment: CommandEnvironment) -> Vec<ToolBinding> {
@@ -93,8 +110,8 @@ fn filesystem_tools(environment: CommandEnvironment) -> Vec<ToolBinding> {
         .collect()
 }
 
-fn subagent_tools(mode: &subagents::Mode) -> Vec<ToolBinding> {
-    subagents::tools()
+fn subagent_tools(mode: &subagents::Mode, prompts: &subagents::Prompts) -> Vec<ToolBinding> {
+    subagents::tools(mode.supports_conversation_forking(), prompts)
         .into_iter()
         .filter(|spec| mode.supports(spec.name))
         .map(|spec| ToolBinding {
@@ -160,10 +177,11 @@ pub(crate) fn direct_tools(config: &HarnessConfig) -> Vec<ToolDefinition> {
     if crate::core::features::model_wait::is_offered(&config.settings.tools) {
         tools.push(crate::core::features::model_wait::tool(
             config.settings.tools.max_wait_ms,
+            &config.settings.prompts.wait_description,
         ));
     }
     tools.extend(
-        filesystem_tools(config.settings.tools.command_environment)
+        session_filesystem_tools(config)
             .into_iter()
             .map(|tool| ToolDefinition {
                 name: tool.descriptor.name,
@@ -171,7 +189,7 @@ pub(crate) fn direct_tools(config: &HarnessConfig) -> Vec<ToolDefinition> {
                 parameters: tool.descriptor.input_schema,
             }),
     );
-    if let Some(spec) = skills::direct_tool(config.skills()) {
+    if let Some(spec) = skills::direct_tool(config.settings.tools.skills, config.skills()) {
         tools.push(ToolDefinition {
             name: spec.name.direct_name().to_string(),
             description: spec.description.to_string(),
@@ -200,10 +218,16 @@ pub(crate) const RESERVED_TOOL_NAMESPACES: [&str; 5] = [
     subagents::NAMESPACE,
 ];
 
-pub(crate) fn is_reserved_direct_name(environment: CommandEnvironment, name: &str) -> bool {
+/// Direct names a caller tool cannot take. `skill` stays free while skills are disabled, so a
+/// caller can declare its own; a Session that may gain skills later keeps it reserved.
+pub(crate) fn is_reserved_direct_name(
+    environment: CommandEnvironment,
+    skill_mode: skills::Mode,
+    name: &str,
+) -> bool {
     file_system::is_direct_name(environment, name)
         || background_processes::is_sandbox_name(name)
-        || skills::is_direct_name(name)
+        || (!skill_mode.is_disabled() && skills::is_direct_name(name))
         || name == "sleep"
         || name == "wait"
 }
@@ -212,17 +236,24 @@ pub(crate) fn is_reserved_direct_name(environment: CommandEnvironment, name: &st
 ///
 /// Feature modules remain the source of built-in identities and availability.
 pub(crate) fn hook_tool_catalog(config: &HarnessConfig) -> Vec<HookToolKey> {
-    let mut tools = filesystem_tools(config.settings.tools.command_environment);
-    tools.extend(self_tools(config.settings.tools.programmatic.max_sleep_ms));
-    // Unconditional, unlike the model-facing list: skills have no enable/disable setting,
-    // and a hook scoped to `skill` must not disappear from the catalogue just because the
-    // project has not declared a skill yet.
-    tools.push(skill_tool());
+    let mut tools = session_filesystem_tools(config);
+    if config.settings.tools.programmatic.offers_sleep() {
+        tools.extend(self_tools(config.settings.tools.programmatic.max_sleep_ms));
+    }
+    // Present unless skills are disabled, unlike the model-facing list: a hook scoped to
+    // `skill` must not disappear from the catalogue just because the project has not
+    // declared a skill yet.
+    if !config.settings.tools.skills.is_disabled() {
+        tools.push(skill_tool());
+    }
     if config.settings.tools.background_processes.is_enabled() {
         tools.extend(background_process_tools());
     }
     if config.settings.tools.subagents.is_enabled() {
-        tools.extend(subagent_tools(&config.settings.tools.subagents));
+        tools.extend(subagent_tools(
+            &config.settings.tools.subagents,
+            &config.settings.prompts.agent_tools,
+        ));
     }
     let mut keys = tools
         .into_iter()
@@ -246,7 +277,10 @@ pub(crate) fn hook_tool_catalog(config: &HarnessConfig) -> Vec<HookToolKey> {
 }
 
 pub(super) fn non_filesystem_runtime_builtin_tools(max_sleep_ms: u64) -> Vec<ToolBinding> {
-    let mut tools = subagent_tools(&subagents::Mode::enabled());
+    let mut tools = subagent_tools(
+        &subagents::Mode::enabled(),
+        &crate::core::prompt::PromptSettings::default().agent_tools,
+    );
     tools.extend(self_tools(max_sleep_ms));
     tools.push(skill_tool());
     tools.extend(background_process_tools());
@@ -319,7 +353,10 @@ Example:
             .chain(self_tools(30_000))
             .chain(std::iter::once(skill_tool()))
             .chain(background_process_tools())
-            .chain(subagent_tools(&subagents::Mode::enabled()))
+            .chain(subagent_tools(
+                &subagents::Mode::enabled(),
+                &crate::core::prompt::PromptSettings::default().agent_tools,
+            ))
             .collect::<Vec<_>>();
         let mut stable_ids = BTreeSet::new();
         let mut namespaces = BTreeSet::new();

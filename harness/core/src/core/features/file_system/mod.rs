@@ -12,6 +12,7 @@ use crate::core::tools::external::RuntimeBuiltinToolName;
 use crate::core::tools::schema::ToolSchema;
 
 pub(crate) const NAMESPACE: &str = "file_system";
+const DEFAULT_BASH_TIMEOUT_SECONDS: i64 = 120;
 const MAX_BASH_TIMEOUT_SECONDS: i64 = 300;
 const EDIT_DESCRIPTION: &str = r#"Exact string replacement in a file.
 
@@ -19,6 +20,22 @@ Read the current file first. `old_string` must match exactly, including whitespa
 
 Example:
 {"file_path":"src/config.ts","old_string":"const mode = \"old\";","new_string":"const mode = \"new\";","replace_all":false}"#;
+
+/// Whether the Session exposes the file system tools. Omission keeps them
+/// enabled, so settings recorded before this field existed keep their tools.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum Mode {
+    #[default]
+    Enabled,
+    Disabled,
+}
+
+impl Mode {
+    pub(crate) fn is_enabled(&self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
 
 pub(crate) fn search_description(environment: CommandEnvironment) -> String {
     match environment.profile() {
@@ -31,7 +48,7 @@ pub(crate) fn search_description(environment: CommandEnvironment) -> String {
 }
 
 fn default_bash_timeout_seconds() -> i64 {
-    MAX_BASH_TIMEOUT_SECONDS
+    DEFAULT_BASH_TIMEOUT_SECONDS
 }
 
 #[derive(JsonSchema)]
@@ -48,11 +65,17 @@ struct ReadFileInput {
 struct ReadFileOutput {
     path: String,
     content: String,
+    /// Size of the file in bytes; for a directory, of its whole listing.
     file_size_bytes: i64,
     returned_bytes: i64,
     offset: i64,
     lines_read: i64,
+    /// Whether the file has more content past what was returned.
     was_truncated: bool,
+    /// Number of lines in the file, or of entries in a directory, or null when the file is too large to count.
+    total_lines: Option<i64>,
+    /// The `offset` to read the rest of the file from, or null when the read reached the end of the file.
+    next_offset: Option<i64>,
 }
 
 #[derive(JsonSchema)]
@@ -115,6 +138,7 @@ struct EditOutput {
 #[schemars(deny_unknown_fields)]
 struct BashInput {
     command: String,
+    /// Seconds the command may run: 120 by default, at most 300. A command that runs longer is stopped, and the result keeps the output it wrote so far with `timed_out` set.
     #[schemars(
         default = "default_bash_timeout_seconds",
         range(min = 1, max = MAX_BASH_TIMEOUT_SECONDS)
@@ -129,6 +153,9 @@ struct BashOutput {
     stderr: String,
     returncode: i64,
     was_truncated: bool,
+    /// Whether the command was stopped at its timeout; `stdout` and `stderr` hold the output written before it.
+    #[schemars(default)]
+    timed_out: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -182,7 +209,9 @@ impl ToolName {
     fn spec(self, environment: CommandEnvironment) -> Option<ToolSpec> {
         let direct_name = self.direct_name(environment)?;
         let description = match self {
-            Self::ReadFile => "Read a text file with optional zero-indexed line offset and limit.",
+            Self::ReadFile => {
+                "Read a text file with optional zero-indexed line offset and limit. When `was_truncated` is true, read on from `next_offset`. An offset past the end of the file is an error. A directory reads as a listing of its entries, one per line with `/` after each subdirectory, at most 500 at a time."
+            }
             Self::WriteFile => "Create or overwrite a UTF-8 file.",
             Self::Edit => EDIT_DESCRIPTION,
             Self::Bash => environment.profile()?.tool_description,
@@ -267,7 +296,7 @@ mod tests {
     ///
     /// *Prepare*: The Core-owned schema for the built-in bash tool.
     /// *Do*: Read the model-visible timeout property.
-    /// *Assert*: Omitted timeout defaults to 300 seconds and explicit values cannot exceed 300.
+    /// *Assert*: Omitted timeout defaults to 120 seconds and explicit values cannot exceed 300.
     ///
     #[test]
     fn bash_timeout_schema_has_the_portable_default_and_maximum() {
@@ -280,7 +309,7 @@ mod tests {
         let timeout = &bash.input_schema["properties"]["timeout_seconds"];
 
         // Assert
-        assert_eq!(timeout["default"], 300);
+        assert_eq!(timeout["default"], 120);
         assert_eq!(timeout["maximum"], 300);
     }
 

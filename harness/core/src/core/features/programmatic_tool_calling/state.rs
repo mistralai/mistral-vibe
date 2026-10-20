@@ -8,7 +8,10 @@ use crate::core::features::permissions::GrantKey;
 use crate::core::features::programmatic_tool_calling::ProgrammaticName;
 use crate::core::features::programmatic_tool_calling::execution::serialized_len;
 use crate::core::features::programmatic_tool_calling::model::{
-    PartialEvaluation, ProgramBudget, ToolFunction, ToolKind, ToolState,
+    PartialEvaluation, ToolFunction, ToolKind, ToolState,
+};
+use crate::core::features::programmatic_tool_calling::time_budget::{
+    ProgramClock, is_shortened_sleep, shortened_sleep_result, sleep_seconds,
 };
 use crate::core::hooks::{HookCall, HookPoint, hook_action_id};
 use crate::core::step_protocol::Action;
@@ -22,6 +25,9 @@ use crate::core::wire::tool::{StructuredContent, ToolResult};
 pub(super) struct PendingProgramOperation {
     call: ExternalToolCall,
     stage: ProgramOperationStage,
+    /// For a sent sleep: its length after pre-tool hooks, before Core fit it
+    /// to the time budget. `None` for other calls.
+    requested_sleep_seconds: Option<f64>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -44,26 +50,39 @@ enum ProgramOperationStage {
     },
 }
 
+/// How far an unfinished program operation got before its program stopped.
+pub(super) enum UnfinishedOperation {
+    /// Waiting for a pre-tool-call hook or an approval: the tool never ran.
+    NotStarted,
+    /// Sent to the Runtime: the tool may have had effects.
+    Running,
+    /// The tool ran; only its post-tool-call hook was left.
+    Finished {
+        /// The tool returned a failure.
+        failed: bool,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ProgramExecution {
     partial_evaluation: PartialEvaluation,
     pending_operations: Vec<PendingProgramOperation>,
     round: u32,
-    started_at_unix_ms: Option<u64>,
+    clock: ProgramClock,
 }
 
 #[derive(Debug)]
 pub(super) struct ProgramContinuation {
     pub(super) partial_evaluation: PartialEvaluation,
     pub(super) round: u32,
-    pub(super) started_at_unix_ms: Option<u64>,
+    pub(super) clock: ProgramClock,
 }
 
 impl ProgramContinuation {
     pub(super) fn after_round(
         partial_evaluation: PartialEvaluation,
         round: u32,
-        started_at_unix_ms: Option<u64>,
+        clock: ProgramClock,
     ) -> Result<Self, CoreError> {
         let round = round
             .checked_add(1)
@@ -71,7 +90,7 @@ impl ProgramContinuation {
         Ok(Self {
             partial_evaluation,
             round,
-            started_at_unix_ms,
+            clock,
         })
     }
 }
@@ -140,6 +159,9 @@ pub(crate) enum PendingProgramRecord {
     },
     Pending {
         call: ExternalToolCall,
+        /// See `PendingProgramOperation::requested_sleep_seconds`. `None`
+        /// also for sleeps restored from checkpoints that did not record it.
+        requested_sleep_seconds: Option<f64>,
     },
     AwaitingPostHook {
         call: ExternalToolCall,
@@ -154,12 +176,12 @@ pub(crate) struct ProgramCapture {
     source: String,
     operations: Vec<ProgramOperationRecord>,
     round: u32,
-    started_at_unix_ms: Option<u64>,
+    clock: ProgramClock,
 }
 
 impl ProgramCapture {
-    pub(crate) fn started_at_unix_ms(&self) -> Option<u64> {
-        self.started_at_unix_ms
+    pub(crate) fn clock(&self) -> ProgramClock {
+        self.clock
     }
 
     pub(crate) fn source(&self) -> &str {
@@ -187,13 +209,17 @@ impl PendingProgramOperation {
                 hook_action_id,
                 hook_binding_ids,
             },
+            requested_sleep_seconds: None,
         }
     }
 
-    pub(super) fn pending(call: ExternalToolCall) -> Self {
+    /// An operation sent as `call`, which Core fit to the time budget from
+    /// `requested`.
+    pub(super) fn pending(requested: &ExternalToolCall, call: ExternalToolCall) -> Self {
         Self {
             call,
             stage: ProgramOperationStage::Pending,
+            requested_sleep_seconds: sleep_seconds(requested),
         }
     }
 
@@ -209,6 +235,7 @@ impl PendingProgramOperation {
                 programmatic_name,
             },
             call,
+            requested_sleep_seconds: None,
         }
     }
 }
@@ -285,37 +312,108 @@ fn settled_tool_state(
 }
 
 impl ProgramExecution {
-    pub(super) fn budget_at(&mut self, now_unix_ms: u64, budget_ms: u64) -> ProgramBudget {
-        // V1 checkpoints written before elapsed budgets have no recorded start.
-        let started_at = *self.started_at_unix_ms.get_or_insert(now_unix_ms);
-        ProgramBudget {
-            budget_ms,
-            elapsed_ms: now_unix_ms.saturating_sub(started_at),
-        }
-    }
-
-    /// Like `budget_at`, but read-only: a program with no recorded start has
-    /// spent nothing yet.
-    pub(super) fn peek_budget_at(&self, now_unix_ms: u64, budget_ms: u64) -> ProgramBudget {
-        ProgramBudget {
-            budget_ms,
-            elapsed_ms: self
-                .started_at_unix_ms
-                .map_or(0, |started_at| now_unix_ms.saturating_sub(started_at)),
-        }
-    }
-
     pub(super) fn new(
         partial_evaluation: PartialEvaluation,
         pending_operations: Vec<PendingProgramOperation>,
         round: u32,
-        started_at_unix_ms: u64,
+        clock: ProgramClock,
+        now_unix_ms: u64,
     ) -> Self {
-        Self {
+        let mut execution = Self {
             partial_evaluation,
             pending_operations,
             round,
-            started_at_unix_ms: Some(started_at_unix_ms),
+            clock,
+        };
+        execution.sync_clock(now_unix_ms);
+        execution
+    }
+
+    /// Pauses the budget clock while an operation waits for an approval or a
+    /// hook, and runs it otherwise.
+    pub(super) fn sync_clock(&mut self, now_unix_ms: u64) {
+        let waiting = self
+            .pending_operations
+            .iter()
+            .any(|operation| !matches!(operation.stage, ProgramOperationStage::Pending));
+        self.clock.set_paused(waiting, now_unix_ms);
+    }
+
+    /// Turns a sleep that the time budget cut short into its catchable budget
+    /// failure.
+    pub(super) fn settle_sleep_result(
+        &mut self,
+        action_id: &str,
+        result: ToolResult,
+        budget_ms: u64,
+        now_unix_ms: u64,
+    ) -> ToolResult {
+        let Some(operation) = self.pending_operations.iter().find(|operation| {
+            operation.call.action_id == action_id
+                && matches!(operation.stage, ProgramOperationStage::Pending)
+        }) else {
+            return result;
+        };
+        let call = &operation.call;
+        // Checkpoints that did not record the requested length fall back to
+        // the length the program asked for.
+        let requested_seconds = operation.requested_sleep_seconds.or_else(|| {
+            self.partial_evaluation
+                .tool_state
+                .iter()
+                .find_map(|operation| match operation {
+                    ToolState::Pending { id, function, .. } if *id == call.call_id => {
+                        function.arguments.get("seconds").and_then(Value::as_f64)
+                    }
+                    _ => None,
+                })
+        });
+        let shortened = requested_seconds
+            .is_some_and(|requested_seconds| is_shortened_sleep(call, requested_seconds));
+        // A sleep cut short by the budget rejects even if the Runtime timer
+        // fired a little early, so the program never mistakes it for a full sleep.
+        if shortened && matches!(result, ToolResult::Success { .. }) {
+            return shortened_sleep_result(budget_ms, self.clock.used_at(now_unix_ms));
+        }
+        result
+    }
+
+    pub(super) fn clock(&self) -> ProgramClock {
+        self.clock
+    }
+
+    pub(super) fn round(&self) -> u32 {
+        self.round
+    }
+
+    pub(super) fn partial_evaluation(&self) -> &PartialEvaluation {
+        &self.partial_evaluation
+    }
+
+    pub(super) fn tool_state(&self) -> &[ToolState] {
+        &self.partial_evaluation.tool_state
+    }
+
+    /// How far the unfinished operation `operation_id` got. Operations
+    /// without a pending stage never started.
+    pub(super) fn unfinished_operation(&self, operation_id: &str) -> UnfinishedOperation {
+        match self
+            .pending_operations
+            .iter()
+            .find(|operation| operation.call.call_id == operation_id)
+            .map(|operation| &operation.stage)
+        {
+            Some(ProgramOperationStage::Pending) => UnfinishedOperation::Running,
+            Some(ProgramOperationStage::AwaitingPostHook { result, .. }) => {
+                UnfinishedOperation::Finished {
+                    failed: matches!(result, ToolResult::Failure { .. }),
+                }
+            }
+            Some(
+                ProgramOperationStage::AwaitingPreHook { .. }
+                | ProgramOperationStage::AwaitingApproval { .. },
+            )
+            | None => UnfinishedOperation::NotStarted,
         }
     }
 
@@ -435,14 +533,16 @@ impl ProgramExecution {
         held + incoming
     }
 
+    /// Sends the operation as `sent_call`, which Core fit to the time budget
+    /// from the post-hook call `effective_call`.
     pub(super) fn continue_after_pre_hook(
         &mut self,
         hook_action_id: &str,
-        effective_call: ExternalToolCall,
+        effective_call: &ExternalToolCall,
+        sent_call: ExternalToolCall,
     ) -> Result<(), CoreError> {
         let operation = self.awaiting_pre_hook_operation_mut(hook_action_id)?;
-        operation.call = effective_call;
-        operation.stage = ProgramOperationStage::Pending;
+        *operation = PendingProgramOperation::pending(effective_call, sent_call);
         Ok(())
     }
 
@@ -487,15 +587,28 @@ impl ProgramExecution {
         Some(&self.pending_operations[operation_index].call)
     }
 
+    /// Starts an approved operation, fitting a wait to the remaining time
+    /// budget. Returns the result instead when the operation cannot start: a
+    /// sleep after the budget is used up.
     pub(crate) fn approve_pending_approval(
         &mut self,
         approval_action_id: &str,
-    ) -> Option<&ExternalToolCall> {
+        budget_ms: u64,
+        now_unix_ms: u64,
+    ) -> Option<Result<&ExternalToolCall, ToolResult>> {
         let operation_index = self.pending_approval_index(approval_action_id)?;
+        let call = match self.clock.fit(
+            &self.pending_operations[operation_index].call,
+            budget_ms,
+            now_unix_ms,
+        ) {
+            Ok(call) => call,
+            Err(result) => return Some(Err(*result)),
+        };
         let operation = &mut self.pending_operations[operation_index];
-
-        operation.stage = ProgramOperationStage::Pending;
-        Some(&operation.call)
+        *operation = PendingProgramOperation::pending(&operation.call, call);
+        self.sync_clock(now_unix_ms);
+        Some(Ok(&self.pending_operations[operation_index].call))
     }
 
     fn pending_approval_index(&self, approval_action_id: &str) -> Option<usize> {
@@ -619,7 +732,7 @@ impl ProgramExecution {
         Ok(Some(ProgramContinuation::after_round(
             self.partial_evaluation.clone(),
             self.round,
-            self.started_at_unix_ms,
+            self.clock,
         )?))
     }
 
@@ -742,7 +855,7 @@ impl ProgramExecution {
             source: self.partial_evaluation.code.clone(),
             operations,
             round: self.round,
-            started_at_unix_ms: self.started_at_unix_ms,
+            clock: self.clock,
         })
     }
 
@@ -750,7 +863,7 @@ impl ProgramExecution {
         source: String,
         operations: Vec<ProgramOperationRecord>,
         round: u32,
-        started_at_unix_ms: Option<u64>,
+        clock: ProgramClock,
     ) -> Result<Self, String> {
         let mut operation_ids = HashSet::new();
         let mut tool_state = Vec::with_capacity(operations.len());
@@ -833,6 +946,16 @@ impl ProgramExecution {
                 "pending program execution must contain at least one operation".to_string(),
             );
         }
+        let mut clock = clock;
+        let waiting = pending_operations
+            .iter()
+            .any(|operation| !matches!(operation.stage, ProgramOperationStage::Pending));
+        if waiting && clock.paused_since_unix_ms.is_none() {
+            // Checkpoints written before pauses were recorded do not say when
+            // the wait started; pause from the program's start so the
+            // approval or hook wait does not count.
+            clock.paused_since_unix_ms = clock.started_at_unix_ms;
+        }
         Ok(Self {
             partial_evaluation: PartialEvaluation {
                 code: source,
@@ -841,7 +964,7 @@ impl ProgramExecution {
             },
             pending_operations,
             round,
-            started_at_unix_ms,
+            clock,
         })
     }
 }
@@ -931,7 +1054,7 @@ fn validate_pending_program_record(
     let call = match pending {
         PendingProgramRecord::AwaitingPreHook { call, .. }
         | PendingProgramRecord::AwaitingApproval { call, .. }
-        | PendingProgramRecord::Pending { call }
+        | PendingProgramRecord::Pending { call, .. }
         | PendingProgramRecord::AwaitingPostHook { call, .. } => call,
     };
     validate_pending_call(id, call)?;
@@ -1092,6 +1215,7 @@ impl From<&PendingProgramOperation> for PendingProgramRecord {
             },
             ProgramOperationStage::Pending => Self::Pending {
                 call: operation.call.clone(),
+                requested_sleep_seconds: operation.requested_sleep_seconds,
             },
             ProgramOperationStage::AwaitingPostHook {
                 hook_action_id,
@@ -1122,6 +1246,7 @@ impl TryFrom<(&str, PendingProgramRecord)> for PendingProgramOperation {
                     hook_action_id,
                     hook_binding_ids,
                 },
+                requested_sleep_seconds: None,
             },
             PendingProgramRecord::AwaitingApproval {
                 call,
@@ -1135,10 +1260,15 @@ impl TryFrom<(&str, PendingProgramRecord)> for PendingProgramOperation {
                     grant_key,
                     programmatic_name,
                 },
+                requested_sleep_seconds: None,
             },
-            PendingProgramRecord::Pending { call } => Self {
+            PendingProgramRecord::Pending {
+                call,
+                requested_sleep_seconds,
+            } => Self {
                 call,
                 stage: ProgramOperationStage::Pending,
+                requested_sleep_seconds,
             },
             PendingProgramRecord::AwaitingPostHook {
                 call,
@@ -1152,6 +1282,7 @@ impl TryFrom<(&str, PendingProgramRecord)> for PendingProgramOperation {
                     hook_binding_ids,
                     result,
                 },
+                requested_sleep_seconds: None,
             },
         };
         validate_pending_call(id, &operation.call)?;
@@ -1232,7 +1363,7 @@ mod tests {
                     pending: Box::new(pending),
                 }],
                 0,
-                None,
+                ProgramClock::default(),
             )
             .unwrap_err()
         };
@@ -1243,7 +1374,10 @@ mod tests {
                     name: "write_file".to_string(),
                     ..function.clone()
                 },
-                PendingProgramRecord::Pending { call: call.clone() },
+                PendingProgramRecord::Pending {
+                    call: call.clone(),
+                    requested_sleep_seconds: None,
+                },
             )
             .contains("targets")
         );
@@ -1255,6 +1389,7 @@ mod tests {
                 function.clone(),
                 PendingProgramRecord::Pending {
                     call: invalid_action,
+                    requested_sleep_seconds: None,
                 },
             )
             .contains("derived action ID")
@@ -1268,7 +1403,7 @@ mod tests {
                     value: Value::Null,
                 }],
                 0,
-                None,
+                ProgramClock::default(),
             )
             .unwrap_err()
             .contains("at least one operation")
@@ -1279,10 +1414,13 @@ mod tests {
             vec![ProgramOperationRecord::ExternalPending {
                 id: operation_id.to_string(),
                 function: function.clone(),
-                pending: Box::new(PendingProgramRecord::Pending { call: call.clone() }),
+                pending: Box::new(PendingProgramRecord::Pending {
+                    call: call.clone(),
+                    requested_sleep_seconds: None,
+                }),
             }],
             u32::MAX,
-            None,
+            ProgramClock::default(),
         )
         .unwrap();
         let overflow = max_round
@@ -1296,5 +1434,103 @@ mod tests {
             )
             .unwrap_err();
         assert!(overflow.detail().contains("round overflowed"));
+    }
+
+    /// A checkpoint written before sleeps recorded their requested length
+    /// compares the sent sleep with the length the program asked for.
+    #[test]
+    fn restored_sleep_without_a_requested_length_compares_with_the_program_arguments() {
+        let operation_id = "operation-1";
+        let sent = ExternalToolCall {
+            action_id: effect_id_for_operation(ToolOrigin::Programmatic, operation_id),
+            call_id: operation_id.to_string(),
+            origin: ToolOrigin::Programmatic,
+            call: ExternalTool::RuntimeBuiltin {
+                name: RuntimeBuiltinToolName::SelfSleep,
+                invocation_name: "sleep".to_string(),
+                arguments: json!({"seconds": 5.0}),
+            },
+        };
+        let settle = |requested_sleep_seconds| {
+            let mut execution = ProgramExecution::restore(
+                "async function main() {}".to_string(),
+                vec![ProgramOperationRecord::ExternalPending {
+                    id: operation_id.to_string(),
+                    function: ProgramFunctionRecord {
+                        name: "sleep".to_string(),
+                        arguments: json!({"seconds": 30}),
+                    },
+                    pending: Box::new(PendingProgramRecord::Pending {
+                        call: sent.clone(),
+                        requested_sleep_seconds,
+                    }),
+                }],
+                0,
+                ProgramClock::started_at(0),
+            )
+            .unwrap();
+            execution.settle_sleep_result(
+                &sent.action_id,
+                ToolResult::Success {
+                    content: Vec::new(),
+                    structured_content: StructuredContent::Absent,
+                    meta: None,
+                },
+                60_000,
+                60_000,
+            )
+        };
+
+        assert!(matches!(settle(None), ToolResult::Failure { .. }));
+        assert!(matches!(settle(Some(5.0)), ToolResult::Success { .. }));
+    }
+
+    /// A checkpoint written before pauses were recorded has a start time but
+    /// no pause; restoring it while an operation waits for a hook pauses the
+    /// clock, so the wait does not count toward the time budget.
+    #[test]
+    fn restore_without_a_recorded_pause_pauses_a_waiting_program() {
+        let operation_id = "operation-1";
+        let arguments = json!({ "path": "notes.txt" });
+        let call = ExternalToolCall {
+            action_id: effect_id_for_operation(ToolOrigin::Programmatic, operation_id),
+            call_id: operation_id.to_string(),
+            origin: ToolOrigin::Programmatic,
+            call: ExternalTool::RuntimeBuiltin {
+                name: RuntimeBuiltinToolName::FileSystemReadFile,
+                invocation_name: "read_file".to_string(),
+                arguments: arguments.clone(),
+            },
+        };
+        let restore = |pending| {
+            ProgramExecution::restore(
+                "async function main() {}".to_string(),
+                vec![ProgramOperationRecord::ExternalPending {
+                    id: operation_id.to_string(),
+                    function: ProgramFunctionRecord {
+                        name: "read_file".to_string(),
+                        arguments: arguments.clone(),
+                    },
+                    pending: Box::new(pending),
+                }],
+                0,
+                ProgramClock::started_at(1_000),
+            )
+            .unwrap()
+            .clock()
+        };
+
+        let waiting = restore(PendingProgramRecord::AwaitingPreHook {
+            hook_action_id: hook_action_id(&call.action_id, HookPoint::PreToolCall),
+            hook_binding_ids: vec!["pre-tool".to_string()],
+            call: call.clone(),
+        });
+        assert_eq!(waiting.used_at(120_000), 0);
+
+        let running = restore(PendingProgramRecord::Pending {
+            call,
+            requested_sleep_seconds: None,
+        });
+        assert_eq!(running.used_at(120_000), 119_000);
     }
 }

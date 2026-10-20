@@ -4,11 +4,13 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::json;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 
-use super::config::{agent_config, turn_id_from};
+use super::config::turn_id_from;
 use super::drive::{RunState, WorkEnd};
+use super::open::open_session;
 use super::pre_turn;
 use super::turn::run_turn_loop;
 use crate::cli::{HeadlessOptions, HeadlessSession};
@@ -17,12 +19,9 @@ use crate::headless_run::StopRequests;
 use crate::headless_startup::{within_startup_deadline, STARTUP_TIMEOUT};
 use crate::run_export::RunOutcome;
 use crate::server::{
-    method, Client, ClientCapabilities, ClientInfo, ContentBlock, InitializeParams, Launch,
-    Notification, RpcError, SessionStartParams, TurnStartParams, CALLBACK_KINDS,
+    method, Client, ClientCapabilities, ClientInfo, Connect, Connected, ContentBlock,
+    InitializeParams, Notification, TurnStartParams, CALLBACK_KINDS,
 };
-
-/// The headless run's session history page, as on `session/start`.
-const HISTORY_LIMIT: u32 = 200;
 
 /// The run's work: spawn the app-server, open the session, and run the
 /// turn. Every failure is classified here, so the stop path can still
@@ -30,26 +29,30 @@ const HISTORY_LIMIT: u32 = 200;
 pub(super) async fn run_session(
     options: HeadlessOptions,
     cwd: Option<String>,
-    launch: Launch,
+    connect: Connect,
     stop: Arc<StopRequests>,
     state: Arc<Mutex<RunState>>,
 ) -> WorkEnd {
-    let (client, child, mut notifications, _crash_rx) = match Client::spawn(launch).await {
-        Ok(spawned) => spawned,
+    let Connected {
+        client,
+        connection,
+        notifications,
+    } = match connect.connect().await {
+        Ok(connected) => connected,
         Err(error) => {
-            return WorkEnd::Failed(
-                RunOutcome::InfrastructureFailure,
-                format!("spawn app-server: {error:#}"),
-            );
+            return WorkEnd::Failed(RunOutcome::InfrastructureFailure, format!("{error:#}"));
         }
     };
     let client = Arc::new(client);
     client.set_deny_callbacks(true);
+    let notifications = Arc::new(AsyncMutex::new(notifications));
     {
         let mut state = state.lock().unwrap();
         state.client = Some(client.clone());
-        state.child = Some(child);
+        state.connection = Some(connection);
+        state.notifications = Some(notifications.clone());
     }
+    let mut notifications = notifications.lock_owned().await;
 
     // A worktree only comes with `session/start`, so a worktree run that
     // resumes starts first, then rebinds once the worktree has settled.
@@ -125,10 +128,10 @@ pub(super) async fn run_session(
         };
     state.lock().unwrap().usage_baseline = usage_baseline.clone();
     let (session_cwd, cwd_text) = (session_cwd.as_deref(), cwd.as_deref());
-    if let Err(failure) =
-        pre_turn::warn_if_host_untrusted(&client, &options, session_cwd, cwd_text).await
-    {
-        return failure;
+    match pre_turn::host_trust_warning(&client, &options, session_cwd, cwd_text).await {
+        Ok(Some(warning)) => state.lock().unwrap().warnings.push(warning),
+        Ok(None) => {}
+        Err(failure) => return failure,
     }
 
     // Read effective config for the export, as the session is ready and
@@ -136,7 +139,10 @@ pub(super) async fn run_session(
     let config = match pre_turn::read_effective_config(&client, &session_id).await {
         Ok(config) => Some(config),
         Err(error) => {
-            eprintln!("config/effective/read failed: {error:#}");
+            pre_turn::report_warning(
+                &options.output,
+                &format!("config/effective/read failed: {error:#}"),
+            );
             None
         }
     };
@@ -219,79 +225,4 @@ async fn initialize(client: &Arc<Client>) -> Result<()> {
         .await
         .context("initialized")?;
     Ok(())
-}
-
-/// Open the run's session: `session/start` for a new one, `session/continue`
-/// or `session/resume` for a saved one. A failure is classified for the
-/// export.
-async fn open_session(
-    client: &Arc<Client>,
-    options: &HeadlessOptions,
-    cwd: Option<String>,
-    session: &HeadlessSession,
-) -> Result<(String, Option<String>), WorkEnd> {
-    let infrastructure = |error: anyhow::Error| {
-        WorkEnd::Failed(RunOutcome::InfrastructureFailure, format!("{error:#}"))
-    };
-    let config = agent_config(options, cwd).map_err(infrastructure)?;
-    let (lifecycle, params) = match session {
-        HeadlessSession::New => {
-            let params = SessionStartParams {
-                agent_config: config,
-                history_limit: HISTORY_LIMIT,
-            };
-            let params = serde_json::to_value(&params).map_err(|e| infrastructure(e.into()))?;
-            (method::SESSION_START, params)
-        }
-        HeadlessSession::Continue => (
-            method::SESSION_CONTINUE,
-            json!({ "agentConfig": saved_session_config(&config), "historyLimit": HISTORY_LIMIT }),
-        ),
-        HeadlessSession::Resume(id) => (
-            method::SESSION_RESUME,
-            json!({
-                "sessionId": id,
-                "agentConfig": saved_session_config(&config),
-                "historyLimit": HISTORY_LIMIT,
-            }),
-        ),
-    };
-    let result = client
-        .request_err(lifecycle, params)
-        .await
-        .map_err(|error| WorkEnd::Failed(open_failure(&error), error.message))?;
-    let session = result.pointer("/state/session");
-    let field = |name: &str| session.and_then(|s| s.get(name)).and_then(Value::as_str);
-    let id = field("id")
-        .map(str::to_owned)
-        .with_context(|| format!("{lifecycle} response missing session id"))
-        .map_err(infrastructure)?;
-    Ok((id, field("cwd").map(str::to_owned)))
-}
-
-/// The agent config sent to reopen a saved session. The server rejects
-/// `worktree` outside `session/start`.
-fn saved_session_config(config: &crate::server::AgentConfig) -> Value {
-    let mut value = serde_json::to_value(config).unwrap_or_else(|_| json!({}));
-    if let Some(fields) = value.as_object_mut() {
-        fields.remove("worktree");
-    }
-    value
-}
-
-/// The outcome of a session that did not open: a missing API key or a config
-/// that does not load is the config's fault, a request the server cannot
-/// serve (an unknown session, nothing to continue) the caller's, and a failed
-/// `--agent-socket` handshake as the server names it.
-pub fn open_failure(error: &RpcError) -> RunOutcome {
-    if let Some(outcome) = crate::agent_socket::named_outcome(error) {
-        return outcome;
-    }
-    if error.is_unauthorized() || error.is_config_error() {
-        return RunOutcome::ConfigError;
-    }
-    match error.code().as_str() {
-        "invalid_params" | "not_found" => RunOutcome::UsageError,
-        _ => RunOutcome::InfrastructureFailure,
-    }
 }

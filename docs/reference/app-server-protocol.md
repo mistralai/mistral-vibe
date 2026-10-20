@@ -54,8 +54,8 @@ registry. The protocol does not promise multiple simultaneous attached
 observers of one Runtime.
 
 Clients send typed action/resource requests. Servers send typed state/resource
-notifications and participation requests (`callback/call` and advertised
-`clientTool/*` operations). Queue editing and queued steering commit independently
+notifications and participation requests (`callback/call`, advertised
+`clientTool/*` operations and advertised `session/spawn`). Queue editing and queued steering commit independently
 of response delivery: their state updates may precede the response, and a lost
 response does not undo acceptance. Other accepted responses precede notifications
 caused by that action. Attachment establishes the snapshot, watermark and live
@@ -63,7 +63,12 @@ route atomically so there is no read/subscribe gap.
 
 ## Session operations and turns
 
-`session/start` creates an empty attached session; resume loads saved state;
+`session/start` creates an attached session. It can also carry the session's
+agent (`agentConfig.agent`), title, model, reasoning effort and first turn,
+applied and pinned as the matching mid-session changes are: like
+`config/model/write`, the model and level also become the user's default unless
+`sessionOnly` is set. If a choice or the first turn fails, the server deletes
+the session it opened and fails the start. Resume loads saved state;
 continue selects the latest eligible session. List, stored read and history
 are passive operations. Fork creates an independent session from a supported
 boundary; `session/stop` flushes and shuts down the attached session.
@@ -199,6 +204,32 @@ The server routes them through its tool-I/O contract, validates responses and
 preserves Runtime permission enforcement and result ownership. Unsupported
 operations fail explicitly.
 
+A client that advertises `capabilities.sessionSpawn` in `initialize` hosts
+sessions the model starts: its sessions are offered Vibe's `start_session`
+tool, permission-gated like other Vibe tools (`ask` by default). The tool takes
+`prompt`, an optional `title`, a `placement`, and an optional `model` and
+`reasoning_effort` its description lists from the host's models; the server
+checks both. A call sends **`session/spawn`** `{parentSessionId, prompt,
+title?, checkout, idempotencyKey, model, reasoningEffort?, approvalPolicy}` to
+that client. `checkout` is where
+the session runs, resolved from the parent's live directory:
+`{kind: "new_worktree"}`, the parent's Vibe-managed worktree
+`{kind: "managed_worktree", path}`, or the parent's own directory
+`{kind: "directory", path}`. `approvalPolicy` is always the parent's; `model`
+and `reasoningEffort` are too unless the tool call names them. Another model
+without a level gets that model's default level.
+`idempotencyKey` is stable for one tool call, so a client can recognize a call
+it already served. The client creates and runs the session its own way and
+answers `{sessionId, title?, url?}`; a JSON-RPC error or a malformed answer is
+a tool error the model reads. A disconnect, or 120 seconds without an answer,
+reports the outcome as unknown, and an answer arriving later is logged and
+dropped. Clients that do not advertise the capability never see the
+tool.
+
+`initialize` ignores client capabilities the server does not know, so a client
+may declare one ahead of the servers that act on it. The rest of the handshake
+stays strict. Servers released before this rule reject unknown capabilities.
+
 ## Product resources and child sessions
 
 Resource APIs expose canonical public values rather than managers. When a
@@ -216,6 +247,38 @@ The Rust CLI renders public values over the stdio API, in both interactive and
 programmatic mode, and ACP translates protocol content and callbacks.
 Clients own rendering and explicitly local facilities, while attached session
 mutations use public APIs.
+
+### Experimental: subagent control
+
+The `session/subagents/*` methods are experimental: they are listed in
+`EXPERIMENTAL_SERVER_METHODS` and may change in a minor release. Each takes the
+root's `sessionId` and acts on the subagents (child sessions) that root
+spawned. A headless client uses them to finish a run: wait for the subagents a
+turn left running, interrupt them on a stop, then read what each did.
+
+- `session/subagents/wait` takes `timeoutMs` and returns `settled`, whether
+  every subagent finished in time, and `running`, the subagents still running
+  when it returned (`sessionId`, `name`, `agentType`).
+- `session/subagents/interrupt` takes a non-empty `reason` and interrupts every
+  running subagent. It returns one result per subagent it found running:
+  `outcome` is `interrupted`, `notRunning` (it finished first) or `failed`,
+  with an `error` when it failed. One subagent's failure does not stop the
+  others.
+- `session/subagents/read` takes an optional `timeoutMs` (default 5000) and
+  returns `subagents`, one row per subagent in spawn order: `sessionId`,
+  `parentSessionId`, `rootSessionId`, `name`, `agentType`, `spawnActionId`,
+  `spawnCallId`, `status` (`running`, `idle`, `interrupted`, `failed`,
+  `closed` or `unknown`), `sessionDir`, `model`, `usage` (input, output,
+  cached input and total tokens), `costUsd`, `pricingModel`,
+  `pricingFallback` and `steps`. `model` is the provider model the
+  subagent's agent called, `null` unless the server saw it call exactly one.
+  The server prices `usage` at that model's configured rates, cached input at
+  the cached rate; `pricingModel` is the alias whose rates it used. When the
+  subagent's model is unknown (no call seen, several models, or a model not
+  in the config), it falls back to the root's rates and sets
+  `pricingFallback`. Each store read must finish
+  by the deadline; a read that does not leaves only its own fields `null`, and
+  the subagent is still listed.
 
 ## Reconnect, shutdown and security
 

@@ -20,13 +20,13 @@ use crate::core::features::skills::{self, SkillDefinition};
 use crate::core::features::tool_discovery::{
     self, SearchRequest, ToolDiscovery, ToolDiscoveryResult,
 };
-use crate::core::features::{file_system, large_output, subagents};
+use crate::core::features::{file_system, large_output};
 use crate::core::step_protocol::ToolDefinition;
 use crate::core::tools::external::{
     ExternalTool, ExternalToolCall, RuntimeBuiltinToolName, ToolTarget,
     provided_tool_qualified_name,
 };
-use crate::core::wire::tool::ToolCall;
+use crate::core::wire::tool::{ToolCall, echoed_tool_name};
 use serde_json::Value;
 
 pub(crate) fn hook_tool_catalog(config: &HarnessConfig) -> Vec<crate::core::hooks::HookToolKey> {
@@ -48,6 +48,12 @@ pub(crate) struct ResolvedTools {
 impl ResolvedTools {
     pub(crate) fn compile(config: &HarnessConfig) -> Result<Self, CoreError> {
         validate_tool_groups(config)?;
+        if config.settings.tools.skills.is_disabled() && config.skills().next().is_some() {
+            return Err(CoreError::invalid_configuration(
+                "settings.tools.skills",
+                "skills require settings.tools.skills to be enabled",
+            ));
+        }
         let (program, discovery) = ResolvedProgramTools::compile_validated(config);
         Ok(Self {
             top_level_tools: build_top_level_tools(config),
@@ -85,7 +91,10 @@ impl ResolvedTools {
             .find(|(route_name, _)| route_name == &call.name)
             .map(|(_, target)| target.clone())
             .ok_or_else(|| {
-                CoreError::invalid_command(format!("unsupported top-level tool {:?}", call.name))
+                CoreError::invalid_command(format!(
+                    "unsupported top-level tool {:?}",
+                    echoed_tool_name(&call.name)
+                ))
             })?;
         if matches!(
             target,
@@ -134,6 +143,11 @@ impl ResolvedTools {
 
     pub(crate) fn programmatic_settings(&self) -> &Settings {
         &self.programmatic_settings
+    }
+
+    /// Whether `run_typescript` and `search_tool_functions` are model tools.
+    pub(crate) fn programmatic_enabled(&self) -> bool {
+        self.programmatic_settings.is_enabled()
     }
 
     pub(crate) fn large_output_policy(&self) -> &large_output::Policy {
@@ -194,9 +208,7 @@ fn validate_tool_groups(config: &HarnessConfig) -> Result<(), CoreError> {
                 ),
             ));
         }
-        if assembly::RESERVED_TOOL_NAMESPACES.contains(&group.name.as_str())
-            || subagents::retired_namespaces().contains(&group.name)
-        {
+        if assembly::RESERVED_TOOL_NAMESPACES.contains(&group.name.as_str()) {
             return Err(CoreError::invalid_configuration(
                 "tool_groups",
                 format!("tool group name {:?} is reserved", group.name),
@@ -216,7 +228,25 @@ fn validate_tool_groups(config: &HarnessConfig) -> Result<(), CoreError> {
                 format!("tool group {:?} connector_id must not be empty", group.name),
             ));
         }
+        if !config.settings.tools.programmatic.is_enabled() && group.metadata.is_some() {
+            return Err(CoreError::invalid_configuration(
+                "tool_groups",
+                format!(
+                    "connector tool group {:?} requires programmatic tool calling",
+                    group.name
+                ),
+            ));
+        }
         for tool in &group.tools {
+            if !config.settings.tools.programmatic.is_enabled() && !tool.exposure.is_direct() {
+                return Err(CoreError::invalid_configuration(
+                    "tool_groups",
+                    format!(
+                        "programmatic-only tool {:?} requires programmatic tool calling",
+                        provided_tool_qualified_name(&group.name, &tool.name)
+                    ),
+                ));
+            }
             if !tool_discovery::is_identifier(&tool.name) {
                 return Err(CoreError::invalid_configuration(
                     "tool_groups",
@@ -256,8 +286,15 @@ fn validate_tool_groups(config: &HarnessConfig) -> Result<(), CoreError> {
 }
 
 fn build_top_level_tools(config: &HarnessConfig) -> Vec<ToolDefinition> {
-    let mut tools = vec![tool_discovery::direct_tool()];
-    tools.extend(programmatic_tool_calling::direct_tools());
+    let mut tools = Vec::new();
+    if config.settings.tools.programmatic.is_enabled() {
+        tools.push(tool_discovery::direct_tool(
+            &config.settings.prompts.discovery_description,
+        ));
+        tools.extend(programmatic_tool_calling::direct_tools(
+            &config.settings.prompts.programs.description,
+        ));
+    }
     tools.extend(assembly::direct_tools(config));
     tools
 }
@@ -265,7 +302,11 @@ fn build_top_level_tools(config: &HarnessConfig) -> Vec<ToolDefinition> {
 fn is_reserved_direct_name(config: &HarnessConfig, name: &str) -> bool {
     tool_discovery::is_direct_name(name)
         || programmatic_tool_calling::is_direct_name(name)
-        || assembly::is_reserved_direct_name(config.settings.tools.command_environment, name)
+        || assembly::is_reserved_direct_name(
+            config.settings.tools.command_environment,
+            config.settings.tools.skills,
+            name,
+        )
 }
 
 #[cfg(test)]

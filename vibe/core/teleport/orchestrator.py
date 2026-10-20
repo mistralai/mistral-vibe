@@ -106,7 +106,7 @@ class TeleportOrchestrator:
         except ServiceTeleportError as e:
             telemetry_tracker.record_service_error(e)
             raise
-        except asyncio.CancelledError, GeneratorExit:
+        except (asyncio.CancelledError, GeneratorExit):
             telemetry_tracker.record_cancelled()
             raise
         except Exception as e:

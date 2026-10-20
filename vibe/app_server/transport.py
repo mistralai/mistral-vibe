@@ -59,7 +59,7 @@ class StdioJsonRpcTransport:
 
     async def messages(self) -> AsyncIterator[dict[str, Any]]:
         while raw := await asyncio.to_thread(self._reader.readline):
-            yield _decode_message(raw)
+            yield decode_json_rpc_message(raw)
 
     async def close(self) -> None:
         if self._close_task is None:
@@ -139,7 +139,7 @@ class StdioJsonRpcTransport:
         try:
             self._writer.write(lines)
             self._writer.flush()
-        except BrokenPipeError, ConnectionResetError:
+        except (BrokenPipeError, ConnectionResetError):
             # The peer went away (e.g. client hit Ctrl-C). Stop the writer
             # cleanly so shutdown can complete instead of surfacing the error.
             return False
@@ -161,7 +161,7 @@ class MemoryJsonRpcTransport:
 
     async def messages(self) -> AsyncIterator[dict[str, Any]]:
         while (raw := await self._incoming.get()) is not None:
-            yield _decode_message(raw)
+            yield decode_json_rpc_message(raw)
 
     async def close(self) -> None:
         if self._closed:
@@ -179,7 +179,8 @@ def memory_transport_pair() -> tuple[MemoryJsonRpcTransport, MemoryJsonRpcTransp
     )
 
 
-def _decode_message(raw: str | bytes) -> dict[str, Any]:
+def decode_json_rpc_message(raw: str | bytes) -> dict[str, Any]:
+    """One framed line as a JSON-RPC message object."""
     try:
         value = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:

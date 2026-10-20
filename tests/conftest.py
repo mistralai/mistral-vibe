@@ -27,6 +27,7 @@ from vibe.core.config.harness_files import (
     reset_harness_files_manager,
 )
 from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.experiments.wait import reset_experiments_eval_failed
 from vibe.core.model_catalog.wait import reset_model_catalog_failed
 from vibe.core.utils.concurrency import run_sync
 from vibe.setup.onboarding.theme import resolve_auto_theme
@@ -93,6 +94,11 @@ def _reset_model_catalog_failed() -> None:
     # A failed catalog fetch is remembered for the process; one test's failure
     # must not stop the next from waiting.
     reset_model_catalog_failed()
+
+
+@pytest.fixture(autouse=True)
+def _reset_experiments_eval_failed() -> None:
+    reset_experiments_eval_failed()
 
 
 @pytest.fixture(autouse=True)
@@ -284,6 +290,23 @@ def _mock_platform(monkeypatch: pytest.MonkeyPatch) -> None:
         "vibe.setup.onboarding.theme_detection.detect_system_preferred_dark",
         lambda: None,
     )
+
+
+@pytest.fixture(autouse=True)
+def _empty_login_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Keep the developer's shell startup files out of commands the tests run.
+
+    The Unified Harness picks zsh when no shell is configured and reads its
+    login profile once per session; a slow profile made shell tests time out.
+    ``ZDOTDIR`` names an empty directory, so zsh reads none of the user's
+    files, and the variables naming a startup file for sh and bash are unset.
+    ``HOME`` is left alone: tests rely on it for git and tool caches.
+    """
+    monkeypatch.setenv("ZDOTDIR", str(tmp_path_factory.mktemp("zdotdir")))
+    for name in ("BASH_ENV", "ENV"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture

@@ -38,7 +38,7 @@ def _find_saved_session_dir(
     ):
         try:
             metadata = _load_raw_metadata(session_dir)
-        except OSError, ValueError, json.JSONDecodeError:
+        except (OSError, ValueError, json.JSONDecodeError):
             continue
 
         if metadata.get("session_id") == session_id:

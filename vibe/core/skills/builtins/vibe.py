@@ -35,7 +35,7 @@ agents, prompts, logs, and session data live here.
   agents/              # Custom agent profiles (*.toml)
   prompts/             # Custom prompts (*.md)
   skills/              # User-level skills (each skill is a subdirectory with SKILL.md)
-  tools/               # Custom tools (<name>.py); descriptions & overrides in tools/prompts/<name>.md
+  tools/               # Custom tools (<name>.py); descriptions in tools/prompts/<name>.md
   logs/
     vibe.log           # Main log file
     session/           # Session log files
@@ -50,7 +50,7 @@ When in a trusted folder, Vibe also looks for project-local configuration:
 - `.vibe/config.toml` - Project-specific config (overrides user config)
 - `.vibe/hooks.toml` - Project-specific hooks (requires trusted folder)
 - `.vibe/skills/` - Project-specific skills
-- `.vibe/tools/` - Project-specific tools (`<name>.py`); a `prompts/<name>.md` beside them sets or overrides the description of the tool named `<name>` — builtin, MCP, or custom (e.g. `.vibe/tools/prompts/bash.md` re-describes `bash`). Same `tools/*.py` + `tools/prompts/*.md` layout as the builtins.
+- `.vibe/tools/` - Project-specific tools (`<name>.py`); a `prompts/<name>.md` beside them describes the custom tool `<name>`. Same `tools/*.py` + `tools/prompts/*.md` layout as the builtins.
 - `.vibe/agents/` - Project-specific agents
 - `.vibe/prompts/` - Project-specific prompts
 - `.agents/skills/` - Standard agent skills directory
@@ -215,6 +215,11 @@ api_timeout = 720.0               # API request timeout in seconds
 api_retry_max_elapsed_time = 300.0  # Retry budget for retryable API failures in seconds
 api_stream_idle_timeout = 0.0     # Silence after the model starts answering that counts as a stall, in seconds; 0 disables
 auto_compact_threshold = 200000   # Fallback for models with neither their own threshold nor a declared window
+compaction_max_output_tokens = 80000     # Output cap for compaction requests; 0: same cap as other requests
+# compaction_thinking = "low"            # Thinking for the first compaction request; unset keeps the compaction model's level
+compaction_reasoning_limit_tokens = 32000  # Reasoning after which compaction falls back to a request without tools or reasoning; 0 disables
+output_limit_retries = 6          # Answers cut off at the output limit that a turn retries with feedback; 0 ends the turn on the first
+output_token_reserve = 4096       # Tokens kept free when the output cap is clipped to a model's max_context_length
 
 # Git commit behavior
 include_commit_signature = true   # Add "Co-Authored-By" to commits
@@ -291,9 +296,9 @@ thinking = "high"                 # "off", "low", "medium", "high", "max"
 thinking_levels = ["off", "high"] # levels /thinking offers; omit for all five, [] for off only. Including "off" claims the model accepts a no-reasoning request (mistral provider)
 auto_compact_threshold = 200000
 supports_images = true            # vision-capable; allows @-mentioned images
-# max_context_length = 262144     # optional; auto-compaction defaults to 80% of the declared window
+# max_context_length = 262144     # optional; auto-compaction defaults to 80% of the declared window, and output caps are clipped to fit it
 # top_p = 0.95                    # optional nucleus sampling, (0, 1]; omit for the provider default
-# max_output_tokens = 32768       # optional per-request output cap; a reply cut off at it ends `vibe -p` with outcome `length`
+# max_output_tokens = 32768       # optional per-request output cap; a reply cut off at it is retried (output_limit_retries), then ends `vibe -p` with outcome `length`
 
 [[models]]
 # A user-defined local model served by llama.cpp; the built-in list ships only
@@ -419,6 +424,12 @@ agent_paths = ["/path/to/custom/agents"]
 # Enable/disable agents
 enabled_agents = ["ask", "accept-edits"]
 disabled_agents = ["auto-approve"]
+
+# Forbid the auto-approve (YOLO) mode entirely: hides the "auto-approve" agent
+# (and any custom agent with safety = "yolo") and ignores --auto-approve/--yolo.
+# Per-tool permissions still apply.
+# Intended for admin-managed (enterprise) config.
+enable_auto_approve = false
 
 # Opt-in builtin agents (only affects agents with install_required=True, e.g. lean)
 installed_agents = ["lean"]
@@ -1004,7 +1015,7 @@ behavior then depends on the mention kind:
 - **Text files** trigger a synthetic `read_file` tool call injected right
   after your message, so the file content arrives as a fresh tool result
   every turn (no caching/dedup). The same limits as the `read_file` tool
-  apply (~2000 lines / 50 KB per call; larger files are truncated or
+  apply (~2000 lines / 64 KB per call; larger files are truncated or
   reported as an error result). Re-mentioning a file always re-reads it.
 - **Folders** are not read automatically — the path stays in your message
   text and the agent can `read_file`/`grep` it on demand.
@@ -1144,6 +1155,7 @@ schema (`https://agent-plugins.org/schemas/1.0.0/plugin.schema.json`):
   "extensions": {
     "ai.mistral.vibe": {
       "schemaVersion": 1,
+      "displayName": "My Plugin",
       "toolNamespace": "myNs",
       "toolOverrides": {
         "tool-name": { "name": "renamedTool", "exposure": "programmatic" }
@@ -1157,6 +1169,8 @@ The `ai.mistral.vibe` extension is optional but gates all Vibe-specific
 components (hooks, knowledge, agents). `toolNamespace` is a
 TypeScript-identifier-safe string used to prefix all component names
 (e.g. `myNs:my-skill`). If omitted, it is derived from the plugin name.
+`displayName` is an optional title of 1 to 100 characters; the plugin `name`
+stays its identity.
 
 Reserved namespaces (rejected): `file_system`, `self`, `process`, `skill`,
 `subagent`, `vibe`.

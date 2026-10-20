@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from vibe.agents import AgentSafety
 from vibe.core.utils import name_matches
 
 if TYPE_CHECKING:
@@ -14,6 +15,15 @@ def excluded_agent_message(
 ) -> str:
     """Generate a message explaining why an agent is not available based on the config."""
     profile = discovered.get(name)
+    if (
+        profile is not None
+        and profile.safety is AgentSafety.YOLO
+        and not config.enable_auto_approve
+    ):
+        return (
+            f"Agent '{name}' is unavailable: the auto-approve mode is disabled "
+            "('enable_auto_approve' is false)."
+        )
     if (
         profile is not None
         and profile.install_required

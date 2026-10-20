@@ -36,7 +36,7 @@ class RegistryAssetContent(BaseModel):
         if self.raw_content is not None:
             try:
                 return base64.b64decode(self.raw_content, validate=True)
-            except binascii.Error, ValueError:
+            except (binascii.Error, ValueError):
                 return None
         return None
 

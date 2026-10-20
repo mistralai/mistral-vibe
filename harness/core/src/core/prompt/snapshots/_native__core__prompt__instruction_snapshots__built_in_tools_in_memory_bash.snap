@@ -1,0 +1,1343 @@
+---
+source: src/core/prompt/instruction_snapshots.rs
+expression: reviewable(snapshot)
+---
+{
+  "top_level_tools": [
+    {
+      "name": "search_tool_functions",
+      "description": {
+        "$multiline": [
+          "Discover callable tool functions for run_typescript.",
+          "",
+          "Use mode=\"best_match\" first with a capability query; it returns up to 20 ranked exact function names, without declarations.",
+          "If a returned name fits, call mode=\"details\" with that exact name before using it.",
+          "Use mode=\"all_connector_capabilities\" with connectors set to exact connector names only when best_match returned moreCandidatesAvailable: true and no candidate fits, or when explicitly listing a connector inventory.",
+          "",
+          "For query, use short tool-capability keywords, not the full user request.",
+          "If the user shares a URL from an online service, first check whether there is a connector for that service. Include the service name or domain plus the needed operation in the best_match query, for example \"google docs open url\", before falling back to generic web URL tools.",
+          "For named connector + capability requests, pass both connectors and query in one best_match call.",
+          "If no returned function name matches after the available discovery path, answer unsupported instead of probing adjacent tools.",
+          "Treat auth as unavailable only when connector guidance or a tool error says so."
+        ]
+      },
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "best_match",
+              "details",
+              "all_connector_capabilities"
+            ],
+            "description": "best_match returns ranked names; details returns declarations for exact functions; all_connector_capabilities lists exact connector inventories.",
+            "default": "best_match"
+          },
+          "query": {
+            "type": "string",
+            "description": "Rewrite the needed operation into short tool keywords, e.g. \"list issues\"; do not pass the full user request."
+          },
+          "functions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Exact {connector}.{function} names for details; required in details mode.",
+            "maxItems": 10,
+            "default": []
+          },
+          "functionNames": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Deprecated alias for functions.",
+            "maxItems": 10
+          },
+          "connectors": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Exact connector names; required in all_connector_capabilities mode, optional filter in best_match, unused in details.",
+            "maxItems": 10,
+            "default": []
+          }
+        }
+      }
+    },
+    {
+      "name": "run_typescript",
+      "description": {
+        "$multiline": [
+          "",
+          "Executes TypeScript code in a sandbox environment.",
+          "",
+          "## How to use run_typescript",
+          "",
+          "The `run_typescript` tool executes TypeScript code in a sandbox environment. This sandbox has access to ES2015 - ES2022 language features, but doesn't have access to NodeJS, browser APIs, or network I/O.",
+          "",
+          "### Sandbox capabilities and durability model",
+          "",
+          "- The sandbox is a replayable TypeScript workflow environment, not a general-purpose Node.js runtime. Use it for orchestration, tool-call wiring, and local data transformation.",
+          "- It supports standard JavaScript/TypeScript computation such as async/await, Promises, JSON, Array/Object/Map/Set operations, RegExp, URL parsing, TextEncoder/TextDecoder, and console output for debugging.",
+          "- It does not provide ambient filesystem access, Node.js packages, browser APIs, DOM APIs, or direct network I/O. Reach external systems only through the provided `tools.<group>.<function>` functions.",
+          "- Execution may pause while tool calls are pending and later replay from the beginning. Local code can therefore run more than once; keep it to pure orchestration, pure data transforms, and tool-call wiring.",
+          "- Time, randomness, and promise-selection APIs are recorded automatically and replay deterministically. This includes `Date()`, `new Date()`, `Date.now()`, `performance.now()`, `Math.random()`, `crypto.randomUUID()`, `crypto.getRandomValues()`, `Promise.race()`, and `Promise.any()`.",
+          "- Each program has a time budget, paused while waiting for approvals or hooks. When it runs out, sleeps end early and the program stops before its next tool call.",
+          "",
+          "### The `main` function",
+          "",
+          "**IMPORTANT:** The sandboxed environment expects a `main` function that will be run automatically.",
+          "- You MUST always define an `async function main() { /* ... */ }` containing all your code",
+          "- You MUST NOT call `main()` yourself - the sandbox calls it automatically",
+          "- The result of the `main` function will be visible as a { type: \"success\", value } object.",
+          "- The input must contain inline `code`.",
+          "- Tool calls may throw. Use `try/catch` or `.catch(...)` to recover or keep partial results; otherwise let errors propagate to the tool result.",
+          "- AVOID using console.log or console.error to read the output of functions. Rely on the main function's returned value instead. Only use console for debugging.",
+          "- For independent calls, prefer `Promise.allSettled(...)`. Use `Promise.all(...)` only when all must succeed; avoid sequential awaits when calls can run concurrently.",
+          "- You MUST NOT use `fetch()`, `setInterval()`, `atob()`, `btoa()`, `DOMParser`, `Buffer`, `require()`, `import()`, or `export` — they do not exist. Tool functions are already available under the `tools` namespace.",
+          "- When a string contains double quotes, you MUST use single quotes for the outer string.",
+          "  WRONG: `await tools.web_search.web_search({ query: \"\"Sample Topic\" TV date\" });`",
+          "  CORRECT: `await tools.web_search.web_search({ query: '\"Sample Topic\" TV date' });`",
+          "",
+          "### Available tool functions",
+          "",
+          "Tool functions are available under `tools.<group>.<function>`; no imports needed.",
+          "",
+          "Before calling an unfamiliar tool function, use `search_tool_functions` to load details for the exact function name. Use only documented function paths and argument shapes.",
+          "",
+          "",
+          "### Example",
+          "",
+          "1. Discover the appropriate tool function signature. Assuming you found the following type definition:",
+          "",
+          "```typescript",
+          "declare namespace tools.someGroup {",
+          "  function someFunction(args: { timestamp: number, someQuery: string }): Promise<{ someOutput: number }>;",
+          "}",
+          "```",
+          "",
+          "2. Run TypeScript code. You can call `run_typescript` with code like:",
+          "",
+          "```json",
+          "{\"code\": \"async function main() {\\n  const timestamp = Date.now();\\n  const { someOutput } = await tools.someGroup.someFunction({ timestamp, someQuery: '...' });\\n  return someOutput;\\n}\"}",
+          "```",
+          "",
+          ""
+        ]
+      },
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ]
+      }
+    },
+    {
+      "name": "wait",
+      "description": "Wait for new input or the requested timeout. Call wait alone. Incoming messages arrive in normal model context, not in the result.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600000
+          }
+        },
+        "required": [
+          "timeout_ms"
+        ]
+      }
+    },
+    {
+      "name": "read_file",
+      "description": "Read a text file with optional zero-indexed line offset and limit. When `was_truncated` is true, read on from `next_offset`. An offset past the end of the file is an error. A directory reads as a listing of its entries, one per line with `/` after each subdirectory, at most 500 at a time.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "integer",
+            "default": 0,
+            "minimum": 0
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null,
+            "minimum": 1
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "name": "write_file",
+      "description": "Create or overwrite a UTF-8 file.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      }
+    },
+    {
+      "name": "edit",
+      "description": {
+        "$multiline": [
+          "Exact string replacement in a file.",
+          "",
+          "Read the current file first. `old_string` must match exactly, including whitespace, indentation, and line endings. With `replace_all=false` (the default), `old_string` must occur exactly once; set `replace_all=true` only to replace every occurrence. If an edit fails, re-read the file before retrying.",
+          "",
+          "Example:",
+          "{\"file_path\":\"src/config.ts\",\"old_string\":\"const mode = \\\"old\\\";\",\"new_string\":\"const mode = \\\"new\\\";\",\"replace_all\":false}"
+        ]
+      },
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Path to the existing text file to edit. Use `file_path`; `path` is not accepted."
+          },
+          "old_string": {
+            "type": "string",
+            "description": "Exact text to find, including whitespace, indentation, and line endings. It must occur exactly once unless `replace_all` is true.",
+            "minLength": 1
+          },
+          "new_string": {
+            "type": "string",
+            "description": "Exact replacement text for `old_string`. It may be empty to delete the matched text, but it must differ from `old_string`."
+          },
+          "replace_all": {
+            "type": "boolean",
+            "description": "When false (the default), replace the single `old_string` match. When true, replace every occurrence of `old_string`.",
+            "default": false
+          }
+        },
+        "required": [
+          "file_path",
+          "old_string",
+          "new_string"
+        ]
+      }
+    },
+    {
+      "name": "bash",
+      "description": {
+        "$multiline": [
+          "Execute a Bash command in a lightweight virtual filesystem environment and return its output.",
+          "",
+          "## Supported Commands",
+          "",
+          "File Operations",
+          "cat, cp, file, ln, ls, mkdir, mv, readlink, rm, rmdir, split, stat, touch, tree",
+          "",
+          "Text Processing",
+          "awk, base64, column, comm, cut, diff, expand, fold, grep, head, join, md5sum, nl, od, paste, printf, rev, rg, sed, sort, strings, tac, tail, tr, unexpand, uniq, wc, xargs",
+          "",
+          "Data Processing",
+          "jq (JSON)",
+          "",
+          "Navigation & Environment",
+          "basename, cd, dirname, du, echo, env, export, find, hostname, printenv, pwd, tee",
+          "",
+          "Shell Utilities",
+          "alias, bash, chmod, clear, date, expr, false, help, history, seq, sh, true, unalias, which, whoami",
+          "",
+          "Notes",
+          "- Node.js and Python interpreters are not available in this environment. Do not use `node`, `python`, or `python3`.",
+          "- Each command runs independently. Files persist between calls, but the working directory, environment variables, aliases, and functions do not.",
+          "- `egrep` and `fgrep` are available as `grep -E` and `grep -F` respectively.",
+          "- Avoid jq string interpolation that embeds literal double quotes inside a shell-quoted filter because that quoting pattern is not reliably supported. Prefer selecting fields separately or use an encoding such as `@tsv` when combining text output.",
+          "- When using jq and xargs together, use `xargs -I {}` for reliable argument replacement.",
+          "- All listed commands support `--help` for usage information.",
+          "",
+          "## Shell Features",
+          "",
+          "Pipes: cmd1 | cmd2",
+          "Redirections: >, >>, 2>, 2>&1, <",
+          "Command chaining: &&, ||, ;",
+          "Variables: $VAR, ${VAR}, ${VAR:-default}",
+          "Positional parameters: $1, $2, $@, $#",
+          "Glob patterns: *, ?, [...]",
+          "If statements: if COND; then CMD; elif COND; then CMD; else CMD; fi",
+          "Functions: function name { ... } or name() { ... }",
+          "Local variables: local VAR=value",
+          "Loops: for, while, until",
+          "Symbolic links: ln -s target link",
+          "Hard links: ln target link"
+        ]
+      },
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "default": 120,
+            "description": "Seconds the command may run: 120 by default, at most 300. A command that runs longer is stopped, and the result keeps the output it wrote so far with `timed_out` set.",
+            "minimum": 1,
+            "maximum": 300
+          }
+        },
+        "required": [
+          "command"
+        ]
+      }
+    },
+    {
+      "name": "skill",
+      "description": "Load a specialized skill that provides domain-specific instructions and workflows. When a task matches one of the available skills listed in your system prompt, call this tool with the exact skill name to load the full skill instructions. Only listed names are valid. Call exactly with {\"name\":\"<exact name>\"}; no other argument keys are accepted.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The exact name of the skill to load from the available skills.",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    }
+  ],
+  "programmatic_tools": [
+    {
+      "name": "read_file",
+      "programmatic_name": {
+        "namespace": "file_system",
+        "name": "read_file"
+      },
+      "description": "Read a text file with optional zero-indexed line offset and limit. When `was_truncated` is true, read on from `next_offset`. An offset past the end of the file is an error. A directory reads as a listing of its entries, one per line with `/` after each subdirectory, at most 500 at a time.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "integer",
+            "default": 0,
+            "minimum": 0
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null,
+            "minimum": 1
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "file_size_bytes": {
+            "type": "integer",
+            "description": "Size of the file in bytes; for a directory, of its whole listing."
+          },
+          "returned_bytes": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "lines_read": {
+            "type": "integer"
+          },
+          "was_truncated": {
+            "type": "boolean",
+            "description": "Whether the file has more content past what was returned."
+          },
+          "total_lines": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Number of lines in the file, or of entries in a directory, or null when the file is too large to count."
+          },
+          "next_offset": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The `offset` to read the rest of the file from, or null when the read reached the end of the file."
+          }
+        },
+        "required": [
+          "path",
+          "content",
+          "file_size_bytes",
+          "returned_bytes",
+          "offset",
+          "lines_read",
+          "was_truncated"
+        ]
+      }
+    },
+    {
+      "name": "write_file",
+      "programmatic_name": {
+        "namespace": "file_system",
+        "name": "write_file"
+      },
+      "description": "Create or overwrite a UTF-8 file.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "bytes_written": {
+            "type": "integer"
+          },
+          "file_existed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "bytes_written",
+          "file_existed"
+        ]
+      }
+    },
+    {
+      "name": "edit",
+      "programmatic_name": {
+        "namespace": "file_system",
+        "name": "edit"
+      },
+      "description": {
+        "$multiline": [
+          "Exact string replacement in a file.",
+          "",
+          "Read the current file first. `old_string` must match exactly, including whitespace, indentation, and line endings. With `replace_all=false` (the default), `old_string` must occur exactly once; set `replace_all=true` only to replace every occurrence. If an edit fails, re-read the file before retrying.",
+          "",
+          "Example:",
+          "{\"file_path\":\"src/config.ts\",\"old_string\":\"const mode = \\\"old\\\";\",\"new_string\":\"const mode = \\\"new\\\";\",\"replace_all\":false}"
+        ]
+      },
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Path to the existing text file to edit. Use `file_path`; `path` is not accepted."
+          },
+          "old_string": {
+            "type": "string",
+            "description": "Exact text to find, including whitespace, indentation, and line endings. It must occur exactly once unless `replace_all` is true.",
+            "minLength": 1
+          },
+          "new_string": {
+            "type": "string",
+            "description": "Exact replacement text for `old_string`. It may be empty to delete the matched text, but it must differ from `old_string`."
+          },
+          "replace_all": {
+            "type": "boolean",
+            "description": "When false (the default), replace the single `old_string` match. When true, replace every occurrence of `old_string`.",
+            "default": false
+          }
+        },
+        "required": [
+          "file_path",
+          "old_string",
+          "new_string"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "lines_changed": {
+            "type": "integer"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "file",
+          "lines_changed",
+          "warnings"
+        ]
+      }
+    },
+    {
+      "name": "bash",
+      "programmatic_name": {
+        "namespace": "file_system",
+        "name": "bash"
+      },
+      "description": {
+        "$multiline": [
+          "Execute a Bash command in a lightweight virtual filesystem environment and return its output.",
+          "",
+          "## Supported Commands",
+          "",
+          "File Operations",
+          "cat, cp, file, ln, ls, mkdir, mv, readlink, rm, rmdir, split, stat, touch, tree",
+          "",
+          "Text Processing",
+          "awk, base64, column, comm, cut, diff, expand, fold, grep, head, join, md5sum, nl, od, paste, printf, rev, rg, sed, sort, strings, tac, tail, tr, unexpand, uniq, wc, xargs",
+          "",
+          "Data Processing",
+          "jq (JSON)",
+          "",
+          "Navigation & Environment",
+          "basename, cd, dirname, du, echo, env, export, find, hostname, printenv, pwd, tee",
+          "",
+          "Shell Utilities",
+          "alias, bash, chmod, clear, date, expr, false, help, history, seq, sh, true, unalias, which, whoami",
+          "",
+          "Notes",
+          "- Node.js and Python interpreters are not available in this environment. Do not use `node`, `python`, or `python3`.",
+          "- Each command runs independently. Files persist between calls, but the working directory, environment variables, aliases, and functions do not.",
+          "- `egrep` and `fgrep` are available as `grep -E` and `grep -F` respectively.",
+          "- Avoid jq string interpolation that embeds literal double quotes inside a shell-quoted filter because that quoting pattern is not reliably supported. Prefer selecting fields separately or use an encoding such as `@tsv` when combining text output.",
+          "- When using jq and xargs together, use `xargs -I {}` for reliable argument replacement.",
+          "- All listed commands support `--help` for usage information.",
+          "",
+          "## Shell Features",
+          "",
+          "Pipes: cmd1 | cmd2",
+          "Redirections: >, >>, 2>, 2>&1, <",
+          "Command chaining: &&, ||, ;",
+          "Variables: $VAR, ${VAR}, ${VAR:-default}",
+          "Positional parameters: $1, $2, $@, $#",
+          "Glob patterns: *, ?, [...]",
+          "If statements: if COND; then CMD; elif COND; then CMD; else CMD; fi",
+          "Functions: function name { ... } or name() { ... }",
+          "Local variables: local VAR=value",
+          "Loops: for, while, until",
+          "Symbolic links: ln -s target link",
+          "Hard links: ln target link"
+        ]
+      },
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "default": 120,
+            "description": "Seconds the command may run: 120 by default, at most 300. A command that runs longer is stopped, and the result keeps the output it wrote so far with `timed_out` set.",
+            "minimum": 1,
+            "maximum": 300
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "returncode": {
+            "type": "integer"
+          },
+          "was_truncated": {
+            "type": "boolean"
+          },
+          "timed_out": {
+            "type": "boolean",
+            "description": "Whether the command was stopped at its timeout; `stdout` and `stderr` hold the output written before it.",
+            "default": false
+          }
+        },
+        "required": [
+          "command",
+          "stdout",
+          "stderr",
+          "returncode",
+          "was_truncated"
+        ]
+      }
+    },
+    {
+      "name": "sleep",
+      "programmatic_name": {
+        "namespace": "self",
+        "name": "sleep"
+      },
+      "description": "Pause this agent execution for a bounded number of seconds while Runtime-owned background work continues.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "seconds": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 30.0
+          }
+        },
+        "required": [
+          "seconds"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "seconds": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "seconds"
+        ]
+      }
+    },
+    {
+      "name": "process_start",
+      "programmatic_name": {
+        "namespace": "process",
+        "name": "start"
+      },
+      "description": "Start a long-running command in the Runtime execution environment and return immediately with a stable process ID.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cwd": {
+            "type": "string",
+            "minLength": 1
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "processId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "completed",
+              "failed",
+              "stopped",
+              "orphaned"
+            ]
+          }
+        },
+        "required": [
+          "processId",
+          "status"
+        ]
+      }
+    },
+    {
+      "name": "process_output",
+      "programmatic_name": {
+        "namespace": "process",
+        "name": "output"
+      },
+      "description": "Read terminal output from a background process. Cursors and byte limits refer to raw stored terminal bytes. Use from=start with nextCursor for incremental reads; waitMs then returns when output arrives, the process exits, or the deadline expires. Use from=end for the current newest page.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "processId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "from": {
+            "type": "string",
+            "enum": [
+              "start",
+              "end"
+            ],
+            "default": "start"
+          },
+          "cursor": {
+            "type": "integer",
+            "default": 0,
+            "minimum": 0
+          },
+          "waitMs": {
+            "type": "integer",
+            "default": 0,
+            "minimum": 0,
+            "maximum": 30000
+          },
+          "maxBytes": {
+            "type": "integer",
+            "default": 16000,
+            "minimum": 1
+          }
+        },
+        "required": [
+          "processId"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "processId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "completed",
+              "failed",
+              "stopped",
+              "orphaned"
+            ]
+          },
+          "exitCode": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "output": {
+            "type": "string"
+          },
+          "outputStartCursor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "nextCursor": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytesAvailable": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "hasMore": {
+            "type": "boolean",
+            "description": "Retained output exists outside this page in the selected read direction."
+          },
+          "truncatedBefore": {
+            "type": "boolean",
+            "description": "The requested view crosses an output prefix that retention discarded."
+          }
+        },
+        "required": [
+          "processId",
+          "status",
+          "exitCode",
+          "output",
+          "nextCursor",
+          "bytesAvailable",
+          "hasMore",
+          "truncatedBefore"
+        ]
+      }
+    },
+    {
+      "name": "process_write",
+      "programmatic_name": {
+        "namespace": "process",
+        "name": "write"
+      },
+      "description": "Send exactly one text, control-key, or base64 byte payload to a running background process.",
+      "input_schema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "processId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "processId",
+              "text"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "processId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "control": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "ctrl_c",
+                    "ctrl_d",
+                    "ctrl_z",
+                    "esc",
+                    "tab",
+                    "enter",
+                    "backspace",
+                    "up",
+                    "down",
+                    "left",
+                    "right"
+                  ]
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "processId",
+              "control"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "processId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "bytesBase64": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "processId",
+              "bytesBase64"
+            ]
+          }
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "processId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "completed",
+              "failed",
+              "stopped",
+              "orphaned"
+            ]
+          },
+          "bytesWritten": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "processId",
+          "status",
+          "bytesWritten"
+        ]
+      }
+    },
+    {
+      "name": "process_list",
+      "programmatic_name": {
+        "namespace": "process",
+        "name": "list"
+      },
+      "description": "List background processes owned by this agent session and their current status.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "processes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "processId": {
+                  "type": "string"
+                },
+                "command": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "running",
+                    "completed",
+                    "failed",
+                    "stopped",
+                    "orphaned"
+                  ]
+                },
+                "exitCode": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "outputPath": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "processId",
+                "command",
+                "status",
+                "exitCode",
+                "outputPath"
+              ]
+            }
+          }
+        },
+        "required": [
+          "processes"
+        ]
+      }
+    },
+    {
+      "name": "process_stop",
+      "programmatic_name": {
+        "namespace": "process",
+        "name": "stop"
+      },
+      "description": "Stop a background process and its child process group.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "processId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "processId"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "processId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "completed",
+              "failed",
+              "stopped",
+              "orphaned"
+            ]
+          },
+          "exitCode": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "processId",
+          "status",
+          "exitCode"
+        ]
+      }
+    },
+    {
+      "name": "agents_list_configs",
+      "programmatic_name": {
+        "namespace": "agents",
+        "name": "list_configs"
+      },
+      "description": "List available named configurations, sorted by name. Omit config_name when spawning a generic child that inherits this agent's configuration.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "configs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "description"
+              ]
+            }
+          }
+        },
+        "required": [
+          "configs"
+        ]
+      }
+    },
+    {
+      "name": "agents_list",
+      "programmatic_name": {
+        "namespace": "agents",
+        "name": "list"
+      },
+      "description": "List admitted direct children in creation order. Provisional spawns are not listed.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "config_name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "pending_turn": {
+                      "const": true
+                    },
+                    "status": {
+                      "const": "running"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "status",
+                    "name",
+                    "pending_turn"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "config_name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "pending_turn": {
+                      "const": false
+                    },
+                    "status": {
+                      "const": "idle"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "status",
+                    "name",
+                    "pending_turn"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "config_name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "pending_turn": {
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "const": "failed"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "status",
+                    "name",
+                    "pending_turn",
+                    "error"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "agents"
+        ]
+      }
+    },
+    {
+      "name": "agents_spawn",
+      "programmatic_name": {
+        "namespace": "agents",
+        "name": "spawn"
+      },
+      "description": "Create an independent child with fresh conversation and admit its first message, without waiting for completion. name is a single path segment unique for the lifetime of this parent Session and cannot be reused. Omit config_name to inherit this agent's configuration.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!\\.{1,2}$)[^/]+$"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "config_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          }
+        },
+        "required": [
+          "name",
+          "message"
+        ]
+      },
+      "output_schema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "agents_send_message",
+      "programmatic_name": {
+        "namespace": "agents",
+        "name": "send_message"
+      },
+      "description": "Send a message to an agent path. Admission does not imply consumption or a reply.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "agent_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "agent_path",
+          "message"
+        ]
+      },
+      "output_schema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "agents_interrupt",
+      "programmatic_name": {
+        "namespace": "agents",
+        "name": "interrupt"
+      },
+      "description": "Interrupt a direct child's exact current Turn without closing its Session.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "output_schema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  ]
+}

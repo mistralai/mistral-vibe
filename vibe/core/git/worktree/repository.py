@@ -820,7 +820,7 @@ class ManagedWorktree:
             relative = cwd.expanduser().resolve().relative_to(self.root.resolve())
             root = recovery.repo_root.expanduser().resolve()
             return RetainedRepositoryMapping(root=root, cwd=root / relative)
-        except OSError, RuntimeError, ValueError:
+        except (OSError, RuntimeError, ValueError):
             return None
 
     def hold_for_attachment(self) -> PendingSessionHold | None:

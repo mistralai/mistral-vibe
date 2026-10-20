@@ -209,9 +209,6 @@ class History:
             self._changes_cache[edit.seq] = cached
         return cached
 
-    def has_edits(self, path: str) -> bool:
-        return bool(self._edits_for(path))
-
     def project(self, path: str, *, only_kept: bool) -> FileState:
         return self._reconstruct(path, self._applied(path, only_kept=only_kept))
 

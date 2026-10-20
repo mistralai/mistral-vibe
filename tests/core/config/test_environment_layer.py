@@ -71,3 +71,38 @@ async def test_fingerprint_changes_when_env_changes() -> None:
 @pytest.mark.asyncio
 async def test_always_trusted() -> None:
     assert await EnvironmentLayer(schema=VibeConfigSchema).resolve_trust() is True
+
+
+@pytest.mark.asyncio
+async def test_unparseable_vars_are_ignored_and_the_others_still_apply(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    env = {
+        "VIBE_MODELS": "mistral-large-latest,mistral-medium-latest",
+        "VIBE_API_TIMEOUT": "soon",
+        "VIBE_ACTIVE_MODEL": "mistral-large",
+        "VIBE_SESSION_LOGGING__ENABLED": "false",
+    }
+    with patch.dict(os.environ, env, clear=True), caplog.at_level("WARNING"):
+        data = await EnvironmentLayer(schema=VibeConfigSchema).load()
+
+    assert data.model_dump() == {
+        "active_model": "mistral-large",
+        "session_logging": {"enabled": False},
+    }
+    assert "VIBE_MODELS or VIBE_MODELS__*" in caplog.text
+    assert "VIBE_API_TIMEOUT or VIBE_API_TIMEOUT__*" in caplog.text
+    assert "mistral-large-latest" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_unparseable_nested_var_drops_only_its_group() -> None:
+    env = {
+        "VIBE_SESSION_LOGGING__ENABLED": "maybe",
+        "VIBE_SESSION_LOGGING__SESSION_PREFIX": "mysession",
+        "VIBE_ACTIVE_MODEL": "mistral-large",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        data = await EnvironmentLayer(schema=VibeConfigSchema).load()
+
+    assert data.model_dump() == {"active_model": "mistral-large"}

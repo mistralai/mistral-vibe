@@ -334,82 +334,6 @@ class TestTelemetryClient:
         assert not isinstance(emitted["harness"], ExperimentSurface)
         assert emitted["terminal_emulator"] == "ghostty"
 
-    def test_send_at_mention_inserted_payload(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_at_mention_inserted(
-            nb_mentions=2,
-            context_types={"file": 1, "folder": 1},
-            file_extensions={".py": 1},
-            message_id="msg-123",
-        )
-
-        assert len(telemetry_events) == 1
-        assert telemetry_events[0]["event_name"] == "vibe.at_mention_inserted"
-        assert telemetry_events[0]["properties"] == {
-            **_expected_system_metadata(),
-            "nb_mentions": 2,
-            "context_types": {"file": 1, "folder": 1},
-            "file_extensions": {".py": 1},
-            "message_id": "msg-123",
-        }
-
-    def test_send_at_mention_inserted_null_file_extensions(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_at_mention_inserted(
-            nb_mentions=1,
-            context_types={"folder": 1},
-            file_extensions=None,
-            message_id=None,
-        )
-
-        assert len(telemetry_events) == 1
-        assert telemetry_events[0]["properties"]["file_extensions"] is None
-        assert telemetry_events[0]["properties"]["message_id"] is None
-
-    def test_send_at_mention_inserted_multiple_files_counts_extensions(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_at_mention_inserted(
-            nb_mentions=4,
-            context_types={"file": 3, "folder": 1},
-            file_extensions={".py": 2, ".ts": 1},
-            message_id="msg-multi",
-        )
-
-        props = telemetry_events[0]["properties"]
-        assert props["nb_mentions"] == 4
-        assert props["context_types"] == {"file": 3, "folder": 1}
-        assert props["file_extensions"] == {".py": 2, ".ts": 1}
-
-    def test_send_at_mention_inserted_duplicate_references_reflected_in_counts(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_at_mention_inserted(
-            nb_mentions=4,
-            context_types={"file": 2, "folder": 2},
-            file_extensions={".py": 2},
-            message_id="msg-dupes",
-        )
-
-        props = telemetry_events[0]["properties"]
-        assert props["nb_mentions"] == 4
-        assert props["context_types"] == {"file": 2, "folder": 2}
-        assert props["file_extensions"] == {".py": 2}
-
     def test_send_auto_compact_triggered_payload(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
@@ -461,22 +385,6 @@ class TestTelemetryClient:
         assert properties["reason"] == "empty_summary"
         assert properties["session_id"] == "session-id"
         assert properties["parent_session_id"] == "parent-session-id"
-
-    def test_send_slash_command_used_payload(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_slash_command_used("help", "builtin")
-        client.send_slash_command_used("my_skill", "skill")
-
-        assert len(telemetry_events) == 2
-        assert telemetry_events[0]["event_name"] == "vibe.slash_command_used"
-        assert telemetry_events[0]["properties"]["command"] == "help"
-        assert telemetry_events[0]["properties"]["command_type"] == "builtin"
-        assert telemetry_events[1]["properties"]["command"] == "my_skill"
-        assert telemetry_events[1]["properties"]["command_type"] == "skill"
 
     def test_send_teleport_completed_payload(
         self, telemetry_events: list[dict[str, Any]]
@@ -1025,6 +933,55 @@ class TestTelemetryClient:
         )
 
         assert telemetry_events[0]["properties"]["attachment_counts"] == {}
+
+    def test_send_tool_call_detected_payload(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_tool_call_detected(
+            model="glm-5-3",
+            backend="mistral",
+            api_style="openai",
+            call_type="secondary_call",
+            reasons=["empty_tool_call_identity"],
+            nb_unusable_attempts=1,
+            nb_dropped_tool_calls=1,
+            status="success",
+            message_id="message-1",
+        )
+
+        assert len(telemetry_events) == 1
+        assert telemetry_events[0]["event_name"] == "vibe.tool_call.detected"
+        properties = telemetry_events[0]["properties"]
+        assert {
+            key: properties[key]
+            for key in (
+                "model",
+                "backend",
+                "api_style",
+                "call_source",
+                "call_type",
+                "message_id",
+                "reasons",
+                "nb_unusable_attempts",
+                "nb_dropped_tool_calls",
+                "status",
+            )
+        } == {
+            "model": "glm-5-3",
+            "backend": "mistral",
+            "api_style": "openai",
+            "call_source": "vibe_code",
+            "call_type": "secondary_call",
+            "message_id": "message-1",
+            "reasons": ["empty_tool_call_identity"],
+            "nb_unusable_attempts": 1,
+            "nb_dropped_tool_calls": 1,
+            "status": "success",
+        }
+        _assert_system_metadata(properties)
 
     def test_send_user_rating_feedback_payload(
         self, telemetry_events: list[dict[str, Any]]

@@ -34,20 +34,6 @@ fn resume_without_id_is_picker_intent() {
 }
 
 #[test]
-fn continue_and_resume_are_mutually_exclusive() {
-    let result = Cli::try_parse_from(["vibe-rs", "--continue", "--resume", "id"]);
-    assert!(result.is_err(), "--continue and --resume must conflict");
-}
-
-#[test]
-fn resume_id_and_resume_picker_are_distinct() {
-    assert_ne!(
-        Cli::parse_from(["vibe-rs", "--resume", "id"]).startup_resume(),
-        Cli::parse_from(["vibe-rs", "--resume"]).startup_resume(),
-    );
-}
-
-#[test]
 fn no_intent_keeps_the_started_session() {
     assert_eq!(StartupResume::None.target(None), None);
 }

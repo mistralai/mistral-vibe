@@ -317,6 +317,16 @@ async def test_maps_system_prompt_experiment_to_config_field() -> None:
 
 
 @pytest.mark.asyncio
+async def test_maps_ml4_system_prompt_experiment_variant_to_config_field() -> None:
+    layer = GrowthbookLayer()
+    layer.set_variants(_manager_with_variant("cli_ml4_2026-10_v2").config_variants())
+
+    data = await layer.load()
+
+    assert data.model_dump() == {"system_prompt_id": "cli_ml4_2026-10_v2"}
+
+
+@pytest.mark.asyncio
 async def test_maps_managed_shell_experiment_to_config_field() -> None:
     layer = GrowthbookLayer()
     layer.set_variants(_manager_with_managed_shell_variant("managed").config_variants())

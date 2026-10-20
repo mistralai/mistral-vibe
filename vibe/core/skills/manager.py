@@ -413,9 +413,3 @@ class SkillManager:
 
     def get_skill(self, name: str) -> SkillInfo | None:
         return self.available_skills.get(name)
-
-    def get_model_invocable_skill(self, name: str) -> SkillInfo | None:
-        skill = self.get_skill(name)
-        if skill is None or not skill.model_invocable:
-            return None
-        return skill

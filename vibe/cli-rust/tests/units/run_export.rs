@@ -62,12 +62,6 @@ fn turn_stop_from_turn_none() {
 }
 
 #[test]
-fn turn_stop_from_turn_no_stop_reason() {
-    let turn = json!({"status": "completed"});
-    assert_eq!(turn_stop_from_turn(&turn), None);
-}
-
-#[test]
 fn turn_stop_from_turn_interrupted_wins_over_reason() {
     // Interrupted status wins even if stopReason is set.
     let turn = json!({"status": "interrupted", "stopReason": "limit"});
@@ -140,6 +134,7 @@ fn run_export_serialization_matches_export_contract() {
             time_limit_s: None,
         },
         exit_code: 3,
+        subagents: None,
     };
     let json = serde_json::to_value(&export).unwrap();
     assert_eq!(json["outcome"], "turn_limit");
@@ -150,32 +145,13 @@ fn run_export_serialization_matches_export_contract() {
     assert_eq!(json["exit_code"], 3);
     assert_eq!(json["journal_dir"], Value::Null);
     assert_eq!(json["limits"]["max_turns"], 5);
+    assert!(json.get("subagents").is_none());
     assert_eq!(json["limits"]["max_price"], Value::Null);
     assert_eq!(
         json["warnings"][0]["message"],
         "a config file did not parse"
     );
     assert_eq!(json["warnings"][0]["source"], "/tmp/agent.toml");
-}
-
-#[test]
-fn run_limits_default() {
-    let limits = RunLimits::default();
-    assert!(limits.max_turns.is_none());
-    assert!(limits.max_price.is_none());
-    assert!(limits.max_tokens.is_none());
-    assert!(limits.time_limit_s.is_none());
-}
-
-#[test]
-fn run_error_serialization() {
-    let error = RunError {
-        message: "something went wrong".into(),
-        code: Some("INVALID_API_KEY".into()),
-    };
-    let json = serde_json::to_value(&error).unwrap();
-    assert_eq!(json["message"], "something went wrong");
-    assert_eq!(json["code"], "INVALID_API_KEY");
 }
 
 #[test]
@@ -471,6 +447,7 @@ fn write_run_export_replaces_an_existing_export() {
         ended_at: "2026-10-08T10:01:00.000000Z".into(),
         limits: RunLimits::default(),
         exit_code: 0,
+        subagents: None,
     };
 
     let root = tempfile::tempdir().unwrap();

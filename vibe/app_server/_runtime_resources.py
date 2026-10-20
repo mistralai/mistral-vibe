@@ -12,7 +12,6 @@ from vibe.app_server.models import (
     AgentSummary,
     ConfigIssue,
     ConnectorCounts,
-    DebugLogPage,
     IdentityView,
     MCPState,
     SessionLogSummary,
@@ -27,10 +26,6 @@ from vibe.app_server.protocol import (
     AgentsListResponse,
     AgentSwitchParams,
     AppServerResponseError,
-    ConfigEffectiveReadParams,
-    ConfigEffectiveReadResponse,
-    ConfigFieldsReadParams,
-    ConfigFieldsReadResponse,
     ConfigMutationResponse,
     ConfigProxyReadParams,
     ConfigProxyReadResponse,
@@ -39,8 +34,6 @@ from vibe.app_server.protocol import (
     ConfigWriteOpWire,
     ConfigWriteParams,
     ConfigWriteResponse,
-    DiagnosticsLogsReadParams,
-    DiagnosticsLogsReadResponse,
     EmptyResponse,
     IdentityReadParams,
     IdentityReadResponse,
@@ -111,26 +104,6 @@ class ConfigResource:
         previous = self.current
         self._state.apply_runtime(snapshot)
         self.publish_change(previous)
-
-    async def read_effective(self) -> ConfigEffectiveReadResponse:
-        client = await self._connection.connect()
-        return validate_wire(
-            ConfigEffectiveReadResponse,
-            await client.request(
-                "config/effective/read",
-                ConfigEffectiveReadParams(session_id=self._state.session_id),
-            ),
-        )
-
-    async def read_fields(self) -> ConfigFieldsReadResponse:
-        client = await self._connection.connect()
-        return validate_wire(
-            ConfigFieldsReadResponse,
-            await client.request(
-                "config/fields/read",
-                ConfigFieldsReadParams(session_id=self._state.session_id),
-            ),
-        )
 
     async def write(
         self, ops: list[ConfigWriteOpWire], *, reason: str, reload_runtime: bool = False
@@ -444,19 +417,6 @@ class RuntimeResource:
 
     def has_tool(self, name: str) -> bool:
         return self._state.has_tool(name)
-
-    async def read_logs(self, *, limit: int = 100, offset: int = 0) -> DebugLogPage:
-        client = await self._connection.connect()
-        response = validate_wire(
-            DiagnosticsLogsReadResponse,
-            await client.request(
-                "diagnostics/logs/read",
-                DiagnosticsLogsReadParams(
-                    session_id=self._state.session_id, limit=limit, offset=offset
-                ),
-            ),
-        )
-        return response.logs
 
     async def wait_until_ready(self) -> None:
         client = await self._connection.connect()

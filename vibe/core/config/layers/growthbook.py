@@ -127,6 +127,10 @@ class GrowthbookLayer(ConfigLayer[RawConfig]):
         """Receive config-scoped variants, not telemetry assignments."""
         self._variants = dict(variants)
 
+    @property
+    def variants(self) -> Mapping[str, object]:
+        return self._variants
+
     async def _check_trust(self) -> bool:
         return True
 

@@ -94,7 +94,9 @@ from vibe.app_server.protocol import (
 
 type SessionBackendKind = Literal["legacy", "unified"]
 type MCPAuthorizationReason = Literal["missing", "expired", "rejected", "invalid"]
-type ConnectorAuthAction = Literal["none", "oauth", "credentials_setup", "unknown"]
+type ConnectorAuthAction = Literal[
+    "none", "oauth", "credentials_setup", "no_auth_connect", "unknown"
+]
 type MCPCatalogOwner = Literal["config", "plugin"]
 
 
@@ -221,7 +223,14 @@ class SessionConnectorSourceState:
     raw_id: str
     alias: str
     display_name: str
-    status: Literal["disabled", "connected", "needs_auth", "needs_setup", "unavailable"]
+    status: Literal[
+        "disabled",
+        "connected",
+        "needs_auth",
+        "needs_setup",
+        "needs_connect",
+        "unavailable",
+    ]
     tools: tuple[SessionConnectorToolDescriptor, ...] = ()
     error: str | None = None
 
@@ -245,6 +254,14 @@ class ConnectorAuthRequest:
     reason: Literal["needs_auth", "needs_setup", "gateway_rejected"]
 
 
+@dataclass(frozen=True, slots=True)
+class ConnectorConnectRequest:
+    session_id: str
+    raw_connector_id: str
+    alias: str
+    display_name: str
+
+
 @runtime_checkable
 class SessionConnectorControl(Protocol):
     async def read_connectors(self) -> SessionConnectorState: ...
@@ -266,6 +283,10 @@ class SessionConnectorControl(Protocol):
     ) -> SessionConnectorState: ...
 
     async def request_connector_auth(self, *, alias: str) -> ConnectorAuthRequest: ...
+
+    async def request_connector_connect(
+        self, *, alias: str
+    ) -> ConnectorConnectRequest: ...
 
 
 @dataclass(frozen=True, slots=True)

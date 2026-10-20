@@ -33,6 +33,7 @@ def read_provider_failure(error: BaseException) -> ProviderFailure:
     return ProviderFailure(
         retryable=_is_retryable(error, response),
         stalled=isinstance(error, ProviderStreamStalled),
+        unusable_tool_calls=isinstance(error, UnusableToolCalls),
         category=_category(error, response),
         label=type(error).__name__ if response is None else f"HTTP {response.status}",
         message=_message(error),
@@ -52,6 +53,13 @@ class ProviderFailure:
     A silence can also be a long generation the provider does not stream, which
     another attempt would repeat, so the retry policy limits how often a stall
     is retried.
+    """
+    unusable_tool_calls: bool
+    """Whether every tool call in a finished response came without a name.
+
+    A model that does this can do it again on every attempt, and each attempt
+    resends the whole context, so the retry policy limits how often it is
+    retried.
     """
     category: PublicRetryCategory
     label: str
@@ -82,6 +90,15 @@ class ProviderStreamError(RuntimeError):
 
 class IncompleteProviderStream(RuntimeError):
     """A response stream that ended before the provider marked it finished."""
+
+
+class UnusableToolCalls(RuntimeError):
+    """A finished response whose every tool call came without a name.
+
+    The model meant to call a tool, but none of the calls can be run. Ending the
+    turn would leave the model's announced action undone, and another attempt
+    usually produces a usable call.
+    """
 
 
 class ProviderRefusal(RuntimeError):
@@ -152,7 +169,7 @@ def _error_response(error: BaseException) -> ProviderErrorResponse | None:
 def _is_retryable(error: BaseException, response: ProviderErrorResponse | None) -> bool:
     if response is not None:
         return response.status in _RETRYABLE_STATUSES
-    if isinstance(error, IncompleteProviderStream):
+    if isinstance(error, IncompleteProviderStream | UnusableToolCalls):
         return True
     # A rejected certificate is the one deterministic TLS fault: every attempt
     # fails the same way. During the handshake the transport wraps it in a

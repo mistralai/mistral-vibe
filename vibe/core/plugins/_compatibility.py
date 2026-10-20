@@ -247,7 +247,7 @@ def _read_schema_id(path: Path) -> str | None:
         return None
     try:
         value = json.loads(read_safe(path, raise_on_error=True).text)
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(value, dict):
         return None
@@ -295,7 +295,7 @@ def _opencode_package_marker(root: Path, path: Path) -> Path | None:
         if not resolved.is_relative_to(root):
             raise ValueError("package.json must resolve inside the plugin root")
         value = json.loads(read_safe(resolved, raise_on_error=True).text)
-    except OSError, ValueError, json.JSONDecodeError:
+    except (OSError, ValueError, json.JSONDecodeError):
         return None
     if not isinstance(value, dict):
         return None
@@ -312,7 +312,7 @@ def _opencode_package_marker(root: Path, path: Path) -> Path | None:
     if isinstance(module, str):
         try:
             module_path = resolve_declared_path(root, module)
-        except OSError, ValueError:
+        except (OSError, ValueError):
             module_path = None
         if module_path is not None and module_path.is_file():
             return module_path

@@ -48,6 +48,8 @@ class ReadFileResult(BaseModel):
     returned_bytes: int
     offset: int = 0
     lines_read: int
+    total_lines: int | None = None
+    next_offset: int | None = None
     was_truncated: bool = False
 
 

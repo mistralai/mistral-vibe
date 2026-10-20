@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import Field, StrictInt
+from pydantic import ConfigDict, Field, StrictInt
 
 from vibe.app_server._model import ProtocolModel
 from vibe.utils import AgentEntrypoint
@@ -34,8 +34,13 @@ class ClientToolMethod(StrEnum):
 
 
 class ClientCapabilities(ProtocolModel):
+    # Unknown capabilities are ignored, so a client can declare one ahead of
+    # the servers that use it.
+    model_config = ConfigDict(extra="ignore")
+
     callback_kinds: list[CallbackKind] = Field(default_factory=list)
     client_tools: list[ClientToolCapability] = Field(default_factory=list)
+    session_spawn: bool = False
     disabled_notifications: list[str] = Field(default_factory=list)
 
 

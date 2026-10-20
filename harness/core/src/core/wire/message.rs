@@ -133,6 +133,8 @@ pub(crate) enum StoredMessageSource {
 pub(crate) struct StoredMessage {
     pub message: Message,
     pub source: StoredMessageSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_index: Option<u64>,
 }
 
 impl Message {
@@ -188,6 +190,7 @@ impl Message {
         Self::tool_success(call_id, name, text_content(content))
     }
 
+    #[cfg(test)]
     pub(crate) fn tool_failure_text(
         call_id: String,
         name: String,
@@ -278,6 +281,7 @@ impl StoredMessage {
         Self {
             message,
             source: StoredMessageSource::History,
+            turn_index: None,
         }
     }
 
@@ -285,6 +289,7 @@ impl StoredMessage {
         Self {
             message,
             source: StoredMessageSource::Injection,
+            turn_index: None,
         }
     }
 
@@ -292,6 +297,7 @@ impl StoredMessage {
         Self {
             message,
             source: StoredMessageSource::GeneratedSystem,
+            turn_index: None,
         }
     }
 

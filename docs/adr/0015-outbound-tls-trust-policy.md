@@ -23,13 +23,16 @@ start.
 
 ## Strict chain validation
 
-Since Python 3.13, `ssl.create_default_context()` enables `VERIFY_X509_STRICT`
-by default, so the Certifi path above validates chains against stricter RFC
-5280 rules (SKID/AKID presence and matching, critical BasicConstraints on CAs,
-CA KeyUsage). The system-trust-store path (`truststore`) does not set this
-flag. A private CA chain that verified on Python 3.12 can therefore be
-rejected on 3.13+; affected users should enable `enable_system_trust_store`
-or issue a compliant CA. Vibe keeps the stricter default deliberately.
+The Certifi path sets `VERIFY_X509_STRICT` explicitly, so it validates chains
+against stricter RFC 5280 rules (SKID/AKID presence and matching, critical
+BasicConstraints on CAs, CA KeyUsage) on every supported Python version. It also
+sets `VERIFY_X509_PARTIAL_CHAIN`, which lets a trusted intermediate anchor a
+chain, to match the Python 3.13+ `ssl.create_default_context()` default.
+Because Python 3.12 sets neither flag, Vibe never relies on that default. The
+system-trust-store path (`truststore`) does not set these flags. A private CA
+chain that a lenient client accepts can therefore be rejected; affected users
+should enable `enable_system_trust_store` or issue a compliant CA. Vibe keeps
+the stricter validation deliberately.
 
 ## Agent Guidance
 

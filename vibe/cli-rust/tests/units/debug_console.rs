@@ -21,7 +21,7 @@ use vibe_rs::debug_console::{
     DebugConsole, Event, LogEntry, LogPage, Scroll, MAX_ENTRIES, MAX_VISUAL_LINES, PAGE_SIZE,
 };
 use vibe_rs::input;
-use vibe_rs::mouse::{self, MouseTarget};
+use vibe_rs::mouse;
 use vibe_rs::server::Client;
 use vibe_rs::ui::theme;
 
@@ -945,28 +945,6 @@ fn the_wheel_scrolls_the_console_log() {
     assert_eq!(app.debug_console.scroll, 2); // one wheel notch
     debug_console::wheel(&mut app, &client, false);
     assert_eq!(app.debug_console.scroll, 0);
-}
-
-#[tokio::test]
-async fn a_wheel_over_the_console_reaches_its_log() {
-    let client = Arc::new(Client::stub());
-    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let mut app = console_app();
-    mouse::register_region(
-        &mut app,
-        Rect::new(80, 0, 40, 40),
-        MouseTarget::DebugConsole,
-    );
-    // The wheel lands on the drawn body, which gates the console's handling.
-    app.debug_console.body_area = Rect::new(80, 0, 40, 40);
-    let wheel_up = MouseEvent {
-        kind: MouseEventKind::ScrollUp,
-        column: 90,
-        row: 5,
-        modifiers: KeyModifiers::NONE,
-    };
-    mouse::handle(&mut app, &client, &config_tx, wheel_up);
-    assert_eq!(app.debug_console.scroll, 2); // one wheel notch
 }
 
 #[test]

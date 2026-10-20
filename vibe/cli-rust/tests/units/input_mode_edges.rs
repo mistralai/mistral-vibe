@@ -118,3 +118,20 @@ fn leading_blank_lines_before_a_literal_prefix_collapse_to_one_space() {
     assert_eq!(submitted_value(InputMode::Prompt, "/help "), "/help");
     assert_eq!(submitted_value(InputMode::Prompt, "\n hello"), "hello");
 }
+
+#[test]
+fn a_bare_slash_never_expands_a_skill() {
+    let skills = vec![("my-skill".to_owned(), "Do the thing.".to_owned())];
+    let bare_slash = ClassifiedInput::Prompt {
+        text: "/".to_owned(),
+    };
+
+    assert_eq!(
+        classify_submitted(InputMode::Slash, "/", &skills),
+        bare_slash
+    );
+    assert_eq!(
+        classify_submitted(InputMode::Prompt, "/", &skills),
+        bare_slash
+    );
+}

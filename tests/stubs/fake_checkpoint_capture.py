@@ -8,7 +8,7 @@ from vibe.core.checkpoints.file_store import FileStore
 from vibe.core.checkpoints.models import FileState
 
 if TYPE_CHECKING:
-    from vibe.core.types import MessageList
+    from vibe.core.types import LLMMessage
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,7 +23,7 @@ class FakeCheckpointCapture:
     def __init__(
         self,
         checkpointer: Checkpointer,
-        messages: MessageList,
+        messages: list[LLMMessage],
         files: FileStore | None = None,
     ) -> None:
         self._checkpointer = checkpointer

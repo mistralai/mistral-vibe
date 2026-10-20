@@ -2,9 +2,9 @@ use crate::core::action_id;
 use crate::core::error::CoreError;
 
 use super::{
-    CompactionBudget, CompactionBudgets, CompactionProjection, CompactionProjectionFit,
-    CompactionTrigger, SummaryAcceptance, SummaryRejection, accept_summary,
-    minimum_replacement_fits,
+    CompactionBudget, CompactionBudgets, CompactionFallback, CompactionProjection,
+    CompactionProjectionFit, CompactionTrigger, NewestToolExchange, SummaryAcceptance,
+    SummaryRejection, accept_summary, minimum_replacement_fits,
 };
 use crate::core::model_context::ModelContext;
 use crate::core::step_protocol::{Observation, Outcome, ToolDefinition};
@@ -167,6 +167,7 @@ pub(crate) fn finish_compaction(
     candidate: CompletionCandidate,
     tools: &[ToolDefinition],
     replacement_budget: CompactionBudget,
+    fallback: CompactionFallback,
 ) -> Result<CompactionAttemptResolution, CoreError> {
     let mut outcome = Outcome::quiet();
     let acceptance = accept_summary(
@@ -175,11 +176,18 @@ pub(crate) fn finish_compaction(
         &candidate,
         tools,
         replacement_budget,
+        fallback,
     )?;
     let (messages, summary) = match acceptance {
         SummaryAcceptance::Accepted { messages, summary } => (messages, summary),
         SummaryAcceptance::Rejected(rejection) => {
-            return retry_or_fail_invalid_summary(context, pending, rejection);
+            return fail_compaction_or_fall_back(
+                context,
+                pending,
+                fallback,
+                replacement_budget.token_threshold,
+                invalid_summary_error(rejection),
+            );
         }
         SummaryAcceptance::ReplacementTooLarge => {
             return Ok(CompactionAttemptResolution::Resolve(Box::new(
@@ -187,7 +195,7 @@ pub(crate) fn finish_compaction(
             )));
         }
     };
-    context.replace_messages(messages);
+    context.replace_with_compacted(messages);
     // The previous provider-reported size describes the now-replaced context.
     // Clear it only once the live history actually changes, so a failed or
     // interrupted attempt keeps the over-budget signal for the next turn.
@@ -206,19 +214,27 @@ pub(crate) fn finish_compaction(
     )))
 }
 
-fn retry_or_fail_invalid_summary(
+/// Fails an attempt over to the next request `fallback` allows, or fails the
+/// compaction when the failed attempt was the last one.
+///
+/// The standalone request differs from the in-context one in its messages,
+/// tools and reasoning, so a provider that cached or deterministically
+/// repeats the failed response does not see the same request again.
+pub(crate) fn fail_compaction_or_fall_back(
     context: &mut ModelContext,
     pending: PendingCompaction,
-    rejection: SummaryRejection,
+    fallback: CompactionFallback,
+    token_threshold: Option<u64>,
+    error: ProtocolError,
 ) -> Result<CompactionAttemptResolution, CoreError> {
-    if let Some(projection) = pending.projection.retry_after_invalid_summary()? {
+    if let Some(projection) = pending.projection.fall_back(fallback, token_threshold)? {
         context.mark_projection_replacement();
         return Ok(CompactionAttemptResolution::Retry(
             PendingCompaction::from_parts(pending.compaction_id, pending.continuation, projection),
         ));
     }
     Ok(CompactionAttemptResolution::Resolve(Box::new(
-        fail_compaction(pending, invalid_summary_error(rejection)),
+        fail_compaction(pending, error),
     )))
 }
 
@@ -229,6 +245,9 @@ fn invalid_summary_error(rejection: SummaryRejection) -> ProtocolError {
             "compaction response contained malformed <summary> delimiters"
         }
         SummaryRejection::ToolCalls => "compaction response emitted tool calls",
+        SummaryRejection::Truncated => {
+            "compaction response reached the output token limit before a complete summary"
+        }
     };
     ProtocolError {
         code: "invalid_compaction_summary".to_string(),
@@ -254,6 +273,18 @@ fn request_too_large_error() -> ProtocolError {
             .to_string(),
         retryable: false,
         details: serde_json::Value::Null,
+    }
+}
+
+fn tool_result_too_large_error(tool_names: &[String]) -> ProtocolError {
+    ProtocolError {
+        code: "compaction_tool_result_too_large".to_string(),
+        message: format!(
+            "the newest result of tool {} cannot fit the configured compaction token threshold; raise the threshold or make the tool return less",
+            tool_names.join(", ")
+        ),
+        retryable: false,
+        details: serde_json::json!({ "tool_names": tool_names }),
     }
 }
 
@@ -329,7 +360,7 @@ pub(crate) fn start_compaction(
     tools: &[ToolDefinition],
     budgets: CompactionBudgets,
 ) -> Result<CompactionStartResolution, CoreError> {
-    let (continuation, extra_instructions) = match request {
+    let (continuation, extra_instructions, newest_tool_exchange) = match request {
         CompactionRequest::Automatic {
             turn_id,
             iterations,
@@ -339,12 +370,14 @@ pub(crate) fn start_compaction(
                 iterations,
             },
             "",
+            NewestToolExchange::Keep,
         ),
         CompactionRequest::Manual { extra_instructions } => (
             CompactionContinuation::BetweenTurns {
                 trigger: CompactionTrigger::Manual,
             },
             extra_instructions,
+            NewestToolExchange::MayRemove,
         ),
     };
     let compaction_id = next_action_id(compaction_count, task_id)?;
@@ -355,17 +388,32 @@ pub(crate) fn start_compaction(
         extra_instructions,
         tools,
         budgets.request,
+        newest_tool_exchange,
     )?;
-    let CompactionProjectionFit::Fitted(projection) = projection else {
-        return Ok(CompactionStartResolution::Failed(Box::new(
-            fail_compaction_attempt(
-                compaction_id.clone(),
-                compaction_id,
-                1,
-                continuation,
-                request_too_large_error(),
-            ),
-        )));
+    let projection = match projection {
+        CompactionProjectionFit::Fitted(projection) => projection,
+        CompactionProjectionFit::TooLarge => {
+            return Ok(CompactionStartResolution::Failed(Box::new(
+                fail_compaction_attempt(
+                    compaction_id.clone(),
+                    compaction_id,
+                    1,
+                    continuation,
+                    request_too_large_error(),
+                ),
+            )));
+        }
+        CompactionProjectionFit::ToolResultTooLarge { tool_names } => {
+            return Ok(CompactionStartResolution::Failed(Box::new(
+                fail_compaction_attempt(
+                    compaction_id.clone(),
+                    compaction_id,
+                    1,
+                    continuation,
+                    tool_result_too_large_error(&tool_names),
+                ),
+            )));
+        }
     };
     if !minimum_replacement_fits(
         context.messages(),

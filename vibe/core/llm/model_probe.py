@@ -315,7 +315,7 @@ def _read_entries() -> dict[str, Any]:
     try:
         with UTILITY_MODEL_CACHE_FILE.path.open(encoding="utf-8") as f:
             data = json.load(f)
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -328,7 +328,7 @@ def _write_entries(entries: dict[str, Any]) -> None:
         with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(entries, f, separators=(",", ":"))
         os.replace(tmp_path, cache_path)
-    except OSError, TypeError:
+    except (OSError, TypeError):
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:

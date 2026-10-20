@@ -38,6 +38,10 @@ from mistralai_vibe_local_harness.protocol import (
     tool_call_wire_arguments,
 )
 from mistralai_vibe_local_harness.vibe._credentials import ProviderCredentialSnapshot
+from mistralai_vibe_local_harness.vibe._http_transport import (
+    env_proxy_transport,
+    keepalive_socket_options,
+)
 from mistralai_vibe_local_harness.vibe._runtime_config import (
     LocalModelRoute,
     LocalRuntimeAdapterConfig,
@@ -56,6 +60,11 @@ from mistralai_vibe_local_harness.vibe.adapters._retry import (
     call_with_retries,
 )
 from mistralai_vibe_local_harness.vibe.adapters._stream_idle import StreamIdleGuard
+from mistralai_vibe_local_harness.vibe.adapters._tool_call_finish import (
+    CompletionSource,
+    MalformedToolCalls,
+    align_finish_reason,
+)
 
 # Mistral's in-band signal that it aborted a generation part way.
 _ABORTED_FINISH_REASON = "error"
@@ -76,7 +85,7 @@ _THINKING_TO_REASONING_EFFORT: dict[str, ReasoningEffort] = {
 }
 
 
-async def execute_mistral_completion(
+async def execute_mistral_completion(  # noqa: PLR0913 - one keyword per request setting and observer
     messages: list[RustMessage],
     tools: list[RustToolDefinition],
     config: LocalRuntimeAdapterConfig,
@@ -84,14 +93,27 @@ async def execute_mistral_completion(
     route: LocalModelRoute,
     *,
     stream: bool = True,
+    disable_reasoning: bool = False,
     metadata: Mapping[str, str] | None = None,
     on_retry: ProviderRetryObserver | None = None,
     on_delta: ProviderDeltaObserver | None = None,
+    malformed: MalformedToolCalls | None = None,
 ) -> RustCompletionResult:
+    """Run one completion against the Mistral API.
+
+    ``disable_reasoning`` asks a reasoning route to answer without reasoning.
+    A route whose thinking is ``off`` already sends no reasoning setting, and
+    stays that way: a model without adjustable reasoning may reject one.
+    """
     notices = RetryNotices(on_retry)
     async with httpx.AsyncClient(
         timeout=config.timeout_s,
-        verify=build_ssl_context(),
+        transport=env_proxy_transport(
+            verify=build_ssl_context(
+                use_system_trust_store=config.enable_system_trust_store
+            ),
+            socket_options=keepalive_socket_options(),
+        ),
         follow_redirects=True,
         # Capture the provider correlation id at the transport level so both the
         # streaming and non-streaming paths report it; the parsed complete_async
@@ -111,7 +133,9 @@ async def execute_mistral_completion(
             "temperature": route.temperature,
         }
         if reasoning_effort := _THINKING_TO_REASONING_EFFORT.get(route.thinking):
-            kwargs["reasoning_effort"] = reasoning_effort
+            kwargs["reasoning_effort"] = (
+                "none" if disable_reasoning else reasoning_effort
+            )
         if route.top_p is not None:
             kwargs["top_p"] = route.top_p
         if (max_tokens := config.output_token_cap(route)) is not None:
@@ -123,6 +147,7 @@ async def execute_mistral_completion(
         if tools:
             kwargs["tools"] = [_tool_payload(tool) for tool in tools]
             kwargs["parallel_tool_calls"] = True
+        source = CompletionSource(provider=config.provider, model=route.model)
         if stream:
 
             async def stream_once() -> RustCompletionResult:
@@ -134,6 +159,8 @@ async def execute_mistral_completion(
                         idle_guard.watch(events, starts_output=_carries_model_output),
                         on_delta,
                         emits_finish_reason=config.emits_finish_reason,
+                        source=source,
+                        record=malformed,
                     )
 
             return await call_with_retries(
@@ -141,15 +168,26 @@ async def execute_mistral_completion(
                 max_elapsed_time_s=config.retry_max_elapsed_time_s,
                 notices=notices,
             )
-        response = await call_with_retries(
-            lambda: client.chat.complete_async(**kwargs),
+
+        # Reading the response is part of the attempt, so a response with only
+        # unusable tool calls is retried like a failed request.
+        async def complete_once() -> RustCompletionResult:
+            return _read_completion(
+                await client.chat.complete_async(**kwargs),
+                source=source,
+                record=malformed,
+            )
+
+        return await call_with_retries(
+            complete_once,
             max_elapsed_time_s=config.retry_max_elapsed_time_s,
             notices=notices,
         )
-        return _read_completion(response)
 
 
-def _read_completion(response: Any) -> RustCompletionResult:
+def _read_completion(
+    response: Any, *, source: CompletionSource, record: MalformedToolCalls | None = None
+) -> RustCompletionResult:
     choice = _first_choice(response)
     if choice is None:
         raise ValueError("Completion response has no choices")
@@ -168,19 +206,20 @@ def _read_completion(response: Any) -> RustCompletionResult:
         text = _delta_text(content)
         if text:
             parts.append(RustTextContentBlock(text=text))
-    tool_call_parts = _message_tool_call_parts(_read_field(message, "tool_calls"))
+    tool_calls = _read_field(message, "tool_calls")
+    tool_call_parts = _message_tool_call_parts(tool_calls)
     parts.extend(tool_call_parts)
+    reason = _read_field(choice, "finish_reason")
+    finish_reason = align_finish_reason(
+        _finish_reason(reason) if isinstance(reason, str) else None,
+        kept_tool_calls=len(tool_call_parts),
+        dropped_tool_calls=(len(tool_calls) if isinstance(tool_calls, list) else 0)
+        - len(tool_call_parts),
+        source=source,
+        record=record,
+    )
     if not parts:
         raise ValueError("Completion response has no content")
-    reason = _read_field(choice, "finish_reason")
-    finish_reason = _finish_reason(reason) if isinstance(reason, str) else "stop"
-    # Core rejects tool_call finish without tool call parts and rejects any
-    # other finish that carries tool call parts, so align finish_reason with
-    # what we actually parsed — mirroring the streaming path.
-    if tool_call_parts:
-        finish_reason = "tool_call"
-    elif finish_reason == "tool_call":
-        finish_reason = "stop"
     return RustCompletionResult(
         parts=parts,
         finish_reason=finish_reason,
@@ -210,6 +249,8 @@ async def _read_stream(
     on_delta: ProviderDeltaObserver | None = None,
     *,
     emits_finish_reason: bool,
+    source: CompletionSource,
+    record: MalformedToolCalls | None = None,
 ) -> RustCompletionResult:
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
@@ -249,31 +290,50 @@ async def _read_stream(
             await on_delta(
                 ProviderStreamDelta(text=delta_text, reasoning=delta_reasoning)
             )
-    if finish_reason is None:
+    if finish_reason is None and emits_finish_reason:
         # The last chunk of a complete stream carries a finish reason, and the
         # SDK also ends iteration when the body closes early.
-        if emits_finish_reason:
-            raise IncompleteProviderStream(
-                "Model stream ended without a finish reason."
-            )
-        finish_reason = "stop"
+        raise IncompleteProviderStream("Model stream ended without a finish reason.")
+    tool_call_parts = _tool_call_parts(tool_calls)
+    return RustCompletionResult(
+        parts=_streamed_parts(
+            reasoning="".join(reasoning_parts),
+            reasoning_meta=reasoning_meta,
+            text="".join(text_parts),
+            tool_call_parts=tool_call_parts,
+        ),
+        finish_reason=align_finish_reason(
+            finish_reason,
+            kept_tool_calls=len(tool_call_parts),
+            dropped_tool_calls=len(tool_calls) - len(tool_call_parts),
+            source=source,
+            record=record,
+        ),
+        usage=usage,
+    )
+
+
+def _streamed_parts(
+    *,
+    reasoning: str,
+    reasoning_meta: JsonObject,
+    text: str,
+    tool_call_parts: list[RustCompletionResultToolCallPart],
+) -> list[RustCompletionResultPart]:
     parts: list[RustCompletionResultPart] = []
-    if reasoning_parts:
+    if reasoning:
         parts.append(
             RustReasoningPart(
-                content=[RustReasoningTextContent(text="".join(reasoning_parts))],
+                content=[RustReasoningTextContent(text=reasoning)],
                 _meta=reasoning_meta or None,
             )
         )
-    text = "".join(text_parts)
     if text:
         parts.append(RustTextContentBlock(text=text))
-    parts.extend(_tool_call_parts(tool_calls))
+    parts.extend(tool_call_parts)
     if not parts:
         parts.append(RustTextContentBlock(text=" "))
-    if tool_calls:
-        finish_reason = "tool_call"
-    return RustCompletionResult(parts=parts, finish_reason=finish_reason, usage=usage)
+    return parts
 
 
 def _delta_text(content: object) -> str:

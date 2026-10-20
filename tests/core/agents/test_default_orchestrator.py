@@ -397,9 +397,9 @@ async def test_tool_defaults_can_be_written_to_discovered_layer() -> None:
 
     assert result == []
     assert orchestrator.config.tools["bash"]["permission"] == ToolPermission.ASK
-    assert orchestrator.config.tools["bash"]["default_timeout"] == 300
+    assert "default_timeout" not in orchestrator.config.tools["bash"]
     assert orchestrator.config.tools["read_file"]["permission"] == ToolPermission.ALWAYS
-    assert orchestrator.config.tools["read_file"]["max_read_bytes"] == 51200
+    assert orchestrator.config.tools["read_file"]["max_read_bytes"] == 64_000
 
 
 @pytest.mark.asyncio

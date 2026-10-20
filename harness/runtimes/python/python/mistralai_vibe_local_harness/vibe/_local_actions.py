@@ -89,7 +89,10 @@ from mistralai_vibe_local_harness.vibe._saved_outputs import (
     SavedOutputs,
     build_saved_outputs,
 )
-from mistralai_vibe_local_harness.vibe._shell_tools import execute_shell_tool
+from mistralai_vibe_local_harness.vibe._shell_tools import (
+    ShellSession,
+    execute_shell_tool,
+)
 from mistralai_vibe_local_harness.vibe._skill_tools import execute_skill_tool
 from mistralai_vibe_local_harness.vibe._smart_approve import (
     CLASSIFIER_PROMPT_VERSION,
@@ -465,6 +468,8 @@ class _LocalActionState:
         )
         self._hook_handlers = hook_handlers
         self._session_id = session_id
+        # The shell's login profile runs once per session, not per command.
+        self._shell_session = ShellSession(session_id or secrets.token_hex(8))
         self._parent_session_id = parent_session_id
         self._filesystem_root = (
             filesystem_root.expanduser().resolve()
@@ -729,7 +734,10 @@ class _LocalActionState:
                 )
             if action.call.name == "file_system.bash":
                 return self._with_approval_note(
-                    await execute_shell_tool(action, self._config), action.action_id
+                    await execute_shell_tool(
+                        action, self._config, session=self._shell_session
+                    ),
+                    action.action_id,
                 )
             if action.call.name == "skill.read":
                 return self._with_approval_note(

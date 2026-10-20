@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use tokio::time::Instant;
 
 use super::drive::RunState;
+use super::subagents::read_subagents;
 use crate::headless_run::StopRequests;
 use crate::run_export::{
     RunError, RunOutcome, RunReport, RunResult, RunUsage, RunWarning, TurnStop,
@@ -29,13 +30,14 @@ pub(super) async fn build_report(
     final_response: Option<String>,
     grace_ends: Instant,
 ) -> RunReport {
-    let (client, session_id, config, usage_baseline) = {
+    let (client, session_id, config, usage_baseline, run_warnings) = {
         let state = state.lock().unwrap();
         (
             state.client.clone(),
             state.session_id.clone(),
             state.config.clone(),
             state.usage_baseline.clone(),
+            state.warnings.clone(),
         )
     };
 
@@ -45,6 +47,7 @@ pub(super) async fn build_report(
     let mut steps = None;
     let mut warnings = None;
     let mut rt_config = None;
+    let mut subagents = Vec::new();
     if let (Some(client), Some(session_id)) = (client, session_id.clone()) {
         // Read runtime for final stats and session log path.
         let runtime_params = RuntimeReadParams {
@@ -100,6 +103,9 @@ pub(super) async fn build_report(
             stop.observe_usage(run_usage.total_tokens, cost);
         }
 
+        // Read while the session is live: stopping it closes its subagents.
+        subagents = read_subagents(&client, &session_id, grace_ends).await;
+
         // Stop the session (persistence boundary), within the grace.
         let _ = tokio::time::timeout_at(
             grace_ends,
@@ -107,6 +113,12 @@ pub(super) async fn build_report(
         )
         .await;
     }
+
+    // The run's own warnings come after the runtime's.
+    let warnings = match (warnings, run_warnings) {
+        (warnings, run) if run.is_empty() => warnings,
+        (warnings, run) => Some(warnings.into_iter().flatten().chain(run).collect()),
+    };
 
     // The runtime snapshot holds the same config view as config/effective/read.
     let config = config.or(rt_config);
@@ -132,6 +144,7 @@ pub(super) async fn build_report(
         },
         final_response,
         session_dir,
+        subagents,
     }
 }
 
@@ -165,7 +178,12 @@ fn runtime_warnings(issues: Option<&Value>) -> Option<Vec<RunWarning>> {
         .filter_map(|issue| {
             Some(RunWarning {
                 message: issue.get("message")?.as_str()?.to_owned(),
-                source: issue.get("file").and_then(Value::as_str).map(str::to_owned),
+                // A process-wide issue, such as a run-server log level, names no file.
+                source: issue
+                    .get("file")
+                    .and_then(Value::as_str)
+                    .filter(|file| !file.is_empty())
+                    .map(str::to_owned),
             })
         })
         .collect();

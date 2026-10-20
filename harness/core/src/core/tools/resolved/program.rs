@@ -26,8 +26,21 @@ pub(super) struct ResolvedProgramTools {
 
 impl ResolvedProgramTools {
     pub(super) fn compile_validated(config: &HarnessConfig) -> (Self, ToolDiscovery) {
+        if !config.settings.tools.programmatic.is_enabled() {
+            return (
+                Self {
+                    descriptors: Vec::new(),
+                    routes: Vec::new(),
+                    tool_group_inventory_prompt_section: String::new(),
+                },
+                ToolDiscovery::with_capacity(0),
+            );
+        }
         let accepted = AcceptedProgramGroups::compose(config);
-        let tool_group_inventory_prompt_section = render_tool_group_inventory_prompt(&accepted);
+        let tool_group_inventory_prompt_section = render_tool_group_inventory_prompt(
+            &accepted,
+            &config.settings.prompts.programs.tool_groups,
+        );
         let tool_count = accepted
             .callable
             .iter()
@@ -105,15 +118,18 @@ impl AcceptedProgramGroups {
     fn compose(config: &HarnessConfig) -> Self {
         let provided_groups = config.tool_groups().collect::<Vec<_>>();
         let command_environment = config.settings.tools.command_environment;
-        let mut callable = vec![
-            CallableProgramGroup {
+        let mut callable = Vec::new();
+        if config.settings.tools.file_system.is_enabled() {
+            callable.push(CallableProgramGroup {
                 namespace: file_system::NAMESPACE.to_string(),
                 prompt: PromptContribution::Listed,
                 search_description: file_system::search_description(command_environment),
                 connector_icon_url: configured_icon(&provided_groups, file_system::NAMESPACE),
                 tools: filesystem_program_tools(command_environment),
-            },
-            CallableProgramGroup {
+            });
+        }
+        if config.settings.tools.programmatic.offers_sleep() {
+            callable.push(CallableProgramGroup {
                 namespace: SELF_NAMESPACE.to_string(),
                 prompt: PromptContribution::Listed,
                 search_description: SELF_SEARCH_DESCRIPTION.to_string(),
@@ -122,8 +138,8 @@ impl AcceptedProgramGroups {
                     .into_iter()
                     .map(ProgramTool::from_tool_binding)
                     .collect(),
-            },
-        ];
+            });
+        }
         if config.settings.tools.background_processes.is_enabled() {
             callable.push(CallableProgramGroup {
                 namespace: background_processes::NAMESPACE.to_string(),
@@ -140,9 +156,17 @@ impl AcceptedProgramGroups {
             callable.push(CallableProgramGroup {
                 namespace: subagents::NAMESPACE.to_string(),
                 prompt: PromptContribution::DedicatedSection,
-                search_description: subagents::SEARCH_DESCRIPTION.to_string(),
+                search_description: config
+                    .settings
+                    .prompts
+                    .agent_tools
+                    .search_description
+                    .clone(),
                 connector_icon_url: configured_icon(&provided_groups, subagents::NAMESPACE),
-                tools: subagent_program_tools(&config.settings.tools.subagents),
+                tools: subagent_program_tools(
+                    &config.settings.tools.subagents,
+                    &config.settings.prompts.agent_tools,
+                ),
             });
         }
 
@@ -163,6 +187,7 @@ impl AcceptedProgramGroups {
                         command_environment,
                         &group.name,
                         &group.description,
+                        &config.settings.prompts.agent_tools.search_description,
                     ),
                     connector_icon_url: group.icon_url.clone(),
                     tools,
@@ -295,8 +320,11 @@ fn background_process_program_tools() -> Vec<ProgramTool> {
         .collect()
 }
 
-fn subagent_program_tools(mode: &subagents::Mode) -> Vec<ProgramTool> {
-    subagents::tools()
+fn subagent_program_tools(
+    mode: &subagents::Mode,
+    prompts: &subagents::Prompts,
+) -> Vec<ProgramTool> {
+    subagents::tools(mode.supports_conversation_forking(), prompts)
         .into_iter()
         .filter(|spec| mode.supports(spec.name))
         .map(|spec| ProgramTool {
@@ -340,6 +368,7 @@ fn search_description(
     environment: CommandEnvironment,
     namespace: &str,
     provided_description: &str,
+    agent_description: &str,
 ) -> String {
     match namespace {
         file_system::NAMESPACE => return file_system::search_description(environment),
@@ -347,13 +376,13 @@ fn search_description(
             return background_processes::SEARCH_DESCRIPTION.to_string();
         }
         SELF_NAMESPACE => SELF_SEARCH_DESCRIPTION,
-        subagents::NAMESPACE => subagents::SEARCH_DESCRIPTION,
+        subagents::NAMESPACE => agent_description,
         _ => provided_description,
     }
     .to_string()
 }
 
-fn render_tool_group_inventory_prompt(groups: &AcceptedProgramGroups) -> String {
+fn render_tool_group_inventory_prompt(groups: &AcceptedProgramGroups, template: &str) -> String {
     tool_group_inventory_prompt(
         groups
             .callable
@@ -363,5 +392,6 @@ fn render_tool_group_inventory_prompt(groups: &AcceptedProgramGroups) -> String 
                 PromptContribution::DedicatedSection => None,
             })
             .chain(groups.listed_notice_names.iter().map(String::as_str)),
+        template,
     )
 }

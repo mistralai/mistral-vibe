@@ -201,16 +201,6 @@ def backend_contract_partial_mistral_response() -> Callable[..., httpx.Response]
     return build
 
 
-@pytest.fixture
-def backend_contract_mistral_completion() -> Callable[[str], httpx.Response]:
-    def build(content: str) -> httpx.Response:
-        response = mistral_completion(content)
-        response["model"] = "mistral-vibe-cli-latest"
-        return httpx.Response(200, json=response)
-
-    return build
-
-
 def _mistral_sse_delta(content: str) -> bytes:
     """One streamed delta, with no finish reason: the answer is still coming."""
     response = mistral_completion(content, tool_calls=None)

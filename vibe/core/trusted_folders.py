@@ -261,7 +261,7 @@ class TrustedFoldersManager:
                 data = tomllib.load(f)
             self._trusted[:] = list(data.get("trusted", []))
             self._untrusted[:] = list(data.get("untrusted", []))
-        except OSError, tomllib.TOMLDecodeError:
+        except (OSError, tomllib.TOMLDecodeError):
             self._trusted.clear()
             self._untrusted.clear()
             self._save()

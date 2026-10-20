@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from vibe.app_server.multiplex import ChannelServer, serve_multiplexed
+from vibe.app_server.multiplex import ChannelOpen, ChannelServer, serve_multiplexed
 from vibe.app_server.transport import JsonRpcTransport, memory_transport_pair
 from vibe.observability.logging import StructuredLogFormatter, logger
 
@@ -20,7 +20,9 @@ async def running_channels() -> AsyncIterator[
     client, server = memory_transport_pair()
     opened: list[JsonRpcTransport] = []
 
-    async def create_channel(transport: JsonRpcTransport) -> ChannelServer:
+    async def create_channel(
+        transport: JsonRpcTransport, _options: ChannelOpen | None
+    ) -> ChannelServer:
         opened.append(transport)
 
         class EchoServer:
@@ -100,7 +102,9 @@ async def test_close_acknowledgement_waits_for_runtime_cleanup() -> None:
     cleaning = asyncio.Event()
     release = asyncio.Event()
 
-    async def create_channel(channel: JsonRpcTransport) -> ChannelServer:
+    async def create_channel(
+        channel: JsonRpcTransport, _options: ChannelOpen | None
+    ) -> ChannelServer:
         class SlowClosingServer:
             async def serve(self) -> None:
                 async for _ in channel.messages():
@@ -144,7 +148,9 @@ async def test_eof_flushes_and_closes_every_channel() -> None:
 async def test_client_close_can_cross_server_initiated_close() -> None:
     client, transport = memory_transport_pair()
 
-    async def create_channel(channel: JsonRpcTransport) -> ChannelServer:
+    async def create_channel(
+        channel: JsonRpcTransport, _options: ChannelOpen | None
+    ) -> ChannelServer:
         class SelfClosingServer:
             async def serve(self) -> None:
                 await anext(channel.messages())
@@ -184,7 +190,9 @@ async def test_late_frames_never_reopen_a_closed_channel() -> None:
 async def test_server_failure_closes_only_its_channel_with_the_reason() -> None:
     client, transport = memory_transport_pair()
 
-    async def create_channel(channel: JsonRpcTransport) -> ChannelServer:
+    async def create_channel(
+        channel: JsonRpcTransport, _options: ChannelOpen | None
+    ) -> ChannelServer:
         class Server:
             async def serve(self) -> None:
                 async for message in channel.messages():
@@ -220,7 +228,9 @@ async def test_channel_setup_failure_keeps_the_process_serving() -> None:
     client, transport = memory_transport_pair()
     opened = 0
 
-    async def create_channel(channel: JsonRpcTransport) -> ChannelServer:
+    async def create_channel(
+        channel: JsonRpcTransport, _options: ChannelOpen | None
+    ) -> ChannelServer:
         nonlocal opened
         opened += 1
         if opened == 1:
@@ -265,7 +275,9 @@ async def test_channel_logs_name_their_channel(
 ) -> None:
     client, transport = memory_transport_pair()
 
-    async def create_channel(channel: JsonRpcTransport) -> ChannelServer:
+    async def create_channel(
+        channel: JsonRpcTransport, _options: ChannelOpen | None
+    ) -> ChannelServer:
         class LoggingServer:
             async def serve(self) -> None:
                 async for message in channel.messages():
@@ -297,7 +309,9 @@ async def test_saturated_channel_never_blocks_its_peers(message_count: int) -> N
     release = asyncio.Event()
     opened = 0
 
-    async def create_channel(channel: JsonRpcTransport) -> ChannelServer:
+    async def create_channel(
+        channel: JsonRpcTransport, _options: ChannelOpen | None
+    ) -> ChannelServer:
         nonlocal opened
         opened += 1
         stalled = opened == 1
@@ -347,7 +361,9 @@ async def test_full_inbox_drains_admitted_messages_before_closing(
     release = asyncio.Event()
     opened = 0
 
-    async def create_channel(channel: JsonRpcTransport) -> ChannelServer:
+    async def create_channel(
+        channel: JsonRpcTransport, _options: ChannelOpen | None
+    ) -> ChannelServer:
         nonlocal opened
         opened += 1
         stalled = opened == 1

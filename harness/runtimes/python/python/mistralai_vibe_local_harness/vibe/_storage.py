@@ -601,7 +601,7 @@ class ChildDependencyV1(_StoredModel):
 
 
 class SessionPin(StrEnum):
-    """A user-selected choice pinned to a session and restored when it reopens.
+    """A choice pinned to a session and restored when it reopens.
 
     Each member's value is the ``SessionMetadataV1`` field that stores it, so the
     storage, lookup, and propagation of pins stay generic: adding a new pin is a
@@ -3561,26 +3561,45 @@ def transition_sha256(transition: RustSessionTransition) -> str:
     return sha256_json(transition.model_dump(mode="json", by_alias=True))
 
 
-def _replay_transition_sha256(transition: RustSessionTransition) -> str:
+def _replay_transition_sha256(
+    transition: RustSessionTransition, *, include_committed_calls: bool = True
+) -> str:
     return _digest_with_llm_actions_normalized(
-        transition, _normalize_llm_action_for_replay
+        transition,
+        _normalize_llm_action_for_replay,
+        include_committed_calls=include_committed_calls,
     )
 
 
 def _replay_transition_sha256_with_model_input(
-    transition: RustSessionTransition,
+    transition: RustSessionTransition, *, include_committed_calls: bool = True
 ) -> str:
     return _digest_with_llm_actions_normalized(
-        transition, _normalize_llm_action_for_replay_with_model_input
+        transition,
+        _normalize_llm_action_for_replay_with_model_input,
+        include_committed_calls=include_committed_calls,
     )
 
 
 def _digest_with_llm_actions_normalized(
-    transition: RustSessionTransition, normalize: Callable[[dict[str, JsonValue]], None]
+    transition: RustSessionTransition,
+    normalize: Callable[[dict[str, JsonValue]], None],
+    *,
+    include_committed_calls: bool = True,
 ) -> str:
     value = cast(
         dict[str, JsonValue], transition.model_dump(mode="json", by_alias=True)
     )
+    if not include_committed_calls:
+        observations = value.get("observations")
+        if isinstance(observations, list):
+            for observation in observations:
+                if (
+                    isinstance(observation, dict)
+                    and observation.get("type") == "tool_result_committed"
+                ):
+                    observation.pop("call", None)
+
     next_action = value.get("next")
     if not isinstance(next_action, dict) or next_action.get("type") != "actions":
         return sha256_json(value)
@@ -3606,10 +3625,21 @@ def _transition_matches_recorded_digest(
         return True
     if payload.replay_transition_sha256 is not None:
         recorded = payload.replay_transition_sha256
-        return (
+        if (
             # Journals recorded before the model input left the digest.
             _replay_transition_sha256_with_model_input(transition) == recorded
             or _replay_transition_sha256(transition) == recorded
+        ):
+            return True
+
+        # Journals recorded before committed observations carried their effective call.
+        return (
+            _replay_transition_sha256_with_model_input(
+                transition, include_committed_calls=False
+            )
+            == recorded
+            or _replay_transition_sha256(transition, include_committed_calls=False)
+            == recorded
         )
     legacy_digest = _legacy_transition_sha256(transition, durable_actions)
     return legacy_digest == payload.transition_sha256
@@ -3674,12 +3704,22 @@ def _normalize_llm_action_for_replay(action: dict[str, JsonValue]) -> None:
     # replacement where the live Core sent an increment, so replay cannot compare it.
     action.pop("max_iterations", None)
     action.pop("model_input", None)
+    _drop_compaction_request_kind(action)
+
+
+def _drop_compaction_request_kind(action: dict[str, JsonValue]) -> None:
+    # A compaction's request kind shapes how the Runtime sends it, like the model
+    # input. Journals recorded before Core named it carry none, and their retry
+    # after an invalid summary resent the in-context request where Core now
+    # sends the standalone one; the recorded result replays the same either way.
+    action.pop("request", None)
 
 
 def _normalize_llm_action_for_replay_with_model_input(
     action: dict[str, JsonValue],
 ) -> None:
     action.pop("max_iterations", None)
+    _drop_compaction_request_kind(action)
     model_input = action.get("model_input")
     if not isinstance(model_input, dict):
         return

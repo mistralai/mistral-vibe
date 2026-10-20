@@ -4,6 +4,7 @@ use serde::Serialize;
 use crate::core::features::compaction::CompactionTrigger;
 use crate::core::features::notifications::Notification;
 use crate::core::step_protocol::Action;
+use crate::core::tools::external::ExternalTool;
 use crate::core::turn::TurnOutcome;
 use crate::core::wire::completion::{CompletionCandidate, TokenUsage};
 use crate::core::wire::content::ContentBlock;
@@ -220,11 +221,15 @@ pub(crate) enum Observation {
         turn_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        /// The content of the latest assistant message of the interrupted Turn.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        output: Vec<ContentBlock>,
     },
     ToolResultCommitted {
         turn_id: String,
         action_id: String,
         call_id: String,
+        call: ExternalTool,
         result: ToolResult,
     },
     ToolDiscoveryFinished {

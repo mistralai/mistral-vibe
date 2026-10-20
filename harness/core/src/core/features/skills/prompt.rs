@@ -1,8 +1,5 @@
 use super::SkillDefinition;
 
-pub(crate) const IDENTITY_GUIDANCE: &str = "Find relevant skills with the `skill` tool";
-pub(crate) const AUTONOMY_ACTIVITY: &str = "loading skills";
-
 pub(crate) fn rules_prompt_section() -> &'static str {
     r#"## Available Skills
 

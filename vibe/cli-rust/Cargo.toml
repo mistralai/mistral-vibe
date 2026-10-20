@@ -1,6 +1,6 @@
 [package]
 name = "vibe-rs"
-version = "3.0.0"
+version = "3.0.1"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
@@ -21,7 +21,7 @@ path = "src/bin/replay.rs"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 shlex = "1"
 tokio = { version = "1", features = ["rt", "macros", "process", "io-util", "io-std", "sync", "time", "signal"] }
 futures = "0.3"

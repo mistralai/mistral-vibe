@@ -11,9 +11,11 @@ from pydantic import JsonValue
 
 type JsonObject = dict[str, JsonValue]
 type JsonSchema = bool | JsonObject
-type ConnectorAuthAction = Literal["none", "oauth", "credentials_setup", "unknown"]
+type ConnectorAuthAction = Literal[
+    "none", "oauth", "credentials_setup", "no_auth_connect", "unknown"
+]
 type ConnectorSourceStatus = Literal[
-    "disabled", "connected", "needs_auth", "needs_setup", "unavailable"
+    "disabled", "connected", "needs_auth", "needs_setup", "needs_connect", "unavailable"
 ]
 
 

@@ -12,6 +12,9 @@ import termios
 from typing import Literal, TypedDict, cast
 
 _MAX_REQUEST_BYTES = 16 * 1024 * 1024
+# As _sandbox_helper.COMMAND_OOM_SCORE_ADJ: the most a process can have, so under
+# memory pressure the kernel kills a runaway command before the Host.
+_COMMAND_OOM_SCORE_ADJ = 1_000
 
 
 class PosixLaunchRequest(TypedDict):
@@ -29,6 +32,7 @@ def run(request_fd: int, status_fd: int, slave_fd: int) -> None:
         os.close(request_fd)
         stage = "setsid"
         os.setsid()
+        _raise_oom_score()
         stage = "controlling_terminal"
         fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
         stage = "chdir"
@@ -51,6 +55,19 @@ def run(request_fd: int, status_fd: int, slave_fd: int) -> None:
     except BaseException as error:
         _write_error(status_fd, stage, getattr(error, "errno", None))
         raise SystemExit(127) from None
+
+
+def _raise_oom_score() -> None:
+    """On Linux, make this process, soon the command, the OOM killer's first
+    pick. Best effort: a kernel without the file leaves the score as it is.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        with open("/proc/self/oom_score_adj", "w") as oom_score_adj:
+            oom_score_adj.write(str(_COMMAND_OOM_SCORE_ADJ))
+    except OSError:
+        pass
 
 
 def _read_request(descriptor: int) -> PosixLaunchRequest:

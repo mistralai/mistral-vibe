@@ -38,15 +38,6 @@ fn parses_the_child_session_wire_shape() {
 }
 
 #[test]
-fn tokens_need_context_usage() {
-    let mut session = child("c", SessionStatus::Idle, 1);
-    session.token_usage.total_tokens = 42;
-    assert_eq!(session.context_tokens(), 0, "0 without contextUsage");
-    session.context_usage = Some(Default::default());
-    assert_eq!(session.context_tokens(), 0);
-}
-
-#[test]
 fn unknown_status_tag_reads_as_unknown() {
     let session = parse(serde_json::json!({
         "id": "c",

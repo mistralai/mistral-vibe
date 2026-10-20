@@ -57,7 +57,6 @@ class SkillMetadata(BaseModel):
     )
     compatibility: str | None = Field(
         default=None,
-        max_length=500,
         description="Environment requirements (intended product, system packages, etc.).",
     )
     metadata: dict[str, str] = Field(

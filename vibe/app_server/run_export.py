@@ -1,7 +1,8 @@
 """How a headless run ended, and the export that records it.
 
 The export is ``export.json`` in the caller's output directory; the session
-journal is copied beside it under ``session/``.
+journal is copied beside it under ``session/``, and each subagent's under
+``subagents/<session ID>/``.
 """
 
 from __future__ import annotations
@@ -158,6 +159,61 @@ class RunResult(BaseModel):
     )
 
 
+class RunSubagentStatus(StrEnum):
+    """Where a subagent was when the run ended.
+
+    ``INTERRUPTED`` is an idle subagent whose last turn was interrupted, as a
+    run that stops interrupts its running subagents. ``UNKNOWN`` is a
+    lifecycle state this version of Vibe does not know.
+    """
+
+    RUNNING = auto()
+    IDLE = auto()
+    INTERRUPTED = auto()
+    FAILED = auto()
+    CLOSED = auto()
+    UNKNOWN = auto()
+
+
+class RunSubagent(BaseModel):
+    """One subagent the session spawned, a child session of its root.
+
+    ``usage``, ``cost_usd`` and ``steps`` are the subagent's own; the run's
+    count none of them. ``usage`` and ``cost_usd`` cover the child's whole
+    life, so after a resume they include what an earlier run's subagent
+    spent. ``model`` is the provider model the subagent's agent called in
+    this run, None unless exactly one. ``cost_usd`` is priced, cached input
+    included, at the rates of ``pricing_model``, a configured model's alias:
+    the subagent's own model, or the root session's when that is unknown, as
+    ``pricing_fallback`` then says. ``steps`` counts the model calls the
+    subagent's agent made in this run.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    parent_session_id: str
+    root_session_id: str
+    agent_name: str
+    # None for the default agent.
+    agent_type: str | None = None
+    # The parent's action that spawned the child, and the model's tool call
+    # it ran in. A spawn from a program has its own call ID, which embeds the
+    # program's tool call ID.
+    spawn_action_id: str
+    spawn_call_id: str | None = None
+    status: RunSubagentStatus
+    model: str | None = None
+    usage: RunUsage | None = None
+    cost_usd: float | None = None
+    pricing_model: str | None = None
+    pricing_fallback: bool = False
+    steps: int | None = None
+    # Relative to the output directory. None when the child left no journal,
+    # as a failed spawn does.
+    journal_dir: str | None = None
+
+
 class RunExport(RunResult):
     # Ignored rather than forbidden: readers parse exports back, and
     # ``exit_code`` is computed, so a forbidding model rejects its own dump.
@@ -171,6 +227,10 @@ class RunExport(RunResult):
     started_at: datetime
     ended_at: datetime
     limits: RunLimits
+    # Left out of the export when the session spawned none.
+    subagents: list[RunSubagent] | None = Field(
+        default=None, exclude_if=lambda value: not value
+    )
 
     @computed_field
     @property

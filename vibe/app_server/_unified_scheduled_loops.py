@@ -95,6 +95,22 @@ class _StoredLoopsV1(BaseModel):
     loops: list[ScheduledPrompt] = Field(max_length=MAX_LOOPS_PER_SESSION)
 
 
+def read_stored_loops(path: Path) -> list[ScheduledPrompt]:
+    """Best-effort read of a persisted loop store.
+
+    Listings and saved-session reads answer for loops without owning a live
+    store, so a missing or corrupt file yields no loops instead of failing the
+    whole read.
+    """
+    try:
+        if not path.exists():
+            return []
+        stored = _StoredLoopsV1.model_validate_json(path.read_text())
+    except Exception:
+        return []
+    return [loop.model_copy(deep=True) for loop in stored.loops]
+
+
 class UnifiedScheduledLoops:
     """Vibe-owned loop schedule kept beside one Unified Harness session."""
 
@@ -144,6 +160,16 @@ class UnifiedScheduledLoops:
     async def list(self) -> list[ScheduledPrompt]:
         async with self._lock:
             return [loop.model_copy(deep=True) for loop in self._loops]
+
+    def snapshot(self) -> list[ScheduledPrompt]:
+        """Lock-free copy of the in-memory schedules.
+
+        Every mutation replaces ``self._loops`` wholesale on the single-threaded
+        event loop, so a synchronous read from a sync projection path cannot
+        observe a half-applied update; the deep copy keeps callers off the
+        stored instances.
+        """
+        return [loop.model_copy(deep=True) for loop in self._loops]
 
     async def create(self, interval: str, prompt: str) -> ScheduledPrompt:
         return await self.create_interval(parse_interval(interval), prompt)

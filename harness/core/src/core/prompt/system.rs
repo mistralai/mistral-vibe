@@ -1,9 +1,15 @@
 use crate::core::capabilities;
 use crate::core::config::{HarnessConfig, HarnessConfigUpdate};
 use crate::core::features::background_processes;
-use crate::core::features::programmatic_tool_calling;
 use crate::core::features::skills;
-use crate::core::features::subagents;
+use crate::core::prompt::PromptSettings;
+
+// Pieces of the default guidance in `default_prompts.json`, combined per enabled feature.
+const SKILLS_IDENTITY_GUIDANCE: &str = "Find relevant skills with the `skill` tool";
+const SKILLS_AUTONOMY_ACTIVITY: &str = "loading skills";
+const PROGRAMMATIC_IDENTITY_GUIDANCE: &str =
+    "discover additional tools with `search_tool_functions`, and call them using `run_typescript`";
+const PROGRAMMATIC_AUTONOMY_ACTIVITY: &str = "discovering tools";
 
 pub(crate) fn configuration_update_changes_system_prompt(
     current: &HarnessConfig,
@@ -13,11 +19,14 @@ pub(crate) fn configuration_update_changes_system_prompt(
         || update.capabilities.is_some()
         || update.plugins.is_some()
         || update.settings.as_ref().is_some_and(|settings| {
-            current
-                .settings
-                .tools
-                .command_environment
-                .changes_system_prompt(settings.tools.command_environment)
+            current.settings.prompts.guidance != settings.prompts.guidance
+                || current.settings.prompts.programs != settings.prompts.programs
+                || current.settings.prompts.agent_tools != settings.prompts.agent_tools
+                || current
+                    .settings
+                    .tools
+                    .command_environment
+                    .changes_system_prompt(settings.tools.command_environment)
                 || current
                     .settings
                     .tools
@@ -39,7 +48,9 @@ pub(crate) fn build_system_prompt(
     if !config.system_instructions.trim().is_empty() {
         sections.push(config.system_instructions.trim().to_string());
     }
-    sections.push(tool_group_inventory_prompt_section.to_string());
+    if !tool_group_inventory_prompt_section.is_empty() {
+        sections.push(tool_group_inventory_prompt_section.to_string());
+    }
     if let Some(section) = skills::catalog_prompt_section(config.skills()) {
         sections.push(section);
     }
@@ -48,11 +59,31 @@ pub(crate) fn build_system_prompt(
 }
 
 fn build_generic_system_prompt(config: &HarnessConfig) -> String {
-    let mut sections = vec![
-        build_intro_prompt(),
-        build_autonomy_prompt(),
-        programmatic_tool_calling::tool_use_prompt().to_string(),
-    ];
+    let prompts = &config.settings.prompts;
+    let programmatic = config.settings.tools.programmatic.is_enabled();
+    let skill_mode = config.settings.tools.skills;
+    let skills_on = !skill_mode.is_disabled();
+    // The default guidance names the skill and programmatic tools, so it is rebuilt for the
+    // features this Session has. An override is prompt research and is used as written.
+    let (intro, autonomy) = if prompts.guidance == PromptSettings::default().guidance {
+        (
+            build_intro_prompt(skills_on, programmatic),
+            build_autonomy_prompt(skills_on, programmatic),
+        )
+    } else {
+        (
+            prompts.guidance.intro.clone(),
+            prompts.guidance.autonomy.clone(),
+        )
+    };
+    // An empty intro or autonomy section is suppressed rather than left as an empty paragraph.
+    let mut sections: Vec<String> = [intro, autonomy]
+        .into_iter()
+        .filter(|section| !section.trim().is_empty())
+        .collect();
+    if programmatic {
+        sections.push(prompts.programs.tool_use.clone());
+    }
     if config.settings.tools.background_processes.is_enabled() {
         let command_profile = config
             .settings
@@ -63,34 +94,55 @@ fn build_generic_system_prompt(config: &HarnessConfig) -> String {
         sections.push(background_processes::prompt_section(command_profile));
     }
     if config.settings.tools.subagents.is_enabled() {
-        sections.push(subagents::prompt_section().to_string());
+        sections.push(config.settings.prompts.agent_tools.guidance.clone());
     }
-    if config.skills().next().is_some() {
+    if skill_mode.exposes(config.skills()) {
         sections.push(skills::rules_prompt_section().to_string());
     }
-    sections.push(programmatic_tool_calling::current_time_prompt());
+    if programmatic {
+        sections.push(prompts.programs.current_time.clone());
+    }
     sections.join("\n\n")
 }
 
-fn build_intro_prompt() -> String {
-    format!(
-        "You help users get complex tasks done. Act directly and proactively. {}, {}.",
-        skills::IDENTITY_GUIDANCE,
-        programmatic_tool_calling::IDENTITY_GUIDANCE,
-    )
+fn build_intro_prompt(skills: bool, programmatic: bool) -> String {
+    let intro = "You help users get complex tasks done. Act directly and proactively.";
+    match (skills, programmatic) {
+        (true, true) => format!(
+            "{intro} {}, {}.",
+            SKILLS_IDENTITY_GUIDANCE, PROGRAMMATIC_IDENTITY_GUIDANCE,
+        ),
+        (true, false) => format!("{intro} {}.", SKILLS_IDENTITY_GUIDANCE),
+        (false, true) => format!("{intro} {}.", capitalize(PROGRAMMATIC_IDENTITY_GUIDANCE)),
+        (false, false) => intro.to_string(),
+    }
 }
 
-fn build_autonomy_prompt() -> String {
+fn capitalize(text: &str) -> String {
+    let mut characters = text.chars();
+    characters
+        .next()
+        .map(|first| first.to_uppercase().chain(characters).collect())
+        .unwrap_or_default()
+}
+
+fn build_autonomy_prompt(skills: bool, programmatic: bool) -> String {
+    let activities = [
+        skills.then_some(SKILLS_AUTONOMY_ACTIVITY),
+        programmatic.then_some(PROGRAMMATIC_AUTONOMY_ACTIVITY),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|activity| format!("{activity}, "))
+    .collect::<String>();
     format!(
         r#"## Autonomy and initiative
 
 - Treat the user's request as authorization to perform the normal, in-scope work needed to complete it. Start working without asking whether to proceed.
-- Do not ask for confirmation before {}, {}, reading or searching available context, or performing other reversible investigation.
+- Do not ask for confirmation before {activities}reading or searching available context, or performing other reversible investigation.
 - When a tool call needs approval, make the tool call and let the runtime's approval mechanism handle it. Do not preemptively ask for permission in chat.
 - When details are ambiguous, first use the available context and tools to resolve them. Ask a clarifying question only when missing information would materially change the result, cannot be discovered, or additional authorization is genuinely required.
-- Make reasonable implementation choices, keep momentum, and continue until the requested outcome is complete or a real blocker remains."#,
-        skills::AUTONOMY_ACTIVITY,
-        programmatic_tool_calling::AUTONOMY_ACTIVITY,
+- Make reasonable implementation choices, keep momentum, and continue until the requested outcome is complete or a real blocker remains."#
     )
 }
 
@@ -100,6 +152,14 @@ mod tests {
     use crate::core::capabilities::{KnowledgeFolderAccess, KnowledgeFolderDefinition};
     use crate::core::testing::*;
     use crate::core::tools::resolved::ResolvedTools;
+
+    #[test]
+    fn guidance_with_every_feature_is_the_default_guidance() {
+        let defaults = PromptSettings::default().guidance;
+
+        assert_eq!(build_intro_prompt(true, true), defaults.intro);
+        assert_eq!(build_autonomy_prompt(true, true), defaults.autonomy);
+    }
     #[test]
     fn system_prompt_indexes_generic_tool_groups_and_skills() {
         let mut config = config();
@@ -235,6 +295,24 @@ mod tests {
         assert!(!prompt.contains("mode: \"best_match\""));
         assert!(!prompt.contains("all_connector_capabilities"));
         assert!(!prompt.contains("moreCandidatesAvailable"));
+    }
+
+    #[test]
+    fn empty_intro_and_autonomy_leave_no_empty_paragraphs() {
+        let mut config = config();
+        config.settings.prompts.guidance.intro = String::new();
+        config.settings.prompts.guidance.autonomy = " \n".to_string();
+
+        let resolved_tools = ResolvedTools::compile(&config).expect("tools resolve");
+        let prompt = build_system_prompt(
+            &config,
+            resolved_tools.tool_group_inventory_prompt_section(),
+        );
+
+        assert!(prompt.starts_with(&config.settings.prompts.programs.tool_use));
+        assert!(!prompt.contains("You help users get complex tasks done."));
+        assert!(!prompt.contains("## Autonomy and initiative"));
+        assert!(!prompt.contains("\n\n\n"));
     }
 
     #[test]

@@ -54,10 +54,7 @@ from vibe.core.config.mcp_servers import (
     MCP_DISABLED_MESSAGE,
     MCPServerAddError,
     MCPServerRemoveError,
-    PersistedMCPServerResult,
     RemovedMCPServerResult,
-    persist_remote_mcp_server,
-    persist_stdio_mcp_server,
     remove_mcp_server,
 )
 from vibe.core.config.orchestrator import ConfigOrchestrator
@@ -845,51 +842,6 @@ class SessionlessMCPCatalog:
             notify=self._notify,
         )
         return result.response
-
-    async def add_server(
-        self,
-        server: MCPHttp | MCPStreamableHttp | MCPStdio,
-        *,
-        login: bool,
-        on_oauth_url: Callable[[str], Awaitable[None]],
-        on_persisted: Callable[[PersistedMCPServerResult[Any]], None] | None = None,
-        allow_insecure_http: bool = False,
-    ) -> PersistedMCPServerResult[Any]:
-        orchestrator = await self._service.sessionless_orchestrator()
-        result = (
-            await persist_stdio_mcp_server(orchestrator, server)
-            if isinstance(server, MCPStdio)
-            else await persist_remote_mcp_server(
-                orchestrator, server, allow_insecure_http=allow_insecure_http
-            )
-        )
-        await self._service.authentication.bind_catalog(orchestrator.config.mcp_servers)
-        if on_persisted is not None:
-            on_persisted(result)
-        if login and _is_oauth(result.server):
-            await self._service.authentication.login(
-                result.server.name, on_url=on_oauth_url
-            )
-        return result
-
-    async def remove_server(self, name: str) -> RemovedMCPServerResult:
-        orchestrator = await self._service.sessionless_orchestrator()
-        server = _server_named(orchestrator, name)
-        await self._service.authentication.bind_catalog(orchestrator.config.mcp_servers)
-        try:
-            return await _remove_server_with_credentials(
-                self._service.authentication,
-                orchestrator,
-                configured=server,
-                name=name,
-                owner=None,
-            )
-        except MCPServerRemoveError:
-            raise
-        except (MCPOAuthError, ValueError) as exc:
-            raise MCPServerRemoveError(
-                f"Failed to remove OAuth credentials for `{name}`: {exc}"
-            ) from exc
 
 
 def create_sessionless_mcp_catalog(

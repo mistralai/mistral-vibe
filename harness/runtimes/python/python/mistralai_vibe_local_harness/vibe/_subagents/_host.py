@@ -70,6 +70,7 @@ class ChildSessionHost(Protocol):
         *,
         target: InterruptTarget | CloseRunningTarget,
         operation_key: str,
+        reason: str = "interrupted by parent",
     ) -> ChildCommandAdmission: ...
 
     async def wait_for_child_generation(
@@ -89,6 +90,8 @@ class ChildSessionHost(Protocol):
     async def reconfigure_child(
         self, child: ChildSessionHandle, binding: ResolvedChildSessionBinding
     ) -> bool: ...
+
+    async def child_is_quiescent(self, child_session_id: str) -> bool: ...
 
     async def delete_child(self, child_session_id: str) -> None: ...
 

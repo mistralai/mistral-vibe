@@ -187,7 +187,10 @@ from mistralai_vibe_local_harness.vibe._subagents._configuration import (
     resolve_declared_agent_types,
     resolve_subagent_configuration,
 )
-from mistralai_vibe_local_harness.vibe._subagents._controller import SubagentController
+from mistralai_vibe_local_harness.vibe._subagents._controller import (
+    ChildInterruptResult,
+    SubagentController,
+)
 from mistralai_vibe_local_harness.vibe._subagents._host import (
     ChildCommandAdmission,
     ChildSessionHandle,
@@ -1685,6 +1688,38 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             record.model_copy(deep=True) for record in subagents.children.values()
         )
 
+    async def wait_for_children_settled(self, root_session_id: str) -> None:
+        """Wait until none of a live root's children has a Turn running.
+
+        Each child is then idle, failed or closed. Waiting starts no root Turn:
+        a child's late result stays queued for the root. Returns at once for a
+        root without subagents, or one that is not live.
+        """
+        controller = self._subagent_controller(root_session_id)
+        if controller is not None:
+            await controller.wait_until_settled()
+
+    async def interrupt_children(
+        self, root_session_id: str, reason: str
+    ) -> tuple[ChildInterruptResult, ...]:
+        """Interrupt every running child of a live root, the way the root's own
+        ``interrupt`` call would, with ``reason`` as the child Turn's reason.
+        Returns one result per child that was running: an interrupt that
+        fails for one child is reported for it and does not stop the others.
+
+        Does not wait for the children to settle; see
+        :meth:`wait_for_children_settled`.
+        """
+        controller = self._subagent_controller(root_session_id)
+        if controller is None:
+            return ()
+        return await controller.interrupt_running_children(reason)
+
+    def _subagent_controller(self, root_session_id: str) -> SubagentController | None:
+        root = self._live_session(root_session_id)
+        runtime = root._runtime if root is not None else None
+        return runtime._subagent_controller if runtime is not None else None
+
     def open_callbacks(self, root_session_id: str) -> tuple[JsonObject, ...]:
         callbacks: list[JsonObject] = []
         for entry in self._sessions.values():
@@ -1945,6 +1980,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         *,
         target: InterruptTarget | CloseRunningTarget,
         operation_key: str,
+        reason: str = "interrupted by parent",
     ) -> ChildCommandAdmission:
         session = self._require_live_child(child)
         identity = session._runtime_for_host().identity
@@ -1954,6 +1990,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             parent_session_id=identity.parent_session_id,
             target=target,
             operation_key=operation_key,
+            reason=reason,
         )
         return ChildCommandAdmission(target=target, turn_id=target.command.turn_id)
 
@@ -2086,6 +2123,28 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             projection_state=stored.projection_state,
         )
         return True
+
+    async def child_is_quiescent(self, child_session_id: str) -> bool:
+        """Whether a child's own store holds no Turn in flight.
+
+        The parent record cannot say: a restore settles an interrupted child in
+        the parent only, and a child can admit a command before its parent
+        records it. A missing child is not quiescent.
+        """
+        session = self._live_session(child_session_id)
+        if session is not None:
+            runtime = session._runtime_for_host()
+            return runtime.runtime_state.quiescent and (
+                runtime.inspection.status not in {"running", "compacting"}
+            )
+        store = UnifiedSessionStore(self._storage_root, child_session_id)
+        if not store.exists:
+            return False
+        stored = await asyncio.to_thread(store.load)
+        turn = stored.projection_state.snapshot.latest_turn
+        return stored.runtime_state.quiescent and (
+            turn is None or turn.status != "in_progress"
+        )
 
     async def reconfigure_subagents(
         self, session_id: str, adapter_config: LocalRuntimeAdapterConfig
@@ -5012,9 +5071,12 @@ def _core_config(session_id: str) -> RustHarnessConfig:
     return RustHarnessConfig(
         task_id=session_id,
         settings=RustHarnessSettings(
-            turn=RustTurnSettings(max_iterations=25),
+            turn=RustTurnSettings(),
             context=RustContextSettings(
-                compaction=RustDisabledCompactionPolicy(), image_token_cost="fixed"
+                compaction=RustDisabledCompactionPolicy(),
+                image_token_cost="fixed",
+                # This Runtime shapes the standalone compaction request.
+                compaction_fallback="standalone",
             ),
             tools=RustToolSettings(
                 programmatic=RustProgrammaticToolSettings(

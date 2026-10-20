@@ -965,7 +965,7 @@ async def test_a_background_start_asks_scoped_to_the_command_it_would_run(
     """*Prepare*: A resolver over the default tool catalogue.
     *Do*: Resolve a ``process.start`` the user has not approved.
     *Assert*: It asks, scoped to the command the start would run. The start runs
-    ``[shell, "-lc", command]``, so it is the shell's own question, and the
+    ``[shell, "-c", command]``, so it is the shell's own question, and the
     command is what a grant gets recorded against.
     """
     # Prepare

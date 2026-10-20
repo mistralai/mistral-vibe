@@ -198,7 +198,6 @@ fn subagent_list_event(app: &mut App, event: MouseEvent) {
             });
         }
         MouseEventKind::Down(MouseButton::Left) if index.is_some() => {
-            app.subagents.list.mouse_session_id = None;
             app.subagents.list.focused = true;
             app.set_app_focus(false);
             crate::selection::blur_composer(app);

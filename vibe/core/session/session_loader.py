@@ -95,7 +95,7 @@ class SessionLoader:
                 return None
 
             messages = SessionLoader._parse_message_lines(read_safe(messages_path).text)
-        except OSError, json.JSONDecodeError:
+        except (OSError, json.JSONDecodeError):
             return None
 
         if not SessionLoader._log_is_loadable(messages, metadata):

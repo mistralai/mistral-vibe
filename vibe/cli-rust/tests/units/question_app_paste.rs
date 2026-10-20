@@ -131,17 +131,6 @@ fn paste_normalises_every_line_boundary_to_a_newline() {
 }
 
 #[test]
-fn paste_into_a_question_without_a_free_text_row_is_dropped() {
-    let mut app = app_with_question();
-    app.question_app.questions[0].hide_other = true;
-
-    handle_paste(&mut app, "one\ntwo".into());
-
-    assert!(app.question_app.other_texts.is_empty());
-    assert_eq!(app.chat_input.input, "");
-}
-
-#[test]
 fn an_empty_paste_leaves_the_free_text_row_untouched() {
     let mut app = app_with_question();
     app.question_app

@@ -647,11 +647,6 @@ class AppServerSession:  # noqa: PLR0904
             response.queue, after_event_id=after_event_id
         )
 
-    async def refresh_state(self) -> PublicSessionState:
-        """Read authoritative session state and publish reconciliation events."""
-        await self._resync(await self._ensure_attached())
-        return self.state
-
     async def steer_queued_turn(
         self, queue_item_id: str, expected_turn_id: str
     ) -> TurnQueueSteerResponse:
@@ -883,16 +878,6 @@ class AppServerSession:  # noqa: PLR0904
     async def clear_history(self) -> None:
         await self.resources.sessions.clear_history()
         await self.resources.refresh()
-
-    def begin_close(self) -> None:
-        """Signal an intentional shutdown before ``close()``.
-
-        Once set, a dropped connection is treated as expected teardown rather
-        than a recoverable disconnect, so ``_pump_messages`` stops instead of
-        reconnecting and re-running ``session/resume`` (whose failure would
-        otherwise surface as a fatal error on the event stream). Idempotent.
-        """
-        self._closing = True
 
     async def close(self) -> None:
         await self.resources.telemetry.flush()

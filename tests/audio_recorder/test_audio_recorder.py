@@ -12,7 +12,7 @@ import pytest
 
 try:
     import miniaudio  # noqa: F401
-except OSError, ImportError:
+except (OSError, ImportError):
     pytest.skip("miniaudio library not available", allow_module_level=True)
 
 from vibe.cli.audio_recorder.audio_recorder import AudioRecorder

@@ -14,11 +14,6 @@ class AttachmentKind(StrEnum):
     IMAGE = "image"
 
 
-class ClientMetadata(BaseModel):
-    name: str
-    version: str
-
-
 class LaunchContext(BaseModel):
     agent_entrypoint: AgentEntrypoint
     agent_version: str

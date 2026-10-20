@@ -47,17 +47,6 @@ fn invalid_params_is_recognized_in_named_and_numeric_forms() {
 }
 
 #[test]
-fn structured_rpc_code_survives_request_context() {
-    let incoming: Incoming = serde_json::from_str(NAMED_INVALID_PARAMS).expect("frame parses");
-    let failure = RequestFailure::Rpc(incoming.error.expect("error"));
-    let error = anyhow::Error::new(failure).context("workspace/prompt/prepare failed");
-
-    assert!(error
-        .downcast_ref::<RequestFailure>()
-        .is_some_and(RequestFailure::is_invalid_params));
-}
-
-#[test]
 fn not_found_code_survives_request_context() {
     let incoming: Incoming = serde_json::from_str(NAMED_NOT_FOUND).expect("frame parses");
     let failure = RequestFailure::Rpc(incoming.error.expect("error"));

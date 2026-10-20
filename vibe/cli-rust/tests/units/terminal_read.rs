@@ -136,13 +136,6 @@ fn normalized_altgr_paste_coalesces_into_one_paste() {
 }
 
 #[test]
-fn raw_altgr_paste_would_split_the_burst() {
-    let out = coalesce(polish_paste(|c| "ąćęłńóśźż".contains(c)));
-
-    assert_ne!(out, vec![Event::Paste("zażółć".into())]);
-}
-
-#[test]
 fn ctrl_alt_on_non_character_keys_is_untouched() {
     let event = key(KeyCode::Backspace, ALTGR);
 

@@ -24,6 +24,8 @@ from vibe.app_server.protocol import (
     ClientCapabilities,
     ProtocolErrorCode,
     SessionOptions,
+    SessionReadParams,
+    SessionReadResponse,
 )
 from vibe.app_server.session import AppServerSession
 
@@ -51,6 +53,57 @@ async def test_loop_resource_supports_crud(
     assert deleted == first
     assert cleared == 1
     assert await backend_contract_session.resources.loops.list() == []
+
+
+@pytest.mark.asyncio
+async def test_session_state_and_catalogue_report_active_loops(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_connection: BackendContractConnection,
+) -> None:
+    """*Prepare*: A persisted session with one scheduled loop.
+    *Do*: Read its state while live, then list sessions from a passive Host.
+    *Assert*: The live state and the catalogue row both report the loop with
+    its recurrence and next fire time.
+    """
+    # Prepare
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("stored")
+    )
+    session = await backend_contract_persistent_connection.host.open_session()
+    try:
+        loop = await session.resources.loops.create("30s", "check the build")
+        _ = [event async for event in session.act("persist the session")]
+
+        # Do
+        session_id = session.session_id
+        live_state = SessionReadResponse.model_validate(
+            await backend_contract_persistent_connection.client.request(
+                "session/read", SessionReadParams(session_id=session_id)
+            )
+        ).state
+    finally:
+        await session.close()
+
+    passive_connection = await connect_backend_contract_host(
+        session_options=SessionOptions(), capabilities=ClientCapabilities()
+    )
+    try:
+        listed = await passive_connection.host.list_sessions()
+    finally:
+        await passive_connection.host.close()
+
+    # Assert
+    assert len(live_state.session.loops) == 1
+    reported = live_state.session.loops[0]
+    assert reported.id == loop.id
+    assert reported.prompt == "check the build"
+    assert reported.interval_seconds == 30
+    assert reported.cron is None
+    assert reported.next_fire_at > 0
+
+    catalogue_row = next(item for item in listed if item.id == session_id)
+    assert catalogue_row.loops == [reported]
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ from vibe.core.agents.models import (
     BUILTIN_AGENTS,
     REMOVED_BUILTIN_AGENTS,
     AgentProfile,
+    AgentSafety,
     AgentType,
     BuiltinAgentName,
 )
@@ -107,6 +108,11 @@ class AgentManager:
             # An explicit startup selection keeps the agent in the picker/cycle for
             # the whole session, regardless of the rollout gate.
             return True
+        if not self.config.enable_auto_approve and profile.safety is AgentSafety.YOLO:
+            # The policy setting can forbid the auto-approve (YOLO) mode outright. The
+            # check keys on the safety level so custom yolo agents are covered
+            # too, and it outranks the enabled_agents/disabled_agents lists below.
+            return False
         if (
             name == BuiltinAgentName.SMART_APPROVE
             and not self.config.smart_approve_offered()

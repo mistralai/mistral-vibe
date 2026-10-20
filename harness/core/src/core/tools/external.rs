@@ -110,6 +110,40 @@ impl RuntimeBuiltinToolName {
         matches!(self, Self::SkillRead)
     }
 
+    /// Whether the permission policy evaluates calls to this tool.
+    ///
+    /// Pure orchestration tools only coordinate the agent tree or pause the
+    /// agent: they act on nothing outside the Session tree, so asking a user to
+    /// approve them adds prompts that guard nothing. Starting an agent is not
+    /// pure orchestration, because the new agent can act.
+    pub(crate) fn is_permission_checked(self) -> bool {
+        match self {
+            Self::SelfWait
+            | Self::SelfSleep
+            | Self::SubagentList
+            | Self::SubagentListConfigs
+            | Self::SubagentSendMessage
+            | Self::SubagentInterrupt
+            | Self::SubagentWait
+            | Self::SubagentStop
+            | Self::DeprecatedSubagentList
+            | Self::DeprecatedSubagentSendMessage
+            | Self::DeprecatedSubagentInterrupt => false,
+            Self::FileSystemReadFile
+            | Self::FileSystemWriteFile
+            | Self::FileSystemSearchReplace
+            | Self::FileSystemBash
+            | Self::SkillRead
+            | Self::ProcessStart
+            | Self::ProcessOutput
+            | Self::ProcessWrite
+            | Self::ProcessList
+            | Self::ProcessStop
+            | Self::SubagentSpawn
+            | Self::DeprecatedSubagentSpawn => true,
+        }
+    }
+
     fn direct_model_name(self, invocation_name: &str) -> Option<String> {
         match self {
             Self::SelfWait => Some("wait".to_string()),
@@ -320,6 +354,23 @@ impl ExternalTool {
         )
     }
 
+    pub(crate) fn is_permission_checked(&self) -> bool {
+        match self {
+            Self::RuntimeBuiltin { name, .. } => name.is_permission_checked(),
+            Self::Provided { .. } => true,
+        }
+    }
+
+    pub(crate) fn is_file_read(&self) -> bool {
+        matches!(
+            self,
+            Self::RuntimeBuiltin {
+                name: RuntimeBuiltinToolName::FileSystemReadFile,
+                ..
+            }
+        )
+    }
+
     pub(crate) fn from_target(
         target: ToolTarget,
         invocation_name: impl Into<String>,
@@ -339,6 +390,12 @@ impl ExternalTool {
                 tool_name,
                 arguments,
             },
+        }
+    }
+
+    pub(crate) fn arguments(&self) -> &Value {
+        match self {
+            Self::RuntimeBuiltin { arguments, .. } | Self::Provided { arguments, .. } => arguments,
         }
     }
 

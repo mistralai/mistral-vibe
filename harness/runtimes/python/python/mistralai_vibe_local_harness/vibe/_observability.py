@@ -19,7 +19,7 @@ type SubagentOperation = Literal[
 type SubagentOperationOutcome = Literal["failure", "success", "timeout"]
 type SubagentTerminalOutcome = Literal["completed", "failed", "interrupted"]
 type SubagentRecoveryPhase = Literal[
-    "action_reconciliation", "child_preflight", "child_watch"
+    "action_reconciliation", "child_preflight", "child_preflight_skipped", "child_watch"
 ]
 
 _meter = metrics.get_meter(__name__)

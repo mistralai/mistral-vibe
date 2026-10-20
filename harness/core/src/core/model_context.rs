@@ -2,10 +2,49 @@ use crate::core::config::ImageDeliveryMode;
 use crate::core::error::CoreError;
 use crate::core::model_input_projection::project_model_input_messages;
 use crate::core::step_protocol::ModelMessageUpdate;
-use crate::core::wire::message::StoredMessage;
+use crate::core::wire::content::ContentBlock;
+use crate::core::wire::message::{AssistantPart, Message, StoredMessage, StoredMessageSource};
 
-/// Everything the model sees, plus the bookkeeping `HarnessSession` needs to
-/// ship it incrementally.
+/// Gives every message except the generated system prompt a Turn group, numbered from zero.
+///
+/// A message joins the current group unless it starts a new one: an indexed message whose
+/// index differs from the group's, or an unindexed user message when the group already has
+/// one. Unindexed history, from older checkpoints or imported history, therefore forms one
+/// group per user message, and unindexed messages after a Turn join that Turn.
+pub(crate) fn assign_turn_indexes(messages: &mut [StoredMessage]) {
+    struct Group {
+        source_index: Option<u64>,
+        has_user: bool,
+    }
+    let mut group: Option<Group> = None;
+    let mut next = 0;
+    for message in messages
+        .iter_mut()
+        .filter(|message| !message.is_generated_system())
+    {
+        let user = message.source == StoredMessageSource::History
+            && matches!(message.message, Message::User { .. });
+        let starts_group = match (&group, message.turn_index) {
+            (None, _) => true,
+            (Some(current), Some(index)) => current
+                .source_index
+                .map_or(current.has_user, |source| source != index),
+            (Some(current), None) => user && current.has_user,
+        };
+        if starts_group {
+            group = Some(Group {
+                source_index: None,
+                has_user: false,
+            });
+            next += 1;
+        }
+        let current = group.as_mut().expect("a group was started above");
+        current.source_index = current.source_index.or(message.turn_index);
+        current.has_user |= user;
+        message.turn_index = Some(next - 1);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 enum ContextChange {
     #[default]
@@ -14,6 +53,8 @@ enum ContextChange {
     Replace,
 }
 
+/// Everything the model sees, plus the bookkeeping `HarnessSession` needs to
+/// ship it incrementally.
 #[derive(Clone, Debug)]
 pub(crate) struct ModelContext {
     messages: Vec<StoredMessage>,
@@ -35,7 +76,8 @@ pub(crate) struct ModelContextCursor {
 }
 
 impl ModelContext {
-    pub(crate) fn new(messages: Vec<StoredMessage>) -> Self {
+    pub(crate) fn new(mut messages: Vec<StoredMessage>) -> Self {
+        assign_turn_indexes(&mut messages);
         Self {
             messages,
             revision: 0,
@@ -44,7 +86,9 @@ impl ModelContext {
         }
     }
 
-    pub(crate) fn restored(messages: Vec<StoredMessage>) -> Self {
+    /// Older checkpoints carry messages without a Turn group; restoring assigns them one.
+    pub(crate) fn restored(mut messages: Vec<StoredMessage>) -> Self {
+        assign_turn_indexes(&mut messages);
         Self {
             messages,
             revision: 0,
@@ -64,6 +108,113 @@ impl ModelContext {
         if self.messages.len() != previous_len {
             self.mark_appended();
         }
+    }
+
+    /// Adds a message to the latest Turn's group, or to Turn 0 before any Turn exists.
+    pub(crate) fn push_in_current_turn(&mut self, mut message: StoredMessage) {
+        message.turn_index = Some(self.current_turn_index());
+        self.push(message);
+    }
+
+    pub(crate) fn extend_current_turn(
+        &mut self,
+        messages: impl IntoIterator<Item = StoredMessage>,
+    ) {
+        let turn_index = Some(self.current_turn_index());
+        self.extend(messages.into_iter().map(|mut message| {
+            message.turn_index = turn_index;
+            message
+        }));
+    }
+
+    /// Replaces history with a compacted form that becomes Turn 0. A Turn in progress
+    /// continues in that group, and later Turns count up from it.
+    pub(crate) fn replace_with_compacted(&mut self, mut messages: Vec<StoredMessage>) {
+        for message in messages
+            .iter_mut()
+            .filter(|message| !message.is_generated_system())
+        {
+            message.turn_index = Some(0);
+        }
+        self.replace_messages(messages);
+    }
+
+    /// Adds context that arrives between Turns to the group of the Turn that follows it.
+    pub(crate) fn push_before_next_turn(
+        &mut self,
+        mut message: StoredMessage,
+    ) -> Result<(), CoreError> {
+        message.turn_index = Some(self.next_turn_index()?);
+        self.push(message);
+        Ok(())
+    }
+
+    pub(crate) fn extend_new_turn(
+        &mut self,
+        messages: impl IntoIterator<Item = StoredMessage>,
+    ) -> Result<(), CoreError> {
+        let index = self.next_turn_index()?;
+        self.extend(messages.into_iter().map(|mut message| {
+            message.turn_index = Some(index);
+            message
+        }));
+        Ok(())
+    }
+
+    /// A group holding only injected context is still waiting for its Turn, which joins it.
+    fn next_turn_index(&self) -> Result<u64, CoreError> {
+        let Some(latest) = self.latest_turn_index() else {
+            return Ok(0);
+        };
+        let waiting_for_turn = self
+            .messages
+            .iter()
+            .rev()
+            .filter(|message| !message.is_generated_system())
+            .take_while(|message| message.turn_index == Some(latest))
+            .all(StoredMessage::is_injected);
+        if waiting_for_turn {
+            return Ok(latest);
+        }
+        latest
+            .checked_add(1)
+            .ok_or_else(|| CoreError::invalid_command("conversation Turn index overflowed"))
+    }
+
+    fn current_turn_index(&self) -> u64 {
+        self.latest_turn_index().unwrap_or(0)
+    }
+
+    fn latest_turn_index(&self) -> Option<u64> {
+        self.messages
+            .iter()
+            .rev()
+            .find_map(|message| message.turn_index)
+    }
+
+    /// The content a final answer would carry, taken from the current Turn's latest assistant
+    /// message: no reasoning, tool calls, or tool results.
+    pub(crate) fn latest_assistant_content_in_current_turn(&self) -> Vec<ContentBlock> {
+        let turn_index = Some(self.current_turn_index());
+        self.messages
+            .iter()
+            .rev()
+            .filter(|message| !message.is_generated_system())
+            .take_while(|message| message.turn_index == turn_index)
+            .find_map(|message| match &message.message {
+                Message::Assistant { content } => Some(content),
+                _ => None,
+            })
+            .map(|content| {
+                content
+                    .iter()
+                    .filter_map(|part| match part {
+                        AssistantPart::Content(block) => Some(block.clone()),
+                        AssistantPart::Semantic(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn messages(&self) -> &[StoredMessage] {

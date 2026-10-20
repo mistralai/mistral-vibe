@@ -277,7 +277,7 @@ def remove_api_key(provider: ProviderConfig) -> None:
 
     try:
         delete_api_key_from_keyring(env_key)
-    except NoKeyringError, PasswordDeleteError:
+    except (NoKeyringError, PasswordDeleteError):
         # No keyring backend, or nothing stored to remove: both are no-ops for sign-out.
         pass
     except KeyringError as exc:

@@ -1176,3 +1176,367 @@ fn multiple_completion_and_tool_rounds_complete_one_turn() {
     assert_eq!(third_tool["call"]["arguments"]["path"], "third.txt");
     assert_eq!(final_completion["iteration"], 2);
 }
+
+const OUTPUT_LIMIT_FEEDBACK: &str = "Your previous response was discarded because it reached the output token limit before it finished. Continue the task with a shorter response: keep reasoning brief, and split long file contents or edits into several smaller tool calls.";
+
+fn output_limit_recovery_config(max_iterations: u32, max_retries: u32) -> HarnessConfig {
+    let mut config = config();
+    config.settings.turn = serde_json::from_value(json!({
+        "max_iterations": max_iterations,
+        "output_limit_recovery": {"mode": "retry", "max_retries": max_retries},
+    }))
+    .expect("turn settings deserialize");
+    config
+}
+
+fn cut_off_completion(action: &Value, text: &str) -> Value {
+    json!({
+        "type": "completion_succeeded",
+        "action_id": action_id(action),
+        "result": {
+            "parts": [{"type": "text", "text": text}],
+            "finish_reason": "length",
+            "usage": null,
+        },
+    })
+}
+
+fn cut_off_committed(turn_id: &str, action: &Value, text: &str) -> Value {
+    let mut candidate = text_candidate(text);
+    candidate["finish_reason"] = json!("length");
+    json!({
+        "type": "assistant_message_committed",
+        "turn_id": turn_id,
+        "action_id": action_id(action),
+        "candidate": candidate,
+    })
+}
+
+///
+/// *Prepare*: Output limit recovery allows two retries per turn.
+/// *Do*: Answer three times with completions cut off at the output limit.
+/// *Assert*: The first two cut-off answers are discarded and retried with feedback appended to the model input, and the third is committed as the turn's output because the recovery budget is spent.
+///
+#[test]
+fn output_limit_recovery_retries_cut_off_completions_up_to_the_cap() {
+    // Prepare
+    let turn_id = "turn-output-limit";
+    let mut runtime = SynchronousRuntime::new(output_limit_recovery_config(8, 2));
+    let first = runtime.start_turn(turn_id, "write the report");
+
+    // Do
+    let second =
+        runtime
+            .apply(
+                cut_off_completion(&first, "first fragment"),
+                running(turn_id).dispatch(llm_call(1)).observe(
+                    agent_completion_candidate_discarded(turn_id, &first, "retry"),
+                ),
+            )
+            .only_action();
+    runtime.assert_last_model_message_update(
+        &second,
+        "append",
+        &[model_user_text(OUTPUT_LIMIT_FEEDBACK)],
+    );
+    let third =
+        runtime
+            .apply(
+                cut_off_completion(&second, "second fragment"),
+                running(turn_id).dispatch(llm_call(2)).observe(
+                    agent_completion_candidate_discarded(turn_id, &second, "retry"),
+                ),
+            )
+            .only_action();
+    runtime.assert_last_model_message_update(
+        &third,
+        "append",
+        &[model_user_text(OUTPUT_LIMIT_FEEDBACK)],
+    );
+    runtime.apply(
+        cut_off_completion(&third, "third fragment"),
+        completed(
+            turn_id,
+            vec![json!({"type": "text", "text": "third fragment"})],
+        )
+        .observe(cut_off_committed(turn_id, &third, "third fragment"))
+        .observe(turn_completed(turn_id, "third fragment")),
+    );
+
+    // Assert: the budget is per turn, so the next turn starts afresh.
+    let next_turn_id = "turn-after-output-limit";
+    let next = runtime
+        .apply(
+            user_message(next_turn_id, "next request", "queue"),
+            running(next_turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_started(next_turn_id, "next request")),
+        )
+        .only_action();
+    let retried = runtime
+        .apply(
+            cut_off_completion(&next, "next fragment"),
+            running(next_turn_id).dispatch(llm_call(1)).observe(
+                agent_completion_candidate_discarded(next_turn_id, &next, "retry"),
+            ),
+        )
+        .only_action();
+    assert_eq!(retried["iteration"], 1);
+}
+
+///
+/// *Prepare*: Output limit recovery is enabled, and the turn has a single iteration.
+/// *Do*: Answer with a completion cut off at the output limit.
+/// *Assert*: Recovery never spends the last iteration, so the cut-off answer is committed as the turn's output.
+///
+#[test]
+fn output_limit_recovery_does_not_spend_the_last_iteration() {
+    // Prepare
+    let turn_id = "turn-output-limit-last-iteration";
+    let mut runtime = SynchronousRuntime::new(output_limit_recovery_config(1, 6));
+    let completion = runtime.start_turn(turn_id, "write the report");
+
+    // Do
+    runtime.apply(
+        cut_off_completion(&completion, "fragment"),
+        completed(turn_id, vec![json!({"type": "text", "text": "fragment"})])
+            .observe(cut_off_committed(turn_id, &completion, "fragment"))
+            .observe(turn_completed(turn_id, "fragment")),
+    );
+
+    // Assert
+    assert_eq!(completion["iteration"], 0);
+}
+
+const CUT_OFF_WRITE_ARGUMENTS: &str =
+    r##"{"path": "report.md", "content": "# Report\n\nThe first sec"##;
+
+fn cut_off_tool_call_completion(action: &Value, usage: Value) -> Value {
+    json!({
+        "type": "completion_succeeded",
+        "action_id": action_id(action),
+        "result": {
+            "parts": [
+                {"type": "text", "text": "Writing the report now."},
+                {
+                    "type": "tool_call",
+                    "id": "cut-off-write",
+                    "name": "write_file",
+                    "arguments_json": CUT_OFF_WRITE_ARGUMENTS,
+                },
+            ],
+            "finish_reason": "length",
+            "usage": usage,
+        },
+    })
+}
+
+///
+/// *Prepare*: Output limit recovery is enabled.
+/// *Do*: Answer with a completion cut off at the output limit while it writes the arguments of a `write_file` call.
+/// *Assert*: Core discards the completion without running the call and retries with feedback that names the call and the output tokens spent.
+///
+#[test]
+fn output_limit_recovery_retries_a_completion_cut_off_inside_a_tool_call() {
+    // Prepare
+    let turn_id = "turn-output-limit-tool-call";
+    let mut runtime = SynchronousRuntime::new(output_limit_recovery_config(8, 6));
+    let first = runtime.start_turn(turn_id, "write the report");
+
+    // Do
+    let retry =
+        runtime
+            .apply(
+                cut_off_tool_call_completion(
+                    &first,
+                    json!({"input_tokens": 1200, "output_tokens": 8192, "total_tokens": 9392}),
+                ),
+                running(turn_id).dispatch(llm_call(1)).observe(
+                    agent_completion_candidate_discarded(turn_id, &first, "retry"),
+                ),
+            )
+            .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(
+        &retry,
+        "append",
+        &[model_user_text(
+            "Your previous response was discarded because it reached the output token limit after 8192 tokens before it finished. It was cut off while writing the arguments of a `write_file` call, so none of its tool calls ran. Continue the task with a shorter response: keep reasoning brief, and split long file contents or edits into several smaller tool calls.",
+        )],
+    );
+}
+
+///
+/// *Prepare*: Output limit recovery allows a single retry per turn.
+/// *Do*: Answer with a cut-off text completion, then with a completion cut off inside a tool call.
+/// *Assert*: Both cut-offs share one budget: the first is retried, and the second runs as a tool call whose unparseable arguments return an error to the model.
+///
+#[test]
+fn cut_off_answers_and_cut_off_tool_calls_share_one_recovery_budget() {
+    // Prepare
+    let turn_id = "turn-output-limit-shared-budget";
+    let mut runtime = SynchronousRuntime::new(output_limit_recovery_config(8, 1));
+    let first = runtime.start_turn(turn_id, "write the report");
+    let second =
+        runtime
+            .apply(
+                cut_off_completion(&first, "first fragment"),
+                running(turn_id).dispatch(llm_call(1)).observe(
+                    agent_completion_candidate_discarded(turn_id, &first, "retry"),
+                ),
+            )
+            .only_action();
+
+    // Do
+    let third = runtime
+        .apply(
+            cut_off_tool_call_completion(&second, Value::Null),
+            running(turn_id)
+                .dispatch(llm_call(2))
+                .observe(cut_off_tool_call_committed(turn_id, &second))
+                .observe(tool_execution_started(turn_id, "cut-off-write"))
+                .observe(tool_execution_finished(
+                    turn_id,
+                    "cut-off-write",
+                    invalid_tool_call_result(&cut_off_arguments_reason()),
+                )),
+        )
+        .only_action();
+
+    // Assert
+    assert_eq!(third["iteration"], 2);
+}
+
+///
+/// *Prepare*: Output limit recovery is disabled, the default.
+/// *Do*: Answer with a completion cut off at the output limit while it writes a tool call.
+/// *Assert*: The completion is committed as a tool call completion, and the call returns its argument error to the model, as before.
+///
+#[test]
+fn cut_off_tool_call_runs_as_a_tool_call_without_output_limit_recovery() {
+    // Prepare
+    let turn_id = "turn-output-limit-tool-call-disabled";
+    let mut runtime = SynchronousRuntime::new(config());
+    let completion = runtime.start_turn(turn_id, "write the report");
+
+    // Do
+    let next = runtime
+        .apply(
+            cut_off_tool_call_completion(&completion, Value::Null),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(cut_off_tool_call_committed(turn_id, &completion))
+                .observe(tool_execution_started(turn_id, "cut-off-write"))
+                .observe(tool_execution_finished(
+                    turn_id,
+                    "cut-off-write",
+                    invalid_tool_call_result(&cut_off_arguments_reason()),
+                )),
+        )
+        .only_action();
+
+    // Assert
+    assert_eq!(next["iteration"], 1);
+}
+
+fn cut_off_arguments_reason() -> String {
+    let error = serde_json::from_str::<Value>(CUT_OFF_WRITE_ARGUMENTS)
+        .expect_err("cut-off arguments are not JSON")
+        .to_string();
+    format!(
+        "tool arguments are not valid JSON ({error}). Send the arguments as one JSON object that matches the tool's input schema. The arguments end early; if they were cut off, split long content into several smaller tool calls."
+    )
+}
+
+fn cut_off_tool_call_committed(turn_id: &str, action: &Value) -> Value {
+    let error = serde_json::from_str::<Value>(CUT_OFF_WRITE_ARGUMENTS)
+        .expect_err("cut-off arguments are not JSON")
+        .to_string();
+    json!({
+        "type": "assistant_message_committed",
+        "turn_id": turn_id,
+        "action_id": action_id(action),
+        "candidate": {
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Writing the report now."},
+                    {
+                        "type": "tool_call",
+                        "id": "cut-off-write",
+                        "name": "write_file",
+                        "arguments": {
+                            "type": "invalid_json",
+                            "raw": CUT_OFF_WRITE_ARGUMENTS,
+                            "error": error,
+                        },
+                    },
+                ],
+            },
+            "finish_reason": "tool_call",
+            "usage": null,
+        },
+    })
+}
+
+///
+/// *Prepare*: Output limit recovery is disabled, the default.
+/// *Do*: Answer with a completion cut off at the output limit.
+/// *Assert*: The cut-off answer is committed as the turn's output, as before.
+///
+#[test]
+fn cut_off_completion_is_committed_without_output_limit_recovery() {
+    // Prepare
+    let turn_id = "turn-output-limit-disabled";
+    let mut runtime = SynchronousRuntime::new(config());
+    let completion = runtime.start_turn(turn_id, "write the report");
+
+    // Do
+    runtime.apply(
+        cut_off_completion(&completion, "fragment"),
+        completed(turn_id, vec![json!({"type": "text", "text": "fragment"})])
+            .observe(cut_off_committed(turn_id, &completion, "fragment"))
+            .observe(turn_completed(turn_id, "fragment")),
+    );
+
+    // Assert
+    assert_eq!(completion["iteration"], 0);
+}
+
+///
+/// *Prepare*: Output limit recovery allows one retry, and the first answer is cut off.
+/// *Do*: Restore from a checkpoint while the retry is pending, then cut off the retried answer as well.
+/// *Assert*: The spent retry survives the checkpoint, so the second cut-off answer is committed.
+///
+#[test]
+fn output_limit_recovery_budget_survives_checkpoint_restore() {
+    // Prepare
+    let turn_id = "turn-output-limit-restore";
+    let mut runtime = SynchronousRuntime::new(output_limit_recovery_config(8, 1));
+    let first = runtime.start_turn(turn_id, "write the report");
+    let second =
+        runtime
+            .apply(
+                cut_off_completion(&first, "first fragment"),
+                running(turn_id).dispatch(llm_call(1)).observe(
+                    agent_completion_candidate_discarded(turn_id, &first, "retry"),
+                ),
+            )
+            .only_action();
+
+    // Do
+    runtime.restart_from_checkpoint_with_config(output_limit_recovery_config(8, 1));
+    runtime.apply(
+        cut_off_completion(&second, "second fragment"),
+        completed(
+            turn_id,
+            vec![json!({"type": "text", "text": "second fragment"})],
+        )
+        .observe(cut_off_committed(turn_id, &second, "second fragment"))
+        .observe(turn_completed(turn_id, "second fragment")),
+    );
+
+    // Assert
+    assert_eq!(second["iteration"], 1);
+}

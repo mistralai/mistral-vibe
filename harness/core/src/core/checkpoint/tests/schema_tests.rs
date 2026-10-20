@@ -354,7 +354,8 @@ fn checkpoint_round_trips_every_rich_content_shape_without_semantic_loss() {
                 "role": "user",
                 "content": rich_content()
             },
-            "source": "history"
+            "source": "history",
+            "turn_index": 0
         },
         {
             "message": {
@@ -383,7 +384,8 @@ fn checkpoint_round_trips_every_rich_content_shape_without_semantic_loss() {
                     { "type": "text", "text": "working" }
                 ]
             },
-            "source": "injection"
+            "source": "injection",
+            "turn_index": 0
         },
         {
             "message": {
@@ -394,7 +396,8 @@ fn checkpoint_round_trips_every_rich_content_shape_without_semantic_loss() {
                 "content": [{ "type": "text", "text": "done" }],
                 "_meta": { "client": { "request_id": "request-1" } }
             },
-            "source": "history"
+            "source": "history",
+            "turn_index": 0
         }
     ]);
 

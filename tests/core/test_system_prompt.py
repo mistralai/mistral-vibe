@@ -10,7 +10,12 @@ import pytest
 
 from vibe.core import system_prompt
 from vibe.core.config import ProjectContextConfig
-from vibe.core.system_prompt import ProjectContextProvider, get_agents_md_section
+from vibe.core.system_prompt import (
+    ProjectContextProvider,
+    default_branch,
+    format_git_context,
+    get_agents_md_section,
+)
 from vibe.utils.platform import WindowsShell, WindowsShellKind
 
 
@@ -97,10 +102,12 @@ def test_fetch_git_context_does_not_inspect_worktree_status(
             ("branch", "--show-current"): "feature\n",
             (
                 "for-each-ref",
-                "--count=1",
-                "--format=%(refname:short)",
+                "--format=%(refname)",
+                "refs/heads/main",
+                "refs/remotes/origin/main",
+                "refs/heads/master",
                 "refs/remotes/origin/master",
-            ): "origin/master\n",
+            ): "refs/remotes/origin/master\n",
             ("log", "--oneline", "--no-decorate", "-5"): "abc123 message\n",
         }[tuple(args)]
         return subprocess.CompletedProcess(args, 0, stdout=output)
@@ -114,6 +121,30 @@ def test_fetch_git_context_does_not_inspect_worktree_status(
     assert "Main branch (you will usually use this for PRs): master" in context
     assert "abc123 message" in context
     assert "Status:" not in context
+
+
+@pytest.mark.parametrize(
+    ("refs", "expected"),
+    [
+        ("refs/heads/master\n", "master"),
+        ("refs/heads/main\nrefs/heads/master\n", "main"),
+        ("refs/remotes/origin/master\nrefs/remotes/origin/main\n", "main"),
+        ("refs/heads/main/old\n", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_default_branch_names_only_a_branch_the_repository_has(
+    refs: str | None, expected: str | None
+) -> None:
+    assert default_branch(refs) == expected
+
+
+def test_git_context_omits_the_main_branch_when_there_is_none() -> None:
+    context = format_git_context("trunk", "", "abc123 message\n")
+
+    assert "Main branch" not in context
+    assert "Current branch: trunk" in context
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -353,4 +384,6 @@ def test_get_agents_md_section_renders_given_project_instructions_alone() -> Non
     assert section is not None
     assert "## Project instructions\n\nInstructions for this project:" in section
     assert "## User instructions" not in section
+    assert "may or may not be relevant" not in section
+    assert section.rstrip().endswith("# Given")
     assert get_agents_md_section("", [], project_instructions=" \n ") is None

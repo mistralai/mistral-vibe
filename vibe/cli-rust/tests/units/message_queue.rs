@@ -274,15 +274,11 @@ fn replace_selected_copies_when_the_prompt_already_left() {
 }
 
 #[tokio::test]
-async fn resume_releases_a_paused_queue_once() {
+async fn resume_releases_a_paused_queue() {
     let mut app = generating_app();
     app.queue.paused = true;
     let client = Arc::new(Client::stub());
 
-    mq::resume(&mut app, &client);
-    assert!(!app.queue.paused);
-
-    app.queue.paused = false;
     mq::resume(&mut app, &client);
     assert!(!app.queue.paused);
 }

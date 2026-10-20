@@ -56,7 +56,7 @@ from vibe.permissions import RequiredPermission
 # The Rust Runtime's builtin tools and Vibe's tool catalogue are separate
 # namespaces; this is the only overlap the local adapter can currently execute.
 # The process family rides the shell tools: a background start runs
-# ``[shell, "-lc", command]``, and the family only exists where a shell does, so
+# ``[shell, "-c", command]``, and the family only exists where a shell does, so
 # a shell denied at the catalogue level takes the process tools down with it.
 _SHELL_TOOL_SOURCES = frozenset({"bash", "powershell", "git_bash"})
 """The shell tools: everything a foreground shell call and a background start do."""
@@ -299,7 +299,7 @@ def _host_path(target: str) -> Path:
     """``target`` as the file it opens, following this host's links."""
     try:
         return Path(target).resolve()
-    except OSError, RuntimeError:
+    except (OSError, RuntimeError):
         return Path(os.path.normpath(target))
 
 
@@ -564,7 +564,7 @@ class UnifiedPermissionResolver:
                 try:
                     tool = self._tools.get(name)
                     tool_cwd = Path(tool.cwd).resolve()
-                except NoSuchToolError, ValueError, OSError:
+                except (NoSuchToolError, ValueError, OSError):
                     continue
                 try:
                     cwd_path = Path(cwd).expanduser()
@@ -572,7 +572,7 @@ class UnifiedPermissionResolver:
                         cwd_path = tool_cwd / cwd_path
                     if cwd_path.resolve() == tool_cwd:
                         return None
-                except ValueError, OSError:
+                except (ValueError, OSError):
                     continue
         for name in self.vibe_tool_names(builtin):
             context = self._context_for(
@@ -630,7 +630,7 @@ class UnifiedPermissionResolver:
         try:
             tool = self._tools.get(name)
             return tool, type(tool).validate_arguments(translate(arguments))
-        except NoSuchToolError, ValueError:
+        except (NoSuchToolError, ValueError):
             # Arguments the tool would itself reject. Its own validation will
             # fail the call; deciding permission off a guess would be worse.
             return None
@@ -660,7 +660,7 @@ class UnifiedPermissionResolver:
                 if not path.is_absolute():
                     path = tool.cwd / path
                 return path.resolve()
-            except ValueError, OSError:
+            except (ValueError, OSError):
                 return None
         return None
 

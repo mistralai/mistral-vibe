@@ -81,6 +81,7 @@ class ConnectorReachability(StrEnum):
     CONNECTED = "connected"
     NEEDS_AUTH = "needs_auth"
     NEEDS_SETUP = "needs_setup"
+    NEEDS_CONNECT = "needs_connect"
     UNAVAILABLE = "unavailable"
     # A disabled connector is never probed.
     UNKNOWN = "unknown"
@@ -92,8 +93,15 @@ _CONNECTOR_INTENT: dict[MCPSourceStatus, tuple[bool, ConnectorReachability]] = {
     MCPSourceStatus.ENABLED: (True, ConnectorReachability.CONNECTED),
     MCPSourceStatus.NEEDS_AUTH: (True, ConnectorReachability.NEEDS_AUTH),
     MCPSourceStatus.NEEDS_SETUP: (True, ConnectorReachability.NEEDS_SETUP),
+    MCPSourceStatus.NEEDS_CONNECT: (True, ConnectorReachability.NEEDS_CONNECT),
     MCPSourceStatus.UNAVAILABLE: (True, ConnectorReachability.UNAVAILABLE),
     MCPSourceStatus.DISABLED: (False, ConnectorReachability.UNKNOWN),
+}
+
+# Clients without a connect action keep a value they can decode.
+_LEGACY_CONNECTOR_INTENT = {
+    **_CONNECTOR_INTENT,
+    MCPSourceStatus.NEEDS_CONNECT: (True, ConnectorReachability.NEEDS_SETUP),
 }
 
 
@@ -115,8 +123,11 @@ class ConnectorResponse(BaseModel):
     error: str | None = None
 
     @classmethod
-    def from_source(cls, source: MCPSourceSummary) -> ConnectorResponse:
-        enabled, reachability = _CONNECTOR_INTENT[source.status]
+    def from_source(
+        cls, source: MCPSourceSummary, *, client_can_connect: bool
+    ) -> ConnectorResponse:
+        intent = _CONNECTOR_INTENT if client_can_connect else _LEGACY_CONNECTOR_INTENT
+        enabled, reachability = intent[source.status]
         return cls(
             name=source.name,
             enabled=enabled,
@@ -139,11 +150,15 @@ class ConnectorsListResponse(BaseModel):
     error: str | None = None
 
     @classmethod
-    def from_state(cls, state: MCPState) -> ConnectorsListResponse:
+    def from_state(
+        cls, state: MCPState, *, client_can_connect: bool
+    ) -> ConnectorsListResponse:
         # Local MCP servers ride the same payload and are not connectors.
         return cls(
             connectors=[
-                ConnectorResponse.from_source(source)
+                ConnectorResponse.from_source(
+                    source, client_can_connect=client_can_connect
+                )
                 for source in state.sources
                 if source.kind is MCPSourceKind.CONNECTOR
             ],

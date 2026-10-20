@@ -36,10 +36,10 @@ pub(crate) fn default_max_wait_ms() -> u64 {
     3_600_000
 }
 
-pub(crate) fn tool(max_wait_ms: u64) -> ToolDefinition {
+pub(crate) fn tool(max_wait_ms: u64, description: &str) -> ToolDefinition {
     ToolDefinition {
         name: "wait".to_string(),
-        description: "Wait for new input or the requested timeout. Call wait alone. Incoming messages arrive in normal model context, not in the result.".to_string(),
+        description: description.to_owned(),
         parameters: json!({
             "type": "object", "additionalProperties": false,
             "properties": {"timeout_ms": {"type": "integer", "minimum": 1, "maximum": max_wait_ms}},
@@ -49,7 +49,7 @@ pub(crate) fn tool(max_wait_ms: u64) -> ToolDefinition {
 }
 
 pub(crate) fn runtime_input_schema(max_wait_ms: u64) -> Value {
-    let mut schema = tool(max_wait_ms).parameters;
+    let mut schema = tool(max_wait_ms, "").parameters;
     schema["properties"]["deadline_unix_ms"] = json!({"type": "integer", "minimum": 0});
     schema["required"] = json!(["timeout_ms", "deadline_unix_ms"]);
     schema

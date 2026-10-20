@@ -456,23 +456,6 @@ fn headless_options_with_budgets() -> HeadlessOptions {
 }
 
 #[test]
-fn agent_config_sends_max_turns_to_server() {
-    // max_turns stays server-side; the server enforces
-    // it and sets stopReason: "limit" on the turn.
-    let config = agent_config(&headless_options_with_budgets(), None).unwrap();
-    assert_eq!(config.max_turns, Some(5));
-}
-
-#[test]
-fn agent_config_omits_price_and_token_budgets() {
-    // max_price and max_session_tokens are enforced client-side by
-    // StopRequests.observe_usage(), not sent to the server.
-    let config = agent_config(&headless_options_with_budgets(), None).unwrap();
-    assert_eq!(config.max_price, None);
-    assert_eq!(config.max_session_tokens, None);
-}
-
-#[test]
 fn agent_config_serializes_max_turns_when_set() {
     let config = agent_config(&headless_options_with_budgets(), None).unwrap();
     let json = serde_json::to_value(&config).unwrap();

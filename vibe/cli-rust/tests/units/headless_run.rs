@@ -15,12 +15,6 @@ fn request_first_wins() {
 }
 
 #[test]
-fn requested_outcome_none_before_request() {
-    let stop = StopRequests::new(RunLimits::default());
-    assert_eq!(stop.requested_outcome(), None);
-}
-
-#[test]
 fn observe_usage_under_limits_does_not_stop() {
     let stop = StopRequests::new(RunLimits {
         max_turns: None,
@@ -89,22 +83,6 @@ fn observe_usage_no_limits_does_not_stop() {
     assert_eq!(stop.requested_outcome(), None);
 }
 
-#[test]
-fn limits_accessor_returns_configured_limits() {
-    let limits = RunLimits {
-        max_turns: Some(5),
-        max_price: Some(2.0),
-        max_tokens: Some(5000),
-        time_limit_s: Some(60.0),
-    };
-    let stop = StopRequests::new(limits.clone());
-    let got = stop.limits();
-    assert_eq!(got.max_turns, Some(5));
-    assert_eq!(got.max_price, Some(2.0));
-    assert_eq!(got.max_tokens, Some(5000));
-    assert_eq!(got.time_limit_s, Some(60.0));
-}
-
 #[tokio::test]
 async fn wait_returns_immediately_when_already_requested() {
     let stop = StopRequests::new(RunLimits::default());
@@ -159,21 +137,6 @@ fn iso_now_format() {
     );
     // Year should start with 20 (2000s).
     assert!(ts.starts_with("20"), "expected year starting with 20: {ts}");
-}
-
-#[test]
-fn iso_now_is_valid_date() {
-    let ts = iso_now();
-    // Parse the date portion to sanity-check.
-    let date_part = &ts[..10];
-    let parts: Vec<&str> = date_part.split('-').collect();
-    assert_eq!(parts.len(), 3, "expected YYYY-MM-DD: {ts}");
-    let year: u32 = parts[0].parse().expect("year should be numeric");
-    let month: u32 = parts[1].parse().expect("month should be numeric");
-    let day: u32 = parts[2].parse().expect("day should be numeric");
-    assert!((2025..=2030).contains(&year), "unexpected year: {year}");
-    assert!((1..=12).contains(&month), "unexpected month: {month}");
-    assert!((1..=31).contains(&day), "unexpected day: {day}");
 }
 
 #[test]

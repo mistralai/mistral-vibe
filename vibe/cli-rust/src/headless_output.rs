@@ -77,23 +77,24 @@ impl Output {
         write_line(&line)
     }
 
-    /// Emit the final output. Returns the I/O error instead of panicking so the
-    /// caller can still run session/stop cleanup on a closed pipe.
-    pub fn finalize(&self, history: Value) -> io::Result<()> {
+    /// Emit the final output and return the turn's answer. Returns the I/O
+    /// error instead of panicking so the caller can still run session/stop
+    /// cleanup on a closed pipe.
+    pub fn finalize(&self, history: Value, turn_id: Option<&str>) -> io::Result<Option<String>> {
         match self.format {
-            OutputFormat::Streaming => Ok(()),
-            OutputFormat::Json => {
-                if let Some(history_arr) = history.as_array() {
-                    let payload = Value::Array(history_arr.clone());
-                    let json = serde_json::to_string_pretty(&payload).unwrap_or_default();
-                    return write_line(&json);
-                }
-                Ok(())
+            OutputFormat::Streaming => Ok(None),
+            OutputFormat::Json if history.is_array() => {
+                let json = serde_json::to_string_pretty(&history).unwrap_or_default();
+                write_line(&json).map(|()| None)
             }
-            OutputFormat::Text => match last_assistant_text(&history) {
-                Some(text) => write_line(&text),
-                None => Ok(()),
-            },
+            OutputFormat::Json => Ok(None),
+            OutputFormat::Text | OutputFormat::Silent => {
+                let text = last_assistant_text(&turn_entries(&history, turn_id));
+                if let (OutputFormat::Text, Some(text)) = (&self.format, &text) {
+                    write_line(text)?;
+                }
+                Ok(text)
+            }
         }
     }
 }

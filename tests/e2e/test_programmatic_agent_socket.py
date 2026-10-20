@@ -257,7 +257,8 @@ def test_a_command_the_server_times_out_is_a_timeout_the_model_reads(
     assert export.outcome == "finished", export.error
     assert len(streaming_mock_server.requests) == 2
     assert any(
-        "Command timed out after 2s: 'sleep 1'" in content
+        "[The command timed out after 2s, the sandbox's time limit and was stopped."
+        in content
         for content in _tool_results(streaming_mock_server.requests[1])
     )
 
@@ -303,7 +304,8 @@ def test_a_command_the_server_stops_leaves_no_process_behind(
     assert result.returncode == 0, result.stderr
     assert read_export(output_dir).outcome == "finished"
     assert any(
-        f"Command timed out after 5s: {_BACKGROUND_SLEEP!r}" in content
+        "[The command timed out after 5s, the sandbox's time limit and was stopped."
+        in content
         for content in _tool_results(streaming_mock_server.requests[1])
     )
     pid = int((sandbox_dir / "sleep.pid").read_text(encoding="utf-8"))

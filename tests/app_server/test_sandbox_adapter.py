@@ -411,10 +411,12 @@ async def test_a_subagent_works_in_its_parents_workspace(
         operation for operation in operations if not operation.startswith("skills-")
     ]
     assert "process" in tool_operations
+    # The child's first command reads the login profile in a run of its own.
     assert sorted(op for op in tool_operations if op != "process") == [
         "bash",
         "file",
         "file",
+        "login-env",
     ]
     assert "inside" in child
 

@@ -1,25 +1,13 @@
 from __future__ import annotations
 
-import asyncio
-from collections.abc import AsyncGenerator
 import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from vibe.core.skills.models import SkillInfo
-from vibe.core.tools.base import (
-    BaseTool,
-    BaseToolConfig,
-    BaseToolState,
-    InvokeContext,
-    ToolError,
-    ToolPermission,
-)
+from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState, ToolPermission
 from vibe.core.tools.permissions import PermissionContext
-from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.types import ToolResultEvent, ToolStreamEvent
-from vibe.utils.tool_presentation import ToolEffectKind
 
 SAMPLED_SKILL_FILES = 10
 MAX_WALKED_SKILL_ENTRIES = 200
@@ -117,83 +105,10 @@ def already_loaded_message(name: str) -> str:
     )
 
 
-def already_loaded_result(skill_info: SkillInfo) -> SkillResult:
-    skill_dir = skill_info.skill_dir
-    return SkillResult(
-        name=skill_info.name,
-        content=already_loaded_message(skill_info.name),
-        skill_dir=None if skill_dir is None else str(skill_dir),
-    )
-
-
-async def build_skill_result(
-    skill_info: SkillInfo, *, already_loaded: bool
-) -> SkillResult:
-    if already_loaded:
-        return already_loaded_result(skill_info)
-    files = await asyncio.to_thread(sample_skill_files, skill_info.skill_dir)
-    return render_skill_result(skill_info, files)
-
-
 class SkillToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ALWAYS
 
 
-class Skill(
-    BaseTool[SkillArgs, SkillResult, SkillToolConfig, BaseToolState],
-    ToolUIData[SkillArgs, SkillResult],
-):
-    effect_kind = ToolEffectKind.SKILL
-
-    @classmethod
-    def format_call_display(cls, args: SkillArgs) -> ToolCallDisplay:
-        return ToolCallDisplay(
-            summary=f"Loading skill: {args.name}",
-            verb="Loading",
-            message=f"skill: {args.name}",
-            settled_verb="Loaded",
-            settled_message=f"skill: {args.name}",
-        )
-
-    @classmethod
-    def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
-        if event.error:
-            return ToolResultDisplay(success=False, message=event.error)
-        if not isinstance(event.result, SkillResult):
-            return ToolResultDisplay(success=True, message="Skill loaded")
-        return ToolResultDisplay(
-            success=True, verb="Loaded", message=f"skill: {event.result.name}"
-        )
-
-    @classmethod
-    def get_status_text(cls) -> str:
-        return "Loading skill"
-
+class Skill(BaseTool[SkillArgs, SkillResult, SkillToolConfig, BaseToolState]):
     def resolve_permission(self, args: SkillArgs) -> PermissionContext | None:
         return PermissionContext(permission=ToolPermission.ALWAYS)
-
-    async def run(
-        self, args: SkillArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | SkillResult]:
-        if ctx is None or ctx.skill_manager is None:
-            raise ToolError("Skill manager not available")
-
-        skill_manager = ctx.skill_manager
-        skill_info = skill_manager.get_model_invocable_skill(args.name)
-
-        if skill_info is None:
-            available = ", ".join(
-                sorted(
-                    name
-                    for name, skill in skill_manager.available_skills.items()
-                    if skill.model_invocable
-                )
-            )
-            raise ToolError(
-                f'Skill "{args.name}" not found. Available skills: {available or "none"}'
-            )
-
-        already_loaded = ctx.is_skill_loaded is not None and ctx.is_skill_loaded(
-            args.name
-        )
-        yield await build_skill_result(skill_info, already_loaded=already_loaded)

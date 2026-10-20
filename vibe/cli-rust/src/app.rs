@@ -705,6 +705,8 @@ pub struct MCPApp {
     pub list: crate::option_list::OptionList<crate::option_list::MultiAction>,
     /// Sender carrying server answers, applied on the main thread.
     pub tx: Option<Sender<crate::mcp::Event>>,
+    /// The connector whose `connector_catalog/connect` is in flight, if any.
+    pub connecting: Option<String>,
 }
 
 /// The identity and account reads `/whoami` renders, kept from the post-ready

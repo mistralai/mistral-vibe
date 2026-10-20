@@ -29,6 +29,7 @@ pub enum MCPSourceStatus {
     Enabled,
     NeedsAuth,
     NeedsSetup,
+    NeedsConnect,
     Unavailable,
 }
 
@@ -40,6 +41,7 @@ impl MCPSourceStatus {
             Self::Enabled => "enabled",
             Self::NeedsAuth => "needs_auth",
             Self::NeedsSetup => "needs_setup",
+            Self::NeedsConnect => "needs_connect",
             Self::Unavailable => "unavailable",
         }
     }

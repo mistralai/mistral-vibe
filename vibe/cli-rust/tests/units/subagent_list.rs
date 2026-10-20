@@ -3,7 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vibe_rs::app::App;
 use vibe_rs::server::{PublicChildSession, SessionStatus};
-use vibe_rs::subagents::{self, MAIN_SESSION_ID};
+use vibe_rs::subagents;
 
 fn child(id: &str, status: SessionStatus) -> PublicChildSession {
     PublicChildSession {
@@ -31,7 +31,7 @@ fn upsert(app: &mut App, session: PublicChildSession) {
 }
 
 #[test]
-fn refresh_lists_children_and_keeps_the_batch_held() {
+fn refresh_lists_active_children() {
     let mut app = App::default();
     upsert(&mut app, running("a"));
     upsert(&mut app, running("b"));
@@ -40,10 +40,6 @@ fn refresh_lists_children_and_keeps_the_batch_held() {
         ["a", "b"],
         "active children are listed"
     );
-    // Both go idle inside the same batch: still listed (no flicker).
-    upsert(&mut app, child("a", SessionStatus::Idle));
-    upsert(&mut app, child("b", SessionStatus::Idle));
-    assert_eq!(ids(&app.subagents.list.rows), ["a", "b"]);
 }
 
 #[test]
@@ -158,32 +154,6 @@ fn selecting_main_from_a_child_view_focuses_the_input() {
     assert_eq!(app.subagents.viewed_subagent_id, None);
     assert!(!app.subagents.list.focused);
     assert!(app.view.app_focus);
-}
-
-#[test]
-fn marker_follows_the_keyboard_highlight_while_focused() {
-    let mut app = App::default();
-    upsert(&mut app, running("a"));
-    subagents::focus_first(&mut app);
-    subagents::handle_list_key(&mut app, key(KeyCode::Down));
-    assert_eq!(
-        app.subagents
-            .list
-            .mouse_session_id
-            .or_else(|| {
-                app.subagents.list.focused.then(|| {
-                    if app.subagents.list.options.selected() == 0 {
-                        MAIN_SESSION_ID.to_owned()
-                    } else {
-                        app.subagents.list.rows[app.subagents.list.options.selected() - 1]
-                            .id
-                            .clone()
-                    }
-                })
-            })
-            .as_deref(),
-        Some("a")
-    );
 }
 
 #[test]

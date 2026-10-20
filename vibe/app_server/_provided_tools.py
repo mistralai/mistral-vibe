@@ -48,6 +48,18 @@ from vibe.app_server._cron import (
     cron_input_schema,
     run_cron,
 )
+from vibe.app_server._session_spawn import (
+    START_SESSION_TOOL_DESCRIPTION,
+    START_SESSION_TOOL_NAME,
+    SessionOriginResolver,
+    SessionSpawner,
+    SessionSpawnError,
+    SpawnModel,
+    StartSessionArgs,
+    StartSessionResult,
+    run_start_session,
+    start_session_input_schema,
+)
 from vibe.app_server._unified_scheduled_loops import (
     ScheduledLoopStoreError,
     UnifiedScheduledLoops,
@@ -81,14 +93,17 @@ TODO_TOOL_NAME = "todo"
 VIBE_PROVIDED_TOOL_NAMES = {
     f"{VIBE_TOOL_GROUP}.{TODO_TOOL_NAME}": TODO_TOOL_NAME,
     f"{VIBE_TOOL_GROUP}.{CRON_TOOL_NAME}": CRON_TOOL_NAME,
+    f"{VIBE_TOOL_GROUP}.{START_SESSION_TOOL_NAME}": START_SESSION_TOOL_NAME,
 }
 
 # "ask" routes through Vibe's permission resolver. Cron defaults to allowed there,
 # while explicit config and session permission overrides still take precedence.
+# Starting a session kicks off real work, so it keeps the resolver's default: ask.
 # Scratchpad writes only inside the session's own storage and is pinned allowed.
 VIBE_PROVIDED_TOOL_MODES: dict[str, ToolApprovalMode] = {
     TODO_TOOL_NAME: "ask",
     CRON_TOOL_NAME: "ask",
+    START_SESSION_TOOL_NAME: "ask",
     SCRATCHPAD_TOOL_NAME: "allow",
 }
 
@@ -98,6 +113,7 @@ def vibe_tool_groups(
     *,
     enabled_tools: Sequence[str] = (),
     disabled_tools: Sequence[str] = (),
+    session_spawn: Sequence[SpawnModel] | None = None,
 ) -> list[RustToolGroupDefinition]:
     # Todo follows the legacy roster, so a tool switched off in config stays off here
     # too. The scratchpad has no catalogue entry to be filtered out of, so it reads
@@ -139,6 +155,18 @@ def vibe_tool_groups(
                 exposure="direct",
             )
         )
+    if session_spawn is not None and _passes_tool_filters(
+        START_SESSION_TOOL_NAME, enabled=enabled_tools, disabled=disabled_tools
+    ):
+        tools.append(
+            RustProvidedToolDefinition(
+                name=START_SESSION_TOOL_NAME,
+                description=START_SESSION_TOOL_DESCRIPTION,
+                input_schema=start_session_input_schema(session_spawn),
+                output_schema=StartSessionResult.model_json_schema(),
+                exposure="direct",
+            )
+        )
     if not tools:
         return []
 
@@ -170,6 +198,8 @@ class VibeProvidedTools:
         *,
         max_todos: Callable[[], int],
         scheduled_loops: Callable[[str], UnifiedScheduledLoops] | None = None,
+        session_spawner: SessionSpawner | None = None,
+        session_origin: SessionOriginResolver | None = None,
     ) -> ProvidedToolExecutorFactory:
         root = Path(storage_root).expanduser().resolve()
 
@@ -190,6 +220,18 @@ class VibeProvidedTools:
                             CronArgs.model_validate(action.call.arguments),
                             scheduled_loops=scheduled_loops(session_id),
                         )
+                    elif action.call.tool_name == START_SESSION_TOOL_NAME:
+                        if session_spawner is None or session_origin is None:
+                            raise ValueError(
+                                "Starting sessions is not available for this session"
+                            )
+                        result = await run_start_session(
+                            StartSessionArgs.model_validate(action.call.arguments),
+                            parent_session_id=session_id,
+                            invocation_id=action.action_id,
+                            origin_of=session_origin,
+                            spawner=session_spawner,
+                        )
                     else:
                         result = await _run(
                             action.call,
@@ -205,6 +247,7 @@ class VibeProvidedTools:
                     OSError,
                     LoopError,
                     ScheduledLoopStoreError,
+                    SessionSpawnError,
                 ) as error:
                     return _failed(action, error)
                 return _succeeded(action, result)

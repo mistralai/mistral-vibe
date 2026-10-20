@@ -38,8 +38,8 @@ async def test_unified_session_advertises_only_supported_agent_tools(
 ) -> None:
     """*Prepare*: A local Unified Harness session and usage-free provider chunks.
     *Do*: Start a turn and discover the agent tool declarations.
-    *Assert*: Local agent tools are declared under ``tools.agents``; waiting is the
-              standalone direct ``wait`` tool, not an ``agents`` function.
+    *Assert*: Local child tools are available without conversation forks; waiting
+              is the standalone direct ``wait`` tool, not an ``agents`` function.
     """
     # Prepare
     # Accounting is covered separately; optional provider usage is omitted here.
@@ -118,6 +118,7 @@ async def test_unified_session_advertises_only_supported_agent_tools(
     assert "declare namespace tools.agents" in declarations
     for operation in ("list", "spawn", "send_message", "interrupt"):
         assert f"function {operation}(" in declarations
+    assert "fork_turns" not in declarations
     assert "function wait(" not in declarations
 
 

@@ -1,6 +1,6 @@
 //! Slash-command resolution: aliases, bare exit synonyms, arguments and side-channel routing.
 
-use vibe_rs::commands::{argument_hint, has_command, is_side_channel, parse};
+use vibe_rs::commands::{argument_hint, is_side_channel, parse};
 use vibe_rs::input_modes::{classify, ClassifiedInput};
 
 #[test]
@@ -65,12 +65,6 @@ fn bare_exit_synonyms_exit_only_as_the_whole_input() {
             "{input:?}"
         );
     }
-}
-
-#[test]
-fn vibe_code_commands_are_always_registered() {
-    assert!(has_command("/teleport"));
-    assert!(has_command("/remote-project"));
 }
 
 #[test]

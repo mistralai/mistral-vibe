@@ -46,12 +46,12 @@ async def kill_async_subprocess(
                     stderr=asyncio.subprocess.DEVNULL,
                 )
                 await subprocess_proc.wait()
-            except FileNotFoundError, OSError:
+            except (FileNotFoundError, OSError):
                 proc.terminate()
         else:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError, PermissionError:
+            except (ProcessLookupError, PermissionError):
                 pass
             except Exception:
                 logger.debug(
@@ -61,5 +61,5 @@ async def kill_async_subprocess(
                 )
 
         await proc.wait()
-    except ProcessLookupError, PermissionError, OSError:
+    except (ProcessLookupError, PermissionError, OSError):
         pass

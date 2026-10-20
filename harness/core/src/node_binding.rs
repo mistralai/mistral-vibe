@@ -27,12 +27,14 @@ impl NodeHarnessEngine {
         &self,
         config_json: String,
         initial_history_json: String,
+        conversation_json: Option<String>,
     ) -> AsyncTask<CreateSessionTask> {
         AsyncTask::new(CreateSessionTask {
             engine: Arc::clone(&self.engine),
             source: SessionSource::Create {
                 config_json,
                 initial_history_json,
+                conversation_json,
             },
         })
     }
@@ -114,6 +116,18 @@ impl NodeHarnessSession {
     }
 
     #[napi_derive::napi]
+    pub fn export_conversation(
+        &self,
+        fork_turns: String,
+    ) -> napi::Result<AsyncTask<SessionOperationTask>> {
+        Ok(AsyncTask::new(SessionOperationTask {
+            engine: Arc::clone(&self.engine),
+            handle: self.required_handle()?,
+            operation: SessionOperation::ExportConversation(fork_turns),
+        }))
+    }
+
+    #[napi_derive::napi]
     pub fn dispose(&mut self) -> napi::Result<AsyncTask<CloseSessionTask>> {
         let handle = self
             .handle
@@ -143,6 +157,7 @@ enum SessionSource {
     Create {
         config_json: String,
         initial_history_json: String,
+        conversation_json: Option<String>,
     },
     Restore {
         config_json: String,
@@ -165,6 +180,7 @@ impl Task for CreateSessionTask {
             SessionSource::Create {
                 config_json,
                 initial_history_json,
+                conversation_json,
             } => {
                 let config = serde_json::from_str(config_json)
                     .map_err(|error| node_error(format!("invalid harness config JSON: {error}")))?;
@@ -172,8 +188,16 @@ impl Task for CreateSessionTask {
                     serde_json::from_str(initial_history_json).map_err(|error| {
                         node_error(format!("invalid initial history JSON: {error}"))
                     })?;
+                let conversation = conversation_json
+                    .as_deref()
+                    .map(|value| {
+                        serde_json::from_str(value).map_err(|error| {
+                            node_error(format!("invalid conversation seed JSON: {error}"))
+                        })
+                    })
+                    .transpose()?;
                 self.engine
-                    .create_with_history(config, initial_history)
+                    .create_with_conversation(config, initial_history, conversation)
                     .map_err(node_error)
             }
             SessionSource::Restore {
@@ -206,6 +230,7 @@ enum SessionOperation {
     Apply(String),
     Inspect,
     Checkpoint,
+    ExportConversation(String),
 }
 
 pub(crate) struct SessionOperationTask {
@@ -233,6 +258,13 @@ impl Task for SessionOperationTask {
             SessionOperation::Checkpoint => {
                 let checkpoint = self.engine.checkpoint(self.handle).map_err(node_error)?;
                 serde_json::to_string(&checkpoint).map_err(|error| node_error(error.to_string()))
+            }
+            SessionOperation::ExportConversation(fork_turns) => {
+                let conversation = self
+                    .engine
+                    .export_conversation(self.handle, fork_turns)
+                    .map_err(node_error)?;
+                serde_json::to_string(&conversation).map_err(|error| node_error(error.to_string()))
             }
         }
     }

@@ -43,7 +43,7 @@ def _resolved_executable(path: Path) -> Path | None:
     try:
         resolved = path.expanduser().resolve()
         return resolved if _is_executable_file(resolved) else None
-    except OSError, RuntimeError:
+    except (OSError, RuntimeError):
         return None
 
 
@@ -60,7 +60,7 @@ def _is_overbroad_project_dir(directory: Path) -> bool:
         return True
     try:
         return directory == Path.home().expanduser().resolve()
-    except OSError, RuntimeError:
+    except (OSError, RuntimeError):
         return False
 
 

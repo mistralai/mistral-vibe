@@ -132,15 +132,6 @@ class EventProjector:
                 updates = []
         return updates
 
-    def effect_detail(self, tool_call_id: str) -> EffectDetail:
-        entry_id = self._effect_entries.get(tool_call_id)
-        if entry_id is None:
-            raise ValueError(f"Effect not found: {tool_call_id}")
-        entry = self._entries[entry_id]
-        if not isinstance(entry, PublicEffectEntry):
-            raise ValueError(f"History entry is not an effect: {tool_call_id}")
-        return entry.detail
-
     def start_effect(
         self, entry_id: str, *, title: str, detail: EffectDetail
     ) -> ProjectedUpdate:

@@ -1,7 +1,7 @@
 # Mistral Vibe
 
 [![PyPI Version](https://img.shields.io/pypi/v/mistral-vibe)](https://pypi.org/project/mistral-vibe)
-[![Python Version](https://img.shields.io/badge/python-3.14%2B-blue)](https://www.python.org/downloads/release/python-3140/)
+[![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/release/python-3120/)
 [![CI Status](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml/badge.svg)](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/mistralai/mistral-vibe)](https://github.com/mistralai/mistral-vibe/blob/main/LICENSE)
 
@@ -46,6 +46,13 @@ Then, use uv command below.
 
 ```bash
 uv tool install mistral-vibe
+```
+
+Vibe needs a GIL-enabled build of Python 3.12 or later. If you have a free-threaded (no-GIL) Python installed and the install fails, force the GIL build of Python 3.14:
+
+```bash
+uv python install cpython-3.14
+uv tool install --python cpython-3.14+gil mistral-vibe
 ```
 
 ### Using pip
@@ -333,8 +340,14 @@ vibe --prompt-file task.md --auto-approve --time-limit 1800 --output-dir out/
 | `0` | `finished` | The agent finished. |
 | `1` | `usage_error`, `config_error` | The run could not start as asked. |
 | `2` | `infrastructure_failure` | The model API (after retries) or the runtime failed. |
-| `3` | `turn_limit`, `token_limit`, `price_limit`, `deadline`, `terminated`, `length`, `refusal` | The agent stopped without finishing; score what it left. `length` means the conversation or the last answer hit a model token limit: the context window, or the output-token cap (`max_output_tokens` on the model). `refusal` means the model declined to answer. |
+| `3` | `turn_limit`, `token_limit`, `price_limit`, `deadline`, `terminated`, `length`, `refusal` | The agent stopped without finishing; score what it left. `length` means the conversation or the last answer hit a model token limit: the context window, or the output-token cap (`max_output_tokens` on the model). An answer cut off at the output cap is first discarded and asked for again, up to `output_limit_retries` times (6 by default). `refusal` means the model declined to answer. |
 | `4` | `aborted` | The `--agent-socket` server aborted the run (experimental, see below); `error.message` in `export.json` is the server's message. |
+
+`vibe -p` exits only after its app-server process has, however the run ends.
+Killed outright (SIGKILL, the OOM killer), it takes its app-server with it: at
+once on Linux and Windows, and on macOS as soon as the app-server sees its
+input close, normally within a second. `vibe run-server`'s app-servers do the
+same.
 
 #### Agent Socket (`--agent-socket`, experimental)
 
@@ -507,6 +520,108 @@ error code `-32002` and a message: `{"code": -32002, "message": str}`. Vibe
 stops the run as SIGTERM does and exits 4, with the outcome `aborted` and the
 server's message as `error.message` in `export.json`. Vibe gives the abort no
 meaning of its own; the message is for whoever reads the export.
+
+#### Many runs in one process (`vibe run-server`, experimental)
+
+Experimental: the command is hidden from `--help`, and it and its protocol may
+change or go away without notice. It is not supported on Windows (exit 1).
+
+`vibe run-server` serves many runs at once, each what
+`vibe -p --agent-socket PATH --output-dir DIR` does, with the same outcomes,
+exit codes, limits and export. Every run must use an agent socket that serves a
+sandbox.
+
+Runs share app-server processes rather than starting one each. An app-server
+serves at most `--runs-per-app-server K` runs (default 16). A run goes to the
+app-server with the most runs that still has room, so that a spare one drains;
+when none has room, another starts. An app-server exits once its last run has
+gone, and a later run starts another. One that exits early fails only its own runs, as
+`infrastructure_failure`. One that has not let a run go 15 seconds after it
+ended takes no new run.
+
+It speaks JSON-RPC 2.0 on stdin and stdout, framed as the agent socket is: one
+compact JSON message with camelCase fields per line. Only the protocol is
+written to stdout. Errors are `{"code": str, "message": str, "data": any}`,
+where `code` is `invalid_request`, `invalid_params`, `not_initialized`,
+`not_found`, `conflict`, `method_not_found` or `internal_error`; an
+`invalid_params` error names the fields at fault, never their values.
+`--max-runs N` caps the live runs.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `initialize` | `{"protocolVersion": 1, "clientInfo": {"name": str, "version": str}}` | `{"protocolVersion": 1, "serverInfo": {"name": "vibe-run-server", "version": str}, "maxRuns": int \| null}` |
+| `run/start` | `{"runId": str, "prompt": str, "agentSocket": str, "outputDir"?: str, "resumeSessionId"?: str, "agent"?: str, "autoApprove"?: bool, "enabledTools"?: [str], "disabledTools"?: [str], "maxTurns"?: int, "maxTokens"?: int, "maxPrice"?: float, "timeLimit"?: float, "config"?: object, "credentials"?: {str: str}}` | `{}` |
+| `run/stop` | `{"runId": str}` | `{}` |
+| `ping` | `{}` | `{}` |
+
+- `initialize` comes first, once. Any other protocol version is refused with
+  `invalid_request`, whose `data` is `{"protocolVersion": 1}`; any other
+  request before it, with `not_initialized`.
+- `run/start` answers at once, and the run goes on in the background. `runId`
+  is the caller's name for the run, unique among live runs; a live one is a
+  `conflict` with `data` `{"reason": "duplicate_run"}`, and `maxRuns` live runs
+  a `conflict` with `{"reason": "at_capacity", "maxRuns": int}`. The options
+  and limits are those of `vibe -p`; `timeLimit` counts from the request.
+  Relative `agentSocket` and `outputDir` paths name paths under the directory
+  the server started in.
+- `config` is the run's user config, the document `config.toml` would hold as
+  parsed TOML. It replaces the server's own `config.toml` for the run, except
+  for what applies to the whole app-server process (see below).
+- `credentials` maps environment variable names to values. A provider whose
+  `api_key_env_var` names one sends that value. The values stay in memory:
+  they are not put in the environment, and are redacted from exports, logs,
+  error messages and `run/ended`.
+- `run/stop` ends a live run as `terminated`, as SIGTERM ends `vibe -p`;
+  `not_found` when no live run has that `runId`. A stopped run that has not
+  wound down 15 seconds after the stop is cancelled, and still ends with
+  `run/ended`: `terminated`, with an `error` saying it was cancelled, whose
+  `code` is `stop_timed_out`. If its export then takes more than 5 more
+  seconds, `run/ended` is sent without it, with an `exportError` and an
+  `exportErrorCode` of `export_timed_out`.
+- `ping` is answered at any time, before `initialize` too. A ping with no
+  answer means the server is wedged.
+
+Each run that started ends with one notification, after its export is
+written:
+
+```json
+{"jsonrpc": "2.0", "method": "run/ended", "params": {"runId": str, "outcome": str, "exitCode": int, "sessionId": str | null, "error": {"message": str, "code": str | null} | null, "exportPath": str | null, "exportError": str | null, "exportErrorCode": str | null, "warnings": [{"message": str, "source": str | null}] | null}}
+```
+
+`outcome` and `exitCode` are those of `vibe -p` (see Exit Codes above),
+`aborted` and 4 included. `error.code`, when set, is a stable name for the
+failure, so failures can be counted without matching messages. `exportError`
+says why the export could not be written, and `exportErrorCode`, when set,
+names that reason. `warnings` are the export's. The `runId` is free again once
+the notification is sent.
+
+On end of input, SIGTERM or SIGINT, the server ends every live run as
+`terminated`, as `run/stop` does, writes its export, sends its `run/ended`,
+stops its app-servers and exits 0. A message that is not a request ends it the
+same way, with exit 1, without repeating the message. A run that has no
+`run/ended` when the server's output closes, or the process exits, is lost:
+treat it as an infrastructure failure. It has no `export.json` (the export is
+written once, at the end, and renamed into place, so a `.export.json.tmp` may
+be left), and its session's journal stops at its last saved message in the
+session log directory. Its sandbox is left as it was.
+
+The runs share `VIBE_HOME` and `HOME` (session logs, trusted folders, the
+user's agents, prompts, skills and tools), the `.env` file, the environment and
+the log file. The server's log lines for a run name it as `run{run=<runId>}`.
+The server does not report errors to Sentry.
+
+Two settings apply to a whole app-server process, so to each of its runs. It
+takes them from the server's own `config.toml` when its first run starts. A run
+whose `config` sets `enable_system_trust_store` otherwise ends as a
+`config_error`. A run whose `config` sets another `log_level` goes on at the
+app-server's level, with a warning in its `warnings` and in the log. The
+app-server sets up no process-wide tracer, so no run's API key serves another
+run's traces.
+
+Each app-server starts with `MALLOC_ARENA_MAX=2` unless the server's
+environment sets it. Its runs use many threads, and on Linux with glibc's
+default of up to eight memory arenas per core, a busy app-server's memory grows
+by about 45 KiB per run; with two arenas it stays flat.
 
 ## Voice Mode
 
@@ -783,6 +898,28 @@ Any extra instructions passed to `/compact ...` are appended after the configure
 
 Compaction keeps the same session and visible conversation. Later model requests
 use the latest compacted context followed by newer messages.
+
+### Compaction and Output Limits
+
+These settings apply to the Unified Harness:
+
+```toml
+compaction_max_output_tokens = 80000       # Output cap for compaction requests; 0: same cap as other requests
+# compaction_thinking = "low"              # Thinking for the first compaction request; unset keeps the compaction model's level
+compaction_reasoning_limit_tokens = 32000  # Reasoning after which compaction falls back; 0 disables
+output_limit_retries = 6                   # Cut-off answers a turn retries with feedback; 0 ends the turn on the first
+output_token_reserve = 4096                # Tokens kept free when the output cap is clipped to the context window
+```
+
+The first compaction request reuses the conversation's prompt prefix, so the
+provider can serve most of it from its cache. If it fails, returns an invalid
+summary, or reasons past `compaction_reasoning_limit_tokens`, Vibe sends one
+fallback request instead: a summarizer prompt over a text transcript of the
+conversation, without tools and without reasoning. It differs from the first
+request, so a provider's response cache cannot hand back the same failed answer.
+
+When a model declares `max_context_length`, each request's output cap is clipped
+to the room its input leaves in that window, less `output_token_reserve`.
 
 ### Custom Title Prompts
 

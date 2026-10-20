@@ -1,7 +1,9 @@
 # CODEOWNERS
 
 # Default owners for everything in the repo
-* @mistralai/eng-vibe-code-cli
+# No default owner: the vibe/ tree is deliberately left without a codeowner.
 
 # Owners for specific directories
-# Not needed for now, can be filled later
+# The CLI team keeps ownership of this file so it can be edited (and a default
+# owner restored) later.
+/.github/CODEOWNERS @mistralai/eng-vibe-code-cli

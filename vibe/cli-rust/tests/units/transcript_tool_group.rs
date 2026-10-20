@@ -99,14 +99,6 @@ fn running(transcript: &Transcript) -> bool {
 }
 
 #[test]
-fn trailing_group_keeps_running_after_a_successful_turn() {
-    // A successful turn is a no-op for the live tail (the turn end never
-    // finalizes the group), so it keeps spinning.
-    let tail = live(&[effect("e1", "completed"), effect("e2", "completed")]);
-    assert!(running(&tail));
-}
-
-#[test]
 fn trailing_group_settles_on_a_failed_or_interrupted_turn() {
     // A turn error finalizes the open group.
     let mut tail = live(&[effect("e1", "completed"), effect("e2", "completed")]);

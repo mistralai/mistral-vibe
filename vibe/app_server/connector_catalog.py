@@ -51,6 +51,7 @@ from vibe.app_server.protocol import (
     ConnectorAuthUrlParams,
     ConnectorCatalogAuthRequestParams,
     ConnectorCatalogAuthRequestResponse,
+    ConnectorCatalogConnectParams,
     ConnectorCatalogEntryView,
     ConnectorCatalogMutationResponse,
     ConnectorCatalogReadParams,
@@ -121,6 +122,8 @@ _MAX_DIAGNOSTICS_PER_CONNECTOR = 3
 _MAX_DIAGNOSTIC_CHARACTERS = 512
 _MAX_CACHE_ENTRY_BYTES = 2 * 1024 * 1024
 _MAX_PUBLIC_NAME_CHARACTERS = 256
+# The dashboard names a no-auth connection this way; reusing it keeps one row.
+_DEFAULT_CONNECTION_NAME = "default"
 _ALIASES = {
     "connectors/read": "connector_catalog/read",
     "connectors/refresh": "connector_catalog/refresh",
@@ -456,7 +459,7 @@ class ConnectorCatalogCache:
         try:
             with self._path.open(encoding="utf-8") as file:
                 payload = json.load(file)
-        except OSError, json.JSONDecodeError:
+        except (OSError, json.JSONDecodeError):
             return {}
         if not isinstance(payload, dict):
             return {}
@@ -558,6 +561,10 @@ class ConnectorCatalogService:
                 response, broker = await self._request_auth(params, root, notify)
                 runtime_updated = False
                 after_response = broker
+            case "connector_catalog/connect":
+                params = validate_wire(ConnectorCatalogConnectParams, raw_params)
+                response, runtime_updated = await self._connect(params, root)
+                after_response = None
             case _:
                 raise method_not_found(method)
         return DispatchResult(
@@ -789,6 +796,50 @@ class ConnectorCatalogService:
                 accepted_catalog_revision=request.accepted_catalog_revision,
             ),
             start_broker,
+        )
+
+    async def _connect(
+        self, params: ConnectorCatalogConnectParams, root: SessionBackend | None
+    ) -> tuple[ConnectorCatalogMutationResponse, bool]:
+        """Create the user's connection for a no-auth connector, then refresh."""
+        _validate_toggle(params.alias, None)
+        context = await self._target(params.session_id, root)
+        request = await context.require_control().request_connector_connect(
+            alias=params.alias
+        )
+        provider = _resolve_provider(context.orchestrator.config)
+        if provider is None:
+            raise RequestFailure(
+                ProtocolErrorCode.UNAUTHORIZED,
+                "Connectors need a Mistral API key to connect",
+            )
+        started_at = time.perf_counter()
+        outcome = "failure"
+        try:
+            await _connect_without_credentials(provider, request.raw_connector_id)
+            outcome = "success"
+        except Exception as exc:
+            logger.warning(
+                "Failed to connect a no-auth connector",
+                extra={
+                    "provider_fingerprint": provider.fingerprint[:12],
+                    "connector_error": type(exc).__name__,
+                    "http_status": getattr(exc, "status_code", None),
+                },
+            )
+            raise RequestFailure(
+                ProtocolErrorCode.INTERNAL_ERROR,
+                _connect_failure_message(exc, request.display_name),
+            ) from exc
+        finally:
+            record_connector_catalog_operation(
+                time.perf_counter() - started_at,
+                operation="connect",
+                outcome=outcome,
+                backend=self._backend,
+            )
+        return await self._refresh_request(
+            ConnectorCatalogRefreshParams(session_id=params.session_id), root
         )
 
     async def accept_auth_required(
@@ -1421,6 +1472,55 @@ async def _connector_auth_url(
         await http_client.aclose()
 
 
+async def _connect_without_credentials(
+    provider: _ConnectorProvider, raw_connector_id: str
+) -> None:
+    # Mirrors the dashboard's connect button: a no-auth connector becomes usable
+    # once the user owns a default connection, which carries no secret.
+    http_client = VibeAsyncHTTPClient(verify=build_ssl_context(), follow_redirects=True)
+    try:
+        from mistralai.client import Mistral
+
+        sdk_client = Mistral(
+            api_key=provider.api_key,
+            server_url=provider.base_url,
+            async_client=http_client,
+        )
+        async with sdk_client as client:
+            await client.beta.connectors.create_or_update_user_credentials_async(
+                connector_id_or_name=raw_connector_id,
+                name=_DEFAULT_CONNECTION_NAME,
+                is_default=True,
+                credentials={"headers": {}},
+            )
+    finally:
+        await http_client.aclose()
+
+
+def _connect_failure_message(exc: Exception, display_name: str) -> str:
+    # Redacted like bootstrap failures: the status explains it, the body stays in logs.
+    from mistralai.client.errors import MistralError
+
+    prefix = f"Could not connect {display_name}"
+    if isinstance(exc, httpx.TransportError):
+        return f"{prefix}: the Mistral API could not be reached. Try again in a moment."
+    if not isinstance(exc, MistralError):
+        return f"{prefix}: {type(exc).__name__}."
+    match exc.status_code:
+        case httpx.codes.UNAUTHORIZED | httpx.codes.FORBIDDEN:
+            return (
+                f"{prefix}: your API key may not create connections "
+                f"(HTTP {exc.status_code}). Check your MISTRAL_API_KEY."
+            )
+        case httpx.codes.NOT_FOUND:
+            return f"{prefix}: the connector no longer exists (HTTP 404)."
+        case _:
+            return (
+                f"{prefix} (HTTP {exc.status_code}). Try again, "
+                "or enable it in the Mistral dashboard."
+            )
+
+
 def _catalog_read_result(
     catalog: ResolvedConnectorCatalog | None,
     disposition: CacheDisposition,
@@ -1468,13 +1568,15 @@ def _project_catalog_entry(connector: ResolvedConnector) -> ConnectorCatalogEntr
 
 def _connector_readiness(
     connector: ResolvedConnector,
-) -> Literal["ready", "needs_auth", "needs_setup", "unavailable"]:
+) -> Literal["ready", "needs_auth", "needs_setup", "needs_connect", "unavailable"]:
     if connector.ready:
         return "ready"
     if connector.auth_action == "oauth":
         return "needs_auth"
     if connector.auth_action == "credentials_setup":
         return "needs_setup"
+    if connector.auth_action == "no_auth_connect":
+        return "needs_connect"
     return "unavailable"
 
 
@@ -1840,6 +1942,8 @@ def _auth_action(action: _BootstrapAuthAction | None) -> ConnectorAuthAction:
         return "oauth"
     if action.type == "credentials_setup":
         return "credentials_setup"
+    if action.type == "no_auth_connect":
+        return "no_auth_connect"
     return "unknown"
 
 
@@ -1987,7 +2091,7 @@ def _is_fresh(stored_at: int, *, now: int) -> bool:
 def _json_size(value: object) -> int:
     try:
         return len(_canonical_json(value))
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return _MAX_CACHE_ENTRY_BYTES + 1
 
 

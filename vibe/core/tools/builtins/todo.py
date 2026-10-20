@@ -1,22 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
 from enum import StrEnum, auto
 from typing import Literal
 
 from pydantic import BaseModel, Field, computed_field
 
-from vibe.core.tools.base import (
-    BaseTool,
-    BaseToolConfig,
-    BaseToolState,
-    InvokeContext,
-    ToolError,
-    ToolPermission,
-)
-from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.types import ToolResultEvent, ToolStreamEvent
-from vibe.utils.tool_presentation import ToolEffectKind
+from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState, ToolPermission
 
 
 class TodoStatus(StrEnum):
@@ -96,65 +85,5 @@ class TodoState(BaseToolState):
     todos: list[TodoItem] = Field(default_factory=list)
 
 
-class Todo(
-    BaseTool[TodoArgs, TodoResult, TodoConfig, TodoState],
-    ToolUIData[TodoArgs, TodoResult],
-):
-    effect_kind = ToolEffectKind.TODO
-
-    @classmethod
-    def format_call_display(cls, args: TodoArgs) -> ToolCallDisplay:
-        match args.action:
-            case "read":
-                return ToolCallDisplay(
-                    summary="Reading todos",
-                    verb="Retrieving",
-                    message="todos",
-                    settled_verb="Retrieved",
-                    settled_message="todos",
-                )
-            case "write":
-                count = len(args.todos) if args.todos else 0
-                return ToolCallDisplay(
-                    summary=f"Writing {count} todos",
-                    verb="Updating",
-                    message=f"{count} todos",
-                    settled_verb="Updated",
-                    settled_message=f"{count} todos",
-                )
-
-    @classmethod
-    def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
-        if not isinstance(event.result, TodoResult):
-            return ToolResultDisplay(success=True, message="Success")
-
-        result = event.result
-        return ToolResultDisplay(
-            success=True, verb=result.verb, message=f"{result.total_count} todos"
-        )
-
-    @classmethod
-    def get_status_text(cls) -> str:
-        return "Managing todos"
-
-    async def run(
-        self, args: TodoArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | TodoResult]:
-        match args.action:
-            case "read":
-                yield self._read_todos()
-            case "write":
-                yield self._write_todos(args.todos or [])
-
-    def _read_todos(self) -> TodoResult:
-        return read_todos(self.state.todos)
-
-    def _write_todos(self, todos: list[TodoItem]) -> TodoResult:
-        try:
-            result = write_todos(todos, max_todos=self.config.max_todos)
-        except TodoValidationError as error:
-            raise ToolError(str(error)) from error
-
-        self.state.todos = result.todos
-
-        return result
+class Todo(BaseTool[TodoArgs, TodoResult, TodoConfig, TodoState]):
+    pass

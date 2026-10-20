@@ -58,7 +58,8 @@ pub(super) fn restorable_active_tool_checkpoint() -> Value {
                 "role": "user",
                 "content": [{ "type": "text", "text": "hello" }]
             },
-            "source": "history"
+            "source": "history",
+            "turn_index": 0
         },
         {
             "message": {
@@ -74,7 +75,8 @@ pub(super) fn restorable_active_tool_checkpoint() -> Value {
                     }
                 }]
             },
-            "source": "history"
+            "source": "history",
+            "turn_index": 0
         }
     ]);
     checkpoint
@@ -114,7 +116,8 @@ pub(super) fn restorable_active_candidate_checkpoint() -> Value {
             "role": "user",
             "content": [{ "type": "text", "text": "hello" }]
         },
-        "source": "history"
+        "source": "history",
+        "turn_index": 0
     }]);
     checkpoint
 }
@@ -239,7 +242,8 @@ pub(super) fn restorable_pending_program_checkpoint() -> Value {
                 "role": "user",
                 "content": [{ "type": "text", "text": "hello" }]
             },
-            "source": "history"
+            "source": "history",
+            "turn_index": 0
         },
         {
             "message": {
@@ -255,7 +259,8 @@ pub(super) fn restorable_pending_program_checkpoint() -> Value {
                     }
                 }]
             },
-            "source": "history"
+            "source": "history",
+            "turn_index": 0
         }
     ]);
     checkpoint

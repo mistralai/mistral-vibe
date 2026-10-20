@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  PYTHON_VERSION: "3.14"
+  PYTHON_VERSION: "3.12"
 
 jobs:
   pre-commit:
@@ -196,7 +196,7 @@ jobs:
             # Pin the wheel to the interpreter the smoke venv uses, like
             # release.yml's check-sdist: unpinned, uv builds with the runner's
             # ambient Python and a mismatched wheel cannot be installed.
-            uv build --python 3.14 --wheel dist/mistral_vibe-*.tar.gz --out-dir dist
+            uv build --python ${{ env.PYTHON_VERSION }} --wheel dist/mistral_vibe-*.tar.gz --out-dir dist
           else
             uv build --wheel --out-dir dist
           fi

@@ -142,7 +142,7 @@ class WorktreeClaim:
         managed_root = WORKTREES_DIR.path.resolve()
         try:
             relative = path.resolve().relative_to(managed_root)
-        except OSError, ValueError:
+        except (OSError, ValueError):
             return None
         parts = relative.parts
         if len(parts) < _BUCKET_AND_NAME_PARTS or parts[0] in {

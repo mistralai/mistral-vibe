@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import cast
 
+from acp.schema import ClientCapabilities
 import pytest
 import pytest_asyncio
 
@@ -195,8 +196,56 @@ async def test_list_splits_the_flattened_status_into_two_axes(
         ("enabled", True, "connected"),
         ("needs_auth", True, "needs_auth"),
         ("needs_setup", True, "needs_setup"),
+        # The client never opted into a connect action, so it reads as setup.
+        ("needs_connect", True, "needs_setup"),
         ("unavailable", True, "unavailable"),
     ]
+
+
+def build_needs_connect_state() -> MCPState:
+    return MCPState(
+        sources=[
+            MCPSourceSummary(
+                name="deepwiki",
+                kind=MCPSourceKind.CONNECTOR,
+                transport="connector",
+                status=MCPSourceStatus.NEEDS_CONNECT,
+            )
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_reports_needs_connect_to_a_client_that_can_connect(
+    connectors_agent: tuple[VibeAcpAgent, str, FakeMCPResource],
+) -> None:
+    agent, session_id, mcp = connectors_agent
+    agent.client_capabilities = ClientCapabilities(
+        field_meta={"connectors-connect": True}
+    )
+    mcp.state = build_needs_connect_state()
+
+    result = await agent.ext_method("connectors/list", {"sessionId": session_id})
+
+    assert result == {
+        "connectors": [expected_connector("deepwiki", "needs_connect")],
+        "error": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_connect_answers_with_the_recomputed_list(
+    connectors_agent: tuple[VibeAcpAgent, str, FakeMCPResource],
+) -> None:
+    agent, session_id, mcp = connectors_agent
+
+    result = await agent.ext_method(
+        "connectors/connect", {"sessionId": session_id, "name": "linear"}
+    )
+
+    assert result == MUTATED_PAYLOAD
+    assert mcp.connect_calls == ["linear"]
+    assert mcp.read_calls == 0
 
 
 @pytest.mark.asyncio

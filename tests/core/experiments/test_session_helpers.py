@@ -11,6 +11,7 @@ from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import ExperimentManager
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
 from vibe.core.experiments.session import initialize_experiments
+from vibe.core.experiments.wait import experiments_eval_failed
 from vibe.core.identity import IdentityResult
 from vibe.core.paths import EXPERIMENT_EVAL_CACHE_FILE
 from vibe.core.telemetry.types import LaunchContext, TerminalEmulator
@@ -308,6 +309,7 @@ async def test_initialize_returns_false_when_remote_eval_fails(
     # this is the "tried but failed" case, distinct from "NO_PLAN_DATA".
     assert result[1] is None
     persist.assert_not_called()
+    assert experiments_eval_failed() is True
 
 
 @pytest.mark.asyncio
@@ -346,6 +348,36 @@ async def test_initialize_returns_true_and_persists_when_remote_eval_succeeds(
 
     assert result[0] is True
     persist.assert_awaited_once()
+    assert experiments_eval_failed() is False
+
+
+@pytest.mark.asyncio
+async def test_an_eval_without_a_user_id_stops_later_waits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No hash attribute: the response assigns nothing and is not cached, so a
+    # later session would wait for another eval that cannot route it either.
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.get_mistral_provider_and_api_key",
+        lambda _config: (MagicMock(), "fake-key"),
+    )
+    response = EvalResponse.model_validate({
+        "features": {"vibe_cli_system_prompt": {"defaultValue": "cli"}}
+    })
+    session_logger = MagicMock()
+    session_logger.persist_experiments = AsyncMock()
+
+    result = await initialize_experiments(
+        harness=ExperimentSurface.UNIFIED,
+        config=_make_config(),
+        manager=ExperimentManager(client=_StubClient(response)),
+        session_logger=session_logger,
+        launch_context=None,
+    )
+
+    assert result[0] is True
+    assert experiments_eval_failed() is True
+    assert not EXPERIMENT_EVAL_CACHE_FILE.path.exists()
 
 
 @pytest.mark.asyncio

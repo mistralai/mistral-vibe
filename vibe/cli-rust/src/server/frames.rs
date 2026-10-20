@@ -95,11 +95,7 @@ impl Skipped {
         tracing::error!(len = self.len, ?dropped, "frame exceeds MAX_FRAME; dropped");
         match dropped {
             Some(Dropped::Response(id)) => {
-                let waiter = pending
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner())
-                    .remove(&id);
-                if let Some(tx) = waiter {
+                if let Some(tx) = pending.take(id) {
                     let _ = tx.send(Err(RequestFailure::FrameTooLarge(self.len)));
                 }
             }

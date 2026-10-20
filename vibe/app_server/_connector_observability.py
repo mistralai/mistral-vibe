@@ -7,7 +7,7 @@ from typing import Literal
 from opentelemetry import metrics
 
 type ConnectorCatalogOperation = Literal[
-    "authorization", "bootstrap", "cache_write", "convergence"
+    "authorization", "bootstrap", "cache_write", "connect", "convergence"
 ]
 type ConnectorCatalogOutcome = Literal[
     "busy",

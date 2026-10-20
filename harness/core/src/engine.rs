@@ -61,6 +61,7 @@ impl HarnessEngine {
         self.create_with_history(config, Vec::new())
     }
 
+    #[cfg(any(test, feature = "benchmark"))]
     pub(crate) fn create_with_history(
         &self,
         config: HarnessConfig,
@@ -68,6 +69,25 @@ impl HarnessEngine {
     ) -> Result<SessionHandle, String> {
         let session = HarnessSession::create_with_history(config, initial_history)?;
         self.insert(session)
+    }
+
+    pub(crate) fn create_with_conversation(
+        &self,
+        config: HarnessConfig,
+        initial_history: Vec<crate::core::Message>,
+        conversation: Option<crate::core::ConversationSeed>,
+    ) -> Result<SessionHandle, String> {
+        let session =
+            HarnessSession::create_with_conversation(config, initial_history, conversation)?;
+        self.insert(session)
+    }
+
+    pub(crate) fn export_conversation(
+        &self,
+        handle: SessionHandle,
+        fork_turns: &str,
+    ) -> Result<crate::core::ConversationSeed, String> {
+        self.with_session(handle, |session| session.export_conversation(fork_turns))?
     }
 
     pub(crate) fn restore(
@@ -189,9 +209,11 @@ mod tests {
             settings: HarnessSettings {
                 turn: TurnSettings {
                     max_iterations: Some(8),
+                    output_limit_recovery: Default::default(),
                 },
                 context: ContextSettings {
                     compaction: CompactionPolicy::Disabled,
+                    compaction_fallback: Default::default(),
                     image_delivery: ImageDeliverySettings::default(),
                     notifications: crate::core::config::NotificationSettings {
                         pending_count: 1000,
@@ -204,6 +226,8 @@ mod tests {
                     max_wait_ms: 3_600_000,
                     model_wait: Default::default(),
                     programmatic: ProgrammaticToolSettings {
+                        mode: Default::default(),
+                        sleep: Default::default(),
                         max_effects: 128,
                         max_operations: 1024,
                         max_elapsed_ms: 60_000,
@@ -212,9 +236,12 @@ mod tests {
                     large_output: crate::core::LargeOutputPolicy::Disabled,
                     subagents: SubagentMode::enabled(),
                     background_processes: BackgroundProcessMode::Disabled,
+                    file_system: Default::default(),
+                    skills: Default::default(),
                     command_environment: CommandEnvironment::Unix,
                     permissions: None,
                 },
+                prompts: Default::default(),
             },
             capabilities: Default::default(),
             skill_catalog_fingerprint: None,

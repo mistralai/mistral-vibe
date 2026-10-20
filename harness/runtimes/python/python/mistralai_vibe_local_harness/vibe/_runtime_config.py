@@ -126,6 +126,43 @@ class RequestSentTelemetry:
 # Host sink for per-completion request telemetry, called once per LLM call.
 type RequestSentSink = Callable[[RequestSentTelemetry], None]
 
+# The ways a provider response can break the tool call contract Core enforces,
+# each named after the rejection it would cause.
+type MalformedToolCallReason = Literal[
+    "tool_call_finish_without_tool_call",
+    "empty_tool_call_identity",
+    "tool_call_with_non_tool_call_finish",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class MalformedToolCallsTelemetry:
+    """One completion whose provider responses broke the tool call contract.
+
+    Reported once, when the completion ends, and only when the adapters had to
+    repair at least one response. ``reasons`` names each kind of repair made.
+    ``nb_unusable_attempts`` counts the responses whose every tool call lacked a
+    name, which the retry policy retries. ``nb_dropped_tool_calls`` counts the
+    tool calls dropped for lacking a name. ``succeeded`` says whether the
+    completion still produced a result. ``purpose``, ``iteration`` and
+    ``turn_id`` mean what they mean on ``RequestSentTelemetry``.
+    """
+
+    model: str
+    backend: str
+    api_style: str
+    purpose: CompletionPurpose
+    iteration: int
+    reasons: tuple[MalformedToolCallReason, ...]
+    nb_unusable_attempts: int
+    nb_dropped_tool_calls: int
+    succeeded: bool
+    turn_id: str | None = None
+
+
+# Host sink for malformed tool call telemetry, called at most once per LLM call.
+type MalformedToolCallsSink = Callable[[MalformedToolCallsTelemetry], None]
+
 
 @dataclass(frozen=True, slots=True)
 class LocalModelRoute:
@@ -138,6 +175,10 @@ class LocalModelRoute:
     # This model's cap on output tokens per request, used when the adapter
     # config sets no ``max_tokens`` of its own.
     max_output_tokens: int | None = None
+    # The model's context window in tokens. When known, each request's output
+    # cap is clipped to the room the input leaves, so input plus output never
+    # asks for more than the window holds.
+    context_window: int | None = None
 
 
 _DEFAULT_LOCAL_MODEL_ROUTE = LocalModelRoute()
@@ -227,6 +268,7 @@ class LocalRuntimeAdapterPorts:
     permission_resolver: PermissionResolver | None
     correlation_id_sink: CorrelationIdSink | None
     request_sent_sink: RequestSentSink | None
+    malformed_tool_calls_sink: MalformedToolCallsSink | None = None
     sandbox: SandboxAdapter | None = None
     helper_crashes: HelperCrashCount = field(
         default_factory=HelperCrashCount, compare=False
@@ -277,6 +319,25 @@ class LocalRuntimeAdapterConfig:
     # route: the gate pins its own sampling settings.
     classifier_model: str = ""
     max_tokens: int | None = None
+    # How the Runtime shapes compaction requests. The names match the Vibe
+    # settings. The first, in-context request reuses the conversation's prompt
+    # prefix and tool catalog; the standalone fallback always runs without
+    # tools and without reasoning.
+    # Output cap for every compaction request, applied below the general cap.
+    # A summary is far shorter than this; the cap bounds how long a request
+    # that reasons instead of summarizing can run. ``None`` applies no extra cap.
+    compaction_max_output_tokens: int | None = 80_000
+    # Reasoning of the in-context request; ``None`` keeps the compaction
+    # route's own.
+    compaction_thinking: ThinkingLevel | None = None
+    # Reasoning, in estimated tokens, after which the in-context request is
+    # abandoned so Core falls back to the standalone request. ``None`` lets it
+    # reason up to the output cap.
+    compaction_reasoning_limit_tokens: int | None = 32_000
+    # Tokens kept free of the context window when an output cap is clipped to
+    # the room the input leaves (see ``LocalModelRoute.context_window``). The
+    # input size is an estimate, so the reserve absorbs its error.
+    output_token_reserve: int = 4096
     # OpenAI-compatible providers expose reasoning under different keys.
     reasoning_field_name: str = "reasoning_content"
     # Some OpenAI-compatible endpoints never emit a finish reason.
@@ -299,6 +360,11 @@ class LocalRuntimeAdapterConfig:
     # that no fixed limit can tell apart from a stall.
     stream_idle_timeout_s: float | None = None
     retry_max_elapsed_time_s: float = 300.0
+    # Verify provider certificates with the operating system's trust store (the
+    # macOS Keychain, for example) instead of OpenSSL's default roots plus
+    # Certifi. That store also skips the strict chain checks of Python's
+    # default context, which some private CAs fail.
+    enable_system_trust_store: bool = False
     workspace: SessionWorkspace = field(default_factory=SessionWorkspace)
     # The environment of commands run on the host. Commands in a Sandbox
     # Environment run with the sandbox's own environment and never see it.
@@ -324,6 +390,7 @@ class LocalRuntimeAdapterConfig:
     permission_resolver: PermissionResolver | None = None
     correlation_id_sink: CorrelationIdSink | None = None
     request_sent_sink: RequestSentSink | None = None
+    malformed_tool_calls_sink: MalformedToolCallsSink | None = None
     skills: Mapping[str, str] = field(default_factory=dict)
     # Where workspace file and shell tools run. None runs them on this host;
     # an adapter runs them in its Sandbox Environment, whose paths ``workspace``
@@ -338,6 +405,16 @@ class LocalRuntimeAdapterConfig:
     )
 
     def __post_init__(self) -> None:
+        if (
+            self.compaction_max_output_tokens is not None
+            and self.compaction_max_output_tokens < 1
+        ):
+            raise ValueError("compaction_max_output_tokens must be positive")
+        if (
+            self.compaction_reasoning_limit_tokens is not None
+            and self.compaction_reasoning_limit_tokens < 1
+        ):
+            raise ValueError("compaction_reasoning_limit_tokens must be positive")
         # ``sandbox`` decides where tools run; the workspace and the process
         # tools have to agree with it.
         if self.workspace.path_space != self.path_space:
@@ -424,6 +501,27 @@ class LocalRuntimeAdapterConfig:
             return self.max_tokens
         return route.max_output_tokens
 
+    def request_output_token_cap(
+        self, route: LocalModelRoute, *, estimated_input_tokens: int, compaction: bool
+    ) -> int | None:
+        """The output-token cap for one Core model request.
+
+        Starts from :meth:`output_token_cap`, lowers it to the compaction cap
+        for a compaction request, then clips it to the room the estimated input
+        leaves in the route's context window, keeping ``output_token_reserve``
+        free. The result is at least 1 so the request stays well formed; a
+        prompt that already fills the window fails at the provider either way.
+        """
+        cap = self.output_token_cap(route)
+        compaction_cap = self.compaction_max_output_tokens
+        if compaction and compaction_cap is not None:
+            cap = compaction_cap if cap is None else min(cap, compaction_cap)
+        if route.context_window is None:
+            return cap
+        room = route.context_window - estimated_input_tokens - self.output_token_reserve
+        room = max(room, 1)
+        return room if cap is None else min(cap, room)
+
     def with_workspace(self, workspace: SessionWorkspace) -> LocalRuntimeAdapterConfig:
         """Return this config projected onto the Session's canonical workspace."""
         if self.workspace == workspace:
@@ -441,6 +539,7 @@ class LocalRuntimeAdapterConfig:
             permission_resolver=self.permission_resolver,
             correlation_id_sink=self.correlation_id_sink,
             request_sent_sink=self.request_sent_sink,
+            malformed_tool_calls_sink=self.malformed_tool_calls_sink,
             sandbox=self.sandbox,
             helper_crashes=self.helper_crashes,
         )
@@ -461,6 +560,7 @@ class LocalRuntimeAdapterConfig:
             permission_resolver=ports.permission_resolver,
             correlation_id_sink=ports.correlation_id_sink,
             request_sent_sink=ports.request_sent_sink,
+            malformed_tool_calls_sink=ports.malformed_tool_calls_sink,
             sandbox=ports.sandbox,
             helper_crashes=ports.helper_crashes,
         )
@@ -481,6 +581,10 @@ _LOCAL_RUNTIME_ADAPTER_BEHAVIOR_FIELDS = frozenset({
     "title_prompt",
     "classifier_model",
     "max_tokens",
+    "compaction_max_output_tokens",
+    "compaction_thinking",
+    "compaction_reasoning_limit_tokens",
+    "output_token_reserve",
     "reasoning_field_name",
     "emits_finish_reason",
     "extra_headers",
@@ -489,6 +593,7 @@ _LOCAL_RUNTIME_ADAPTER_BEHAVIOR_FIELDS = frozenset({
     "timeout_s",
     "stream_idle_timeout_s",
     "retry_max_elapsed_time_s",
+    "enable_system_trust_store",
     "env",
     "command_environment",
     "shell",
@@ -533,6 +638,9 @@ __all__ = [
     "LocalProviderRoute",
     "LocalRuntimeAdapterConfig",
     "LocalRuntimeAdapterPorts",
+    "MalformedToolCallReason",
+    "MalformedToolCallsSink",
+    "MalformedToolCallsTelemetry",
     "ProcessAuthority",
     "ProviderDeltaObserver",
     "ProviderStreamDelta",

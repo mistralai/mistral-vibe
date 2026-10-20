@@ -18,8 +18,3 @@ def first_of_type[E: BaseException](exc: BaseException, target: type[E]) -> E | 
             if (found := first_of_type(inner, target)) is not None:
                 return found
     return None
-
-
-def describe_exception(exc: BaseException) -> str:
-    message = str(exc).strip()
-    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__

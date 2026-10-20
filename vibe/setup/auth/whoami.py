@@ -150,7 +150,7 @@ def load_cached_whoami(api_key: str) -> WhoAmIResult | None:
         return None
     try:
         return WhoAmIResult.model_validate(payload)
-    except ValueError, ValidationError:
+    except (ValueError, ValidationError):
         return None
 
 
@@ -190,7 +190,7 @@ def _read_whoami_entries() -> dict[str, Any]:
     try:
         with WHOAMI_CACHE_FILE.path.open(encoding="utf-8") as f:
             data = json.load(f)
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -203,7 +203,7 @@ def _write_whoami_entries(entries: dict[str, Any]) -> None:
         with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(entries, f, separators=(",", ":"))
         os.replace(tmp_path, cache_path)
-    except OSError, TypeError:
+    except (OSError, TypeError):
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:

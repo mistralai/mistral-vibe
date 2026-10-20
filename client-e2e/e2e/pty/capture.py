@@ -66,7 +66,7 @@ class _ClipboardCapture:
             payload = self.buffer[start + len(_OSC52) : end]
             try:
                 self.text = base64.b64decode(payload, validate=True).decode()
-            except binascii.Error, UnicodeDecodeError:
+            except (binascii.Error, UnicodeDecodeError):
                 pass
             self.buffer = self.buffer[end + 1 :]
         self.buffer = self.buffer[-(len(_OSC52) - 1) :]
@@ -298,7 +298,7 @@ def _terminate(pid: int, fd: int) -> None:
     ):
         try:
             target()
-        except ProcessLookupError, PermissionError, OSError:
+        except (ProcessLookupError, PermissionError, OSError):
             pass
     try:
         os.close(fd)
@@ -306,5 +306,5 @@ def _terminate(pid: int, fd: int) -> None:
         pass
     try:
         os.waitpid(pid, os.WNOHANG)
-    except ChildProcessError, OSError:
+    except (ChildProcessError, OSError):
         pass

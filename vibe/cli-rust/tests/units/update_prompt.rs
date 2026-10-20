@@ -45,16 +45,6 @@ fn labels_follow_the_prompt_mode() {
 }
 
 #[test]
-fn navigation_swaps_and_wraps_between_the_two_choices() {
-    let mut state = dialog(UpdatePromptMode::Startup);
-    state.move_selection();
-    assert_eq!(state.selected, UpdateChoice::Continue);
-    // Two choices: the modulo cycle lands back on Update.
-    state.move_selection();
-    assert_eq!(state.selected, UpdateChoice::Update);
-}
-
-#[test]
 fn navigation_is_ignored_while_updating() {
     let mut state = dialog(UpdatePromptMode::Startup);
     state.updating = true;

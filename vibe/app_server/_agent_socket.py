@@ -55,12 +55,17 @@ the name of one of the session's MCP servers, and a ``namespace.name`` is
 declared once; otherwise the run cannot start, as a usage error.
 
 ``tools/call``, once per call of a tool, carrying its ``client_tool`` payload:
-    ``{"callbackId": str, "name": str, "input": JSON, "toolCallId": str}`` ->
-    a ``CallbackResult``: ``{"output": JSON, "annotations": object, "error":
-    {"message": str, "code": str | null, "details": JSON} | null}``.
-    ``callbackId`` is unique to the call and ``name`` is ``namespace.name``;
-    ``output`` is the tool's result and ``error`` a tool error the model
-    reads.
+    ``{"callbackId": str, "name": str, "input": JSON, "toolCallId": str,
+    "caller": Caller | null}`` -> a ``CallbackResult``: ``{"output": JSON,
+    "annotations": object, "error": {"message": str, "code": str | null,
+    "details": JSON} | null}``. ``callbackId`` is unique to the call and
+    ``name`` is ``namespace.name``; ``output`` is the tool's result and
+    ``error`` a tool error the model reads.
+    ``Caller`` is the session that made the call: ``{"sessionId": str,
+    "rootSessionId": str, "parentSessionId": str | null, "name": str | null,
+    "agentType": str | null}``. The run's own session is the root, with no
+    parent, name or agent; a subagent names its parent, its own name and the
+    agent it runs as. ``caller`` is null when Vibe could not tell.
 
 A request that outlives its timeout is answered with the JSON-RPC error code
 -32001. For ``sandbox/execute``, that is the command's own timeout: the model
@@ -183,11 +188,20 @@ class _ReadFileParams(_Params):
     max_bytes: int
 
 
+class _ToolCaller(_Params):
+    session_id: str
+    root_session_id: str
+    parent_session_id: str | None
+    name: str | None
+    agent_type: str | None
+
+
 class _ToolCallParams(_Params):
     callback_id: str
     name: str
     input: JsonValue
     tool_call_id: str
+    caller: _ToolCaller | None
 
 
 class _Reply(ProtocolModel):
@@ -360,6 +374,15 @@ class AgentSocket:
                 name=call.name,
                 input=call.input,
                 tool_call_id=call.tool_call_id,
+                caller=None
+                if call.caller is None
+                else _ToolCaller(
+                    session_id=call.caller.session_id,
+                    root_session_id=call.caller.root_session_id,
+                    parent_session_id=call.caller.parent_session_id,
+                    name=call.caller.name,
+                    agent_type=call.caller.agent_type,
+                ),
             ),
             _ToolCallResult,
             timeout=None,
@@ -598,8 +621,22 @@ class AgentSocketMount:
             update={"cwd": sandbox.workspace, "workdir": None, "trust_workspace": False}
         )
 
+    def require_sandbox(self, why: str) -> None:
+        """Fail every session open as a usage error when the server serves no
+        sandbox; ``why`` says what needs one.
+        """
+        if self.agent_socket is not None and self.agent_socket.sandbox is None:
+            self._fail(
+                RunOutcome.USAGE_ERROR,
+                f"The agent socket at {self.path} serves no sandbox; {why}",
+            )
+
     def subscribe(self, notify: Notifier) -> None:
         self._notifiers.append(notify)
+
+    def close(self) -> None:
+        """Stop notifying: the app servers subscribed are done with the mount."""
+        self._notifiers.clear()
 
     async def _abort(self, message: str) -> None:
         # Kept, so an abort a caller swallows still fails the next session open.

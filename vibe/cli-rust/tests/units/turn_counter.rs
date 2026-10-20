@@ -22,12 +22,3 @@ fn the_limit_is_exceeded_only_by_one_more_assistant_turn() {
     // The second assistant turn exceeds it.
     assert!(counter.observe(&json!({"role": "assistant"})));
 }
-
-#[test]
-fn a_turn_within_the_limit_needs_no_stop() {
-    let mut counter = TurnCounter::new(Some(3));
-    for _ in 0..3 {
-        assert!(!counter.observe(&json!({"role": "assistant"})));
-    }
-    assert!(counter.observe(&json!({"role": "assistant"})));
-}

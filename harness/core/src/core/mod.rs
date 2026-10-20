@@ -8,6 +8,7 @@ mod action_id;
 mod capabilities;
 mod checkpoint;
 pub(crate) mod config;
+mod conversation;
 mod error;
 mod features;
 mod helpers;
@@ -32,6 +33,7 @@ pub(crate) use checkpoint::Checkpoint;
 #[allow(unused_imports)]
 pub(crate) use checkpoint::decode_checkpoint;
 pub(crate) use config::HarnessConfig;
+pub(crate) use conversation::ConversationSeed;
 #[cfg(test)]
 pub(crate) use features::large_output::Policy as LargeOutputPolicy;
 pub(crate) use session::HarnessSession;
@@ -172,6 +174,10 @@ pub(crate) fn reconfigure_in_place(
         state.mark_tool_catalog_changed();
     }
     if rebuild_system_prompt && !state.context.is_empty() {
+        // Rewriting the system prompt in place invalidates the provider KV cache for
+        // the whole history. A skill catalog change takes this path because the
+        // catalog lives in the system prompt. It stops once catalog changes are
+        // delivered as appended context with a KV-cache-friendly context upsert.
         let system_prompt = build_system_prompt(
             &state.config,
             state.resolved_tools.tool_group_inventory_prompt_section(),
@@ -218,6 +224,10 @@ fn patched_system_prompt(
 
 fn tool_catalog_source_changed(current: &HarnessConfig, next: &HarnessConfig) -> bool {
     current.settings.tools.command_environment != next.settings.tools.command_environment
+        || current
+            .settings
+            .prompts
+            .tool_text_changed(&next.settings.prompts)
         || current.capabilities.tool_groups != next.capabilities.tool_groups
         || current.capabilities.skills != next.capabilities.skills
         || current.plugins.len() != next.plugins.len()
@@ -241,11 +251,18 @@ fn planned_config(
 ) -> Result<(HarnessConfig, ResolvedTools), CoreError> {
     let mut next = current.clone();
     if let Some(settings) = update.settings {
+        if current.settings.tools.permissions != settings.tools.permissions {
+            return Err(CoreError::invalid_configuration(
+                "settings.tools.permissions",
+                "settings.tools.permissions cannot be reconfigured after session creation",
+            ));
+        }
         subagents::validate_reconfiguration(
             &current.settings.tools.subagents,
             &settings.tools.subagents,
         )
         .map_err(|detail| CoreError::invalid_configuration("settings.tools.subagents", detail))?;
+        validate_builtin_reconfiguration(&current.settings.tools, &settings.tools)?;
         next.settings = settings;
     }
     if let Some(capabilities) = update.capabilities {
@@ -270,6 +287,38 @@ fn planned_config(
     capabilities::validate(&next)
         .map_err(|detail| CoreError::invalid_configuration("capabilities", detail))?;
     Ok((next, resolved_tools))
+}
+
+/// Built-in feature switches shape the model tool catalog and system prompt, so
+/// they stay fixed for the Session lifetime.
+fn validate_builtin_reconfiguration(
+    current: &config::ToolSettings,
+    next: &config::ToolSettings,
+) -> Result<(), CoreError> {
+    let unchanged = [
+        (
+            "settings.tools.file_system",
+            current.file_system == next.file_system,
+        ),
+        ("settings.tools.skills", current.skills == next.skills),
+        (
+            "settings.tools.programmatic.mode",
+            current.programmatic.mode == next.programmatic.mode,
+        ),
+        (
+            "settings.tools.programmatic.sleep",
+            current.programmatic.sleep == next.programmatic.sleep,
+        ),
+    ];
+    for (field, unchanged) in unchanged {
+        if !unchanged {
+            return Err(CoreError::invalid_configuration(
+                field,
+                format!("{field} cannot be reconfigured after session creation"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_compaction_budget(

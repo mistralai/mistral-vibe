@@ -168,7 +168,7 @@ class LegacyMCPDescriptorCache:
             return False
         try:
             payload = _encode(record)
-        except ValidationError, ValueError, TypeError:
+        except (ValidationError, ValueError, TypeError):
             return False
         if len(payload) > _MAX_RECORD_BYTES:
             return False
@@ -221,7 +221,7 @@ class LegacyMCPDescriptorCache:
             if len(record.descriptors) > _MAX_TOOLS:
                 return None
             return record.to_runtime()
-        except OSError, ValidationError, ValueError, TypeError:
+        except (OSError, ValidationError, ValueError, TypeError):
             return None
 
     def _fresh(self, record: LegacyDescriptorCacheRecord, now: datetime) -> bool:
@@ -288,7 +288,7 @@ class LegacyMCPDescriptorCache:
                 record = _Record.model_validate_json(path.read_bytes(), strict=True)
                 if not _aware(record.last_used_at):
                     raise ValueError("naive timestamp")
-            except OSError, ValidationError, ValueError, TypeError:
+            except (OSError, ValidationError, ValueError, TypeError):
                 try:
                     path.unlink(missing_ok=True)
                 except OSError:

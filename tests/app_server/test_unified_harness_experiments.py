@@ -11,11 +11,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import tomli_w
 
+from tests.stubs.experiment_responses import routing_eval_response
 from vibe.app_server.models import AccountPlanKind
 from vibe.app_server.protocol import ClientInfo, SessionOptions
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import ExperimentManager
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
+from vibe.core.experiments.wait import experiments_eval_failed
 from vibe.core.identity import IdentityResult
 from vibe.core.telemetry.types import LaunchContext
 from vibe.setup.auth.whoami import WhoAmIResult
@@ -318,6 +320,7 @@ async def test_unified_experiment_initialization_never_raises(
 
     await adapter.initialize_experiments(_launch_context())
     assert session.applied == []
+    assert experiments_eval_failed() is True
 
 
 @pytest.mark.asyncio
@@ -803,5 +806,310 @@ async def test_unified_no_mistral_credential_means_no_wait(
     read = await adapter.dispatch_extension("session/ready/read", {})
     assert read.response.ready is True
     task = adapter._model_catalog_task
+    assert task is not None
+    await task
+
+
+def _unpin_with_experiments(config_dir: Path) -> None:
+    _enable_experiments(config_dir)
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["active_model"] = ""
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+
+
+def _start_experiments(adapter: Any) -> None:
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendHostAdapter,
+    )
+
+    host = UnifiedHarnessBackendHostAdapter(
+        cast(Any, None), cast(Any, None), cast(Any, _RecordingServices())
+    )
+    host._start_experiments(adapter)
+
+
+def _hold_eval(
+    client: _StubEvalClient, monkeypatch: pytest.MonkeyPatch
+) -> asyncio.Event:
+    released = asyncio.Event()
+    answer = client.evaluate
+
+    async def _held(attributes: ExperimentAttributes) -> EvalResponse | None:
+        await released.wait()
+        return await answer(attributes)
+
+    monkeypatch.setattr(client, "evaluate", _held)
+    return released
+
+
+@pytest.mark.asyncio
+async def test_unified_an_uncached_eval_holds_an_unpinned_session_until_it_lands(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    _unpin_with_experiments(config_dir)
+    adapter, client = await _build_adapter(
+        tmp_path,
+        response=routing_eval_response(_ROUTED_ALIAS),
+        session=_RecordingSession(),
+        monkeypatch=monkeypatch,
+    )
+    released = _hold_eval(client, monkeypatch)
+
+    _start_experiments(adapter)
+    waiter = asyncio.create_task(adapter._wait_for_first_turn_fetches())
+    await asyncio.sleep(0.01)
+
+    assert not waiter.done()
+    released.set()
+    await asyncio.wait_for(waiter, timeout=2)
+    config = adapter._context.config_orchestrator.config
+    assert config.get_active_model().alias == _ROUTED_ALIAS
+
+
+@pytest.mark.asyncio
+async def test_unified_a_pinned_session_does_not_wait_for_the_eval(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    _enable_experiments(config_dir)  # the test config pins a built-in model
+    adapter, _client = await _build_adapter(
+        tmp_path,
+        response=routing_eval_response(_ROUTED_ALIAS),
+        session=_RecordingSession(),
+        monkeypatch=monkeypatch,
+    )
+
+    _start_experiments(adapter)
+
+    assert adapter._experiments_wait is None
+    task = adapter._experiments_task
+    assert task is not None
+    await task
+
+
+@pytest.mark.asyncio
+async def test_unified_a_reopened_session_with_a_pinned_model_does_not_wait(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._session_model import set_session_active_model_override
+    from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
+
+    _unpin_with_experiments(config_dir)
+    adapter, _client = await _build_adapter(
+        tmp_path,
+        response=routing_eval_response(_ROUTED_ALIAS),
+        session=_RecordingSession(),
+        monkeypatch=monkeypatch,
+    )
+    # What a reopened session does with the model its first turn pinned.
+    assert not await set_session_active_model_override(
+        adapter._context.config_orchestrator,
+        DEFAULT_ACTIVE_MODEL_CONFIG.alias,
+        reason="restore",
+    )
+
+    _start_experiments(adapter)
+
+    assert adapter._experiments_wait is None
+    task = adapter._experiments_task
+    assert task is not None
+    await task
+
+
+@pytest.mark.asyncio
+async def test_unified_a_cached_eval_means_no_wait(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    _unpin_with_experiments(config_dir)
+    first, _client = await _build_adapter(
+        tmp_path,
+        response=routing_eval_response(_ROUTED_ALIAS),
+        session=_RecordingSession(),
+        monkeypatch=monkeypatch,
+    )
+    _start_experiments(first)
+    assert first._experiments_wait is not None
+    first_task = first._experiments_task
+    assert first_task is not None
+    await first_task
+
+    second, _client = await _build_adapter(
+        tmp_path,
+        response=routing_eval_response(_ROUTED_ALIAS),
+        session=_RecordingSession(),
+        monkeypatch=monkeypatch,
+    )
+    _start_experiments(second)
+
+    assert second._experiments_wait is None
+    second_task = second._experiments_task
+    assert second_task is not None
+    await second_task
+
+
+@pytest.mark.asyncio
+async def test_unified_sessions_stop_waiting_once_an_eval_failed(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    _unpin_with_experiments(config_dir)
+    first, _client = await _build_adapter(
+        tmp_path, response=None, session=_RecordingSession(), monkeypatch=monkeypatch
+    )
+    _start_experiments(first)
+    assert first._experiments_wait is not None
+    await asyncio.wait_for(first._wait_for_first_turn_fetches(), timeout=2)
+
+    second, _client = await _build_adapter(
+        tmp_path, response=None, session=_RecordingSession(), monkeypatch=monkeypatch
+    )
+    _start_experiments(second)
+
+    assert second._experiments_wait is None
+    for adapter in (first, second):
+        task = adapter._experiments_task
+        assert task is not None
+        await task
+
+
+@pytest.mark.asyncio
+async def test_unified_sessions_stop_waiting_once_an_eval_outlasts_the_cap(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    import vibe.core.experiments.wait as wait_module
+
+    _unpin_with_experiments(config_dir)
+    monkeypatch.setattr(wait_module, "EVAL_WAIT_CAP_SECONDS", 0.05)
+    first, client = await _build_adapter(
+        tmp_path,
+        response=routing_eval_response(_ROUTED_ALIAS),
+        session=_RecordingSession(),
+        monkeypatch=monkeypatch,
+    )
+    _hold_eval(client, monkeypatch)
+    _start_experiments(first)
+    ready = asyncio.create_task(first.dispatch_extension("session/ready/wait", {}))
+
+    # Nothing waits on the first session's turns: the cap still counts.
+    await asyncio.sleep(0.2)
+
+    wait = first._experiments_wait
+    assert wait is not None
+    assert wait.done
+    # Readiness still waits for the whole eval, for the startup telemetry.
+    assert not ready.done()
+    second, _client = await _build_adapter(
+        tmp_path, response=None, session=_RecordingSession(), monkeypatch=monkeypatch
+    )
+    _start_experiments(second)
+    assert second._experiments_wait is None
+    first._cancel_experiments_task()
+    await ready
+    second_task = second._experiments_task
+    assert second_task is not None
+    await second_task
+
+
+@pytest.mark.asyncio
+async def test_unified_an_eval_outlasting_the_cap_in_a_pinned_session_stops_later_waits(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    import vibe.core.experiments.wait as wait_module
+
+    _enable_experiments(config_dir)  # the test config pins a built-in model
+    monkeypatch.setattr(wait_module, "EVAL_WAIT_CAP_SECONDS", 0.05)
+    pinned, client = await _build_adapter(
+        tmp_path,
+        response=routing_eval_response(_ROUTED_ALIAS),
+        session=_RecordingSession(),
+        monkeypatch=monkeypatch,
+    )
+    _hold_eval(client, monkeypatch)
+    _start_experiments(pinned)
+    assert pinned._experiments_wait is None
+
+    await asyncio.sleep(0.2)
+
+    assert experiments_eval_failed() is True
+    _unpin_with_experiments(config_dir)
+    unpinned, _client = await _build_adapter(
+        tmp_path, response=None, session=_RecordingSession(), monkeypatch=monkeypatch
+    )
+    _start_experiments(unpinned)
+    assert unpinned._experiments_wait is None
+    pinned._cancel_experiments_task()
+    task = unpinned._experiments_task
+    assert task is not None
+    await task
+
+
+@pytest.mark.asyncio
+async def test_unified_a_cache_written_after_the_session_was_built_still_waits(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    _unpin_with_experiments(config_dir)
+    second, _client = await _build_adapter(
+        tmp_path,
+        response=routing_eval_response(_ROUTED_ALIAS),
+        session=_RecordingSession(),
+        monkeypatch=monkeypatch,
+    )
+    first, _client = await _build_adapter(
+        tmp_path,
+        response=routing_eval_response(_ROUTED_ALIAS),
+        session=_RecordingSession(),
+        monkeypatch=monkeypatch,
+    )
+    # Another session's eval writes the cache before this one opens.
+    await first.initialize_experiments(_launch_context())
+
+    _start_experiments(second)
+
+    assert second._experiments_wait is not None
+    task = second._experiments_task
+    assert task is not None
+    await task
+
+
+@pytest.mark.asyncio
+async def test_unified_a_slow_lookup_without_an_eval_is_not_an_eval_failure(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    import vibe.core.experiments.wait as wait_module
+
+    # The A/B opt-out still resolves identity for telemetry, but sends no eval.
+    _enable_experiments(config_dir, enable=False)
+    monkeypatch.setattr(wait_module, "EVAL_WAIT_CAP_SECONDS", 0.05)
+    adapter, _client = await _build_adapter(
+        tmp_path, response=None, session=_RecordingSession(), monkeypatch=monkeypatch
+    )
+    released = asyncio.Event()
+
+    async def _slow_identity(*_args: object, **_kwargs: object) -> object:
+        await released.wait()
+        return IdentityResult(id="user-1", organization=None, workspace=None)
+
+    monkeypatch.setattr("vibe.core.identity_cache.fetch_identity", _slow_identity)
+    _start_experiments(adapter)
+
+    await asyncio.sleep(0.2)
+
+    assert adapter._experiments_wait is None
+    assert experiments_eval_failed() is False
+    released.set()
+    task = adapter._experiments_task
     assert task is not None
     await task

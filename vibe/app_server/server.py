@@ -48,6 +48,7 @@ from vibe.app_server._session_backend_port import (
 )
 from vibe.app_server._session_backend_services import SessionBackendServices
 from vibe.app_server._session_lease_subscription import SessionLeaseSubscription
+from vibe.app_server._session_spawn import SessionSpawnError
 from vibe.app_server.connector_catalog import ConnectorCatalogService
 from vibe.app_server.events import (
     CallbackRequested,
@@ -57,6 +58,7 @@ from vibe.app_server.events import (
 from vibe.app_server.models import OpenCallbackState, PublicCallbackEntry
 from vibe.app_server.protocol import (
     SERVER_METHODS,
+    SESSION_SPAWN_METHOD,
     AgentInstallParams,
     AgentSwitchParams,
     CallbackCallParams,
@@ -112,6 +114,8 @@ from vibe.app_server.protocol import (
     SessionRewindParams,
     SessionSettingsUpdateParams,
     SessionSnapshotParams,
+    SessionSpawnParams,
+    SessionSpawnResponse,
     SessionStartParams,
     SessionStartResponse,
     SessionTitleUpdateParams,
@@ -128,6 +132,7 @@ from vibe.app_server.protocol import (
     TurnQueueResumeParams,
     TurnQueueSteerParams,
     TurnStartParams,
+    TurnStartResponse,
     TurnSteerParams,
     format_invalid_params_issues,
     validate_callback_acknowledgement,
@@ -249,6 +254,9 @@ class AppServer:
         self._next_request_id = 1
         self._event_watermarks: dict[str, int] = {}
         self._callback_requests: dict[int, CallbackDelivery] = {}
+        self._spawn_requests: dict[int, asyncio.Future[SessionSpawnResponse]] = {}
+        # Timed out on our side; the client may still answer.
+        self._unanswered_spawns: set[int] = set()
         self._request_tasks: set[asyncio.Task[None]] = set()
         self._leases = SessionLeaseSubscription(self._send_notification)
         self._backend_event_task: asyncio.Task[None] | None = None
@@ -500,6 +508,7 @@ class AppServer:
             except BaseException as exc:
                 errors.append(exc)
             self._callback_requests.clear()
+            self._abandon_spawn_requests("The app server closed")
             self._pending_notifications.clear()
             self._connection_attached = False
             self._attaching = False
@@ -537,6 +546,7 @@ class AppServer:
             except BaseException as exc:
                 errors.append(exc)
         self._callback_requests.clear()
+        self._abandon_spawn_requests("The client disconnected")
         self._pending_notifications.clear()
         self._connection_attached = False
         self._attaching = False
@@ -1126,6 +1136,11 @@ class AppServer:
         if method == "session/start":
             params = validate_wire(SessionStartParams, raw_params)
             lifecycle = await self._session_backend_host.start(params)
+            try:
+                first_turn = await self._apply_start_choices(lifecycle.backend, params)
+            except BaseException:
+                await self._discard_started(lifecycle.backend)
+                raise
             self._record_session_created(lifecycle.backend)
             response = await self._activate_backend(
                 lifecycle.backend, params.history_limit
@@ -1134,7 +1149,13 @@ class AppServer:
                 SessionStartResponse(
                     state=response.state, last_event_id=response.last_event_id
                 ),
-                after_response=lifecycle.after_response,
+                after_response=_in_order(
+                    lifecycle.after_response,
+                    first_turn.after_response if first_turn else None,
+                ),
+                on_response_abandoned=(
+                    first_turn.on_response_abandoned if first_turn else None
+                ),
                 session_attached=True,
             )
         if method == "session/resume":
@@ -1166,6 +1187,55 @@ class AppServer:
                 runtime_updated=True,
             )
         raise RuntimeError(f"Unsupported session lifecycle method: {method}")
+
+    async def _discard_started(self, backend: SessionBackend) -> None:
+        """A first turn that failed may already have saved the session, and the
+        client never gets its id to delete it.
+        """
+        host = self._session_backend_host
+        if not isinstance(host, SessionBackendHostDelete):
+            await backend.shutdown()
+            return
+        await host.delete(SessionDeleteParams(session_id=backend.session_id))
+
+    async def _apply_start_choices(
+        self, backend: SessionBackend, params: SessionStartParams
+    ) -> SessionBackendResult[TurnStartResponse] | None:
+        """Everything but the first turn applies while the session is unsaved, so
+        a rejected choice leaves no session behind. The model goes last: unless
+        `session_only`, it also writes the user's default, which a choice
+        rejected after it would leave changed. The host already applied and
+        pinned `agent_config.agent`.
+        """
+        session_id = backend.session_id
+        if params.title is not None:
+            await self._session_backend_host.rename(
+                SessionTitleUpdateParams(session_id=session_id, title=params.title)
+            )
+        if params.model is not None or params.reasoning_effort is not None:
+            written = await backend.write_model_config(
+                ModelConfigWriteParams(
+                    session_id=session_id,
+                    model_alias=params.model,
+                    reasoning_effort=params.reasoning_effort,
+                    session_only=params.session_only,
+                )
+            )
+            if written.response.rejected or written.response.failures:
+                raise RequestFailure(
+                    ProtocolErrorCode.INVALID_PARAMS,
+                    "; ".join(written.response.failures)
+                    or "The configuration rejected the model choice",
+                )
+        if params.first_turn is None:
+            return None
+        return await backend.start_turn(
+            TurnStartParams(
+                session_id=session_id,
+                message=params.first_turn.message,
+                client_user_message_id=params.first_turn.client_user_message_id,
+            )
+        )
 
     def _record_session_created(self, backend: SessionBackend) -> None:
         logger.debug(
@@ -1454,6 +1524,18 @@ class AppServer:
         request_id = response.id
         if not isinstance(request_id, int):
             raise JsonRpcProtocolError("Server request responses require integer IDs")
+        spawn = self._spawn_requests.pop(request_id, None)
+        if spawn is not None:
+            _settle_spawn(spawn, response)
+            return
+        if request_id in self._unanswered_spawns:
+            self._unanswered_spawns.discard(request_id)
+            logger.info(
+                "session/spawn %s answered after the tool gave up on it: %s",
+                request_id,
+                "refused" if isinstance(response, JsonRpcErrorResponse) else "started",
+            )
+            return
         callback_route = self._callback_requests.pop(request_id, None)
         if callback_route is None:
             raise JsonRpcProtocolError(
@@ -1601,6 +1683,50 @@ class AppServer:
     async def publish_callback(self, callback: PublicCallbackEntry) -> None:
         await self._publish_callback(callback)
 
+    async def spawn_session(self, params: SessionSpawnParams) -> SessionSpawnResponse:
+        if not self._client_capabilities.session_spawn:
+            raise SessionSpawnError("The attached client cannot start sessions")
+        transport = self._transport
+        if transport is None or not self._connection_attached:
+            raise SessionSpawnError("No client is attached to start the session")
+        request_id = self._next_request_id
+        self._next_request_id += 1
+        spawned = asyncio.get_running_loop().create_future()
+        self._spawn_requests[request_id] = spawned
+        try:
+            try:
+                await transport.send({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": SESSION_SPAWN_METHOD,
+                    # An option left out is absent rather than null.
+                    "params": params.model_dump(
+                        mode="json", by_alias=True, exclude_none=True
+                    ),
+                })
+            except Exception as exc:
+                raise SessionSpawnError(
+                    f"Could not reach the client to start the session: {exc}"
+                ) from exc
+            return await spawned
+        finally:
+            self._spawn_requests.pop(request_id, None)
+            if spawned.cancelled() or not spawned.done():
+                self._unanswered_spawns.add(request_id)
+
+    def _abandon_spawn_requests(self, reason: str) -> None:
+        for spawned in self._spawn_requests.values():
+            if not spawned.done():
+                spawned.set_exception(
+                    SessionSpawnError(
+                        f"{reason} before confirming the session, so it may or may "
+                        "not have started. Do not start it again before the user "
+                        "has checked their sessions."
+                    )
+                )
+        self._spawn_requests.clear()
+        self._unanswered_spawns.clear()
+
     def _sequence_notification(self, params: ProtocolModel) -> ProtocolModel:
         if not isinstance(params, EventNotificationParams):
             return params
@@ -1642,6 +1768,38 @@ class AppServer:
 
     def _event_watermark(self, session_id: str) -> int:
         return self._event_watermarks.get(session_id, 0)
+
+
+def _in_order(*callbacks: Callable[[], None] | None) -> Callable[[], None] | None:
+    present = [callback for callback in callbacks if callback is not None]
+    if not present:
+        return None
+
+    def run() -> None:
+        for callback in present:
+            callback()
+
+    return run
+
+
+def _settle_spawn(
+    spawned: asyncio.Future[SessionSpawnResponse],
+    response: JsonRpcErrorResponse | JsonRpcSuccessResponse,
+) -> None:
+    """Resolve a pending ``session/spawn`` with the client's answer. A refusal
+    or a malformed answer is the spawn's failure, not the connection's.
+    """
+    if spawned.done():
+        return
+    if isinstance(response, JsonRpcErrorResponse):
+        spawned.set_exception(SessionSpawnError(response.error.message))
+        return
+    try:
+        spawned.set_result(validate_wire(SessionSpawnResponse, response.result))
+    except ValidationError as exc:
+        spawned.set_exception(
+            SessionSpawnError(f"The client answered session/spawn invalidly: {exc}")
+        )
 
 
 def _omits_session_id(method: str, raw_params: dict[str, Any]) -> bool:

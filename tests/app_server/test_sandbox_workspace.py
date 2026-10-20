@@ -15,6 +15,7 @@ import pytest
 
 pytest.importorskip("mistralai_vibe_local_harness.vibe")
 
+from mistralai_vibe_local_harness.vibe import SandboxExecResult
 from tests.stubs.local_sandbox import (
     ROOT_DOC,
     SUB_DOC,
@@ -22,8 +23,10 @@ from tests.stubs.local_sandbox import (
     build_trusted_project,
 )
 from vibe.app_server._runtime import HarnessProcess
+from vibe.app_server._sandbox_workspace import sandbox_git_status
 from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
 from vibe.app_server.protocol import SessionOptions
+from vibe.core.config import ProjectContextConfig
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.trusted_folders import trusted_folders_manager
 
@@ -153,3 +156,39 @@ async def test_a_sandboxed_session_without_git_says_so_like_the_host(
         derived.core_config.system_instructions
     )
     await process.close()
+
+
+class _TimedSandbox(RecordingSandbox):
+    """A Recording Sandbox that also records each command's time limit."""
+
+    def __init__(self, workspace: Path) -> None:
+        super().__init__(workspace)
+        self.timeouts: list[float | None] = []
+
+    async def execute(
+        self, command: str, cwd: str, timeout: float | None
+    ) -> SandboxExecResult:
+        self.timeouts.append(timeout)
+        return await super().execute(command, cwd, timeout)
+
+
+@pytest.mark.asyncio
+async def test_a_sandboxed_session_reads_git_metadata_in_one_round_trip(
+    project: Path,
+) -> None:
+    """*Prepare*: A sandbox over a repository, and the default 2s git timeout.
+    *Do*: Read the git metadata section through the sandbox.
+    *Assert*: It names the branch, and took one sandbox call, with a time
+    limit longer than the 2s meant for git on the host.
+    """
+    # Prepare
+    sandbox = _TimedSandbox(project)
+    config = ProjectContextConfig()
+
+    # Do
+    section = await sandbox_git_status(sandbox, config, cwd=project)
+
+    # Assert
+    assert "Current branch: main" in section
+    assert len(sandbox.commands) == 1
+    assert sandbox.timeouts == [10.0]

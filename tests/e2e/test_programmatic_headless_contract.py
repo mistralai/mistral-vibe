@@ -8,6 +8,7 @@ endpoint received.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import signal
@@ -32,6 +33,7 @@ from tests.e2e.common import (
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
 from vibe import __version__
 from vibe.app_server.run_export import RunUsage
+from vibe.core.config._defaults import DEFAULT_OUTPUT_LIMIT_RETRIES
 
 pytestmark = [pytest.mark.timeout(90), pytest.mark.usefixtures("setup_e2e_env")]
 
@@ -601,9 +603,10 @@ def _truncated_reply(
 def test_response_cut_off_at_the_output_cap_is_a_length_outcome(
     streaming_mock_server: StreamingMockServer, e2e_workdir: Path, tmp_path: Path
 ) -> None:
-    """*Prepare*: A model whose answer stops at the output cap.
+    """*Prepare*: A model whose every answer stops at the output cap.
     *Do*: Run `vibe -p`.
-    *Assert*: Exit 3 and the export reports `length`.
+    *Assert*: Vibe asks again with feedback up to the retry cap, then exits 3
+    and the export reports `length`.
     """
     # Prepare
     output_dir = tmp_path / "out"
@@ -619,7 +622,11 @@ def test_response_cut_off_at_the_output_cap_is_a_length_outcome(
     assert export.outcome == "length"
     assert export.exit_code == 3
     assert export.stop_reason == "length"
-    assert len(streaming_mock_server.requests) == 1
+    assert len(streaming_mock_server.requests) == 1 + DEFAULT_OUTPUT_LIMIT_RETRIES
+    last_request = json.dumps(streaming_mock_server.requests[-1])
+    assert last_request.count("reached the output token limit") == (
+        DEFAULT_OUTPUT_LIMIT_RETRIES
+    )
 
 
 def _refused_reply(

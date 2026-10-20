@@ -3,6 +3,7 @@
 pub mod add_args;
 mod browser;
 pub mod commands;
+mod connect;
 mod help;
 mod labels;
 mod notices;
@@ -57,8 +58,18 @@ pub enum Event {
         toggle: Toggle,
         message: String,
     },
-    /// The viewed source awaits auth.
-    AuthRequested,
+    /// The viewed source has a pending action to start.
+    ActionRequested,
+    /// `connector_catalog/connect` for `name` answered; its response carries the new runtime.
+    Connected {
+        name: String,
+        response: Value,
+    },
+    /// `connector_catalog/connect` for `name` failed with this message.
+    ConnectFailed {
+        name: String,
+        message: String,
+    },
     Error(String),
 }
 
@@ -144,7 +155,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
         } => {
             crate::mcp_oauth::dismiss(app);
             // A reopen that raced an open browser shows its list rather than loop back into auth.
-            if reopened && viewing_awaits_auth(app, &state) {
+            if reopened && viewing_pending_action(app, &state) {
                 back(app);
             }
             if let Some(response) = response {
@@ -170,7 +181,9 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             toggle::revert(app, &toggle);
             app.show_toast(message, crate::app::ToastSeverity::Warning, TOAST_SECS);
         }
-        Event::AuthRequested => browser::hand_off_auth(app, client),
+        Event::ActionRequested => browser::hand_off(app, client),
+        Event::Connected { name, response } => connect::finished(app, client, &name, &response),
+        Event::ConnectFailed { name, message } => connect::failed(app, &name, &message),
         Event::Error(message) => {
             crate::mcp_oauth::dismiss(app);
             add_error(app, &message);
@@ -179,10 +192,10 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
     app.commit_finished();
 }
 
-fn viewing_awaits_auth(app: &App, state: &MCPState) -> bool {
+fn viewing_pending_action(app: &App, state: &MCPState) -> bool {
     app.mcp.viewing_name.as_deref().is_some_and(|name| {
         rows::find_source(state, name, app.mcp.viewing_kind)
-            .is_some_and(|source| rows::awaits_auth(state, source))
+            .is_some_and(|source| rows::pending_action(state, source).is_some())
     })
 }
 
@@ -215,8 +228,9 @@ fn open(app: &mut App, mut state: MCPState, initial_source: &str, reopened: bool
         );
         return;
     }
-    // After an auth flow that left it unauthenticated, show the list rather than loop back.
-    let viewing = viewing.filter(|source| !(reopened && rows::awaits_auth(&state, source)));
+    // After a flow that left it unusable, show the list rather than loop back.
+    let viewing =
+        viewing.filter(|source| !(reopened && rows::pending_action(&state, source).is_some()));
     add_result(app, "MCP and connectors opened...");
     app.mcp.search = crate::search_field::Search::default();
     app.mcp.viewing_name = viewing.map(|source| source.name.clone());
@@ -259,7 +273,7 @@ fn set_state(app: &mut App, state: MCPState) {
         select_row_id(app, &id);
     }
     reconcile_selection(app);
-    browser::request_auth(app);
+    browser::request_action(app);
 }
 
 /// Keep the highlight on a selectable row after the rows were rebuilt, landing

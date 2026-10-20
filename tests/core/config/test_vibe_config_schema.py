@@ -109,6 +109,32 @@ def test_stream_idle_timeout_is_off_by_default_and_never_negative() -> None:
         VibeConfigSchema(api_stream_idle_timeout=-1.0)
 
 
+def test_compaction_and_output_limits_default_on() -> None:
+    config = VibeConfigSchema()
+    assert config.compaction_max_output_tokens == 80_000
+    assert config.compaction_thinking is None
+    assert config.compaction_reasoning_limit_tokens == 32_000
+    assert config.output_limit_retries == 6
+    assert config.output_token_reserve == 4_096
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        {"compaction_max_output_tokens": -1},
+        {"compaction_reasoning_limit_tokens": -1},
+        {"output_limit_retries": -1},
+        {"output_token_reserve": -1},
+        {"compaction_thinking": "extreme"},
+    ],
+)
+def test_compaction_and_output_limits_reject_invalid_values(
+    setting: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        VibeConfigSchema.model_validate(setting)
+
+
 def test_duplicate_model_alias_last_wins() -> None:
     config = VibeConfigSchema.model_validate({
         "models": [
@@ -793,6 +819,7 @@ def test_admin_allowed_models_matching_nothing_are_rejected() -> None:
         VibeConfigSchema.validate_merged(
             {"models": models, "allowed_models": ["does-not-exist"]},
             origins={"allowed_models": "admin"},
+            defined_entries={},
         )
 
 
@@ -999,6 +1026,60 @@ def test_log_level_rejects_invalid() -> None:
 @pytest.mark.parametrize("level", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
 def test_log_level_accepts_canonical_levels(level: str) -> None:
     assert VibeConfigSchema(log_level=level).log_level == level
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["bash", "git_bash", "powershell"])
+async def test_a_shell_default_timeout_above_its_maximum_is_a_config_error(
+    tmp_path: Path, tool: str
+) -> None:
+    """*Prepare*: A `config.toml` whose shell tool has a default timeout above its
+    maximum.
+    *Do*: Load the config.
+    *Assert*: Loading fails, naming both values; the default is not lowered.
+    """
+    # Prepare
+    toml_path = tmp_path / "config.toml"
+    toml_path.write_text(
+        f"[tools.{tool}]\ndefault_timeout = 900\nmax_timeout_seconds = 600\n"
+    )
+
+    # Do / Assert
+    with patch.dict(os.environ, {}, clear=True):
+        user = UserConfigLayer(path=toml_path)
+        with pytest.raises(ValidationError) as exc_info:
+            _ = await ConfigOrchestrator.create(
+                schema=VibeConfigSchema,
+                layers=[user],
+                default_layer_resolver=lambda: user,
+            )
+
+    message = str(exc_info.value)
+    assert f"tools.{tool}: default_timeout 900" in message
+    assert "max_timeout_seconds 600" in message
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"default_timeout": 300, "max_timeout_seconds": 1_200},
+        {"default_timeout": 600, "max_timeout_seconds": 600},
+        {"default_timeout": 1_200},
+        {"max_timeout_seconds": 60},
+    ],
+)
+def test_shell_timeouts_within_their_maximum_load_unchanged(
+    settings: dict[str, int],
+) -> None:
+    """*Prepare*: Shell timeouts with the default at most the maximum, or only one set.
+    *Do*: Load the config.
+    *Assert*: They load as given.
+    """
+    # Do
+    config = VibeConfigSchema.model_validate({"tools": {"bash": settings}})
+
+    # Assert
+    assert config.tools["bash"] == settings
 
 
 @pytest.mark.asyncio

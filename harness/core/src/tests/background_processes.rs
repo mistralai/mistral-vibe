@@ -217,7 +217,8 @@ fn programmatic_background_process_route_matrix_survives_restore() {
     for (index, (action, case)) in actions.iter().zip(&expected).enumerate() {
         let command = structured_tool_success(action, &case.result);
         let live = accepted_value(session.apply(input(3 + index as u64, command.clone())));
-        let restored_result = accepted_value(restored.apply(input(1 + index as u64, command)));
+        let restored_result =
+            accepted_value(restored.apply(input_at(1 + index as u64, 3 + index as u64, command)));
 
         assert_eq!(
             live["transition"]["observations"],

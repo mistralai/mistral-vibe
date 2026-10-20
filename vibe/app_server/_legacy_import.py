@@ -117,7 +117,7 @@ class LegacySessionStore:
             return None
         try:
             messages, metadata_dict = SessionLoader.load_session(session_dir)
-        except OSError, ValueError:
+        except (OSError, ValueError):
             return None
         if not metadata_dict:
             return None

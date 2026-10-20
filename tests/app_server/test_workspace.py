@@ -61,13 +61,13 @@ def test_mentioned_file_content_blocks_attach_text_resources(
 
 
 def test_mentioned_file_content_blocks_cap_text_resources(tmp_path: Path) -> None:
-    (tmp_path / "large.txt").write_text("x" * (60 * 1024), encoding="utf-8")
+    (tmp_path / "large.txt").write_text("x" * (70 * 1024), encoding="utf-8")
 
     [block] = mentioned_file_content_blocks("read @large.txt", base_dir=tmp_path)
 
     assert isinstance(block, ResourceContentBlock)
     assert isinstance(block.resource, UserTextResource)
-    assert len(block.resource.text.encode("utf-8")) < 53 * 1024
+    assert len(block.resource.text.encode("utf-8")) < 64_000 + 2 * 1024
     assert "truncated" in block.resource.text
 
 

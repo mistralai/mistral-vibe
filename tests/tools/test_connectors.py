@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import json
 from typing import Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import httpx
-from mcp.shared.exceptions import McpError
-from mcp.types import ErrorData
 import pytest
 import respx
 
@@ -15,7 +13,6 @@ from tests.constants import CONNECTORS_BOOTSTRAP_PATH, MISTRAL_BASE_URL
 from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.core.config import ConnectorConfig, VibeConfigSchema
-from vibe.core.tools.base import BaseToolConfig, ToolError
 from vibe.core.tools.connectors import (
     compute_connector_counts,
     connector_registry as connector_registry_module,
@@ -26,14 +23,13 @@ from vibe.core.tools.connectors.connector_registry import (
     ConnectorRegistry,
     RemoteTool,
     _bootstrap_cache_key,
-    _connector_error_message,
     _normalize_name,
     _unwrap_http_status_error,
     builtin_connectors,
     create_connector_proxy_tool_class,
 )
 from vibe.core.tools.manager import ToolManager
-from vibe.core.tools.mcp.tools import MCPTool, MCPToolResult
+from vibe.core.tools.mcp.tools import MCPTool
 
 _BOOTSTRAP_CACHE_FILE_NAME = "connector_bootstrap_cache.json"
 
@@ -62,23 +58,13 @@ class TestCreateConnectorProxyTool:
     def test_tool_name(self) -> None:
         remote = RemoteTool(name="search", description="Search docs")
         cls = create_connector_proxy_tool_class(
-            connector_name="deepwiki",
-            connector_alias="deepwiki",
-            connector_id="abc-123",
-            remote=remote,
-            api_key="key",
+            connector_alias="deepwiki", remote=remote
         )
         assert cls.get_name() == "connector_deepwiki_search"
 
     def test_is_connector_flag(self) -> None:
         remote = RemoteTool(name="read", description="Read file")
-        cls = create_connector_proxy_tool_class(
-            connector_name="myconn",
-            connector_alias="myconn",
-            connector_id="id-1",
-            remote=remote,
-            api_key="key",
-        )
+        cls = create_connector_proxy_tool_class(connector_alias="myconn", remote=remote)
         assert issubclass(cls, MCPTool)
         assert cls._is_connector is True
         assert cls.is_connector() is True
@@ -86,11 +72,7 @@ class TestCreateConnectorProxyTool:
     def test_description_includes_alias(self) -> None:
         remote = RemoteTool(name="fetch", description="Fetch page")
         cls = create_connector_proxy_tool_class(
-            connector_name="web_tool",
-            connector_alias="web_tool",
-            connector_id="id-2",
-            remote=remote,
-            api_key="key",
+            connector_alias="web_tool", remote=remote
         )
         assert cls.description.startswith("[web_tool]")
         assert "Fetch page" in cls.description
@@ -106,13 +88,7 @@ class TestCreateConnectorProxyTool:
             "description": "Search",
             "inputSchema": schema,
         })
-        cls = create_connector_proxy_tool_class(
-            connector_name="conn",
-            connector_alias="conn",
-            connector_id="id-3",
-            remote=remote,
-            api_key="key",
-        )
+        cls = create_connector_proxy_tool_class(connector_alias="conn", remote=remote)
         params = cls.get_parameters()
         assert params["properties"]["query"]["type"] == "string"
 
@@ -121,11 +97,7 @@ class TestCreateConnectorProxyTool:
         cls = cast(
             type[MCPTool],
             create_connector_proxy_tool_class(
-                connector_name="my-connector",
-                connector_alias="my-connector",
-                connector_id="id-4",
-                remote=remote,
-                api_key="key",
+                connector_alias="my-connector", remote=remote
             ),
         )
         assert cls.get_server_name() == "my-connector"
@@ -210,69 +182,6 @@ def _make_http_status_error(status: int, body: str = "") -> httpx.HTTPStatusErro
     return httpx.HTTPStatusError("error", request=response.request, response=response)
 
 
-class TestConnectorErrorMessage:
-    def test_timeout(self) -> None:
-        exc = httpx.ReadTimeout("timed out")
-        msg = _connector_error_message(exc, "id-1", "myconn")
-        assert "timed out" in msg.lower()
-        assert "myconn" in msg
-
-    def test_connect_error(self) -> None:
-        exc = httpx.ConnectError("connection refused")
-        msg = _connector_error_message(exc, "id-1", "myconn")
-        assert "network" in msg.lower()
-        assert "myconn" in msg
-
-    def test_exception_group(self) -> None:
-        exc = ExceptionGroup("errors", [ValueError("a"), RuntimeError("b")])
-        msg = _connector_error_message(exc, "id-1", "myconn")
-        assert "multiple errors" in msg.lower()
-        assert "myconn" in msg
-
-    def test_generic_error(self) -> None:
-        exc = RuntimeError("something broke")
-        msg = _connector_error_message(exc, "id-1", "myconn")
-        assert "something broke" in msg
-        assert "myconn" in msg
-
-    def test_http_401_surfaces_auth_message(self) -> None:
-        exc = _make_http_status_error(401, "Unauthorized")
-        msg = _connector_error_message(exc, "id-1", "myconn")
-        assert "authentication failed" in msg.lower()
-        assert "401" in msg
-        assert "Unauthorized" in msg
-
-    def test_http_400_surfaces_response_body(self) -> None:
-        exc = _make_http_status_error(400, '{"error": "missing field X"}')
-        msg = _connector_error_message(exc, "id-1", "myconn")
-        assert "400" in msg
-        assert "missing field X" in msg
-
-    def test_http_404_surfaces_not_found(self) -> None:
-        exc = _make_http_status_error(404)
-        msg = _connector_error_message(exc, "id-1", "myconn")
-        assert "not found" in msg.lower()
-
-    def test_http_error_wrapped_in_exception_group(self) -> None:
-        inner = _make_http_status_error(400, "bad request detail")
-        exc = ExceptionGroup("errors", [inner])
-        msg = _connector_error_message(exc, "id-1", "myconn")
-        assert "400" in msg
-        assert "bad request detail" in msg
-
-    def test_nested_session_terminated_surfaces_gateway_404(self) -> None:
-        leaf = McpError(ErrorData(code=32600, message="Session terminated"))
-        exc = ExceptionGroup("g", [ExceptionGroup("g", [leaf])])
-        msg = _connector_error_message(exc, "id-1", "myconn")
-        assert "HTTP 404" in msg
-
-    def test_nested_connect_error_keeps_ssl_detail(self) -> None:
-        leaf = httpx.ConnectError("CERTIFICATE_VERIFY_FAILED")
-        exc = ExceptionGroup("g", [ExceptionGroup("g", [leaf])])
-        msg = _connector_error_message(exc, "id-1", "myconn")
-        assert "CERTIFICATE_VERIFY_FAILED" in msg
-
-
 class TestUnwrapHttpStatusError:
     def test_direct(self) -> None:
         exc = _make_http_status_error(400)
@@ -295,113 +204,6 @@ class TestUnwrapHttpStatusError:
 
 # ---------------------------------------------------------------------------
 # ConnectorProxyTool.run() via MCP proxy
-# ---------------------------------------------------------------------------
-
-
-class TestConnectorProxyToolRun:
-    @staticmethod
-    def _make_tool_class() -> type[MCPTool]:
-        remote = RemoteTool(name="search", description="Search docs")
-        return cast(
-            type[MCPTool],
-            create_connector_proxy_tool_class(
-                connector_name="wiki",
-                connector_alias="wiki",
-                connector_id="conn-123",
-                remote=remote,
-                api_key="test-key",
-                server_url="https://custom.api.example.com",
-            ),
-        )
-
-    @staticmethod
-    def _make_tool(tool_cls: type[MCPTool]) -> MCPTool:
-        return cast(MCPTool, tool_cls.from_config(lambda: BaseToolConfig()))
-
-    @pytest.mark.asyncio
-    async def test_run_calls_mcp_proxy(self) -> None:
-        cls = self._make_tool_class()
-        tool = self._make_tool(cls)
-        expected = MCPToolResult(
-            ok=True, server="test", tool="search", text="result text"
-        )
-
-        with patch(
-            "vibe.core.tools.connectors.connector_registry.call_tool_http",
-            new_callable=AsyncMock,
-            return_value=expected,
-        ) as mock_call:
-            results = [r async for r in tool.invoke(query="hello")]
-
-        mock_call.assert_awaited_once()
-        call_args = mock_call.call_args
-        assert "/v1/connectors-gateway/conn-123/mcp" in call_args.args[0]
-        assert call_args.args[1] == "search"
-        assert call_args.kwargs["headers"]["Authorization"] == "Bearer test-key"
-
-        assert len(results) == 1
-        assert results[0] == expected
-
-    @pytest.mark.asyncio
-    async def test_run_uses_default_base_url(self) -> None:
-        remote = RemoteTool(name="ping", description="Ping")
-        cls = cast(
-            type[MCPTool],
-            create_connector_proxy_tool_class(
-                connector_name="svc",
-                connector_alias="svc",
-                connector_id="c-1",
-                remote=remote,
-                api_key="key",
-                server_url=None,
-            ),
-        )
-        tool = self._make_tool(cls)
-        expected = MCPToolResult(ok=True, server="s", tool="ping", text="pong")
-
-        with patch(
-            "vibe.core.tools.connectors.connector_registry.call_tool_http",
-            new_callable=AsyncMock,
-            return_value=expected,
-        ) as mock_call:
-            [_ async for _ in tool.invoke()]
-
-        url = mock_call.call_args.args[0]
-        assert url.startswith("https://api.mistral.ai/")
-
-    @pytest.mark.asyncio
-    async def test_run_surfaces_timeout_error(self) -> None:
-        cls = self._make_tool_class()
-        tool = self._make_tool(cls)
-
-        with (
-            patch(
-                "vibe.core.tools.connectors.connector_registry.call_tool_http",
-                new_callable=AsyncMock,
-                side_effect=httpx.ReadTimeout("timed out"),
-            ),
-            pytest.raises(ToolError, match="timed out"),
-        ):
-            [_ async for _ in tool.invoke(query="hello")]
-
-    @pytest.mark.asyncio
-    async def test_run_surfaces_connect_error(self) -> None:
-        cls = self._make_tool_class()
-        tool = self._make_tool(cls)
-
-        with (
-            patch(
-                "vibe.core.tools.connectors.connector_registry.call_tool_http",
-                new_callable=AsyncMock,
-                side_effect=httpx.ConnectError("refused"),
-            ),
-            pytest.raises(ToolError, match="network"),
-        ):
-            [_ async for _ in tool.invoke(query="hello")]
-
-
-# ---------------------------------------------------------------------------
-# ToolManager: per-connector disabled / disabled_tools filtering
 # ---------------------------------------------------------------------------
 
 

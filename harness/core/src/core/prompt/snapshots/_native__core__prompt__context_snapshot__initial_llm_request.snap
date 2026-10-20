@@ -57,7 +57,7 @@ expression: reviewable_snapshot(request)
                   "",
                   "## Agents",
                   "",
-                  "Use the available functions in `tools.agents` through `run_typescript`. Each child has an independent Session and history. Spawn admits its first message without waiting for the answer. Child names are permanent single path segments below /root and cannot be reused. List shows admitted direct children, not provisional work. Agent operations are external effects.",
+                  "Use the available functions in `tools.agents` through `run_typescript`. Before you delegate work to a child, or when a task needs tools you do not have, call `tools.agents.list_configs`. A named configuration can have instructions and tools that you do not have; when one fits the work, pass its name as `config_name`. Omit `config_name` only when none fits: the child then inherits your configuration. Each child has an independent Session and history. Spawn admits its first message without waiting for the answer. Child names are permanent single path segments below /root and cannot be reused. List shows admitted direct children, not provisional work. Agent operations are external effects.",
                   "",
                   "## Available Skills",
                   "",
@@ -240,6 +240,7 @@ expression: reviewable_snapshot(request)
               "- It does not provide ambient filesystem access, Node.js packages, browser APIs, DOM APIs, or direct network I/O. Reach external systems only through the provided `tools.<group>.<function>` functions.",
               "- Execution may pause while tool calls are pending and later replay from the beginning. Local code can therefore run more than once; keep it to pure orchestration, pure data transforms, and tool-call wiring.",
               "- Time, randomness, and promise-selection APIs are recorded automatically and replay deterministically. This includes `Date()`, `new Date()`, `Date.now()`, `performance.now()`, `Math.random()`, `crypto.randomUUID()`, `crypto.getRandomValues()`, `Promise.race()`, and `Promise.any()`.",
+              "- Each program has a time budget, paused while waiting for approvals or hooks. When it runs out, sleeps end early and the program stops before its next tool call.",
               "",
               "### The `main` function",
               "",
@@ -297,7 +298,7 @@ expression: reviewable_snapshot(request)
         },
         {
           "name": "read_file",
-          "description": "Read a text file with optional zero-indexed line offset and limit.",
+          "description": "Read a text file with optional zero-indexed line offset and limit. When `was_truncated` is true, read on from `next_offset`. An offset past the end of the file is an error. A directory reads as a listing of its entries, one per line with `/` after each subdirectory, at most 500 at a time.",
           "parameters": {
             "type": "object",
             "additionalProperties": false,
@@ -398,7 +399,8 @@ expression: reviewable_snapshot(request)
               },
               "timeout_seconds": {
                 "type": "integer",
-                "default": 300,
+                "default": 120,
+                "description": "Seconds the command may run: 120 by default, at most 300. A command that runs longer is stopped, and the result keeps the output it wrote so far with `timed_out` set.",
                 "minimum": 1,
                 "maximum": 300
               }

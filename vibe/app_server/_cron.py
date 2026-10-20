@@ -14,7 +14,20 @@ CRON_TOOL_NAME = "cron"
 CRON_TOOL_DESCRIPTION = """Schedule recurring prompts at an interval (integer seconds, minimum 30) or a \
 standard five-field cron expression in the local timezone. List, cancel by ID, \
 or clear schedules. At most 50 schedules per session, persisted across resumes. \
-Prompts run only while the session is live and idle; missed runs are not caught up."""
+Prompts run only while the session is live and idle; missed runs are not caught up. \
+Write each prompt in two parts: a short title on the first line naming the loop \
+(a few words, not a full sentence), then a line break, then the full instruction. \
+The full instruction is shown to the user as-is every time the loop fires, so \
+write it as a clear, human-readable instruction and avoid internal shorthand or \
+model-facing notes. The first line is displayed in the UI as the loop's name."""
+
+PROMPT_FIELD_DESCRIPTION = (
+    "The prompt to run on every fire, in two parts: a short title on the first "
+    "line naming the loop (a few words, not a full sentence), then a line break, "
+    "then the full instruction, written as a clear, human-readable text for the "
+    "user reading it in the transcript. The first line is displayed in the UI as "
+    "the loop's name."
+)
 
 
 @final
@@ -23,7 +36,7 @@ class ScheduleArgs(BaseModel):
 
     action: Literal["schedule"]
     interval_seconds: int = Field(ge=MIN_INTERVAL_SECONDS, strict=True)
-    prompt: str = Field(min_length=1)
+    prompt: str = Field(min_length=1, description=PROMPT_FIELD_DESCRIPTION)
 
 
 @final
@@ -35,7 +48,7 @@ class ScheduleCronArgs(BaseModel):
         min_length=1,
         description="Standard five-field cron expression: minute hour day month weekday",
     )
-    prompt: str = Field(min_length=1)
+    prompt: str = Field(min_length=1, description=PROMPT_FIELD_DESCRIPTION)
 
 
 @final

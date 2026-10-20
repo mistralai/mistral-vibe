@@ -1,4 +1,4 @@
-# What's new in v3.0.0
+# What's new in v3.0.1
 
 Vibe 3.0 is here: a brand-new terminal UI, and one agent harness across the CLI, VS Code and the browser.
 

@@ -580,6 +580,9 @@ def test_projects_process_start_with_command_in_display() -> None:
     assert projected.state.display.verb == "Started"
     assert projected.state.display.message == "sleep 30"
     assert projected.state.display.suffix == "(running)"
+    # Clients use the id to show the live status of the started process.
+    assert isinstance(projected.state.output, dict)
+    assert projected.state.output["processId"] == "process-abc12345-abcdef"
 
 
 def test_self_sleep_label_renders_the_verb_alone() -> None:

@@ -39,6 +39,7 @@ from vibe.app_server._agent_socket import (
 from vibe.app_server._client_provided_tools import (
     CLIENT_TOOL_TIMEOUT_SECONDS,
     ClientToolCall,
+    ClientToolCaller,
     ClientToolDeclarationError,
     ClientToolDefinition,
     ClientToolError,
@@ -185,11 +186,57 @@ async def test_a_tool_call_carries_the_callback_and_returns_the_servers_answer(
         "name": "kb.lookup",
         "input": {"term": "harness"},
         "toolCallId": "call-1",
+        "caller": None,
     }
     assert found == ClientToolResult(output={"hits": 1}, annotations={"cost": 2})
     assert failed == ClientToolResult(
         error=ClientToolError(message="no such term", code="not_found")
     )
+
+
+@pytest.mark.asyncio
+async def test_a_subagents_tool_call_names_it_as_the_caller(socket_path: Path) -> None:
+    """*Prepare*: An agent server with a tool.
+    *Do*: Call it as a subagent.
+    *Assert*: The request names the subagent, its parent, its root and its
+    agent.
+    """
+
+    # Prepare
+    async def answer(_params: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return {"output": "ok"}
+
+    call = ClientToolCall(
+        call_id="client_tool:1",
+        name="kb.lookup",
+        input={},
+        tool_call_id="call-1",
+        caller=ClientToolCaller(
+            session_id="child",
+            root_session_id="root",
+            parent_session_id="root",
+            name="reader",
+            agent_type="explore",
+        ),
+    )
+    async with FakeAgentServer(
+        socket_path, None, tools=[_LOOKUP], on_tool_call=answer
+    ) as server:
+        agent = await connect_agent_socket(socket_path)
+
+        # Do
+        await agent.call_tool(call)
+
+    # Assert
+    params = server.requests[1]["params"]
+    assert isinstance(params, dict)
+    assert params["caller"] == {
+        "sessionId": "child",
+        "rootSessionId": "root",
+        "parentSessionId": "root",
+        "name": "reader",
+        "agentType": "explore",
+    }
 
 
 @pytest.mark.asyncio

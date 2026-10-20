@@ -8,6 +8,7 @@ from vibe.app_server.config import (
     AudioProviderView,
     ConfigView,
     ModelConfigView,
+    ModelSource,
     SpeechConfigView,
     TranscribeModelConfigView,
     TranscriptionConfigView,
@@ -30,10 +31,36 @@ from vibe.core.config import (
     TTSProviderConfig,
     VibeConfigSchema,
 )
+from vibe.core.config.layers.admin import AdminConfigLayer
+from vibe.core.config.layers.agent_profile import AgentProfileLayer
+from vibe.core.config.layers.default import DefaultConfigLayer
+from vibe.core.config.layers.environment import EnvironmentLayer
+from vibe.core.config.layers.growthbook import GrowthbookLayer
+from vibe.core.config.layers.model_catalog import ModelCatalogLayer
+from vibe.core.config.layers.overrides import OverridesLayer
+from vibe.core.config.layers.project import ProjectConfigLayer
+from vibe.core.config.layers.user import SuppliedUserConfigLayer, UserConfigLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.log_reader import PaginatedLogs
 from vibe.core.skills.models import SkillInfo, SkillSource
 from vibe.core.utils import name_matches
+
+# Model picker display priority, each layer with the group it lists models
+# under: org-curated sources first, the user's own last. Display only -- which
+# layer's values win is the merge's call.
+_MODEL_SOURCES: tuple[tuple[str, ModelSource], ...] = (
+    (AdminConfigLayer.NAME, "admin"),
+    (GrowthbookLayer.NAME, "growthbook"),
+    (ModelCatalogLayer.NAME, "catalog"),
+    (ProjectConfigLayer.NAME, "project"),
+    (AgentProfileLayer.NAME, "project"),
+    (EnvironmentLayer.NAME, "project"),
+    (OverridesLayer.NAME, "project"),
+    (UserConfigLayer.NAME, "local"),
+    # Stands in for the user file when an embedding host supplies the config.
+    (SuppliedUserConfigLayer.NAME, "local"),
+    (DefaultConfigLayer.NAME, "local"),
+)
 
 
 def project_config_view(
@@ -53,8 +80,17 @@ def project_config_view(
     # promise good for every source kind: the link only exists for a
     # file-backed image, so an inline one would still reach a blind model.
     describable = image_fallback and config.get_vision_fallback_model() is not None
+    sources = _model_sources(config)
+    available = config.available_models()
+    # Grouped by source; a model no known layer defines keeps its place, last.
+    models = [available[alias] for alias in sources if alias in available]
+    models += [model for alias, model in available.items() if alias not in sources]
     return ConfigView(
-        active_model=_project_model_config(active_model, image_fallback=image_fallback),
+        active_model=_project_model_config(
+            active_model,
+            image_fallback=image_fallback,
+            source=sources.get(active_model.alias),
+        ),
         active_model_pinned=active_model_pinned,
         images_supported=active_model.supports_images or describable,
         awaiting_experiment_model=awaiting_experiment_model,
@@ -83,8 +119,10 @@ def project_config_view(
         enable_telemetry=config.enable_telemetry,
         experimental_enable_registry_skills=config.experimental_enable_registry_skills,
         models=[
-            _project_model_config(model, image_fallback=image_fallback)
-            for model in config.available_models().values()
+            _project_model_config(
+                model, image_fallback=image_fallback, source=sources.get(model.alias)
+            )
+            for model in models
         ],
         transcribe_models=[model.alias for model in config.transcribe_models],
         tts_models=[model.alias for model in config.tts_models],
@@ -111,8 +149,25 @@ def _project_audio_client(client: TranscribeClient | TTSClient) -> Literal["mist
     raise ValueError(f"Unsupported audio client: {client}")
 
 
+def _model_sources(config: VibeConfigSchema) -> dict[str, ModelSource]:
+    """Each model alias's group, from the highest-priority layer defining it.
+
+    The keys come in picker order: walking the layers by priority, an alias
+    first appears under its highest defining layer, in that layer's own order
+    (the catalog's order for the catalog group). A layer that only adjusts a
+    model, such as a thinking level a pick writes for the session, defines
+    nothing and never moves it.
+    """
+    defined = config.defined_entries_by_layer("models")
+    sources: dict[str, ModelSource] = {}
+    for layer, source in _MODEL_SOURCES:
+        for alias in defined.get(layer, ()):
+            sources.setdefault(alias, source)
+    return sources
+
+
 def _project_model_config(
-    model: ModelConfig, *, image_fallback: bool
+    model: ModelConfig, *, image_fallback: bool, source: ModelSource | None
 ) -> ModelConfigView:
     image_delivery: Literal["native", "resource_link"] | None = None
     if model.supports_images:
@@ -129,6 +184,7 @@ def _project_model_config(
         auto_compact_threshold=model.auto_compact_threshold,
         image_delivery=image_delivery,
         thinking_levels=list(model.thinking_levels),
+        source=source,
     )
 
 

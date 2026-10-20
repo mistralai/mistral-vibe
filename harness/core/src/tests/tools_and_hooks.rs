@@ -80,7 +80,7 @@ fn pending_direct_pre_hook(
 }
 
 ///
-/// *Prepare*: Provided tool groups use a reserved or retired namespace (including every namespace that holds replay-only functions), a built-in direct name, or the same stable ID twice.
+/// *Prepare*: Provided tool groups use a reserved namespace, a built-in direct name, or the same stable ID twice.
 /// *Do*: Create a Harness session from each invalid configuration.
 /// *Assert*: Session creation rejects each collision with the exact configuration error.
 ///
@@ -95,10 +95,8 @@ fn provided_tool_name_collisions_reject_session_creation() {
             "exposure": exposure,
         })
     };
-    let retired_namespaces = ["agent", "collaboration", "subagent"];
     let reserved_configs = crate::core::tools::resolved::RESERVED_TOOL_NAMESPACES
         .into_iter()
-        .chain(retired_namespaces)
         .map(|namespace| {
             let mut config = config();
             config.settings.tools.background_processes = BackgroundProcessMode::Disabled;
@@ -303,6 +301,7 @@ fn direct_tool_hooks_commit_only_the_transformed_result() {
     assert_eq!(post_hook_pending["transition"]["observations"], json!([]));
     let committed = &transformed["transition"]["observations"][0];
     assert_eq!(committed["type"], "tool_result_committed");
+    assert_eq!(committed["call"], tool_action["call"]);
     assert_eq!(
         committed["result"]["content"][0]["text"],
         "transformed public result"

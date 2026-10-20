@@ -1,23 +1,15 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from pydantic import BaseModel, ValidationError
 import pytest
 
-from tests.mock.utils import collect_result
-from vibe.core.tools.base import BaseToolState, ToolError
 from vibe.core.tools.builtins.edit import EditArgs
 from vibe.core.tools.builtins.experimental_bash import ExperimentalBashArgs
 from vibe.core.tools.builtins.git_bash import GitBashArgs
 from vibe.core.tools.builtins.grep import GrepArgs
 from vibe.core.tools.builtins.read_file import ReadFileArgs
 from vibe.core.tools.builtins.windows_shell import WindowsShellArgs
-from vibe.core.tools.builtins.write_file import (
-    WriteFile,
-    WriteFileArgs,
-    WriteFileConfig,
-)
+from vibe.core.tools.builtins.write_file import WriteFileArgs
 from vibe.utils import paths
 
 MSYS_PATH = "/c/Users/acmedev/test/notes.md"
@@ -80,16 +72,3 @@ def test_path_argument_is_untouched_off_windows(
     args = model.model_validate({field: raw, **extra})
 
     assert getattr(args, field) == raw
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("on_windows")
-async def test_driveless_path_fails_the_tool_call_without_creating_anything(
-    tmp_working_directory: Path,
-) -> None:
-    tool = WriteFile(lambda: WriteFileConfig(), BaseToolState())
-
-    with pytest.raises(ToolError, match="drive"):
-        await collect_result(tool.invoke(file_path=DRIVELESS_PATH, content="hello"))
-
-    assert not (tmp_working_directory / "Users").exists()

@@ -114,7 +114,7 @@ def _read_file_path(
         path = context.config.workspace.cwd / path
     try:
         return path.resolve()
-    except OSError, ValueError:
+    except (OSError, ValueError):
         return None
 
 

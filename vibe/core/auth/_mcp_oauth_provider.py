@@ -26,7 +26,7 @@ async def _classify_refresh_error(response: httpx.Response) -> tuple[str, bool]:
         # body arrives unread in the httpx auth flow
         await response.aread()
         payload = response.json()
-    except ValueError, httpx.HTTPError:
+    except (ValueError, httpx.HTTPError):
         return f"HTTP {response.status_code}", False
     if not isinstance(payload, dict):
         return f"HTTP {response.status_code}", False

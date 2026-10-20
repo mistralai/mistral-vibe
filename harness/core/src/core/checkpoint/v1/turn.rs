@@ -1,14 +1,15 @@
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
 use crate::core::features::compaction::{
-    CompactionBudget, CompactionProjection, CompactionProjectionFit, CompactionTrigger,
-    PendingCompaction,
+    CompactionBudget, CompactionProjection, CompactionProjectionFit, CompactionRequestKind,
+    CompactionTrigger, NewestToolExchange, PendingCompaction,
 };
 use crate::core::hooks::{HookPoint, hook_action_id};
 use crate::core::model_context::ModelContext;
 use crate::core::state::{ActivePhase, ActiveTurn, QueuedTurn, TurnState};
 use crate::core::step_protocol::ToolDefinition;
-use crate::core::turn::{PendingLifecycleHook, SuspendedTurn, TurnOutcome};
+use crate::core::turn::{PendingLifecycleHook, TurnOutcome};
 use crate::core::wire::content::{ContentBlock, validate_non_empty_content};
 use crate::core::wire::message::StoredMessage;
 
@@ -37,6 +38,8 @@ enum CheckpointTurnStateRepr {
         queued: CheckpointQueuedTurn,
         pending_steer: Vec<CheckpointStoredMessage>,
         model_input_ready: bool,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        output_limit_retries: u32,
     },
     Terminal {
         turn_id: String,
@@ -72,6 +75,7 @@ impl CheckpointTurnState {
                     queued: CheckpointQueuedTurn::capture(&active.queued)?,
                     pending_steer: capture_pending_steer(&active.pending_steer)?,
                     model_input_ready: active.model_input_ready,
+                    output_limit_retries: active.output_limit_retries,
                 }))
             }
             TurnState::Terminal { turn_id, outcome } => {
@@ -103,7 +107,12 @@ impl CheckpointTurnState {
                     pending: PendingCompaction::between_turns(
                         compaction_id,
                         trigger.restore(),
-                        projection.restore(generated_system.clone(), tools, budget)?,
+                        projection.restore(
+                            generated_system.clone(),
+                            tools,
+                            budget,
+                            NewestToolExchange::MayRemove,
+                        )?,
                     ),
                 })
             }
@@ -114,6 +123,7 @@ impl CheckpointTurnState {
                 queued,
                 pending_steer,
                 model_input_ready,
+                output_limit_retries,
             } => {
                 if turn_id.trim().is_empty() {
                     return Err("active checkpoint turn ID must not be empty".to_string());
@@ -132,6 +142,7 @@ impl CheckpointTurnState {
                     phase,
                     pending_steer: restore_pending_steer(pending_steer)?,
                     model_input_ready,
+                    output_limit_retries,
                     queued: queued.restore()?,
                 }))
             }
@@ -150,7 +161,42 @@ impl CheckpointTurnState {
 #[serde(deny_unknown_fields)]
 struct CheckpointCompactionProjection {
     attempt: u32,
+    /// Absent in checkpoints captured before the standalone fallback existed.
+    #[serde(
+        default,
+        skip_serializing_if = "CheckpointCompactionRequest::is_in_context"
+    )]
+    request: CheckpointCompactionRequest,
     messages: Vec<CheckpointStoredMessage>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+enum CheckpointCompactionRequest {
+    #[default]
+    #[serde(rename = "in_context")]
+    InContext,
+    #[serde(rename = "standalone")]
+    Standalone,
+}
+
+impl CheckpointCompactionRequest {
+    fn is_in_context(&self) -> bool {
+        *self == Self::InContext
+    }
+
+    fn capture(request: CompactionRequestKind) -> Self {
+        match request {
+            CompactionRequestKind::InContext => Self::InContext,
+            CompactionRequestKind::Standalone => Self::Standalone,
+        }
+    }
+
+    fn restore(self) -> CompactionRequestKind {
+        match self {
+            Self::InContext => CompactionRequestKind::InContext,
+            Self::Standalone => CompactionRequestKind::Standalone,
+        }
+    }
 }
 
 impl CheckpointCompactionProjection {
@@ -163,6 +209,7 @@ impl CheckpointCompactionProjection {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             attempt: projection.attempt(),
+            request: CheckpointCompactionRequest::capture(projection.request_kind()),
             messages,
         })
     }
@@ -172,6 +219,7 @@ impl CheckpointCompactionProjection {
         generated_system: StoredMessage,
         tools: &[ToolDefinition],
         budget: CompactionBudget,
+        newest_tool_exchange: NewestToolExchange,
     ) -> Result<CompactionProjection, String> {
         let mut messages = vec![generated_system];
         messages.extend(
@@ -180,15 +228,22 @@ impl CheckpointCompactionProjection {
                 .map(CheckpointStoredMessage::restore)
                 .collect::<Result<Vec<_>, _>>()?,
         );
-        let projection = CompactionProjection::restore(messages, self.attempt)
-            .map_err(|error| error.detail().to_string())?;
-        match projection
-            .fit_to_budget(tools, budget)
-            .map_err(|error| error.detail().to_string())?
+        match CompactionProjection::restore(
+            messages,
+            self.attempt,
+            self.request.restore(),
+            tools,
+            budget,
+            newest_tool_exchange,
+        )
+        .map_err(|error| error.detail().to_string())?
         {
             CompactionProjectionFit::Fitted(projection) => Ok(projection),
             CompactionProjectionFit::TooLarge => Err(
                 "token threshold cannot fit the generated system prompt, latest user message, tool catalog, and compaction prompt".to_string(),
+            ),
+            CompactionProjectionFit::ToolResultTooLarge { .. } => Err(
+                "token threshold cannot fit the newest tool calls and their results".to_string(),
             ),
         }
     }
@@ -290,7 +345,12 @@ impl CheckpointActivePhase {
                     compaction_id,
                     turn_id.to_string(),
                     iterations,
-                    projection.restore(generated_system, tools, budget)?,
+                    projection.restore(
+                        generated_system,
+                        tools,
+                        budget,
+                        NewestToolExchange::Keep,
+                    )?,
                 ),
             }),
             Self::AwaitingToolBatch { batch } => Ok(ActivePhase::AwaitingToolBatch {
@@ -419,7 +479,10 @@ enum CheckpointPendingLifecycleHook {
     PreAgentTurn {
         hook_binding_ids: Vec<String>,
         user_content: Vec<ContentBlock>,
-        previous_turn: CheckpointInactiveTurnState,
+        /// Deprecated: still written by `mistralai-vibe-harness` 0.1.9. Accepted
+        /// so those checkpoints restore; the value is ignored and never written.
+        #[serde(default, skip_serializing)]
+        previous_turn: IgnoredAny,
     },
     PreLlmCall {
         hook_binding_ids: Vec<String>,
@@ -445,7 +508,6 @@ impl CheckpointPendingLifecycleHook {
                 hook_binding_ids,
                 turn_id,
                 user_content,
-                suspended,
             } => {
                 validate_non_empty_content(user_content, "pre-agent user content")
                     .map_err(|error| error.detail().to_string())?;
@@ -462,7 +524,7 @@ impl CheckpointPendingLifecycleHook {
                 Ok(Self::PreAgentTurn {
                     hook_binding_ids: hook_binding_ids.clone(),
                     user_content: user_content.clone(),
-                    previous_turn: CheckpointInactiveTurnState::capture(suspended)?,
+                    previous_turn: IgnoredAny,
                 })
             }
             PendingLifecycleHook::PreLlmCall {
@@ -522,7 +584,7 @@ impl CheckpointPendingLifecycleHook {
             Self::PreAgentTurn {
                 hook_binding_ids,
                 user_content,
-                previous_turn,
+                previous_turn: _,
             } => {
                 validate_non_empty_content(&user_content, "pre-agent user content")
                     .map_err(|error| error.detail().to_string())?;
@@ -531,7 +593,6 @@ impl CheckpointPendingLifecycleHook {
                     hook_binding_ids,
                     turn_id: active_turn_id.to_string(),
                     user_content,
-                    suspended: previous_turn.restore()?,
                 })
             }
             Self::PreLlmCall {
@@ -573,40 +634,6 @@ fn validate_identity(id: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum CheckpointInactiveTurnState {
-    Idle,
-    Terminal {
-        turn_id: String,
-        outcome: CheckpointTurnOutcome,
-    },
-}
-
-impl CheckpointInactiveTurnState {
-    fn capture(turn: &SuspendedTurn) -> Result<Self, String> {
-        match turn {
-            SuspendedTurn::Idle => Ok(Self::Idle),
-            SuspendedTurn::Terminal { turn_id, outcome } => {
-                validate_identity(turn_id, "previous terminal checkpoint turn ID")?;
-                Ok(Self::Terminal {
-                    turn_id: turn_id.clone(),
-                    outcome: CheckpointTurnOutcome::capture(outcome),
-                })
-            }
-        }
-    }
-
-    fn restore(self) -> Result<SuspendedTurn, String> {
-        match self {
-            Self::Idle => Ok(SuspendedTurn::Idle),
-            Self::Terminal { turn_id, outcome } => {
-                validate_identity(&turn_id, "previous terminal checkpoint turn ID")?;
-                Ok(SuspendedTurn::Terminal {
-                    turn_id,
-                    outcome: outcome.restore(),
-                })
-            }
-        }
-    }
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }

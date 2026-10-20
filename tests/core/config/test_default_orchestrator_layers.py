@@ -9,6 +9,7 @@ import tomli_w
 from tests.conftest import get_base_config
 from vibe.core.config import build_default_orchestrator
 from vibe.core.config.harness_files import (
+    HarnessFilesManager,
     init_harness_files_manager,
     reset_harness_files_manager,
 )
@@ -213,3 +214,67 @@ class TestBothTomlLayersInstalled:
         # Order: user before project.
         ordered = [layer.name for layer in orch.layers]
         assert ordered.index("user-toml") < ordered.index("project-toml")
+
+
+class TestSuppliedUserConfig:
+    @pytest.mark.asyncio
+    async def test_supplied_config_stands_in_for_the_file_and_saves_in_memory(
+        self, config_dir: Path
+    ) -> None:
+        """*Prepare*: A user config file, and harness files that supply another
+        user config.
+        *Do*: Build the config from the supplied one and save a field.
+        *Assert*: The supplied config is read, the save lands in memory, and the
+        file is untouched.
+        """
+        # Prepare
+        _write_user_config(config_dir, {"theme": "file-theme"})
+        before = (config_dir / "config.toml").read_bytes()
+        supplied = {**get_base_config(), "theme": "supplied-theme"}
+        harness_files = HarnessFilesManager(sources=("user",), user_config=supplied)
+
+        # Do
+        orch = await build_default_orchestrator(harness_files=harness_files)
+        await orch.set_field("/enable_connectors", False)
+
+        # Assert
+        assert orch.config.theme == "supplied-theme"
+        assert orch.writable_layer_name == "user-supplied"
+        assert orch.config.enable_connectors is False
+        assert (config_dir / "config.toml").read_bytes() == before
+        assert "enable_connectors" not in supplied
+
+    @pytest.mark.asyncio
+    async def test_supplied_config_loads_and_migrates_as_the_file_would(self) -> None:
+        """*Prepare*: A supplied config in the file's shape: models as a list,
+        and a tool under its old name.
+        *Do*: Build the config from it.
+        *Assert*: The model resolves and the tool carries its new name, as they
+        would from the file. The caller's document is unchanged.
+        """
+        # Prepare
+        supplied = {**get_base_config(), "disabled_tools": ["read"]}
+        harness_files = HarnessFilesManager(sources=("user",), user_config=supplied)
+
+        # Do
+        orch = await build_default_orchestrator(harness_files=harness_files)
+
+        # Assert
+        assert orch.config.get_active_model().name == "mistral-vibe-cli-latest"
+        assert orch.config.disabled_tools == ["read_file"]
+        assert supplied["disabled_tools"] == ["read"]
+
+    def test_a_session_keeps_the_supplied_config(self, tmp_path: Path) -> None:
+        """*Prepare*: Harness files that supply a user config.
+        *Do*: Derive the files of a session.
+        *Assert*: It keeps the supplied config.
+        """
+        # Prepare
+        supplied = {"theme": "supplied-theme"}
+        harness_files = HarnessFilesManager(sources=("user",), user_config=supplied)
+
+        # Do
+        session = harness_files.for_session(tmp_path)
+
+        # Assert
+        assert session.user_config is supplied

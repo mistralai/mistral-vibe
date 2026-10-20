@@ -54,7 +54,7 @@ pub fn help_text(app: &App) -> Vec<Hint> {
         return help.to_vec();
     }
     let help = match rows.get(app.mcp.list.selected()) {
-        Some(Row::Source(row)) if row.awaits_auth => LIST_VIEW_HELP_AUTH,
+        Some(Row::Source(row)) if row.action.is_some() => LIST_VIEW_HELP_AUTH,
         Some(Row::Source(row)) if row.blocked => LIST_VIEW_HELP_BLOCKED,
         _ => LIST_VIEW_HELP_TOOLS,
     };

@@ -262,7 +262,12 @@ fn compact_structured_payload(content: &[ContentBlock], value: &Value) -> bool {
     match content {
         [] => true,
         [ContentBlock::Text(text)] if text.meta.is_none() && text.annotations.is_none() => {
-            serde_json::to_string(value).is_ok_and(|compact| compact == text.text)
+            let mirrors_value = value.as_str() == Some(text.text.as_str())
+                || serde_json::from_str::<Value>(&text.text).is_ok_and(|parsed| parsed == *value);
+            // The model reads the text, so it must not be longer than the value measured in its place.
+            mirrors_value
+                && serde_json::to_string_pretty(&parse_top_level_json_string(value.clone()))
+                    .is_ok_and(|measured| utf16_len(&text.text) <= utf16_len(&measured))
         }
         _ => false,
     }
@@ -305,15 +310,15 @@ fn build_saved_output_message(
 ) -> String {
     [
         format_system_tag(&format!(
-            "The tool output is large. To preserve your context window, it was saved to the file system under {file_path}.\nOutput size: {} characters\nMax size before saving: {} characters\nThe truncated output below contains only the first {} characters of the tool response.",
+            "The tool output is large. To preserve your context window, it was saved to the file system under {file_path}.\nOutput size: {} characters\nMax size before saving: {} characters\n{}",
             utf16_len(serialized),
             limits.max_output,
-            limits.model_visible_output
+            excerpt_note(limits.model_visible_output)
         )),
         format_truncated_output(serialized, limits.model_visible_output),
         format!("<output-type>{type_definition}</output-type>"),
         format_system_tag(&format!(
-            "Remember: The full content was saved to {file_path}.\nRead the JSON's inferred type definition from the <output-type> tag first, then inspect the saved JSON with `jq` before searching them with `grep` instead of `read_file`."
+            "Remember: The full content was saved to {file_path}.\nRead the JSON's inferred type definition from the <output-type> tag first. To see an omitted part, extract the field you need with `jq` and search or slice it with `grep`, or page through the file with `read_file` using `offset` and `limit`."
         )),
     ]
     .join("\n")
@@ -329,9 +334,10 @@ fn build_write_error_message(
 ) -> String {
     [
         format_system_tag(&format!(
-            "The {tool_name} tool output was too large ({} characters, filesystem threshold is {}), but saving it to {file_path} failed.\nThe output also exceeds the hard inline safety limit of {HARD_INLINE_CHARACTER_LIMIT} characters. The truncated output below contains only the first {HARD_INLINE_CHARACTER_LIMIT} characters of the tool response.\nError: {}",
+            "The {tool_name} tool output was too large ({} characters, filesystem threshold is {}), but saving it to {file_path} failed.\nThe output also exceeds the hard inline safety limit of {HARD_INLINE_CHARACTER_LIMIT} characters. {}\nError: {}",
             utf16_len(serialized),
             limits.max_output,
+            excerpt_note(HARD_INLINE_CHARACTER_LIMIT),
             error.message
         )),
         format_truncated_output(serialized, HARD_INLINE_CHARACTER_LIMIT),
@@ -346,8 +352,9 @@ fn build_write_error_message(
 fn build_hard_limit_message(tool_name: &str, serialized: &str, type_definition: &str) -> String {
     [
         format_system_tag(&format!(
-            "The {tool_name} tool output is unreasonably large ({} characters). To protect the context window, the hard inline safety limit is {HARD_INLINE_CHARACTER_LIMIT} characters.\nThe truncated output below contains only the first {HARD_INLINE_CHARACTER_LIMIT} characters of the tool response.",
+            "The {tool_name} tool output is unreasonably large ({} characters). To protect the context window, the hard inline safety limit is {HARD_INLINE_CHARACTER_LIMIT} characters.\n{}",
             utf16_len(serialized),
+            excerpt_note(HARD_INLINE_CHARACTER_LIMIT),
         )),
         format_truncated_output(serialized, HARD_INLINE_CHARACTER_LIMIT),
         format!("<output-type>{type_definition}</output-type>"),
@@ -358,11 +365,116 @@ fn build_hard_limit_message(tool_name: &str, serialized: &str, type_definition: 
     .join("\n")
 }
 
+fn excerpt_note(limit: usize) -> String {
+    format!(
+        "The excerpt below keeps about {limit} characters of the tool response: the start and end of each long text field, or of the whole response, with the middle omitted."
+    )
+}
+
 fn format_truncated_output(serialized: &str, limit: usize) -> String {
     format!(
-        "<truncated-output>\n{}…\n</truncated-output>",
-        take_utf16_prefix(serialized, limit)
+        "<truncated-output>\n{}\n</truncated-output>",
+        excerpt(serialized, limit)
     )
+}
+
+/// Shortens `serialized` JSON to about `limit` UTF-16 units.
+///
+/// Long string values are cut in the middle first, all to the same length, so
+/// short fields such as status codes, counts, and flags stay readable. When the
+/// response is mostly structure rather than text, the serialized text itself
+/// keeps its start and end.
+fn excerpt(serialized: &str, limit: usize) -> String {
+    let length = utf16_len(serialized);
+    if length <= limit {
+        return serialized.to_string();
+    }
+    serde_json::from_str::<Value>(serialized)
+        .ok()
+        .and_then(|value| excerpt_string_values(&value, limit))
+        .unwrap_or_else(|| cut_middle(serialized, length, limit))
+}
+
+fn excerpt_string_values(value: &Value, limit: usize) -> Option<String> {
+    let mut lengths = Vec::new();
+    collect_string_lengths(value, &mut lengths);
+    let longest = lengths.iter().copied().max()?;
+    let render = |cap: usize| {
+        serde_json::to_string_pretty(&cap_string_values(value, &lengths, cap, &mut 0))
+            .expect("JSON values serialize")
+    };
+    let mut fitting = render(0);
+    if utf16_len(&fitting) > limit {
+        return None;
+    }
+    // Find the longest cap that still fits. Uncut, at `longest`, it does not.
+    let (mut low, mut high) = (0, longest);
+    while low < high {
+        let cap = low + (high - low).div_ceil(2);
+        let candidate = render(cap);
+        if utf16_len(&candidate) <= limit {
+            low = cap;
+            fitting = candidate;
+        } else {
+            high = cap - 1;
+        }
+    }
+    Some(fitting)
+}
+
+fn collect_string_lengths(value: &Value, lengths: &mut Vec<usize>) {
+    match value {
+        Value::String(text) => lengths.push(utf16_len(text)),
+        Value::Array(values) => values
+            .iter()
+            .for_each(|value| collect_string_lengths(value, lengths)),
+        Value::Object(fields) => fields
+            .values()
+            .for_each(|value| collect_string_lengths(value, lengths)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+/// Copies `value` with every string longer than `cap` cut to `cap`, visiting
+/// strings in the order `collect_string_lengths` measured them.
+fn cap_string_values(value: &Value, lengths: &[usize], cap: usize, next: &mut usize) -> Value {
+    match value {
+        Value::String(text) => {
+            let length = lengths[*next];
+            *next += 1;
+            Value::String(cut_middle(text, length, cap))
+        }
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| cap_string_values(value, lengths, cap, next))
+                .collect(),
+        ),
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), cap_string_values(value, lengths, cap, next)))
+                .collect(),
+        ),
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+    }
+}
+
+/// Keeps the start and end of `text`, which is `length` UTF-16 units long,
+/// within `cap` units plus a marker naming how much was omitted. Text that the
+/// marker would not shorten is kept whole.
+fn cut_middle(text: &str, length: usize, cap: usize) -> String {
+    if length <= cap {
+        return text.to_string();
+    }
+    let head = take_utf16_prefix(text, cap.div_ceil(2));
+    let tail = take_utf16_suffix(text, cap - utf16_len(head));
+    let omitted = length - utf16_len(head) - utf16_len(tail);
+    let marker = format!("\n[... {omitted} characters omitted ...]\n");
+    if cap + utf16_len(&marker) >= length {
+        return text.to_string();
+    }
+    format!("{head}{marker}{tail}")
 }
 
 fn format_system_tag(content: &str) -> String {
@@ -392,6 +504,20 @@ fn take_utf16_prefix(value: &str, limit: usize) -> &str {
         end = index + character.len_utf8();
     }
     &value[..end]
+}
+
+fn take_utf16_suffix(value: &str, limit: usize) -> &str {
+    let mut used = 0;
+    let mut start = value.len();
+    for (index, character) in value.char_indices().rev() {
+        let next = character.len_utf16();
+        if used + next > limit {
+            break;
+        }
+        used += next;
+        start = index;
+    }
+    &value[start..]
 }
 
 fn encode_path_segment(value: &str) -> String {
@@ -566,8 +692,102 @@ mod tests {
             text.text
                 .contains("/home/user/tool-results/web_search-call-123.json")
         );
-        assert!(text.text.contains("<truncated-output>\n{\n  …"));
+        assert!(text.text.contains("<truncated-output>\n{\n  \"text\": "));
         assert!(text.text.contains("export interface Output"));
+    }
+
+    ///
+    /// *Prepare*: A command result whose stdout is far longer than the excerpt budget.
+    /// *Do*: Build the excerpt.
+    /// *Assert*: Stdout keeps its start and end around an omission marker, and the short fields stay whole.
+    ///
+    #[test]
+    fn excerpt_cuts_long_text_fields_and_keeps_short_fields() {
+        // Prepare
+        let stdout = format!(
+            "{}{}{}",
+            "a".repeat(5_000),
+            "#".repeat(5_000),
+            "z".repeat(5_000)
+        );
+        let serialized = serde_json::to_string_pretty(&json!({
+            "command": "make test",
+            "stdout": stdout,
+            "stderr": "",
+            "returncode": 2,
+            "was_truncated": false,
+        }))
+        .unwrap();
+
+        // Do
+        let excerpt = excerpt(&serialized, 2_000);
+
+        // Assert
+        assert!(utf16_len(&excerpt) <= 2_000);
+        let value: Value = serde_json::from_str(&excerpt).unwrap();
+        assert_eq!(value["command"], "make test");
+        assert_eq!(value["returncode"], 2);
+        assert_eq!(value["was_truncated"], false);
+        let stdout = value["stdout"].as_str().unwrap();
+        assert!(stdout.starts_with("aaaa"));
+        assert!(stdout.ends_with("zzzz"));
+        assert!(stdout.contains(" characters omitted ...]\n"));
+        assert!(!stdout.contains('#'));
+    }
+
+    ///
+    /// *Prepare*: Two long text fields of different lengths and a long multi-byte field.
+    /// *Do*: Build the excerpt.
+    /// *Assert*: Both long fields are cut to the same kept length, the shorter one is cut no more than the longer, and characters are never split.
+    ///
+    #[test]
+    fn excerpt_cuts_every_long_field_to_one_length() {
+        // Prepare
+        let serialized = serde_json::to_string_pretty(&json!({
+            "first": "x".repeat(4_000),
+            "second": "y".repeat(8_000),
+            "emoji": "\u{1F600}".repeat(3_000),
+        }))
+        .unwrap();
+
+        // Do
+        let excerpt = excerpt(&serialized, 3_000);
+
+        // Assert
+        let value: Value = serde_json::from_str(&excerpt).unwrap();
+        let kept = |field: &str| {
+            value[field]
+                .as_str()
+                .unwrap()
+                .chars()
+                .filter(|character| ['x', 'y'].contains(character))
+                .count()
+        };
+        assert_eq!(kept("first"), kept("second"));
+        assert!(value["emoji"].as_str().unwrap().starts_with('\u{1F600}'));
+        assert!(value["emoji"].as_str().unwrap().ends_with('\u{1F600}'));
+    }
+
+    ///
+    /// *Prepare*: A response made of many short values, with no long text field to cut.
+    /// *Do*: Build the excerpt.
+    /// *Assert*: The serialized text keeps its start and end around an omission marker.
+    ///
+    #[test]
+    fn excerpt_of_structure_keeps_the_start_and_end_of_the_text() {
+        // Prepare
+        let serialized = serde_json::to_string_pretty(&(0..2_000).collect::<Vec<_>>()).unwrap();
+
+        // Do
+        let excerpt = excerpt(&serialized, 200);
+
+        // Assert
+        assert!(excerpt.starts_with("[\n  0,\n  1,"));
+        assert!(excerpt.ends_with("1999\n]"));
+        assert!(excerpt.contains(&format!(
+            "\n[... {} characters omitted ...]\n",
+            utf16_len(&serialized) - 200
+        )));
     }
 
     #[test]
@@ -757,6 +977,78 @@ mod tests {
         .unwrap();
         let ResultDisposition::Write(pending) = evaluated.disposition else {
             panic!("compact structured value must still be eligible");
+        };
+        assert_eq!(
+            pending.serialized(),
+            serde_json::to_string_pretty(&value).expect("pretty JSON serializes")
+        );
+    }
+
+    #[test]
+    fn string_structured_value_mirrored_as_text_is_counted_once() {
+        let text = "x".repeat(HARD_INLINE_CHARACTER_LIMIT * 6 / 10);
+        let result = ToolResult::Success {
+            content: vec![ContentBlock::text(text.clone())],
+            structured_content: StructuredContent::present(Value::String(text)),
+            meta: None,
+        };
+
+        let evaluated =
+            evaluate_result(&Policy::Disabled, "authored_tool", "call", result).unwrap();
+
+        assert_eq!(evaluated, None);
+    }
+
+    #[test]
+    fn padded_text_mirroring_a_small_value_is_measured_at_its_own_length() {
+        let padding = " ".repeat(HARD_INLINE_CHARACTER_LIMIT);
+        for (text, value) in [
+            (format!("{{\"ok\":{padding}true}}"), json!({"ok": true})),
+            (
+                format!("{{{padding}}}"),
+                Value::String(format!("{{{padding}}}")),
+            ),
+        ] {
+            let result = ToolResult::Success {
+                content: vec![ContentBlock::text(text)],
+                structured_content: StructuredContent::present(value),
+                meta: None,
+            };
+
+            let evaluated =
+                evaluate_result(&Policy::Disabled, "authored_tool", "call", result).unwrap();
+
+            assert!(
+                evaluated.is_some(),
+                "padded text must still hit the hard limit"
+            );
+        }
+    }
+
+    #[test]
+    fn structured_value_mirrored_as_differently_spaced_json_is_saved_once() {
+        let value = json!({"text": "x".repeat(20), "count": 2});
+        let result = ToolResult::Success {
+            content: vec![ContentBlock::text(format!(
+                r#"{{"text": "{}", "count": 2}}"#,
+                "x".repeat(20)
+            ))],
+            structured_content: StructuredContent::present(value.clone()),
+            meta: None,
+        };
+        let evaluated = evaluate_result(
+            &Policy::Filesystem {
+                max_output_tokens: 2,
+                model_visible_output_tokens: 1,
+            },
+            "authored_tool",
+            "call",
+            result,
+        )
+        .unwrap()
+        .unwrap();
+        let ResultDisposition::Write(pending) = evaluated.disposition else {
+            panic!("structured value must exceed the configured limit");
         };
         assert_eq!(
             pending.serialized(),

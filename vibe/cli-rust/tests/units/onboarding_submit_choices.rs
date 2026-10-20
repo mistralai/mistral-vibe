@@ -82,10 +82,3 @@ fn a_theme_is_submitted_whenever_one_was_selected() {
         Some(vibe_rs::theme_picker::options()[1].to_owned())
     );
 }
-
-#[test]
-fn an_unselected_theme_is_never_submitted() {
-    let state = OnboardingState::default();
-    let choices = submit::choices(&state);
-    assert_eq!(choices.theme, None, "no selection, no write signal");
-}

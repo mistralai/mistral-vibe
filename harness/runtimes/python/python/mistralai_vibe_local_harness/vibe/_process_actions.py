@@ -146,7 +146,9 @@ def validate_process_action(
     if name == "process.list":
         return ValidatedProcessList()
     if name == "process.stop":
-        return ValidatedProcessStop(process_id=_required_string(arguments, "processId"))
+        return ValidatedProcessStop(
+            process_id=_required_string("process.stop", arguments, "processId")
+        )
     raise ValueError(f"Not a process Action: {name}")
 
 
@@ -275,7 +277,7 @@ def _validate_start(
     config: LocalRuntimeAdapterConfig,
 ) -> ValidatedProcessStart:
     arguments = action.call.arguments
-    command = _required_string(arguments, "command")
+    command = _required_string("process.start", arguments, "command")
     raw_env = arguments.get("env", {})
     explicit_env = (
         {key: value for key, value in raw_env.items() if isinstance(value, str)}
@@ -293,11 +295,16 @@ def _validate_start(
     if config.process_authority == "sandbox":
         # The sandbox checks the directory and supplies the environment the
         # explicit variables are merged into.
+        if not isinstance(raw_cwd, str):
+            issues.append(_cwd_issue("Working directory must be a string"))
         _raise_argument_issues("process.start", issues)
+        assert isinstance(raw_cwd, str)
         return ValidatedProcessStart(
             process_id=process_id(session_id, action.action_id, action.call_id),
             command=command,
-            cwd=_sandbox_working_directory(raw_cwd, config.workspace.cwd),
+            cwd=sandbox_path(
+                raw_cwd.strip() or config.workspace.cwd, cwd=config.workspace.cwd
+            ),
             explicit_env=explicit_env,
             process_env=explicit_env,
         )
@@ -325,8 +332,21 @@ def _validate_output(
     action: RustRuntimeBuiltinToolCallAction,
 ) -> ValidatedProcessOutput:
     arguments = action.call.arguments
-    wait_ms = _integer(arguments, "waitMs", 0)
-    issues = []
+    process_identifier = _required_string("process.output", arguments, "processId")
+    wait_ms = _integer("process.output", arguments, "waitMs", 0)
+    cursor = _integer("process.output", arguments, "cursor", 0)
+    max_bytes = _integer("process.output", arguments, "maxBytes", 16_000)
+    issues = [
+        ProcessArgumentIssue(
+            name, "value_too_small", f"{name} must be at least {minimum}"
+        )
+        for name, value, minimum in (
+            ("waitMs", wait_ms, 0),
+            ("cursor", cursor, 0),
+            ("maxBytes", max_bytes, 1),
+        )
+        if value < minimum
+    ]
     if wait_ms > _MAX_OUTPUT_WAIT_MS:
         issues.append(
             ProcessArgumentIssue(
@@ -337,11 +357,11 @@ def _validate_output(
         )
     _raise_argument_issues("process.output", issues)
     return ValidatedProcessOutput(
-        process_id=_required_string(arguments, "processId"),
+        process_id=process_identifier,
         from_end=arguments.get("from", "start") == "end",
-        cursor=_integer(arguments, "cursor", 0),
+        cursor=cursor,
         wait_ms=wait_ms,
-        max_bytes=min(_integer(arguments, "maxBytes", 16_000), 64_000),
+        max_bytes=min(max_bytes, 64_000),
     )
 
 
@@ -349,11 +369,11 @@ def _validate_write(
     action: RustRuntimeBuiltinToolCallAction, *, windows: bool
 ) -> ValidatedProcessWrite:
     arguments = action.call.arguments
-    process_identifier = _required_string(arguments, "processId")
+    process_identifier = _required_string("process.write", arguments, "processId")
     issues: list[ProcessArgumentIssue] = []
     data = b""
     if "text" in arguments:
-        text = _required_string(arguments, "text", allow_empty=True)
+        text = _required_string("process.write", arguments, "text", allow_empty=True)
         if not text:
             issues.append(
                 ProcessArgumentIssue(
@@ -364,13 +384,41 @@ def _validate_write(
             data = text.encode()
     elif "control" in arguments:
         controls = arguments["control"]
-        if not isinstance(controls, list):
-            raise ValueError("process.write control must be a list")
+        if not isinstance(controls, list) or not all(
+            isinstance(key, str) and key in _CONTROL_BYTES for key in controls
+        ):
+            raise _argument_issues_error(
+                "process.write",
+                [
+                    ProcessArgumentIssue(
+                        "control",
+                        "invalid_control",
+                        f"control must be a list of: {', '.join(_CONTROL_BYTES)}",
+                    )
+                ],
+            )
+        if not controls:
+            issues.append(
+                ProcessArgumentIssue(
+                    "control", "empty_input", "Process input must not be empty"
+                )
+            )
         data = b"".join(
             _CONTROL_BYTES[cast(ProcessControlKey, key)] for key in controls
         )
+    elif "bytesBase64" not in arguments:
+        raise _argument_issues_error(
+            "process.write",
+            [
+                ProcessArgumentIssue(
+                    "input",
+                    "missing_input",
+                    "process.write requires one of text, control, or bytesBase64",
+                )
+            ],
+        )
     else:
-        encoded = _required_string(arguments, "bytesBase64")
+        encoded = _required_string("process.write", arguments, "bytesBase64")
         try:
             data = base64.b64decode(encoded, validate=True)
         except (ValueError, binascii.Error):
@@ -454,7 +502,7 @@ def _resolve_working_directory(
     value: JsonValue, session_cwd: Path, *, windows: bool
 ) -> tuple[Path | None, ProcessArgumentIssue | None]:
     if not isinstance(value, str):
-        raise ValueError("process.start cwd must be a string")
+        return None, _cwd_issue("Working directory must be a string")
     raw = value.strip()
     if not raw:
         raw = str(session_cwd)
@@ -474,12 +522,6 @@ def _resolve_working_directory(
     if not resolved.is_dir():
         return None, _cwd_issue("Working directory must exist and be a directory")
     return resolved, None
-
-
-def _sandbox_working_directory(value: JsonValue, session_cwd: Path) -> Path:
-    if not isinstance(value, str):
-        raise ValueError("process.start cwd must be a string")
-    return sandbox_path(value.strip() or session_cwd, cwd=session_cwd)
 
 
 def _merge_process_environment(
@@ -518,12 +560,17 @@ def _setdefault_environment(
 def _raise_argument_issues(
     tool: ProcessToolName, issues: list[ProcessArgumentIssue]
 ) -> None:
-    if not issues:
-        return
+    if issues:
+        raise _argument_issues_error(tool, issues)
+
+
+def _argument_issues_error(
+    tool: ProcessToolName, issues: list[ProcessArgumentIssue]
+) -> ProcessActionError:
     sorted_issues = sorted(
         issues, key=lambda item: (item.location, item.type, item.message)
     )
-    raise ProcessActionError(
+    return ProcessActionError(
         process_error(
             "invalid_arguments",
             f"Invalid arguments for {tool}",
@@ -546,18 +593,31 @@ def _raise_argument_issues(
 
 
 def _required_string(
-    arguments: JsonObject, name: str, *, allow_empty: bool = False
+    tool: ProcessToolName,
+    arguments: JsonObject,
+    name: str,
+    *,
+    allow_empty: bool = False,
 ) -> str:
     value = arguments.get(name)
-    if not isinstance(value, str) or (not allow_empty and not value):
-        raise ValueError(f"process Action {name} must be a nonempty string")
-    return value
+    if not isinstance(value, str):
+        issue = ProcessArgumentIssue(name, "invalid_type", f"{name} must be a string")
+    elif not allow_empty and not value:
+        issue = ProcessArgumentIssue(name, "empty_value", f"{name} must not be empty")
+    else:
+        return value
+    raise _argument_issues_error(tool, [issue])
 
 
-def _integer(arguments: JsonObject, name: str, default: int) -> int:
+def _integer(
+    tool: ProcessToolName, arguments: JsonObject, name: str, default: int
+) -> int:
     value = arguments.get(name, default)
     if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f"process Action {name} must be an integer")
+        raise _argument_issues_error(
+            tool,
+            [ProcessArgumentIssue(name, "invalid_type", f"{name} must be an integer")],
+        )
     return value
 
 

@@ -1,11 +1,11 @@
-use super::CompactionBudget;
+use super::{CompactionBudget, CompactionFallback};
 use crate::core::config::{ImageDeliveryMode, ImageTokenCost};
 use crate::core::error::CoreError;
 use crate::core::model_input_budget::{
     APPROX_BYTES_PER_TOKEN, estimate_model_content_tokens, estimate_model_input_tokens,
 };
 use crate::core::step_protocol::ToolDefinition;
-use crate::core::wire::completion::CompletionCandidate;
+use crate::core::wire::completion::{CompletionCandidate, CompletionFinishReason};
 use crate::core::wire::content::{ContentBlock, content_blocks_to_text};
 use crate::core::wire::message::{Message, StoredMessage};
 
@@ -80,6 +80,28 @@ pub(in crate::core) fn validate_prompt(messages: &[StoredMessage]) -> Result<(),
     prompt_history(messages).map(|_| ())
 }
 
+/// Returns the caller's extra instructions carried by the compaction prompt.
+pub(super) fn prompt_extra_instructions(
+    messages: &[StoredMessage],
+) -> Result<Option<String>, CoreError> {
+    prompt_history(messages)?;
+    let Some(Message::User { content }) = messages.last().map(|stored| &stored.message) else {
+        return Err(CoreError::invariant(
+            "compaction context is missing its prompt message",
+        ));
+    };
+    let text = content_blocks_to_text(content, "compaction prompt")?;
+    let Some(extra) = text
+        .strip_prefix(PROMPT)
+        .and_then(|rest| rest.trim_start().strip_prefix(EXTRA_INSTRUCTIONS_OPEN))
+        .and_then(|rest| rest.strip_suffix(EXTRA_INSTRUCTIONS_CLOSE))
+    else {
+        return Ok(None);
+    };
+    let extra = extra.trim();
+    Ok((!extra.is_empty()).then(|| extra.to_string()))
+}
+
 pub(in crate::core) enum SummaryAcceptance {
     Accepted {
         messages: Vec<StoredMessage>,
@@ -94,6 +116,9 @@ pub(in crate::core) enum SummaryRejection {
     EmptyResponse,
     MalformedDelimiters,
     ToolCalls,
+    /// The provider stopped at its output limit before a complete delimited
+    /// summary. Bare text is only trusted when the response ended normally.
+    Truncated,
 }
 
 pub(in crate::core) fn accept_summary(
@@ -102,6 +127,7 @@ pub(in crate::core) fn accept_summary(
     candidate: &CompletionCandidate,
     tools: &[ToolDefinition],
     budget: CompactionBudget,
+    fallback: CompactionFallback,
 ) -> Result<SummaryAcceptance, CoreError> {
     prompt_history(projected_messages)?;
     if !candidate.message.tool_calls().is_empty() {
@@ -117,8 +143,21 @@ pub(in crate::core) fn accept_summary(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    // A cut-off summary is rejected only when a different request can follow.
+    // Resending the same request with the same output cap would be cut off
+    // again, so without the standalone fallback bare text is accepted as before.
+    let truncated = fallback == CompactionFallback::Standalone
+        && candidate.finish_reason == CompletionFinishReason::Length;
     let summary = match extract_summary(&response) {
-        Ok(summary) => summary,
+        Ok(ExtractedSummary {
+            delimited: false, ..
+        }) if truncated => {
+            return Ok(SummaryAcceptance::Rejected(SummaryRejection::Truncated));
+        }
+        Ok(ExtractedSummary { summary, .. }) => summary,
+        Err(_) if truncated => {
+            return Ok(SummaryAcceptance::Rejected(SummaryRejection::Truncated));
+        }
         Err(rejection) => return Ok(SummaryAcceptance::Rejected(rejection)),
     };
     let system_message = projected_messages
@@ -251,7 +290,12 @@ fn replacement_user_budget(
         .min(USER_MESSAGE_MAX_TOKENS))
 }
 
-fn extract_summary(response: &str) -> Result<String, SummaryRejection> {
+struct ExtractedSummary {
+    summary: String,
+    delimited: bool,
+}
+
+fn extract_summary(response: &str) -> Result<ExtractedSummary, SummaryRejection> {
     let response = response.trim();
     if response.is_empty() {
         return Err(SummaryRejection::EmptyResponse);
@@ -261,7 +305,10 @@ fn extract_summary(response: &str) -> Result<String, SummaryRejection> {
         return if response.contains(SUMMARY_CLOSE) {
             Err(SummaryRejection::MalformedDelimiters)
         } else {
-            Ok(response.to_string())
+            Ok(ExtractedSummary {
+                summary: response.to_string(),
+                delimited: false,
+            })
         };
     };
     let content_start = summary_start + SUMMARY_OPEN.len();
@@ -272,7 +319,10 @@ fn extract_summary(response: &str) -> Result<String, SummaryRejection> {
     if summary.is_empty() {
         return Err(SummaryRejection::MalformedDelimiters);
     }
-    Ok(summary.to_string())
+    Ok(ExtractedSummary {
+        summary: summary.to_string(),
+        delimited: true,
+    })
 }
 
 fn is_prompt_content(content: &[ContentBlock]) -> bool {
@@ -311,7 +361,9 @@ fn collect_user_messages(
             selected.push(stored.clone());
             remaining -= cost;
         } else if let Some(truncated) = truncate_text_user_message(&stored.message, remaining) {
-            selected.push(StoredMessage::visible(truncated));
+            let mut message = stored.clone();
+            message.message = truncated;
+            selected.push(message);
             break;
         } else {
             if selected.is_empty() {
@@ -369,7 +421,7 @@ fn approx_token_count(text: &str) -> usize {
     text.len().div_ceil(APPROX_BYTES_PER_TOKEN)
 }
 
-fn truncate_middle_to_tokens(text: &str, max_tokens: usize) -> String {
+pub(super) fn truncate_middle_to_tokens(text: &str, max_tokens: usize) -> String {
     if text.is_empty() {
         return String::new();
     }

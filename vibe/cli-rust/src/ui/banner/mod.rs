@@ -7,16 +7,14 @@ use std::time::Instant;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use unicode_width::UnicodeWidthStr;
-
 use super::markdown::LinkedLines;
 use super::theme;
 use crate::selection::Fold;
 use crate::utils::startup_cache::StartupConfig;
 use petit_chat::{CatVariant, PetitChat};
 
-/// Columns between the cat and the info block.
-const CAT_GAP: &str = "  ";
+/// Columns before the info block, the same for every cat variant so the text never moves.
+const CAT_COLS: usize = 14;
 
 /// The welcome banner: an animated cat beside a static info block.
 #[derive(Default)]
@@ -85,21 +83,23 @@ impl Banner {
                 Span::styled(" for more information", meta),
             ]),
         ];
-        let cat = self.chat.render();
-        let lead = cat.lines().next().map_or(0, str::width) + CAT_GAP.width();
+        let grid = self.chat.render();
+        let cat = grid
+            .lines()
+            .map(|row| format!("{row:<width$}", width = CAT_COLS));
         if info
             .iter()
-            .any(|line| lead + line.width() > usize::from(width))
+            .any(|line| CAT_COLS + line.width() > usize::from(width))
         {
-            lines.extend(cat.lines().map(|row| Line::from(row.to_owned())));
+            lines.extend(cat.map(Line::from));
             lines.push_gap();
             lines.extend(info);
         } else {
             // The cat is indentation, so a copy keeps only the info text.
-            for (row, info) in cat.lines().zip(info) {
-                let mut line = Line::from(format!("{row}{CAT_GAP}"));
+            for (row, info) in cat.zip(info) {
+                let mut line = Line::from(row);
                 line.spans.extend(info.spans);
-                lines.push_folded(line, Some(Fold::indented(lead as u16)));
+                lines.push_folded(line, Some(Fold::indented(CAT_COLS as u16)));
             }
         }
         // `.greeting-message` `margin-top: 1`: one blank row above the greeting.

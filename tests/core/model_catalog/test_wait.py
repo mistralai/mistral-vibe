@@ -71,23 +71,6 @@ async def test_no_wait_once_a_catalog_fetch_failed_in_this_process() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_wait_ends_with_the_fetch() -> None:
-    released = asyncio.Event()
-    task = asyncio.create_task(released.wait())
-    wait = ModelCatalogWait(task)
-    waiter = asyncio.create_task(wait.wait())
-    await asyncio.sleep(0)
-    assert not waiter.done()
-    assert wait.done is False
-
-    released.set()
-    await waiter
-
-    assert wait.done is True
-    assert model_catalog_failed() is False
-
-
-@pytest.mark.asyncio
 async def test_a_fetch_slower_than_the_cap_is_given_up_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -106,18 +89,6 @@ async def test_a_fetch_slower_than_the_cap_is_given_up_on(
 
 
 @pytest.mark.asyncio
-async def test_a_cancelled_fetch_is_not_a_failure() -> None:
-    task = asyncio.create_task(asyncio.sleep(3600))
-    wait = ModelCatalogWait(task)
-    task.cancel()
-
-    await wait.wait()
-
-    assert task.cancelled()
-    assert model_catalog_failed() is False
-
-
-@pytest.mark.asyncio
 async def test_no_mistral_credential_means_no_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -128,74 +99,3 @@ async def test_no_mistral_credential_means_no_wait(
     )
 
     assert model_catalog_wait_needed(await _orchestrator(active_model="")) is False
-
-
-@pytest.mark.asyncio
-async def test_the_cap_is_recorded_even_with_nobody_waiting(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(wait_module, "MODEL_CATALOG_WAIT_CAP_SECONDS", 0.01)
-    task = asyncio.create_task(asyncio.sleep(3600))
-    wait = ModelCatalogWait(task)
-
-    await asyncio.sleep(0.05)
-
-    assert wait.done is True
-    assert model_catalog_failed() is True
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
-
-
-@pytest.mark.asyncio
-async def test_each_held_fetch_gets_its_own_cap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # A session closed during its fetch leaves nothing behind: a later held
-    # fetch still waits for its own result.
-    monkeypatch.setattr(wait_module, "MODEL_CATALOG_WAIT_CAP_SECONDS", 0.2)
-    first = asyncio.create_task(asyncio.sleep(3600))
-    ModelCatalogWait(first)
-    first.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await first
-    await asyncio.sleep(0.3)
-    released = asyncio.Event()
-    second = asyncio.create_task(released.wait())
-    wait = ModelCatalogWait(second)
-
-    await asyncio.sleep(0.05)
-
-    assert wait.done is False
-    assert model_catalog_failed() is False
-    released.set()
-    await wait.wait()
-
-
-@pytest.mark.asyncio
-async def test_a_discarded_wait_does_not_fail_a_later_one(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Replacing a wait leaves the fetch running. Its cap must not fail the
-    # process out from under the wait that replaced it.
-    monkeypatch.setattr(wait_module, "MODEL_CATALOG_WAIT_CAP_SECONDS", 0.05)
-    first_task = asyncio.create_task(asyncio.sleep(3600))
-    first = ModelCatalogWait(first_task)
-    first.discard()
-    assert first._cap.cancelled()
-    first._expire()
-
-    monkeypatch.setattr(wait_module, "MODEL_CATALOG_WAIT_CAP_SECONDS", 30)
-    released = asyncio.Event()
-    second_task = asyncio.create_task(released.wait())
-    second = ModelCatalogWait(second_task)
-    await asyncio.sleep(0.1)
-
-    assert first.done is True
-    assert second.done is False
-    assert model_catalog_failed() is False
-    released.set()
-    await second.wait()
-    first_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await first_task

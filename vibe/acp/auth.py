@@ -87,6 +87,21 @@ def _custom_domain_of(provider: ProviderConfig) -> str | None:
     return base_url
 
 
+def _is_same_tenant(requested: ProviderConfig, current: ProviderConfig) -> bool:
+    """Compare the sign-in URLs that identify a tenant.
+
+    Configured URLs may be hand-written (trailing slash, no scheme), so both
+    sides go through the normalization applied to a requested custom domain.
+    """
+    if not requested.browser_auth_base_url or not current.browser_auth_base_url:
+        return False
+    return resolve_browser_auth_urls(
+        requested.browser_auth_base_url, requested.browser_auth_api_base_url
+    ) == resolve_browser_auth_urls(
+        current.browser_auth_base_url, current.browser_auth_api_base_url
+    )
+
+
 def _account_base_of(provider: ProviderConfig) -> str | None:
     """CLI-reachable console origin for account calls, or None for the default.
 
@@ -188,6 +203,14 @@ class AcpAuthController:
         if action not in {None, "start"}:
             raise InvalidRequestError(f"Unsupported browser auth action: {action}")
         provider = self._resolve_sign_in_provider(arguments)
+        # Some ACP clients call authenticate on every connection. The stored key
+        # belongs to the tenant configured on the active provider, so a request
+        # for that same tenant has nothing to sign in to.
+        if (
+            _is_same_tenant(provider, self._load_context().provider)
+            and self.status().can_use_active_provider
+        ):
+            return AuthenticateResponse()
         service = self._service_factory(provider)
         try:
             api_key = await service.authenticate()

@@ -150,6 +150,16 @@ def _find_env_value(name: str) -> str | None:
     return None
 
 
+def _find_env_list(name: str) -> list[Any] | None:
+    if not (value := _find_env_value(name)):
+        return None
+    try:
+        return _ONBOARDING_LIST_ADAPTER.validate_json(value)
+    except ValueError:
+        logger.warning("Ignoring unparseable %s environment value", name)
+        return None
+
+
 def _load_onboarding_toml_payload() -> dict[str, Any]:
     try:
         harness_files = get_harness_files_manager()
@@ -199,14 +209,14 @@ def _load_onboarding_env_payload_for_fields(
         payload["active_model"] = active_model
     if (
         "providers" in field_names
-        and (providers := _find_env_value("VIBE_PROVIDERS")) is not None
+        and (providers := _find_env_list("VIBE_PROVIDERS")) is not None
     ):
-        payload["providers"] = _ONBOARDING_LIST_ADAPTER.validate_json(providers)
+        payload["providers"] = providers
     if (
         "models" in field_names
-        and (models := _find_env_value("VIBE_MODELS")) is not None
+        and (models := _find_env_list("VIBE_MODELS")) is not None
     ):
-        payload["models"] = _ONBOARDING_LIST_ADAPTER.validate_json(models)
+        payload["models"] = models
     if (
         "vibe_base_url" in field_names
         and (vibe_base_url := _find_env_value("VIBE_VIBE_BASE_URL")) is not None
@@ -244,15 +254,11 @@ def _build_onboarding_snapshot_payload(**overrides: Any) -> dict[str, Any]:
     except RuntimeError:
         if not _can_resolve_provider_from_explicit_overrides(explicit_overrides):
             raise
-    try:
-        payload.update(
-            _load_onboarding_env_payload_for_fields(
-                _ONBOARDING_FIELDS.difference(explicit_overrides)
-            )
+    payload.update(
+        _load_onboarding_env_payload_for_fields(
+            _ONBOARDING_FIELDS.difference(explicit_overrides)
         )
-    except ValidationError, ValueError:
-        if not _can_resolve_provider_from_explicit_overrides(explicit_overrides):
-            raise
+    )
     payload.update(explicit_overrides)
     return payload
 
@@ -269,7 +275,7 @@ def _validated_payloads[PayloadConfig: ModelConfig | ProviderConfig](
             continue
         try:
             validated_payloads.append(model_type.model_validate(payload))
-        except ValidationError, ValueError:
+        except (ValidationError, ValueError):
             continue
     return validated_payloads
 
@@ -343,7 +349,7 @@ class OnboardingContext:
                 console_base_url=snapshot.console_base_url,
                 theme=snapshot.theme,
             )
-        except RuntimeError, ValidationError, ValueError:
+        except (RuntimeError, ValidationError, ValueError):
             logger.warning(
                 "Onboarding config fallback activated; using defaults", exc_info=True
             )

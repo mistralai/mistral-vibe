@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use crate::server::{method, notification, server_method, Notification, Request};
 
@@ -135,19 +135,12 @@ async fn send_deny(wiring: DenyWiring<'_>, callback_id: &str, kind: &str, sessio
     });
     // Register the result so a server rejection is delivered, not silently
     // dropped: without an entry the turn would wait forever on `turn/completed`.
-    let (tx, rx) = oneshot::channel();
-    pending
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .insert(result_id, tx);
+    let rx = pending.register(result_id);
     if let Ok(frame) =
         serde_json::to_string(&Request::call(result_id, method::CALLBACK_RESULT, params))
     {
         if to_writer.send(Some(frame)).is_err() {
-            pending
-                .lock()
-                .unwrap_or_else(|err| err.into_inner())
-                .remove(&result_id);
+            pending.take(result_id);
             return;
         }
     }

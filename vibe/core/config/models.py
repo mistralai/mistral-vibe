@@ -617,28 +617,6 @@ def _serialize_model_entry(model: Any) -> Any:
     return entry
 
 
-def normalize_model_configs_with_defaults(value: Any, defaults: Any) -> Any:
-    """Normalize models and fill sparse default-model overrides when required."""
-    normalized = normalize_model_configs(value)
-    if not isinstance(normalized, Mapping):
-        return normalized
-
-    default_models = normalize_model_configs(defaults)
-    if not isinstance(default_models, Mapping):
-        return normalized
-
-    if not _needs_default_model_payloads(normalized, default_models):
-        return normalized
-
-    return merge_model_payloads(
-        {
-            alias: _model_payload_for_merge(model)
-            for alias, model in default_models.items()
-        },
-        normalized,
-    )
-
-
 def _model_alias_from_payload(payload: Any) -> str:
     if isinstance(payload, ModelConfig):
         return payload.alias
@@ -677,27 +655,6 @@ def _model_payload_with_alias(alias: Any, payload: Any) -> Any:
             f"Model key '{alias}' does not match model alias '{existing_alias}'."
         )
     return model_payload
-
-
-def _needs_default_model_payloads(
-    models: Mapping[str, Any], defaults: Mapping[str, Any]
-) -> bool:
-    """Return whether a known default model is missing required identity fields."""
-    for alias, payload in models.items():
-        if alias not in defaults or not isinstance(payload, Mapping):
-            continue
-        if "name" not in payload or "provider" not in payload:
-            return True
-    return False
-
-
-def _model_payload_for_merge(model: Any) -> dict[str, Any]:
-    """Convert a default model entry into a plain mapping for deep merge."""
-    if isinstance(model, ModelConfig):
-        return model.model_dump(mode="json")
-    if isinstance(model, Mapping):
-        return dict(model)
-    return {}
 
 
 def merge_model_payloads(

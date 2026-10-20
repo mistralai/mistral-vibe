@@ -1,40 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
-from pathlib import Path
-from typing import final
+from pydantic import BaseModel, Field, PrivateAttr
 
-from pydantic import BaseModel, Field, JsonValue, PrivateAttr
-
-from vibe.core.scratchpad import is_scratchpad_display_path
-from vibe.core.tools.base import (
-    BaseTool,
-    BaseToolConfig,
-    BaseToolState,
-    InvokeContext,
-    ToolError,
-    ToolPermission,
-)
-from vibe.core.tools.io_port import ToolIOPort
+from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState, ToolPermission
 from vibe.core.tools.permissions import PermissionContext
-from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import (
     DEFAULT_SENSITIVE_PATTERNS,
     ToolPath,
-    display_file_path,
     resolve_file_tool_permission,
-    resolve_tool_path,
 )
-from vibe.core.types import ToolResultEvent, ToolStreamEvent
-from vibe.utils.io import (
-    ReadSafeResult,
-    atomic_replace,
-    file_write_lock,
-    normalize_edit_strings,
-    read_safe_async,
-)
-from vibe.utils.text import line_contexts
-from vibe.utils.tool_presentation import ToolEffectKind
 
 
 class EditArgs(BaseModel):
@@ -79,12 +53,7 @@ class EditConfig(BaseToolConfig):
     )
 
 
-class Edit(
-    BaseTool[EditArgs, EditResult, EditConfig, BaseToolState],
-    ToolUIData[EditArgs, EditResult],
-):
-    effect_kind = ToolEffectKind.FILE_EDIT
-
+class Edit(BaseTool[EditArgs, EditResult, EditConfig, BaseToolState]):
     def resolve_permission(self, args: EditArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
             args.file_path,
@@ -96,181 +65,3 @@ class Edit(
             workspace=self.workspace,
             scratchpad_dir=self.scratchpad_dir,
         )
-
-    @classmethod
-    def format_call_display(cls, args: EditArgs) -> ToolCallDisplay:
-        suffix = "(scratchpad)" if is_scratchpad_display_path(args.file_path) else ""
-        shown = display_file_path(args.file_path)
-        return ToolCallDisplay(
-            summary=f"Editing {shown}",
-            content=f"old_string: {args.old_string!r}\nnew_string: {args.new_string!r}",
-            suffix=suffix,
-            verb="Editing",
-            message=shown,
-            settled_verb="Edited",
-            settled_message=shown,
-        )
-
-    @classmethod
-    def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
-        if isinstance(event.result, EditResult):
-            suffix = (
-                "(scratchpad)" if is_scratchpad_display_path(event.result.file) else ""
-            )
-            return ToolResultDisplay(
-                success=True,
-                verb="Edited",
-                message=display_file_path(event.result.file),
-                suffix=suffix,
-            )
-        return ToolResultDisplay(
-            success=False, message=event.error or event.skip_reason or "No result"
-        )
-
-    @classmethod
-    def project_result(cls, result: EditResult) -> JsonValue:
-        return {
-            "file": result.file,
-            "old_string": result.old_string,
-            "new_string": result.new_string,
-            "occurrences": [
-                {"start_line": start_line, "old_text": old_text, "new_text": new_text}
-                for start_line, old_text, new_text in result.ui_occurrences
-            ],
-        }
-
-    @classmethod
-    def get_status_text(cls) -> str:
-        return "Editing files"
-
-    async def _read_file(
-        self, file_path: Path, tool_io: ToolIOPort | None = None
-    ) -> ReadSafeResult:
-        if tool_io is not None and tool_io.supports_read:
-            return await tool_io.read_text(file_path)
-        return await read_safe_async(file_path, raise_on_error=True)
-
-    async def _write_file(
-        self,
-        file_path: Path,
-        content: str,
-        encoding: str,
-        newline: str,
-        tool_io: ToolIOPort | None = None,
-    ) -> None:
-        if tool_io is not None and tool_io.supports_write:
-            await tool_io.write_text(
-                file_path, content, encoding=encoding, newline=newline
-            )
-            return
-        await atomic_replace(file_path, content, encoding=encoding, newline=newline)
-
-    @final
-    async def run(
-        self, args: EditArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | EditResult]:
-        file_path = self._validate_args(args)
-        tool_io = ctx.tool_io if ctx is not None else None
-        # The file is matched with \n line endings and written back with its
-        # own, so either form the model copies (read_file shows CRLF) matches.
-        old_string, new_string = normalize_edit_strings(
-            args.old_string, args.new_string
-        )
-
-        try:
-            async with file_write_lock(file_path):
-                result = await self._read_file(file_path, tool_io)
-                original = result.text
-
-                if old_string not in original:
-                    raise ToolError(
-                        f"String to replace not found in file.\n"
-                        f"String: {args.old_string}"
-                    )
-                occurrences = original.count(old_string)
-                if occurrences > 1 and not args.replace_all:
-                    raise ToolError(
-                        f"Found {occurrences} matches of the string to replace, "
-                        f"but replace_all is false. To replace all occurrences, "
-                        f"set replace_all to true. To replace only one occurrence, "
-                        f"please provide more context to uniquely identify the "
-                        f"instance.\nString: {args.old_string}"
-                    )
-
-                contexts = line_contexts(original, old_string)
-                if not args.replace_all:
-                    contexts = contexts[:1]
-
-                modified = self._apply_edit(
-                    original, old_string, new_string, args.replace_all
-                )
-
-                if modified != original:
-                    await self._write_file(
-                        file_path, modified, result.encoding, result.newline, tool_io
-                    )
-        except UnicodeDecodeError as e:
-            raise ToolError(
-                f"Cannot edit {file_path}: file is not valid text "
-                f"({e.encoding}, byte {e.start})"
-            ) from e
-        except PermissionError as e:
-            raise ToolError(f"Permission denied accessing file: {file_path}") from e
-        except OSError as e:
-            raise ToolError(f"OS error accessing {file_path}: {e}") from e
-
-        if args.replace_all:
-            message = (
-                "The file has been updated. All occurrences were successfully replaced"
-            )
-        else:
-            message = "The file has been updated successfully."
-
-        result = EditResult(
-            file=str(file_path),
-            message=message,
-            old_string=old_string,
-            new_string=new_string,
-        )
-        result._ui_occurrences = [
-            (start, prefix + old_string + suffix, prefix + new_string + suffix)
-            for start, prefix, suffix in contexts
-        ]
-        yield result
-
-    @final
-    def _validate_args(self, args: EditArgs) -> Path:
-        file_path_str = args.file_path.strip()
-        if not file_path_str:
-            raise ToolError("File path cannot be empty")
-
-        if not args.old_string.removesuffix("\r"):
-            raise ToolError(
-                "old_string cannot be empty. Use write_file to create new files."
-            )
-
-        old_string, new_string = normalize_edit_strings(
-            args.old_string, args.new_string
-        )
-        if old_string == new_string:
-            raise ToolError(
-                "No changes to make — old_string and new_string are identical"
-            )
-
-        file_path = resolve_tool_path(file_path_str, self.cwd)
-
-        if not file_path.exists():
-            raise ToolError(f"File does not exist: {file_path}")
-
-        if not file_path.is_file():
-            raise ToolError(f"Path is not a file: {file_path}")
-
-        return file_path
-
-    @staticmethod
-    def _apply_edit(
-        content: str, old_string: str, new_string: str, replace_all: bool
-    ) -> str:
-        if replace_all:
-            return content.replace(old_string, new_string)
-        return content.replace(old_string, new_string, 1)

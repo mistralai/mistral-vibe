@@ -90,9 +90,9 @@ def _write_tls_material(tmp_path: Path) -> _TLSMaterial:
     now = datetime.now(UTC)
     ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Vibe test CA")])
-    # Strict RFC 5280 chain validation (the Python 3.13+ default for
-    # create_default_context) requires SKID/KeyUsage on the CA and AKID on the
-    # leaf, so the mock chain carries all three.
+    # Strict RFC 5280 chain validation (VERIFY_X509_STRICT, which
+    # build_ssl_context enables) requires SKID/KeyUsage on the CA and AKID on
+    # the leaf, so the mock chain carries all three.
     ca_cert = (
         x509
         .CertificateBuilder()

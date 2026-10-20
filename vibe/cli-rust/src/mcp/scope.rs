@@ -11,15 +11,23 @@ pub const BLOCKED_STATUS: &str = "needs a personal API key";
 pub fn blocked(state: &MCPState, source: &MCPSourceSummary) -> bool {
     state.private_connectors_hidden
         && source.kind == MCPSourceKind::Connector
-        && source.status == MCPSourceStatus::NeedsAuth
+        && matches!(
+            source.status,
+            MCPSourceStatus::NeedsAuth | MCPSourceStatus::NeedsConnect
+        )
 }
 
 /// Detail view of a blocked connector, in place of its auth flow.
-pub fn blocked_hint() -> Row {
+pub fn blocked_hint(source: &MCPSourceSummary) -> Row {
+    let need = if source.status == MCPSourceStatus::NeedsConnect {
+        "a personal connection"
+    } else {
+        "your login"
+    };
     Row::Hint {
-        before:
-            "This connector needs your login, but your API key only gives access to shared connectors. Run "
-                .to_owned(),
+        before: format!(
+            "This connector needs {need}, but your API key only gives access to shared connectors. Run "
+        ),
         key: "vibe --setup".to_owned(),
         after: " and create a new API key from the link it shows.".to_owned(),
     }

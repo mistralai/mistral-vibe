@@ -201,6 +201,10 @@ fn programmatic_pre_tool_skip_commits_the_normalized_result() {
     assert_eq!(observations[0]["type"], "tool_result_committed");
     assert_eq!(observations[0]["action_id"], tool_action_id);
     assert_eq!(observations[0]["call_id"], tool_call_id);
+    assert_eq!(
+        observations[0]["call"],
+        hook_action["input"]["tool_call"]["call"]
+    );
     assert_eq!(observations[0]["result"]["type"], "failure");
     assert_eq!(observations[0]["result"]["error"]["code"], "tool_skipped");
     assert_eq!(

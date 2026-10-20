@@ -33,6 +33,7 @@ from tests.stubs.local_sandbox import EXECUTE_COMPLETION, build_trusted_project
 from vibe.app_server._client_provided_tools import (
     ClientProvidedTools,
     ClientToolCall,
+    ClientToolCaller,
     ClientToolDeclarationError,
     ClientToolDefinition,
     ClientToolError,
@@ -223,7 +224,8 @@ async def test_a_program_calls_a_client_tool_and_reads_its_output(
     """*Prepare*: A client tool `kb.lookup`, programmatic by default.
     *Do*: Run a program that calls it.
     *Assert*: The tool is not offered to the model directly, the runner gets
-    its name and input, and the program reads the output.
+    its name, input and caller, the root session, and the program reads the
+    output.
     """
     # Prepare
     model = _ToolCallingModel("run_typescript", {"code": _PROGRAM})
@@ -231,7 +233,7 @@ async def test_a_program_calls_a_client_tool_and_reads_its_output(
     runner = _Runner(_found)
 
     # Do
-    await _run(project, runner)
+    session, _ = await _run(project, runner)
 
     # Assert
     assert not any("lookup" in name for name in model.offered[0])
@@ -241,6 +243,9 @@ async def test_a_program_calls_a_client_tool_and_reads_its_output(
     assert call.input == {"term": "harness"}
     assert call.call_id
     assert call.tool_call_id
+    assert call.caller == ClientToolCaller(
+        session_id=session.session_id, root_session_id=session.session_id
+    )
     assert "the thing that runs the agent" in model.final_input
 
 

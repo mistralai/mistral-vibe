@@ -60,7 +60,8 @@ fn pending_steering_and_ready_notifications_restore_without_semantic_loss() {
             "role": "user",
             "content": [{ "type": "text", "text": "start work" }]
         },
-        "source": "history"
+        "source": "history",
+        "turn_index": 0
     }]);
     checkpoint["notifications"] = json!([
         {
@@ -103,6 +104,47 @@ fn pending_steering_and_ready_notifications_restore_without_semantic_loss() {
     assert_eq!(notifications[0].id, "notification-ready");
     checkpoint["notifications"][0]["preceding_steers"] = json!(1);
     assert_eq!(recaptured, checkpoint);
+}
+
+/// *Prepare*: An older checkpoint whose context messages carry no Turn index.
+/// *Do*: Restore it and capture it again.
+/// *Assert*: Each user exchange becomes one Turn, and injected context joins the Turn before it.
+#[test]
+fn older_checkpoint_messages_restore_into_turn_groups() {
+    // Prepare
+    let message = |role: &str, text: &str, source: &str| {
+        json!({
+            "message": {"role": role, "content": [{"type": "text", "text": text}]},
+            "source": source
+        })
+    };
+    let mut checkpoint = checkpoint_with_turn(json!({"type": "idle"}));
+    checkpoint["context"]["messages"] = json!([
+        message("user", "first question", "history"),
+        message("assistant", "first answer", "history"),
+        message("user", "injected context", "injection"),
+        message("user", "second question", "history"),
+        message("assistant", "second answer", "history"),
+    ]);
+
+    // Do
+    let restored = decode_checkpoint(&checkpoint.to_string())
+        .unwrap()
+        .restore(config())
+        .unwrap();
+    let recaptured = serde_json::to_value(Checkpoint::capture(&restored).unwrap()).unwrap();
+
+    // Assert
+    let indexes = recaptured["context"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| message["turn_index"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        indexes,
+        vec![json!(0), json!(0), json!(0), json!(1), json!(1)]
+    );
 }
 
 #[test]
@@ -344,9 +386,15 @@ fn lifecycle_hook_identities_are_reconstructed_from_their_parent() {
         action_id,
         &crate::core::hooks::hook_action_id(&active.turn_id, crate::core::HookPoint::PreAgentTurn,)
     );
+    // Older checkpoints carry `previous_turn`; it restores and is no longer written.
+    let mut recaptured_json = pre_agent_json.clone();
+    recaptured_json["turn"]["phase"]["pending"]
+        .as_object_mut()
+        .unwrap()
+        .remove("previous_turn");
     assert_eq!(
         serde_json::to_value(Checkpoint::capture(&pre_agent_state).unwrap()).unwrap(),
-        pre_agent_json
+        recaptured_json
     );
 
     let mut legacy_completion_id = restorable_active_candidate_checkpoint();

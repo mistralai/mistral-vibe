@@ -29,12 +29,12 @@ from vibe.core.review import (
     ScopeTarget,
     TextReviewRegion,
 )
-from vibe.core.types import LLMMessage, MessageList, Role
+from vibe.core.types import LLMMessage, Role
 
 
-def _make_messages(*contents: str) -> MessageList:
-    """Create a MessageList with a system message followed by user/assistant pairs."""
-    msgs = MessageList([LLMMessage(role=Role.system, content="system")])
+def _make_messages(*contents: str) -> list[LLMMessage]:
+    """Create a message list with a system message followed by user/assistant pairs."""
+    msgs = [LLMMessage(role=Role.system, content="system")]
     for content in contents:
         msgs.append(LLMMessage(role=Role.user, content=content))
         msgs.append(LLMMessage(role=Role.assistant, content=f"reply to {content}"))
@@ -54,10 +54,10 @@ def _snap(path: Path) -> FileSnapshot:
 class _Shells(NamedTuple):
     recorder: FakeCheckpointCapture
     review: ReviewManager
-    messages: MessageList
+    messages: list[LLMMessage]
 
 
-def _shells(messages: MessageList) -> _Shells:
+def _shells(messages: list[LLMMessage]) -> _Shells:
     checkpointer = Checkpointer()
     return _Shells(
         recorder=FakeCheckpointCapture(checkpointer, messages),
@@ -69,7 +69,7 @@ def _shells(messages: MessageList) -> _Shells:
 class _Turn:
     """Helper that simulates one conversation turn."""
 
-    def __init__(self, sh: _Shells, messages: MessageList) -> None:
+    def __init__(self, sh: _Shells, messages: list[LLMMessage]) -> None:
         self._mgr = sh
         self._messages = messages
 
@@ -536,7 +536,7 @@ class TestManualEditDuringReview:
     def test_mid_review_manual_edit_survives_a_later_turn_revert(
         self, tmp_path: Path
     ) -> None:
-        messages = MessageList([LLMMessage(role=Role.system, content="system")])
+        messages = [LLMMessage(role=Role.system, content="system")]
         sh = _shells(messages)
         turn = _Turn(sh, messages)
         f = tmp_path / "s.txt"

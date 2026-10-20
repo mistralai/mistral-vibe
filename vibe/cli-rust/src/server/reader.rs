@@ -5,8 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::io::AsyncReadExt;
-use tokio::process::ChildStdout;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{mpsc, watch};
 
 use super::frames::Frames;
@@ -115,10 +114,10 @@ async fn accept_frame(
     .await
 }
 
-/// Spawn the reader task that routes each stdout line and answers callbacks.
+/// Spawn the reader task that routes each input line and answers callbacks.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn spawn(
-    mut stdout: ChildStdout,
+pub(super) fn spawn<R: AsyncRead + Unpin + Send + 'static>(
+    mut stdout: R,
     pending: Pending,
     notif_tx: mpsc::Sender<Notification>,
     to_writer: mpsc::UnboundedSender<Option<String>>,
@@ -190,15 +189,7 @@ pub(super) fn spawn(
         }
         let crashed = !shutdown_requested.load(Ordering::Relaxed);
         let _ = crash_tx.send(crashed);
-        // Fail any in-flight requests so callers unblock on shutdown. Scope the
-        // std `MutexGuard` so it does not cross the `await` below, which would
-        // make the task `!Send`.
-        {
-            let mut map = pending.lock().unwrap_or_else(|err| err.into_inner());
-            for (_, tx) in map.drain() {
-                let _ = tx.send(Err(RequestFailure::AppServerClosed));
-            }
-        }
+        pending.close();
         // Wake any consumer blocked on the notification channel: the `Client`
         // keeps a `notif_tx` clone alive, so `recv()` would otherwise hang after
         // the reader exits (e.g. the headless turn loop mid-turn).
@@ -233,8 +224,7 @@ async fn route_line(
     match (incoming.id, incoming.method) {
         // Response to one of our requests.
         (Some(id), None) => {
-            let mut guard = pending.lock().unwrap_or_else(|err| err.into_inner());
-            if let Some(tx) = guard.remove(&id) {
+            if let Some(tx) = pending.take(id) {
                 let result = match incoming.error {
                     Some(error) => Err(RequestFailure::Rpc(error)),
                     None => Ok(incoming.result.unwrap_or(Value::Null)),

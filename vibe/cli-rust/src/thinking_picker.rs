@@ -201,12 +201,8 @@ fn commit(
     let thinking_tx = app.thinking_picker.tx.clone();
     let pending = app.commit_started();
     tokio::spawn(async move {
-        let written = match saved {
-            Some(pick) => config_write::write_model(&client, &session_id, pick, ops, reason).await,
-            None => config_write::write(&client, &session_id, ops, reason)
-                .await
-                .map(|_| false),
-        };
+        let written =
+            crate::model_enforcement::write(&client, &session_id, saved, ops, reason).await;
         // Only a clean, applied write is worth reloading: `config/reload` is
         // idle-only, so a parked pick would read as failed.
         let event = match written {

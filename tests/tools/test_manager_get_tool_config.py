@@ -38,7 +38,8 @@ def test_returns_default_config_when_no_overrides(tool_manager):
     assert (
         type(config).__name__ == "BashToolConfig"
     )  # due to vibe's discover system isinstance would fail
-    assert config.default_timeout == 300  # type: ignore[attr-defined]
+    assert config.default_timeout is None  # type: ignore[attr-defined]
+    assert config.native_default_timeout == 300  # type: ignore[attr-defined]
     assert config.max_output_bytes == 16000  # type: ignore[attr-defined]
     assert config.permission == ToolPermission.ASK
 
@@ -236,18 +237,6 @@ def test_native_windows_exposes_managed_git_bash_family_first(monkeypatch):
     assert "powershell_output" not in tools
     assert tools["git_bash"].__name__ == "ExperimentalGitBash"
 
-    specs = {spec.name: spec.description for spec in manager.available_tool_specs()}
-    for name in (
-        "git_bash",
-        "git_bash_output",
-        "git_bash_stdin",
-        "git_bash_sessions",
-        "git_bash_log_file",
-    ):
-        assert "git bash" in specs[name].lower() or "git_bash" in specs[name]
-        assert "powershell" not in specs[name].lower()
-        assert "windows_shell" not in specs[name].lower()
-
 
 def test_native_windows_uses_client_git_bash_when_local_managed_shell_is_disabled(
     monkeypatch,
@@ -339,17 +328,6 @@ def test_native_windows_exposes_managed_powershell_family(monkeypatch):
     assert "powershell_log_file" in tools
     assert tools["powershell"].__name__ == "ExperimentalWindowsShell"
 
-    specs = {spec.name: spec.description for spec in manager.available_tool_specs()}
-    for name in (
-        "powershell",
-        "powershell_output",
-        "powershell_stdin",
-        "powershell_sessions",
-        "powershell_log_file",
-    ):
-        assert "bash" not in specs[name].lower()
-        assert "windows_shell" not in specs[name].lower()
-
 
 def test_native_windows_uses_client_powershell_when_local_managed_shell_is_disabled(
     monkeypatch,
@@ -434,7 +412,8 @@ def test_managed_bash_inherits_bash_tool_config_permissions():
 
     assert type(config).__name__ == "ExperimentalBashToolConfig"
     assert config.permission == ToolPermission.ALWAYS
-    assert config.default_timeout == 300  # type: ignore[attr-defined]
+    assert config.default_timeout is None  # type: ignore[attr-defined]
+    assert config.native_default_timeout == 300  # type: ignore[attr-defined]
 
 
 def test_merges_user_overrides_with_defaults():
@@ -447,7 +426,8 @@ def test_merges_user_overrides_with_defaults():
         type(config).__name__ == "BashToolConfig"
     )  # due to vibe's discover system isinstance would fail
     assert config.permission == ToolPermission.ALWAYS
-    assert config.default_timeout == 300  # type: ignore[attr-defined]
+    assert config.default_timeout is None  # type: ignore[attr-defined]
+    assert config.native_default_timeout == 300  # type: ignore[attr-defined]
 
 
 def test_preserves_tool_specific_fields_from_overrides():
@@ -676,6 +656,34 @@ class WeatherTool(BaseTool[WeatherArgs, WeatherResult, BaseToolConfig, BaseToolS
         manager = ToolManager(lambda: vibe_config)
 
         assert "todo" in manager.custom_tool_names
+
+    def test_fixed_custom_tool_loads_on_next_scan(self, tmp_path: Path):
+        tool_dir = tmp_path / "tools"
+        tool_dir.mkdir()
+        tool_file = tool_dir / "broken_then_fixed.py"
+        tool_file.write_text("raise RuntimeError('boom')\n")
+        vibe_config = build_test_vibe_config(tool_paths=[tool_dir])
+
+        broken = ToolManager(lambda: vibe_config)
+        assert [f.path for f in broken.failed_custom_tool_files] == [tool_file]
+
+        tool_file.write_text("""
+from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
+from pydantic import BaseModel
+
+class FixedArgs(BaseModel):
+    pass
+
+class FixedResult(BaseModel):
+    pass
+
+class FixedTool(BaseTool[FixedArgs, FixedResult, BaseToolConfig, BaseToolState]):
+    pass
+""")
+        fixed = ToolManager(lambda: vibe_config)
+
+        assert fixed.failed_custom_tool_files == []
+        assert "fixed_tool" in fixed.custom_tool_names
 
 
 class TestToolRuntimeAvailability:

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Build in manylinux for glibc compatibility, then clear executable-stack
 # flags rejected by hardened Linux kernels.
-python_version="${PYTHON_VERSION:-3.14}"
+python_version="${PYTHON_VERSION:-3.12}"
 patchelf_version="${PATCHELF_VERSION:-0.18.0}"
 
 uv python install "${python_version}"

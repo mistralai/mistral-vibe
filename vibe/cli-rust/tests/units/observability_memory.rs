@@ -5,12 +5,6 @@
 use std::sync::{Arc, Mutex};
 
 #[test]
-fn peak_rss_sampling_answers_a_number() {
-    let kilobytes = vibe_rs::observability::memory::peak_rss_kilobytes();
-    assert!(kilobytes.is_some_and(|rss| rss > 0), "got {kilobytes:?}");
-}
-
-#[test]
 fn exit_rss_line_reports_the_peak() {
     let buf = SharedBuf::default();
     let subscriber = tracing_subscriber::fmt()

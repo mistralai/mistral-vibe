@@ -20,15 +20,19 @@ started them; later calls find it through a private state directory.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import base64
+import codecs
 from collections.abc import Callable, Iterator, Mapping, Sequence
 import contextlib
+import difflib
 import hashlib
 import hmac
 import json
 import os
 from pathlib import Path
 import secrets
+import select
 import shutil
 import signal
 import socket
@@ -39,7 +43,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import IO, Any, Literal
+from typing import IO, Any, Literal, NamedTuple
 import zlib
 
 SNIFF_BYTES = 4_096
@@ -47,12 +51,44 @@ _FIRST_PRINTABLE = 0x20
 _DEL = 0x7F
 _C1_CONTROL_END = 0x9F
 DEFAULT_LINE_LIMIT = 2_000
-MAX_READ_BYTES = 50 * 1_024
+MAX_READ_BYTES = 64_000
+"""The most bytes one ``read_file`` returns: the Agents SDK's ``MAX_FILE_BYTES``."""
+MAX_COUNTED_FILE_BYTES = 32 * 1_024 * 1_024
+"""The largest file ``read_file`` reads to the end to count its lines."""
+MAX_DIRECTORY_ENTRIES = 500
+"""The most entries one ``read_file`` of a directory lists."""
 MAX_WRITE_BYTES = 64_000
 MAX_WRITE_PREVIOUS_CONTENT_BYTES = 64_000
 MAX_EDIT_FILE_SIZE_BYTES = 512 * 1_024 * 1_024
 MAX_NEWLINE_SNIFF_BYTES = 1_024 * 1_024
-MAX_OUTPUT_BYTES = 16_000
+MAX_OUTPUT_BYTES = 512 * 1_024
+"""The most of one output stream a command's result carries whole. Past it,
+the result keeps the stream's first and last ``MAX_OUTPUT_BYTES // 2`` bytes."""
+OUTPUT_HEAD_BYTES = MAX_OUTPUT_BYTES // 2
+OUTPUT_TAIL_BYTES = MAX_OUTPUT_BYTES - OUTPUT_HEAD_BYTES
+_OUTPUT_DRAIN_SECONDS = 2.0
+LOGIN_ENV_TIMEOUT_SECONDS = 10.0
+"""How long a shell's login profile may take to run before commands run without
+what it sets. It is read once per session, ahead of the first command and
+outside that command's own timeout, and again when one of its files changes.
+
+The workflow Runtime reads login profiles the same way, in its own package; the
+limit, the size cap, the capture command, the snapshot scripts, the snapshot
+file and its source line, the profile files, the merge order and the failure
+message must stay the same in both (ADR 0026)."""
+COMMAND_OOM_SCORE_ADJ = 1_000
+"""The ``oom_score_adj`` each command takes on Linux: the most a process can
+have, so under memory pressure the kernel kills a runaway command before the
+helper, the process server or the Host that started it."""
+LOGIN_ENV_MAX_BYTES = 4 * 1_024 * 1_024
+"""The most a login profile's capture may print before it counts as failed."""
+_EDIT_HINT_MAX_LINES = 8
+_EDIT_HINT_MAX_CHARS = 400
+_EDIT_HINT_MAX_MATCH_LINES = 5
+_EDIT_HINT_MIN_SIMILARITY = 0.6
+# Bounds the closest-match search to roughly this many compared characters, so
+# a miss in a large file still fails fast.
+_EDIT_HINT_MAX_COMPARED_CHARS = 2_000_000
 SESSION_DIRECTORY_PREFIX = "mistralai-vibe-session-"
 TOOL_RESULTS_DIRECTORY = "tool-results"
 _POSIX_SHELL_NAMES = ("zsh", "bash", "sh")
@@ -110,7 +146,15 @@ def resolve_path(
 
 
 def read_file(path: Path, *, offset: int = 0, limit: int | None) -> dict[str, Any]:
-    """Read a text file window, trying each supported encoding in turn."""
+    """Read a text file window, trying each supported encoding in turn.
+
+    ``was_truncated`` means the file has more past what was returned, and
+    ``next_offset`` is where to read on, None once the window reached the end.
+    An offset past the last line is an error, not an empty window. A directory
+    reads as its listing; see :func:`_read_directory`.
+    """
+    if _is_directory(path):
+        return _read_directory(path, offset=offset, limit=limit)
     handle, status = _open_file(path)
     with handle:
         file_size_bytes = status.st_size
@@ -120,11 +164,16 @@ def read_file(path: Path, *, offset: int = 0, limit: int | None) -> dict[str, An
             resolved_offset = _resolve_read_offset(
                 path, encoding=encoding, offset=offset
             )
-            content, was_truncated = _read_content(
-                path, encoding=encoding, offset=resolved_offset, limit=limit
+            window = _read_content(
+                path,
+                encoding=encoding,
+                offset=resolved_offset,
+                limit=limit,
+                count_lines=file_size_bytes <= MAX_COUNTED_FILE_BYTES,
             )
         except UnicodeDecodeError:
             continue
+        content = window.content
         return {
             "path": str(path),
             "content": content,
@@ -132,9 +181,98 @@ def read_file(path: Path, *, offset: int = 0, limit: int | None) -> dict[str, An
             "returned_bytes": len(content.encode("utf-8")),
             "offset": resolved_offset,
             "lines_read": len(content.splitlines()),
-            "was_truncated": was_truncated,
+            "total_lines": window.total_lines,
+            "next_offset": window.next_offset,
+            "was_truncated": window.next_offset is not None or window.line_cut,
         }
     raise ValueError(f"Could not decode text file with supported encodings: {path}")
+
+
+def _is_directory(path: Path) -> bool:
+    """Whether ``path`` itself, not a link standing there, is a directory."""
+    try:
+        return stat.S_ISDIR(os.stat(path, follow_symlinks=False).st_mode)
+    except OSError:
+        return False
+
+
+def _read_directory(path: Path, *, offset: int, limit: int | None) -> dict[str, Any]:
+    """List a directory's entries, sorted, one per line, ``/`` after directories.
+
+    Windowed like a file read, one entry per line, at most
+    ``MAX_DIRECTORY_ENTRIES`` entries and ``MAX_READ_BYTES`` bytes at a time.
+    ``file_size_bytes`` is the size of the whole listing.
+    """
+    lines = [entry + "\n" for entry in _directory_entries(path)]
+    if offset == -1:
+        offset = max(len(lines) - 1, 0)
+    elif offset < 0:
+        raise ValueError(
+            "offset must be greater than or equal to 0, or -1 to read the last line"
+        )
+    if offset > 0 and offset >= len(lines):
+        raise ValueError(_past_listing_end_message(offset, len(lines)))
+    cap = MAX_DIRECTORY_ENTRIES if limit is None else min(limit, MAX_DIRECTORY_ENTRIES)
+    parts: list[str] = []
+    returned_bytes = 0
+    for line in lines[offset : offset + cap]:
+        line_bytes = len(line.encode("utf-8"))
+        if parts and returned_bytes + line_bytes > MAX_READ_BYTES:
+            break
+        parts.append(line)
+        returned_bytes += line_bytes
+    end = offset + len(parts)
+    next_offset = end if end < len(lines) else None
+    return {
+        "path": str(path),
+        "content": "".join(parts),
+        "file_size_bytes": sum(len(line.encode("utf-8")) for line in lines),
+        "returned_bytes": returned_bytes,
+        "offset": offset,
+        "lines_read": len(parts),
+        "total_lines": len(lines),
+        "next_offset": next_offset,
+        "was_truncated": next_offset is not None,
+    }
+
+
+def _directory_entries(path: Path) -> list[str]:
+    """Entry names, sorted, with ``/`` after each directory.
+
+    Opened without following a link swapped in at ``path`` since it was
+    checked, where the platform can list an open directory.
+    """
+    if os.scandir in os.supports_fd:
+        flags = os.O_RDONLY | _NO_FOLLOW | getattr(os, "O_DIRECTORY", 0)
+        fd = os.open(path, flags)
+        try:
+            with os.scandir(fd) as entries:
+                return sorted(_entry_line(entry) for entry in entries)
+        finally:
+            os.close(fd)
+    with os.scandir(path) as entries:
+        return sorted(_entry_line(entry) for entry in entries)
+
+
+def _entry_line(entry: os.DirEntry[str]) -> str:
+    # A name is any bytes but "/" and NUL: keep each on its own line, and
+    # bytes that are not UTF-8 visible but harmless.
+    name = os.fsencode(entry.name).decode("utf-8", errors="replace")
+    name = name.replace("\r", "?").replace("\n", "?")
+    try:
+        is_directory = entry.is_dir()
+    except OSError:
+        is_directory = False
+    return name + "/" if is_directory else name
+
+
+def _past_listing_end_message(offset: int, entries: int) -> str:
+    if entries == 0:
+        return f"offset {offset} is past the end of the listing: the directory is empty"
+    return (
+        f"offset {offset} is past the end of the listing: the directory has"
+        f" {entries} entries, so the last offset is {entries - 1}"
+    )
 
 
 def write_file(path: Path, content: str) -> tuple[dict[str, Any], str | None]:
@@ -238,11 +376,9 @@ def _apply_block(
         raise ValueError(f"block {index}: old_str and new_str must differ")
     matches = text.count(old_str)
     if matches == 0:
-        raise ValueError(f"block {index}: old_str not found in {path}")
+        raise ValueError(_not_found_message(text, index, old_str, path))
     if matches > 1 and not replace_all:
-        raise ValueError(
-            f"block {index}: old_str is not unique; found {matches} matches in {path}"
-        )
+        raise ValueError(_not_unique_message(text, index, old_str, path, matches))
 
     replacement_count = matches if replace_all else 1
     old_lines = old_str.splitlines(keepends=True)
@@ -259,6 +395,94 @@ def _apply_block(
         line_delta += len(new_lines) - len(old_lines)
     lines_changed = max(len(old_lines), len(new_lines)) * replacement_count
     return text.replace(old_str, new_str, replacement_count), lines_changed
+
+
+def _not_found_message(text: str, index: int, old_str: str, path: Path) -> str:
+    message = f"block {index}: old_str not found in {path}"
+    lines = text.splitlines(keepends=True)
+    line_count = len(old_str.splitlines()) or 1
+    start = _whitespace_insensitive_match(text, old_str)
+    if start is not None:
+        snippet = _edit_hint_snippet(lines[start - 1 : start - 1 + line_count])
+        return (
+            f"{message}; the text at line {start} differs from it only in "
+            "whitespace or indentation. Copy it exactly, including indentation:\n"
+            f"{snippet}"
+        )
+    closest = _closest_match(lines, old_str, line_count)
+    if closest is None:
+        return f"{message}; read the file again and copy old_str exactly"
+    start, similarity = closest
+    snippet = _edit_hint_snippet(lines[start - 1 : start - 1 + line_count])
+    return (
+        f"{message}; the closest match ({similarity:.0%} similar) starts at "
+        f"line {start}:\n{snippet}"
+    )
+
+
+def _not_unique_message(
+    text: str, index: int, old_str: str, path: Path, matches: int
+) -> str:
+    starts = _find_matches(text, old_str, limit=_EDIT_HINT_MAX_MATCH_LINES)
+    lines = ", ".join(str(text.count("\n", 0, start) + 1) for start in starts)
+    if matches > len(starts):
+        lines += f" and {matches - len(starts)} more"
+    return (
+        f"block {index}: old_str is not unique; found {matches} matches in {path} "
+        f"at lines {lines}. Add surrounding lines to old_str to pick one, or set "
+        "replace_all to replace every match"
+    )
+
+
+def _whitespace_insensitive_match(text: str, old_str: str) -> int | None:
+    """Return the line where ``old_str`` matches once whitespace runs are
+    collapsed and every line is stripped, or ``None``.
+    """
+
+    def normalize(value: str) -> str:
+        return "\n".join(" ".join(line.split()) for line in value.split("\n"))
+
+    needle = normalize(old_str).strip("\n")
+    if not needle.strip():
+        return None
+    haystack = normalize(text)
+    found = haystack.find(needle)
+    if found < 0:
+        return None
+    return haystack.count("\n", 0, found) + 1
+
+
+def _closest_match(
+    lines: Sequence[str], old_str: str, line_count: int
+) -> tuple[int, float] | None:
+    """Return the start line and similarity of the window of ``line_count``
+    lines most like ``old_str``, if any reaches the similarity floor.
+    """
+    windows = max(len(lines) - line_count + 1, 0)
+    if windows * 2 * len(old_str) > _EDIT_HINT_MAX_COMPARED_CHARS:
+        return None
+    matcher = difflib.SequenceMatcher(None, autojunk=False)
+    matcher.set_seq2(old_str)
+    best: tuple[int, float] | None = None
+    floor = _EDIT_HINT_MIN_SIMILARITY
+    for start in range(windows):
+        matcher.set_seq1("".join(lines[start : start + line_count]))
+        if matcher.real_quick_ratio() < floor or matcher.quick_ratio() < floor:
+            continue
+        similarity = matcher.ratio()
+        if similarity >= floor and (best is None or similarity > best[1]):
+            best = (start + 1, similarity)
+            floor = similarity
+    return best
+
+
+def _edit_hint_snippet(lines: Sequence[str]) -> str:
+    snippet = "".join(lines[:_EDIT_HINT_MAX_LINES]).rstrip("\n")
+    truncated = len(lines) > _EDIT_HINT_MAX_LINES
+    if len(snippet) > _EDIT_HINT_MAX_CHARS:
+        snippet = snippet[:_EDIT_HINT_MAX_CHARS]
+        truncated = True
+    return f"{snippet}\n[...]" if truncated else snippet
 
 
 def run_file_tool(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -388,37 +612,103 @@ def _resolve_read_offset(path: Path, *, encoding: str, offset: int) -> int:
     return max(line_count - 1, 0)
 
 
+class _ReadWindow:
+    def __init__(
+        self,
+        content: str,
+        *,
+        next_offset: int | None,
+        total_lines: int | None,
+        line_cut: bool,
+    ) -> None:
+        self.content = content
+        self.next_offset = next_offset
+        self.total_lines = total_lines
+        self.line_cut = line_cut
+
+
 def _read_content(
-    path: Path, *, encoding: str, offset: int, limit: int | None
-) -> tuple[str, bool]:
+    path: Path, *, encoding: str, offset: int, limit: int | None, count_lines: bool
+) -> _ReadWindow:
+    """Read up to ``limit`` whole lines from ``offset``, within ``MAX_READ_BYTES``.
+
+    A first line longer than the byte cap is cut, and the window moves past it.
+    With ``count_lines``, the rest of the file is read to count its lines;
+    otherwise ``total_lines`` is known only when the window reaches the end.
+    """
     parts: list[str] = []
     bytes_written = 0
-    seen = 0
-    yielded = 0
+    lines = 0
+    next_offset: int | None = None
+    line_cut = False
 
     with _open_text(path, encoding) as handle:
         for line in handle:
-            if seen < offset:
-                seen += 1
+            index = lines
+            lines += 1
+            if index < offset:
                 continue
+            yielded = index - offset
             if limit is not None and yielded >= limit:
-                return "".join(parts), True
-
+                next_offset = index
+                break
             line_bytes = len(line.encode("utf-8"))
             if bytes_written + line_bytes <= MAX_READ_BYTES:
                 parts.append(line)
                 bytes_written += line_bytes
-                yielded += 1
                 continue
+            if yielded > 0:
+                next_offset = index
+                break
+            # One line longer than the whole budget: return its start.
+            parts.append(
+                line.encode("utf-8")[:MAX_READ_BYTES].decode("utf-8", errors="ignore")
+            )
+            line_cut = True
+            next_offset = lines
+            break
+        else:
+            if offset > 0 and offset >= lines:
+                raise ValueError(_past_end_message(offset, lines))
+            return _ReadWindow(
+                "".join(parts), next_offset=None, total_lines=lines, line_cut=False
+            )
+        if count_lines:
+            total_lines = _count_remaining(handle, lines)
+        else:
+            total_lines = None
+            if line_cut and next(handle, None) is None:
+                total_lines = lines
 
-            remaining = MAX_READ_BYTES - bytes_written
-            if remaining > 0:
-                parts.append(
-                    line.encode("utf-8")[:remaining].decode("utf-8", errors="ignore")
-                )
-            return "".join(parts), True
+    if line_cut and total_lines is not None and lines >= total_lines:
+        next_offset = None
+    return _ReadWindow(
+        "".join(parts),
+        next_offset=next_offset,
+        total_lines=total_lines,
+        line_cut=line_cut,
+    )
 
-    return "".join(parts), False
+
+def _count_remaining(handle: IO[str], counted: int) -> int | None:
+    """``counted`` plus the lines left in ``handle``, or None if they do not
+    decode: the window read fine, so it is still returned.
+    """
+    try:
+        for _line in handle:
+            counted += 1
+    except UnicodeDecodeError:
+        return None
+    return counted
+
+
+def _past_end_message(offset: int, lines: int) -> str:
+    if lines == 0:
+        return f"offset {offset} is past the end of the file: the file is empty"
+    return (
+        f"offset {offset} is past the end of the file: it has {lines} lines,"
+        f" so the last offset is {lines - 1}"
+    )
 
 
 def _decode_editable_text(raw: bytes, path: Path) -> tuple[str, str]:
@@ -572,20 +862,24 @@ def save_tool_result(request: Mapping[str, Any]) -> dict[str, Any]:
     directory found there as a symlink, owned by someone else or open to others
     is refused rather than written through.
     """
-    session_id = _path_segment(request["session_id"])
     name = _path_segment(request["name"])
     content = request["content"]
     if not isinstance(content, str):
         raise ValueError("content must be a string")
-    directory = os.path.join(
-        tempfile.gettempdir(), SESSION_DIRECTORY_PREFIX + session_id
-    )
+    directory = session_directory(request["session_id"])
     results = os.path.join(directory, TOOL_RESULTS_DIRECTORY)
     _make_private_directory(directory)
     _make_private_directory(results)
     path = Path(results) / name
     _atomic_write_text(path, content, "utf-8")
     return {"path": str(path)}
+
+
+def session_directory(session_id: object) -> str:
+    """The session's directory under the temporary directory; not created."""
+    return os.path.join(
+        tempfile.gettempdir(), SESSION_DIRECTORY_PREFIX + _path_segment(session_id)
+    )
 
 
 def _path_segment(value: object) -> str:
@@ -854,19 +1148,561 @@ def _resolve_executable(candidate: str, search_path: str) -> str | None:
     return shutil.which(candidate, path=search_path)
 
 
+class LoginShell(NamedTuple):
+    """How one command runs after ``shell``'s login profile.
+
+    ``env`` is the command's environment; see ``merge_login_env``.
+    ``snapshot`` is the file holding the functions and aliases the profile
+    defined, or None when there are none or they could not be kept;
+    ``command`` sources it ahead of a command.
+    """
+
+    shell: str
+    env: dict[str, str]
+    snapshot: str | None
+
+    def command(self, command: str) -> str:
+        return login_snapshot_command(self.shell, command, self.snapshot)
+
+
+def login_shell(
+    shell: str,
+    base: Mapping[str, str],
+    request: Mapping[str, str] | None = None,
+    *,
+    session_id: str | None = None,
+    on_failure: Callable[[str], None] | None = None,
+) -> LoginShell:
+    """The environment and the function snapshot of one command run as
+    ``shell -c``, after ``shell``'s login profile.
+
+    The profile runs once per shell and ``base``, not once per command, with
+    ``base`` as its environment: this process keeps what it set, and so does
+    the session's directory under the temporary directory when ``session_id``
+    is given, for later processes that each run one command. A missing or
+    unreadable copy there is captured again, and so is one taken before a
+    profile file changed (see ``login_profile_stamp``). A profile that fails,
+    or runs past ``LOGIN_ENV_TIMEOUT_SECONDS``, leaves ``base`` as it is, and
+    ``on_failure`` gets ``login_env_failure_message`` when this call ran it.
+    """
+    captured = _login_env(shell, base, session_id=session_id, on_failure=on_failure)
+    return LoginShell(
+        shell, merge_login_env(base, captured.env, request or {}), captured.snapshot
+    )
+
+
+def login_shell_env(
+    shell: str,
+    base: Mapping[str, str],
+    request: Mapping[str, str] | None = None,
+    *,
+    session_id: str | None = None,
+    on_failure: Callable[[str], None] | None = None,
+) -> dict[str, str]:
+    """The environment of one command run as ``shell -c``; see ``login_shell``."""
+    return login_shell(
+        shell, base, request, session_id=session_id, on_failure=on_failure
+    ).env
+
+
+def read_login_env(
+    shell: str, env: Mapping[str, str], *, session_id: str | None = None
+) -> bool:
+    """Run ``shell``'s login profile now, unless it already ran, and say
+    whether what it set was captured.
+
+    Lets a caller read the profile ahead of a command, so the profile's time
+    does not count against the command's; ``login_shell`` reuses it.
+    """
+    return _login_env(shell, env, session_id=session_id).env is not None
+
+
+class _LoginCapture(NamedTuple):
+    env: dict[str, str] | None
+    snapshot: str | None
+    stamp: list[list[Any]]
+
+
+def _login_env(
+    shell: str,
+    env: Mapping[str, str],
+    *,
+    session_id: str | None,
+    on_failure: Callable[[str], None] | None = None,
+) -> _LoginCapture:
+    key = _login_env_key(shell, env)
+    stamp = login_profile_stamp(env)
+    cached = _login_envs.get(key)
+    if cached is None or cached.stamp != stamp:
+        cached = _load_login_env(
+            shell, env, key=key, session_id=session_id, stamp=stamp
+        )
+        _login_envs[key] = cached
+        if cached.env is None and on_failure is not None:
+            on_failure(login_env_failure_message(shell))
+    return cached
+
+
+def login_env_failure_message(shell: str) -> str:
+    return (
+        f"The login profile of {shell} failed or ran past"
+        f" {LOGIN_ENV_TIMEOUT_SECONDS:g}s; commands run without what it sets."
+    )
+
+
+def read_sandbox_login_env(request: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``login-env`` operation: read the login profile of the shell
+    ``bash`` runs for the Session ``session_id``, ahead of its first command.
+
+    Returns ``{"shell": ..., "captured": ...}``. The capture, or its failure,
+    is kept with the Session, where ``bash`` finds it.
+    """
+    base = dict(os.environ)
+    resolved = resolve_posix_shell(request.get("shell"), base)
+    captured = read_login_env(resolved, base, session_id=request.get("session_id"))
+    return {"shell": resolved, "captured": captured}
+
+
+def capture_login_env(shell: str, env: Mapping[str, str]) -> dict[str, str] | None:
+    """The environment ``shell``'s login profile leaves, or None if it fails."""
+    return capture_login_shell(shell, env)[0]
+
+
+def capture_login_shell(
+    shell: str, env: Mapping[str, str]
+) -> tuple[dict[str, str] | None, bytes | None]:
+    """The environment ``shell``'s login profile leaves, and the snapshot of
+    the functions and aliases it defined; ``(None, None)`` if it fails.
+
+    Standard input is a pipe closed at once, not ``/dev/null``, which a
+    command may have deleted. The shell runs in its own process group, killed
+    afterwards with whatever the profile left running in it.
+    """
+    marker = new_login_env_marker()
+    try:
+        process = subprocess.Popen(
+            login_env_capture_command(shell, marker),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=dict(env),
+            start_new_session=True,
+        )
+    except OSError:
+        return None, None
+    try:
+        if process.stdin is not None:
+            process.stdin.close()
+        output = _read_login_output(process)
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+        if process.stdout is not None:
+            process.stdout.close()
+    if output is None or process.returncode != 0:
+        return None, None
+    captured = parse_login_env_output(output, marker)
+    if captured is None:
+        return None, None
+    return captured, parse_login_snapshot_output(shell, output, marker)
+
+
+def new_login_env_marker() -> str:
+    return "mistralai-vibe-login-env-" + secrets.token_hex(8)
+
+
+def login_env_capture_command(shell: str, marker: str) -> list[str]:
+    """A login shell that prints ``marker``, the snapshot of its functions and
+    aliases, ``marker`` again, then its environment, NUL-separated.
+
+    Whatever the profile prints comes before the first marker, so the parse
+    skips it. Only bash and zsh, by the shell's file name, print a snapshot
+    (see ``_LOGIN_SNAPSHOT_SCRIPTS``); its errors are dropped, so they cannot
+    reach it. ``env`` runs by its path, ``/usr/bin/env`` else ``/bin/env``,
+    since the profile may leave a ``PATH`` without it; plain ``env`` only when
+    neither exists. The shell resolves the path where it runs, and ``exec``
+    keeps a logout script from printing after the dump.
+    """
+    return [
+        shell,
+        "-lc",
+        _LOGIN_ENV_CAPTURE_SCRIPT.format(
+            marker=marker,
+            snapshot=_LOGIN_SNAPSHOT_SCRIPTS.get(os.path.basename(shell), ""),
+        ),
+    ]
+
+
+def parse_login_env_output(output: bytes, marker: str) -> dict[str, str] | None:
+    """The environment printed after the last ``marker``, or None if the
+    capture did not finish.
+
+    ``env -0`` ends every variable with a NUL, so output that does not end
+    with one is an error message or a cut dump, not an environment. Bytes
+    that are not ``NAME=value`` are skipped.
+    """
+    _, found, dump = output.rpartition(marker.encode("ascii"))
+    if not found or not dump.endswith(b"\0"):
+        return None
+    env: dict[str, str] = {}
+    for entry in dump[:-1].split(b"\0"):
+        name, separator, value = entry.partition(b"=")
+        if separator and name:
+            env[os.fsdecode(name)] = os.fsdecode(value)
+    return env
+
+
+def parse_login_snapshot_output(shell: str, output: bytes, marker: str) -> bytes | None:
+    """The file to source ahead of each command of ``shell``: the snapshot
+    printed between the last two ``marker``s, or None when it defines
+    nothing.
+
+    bash expands aliases only when told to, so its snapshot first turns that
+    on; a lone ``shopt -s extglob`` defines nothing.
+    """
+    kind = _login_snapshot_kind(shell)
+    encoded = marker.encode("ascii")
+    head, found, _ = output.rpartition(encoded)
+    _, found_before, snapshot = head.rpartition(encoded)
+    if kind is None or not found or not found_before:
+        return None
+    if not any(
+        line.strip() and line != b"shopt -s extglob" for line in snapshot.splitlines()
+    ):
+        return None
+    if kind == "bash":
+        return b"shopt -s expand_aliases\n" + snapshot
+    return snapshot
+
+
+def login_snapshot_command(shell: str, command: str, snapshot: str | None) -> str:
+    """``command``, run after ``shell`` sources ``snapshot``.
+
+    The snapshot is sourced on a line of its own, with errors dropped, and
+    only if it is still there, so it cannot stop the command. bash reads a
+    ``-c`` string line by line, so the next line already sees the aliases;
+    zsh parses the whole string first, so there the command runs through
+    ``eval``. Without a snapshot the command is unchanged.
+    """
+    kind = _login_snapshot_kind(shell)
+    if snapshot is None or kind is None:
+        return command
+    path = _shell_quote(snapshot)
+    prefix = f"{{ [ -r {path} ] && . {path}; }} 2>&-\n"
+    if kind == "zsh":
+        return f"{prefix}eval {_shell_quote(command)}"
+    return prefix + command
+
+
+def login_profile_stamp(env: Mapping[str, str]) -> list[list[Any]]:
+    """The path, modification time and size of each login profile file that
+    exists, for ``env``'s ``HOME`` and ``ZDOTDIR``.
+
+    A capture taken under another stamp is taken again. Files a profile
+    sources from elsewhere are not part of it.
+    """
+    home = env.get("HOME", "")
+    roots = {"/": "/", "HOME": home, "ZDOTDIR": env.get("ZDOTDIR") or home}
+    stamp: list[list[Any]] = []
+    for root, name in LOGIN_PROFILE_FILES:
+        if not roots[root]:
+            continue
+        path = os.path.join(roots[root], name)
+        try:
+            status = os.stat(path)
+        except (OSError, ValueError):
+            continue
+        stamp.append([path, status.st_mtime_ns, status.st_size])
+    return stamp
+
+
+def merge_login_env(
+    base: Mapping[str, str], login: Mapping[str, str] | None, request: Mapping[str, str]
+) -> dict[str, str]:
+    """The environment of one command.
+
+    ``base`` is what the shell gets without a profile, and what the profile
+    ran with. Variables the profile sets win over ``base``, as in a login
+    shell, except that ``PATH`` keeps the ``base`` entries the profile
+    dropped, ahead of the profile's own: a caller that put a directory on
+    ``PATH`` meant its commands to be found. ``request``'s variables win over
+    both, ``PATH`` included, since the caller set them for this command.
+    Without a login environment, this is ``base`` updated with ``request``.
+    """
+    merged = dict(base)
+    if login is not None:
+        merged.update(
+            (name, value)
+            for name, value in login.items()
+            if name not in _LOGIN_SHELL_VARIABLES
+        )
+        if "PATH" in base and "PATH" in login:
+            merged["PATH"] = _merge_search_paths(base["PATH"], login["PATH"])
+    merged.update(request)
+    return merged
+
+
+LOGIN_PROFILE_FILES = (
+    ("/", "etc/profile"),
+    ("/", "etc/bashrc"),
+    ("/", "etc/bash.bashrc"),
+    ("/", "etc/zshenv"),
+    ("/", "etc/zprofile"),
+    ("/", "etc/zshrc"),
+    ("/", "etc/zlogin"),
+    ("/", "etc/zsh/zshenv"),
+    ("/", "etc/zsh/zprofile"),
+    ("/", "etc/zsh/zshrc"),
+    ("/", "etc/zsh/zlogin"),
+    ("HOME", ".bash_profile"),
+    ("HOME", ".bash_login"),
+    ("HOME", ".profile"),
+    ("HOME", ".bashrc"),
+    ("ZDOTDIR", ".zshenv"),
+    ("ZDOTDIR", ".zprofile"),
+    ("ZDOTDIR", ".zshrc"),
+    ("ZDOTDIR", ".zlogin"),
+)
+"""The files a bash or zsh login profile starts from, by root: ``/``,
+``$HOME``, or ``$ZDOTDIR`` (``$HOME`` when unset). A change to any of them
+captures the profile again before the next command."""
+# Variables a shell sets for itself, which describe the capture, not a command.
+_LOGIN_SHELL_VARIABLES = frozenset({"PWD", "OLDPWD", "SHLVL", "_"})
+_LOGIN_ENV_FORMAT = 2
+_LOGIN_ENV_CAPTURE_SCRIPT = (
+    "printf '%s' {marker}; "
+    "{snapshot}"
+    "printf '%s' {marker}; "
+    "[ -x /usr/bin/env ] && exec /usr/bin/env -0; "
+    "[ -x /bin/env ] && exec /bin/env -0; "
+    "exec env -0"
+)
+# What each shell prints for its snapshot, between the two markers.
+_LOGIN_SNAPSHOT_SCRIPTS = {
+    "bash": (
+        "{ shopt -q extglob && printf '%s\\n' 'shopt -s extglob'; "
+        "declare -f; alias -p; } 2>&-; "
+    ),
+    "zsh": "{ functions; alias -L; } 2>&-; ",
+}
+_login_envs: dict[str, _LoginCapture] = {}
+_snapshot_directory: list[str] = []
+
+
+def _login_snapshot_kind(shell: str) -> str | None:
+    name = os.path.basename(shell)
+    return name if name in _LOGIN_SNAPSHOT_SCRIPTS else None
+
+
+def _shell_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+def _merge_search_paths(base: str, login: str) -> str:
+    login_entries = login.split(os.pathsep)
+    dropped = [
+        entry
+        for entry in base.split(os.pathsep)
+        if entry and entry not in login_entries
+    ]
+    return os.pathsep.join(dict.fromkeys([*dropped, *login_entries]))
+
+
+def _login_env_key(shell: str, env: Mapping[str, str]) -> str:
+    material = json.dumps([_LOGIN_ENV_FORMAT, shell, sorted(env.items())])
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+
+
+def _load_login_env(
+    shell: str,
+    env: Mapping[str, str],
+    *,
+    key: str,
+    session_id: str | None,
+    stamp: list[list[Any]],
+) -> _LoginCapture:
+    directory = None
+    if session_id is not None:
+        try:
+            directory = session_directory(session_id)
+            _make_private_directory(directory)
+        except (OSError, ValueError):
+            directory = None
+    path = (
+        None if directory is None else os.path.join(directory, f"login-env-{key}.json")
+    )
+    if path is not None:
+        with contextlib.suppress(OSError, ValueError):
+            saved = _read_login_env(path)
+            if saved.stamp == stamp:
+                return saved
+    captured, snapshot = capture_login_shell(shell, env)
+    snapshot_path = None
+    if snapshot is not None:
+        with contextlib.suppress(OSError, ValueError):
+            snapshot_path = os.path.join(
+                directory or _private_snapshot_directory(), f"login-shell-{key}.sh"
+            )
+            _write_private_bytes(snapshot_path, snapshot)
+    loaded = _LoginCapture(captured, snapshot_path, stamp)
+    if path is not None:
+        with contextlib.suppress(OSError, ValueError):
+            _write_private_json(
+                path, {"env": captured, "snapshot": snapshot_path, "stamp": stamp}
+            )
+    return loaded
+
+
+def _private_snapshot_directory() -> str:
+    """This process's own directory for snapshots of a capture no Session
+    keeps; removed when the process exits.
+    """
+    if not _snapshot_directory:
+        directory = tempfile.mkdtemp(prefix="mistralai-vibe-login-shell-")
+        atexit.register(shutil.rmtree, directory, True)
+        _snapshot_directory.append(directory)
+    return _snapshot_directory[0]
+
+
+def _write_private_bytes(path: str, content: bytes) -> None:
+    temporary = f"{path}.{secrets.token_hex(8)}.tmp"
+    descriptor = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NO_FOLLOW, 0o600
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+        os.replace(temporary, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+
+
+def _read_login_env(path: str) -> _LoginCapture:
+    """A saved capture; raises ``OSError`` or ``ValueError`` when there is none."""
+    descriptor = os.open(path, os.O_RDONLY | _NO_FOLLOW)
+    with os.fdopen(descriptor, encoding="utf-8") as handle:
+        saved = json.load(handle)
+    if not isinstance(saved, dict) or not {"env", "snapshot", "stamp"} <= saved.keys():
+        raise ValueError(f"Not a saved login environment: {path}")
+    captured, snapshot, stamp = saved["env"], saved["snapshot"], saved["stamp"]
+    if not (
+        captured is None
+        or (
+            isinstance(captured, dict)
+            and all(
+                isinstance(name, str) and isinstance(value, str)
+                for name, value in captured.items()
+            )
+        )
+    ):
+        raise ValueError(f"Not a saved login environment: {path}")
+    if not (snapshot is None or isinstance(snapshot, str)) or not isinstance(
+        stamp, list
+    ):
+        raise ValueError(f"Not a saved login environment: {path}")
+    if snapshot is not None and not os.path.isfile(snapshot):
+        raise ValueError(f"The saved snapshot is gone: {snapshot}")
+    return _LoginCapture(captured, snapshot, stamp)
+
+
+def _read_login_output(process: subprocess.Popen[bytes]) -> bytes | None:
+    """Everything the capture printed by the time it exited, or None.
+
+    Reading stops when the shell exits, not at end of file: a process the
+    profile started in the background may hold the pipe open for good.
+    """
+    assert process.stdout is not None
+    descriptor = process.stdout.fileno()
+    deadline = time.monotonic() + LOGIN_ENV_TIMEOUT_SECONDS
+    chunks: list[bytes] = []
+    size = 0
+    while (remaining := deadline - time.monotonic()) > 0:
+        exited = process.poll() is not None
+        readable, _, _ = select.select(
+            [descriptor], [], [], 0 if exited else min(remaining, 0.1)
+        )
+        if not readable:
+            if exited:
+                return b"".join(chunks)
+            continue
+        chunk = os.read(descriptor, 65_536)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > LOGIN_ENV_MAX_BYTES:
+            return None
+    return None
+
+
+# Raises the shell's own OOM score, then becomes the command: sh -c PRELUDE
+# ARGV0 ARGS... runs it with ARGV0 as $0. Stderr is closed for the write rather
+# than sent to /dev/null, which a command may have deleted; a failed redirection
+# there would stop the shell, a failed write is ignored.
+_OOM_SCORE_PRELUDE = (
+    f"{{ echo {COMMAND_OOM_SCORE_ADJ} >/proc/self/oom_score_adj; }} 2>&-; "
+    'exec "$0" "$@"'
+)
+
+
+def with_raised_oom_score(argv: Sequence[str]) -> list[str]:
+    """``argv``, run on Linux so the OOM killer picks it first.
+
+    A ``/bin/sh`` prelude raises its own ``oom_score_adj`` to
+    ``COMMAND_OOM_SCORE_ADJ``, then ``exec``s ``argv``, which keeps the
+    process, its group and its session. ``preexec_fn`` would do it in one
+    step, but is unsafe in a process with threads. Elsewhere, or without
+    ``/bin/sh``, ``argv`` is returned as it is.
+    """
+    if not sys.platform.startswith("linux") or not os.access("/bin/sh", os.X_OK):
+        return list(argv)
+    return ["/bin/sh", "-c", _OOM_SCORE_PRELUDE, *argv]
+
+
 async def spawn_shell(
     argv: Sequence[str], *, cwd: str | Path, env: Mapping[str, str]
 ) -> asyncio.subprocess.Process:
-    """Start a shell command with piped output, in its own process group."""
-    return await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        stdin=asyncio.subprocess.DEVNULL,
-        cwd=cwd,
-        env=dict(env),
-        start_new_session=sys.platform != "win32",
-    )
+    """Start a shell command with piped output, in its own process group.
+
+    On POSIX, standard input is a pipe closed at once rather than
+    ``/dev/null``, which a command may have deleted. On Linux the command
+    is the OOM killer's first pick (see ``with_raised_oom_score``).
+    """
+    if sys.platform == "win32":
+        return await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
+            cwd=cwd,
+            env=dict(env),
+        )
+    stdin = closed_input()
+    try:
+        return await asyncio.create_subprocess_exec(
+            *with_raised_oom_score(argv),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=stdin,
+            cwd=cwd,
+            env=dict(env),
+            start_new_session=True,
+        )
+    finally:
+        os.close(stdin)
+
+
+def closed_input() -> int:
+    """The read end of a pipe whose write end is closed: input that is empty.
+
+    Unlike ``/dev/null``, it does not depend on a file a command can delete.
+    The caller closes it once the child holds its own copy.
+    """
+    reader, writer = os.pipe()
+    os.close(writer)
+    return reader
 
 
 async def collect_bash(
@@ -876,52 +1712,100 @@ async def collect_bash(
     timeout_seconds: int,
     output_encoding: str = "utf-8",
 ) -> dict[str, Any]:
-    """Wait for a spawned command and return its bounded, decoded output.
+    """Wait for a spawned command and return its decoded output.
 
-    A non-zero exit is a result, not an error: the caller reports the code.
-    The process group is always killed, on success, timeout or cancellation.
+    A stream longer than ``MAX_OUTPUT_BYTES`` comes back as its first and last
+    bytes around a notice of how much was left out. Output long enough to
+    crowd the model's context is saved to a file by the Harness Core, which
+    gives the model the start and end of it and the file's path.
+
+    A non-zero exit is a result, not an error: the caller reports the code. So
+    is a timeout: the command is stopped, and the result carries what it
+    printed until then, with ``timed_out`` set. The process group is always
+    killed, on success, timeout or cancellation.
     """
-    task = asyncio.ensure_future(_communicate_bounded(process))
+    stdout = _OutputCapture("stdout")
+    stderr = _OutputCapture("stderr")
+    readers = asyncio.ensure_future(
+        asyncio.gather(
+            _capture(process.stdout, stdout), _capture(process.stderr, stderr)
+        )
+    )
+    timed_out = False
     try:
-        done, _ = await asyncio.wait({task}, timeout=timeout_seconds)
-        if not done:
-            raise TimeoutError(
-                f"Command timed out after {timeout_seconds}s: {command!r}"
+        try:
+            await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
+        except TimeoutError:
+            timed_out = True
+            await kill(process)
+        # Output written just before the exit may still be in the pipes, and a
+        # process that left the group may hold them open: wait only briefly.
+        await asyncio.wait({readers}, timeout=_OUTPUT_DRAIN_SECONDS)
+        stderr_text = stderr.render(output_encoding)
+        if timed_out:
+            stderr_text += (
+                f"\n[The command timed out after {timeout_seconds}s and was"
+                " stopped. The output above is what it printed until then.]"
             )
-        stdout_bytes, stdout_truncated, stderr_bytes, stderr_truncated = task.result()
         return {
             "command": command,
-            "stdout": decode_output(stdout_bytes, output_encoding),
-            "stderr": decode_output(stderr_bytes, output_encoding),
-            "returncode": process.returncode or 0,
-            "was_truncated": stdout_truncated or stderr_truncated,
+            "stdout": stdout.render(output_encoding),
+            "stderr": stderr_text,
+            "returncode": -1 if process.returncode is None else process.returncode,
+            "was_truncated": stdout.truncated or stderr.truncated,
+            "timed_out": timed_out,
         }
     finally:
         await kill(process)
-        if not task.done():
-            task.cancel()
+        if not readers.done():
+            readers.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await task
+                await readers
 
 
 async def run_bash(
-    command: str, *, timeout_seconds: int, cwd: str, shell: str | None
+    command: str,
+    *,
+    timeout_seconds: int,
+    cwd: str,
+    shell: str | None,
+    session_id: str | None,
+    login_env: bool = True,
 ) -> dict[str, Any]:
-    """Run ``command`` in a POSIX login shell with this process's environment.
+    """Run ``command`` with this process's environment, after the shell's
+    login profile.
 
-    The shell runs under ``_SESSION_GUARD``, so a sandbox that kills this
-    helper, as one does to a command it stops at its own time limit, kills
-    the command too.
+    The profile is read once per session (see ``login_shell``), usually
+    by an earlier ``login-env`` operation, and again after a profile file
+    changed. The command runs in a non-login shell, after it sources the
+    functions and aliases the profile defined, so a profile that resets
+    ``PATH`` cannot drop the directories this environment put on it. A profile
+    read here that fails adds ``login_env_warning`` to the result. Without
+    ``login_env`` the profile is not read. The shell runs
+    under ``_SESSION_GUARD``, so a sandbox that kills this helper, as one does
+    to a command it stops at its own time limit, kills the command too. On
+    Linux the shell, not the guard, is the OOM killer's first pick: a guard
+    killed first would leave the command running.
     """
-    env = shell_env(os.environ, {}, windows=False)
-    argv = [resolve_posix_shell(shell, env), "-lc", command]
+    base = dict(os.environ)
+    resolved = resolve_posix_shell(shell, base)
+    warnings: list[str] = []
+    if login_env:
+        login = login_shell(
+            resolved, base, session_id=session_id, on_failure=warnings.append
+        )
+        base = login.env
+        command_line = login.command(command)
+    else:
+        command_line = command
+    env = shell_env(base, {}, windows=False)
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-I",
         "-S",
         "-c",
         _SESSION_GUARD,
-        *argv,
+        *with_raised_oom_score([resolved, "-c", command_line]),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -929,7 +1813,13 @@ async def run_bash(
         env=env,
         start_new_session=True,
     )
-    return await collect_bash(process, command=command, timeout_seconds=timeout_seconds)
+    result = await collect_bash(
+        process, command=command, timeout_seconds=timeout_seconds
+    )
+    if warnings:
+        # The profile changed since the Host read it, and failed this time.
+        result["login_env_warning"] = warnings[0]
+    return result
 
 
 # Leads the session a sandboxed command runs in, and kills the session's process
@@ -937,11 +1827,15 @@ async def run_bash(
 # limit by killing the helper's process group, which the command's own session is
 # not in, so without it the command would run on until the sandbox is deleted.
 # The guard's stdin is a pipe that only the helper holds open: end of file means
-# the helper is gone. Otherwise the guard exits as the shell did.
+# the helper is gone. Otherwise the guard exits as the shell did. The shell's own
+# stdin is an empty pipe rather than /dev/null, which a command may have deleted.
 _SESSION_GUARD = """
 import os, signal, subprocess, sys, threading
 signal.signal(signal.SIGINT, signal.SIG_DFL)
-shell = subprocess.Popen(sys.argv[1:], stdin=subprocess.DEVNULL)
+empty, writer = os.pipe()
+os.close(writer)
+shell = subprocess.Popen(sys.argv[1:], stdin=empty)
+os.close(empty)
 def guard():
     try:
         while os.read(0, 4096):
@@ -988,29 +1882,66 @@ async def kill(process: asyncio.subprocess.Process) -> None:
         await process.wait()
 
 
-async def _communicate_bounded(
-    process: asyncio.subprocess.Process,
-) -> tuple[bytes, bool, bytes, bool]:
-    stdout, stderr, _ = await asyncio.gather(
-        _read_bounded(process.stdout), _read_bounded(process.stderr), process.wait()
-    )
-    return stdout[0], stdout[1], stderr[0], stderr[1]
+class _OutputCapture:
+    """One output stream: kept whole up to ``MAX_OUTPUT_BYTES``; past that,
+    only its first and last bytes are kept.
+    """
+
+    def __init__(self, stream: str) -> None:
+        self.stream = stream
+        self.truncated = False
+        self._head = bytearray()
+        self._tail = bytearray()
+        self._total = 0
+
+    def feed(self, chunk: bytes) -> None:
+        self._total += len(chunk)
+        if not self.truncated:
+            self._head += chunk
+            if len(self._head) <= MAX_OUTPUT_BYTES:
+                return
+            self.truncated = True
+            chunk = bytes(self._head[OUTPUT_HEAD_BYTES:])
+            del self._head[OUTPUT_HEAD_BYTES:]
+        self._tail += chunk
+        del self._tail[:-OUTPUT_TAIL_BYTES]
+
+    def render(self, encoding: str) -> str:
+        if not self.truncated:
+            return decode_output(bytes(self._head), encoding)
+        head = _decode_head(bytes(self._head), encoding)
+        tail = _decode_tail(bytes(self._tail), encoding)
+        omitted = self._total - len(self._head) - len(self._tail)
+        return (
+            f"{head}\n\n[... {omitted:,} of {self._total:,} bytes of {self.stream}"
+            " omitted. Narrow the command, or send its output to a file and"
+            f" search that. ...]\n\n{tail}"
+        )
 
 
-async def _read_bounded(reader: asyncio.StreamReader | None) -> tuple[bytes, bool]:
+async def _capture(
+    reader: asyncio.StreamReader | None, capture: _OutputCapture
+) -> None:
     if reader is None:
-        return b"", False
-    chunks: list[bytes] = []
-    size = 0
-    truncated = False
-    while chunk := await reader.read(4096):
-        remaining = MAX_OUTPUT_BYTES - size
-        if remaining > 0:
-            chunks.append(chunk[:remaining])
-            size += min(len(chunk), remaining)
-        if len(chunk) > remaining:
-            truncated = True
-    return b"".join(chunks), truncated
+        return
+    while chunk := await reader.read(65_536):
+        capture.feed(chunk)
+
+
+def _decode_head(raw: bytes, encoding: str) -> str:
+    """Decode ``raw`` without the partial character it may end in."""
+    decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+    return decoder.decode(raw, final=False)
+
+
+def _decode_tail(raw: bytes, encoding: str) -> str:
+    """Decode ``raw`` without the partial UTF-8 character it may start with."""
+    if codecs.lookup(encoding).name == "utf-8":
+        start = 0
+        while start < min(3, len(raw)) and 0x80 <= raw[start] <= 0xBF:  # noqa: PLR2004
+            start += 1
+        raw = raw[start:]
+    return decode_output(raw, encoding)
 
 
 # Background processes
@@ -1068,18 +1999,25 @@ _PR_SET_CHILD_SUBREAPER = 36
 _ProcessSnapshot = tuple[float, dict[int, tuple[int, int, bool]]]
 
 # Runs in the child before the shell: makes the terminal the controlling one,
-# and undoes the signal state a Python parent leaves behind, then becomes the
-# shell, so the shell keeps this process's pid and group.
-_PROCESS_BOOTSTRAP = """
+# undoes the signal state a Python parent leaves behind and, on Linux, makes the
+# process the OOM killer's first pick (see COMMAND_OOM_SCORE_ADJ), then becomes
+# the shell, so the shell keeps this process's pid and group.
+_PROCESS_BOOTSTRAP = f"""
 import fcntl, os, signal, sys, termios
 fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+if sys.platform.startswith("linux"):
+    try:
+        with open("/proc/self/oom_score_adj", "w") as oom_score_adj:
+            oom_score_adj.write("{COMMAND_OOM_SCORE_ADJ}")
+    except OSError:
+        pass
 if hasattr(signal, "pthread_sigmask"):
     signal.pthread_sigmask(signal.SIG_SETMASK, [])
 for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
     number = getattr(signal, name, None)
     if number is not None:
         signal.signal(number, signal.SIG_DFL)
-os.execv(sys.argv[1], [sys.argv[1], "-lc", sys.argv[2]])
+os.execv(sys.argv[1], [sys.argv[1], "-c", sys.argv[2]])
 """
 
 
@@ -1369,7 +2307,7 @@ def _ps_process_table() -> dict[int, tuple[int, int, bool]]:
     try:
         completed = subprocess.run(
             ["ps", "-A", "-o", "pid=,ppid=,pgid=,stat="],
-            stdin=subprocess.DEVNULL,
+            input=b"",
             capture_output=True,
             check=False,
             timeout=5,
@@ -1585,6 +2523,8 @@ class ProcessServer:
             shell = resolve_posix_shell(payload.get("shell"), env)
         except ShellNotFoundError as exc:
             return _process_failure("shell_not_found", str(exc))
+        login = login_shell(shell, env, session_id=self.session_id)
+        env = login.env
         master_fd, slave_fd = pty.openpty()
         try:
             process = subprocess.Popen(
@@ -1594,7 +2534,7 @@ class ProcessServer:
                     "-c",
                     _PROCESS_BOOTSTRAP,
                     shell,
-                    payload["command"],
+                    login.command(payload["command"]),
                 ],
                 cwd=cwd,
                 env=env,
@@ -1964,6 +2904,7 @@ def _start_process_server(directory: str, session_id: str) -> dict[str, Any]:
         os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
         0o600,
     )
+    stdin = closed_input()
     try:
         process = subprocess.Popen(
             [
@@ -1976,13 +2917,14 @@ def _start_process_server(directory: str, session_id: str) -> dict[str, Any]:
             ],
             cwd=directory,
             env={**os.environ, _PROCESS_TOKEN_ENV: token},
-            stdin=subprocess.DEVNULL,
+            stdin=stdin,
             stdout=log,
             stderr=subprocess.STDOUT,
             close_fds=True,
             start_new_session=True,
         )
     finally:
+        os.close(stdin)
         os.close(log)
     deadline = time.monotonic() + _PROCESS_STARTUP_SECONDS
     while time.monotonic() < deadline:
@@ -2193,26 +3135,32 @@ def decode_request(encoded: str) -> dict[str, Any]:
 
 
 def _run_operation(operation: str, request: Mapping[str, Any]) -> Any:
-    if operation == "file":
-        return run_file_tool(request)
-    if operation == "save-tool-result":
-        return save_tool_result(request)
-    if operation == "skills-scan":
-        return scan_skills(request)
-    if operation == "skills-install":
-        return install_skills(request)
-    if operation == "bash":
-        return asyncio.run(
-            run_bash(
-                request["command"],
-                timeout_seconds=request["timeout_seconds"],
-                cwd=request["cwd"],
-                shell=request.get("shell"),
-            )
+    operations: dict[str, Callable[[Mapping[str, Any]], Any]] = {
+        "file": run_file_tool,
+        "save-tool-result": save_tool_result,
+        "skills-scan": scan_skills,
+        "skills-install": install_skills,
+        "bash": _run_bash_request,
+        "login-env": read_sandbox_login_env,
+        "process": run_process_operation,
+    }
+    run = operations.get(operation)
+    if run is None:
+        raise ValueError(f"Unsupported sandbox helper operation: {operation}")
+    return run(request)
+
+
+def _run_bash_request(request: Mapping[str, Any]) -> dict[str, Any]:
+    return asyncio.run(
+        run_bash(
+            request["command"],
+            timeout_seconds=request["timeout_seconds"],
+            cwd=request["cwd"],
+            shell=request.get("shell"),
+            session_id=request.get("session_id"),
+            login_env=request.get("login_env", True),
         )
-    if operation == "process":
-        return run_process_operation(request)
-    raise ValueError(f"Unsupported sandbox helper operation: {operation}")
+    )
 
 
 def take_request_file(path: str) -> str:

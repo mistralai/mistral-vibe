@@ -166,6 +166,25 @@ async def test_admin_allowed_model_names_cannot_be_bypassed_by_a_user_alias() ->
 
 
 @pytest.mark.asyncio
+async def test_admin_enable_auto_approve_false_shadows_lower_layers() -> None:
+    overrides = OverridesLayer(data={"enable_auto_approve": True})
+    admin = AdminConfigLayer()
+    admin.load_managed_toml("enable_auto_approve = false\n")
+
+    orchestrator = await ConfigOrchestrator.create(
+        schema=VibeConfigSchema,
+        layers=[overrides, admin],
+        default_layer_resolver=lambda: overrides,
+    )
+
+    assert orchestrator.config.enable_auto_approve is False
+
+    # A lower-layer write cannot re-enable the mode.
+    await orchestrator.set_field("/enable_auto_approve", True)
+    assert orchestrator.config.enable_auto_approve is False
+
+
+@pytest.mark.asyncio
 async def test_unmatched_admin_allowed_model_names_fail_closed() -> None:
     defaults = DefaultConfigLayer(schema=VibeConfigSchema)
     overrides = OverridesLayer(data={})

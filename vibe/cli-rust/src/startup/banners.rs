@@ -236,7 +236,7 @@ fn fetch_untrusted_config(app: &mut App, client: &Arc<Client>) {
 
 /// The untrusted-config warning's gate and body: warn once per folder,
 /// still surfacing new ones, then record the folders as acknowledged.
-fn untrusted_warning(response: &Value) -> Option<String> {
+pub fn untrusted_warning(response: &Value) -> Option<String> {
     let parsed: WorkspaceUntrustedConfigResponse = serde_json::from_value(response.clone()).ok()?;
     if parsed.dirs.is_empty() {
         return None;

@@ -6,10 +6,14 @@ use serde_json::json;
 
 use crate::core::features::large_output::PendingWrite;
 use crate::core::features::permissions::GrantKey;
-use crate::core::features::programmatic_tool_calling::ProgramExecution;
+use crate::core::features::programmatic_tool_calling::{
+    ProgramExecution, interrupted_program_content,
+};
 use crate::core::hooks::HookCall;
-use crate::core::step_protocol::Action;
+use crate::core::step_protocol::{Action, DeterminismContext};
+use crate::core::tools::context::ToolContext;
 use crate::core::tools::external::ExternalToolCall;
+use crate::core::wire::content::text_content;
 use crate::core::wire::message::Message;
 use crate::core::wire::tool::{ToolCall, ToolResult};
 
@@ -66,6 +70,18 @@ pub(crate) struct ToolBatch {
 }
 
 impl ToolBatch {
+    /// The results of the calls that already finished, in call order. Core commits them to
+    /// the conversation only when every call in the batch has finished.
+    pub(crate) fn completed_messages(&self) -> Vec<&Message> {
+        self.executions
+            .iter()
+            .filter_map(|execution| match &execution.state {
+                ToolExecutionState::Completed { message } => Some(message),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn pending_actions(&self, turn_id: &str) -> Vec<Action> {
         self.executions
             .iter()
@@ -129,32 +145,46 @@ impl ToolBatch {
             .collect()
     }
 
+    /// Closes every unfinished call with an Interrupted failure. An
+    /// interrupted program also says which of its tool calls already ran, so
+    /// the model does not run them again.
     pub(crate) fn interrupted_messages(
         &self,
+        tools: &ToolContext<'_>,
         interruption_message: &str,
+        determinism: DeterminismContext,
     ) -> Result<Vec<Message>, CoreError> {
         self.executions
             .iter()
-            .map(|execution| match &execution.state {
-                ToolExecutionState::Completed { message } => Ok(message.clone()),
-                ToolExecutionState::DirectAwaitingPreHook { .. }
-                | ToolExecutionState::DirectAwaitingApproval { .. }
-                | ToolExecutionState::DirectPending { .. }
-                | ToolExecutionState::DirectAwaitingPostHook { .. }
-                | ToolExecutionState::ProgramPending { .. }
-                | ToolExecutionState::AwaitingLargeOutputWrite { .. } => {
-                    Ok(Message::tool_failure_text(
-                        execution.call.id.clone(),
-                        execution.call.name.clone(),
-                        serde_json::to_string(&json!({
-                            "result": {
-                                "type": "error",
-                                "error": {"name": "Interrupted", "message": interruption_message}
-                            }
-                        }))
-                        .map_err(|error| CoreError::invariant(error.to_string()))?,
-                    ))
+            .map(|execution| {
+                if let ToolExecutionState::Completed { message } = &execution.state {
+                    return Ok(message.clone());
                 }
+                let mut content = text_content(
+                    serde_json::to_string(&json!({
+                        "result": {
+                            "type": "error",
+                            "error": {"name": "Interrupted", "message": interruption_message}
+                        }
+                    }))
+                    .map_err(|error| CoreError::invariant(error.to_string()))?,
+                );
+                if let ToolExecutionState::ProgramPending { execution: program } = &execution.state
+                {
+                    content.extend(tools.with_program_context(|context| {
+                        interrupted_program_content(
+                            context,
+                            program,
+                            &execution.call.id,
+                            determinism,
+                        )
+                    }));
+                }
+                Ok(Message::tool_failure(
+                    execution.call.id.clone(),
+                    execution.call.name.clone(),
+                    content,
+                ))
             })
             .collect()
     }

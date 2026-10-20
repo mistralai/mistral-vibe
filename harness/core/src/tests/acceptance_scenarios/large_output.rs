@@ -79,20 +79,40 @@ fn filesystem_failed(action: &Value, message: &str) -> Value {
     })
 }
 
+/// The start and end of ASCII `text`, `cap` characters in all, around a
+/// marker naming how many characters were omitted.
+fn cut_middle(text: &str, cap: usize) -> String {
+    let head = cap.div_ceil(2);
+    let tail = cap - head;
+    format!(
+        "{}\n[... {} characters omitted ...]\n{}",
+        &text[..head],
+        text.len() - cap,
+        &text[text.len() - tail..],
+    )
+}
+
+/// The pretty JSON of `{"text": text}` with `text` cut to the longest length
+/// that fits `limit`.
+fn text_field_excerpt(text: &str, limit: usize) -> String {
+    (0..=limit)
+        .rev()
+        .map(|cap| serde_json::to_string_pretty(&json!({"text": cut_middle(text, cap)})).unwrap())
+        .find(|excerpt| excerpt.encode_utf16().count() <= limit)
+        .unwrap()
+}
+
 fn saved_receipt(
     path: &str,
     serialized: &str,
     max_output_characters: usize,
     preview_characters: usize,
+    excerpt: &str,
     type_definition: &str,
 ) -> String {
     format!(
-        "<system>The tool output is large. To preserve your context window, it was saved to the file system under {path}.\nOutput size: {} characters\nMax size before saving: {max_output_characters} characters\nThe truncated output below contains only the first {preview_characters} characters of the tool response.</system>\n<truncated-output>\n{}…\n</truncated-output>\n<output-type>{type_definition}</output-type>\n<system>Remember: The full content was saved to {path}.\nRead the JSON's inferred type definition from the <output-type> tag first, then inspect the saved JSON with `jq` before searching them with `grep` instead of `read_file`.</system>",
+        "<system>The tool output is large. To preserve your context window, it was saved to the file system under {path}.\nOutput size: {} characters\nMax size before saving: {max_output_characters} characters\nThe excerpt below keeps about {preview_characters} characters of the tool response: the start and end of each long text field, or of the whole response, with the middle omitted.</system>\n<truncated-output>\n{excerpt}\n</truncated-output>\n<output-type>{type_definition}</output-type>\n<system>Remember: The full content was saved to {path}.\nRead the JSON's inferred type definition from the <output-type> tag first. To see an omitted part, extract the field you need with `jq` and search or slice it with `grep`, or page through the file with `read_file` using `offset` and `limit`.</system>",
         serialized.encode_utf16().count(),
-        serialized
-            .chars()
-            .take(preview_characters)
-            .collect::<String>(),
     )
 }
 
@@ -109,8 +129,9 @@ fn too_large_result(code: &str, message: &str, limit_bytes: usize) -> Value {
     })
 }
 
-/// The `run_typescript` failure for a replay over the memory limit, and its text.
-fn memory_limit_failure(operation_count: usize) -> (Value, String) {
+/// The `run_typescript` failure for a replay over the memory limit, and its
+/// content: the error, then the call list with `call_lines`.
+fn memory_limit_failure(operation_count: usize, call_lines: &[&str]) -> (Value, Value) {
     let memory_error = json!({
         "name": "MemoryLimitError",
         "message": format!("run_typescript exceeded its 16 MiB memory limit with {operation_count} recorded operations. Retry with fewer tool calls in each run_typescript block, request smaller tool results, or split the work across multiple run_typescript calls. Return only the fields needed for the next step instead of every full tool result."),
@@ -123,9 +144,16 @@ fn memory_limit_failure(operation_count: usize) -> (Value, String) {
         "run_typescript failed: {}",
         serde_json::to_string(&memory_error).unwrap()
     );
+    let failure_content = json!([
+        {"type": "text", "text": failure_text},
+        {
+            "type": "text",
+            "text": program_call_summary(call_lines),
+        },
+    ]);
     let failure_result = json!({
         "type": "failure",
-        "content": [{"type": "text", "text": failure_text}],
+        "content": failure_content,
         "error": {
             "code": "MemoryLimitError",
             "message": memory_error["message"],
@@ -133,22 +161,19 @@ fn memory_limit_failure(operation_count: usize) -> (Value, String) {
             "details": memory_error["details"],
         },
     });
-    (failure_result, failure_text)
+    (failure_result, failure_content)
 }
 
 fn hard_limit_receipt(
     tool_name: &str,
     serialized: &str,
     hard_limit_characters: usize,
+    excerpt: &str,
     type_definition: &str,
 ) -> String {
     format!(
-        "<system>The {tool_name} tool output is unreasonably large ({} characters). To protect the context window, the hard inline safety limit is {hard_limit_characters} characters.\nThe truncated output below contains only the first {hard_limit_characters} characters of the tool response.</system>\n<truncated-output>\n{}…\n</truncated-output>\n<output-type>{type_definition}</output-type>\n<system>Recovery: Retry the tool with narrower parameters, or ask for a summarized/filtered result.</system>",
+        "<system>The {tool_name} tool output is unreasonably large ({} characters). To protect the context window, the hard inline safety limit is {hard_limit_characters} characters.\nThe excerpt below keeps about {hard_limit_characters} characters of the tool response: the start and end of each long text field, or of the whole response, with the middle omitted.</system>\n<truncated-output>\n{excerpt}\n</truncated-output>\n<output-type>{type_definition}</output-type>\n<system>Recovery: Retry the tool with narrower parameters, or ask for a summarized/filtered result.</system>",
         serialized.encode_utf16().count(),
-        serialized
-            .chars()
-            .take(hard_limit_characters)
-            .collect::<String>(),
     )
 }
 
@@ -166,7 +191,14 @@ fn direct_large_output_is_written_before_the_effective_result_is_committed() {
     let relative_path = "tool-results/large_lookup-direct-large.json";
     let resolved_path = "/home/user/tool-results/large_lookup-direct-large.json";
     let type_definition = "export interface Output {\ntext: string\n}\n";
-    let receipt = saved_receipt(resolved_path, &serialized, 80, 20, type_definition);
+    let receipt = saved_receipt(
+        resolved_path,
+        &serialized,
+        80,
+        20,
+        &cut_middle(&serialized, 20),
+        type_definition,
+    );
     let effective_result = json!({
         "type": "success",
         "content": [{"type": "text", "text": receipt}],
@@ -306,6 +338,10 @@ fn disabled_mode_truncates_only_results_above_the_hard_inline_limit() {
         "large_lookup",
         &serialized,
         HARD_INLINE_CHARACTER_LIMIT,
+        &text_field_excerpt(
+            &"x".repeat(HARD_INLINE_CHARACTER_LIMIT * 2),
+            HARD_INLINE_CHARACTER_LIMIT,
+        ),
         type_definition,
     );
     let effective_result = json!({
@@ -567,7 +603,14 @@ fn programmatic_results_beyond_what_one_program_can_replay_fail_on_arrival() {
     );
     let checkpoint_bytes = runtime.checkpoint_value().to_string().len();
     let small_result = text_tool_success(&actions[3], "small page");
-    let (failure_result, failure_text) = memory_limit_failure(4);
+    let (failure_result, failure_content) = memory_limit_failure(
+        4,
+        &[
+            "tools.data.large_lookup 1-2: done",
+            "tools.data.large_lookup 3: failed, check effects",
+            "tools.data.large_lookup 4: done",
+        ],
+    );
     let failure_serialized = serde_json::to_string_pretty(&failure_result).unwrap();
     let next_completion = runtime
         .apply(
@@ -600,7 +643,7 @@ fn programmatic_results_beyond_what_one_program_can_replay_fail_on_arrival() {
                 "tool_call_id": call_id,
                 "name": "run_typescript",
                 "outcome": "failure",
-                "content": [{"type": "text", "text": failure_text}],
+                "content": failure_content,
             }),
         ],
     );
@@ -723,7 +766,13 @@ fn programmatic_results_awaiting_a_post_tool_hook_count_once() {
             running(turn_id).dispatch(post_hook()),
         )
         .only_action();
-    let (failure_result, failure_text) = memory_limit_failure(4);
+    let (failure_result, failure_content) = memory_limit_failure(
+        4,
+        &[
+            "tools.data.large_lookup 1-2: done",
+            "tools.data.large_lookup 3-4: failed, check effects",
+        ],
+    );
     let failure_serialized = serde_json::to_string_pretty(&failure_result).unwrap();
     let grown = text_tool_success(&actions[3], &"x".repeat(79 * MIB / 10));
     let next_completion = runtime
@@ -757,7 +806,7 @@ fn programmatic_results_awaiting_a_post_tool_hook_count_once() {
                 "tool_call_id": call_id,
                 "name": "run_typescript",
                 "outcome": "failure",
-                "content": [{"type": "text", "text": failure_text}],
+                "content": failure_content,
             }),
         ],
     );
@@ -809,7 +858,8 @@ fn programmatic_results_count_only_what_replay_keeps() {
             "structured_content": structured,
         },
     });
-    let (failure_result, failure_text) = memory_limit_failure(3);
+    let (failure_result, failure_content) =
+        memory_limit_failure(3, &["tools.data.large_lookup 1-3: done"]);
     let failure_serialized = serde_json::to_string_pretty(&failure_result).unwrap();
 
     // Do
@@ -840,7 +890,7 @@ fn programmatic_results_count_only_what_replay_keeps() {
                 "tool_call_id": call_id,
                 "name": "run_typescript",
                 "outcome": "failure",
-                "content": [{"type": "text", "text": failure_text}],
+                "content": failure_content,
             }),
         ],
     );
@@ -946,7 +996,8 @@ fn sequential_programmatic_batches_report_memory_limit_and_continue() {
 
     let last_second_action = second_actions.last().unwrap();
     let last_second_result = nested_result(last_second_action, second_queries.last().unwrap());
-    let (failure_result, failure_text) = memory_limit_failure(42);
+    let (failure_result, failure_content) =
+        memory_limit_failure(42, &["tools.data.large_lookup 1-42: done"]);
     let failure_serialized = serde_json::to_string_pretty(&failure_result).unwrap();
     let next_completion = runtime
         .apply(
@@ -973,7 +1024,7 @@ fn sequential_programmatic_batches_report_memory_limit_and_continue() {
                 "tool_call_id": call_id,
                 "name": "run_typescript",
                 "outcome": "failure",
-                "content": [{"type": "text", "text": failure_text}],
+                "content": failure_content,
             }),
         ],
     );
@@ -997,6 +1048,7 @@ fn oversized_outer_run_typescript_result_uses_the_private_write_action() {
         &serialized,
         80,
         20,
+        &cut_middle(&serialized, 20),
         "export interface Output {\ntext: string\n}\n",
     );
     let mut runtime = SynchronousRuntime::new(large_output_config(ProvidedToolExposure::Direct));
@@ -1069,7 +1121,14 @@ fn oversized_run_typescript_stdout_is_included_in_the_private_write() {
     let relative_path = "tool-results/run_typescript-outer-stdout.json";
     let resolved_path = "/home/user/tool-results/run_typescript-outer-stdout.json";
     let type_definition = "export interface Output {\ncontent: {\ntype: string\ntext: string\n}[]\nstructured_content: {\nok: boolean\n}\n}\n";
-    let receipt = saved_receipt(resolved_path, &serialized, 80, 20, type_definition);
+    let receipt = saved_receipt(
+        resolved_path,
+        &serialized,
+        80,
+        20,
+        &cut_middle(&serialized, 20),
+        type_definition,
+    );
     let mut runtime = SynchronousRuntime::new(large_output_config(ProvidedToolExposure::Direct));
     let first_completion = runtime.start_turn(turn_id, "log a large local value");
 
@@ -1108,6 +1167,76 @@ fn oversized_run_typescript_stdout_is_included_in_the_private_write() {
         &[
             model_assistant_typescript(call_id, &source),
             model_tool_text(call_id, "run_typescript", &receipt),
+        ],
+    );
+}
+
+///
+/// *Prepare*: Filesystem offloading is configured far below the size of one `read_file` page.
+/// *Do*: The Runtime returns the large page for a direct `read_file` call.
+/// *Assert*: Core commits the page itself and continues, with no filesystem write and no large-output Observation.
+///
+#[test]
+fn file_read_pages_are_not_offloaded() {
+    let arguments = json!({"path": "big.txt", "offset": 0, "limit": 200});
+    let page = json!({
+        "path": "big.txt",
+        "content": "x\n".repeat(200),
+        "file_size_bytes": 4_000,
+        "returned_bytes": 400,
+        "offset": 0,
+        "lines_read": 200,
+        "was_truncated": true,
+        "total_lines": 2_000,
+        "next_offset": 200,
+    });
+    assert_page_is_not_offloaded(
+        large_output_config(ProvidedToolExposure::Direct),
+        ("read_file", "file_system.read_file"),
+        arguments,
+        page,
+    );
+}
+
+fn assert_page_is_not_offloaded(
+    harness_config: HarnessConfig,
+    (model_name, runtime_name): (&str, &str),
+    arguments: Value,
+    page: Value,
+) {
+    // Prepare
+    let turn_id = "turn-large-page";
+    let call_id = "large-page";
+    let mut runtime = SynchronousRuntime::new(harness_config);
+    let first_completion = runtime.start_turn(turn_id, "read the large page");
+    let calls = vec![tool_call(call_id, model_name, arguments.clone())];
+    let read_action = runtime
+        .complete_with_tool_calls(
+            turn_id,
+            &first_completion,
+            &calls,
+            [runtime_tool(runtime_name, arguments)],
+        )
+        .only_action();
+    let read_result = structured_tool_success(&read_action, page.clone());
+
+    // Do
+    let next_completion = runtime
+        .apply(
+            read_result.clone(),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe_completed_tool_result(&read_action, &read_result),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(
+        &next_completion,
+        "append",
+        &[
+            model_assistant_tool_calls(&calls),
+            model_tool_text(call_id, model_name, &serde_json::to_string(&page).unwrap()),
         ],
     );
 }

@@ -11,6 +11,7 @@ from vibe.app_server._integration_resources import MCPResource, PluginCatalogRes
 from vibe.app_server.models import MCPState, PluginCatalogEntry, PluginCatalogState
 from vibe.app_server.protocol import (
     AppServerResponseError,
+    ConnectorCatalogConnectParams,
     ConnectorCatalogMutationResponse,
     ConnectorCatalogReadResponse,
     ConnectorCatalogRefreshParams,
@@ -94,6 +95,7 @@ async def test_mcp_resource_routes_connector_actions_to_connector_catalog(
     resource = MCPResource(cast(Any, FakeConnection(client)), cast(Any, state))
 
     await resource.refresh_connectors()
+    await resource.connect_connector("deepwiki")
     await resource.toggle(
         "github", source="connector", disabled=True, tool_name="search"
     )
@@ -102,6 +104,10 @@ async def test_mcp_resource_routes_connector_actions_to_connector_catalog(
         (
             "connector_catalog/refresh",
             ConnectorCatalogRefreshParams(session_id="session-1"),
+        ),
+        (
+            "connector_catalog/connect",
+            ConnectorCatalogConnectParams(session_id="session-1", alias="deepwiki"),
         ),
         (
             "connector_catalog/toggle",

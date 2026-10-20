@@ -24,6 +24,14 @@ _git_status_lock = threading.Lock()
 GIT_TIMEOUT_MESSAGE = "Git operations timed out (large repository)"
 GIT_UNAVAILABLE_MESSAGE = "Not a git repository or git not available"
 _KILL_TIMEOUT_SECONDS = 2.0
+# The default-branch candidates, local and on origin. Named one by one so git
+# reads only these refs, never every ref.
+_DEFAULT_BRANCH_REFS = (
+    "refs/heads/main",
+    "refs/remotes/origin/main",
+    "refs/heads/master",
+    "refs/remotes/origin/master",
+)
 
 
 def git_bash_form(path: Path | str) -> str | None:
@@ -44,24 +52,40 @@ def git_bash_form(path: Path | str) -> str | None:
 def git_metadata_args(num_commits: int) -> tuple[list[str], list[str], list[str]]:
     """The read-only git commands behind the project context.
 
-    Current branch, whether ``origin/master`` exists and recent commits, in
-    that order. Do not add ``git status``: unlike these metadata-only commands,
-    it may pass working-tree contents through clean or process filters the
-    repository configures, and project context is collected outside the shell
-    permission boundary. Nothing here may list or decorate with every ref:
-    that takes seconds on repositories with many refs, longer on Windows.
+    Current branch, which of ``main`` and ``master`` exist, locally or on
+    ``origin``, and recent commits, in that order. Do not add ``git status``:
+    unlike these metadata-only commands, it may pass working-tree contents
+    through clean or process filters the repository configures, and project
+    context is collected outside the shell permission boundary. Nothing here
+    may list or decorate with every ref: that takes seconds on repositories
+    with many refs, longer on Windows.
     """
     return (
         ["branch", "--show-current"],
-        [
-            "for-each-ref",
-            "--count=1",
-            "--format=%(refname:short)",
-            "refs/remotes/origin/master",
-        ],
+        ["for-each-ref", "--format=%(refname)", *_DEFAULT_BRANCH_REFS],
         # --no-decorate also overrides a user's log.decorate setting.
         ["log", "--oneline", "--no-decorate", f"-{num_commits}"],
     )
+
+
+def default_branch(refs: str | None) -> str | None:
+    """``main`` or ``master``, whichever the repository has, locally or on origin.
+
+    ``refs`` is full ref names, one per line, as the second command of
+    ``git_metadata_args`` prints them. None when the repository has neither,
+    or the refs could not be read: naming a branch that does not exist sends
+    the agent after it.
+    """
+    if refs is None:
+        return None
+    names = {line.strip() for line in refs.splitlines()}
+    for candidate in ("main", "master"):
+        if (
+            f"refs/heads/{candidate}" in names
+            or f"refs/remotes/origin/{candidate}" in names
+        ):
+            return candidate
+    return None
 
 
 def parse_git_log(log_output: str) -> list[str]:
@@ -69,13 +93,19 @@ def parse_git_log(log_output: str) -> list[str]:
 
 
 def format_git_context(
-    current_branch: str, has_origin_master: bool, log_output: str
+    current_branch: str, default_branch_refs: str | None, log_output: str
 ) -> str:
-    main_branch = "master" if has_origin_master else "main"
-    git_info_parts = [
-        f"Current branch: {current_branch}",
-        f"Main branch (you will usually use this for PRs): {main_branch}",
-    ]
+    """Render the git metadata section.
+
+    ``default_branch_refs`` is the output of the second command of
+    ``git_metadata_args``, or None on failure.
+    """
+    git_info_parts = [f"Current branch: {current_branch}"]
+    main_branch = default_branch(default_branch_refs)
+    if main_branch is not None:
+        git_info_parts.append(
+            f"Main branch (you will usually use this for PRs): {main_branch}"
+        )
     recent_commits = parse_git_log(log_output.strip())
     if recent_commits:
         git_info_parts.append("Recent commits:")
@@ -205,14 +235,14 @@ class ProjectContextProvider:
 
             current_branch = branch_future.result().stdout.strip()
 
-            has_origin_master = False
+            default_branch_refs: str | None = None
             try:
-                has_origin_master = bool(remote_future.result().stdout.strip())
-            except subprocess.CalledProcessError, subprocess.TimeoutExpired:
+                default_branch_refs = remote_future.result().stdout
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 pass
 
             return format_git_context(
-                current_branch, has_origin_master, log_future.result().stdout
+                current_branch, default_branch_refs, log_future.result().stdout
             )
 
         except subprocess.TimeoutExpired:
@@ -280,4 +310,11 @@ def get_agents_md_section(
     if not doc_sections:
         return None
     template = UtilityPrompt.AGENTS_DOC.read()
+    if given:
+        # Instructions the session was started with are meant for its task: the
+        # closing hedge that they "may or may not be relevant" would undercut them.
+        template = template.split(_AGENTS_DOC_HEDGE, 1)[0].rstrip() + "\n"
     return Template(template).safe_substitute(sections="\n\n".join(doc_sections))
+
+
+_AGENTS_DOC_HEDGE = "IMPORTANT: this context may or may not be relevant"

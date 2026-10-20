@@ -181,8 +181,10 @@ class SessionWorktrees:
             raise
         # The session is standing in the worktree by now. Letting go of where it
         # was is bookkeeping, and must not be the reason its turns are refused.
-        with suppress(Exception):
-            self.release(previous, session_id)
+        # A session that started in the worktree it joins was never elsewhere.
+        if not _same_directory(previous, cwd):
+            with suppress(Exception):
+                self.release(previous, session_id)
         return resolution
 
     async def cleanup(self, resolution: WorktreeResolution) -> None:
@@ -299,6 +301,10 @@ def _requested(options: SessionOptions) -> WorktreeRequest | None:
 
 def _base_cwd(options: SessionOptions) -> Path:
     return Path(options.cwd or Path.cwd())
+
+
+def _same_directory(left: Path, right: Path) -> bool:
+    return left.expanduser().resolve() == right.expanduser().resolve()
 
 
 def _rewritten(

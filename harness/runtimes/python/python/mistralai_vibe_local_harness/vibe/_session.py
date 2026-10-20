@@ -2314,6 +2314,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         parent_session_id: str,
         target: InterruptTarget | CloseRunningTarget,
         operation_key: str,
+        reason: str = "interrupted by parent",
     ) -> None:
         runtime = self._runtime_for_host()
         inspection = runtime.inspection
@@ -2322,7 +2323,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 raise HarnessStaleTurnError(inspection.active_turn_id)
             await self._cancel_active_work()
             await runtime.interrupt(
-                expected_turn_id=target.command.turn_id, reason="interrupted by parent"
+                expected_turn_id=target.command.turn_id, reason=reason
             )
         elif inspection.last_turn_id != target.command.turn_id:
             raise HarnessStaleTurnError(inspection.active_turn_id)
@@ -2346,17 +2347,22 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
 
     async def _wait_for_parent_turn(self, turn_id: str) -> PublicSessionState:
         state, _watermark = self._current_state_and_watermark()
-        if (
+        while not (
             state.latest_turn is not None
             and state.latest_turn.id == turn_id
             and state.latest_turn.status != "in_progress"
         ):
-            return state
-        event = self._turn_terminal_events.setdefault(turn_id, asyncio.Event())
-        await event.wait()
-        state, _watermark = self._current_state_and_watermark()
-        if state.latest_turn is None or state.latest_turn.id != turn_id:
-            raise RuntimeError("child Turn terminated without a public outcome")
+            event = self._turn_terminal_events.setdefault(turn_id, asyncio.Event())
+            await event.wait()
+            state, _watermark = self._current_state_and_watermark()
+            if state.latest_turn is None or state.latest_turn.id != turn_id:
+                raise RuntimeError("child Turn terminated without a public outcome")
+            if state.latest_turn.status == "in_progress":
+                # An interrupt cancels the Turn's task, which fires this event,
+                # before Core records the Turn as interrupted: wait for the
+                # Turn's terminal state to be published.
+                if self._turn_terminal_events.get(turn_id) is event:
+                    del self._turn_terminal_events[turn_id]
         return state
 
     async def _record_parent_command(
@@ -2568,6 +2574,11 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         # the event carrying that status is the one that must report it gone.
         self._emit_event(self._with_harness_owned_state(published))
         if terminal is not None:
+            # Every way a Turn ends publishes its terminal state here, so a
+            # waiter for the Turn's outcome wakes however it was stopped.
+            waiter = self._turn_terminal_events.get(terminal[0])
+            if waiter is not None:
+                waiter.set()
             self._handle_terminal_turn(*terminal)
 
     def _publish_sequenced_event(self, event: JsonObject) -> None:

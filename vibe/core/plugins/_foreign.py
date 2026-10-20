@@ -199,7 +199,7 @@ def _opencode_executable_paths(
     for value in _opencode_package_entrypoints(package):
         try:
             path = resolve_declared_path(root, value)
-        except OSError, ValueError:
+        except (OSError, ValueError):
             continue
         if path.is_file() and _is_opencode_code_path(path):
             paths.add(path)

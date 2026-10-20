@@ -99,17 +99,22 @@ class ConfigBuilder[S: ConfigSchema]:
                     raw = data.model_dump()
                     if raw:
                         layer_dicts.append(_LayerData(name=layer.name, data=raw))
-                except UntrustedLayerError, EmptyLayerError:
+                except (UntrustedLayerError, EmptyLayerError):
                     continue
 
-            merged, origins = self._merge_fields(self._schema, layer_dicts)
-            return self._schema.validate_merged(merged, origins=origins)
+            merged, origins, defined_entries = self._merge_fields(
+                self._schema, layer_dicts
+            )
+            return self._schema.validate_merged(
+                merged, origins=origins, defined_entries=defined_entries
+            )
 
     def _merge_fields(
         self, schema: type[S], layer_dicts: list[_LayerData]
-    ) -> tuple[dict[str, Any], dict[str, str]]:
+    ) -> tuple[dict[str, Any], dict[str, str], dict[str, dict[str, tuple[str, ...]]]]:
         accumulated: dict[str, Any] = defaultdict(dict)
         origins: dict[str, str] = {}
+        defined_entries: dict[str, dict[str, tuple[str, ...]]] = defaultdict(dict)
 
         for ld in layer_dicts:
             for key, value in ld.data.items():
@@ -168,8 +173,18 @@ class ConfigBuilder[S: ConfigSchema]:
                     key, meta, accumulated, value, layer_name=ld.name
                 )
                 origins[key] = ld.name
+                if meta.merge_strategy is MergeStrategy.DEEP_MERGE and isinstance(
+                    value, dict
+                ):
+                    defined = tuple(
+                        entry
+                        for entry, payload in value.items()
+                        if schema.defines_entry(key, payload)
+                    )
+                    if defined:
+                        defined_entries[key][ld.name] = defined
 
-        return accumulated, origins
+        return accumulated, origins, dict(defined_entries)
 
     def _validate_merge_value(
         self, field_name: str, layer_name: str, strategy: MergeStrategy, value: Any

@@ -4,6 +4,7 @@ pub(super) mod file_system;
 pub(super) mod large_output;
 pub(super) mod model_wait;
 pub(super) mod notifications;
+pub(super) mod output_limit_recovery;
 pub(super) mod permissions;
 pub(super) mod programmatic_tool_calling;
 pub(super) mod skills;

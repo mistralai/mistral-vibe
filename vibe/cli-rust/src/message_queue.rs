@@ -23,7 +23,7 @@ pub use selection::{
     confirm_consumed_edit, edit_selected, end_edit, enter, exit, finish_consumed_edit,
     handle_selection_key, is_available, mode_hints, select_newer, select_older,
 };
-pub use snapshot::sync;
+pub use snapshot::{adopt, sync};
 pub use steering::{
     can_steer, defer_prompt, history_added as steering_history_added, mutation_in_flight,
     reconcile_snapshot, steer_pending,

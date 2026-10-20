@@ -5,6 +5,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.1] - 2026-10-20
+
+### Added
+
+- New `enable_auto_approve` setting: when the admin-managed config sets it to `false`, the auto-approve (YOLO) mode is forbidden — the `auto-approve` agent (and any custom agent with `safety = "yolo"`) is hidden and `--auto-approve`/`--yolo` plus `bypass_tool_permissions` are ignored. Per-tool permissions still apply.
+- `compaction_max_output_tokens` (80000), `compaction_thinking` (unset), `compaction_reasoning_limit_tokens` (32000), `output_limit_retries` (6) and `output_token_reserve` (4096) settings tune compaction requests and recovery from answers cut off at the output limit.
+- The app server has experimental `session/subagents/wait`, `session/subagents/interrupt` and `session/subagents/read` methods: a client can wait for the subagents a turn left running, interrupt them, and read each one's status, store, model, usage, cost and steps
+- `vibe -p` waits for the subagents its turn left running before it exits; `--time-limit` and other stops interrupt them, and the `--output-dir` export lists each subagent with its status, model, usage, cost and steps, and copies its journal
+- Each subagent's cost is priced at its own model's rates; when its model is unknown, the root's rates price it and the row says so (`pricingModel`, `pricingFallback`)
+- An `--agent-socket` server's `tools/call` names its caller, so the server can tell a subagent's call from the root's
+- A custom tool that fails to load now shows a warning naming the file and the error, instead of disappearing silently.
+- Experimental `vibe run-server` command: runs many `vibe -p --agent-socket` sessions from one process, on shared app-servers (`--runs-per-app-server`, default 16) that exit once idle, each run with its own config, credentials, limits and export
+- Vibe Desktop sessions support scheduled loops: the assistant can schedule a recurring prompt, fired prompts show as loop cards in the conversation, and active loops are listed (and can be deleted) in the session info.
+
+### Changed
+
+- `/model` and the `/config` model list now group models by where they come from: your organization, experiments, the model catalog, then your own config.
+- Resuming or continuing a session keeps the agent it last ran on, even if your default agent changes; switch agents in the session to change it.
+- ACP usage updates now report the session's prompt-cache hits as cached read tokens.
+- A tool output past about 16,000 characters is saved to a file, and the model sees its start and end instead of only its start.
+- A bash command that times out returns what it printed, and the default timeout is now 120 seconds, up to 300 when asked.
+- `tools.bash.default_timeout` and `max_timeout_seconds` are unset unless set in `config.toml`; the native shell tools still default to 300 seconds, at most 600 or the default when that is longer.
+- A shell tool's `default_timeout` above its `max_timeout_seconds` is now a config error naming both, instead of being lowered to the maximum.
+- `read_file` reports the file's line count and where to read on, and an offset past the end is an error.
+- `read_file` on a directory lists its entries, up to 500 at a time, instead of failing.
+- `read_file` and file mentions return up to 64,000 bytes a call instead of 51,200, the same as the Agents SDK.
+- On Linux, a command that runs the machine out of memory is the first process the kernel stops, before Vibe itself.
+- A shell's login profile runs before a session's first command and outside its timeout, and one that fails or takes over 10 seconds is skipped with a warning.
+- Bash commands can call the functions and aliases the login profile defines, for bash and zsh, and a change to a profile file is picked up by the next command.
+- Vibe now supports Python 3.12 and later instead of requiring Python 3.14.
+- All Vibe skill descriptions now support up to 1,024 characters.
+
+### Fixed
+
+- Background process results from the app server keep their process ID and exit code.
+- A model response kept open by keepalives without sending any data now times out after `api_timeout` instead of hanging the session.
+- An unparseable `VIBE_*` environment variable such as `VIBE_MODELS` is now ignored and logged instead of stopping Vibe at startup.
+- Sessions now record the agent they run on, so a session started with `--agent` reopens on that agent.
+- Code the agent runs with `run_typescript` now sees an MCP or connector tool's own error text instead of a generic message.
+- A failed /clear keeps the conversation on screen, and failed /clear and rewind requests show the server's reason.
+- Picking a model your administrator enforces explains why the model does not change.
+- Resuming a session from the picker restores its queued prompts.
+- A malformed background-process call now fails that tool call instead of ending the session.
+- When you have not chosen a model, a new session's first message now waits up to 5 seconds for the model assigned to your account.
+- Editors that sign in on every connection over ACP, such as CodeCompanion.nvim, no longer open a browser sign-in page when Vibe already has an API key for that console.
+- With `enable_system_trust_store = true` in `config.toml`, prompts now also use the operating system's certificates, so they work behind corporate proxies that only the OS trusts.
+- Turns no longer fail when the model announces a tool call but sends none, or sends one without a name; Vibe retries once or ends the turn cleanly instead.
+- The welcome banner text no longer shifts when you switch to or from a Mistral Large model.
+- Connectors that need no login, such as DeepWiki, now show as `not connected` in `/mcp` instead of `error - try refreshing`, and pressing Enter connects them without visiting the dashboard.
+- The CLI no longer hangs when it talks to an app-server that has already exited, such as after cancelling setup during a slow startup
+- Hovering a subagent row with the ansi-dark theme no longer turns its text black on black
+- Clicking a hovered subagent row no longer flashes the highlight back to the previous row
+- Installs and launches through uv now force a GIL-enabled build of Python, fixing failures on machines with a free-threaded (no-GIL) Python 3.14 installed.
+- Compaction no longer fails when a provider's cache repeats a malformed summary, or spends its whole output budget reasoning; Vibe falls back to a simpler request instead.
+- An answer cut off at the output-token limit no longer ends the turn at once: it is discarded and asked for again with feedback, up to 6 times a turn.
+- A tool call cut off at the output-token limit, such as a large file write, is asked for again in smaller pieces instead of failing with a JSON error.
+- Tool argument errors now name the field at fault, the allowed fields and the one the model most likely meant.
+- A failed edit now shows the closest matching text in the file, or the lines where a repeated match occurs.
+- Requests to a model with a declared `max_context_length` no longer overflow its window: the output cap is clipped to the room the input leaves, less a 4096-token reserve.
+- Bash commands no longer lose `PATH` entries that a login profile resets, and the profile runs once per session.
+- Bash commands still run after a command deleted `/dev/null`.
+- The git context names the repository's default branch instead of always `main`, and no longer hedges the instructions a session starts with.
+- In a sandbox, the git context is read in one round trip, and no longer times out on a slow sandbox.
+- Cached input tokens now reach the session's token usage and runtime stats, so `vibe -p` reports and prices them
+- Plugins that set a `displayName` in their `ai.mistral.vibe` extension now load their knowledge, hooks, agents and tool namespace instead of reporting an extension error.
+- `vibe -p` exits only once its app-server has, and on Linux a killed `vibe -p` or `vibe run-server` takes its app-servers down with it
+- `vibe -p` whose stdout closes early, as when piped into `head`, now ends the run as `infrastructure_failure` instead of crashing in text output
+- In Vibe Desktop, a session with no new turn no longer moves in the sidebar session list when you open it or restart the app.
+
 ## [3.0.0] - 2026-10-15
 
 ### Added
@@ -22,6 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rust CLI: Report activity, approvals, questions, completion, and failure with session titles and error messages through the OSC 7501 Program Status Protocol.
 - `/status` shows the credential source in use and the shadowed sources
 - Admin-enforceable `enable_mcp` flag to block all user-facing MCP server operations (add, remove, toggle, login, logout, tool registration), including plugin-provided MCP servers, via managed config.
+- With `experimental_enable_model_catalog` on and no model picked, Vibe runs the catalog's recommended model.
 
 ### Changed
 
@@ -48,6 +118,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `vibe -p` JSON and streaming output mark each completed assistant message and reasoning with an `outcome`: committed, or discarded with its cause.
 - The Rust TUI detects terminal activity reporting support to avoid duplicate title indicators and notification bells.
 - Faster session startup, most noticeably on Windows and in repositories with many branches or tags.
+- On Windows, hooks run in the same shell as the `bash` tool (Git Bash, otherwise PowerShell) instead of cmd.exe
+- The Upgrade to Vibe Pro offer opens the plans page instead of the API key page
+- When your selected model is not available, the warning names the model Vibe runs instead and how to pick another.
+- Changing a setting of a model that comes from the catalog or an experiment no longer copies the model's definition into your config file.
 
 ### Fixed
 
@@ -105,6 +179,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `grep` or `rg` shell command run by the agent shows its matches as a file-search result with clickable file chips
 - Git timeouts while reading project context are now enforced on Windows.
 - Recent commit messages in the project context are no longer truncated at their first parenthesis.
+- On Windows, PowerShell commands can now run `npm` scripts, fail on prompts instead of hanging, and show non-ASCII output correctly
+- On Windows, MCP stdio servers whose `command` string contains a backslash path now start
+- Resuming a session already open in another Vibe process now shows a clear busy message, at startup and in the /resume picker
+- The /resume picker marks those sessions with a lock and refuses to resume or delete them with a busy toast
+- Failed resume and delete attempts report the server's own error, and their notices no longer leak into the resumed session's transcript
+- Toasts float above open bottom apps instead of covering them, and --resume keeps the initializing indicator visible behind the picker
+- Rewinding a compacted conversation no longer hides the next answer or overwrites an earlier one.
+- The what's-new message shows your Vibe Pro upgrade or API key switch offer again
+- Vibe no longer fails to start when your config overrides a model that does not exist; the override is ignored with a warning.
 
 ### Removed
 

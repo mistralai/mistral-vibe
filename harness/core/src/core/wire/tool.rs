@@ -16,6 +16,20 @@ pub(crate) struct ToolCall {
     pub argument_error: Option<String>,
 }
 
+/// Longest tool name, in characters, that Core repeats back to the model in an
+/// error or feedback message. A model that invents a very long name sees a
+/// short echo of it, not its own output again.
+pub(crate) const ECHOED_TOOL_NAME_CHARS: usize = 64;
+
+/// `name` as Core repeats it to the model: cut to [`ECHOED_TOOL_NAME_CHARS`]
+/// characters, with `...` marking a cut.
+pub(crate) fn echoed_tool_name(name: &str) -> String {
+    match name.char_indices().nth(ECHOED_TOOL_NAME_CHARS) {
+        None => name.to_string(),
+        Some((end, _)) => format!("{}...", &name[..end]),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct ProtocolError {
     pub code: String,
@@ -116,6 +130,19 @@ impl ToolResult {
 mod tests {
     use super::*;
     use crate::core::testing::*;
+
+    #[test]
+    fn echoed_tool_names_are_cut_to_a_bounded_length() {
+        assert_eq!(echoed_tool_name("read_file"), "read_file");
+        let exact = "a".repeat(ECHOED_TOOL_NAME_CHARS);
+        assert_eq!(echoed_tool_name(&exact), exact);
+        let long = format!("{}{}", "\u{e9}".repeat(ECHOED_TOOL_NAME_CHARS), "tail");
+        assert_eq!(
+            echoed_tool_name(&long),
+            format!("{}...", "\u{e9}".repeat(ECHOED_TOOL_NAME_CHARS))
+        );
+    }
+
     #[test]
     fn tool_result_wire_shape_distinguishes_absent_and_null_structured_content() {
         let absent: ToolResult = serde_json::from_value(json!({

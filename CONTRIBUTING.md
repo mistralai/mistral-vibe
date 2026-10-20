@@ -44,7 +44,7 @@ This section is for developers who want to set up the repository for local devel
 
 ### Prerequisites
 
-- Python 3.14 or higher
+- Python 3.12 or higher
 - [uv](https://github.com/astral-sh/uv) - Modern Python package manager
 - [Rust](https://rustup.rs) - Builds the `vibe-rs` terminal UI
 

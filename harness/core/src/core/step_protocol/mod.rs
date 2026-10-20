@@ -133,7 +133,7 @@ pub(crate) struct Inspection {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum HarnessConfigurationChange {
     SystemInstructions { value: String },
-    Settings { value: HarnessSettings },
+    Settings { value: Box<HarnessSettings> },
     Capabilities { value: HarnessCapabilitySet },
     SkillCatalogFingerprint { value: String },
     Plugins { value: Vec<PluginContextDefinition> },
@@ -386,7 +386,7 @@ pub(crate) fn configuration_update(
             HarnessConfigurationChange::SystemInstructions { value } => {
                 update.system_instructions = Some(value);
             }
-            HarnessConfigurationChange::Settings { value } => update.settings = Some(value),
+            HarnessConfigurationChange::Settings { value } => update.settings = Some(*value),
             HarnessConfigurationChange::Capabilities { value } => {
                 update.capabilities = Some(value);
             }

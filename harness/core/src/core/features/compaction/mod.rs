@@ -1,6 +1,7 @@
 mod context;
 mod execution;
 mod projection;
+mod standalone;
 
 use serde::{Deserialize, Serialize};
 
@@ -13,10 +14,12 @@ pub(in crate::core) use context::{
 };
 pub(in crate::core) use execution::{
     CompactionAttemptResolution, CompactionRequest, CompactionResolution,
-    CompactionStartResolution, PendingCompaction, fail_compaction, finish_compaction,
-    start_compaction,
+    CompactionStartResolution, PendingCompaction, fail_compaction, fail_compaction_or_fall_back,
+    finish_compaction, start_compaction,
 };
-pub(in crate::core) use projection::{CompactionProjection, CompactionProjectionFit};
+pub(in crate::core) use projection::{
+    CompactionProjection, CompactionProjectionFit, CompactionRequestKind, NewestToolExchange,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CompactionBudget {
@@ -54,6 +57,28 @@ impl CompactionPolicy {
             ));
         }
         Ok(())
+    }
+}
+
+/// What Core does after a compaction attempt fails.
+///
+/// The Runtime chooses it because the standalone request carries a `request`
+/// field and needs its own request shaping, which a Runtime has to support.
+/// A Runtime that omits the setting keeps the earlier behaviour.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CompactionFallback {
+    /// Resend the same in-context request once after an invalid summary, and
+    /// fail the compaction when the provider call fails.
+    #[default]
+    Resend,
+    /// Send one standalone request after any failed in-context attempt.
+    Standalone,
+}
+
+impl CompactionFallback {
+    pub(crate) fn is_resend(&self) -> bool {
+        *self == Self::Resend
     }
 }
 

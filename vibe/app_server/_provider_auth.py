@@ -148,7 +148,7 @@ def probe_env_file(path: Path, env_var: str) -> SourceProbe:
         if not path.is_file() and not path.is_fifo():
             return SourceProbe(value=None)
         value = dotenv_values(path).get(env_var)
-    except OSError, ValueError:
+    except (OSError, ValueError):
         # ``dotenv_values`` raises UnicodeDecodeError (a ValueError) on a
         # non-UTF-8 file; either way the file could not be inspected.
         return SourceProbe(unavailable=True)

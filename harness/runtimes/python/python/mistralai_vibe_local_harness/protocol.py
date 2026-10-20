@@ -228,8 +228,12 @@ class RustEnabledRuntimeToolFeature(RustProtocolModel):
 
 
 class RustEnabledAgentTools(RustEnabledRuntimeToolFeature):
+    conversation_forking: bool = False
     operations: list[Literal["list", "spawn", "send_message", "interrupt"]] = Field(
         default_factory=lambda: ["list", "spawn", "send_message", "interrupt"]
+    )
+    idle_message_starts: Literal["direct_children", "none"] = Field(
+        default="direct_children", exclude_if=lambda value: value == "direct_children"
     )
 
 
@@ -240,6 +244,18 @@ RustAgentToolFeature = Annotated[
 
 RustRuntimeToolFeature = Annotated[
     RustDisabledRuntimeToolFeature | RustEnabledRuntimeToolFeature,
+    Field(discriminator="mode"),
+]
+
+
+class RustWhenConfiguredSkills(RustProtocolModel):
+    mode: Literal["when_configured"] = "when_configured"
+
+
+RustSkillsFeature = Annotated[
+    RustDisabledRuntimeToolFeature
+    | RustWhenConfiguredSkills
+    | RustEnabledRuntimeToolFeature,
     Field(discriminator="mode"),
 ]
 
@@ -342,8 +358,29 @@ class RustImageDeliverySettings(RustProtocolModel):
     compaction: Literal["native", "resource_link"] = "native"
 
 
+class RustDisabledOutputLimitRecovery(RustProtocolModel):
+    mode: Literal["disabled"] = "disabled"
+
+
+class RustRetryOutputLimitRecovery(RustProtocolModel):
+    mode: Literal["retry"] = "retry"
+    max_retries: int = Field(gt=0)
+
+
+RustOutputLimitRecovery = Annotated[
+    RustDisabledOutputLimitRecovery | RustRetryOutputLimitRecovery,
+    Field(discriminator="mode"),
+]
+
+
 class RustTurnSettings(RustProtocolModel):
     max_iterations: Annotated[int, Field(gt=0)] | None = None
+    # Omitted while disabled, as Core omits it, so configs and digests recorded
+    # before the setting existed still match.
+    output_limit_recovery: RustOutputLimitRecovery = Field(
+        default_factory=RustDisabledOutputLimitRecovery,
+        exclude_if=lambda value: value.mode == "disabled",
+    )
 
 
 class RustNotificationSettings(RustProtocolModel):
@@ -354,6 +391,12 @@ class RustNotificationSettings(RustProtocolModel):
 
 class RustContextSettings(RustProtocolModel):
     compaction: RustCompactionPolicy
+    # Mirrors Core: omitted for `resend`, the default for Runtimes that predate
+    # the standalone request. This Runtime's settings builders ask for
+    # `standalone`, since it reads the compaction `request` kind and shapes it.
+    compaction_fallback: Literal["resend", "standalone"] = Field(
+        default="resend", exclude_if=lambda value: value == "resend"
+    )
     image_delivery: RustImageDeliverySettings = Field(
         default_factory=RustImageDeliverySettings
     )
@@ -364,6 +407,12 @@ class RustContextSettings(RustProtocolModel):
 
 
 class RustProgrammaticToolSettings(RustProtocolModel):
+    mode: Literal["enabled", "disabled"] = Field(
+        default="enabled", exclude_if=lambda value: value == "enabled"
+    )
+    sleep: Literal["enabled", "disabled"] = Field(
+        default="enabled", exclude_if=lambda value: value == "enabled"
+    )
     max_effects: int = Field(gt=0)
     max_operations: int = Field(gt=0)
     max_elapsed_ms: int = Field(gt=0)
@@ -386,7 +435,15 @@ class RustToolSettings(RustProtocolModel):
     programmatic: RustProgrammaticToolSettings
     subagents: RustAgentToolFeature
     background_processes: RustRuntimeToolFeature
+    file_system: RustRuntimeToolFeature = Field(
+        default_factory=RustEnabledRuntimeToolFeature,
+        exclude_if=lambda value: value.mode == "enabled",
+    )
     command_environment: RustCommandEnvironment
+    skills: RustSkillsFeature = Field(
+        default_factory=RustWhenConfiguredSkills,
+        exclude_if=lambda value: value.mode == "when_configured",
+    )
     large_output: RustLargeOutputPolicy
 
 
@@ -857,6 +914,14 @@ class RustLLMCallAction(RustProtocolModel):
     compaction_id: str | None = None
     attempt: int | None = Field(default=None, gt=0)
     trigger: Literal["automatic", "manual"] | None = None
+    # Omitted from agent calls so transition digests recorded before the field
+    # existed still match on replay.
+    request: Literal["in_context", "standalone"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    """How a compaction request is shaped: ``standalone`` is sent without
+    tools and without reasoning. Core names only that fallback, so ``None``
+    is the in-context request, as in journals recorded before the field existed."""
     iteration: int = Field(ge=0)
     max_iterations: Annotated[int, Field(gt=0)] | None
     model_input: RustModelInputUpdate
@@ -870,6 +935,7 @@ class RustLLMCallAction(RustProtocolModel):
                 self.trigger is not None
                 or self.compaction_id is not None
                 or self.attempt is not None
+                or self.request is not None
             ):
                 raise ValueError("agent LLM calls cannot have compaction fields")
             return self
@@ -1005,6 +1071,7 @@ class RustToolResultCommittedObservation(RustProtocolModel):
     turn_id: str
     action_id: str
     call_id: str
+    call: RustExternalToolCall
     result: RustToolResult
 
 
@@ -1046,9 +1113,15 @@ class RustAgentResultError(RustProtocolModel):
     details: JsonValue = None
 
 
+type RustTurnStopReason = Literal["iteration_limit", "skipped"]
+
+
 class RustCompletedAgentResult(RustProtocolModel):
     outcome: Literal["completed"] = "completed"
     output: JsonValue = None
+    stop_reason: RustTurnStopReason | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class RustFailedAgentResult(RustProtocolModel):
@@ -1059,6 +1132,7 @@ class RustFailedAgentResult(RustProtocolModel):
 class RustCancelledAgentResult(RustProtocolModel):
     outcome: Literal["cancelled"] = "cancelled"
     reason: str | None = None
+    output: JsonValue = Field(default=None, exclude_if=lambda value: value is None)
 
 
 type RustAgentResultTermination = Annotated[
@@ -1239,9 +1313,6 @@ class RustTurnFailedObservation(RustProtocolModel):
     error: RustProtocolError
 
 
-type RustTurnStopReason = Literal["iteration_limit", "skipped"]
-
-
 class RustTurnCompletedObservation(RustProtocolModel):
     type: Literal["turn_completed"] = "turn_completed"
     turn_id: str
@@ -1253,6 +1324,9 @@ class RustTurnInterruptedObservation(RustProtocolModel):
     type: Literal["turn_interrupted"] = "turn_interrupted"
     turn_id: str
     reason: str | None = None
+    output: list[RustContentBlock] = Field(
+        default_factory=list, exclude_if=lambda value: not value
+    )
 
 
 RustObservation = Annotated[
@@ -1407,9 +1481,41 @@ class RustUserMessageEvent(RustProtocolModel):
     mode: Literal["queue", "steer"]
 
 
+class RustUnattributedAgentTaskContext(RustProtocolModel):
+    type: Literal["unattributed"] = "unattributed"
+
+
+class RustCurrentAgentTaskContext(RustProtocolModel):
+    type: Literal["current"] = "current"
+    recipient_agent_path: Annotated[str, Field(min_length=1)]
+
+
+class RustInheritedAgentTaskContext(RustProtocolModel):
+    type: Literal["inherited"] = "inherited"
+    recipient_agent_path: Annotated[str, Field(min_length=1)]
+    source_agent_path: Annotated[str, Field(min_length=1)]
+
+
+type RustAgentTaskContext = Annotated[
+    RustUnattributedAgentTaskContext
+    | RustCurrentAgentTaskContext
+    | RustInheritedAgentTaskContext,
+    Field(discriminator="type"),
+]
+
+
+class RustAgentTaskMessageContext(RustProtocolModel):
+    context: RustAgentTaskContext = Field(
+        default_factory=RustUnattributedAgentTaskContext
+    )
+    sender_agent_path: str = Field(min_length=1)
+    kind: Literal["task"] = "task"
+    content: list[RustContentBlock] = Field(min_length=1)
+
+
 class RustAgentMessageContext(RustProtocolModel):
     sender_agent_path: str = Field(min_length=1)
-    kind: Literal["task", "message"]
+    kind: Literal["message"] = "message"
     content: list[RustContentBlock] = Field(min_length=1)
 
 
@@ -1423,7 +1529,8 @@ class RustAgentMessageEvent(RustProtocolModel):
     type: Literal["agent_message"] = "agent_message"
     turn_id: str = Field(min_length=1)
     message: Annotated[
-        RustAgentMessageContext | RustAgentResultContext, Field(discriminator="kind")
+        RustAgentTaskMessageContext | RustAgentMessageContext | RustAgentResultContext,
+        Field(discriminator="kind"),
     ]
     mode: Literal["queue", "steer"]
 
@@ -1968,6 +2075,7 @@ __all__ = [
     "RustDisabledCommandEnvironment",
     "RustDisabledCompactionPolicy",
     "RustDisabledLargeOutputPolicy",
+    "RustDisabledOutputLimitRecovery",
     "RustDisabledRuntimeToolFeature",
     "RustDispatchActionDirective",
     "RustEmbeddedResourceContentBlock",
@@ -2042,6 +2150,7 @@ __all__ = [
     "RustNotificationSource",
     "RustObservation",
     "RustOutOfOrderInputRejection",
+    "RustOutputLimitRecovery",
     "RustPendingAction",
     "RustPendingCompletionAction",
     "RustPendingFilesystemAction",
@@ -2086,6 +2195,7 @@ __all__ = [
     "RustReplaceAssistantContent",
     "RustResourceContents",
     "RustResourceLinkContentBlock",
+    "RustRetryOutputLimitRecovery",
     "RustRunningTurn",
     "RustRuntimeBuiltinToolCall",
     "RustRuntimeBuiltinToolCallAction",
@@ -2095,6 +2205,7 @@ __all__ = [
     "RustSessionTransition",
     "RustSettingsChange",
     "RustSkillDefinition",
+    "RustSkillsFeature",
     "RustStaleInputRejection",
     "RustSubagentNotificationSource",
     "RustSystemInstructionsChange",
@@ -2134,6 +2245,7 @@ __all__ = [
     "RustUnixCommandEnvironment",
     "RustUserMessage",
     "RustUserMessageEvent",
+    "RustWhenConfiguredSkills",
     "json_schema_object",
     "parse_apply_result",
     "tool_call_wire_arguments",

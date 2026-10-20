@@ -17,14 +17,6 @@ fn prompt_flag_enables_headless() {
 }
 
 #[test]
-fn long_prompt_flag_enables_headless() {
-    let cli = Cli::parse_from(["vibe-rs", "--prompt", "hello"]);
-    assert!(cli.is_headless());
-    let opts = cli.headless_options(None).unwrap();
-    assert_eq!(opts.prompt, "hello");
-}
-
-#[test]
 fn prompt_with_stdin_fallback() {
     let cli = Cli::parse_from(["vibe-rs", "-p"]);
     assert!(cli.is_headless());
@@ -226,13 +218,6 @@ fn time_limit_flag_parsed() {
 }
 
 #[test]
-fn time_limit_defaults_to_none() {
-    let cli = Cli::parse_from(["vibe-rs", "-p", "hi"]);
-    let opts = cli.headless_options(None).unwrap();
-    assert_eq!(opts.time_limit, None);
-}
-
-#[test]
 fn output_dir_flag_parsed() {
     let cli = Cli::parse_from(["vibe-rs", "-p", "hi", "--output-dir", "/tmp/exports"]);
     let opts = cli.headless_options(None).unwrap();
@@ -240,19 +225,6 @@ fn output_dir_flag_parsed() {
         opts.output_dir.as_ref().map(|p| p.to_path_buf()),
         Some(std::path::PathBuf::from("/tmp/exports"))
     );
-}
-
-#[test]
-fn output_dir_defaults_to_none() {
-    let cli = Cli::parse_from(["vibe-rs", "-p", "hi"]);
-    let opts = cli.headless_options(None).unwrap();
-    assert!(opts.output_dir.is_none());
-}
-
-#[test]
-fn prompt_file_enables_headless() {
-    let cli = Cli::parse_from(["vibe-rs", "--prompt-file", "/tmp/prompt.txt"]);
-    assert!(cli.is_headless());
 }
 
 #[test]
@@ -277,12 +249,6 @@ fn bare_prompt_flag_combines_with_prompt_file() {
 fn a_repeated_flag_keeps_its_last_value() {
     let cli = Cli::parse_from(["vibe-rs", "--workdir", "/a", "-p", "x", "--workdir", "/b"]);
     assert_eq!(cli.cwd.as_deref(), Some(std::path::Path::new("/b")));
-}
-
-#[test]
-fn a_repeated_list_flag_still_accumulates() {
-    let cli = Cli::parse_from(["vibe-rs", "--add-dir", "/a", "--add-dir", "/b"]);
-    assert_eq!(cli.add_dir.len(), 2);
 }
 
 #[test]

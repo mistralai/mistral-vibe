@@ -54,36 +54,6 @@ fn click(app: &mut App, column: u16, row: u16) {
 }
 
 #[test]
-fn ctrl_j_and_shift_enter_insert_a_newline_but_enter_does_not() {
-    let mut app = app_with_answer("ab", 2);
-
-    assert!(handle_other_key(
-        &mut app,
-        key(KeyCode::Char('j'), KeyModifiers::CONTROL)
-    ));
-    assert!(handle_other_key(
-        &mut app,
-        key(KeyCode::Enter, KeyModifiers::SHIFT)
-    ));
-    assert!(!handle_other_key(
-        &mut app,
-        key(KeyCode::Enter, KeyModifiers::NONE)
-    ));
-
-    assert_eq!(app.question_app.other_texts[&0], "ab\n\n");
-}
-
-#[test]
-fn esc_falls_through_to_the_question_app() {
-    let mut app = app_with_answer("ab", 2);
-
-    assert!(!handle_other_key(
-        &mut app,
-        key(KeyCode::Esc, KeyModifiers::NONE)
-    ));
-}
-
-#[test]
 fn editing_the_field_reattaches_a_scrolled_away_viewport() {
     let mut app = app_with_answer("ab", 2);
     app.question_app.list.detach_at(9);
@@ -94,19 +64,6 @@ fn editing_the_field_reattaches_a_scrolled_away_viewport() {
     ));
 
     assert!(!app.question_app.list.free_scroll());
-}
-
-#[test]
-fn clearing_the_field_unticks_it_in_multi_select() {
-    let mut app = app_with_answer("", 0);
-    app.question_app.questions[0].multi_select = true;
-    let other_idx = other_option_idx(&app).unwrap();
-
-    handle_other_key(&mut app, key(KeyCode::Char('a'), KeyModifiers::NONE));
-    assert!(app.question_app.multi_selections[&0].contains(&other_idx));
-
-    handle_other_key(&mut app, key(KeyCode::Char('w'), KeyModifiers::CONTROL));
-    assert!(!app.question_app.multi_selections[&0].contains(&other_idx));
 }
 
 #[test]

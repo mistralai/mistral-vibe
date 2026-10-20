@@ -7,7 +7,6 @@ agent; the Runtime then gates each tool call with the risk classifier via the
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import logging
 from pathlib import Path
@@ -17,22 +16,6 @@ import pytest
 
 from vibe import _experimental_harness
 from vibe.observability import logging as vibe_logging
-
-
-def _parse(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    _experimental_harness.add_smart_approve_argument(parser)
-    return parser.parse_args(argv)
-
-
-def test_smart_approve_flag_defaults_to_false() -> None:
-    # Do / Assert
-    assert _parse([]).smart_approve is False
-
-
-def test_smart_approve_flag_parses_when_present() -> None:
-    # Do / Assert
-    assert _parse(["--smart-approve"]).smart_approve is True
 
 
 def test_host_creation_needs_no_smart_approve_registration() -> None:

@@ -24,8 +24,8 @@ use crate::core::tools::execution::{
 };
 use crate::core::tools::external::ExternalToolCall;
 use crate::core::tools::result::{
-    approval_failed_result, invalid_tool_call_result, model_tool_result_message,
-    permission_denied_result,
+    approval_failed_result, approval_rejected_result, invalid_tool_call_result,
+    model_tool_result_message, permission_denied_result,
 };
 use crate::core::wire::message::Message;
 use crate::core::wire::tool::{ProtocolError, ToolCall, ToolResult};
@@ -82,16 +82,34 @@ pub(crate) fn start_tool_batch(
     })
 }
 
+/// What the model sees for arguments that are not JSON: the parse error, what
+/// Core expects instead, and, when the arguments simply stop, the likely cause.
+fn invalid_json_arguments_reason(error: &str) -> String {
+    let mut reason = format!(
+        "tool arguments are not valid JSON ({error}). Send the arguments as one JSON object that matches the tool's input schema."
+    );
+    if error.starts_with("EOF while parsing") {
+        reason.push_str(
+            " The arguments end early; if they were cut off, split long content into several smaller tool calls.",
+        );
+    }
+    reason
+}
+
 fn start_tool_execution(
     tools: ToolContext<'_>,
     call: ToolCall,
     determinism: DeterminismContext,
 ) -> Result<(ToolExecution, Vec<Action>, Vec<Observation>), CoreError> {
     if let Some(error) = &call.argument_error {
-        let result = invalid_tool_call_result(error.clone());
+        let result = invalid_tool_call_result(invalid_json_arguments_reason(error));
         return Ok(completed_execution(tools.turn_id, call, result, Vec::new()));
     }
-    if let Some(result) = tool_discovery::dispatch(&call, |request| tools.search(request)) {
+    // With programmatic tool calling disabled, `search_tool_functions` and
+    // `run_typescript` fall through to the direct routes and fail as unsupported.
+    if tools.programmatic_enabled()
+        && let Some(result) = tool_discovery::dispatch(&call, |request| tools.search(request))
+    {
         let result = result?;
         let observations = result
             .summary
@@ -110,9 +128,11 @@ fn start_tool_execution(
         ));
     }
     let mut accepted_results = Vec::new();
-    if let Some(result) = tools.with_program_context(|context| {
-        dispatch_program(context, &call, determinism, &mut accepted_results)
-    }) {
+    if tools.programmatic_enabled()
+        && let Some(result) = tools.with_program_context(|context| {
+            dispatch_program(context, &call, determinism, &mut accepted_results)
+        })
+    {
         let (outcome, effects) = result?;
         let mut observations = accepted_program_results(tools.turn_id, accepted_results);
         return match outcome {
@@ -172,11 +192,14 @@ fn start_tool_execution(
                 action,
             ),
             PermissionResolution::Deny => {
+                let result = permission_denied_result();
+                let observation =
+                    accepted_direct_result(tools.turn_id, &call.id, &external_call, result.clone());
                 return Ok(completed_execution(
                     tools.turn_id,
                     call,
-                    permission_denied_result(),
-                    Vec::new(),
+                    result,
+                    vec![observation],
                 ));
             }
             PermissionResolution::Ask(grant_key) => {
@@ -285,9 +308,12 @@ fn finalize_tool_result(
     source: LargeOutputSource,
     result: ToolResult,
 ) -> Result<FinalizedTopLevelResult, CoreError> {
+    // A file read already returns a bounded page and names the offset to read
+    // on from; saving that page to another file would only add a detour.
     let excluded = matches!(
         &source,
-        LargeOutputSource::Direct { call } if call.call.is_skill_read()
+        LargeOutputSource::Direct { call }
+            if call.call.is_skill_read() || call.call.is_file_read()
     );
     let evaluated = (!excluded)
         .then(|| {
@@ -374,6 +400,7 @@ fn accepted_program_result(turn_id: &str, accepted: AcceptedProgramResult) -> Ob
         turn_id: turn_id.to_string(),
         action_id: accepted.action_id,
         call_id: accepted.operation_id,
+        call: accepted.call,
         result: accepted.result,
     }
 }
@@ -398,6 +425,7 @@ fn accepted_direct_result(
         turn_id: turn_id.to_string(),
         action_id: call.action_id.clone(),
         call_id: operation_id.to_string(),
+        call: call.call.clone(),
         result,
     }
 }
@@ -611,31 +639,31 @@ pub(crate) fn finish_tool_batch_approval(
             continue;
         };
 
-        let Some(call) = program.pending_approval(action_id) else {
+        if program.pending_approval(action_id).is_none() {
             continue;
-        };
+        }
 
         let result = match resolution {
             Ok(ApprovalOutcome::Approve) => {
-                // A grant that arrives after the elapsed budget ran out must
-                // not start the effect, as for a late pre-hook `Continue`.
-                if let Some(expired) = tools.with_program_context(|context| {
-                    program.expired_approval_result(context, determinism)
-                }) {
-                    expired
-                } else {
-                    let action = external_tool_effect(tools, call)?;
-                    program
-                        .approve_pending_approval(action_id)
-                        .expect("program approval was found before resolution");
-
-                    return Ok(ToolBatchTransition {
-                        resolution: resolve_tool_batch(batch, vec![action]),
-                        observations: Vec::new(),
-                    });
+                // Approval time never counts toward the program time budget;
+                // an approved wait is fit to what remains of it.
+                let budget_ms =
+                    tools.with_program_context(|context| context.settings().max_elapsed_ms);
+                match program
+                    .approve_pending_approval(action_id, budget_ms, determinism.time_unix_ms)
+                    .expect("program approval was found before resolution")
+                {
+                    Ok(call) => {
+                        let action = external_tool_effect(tools, call)?;
+                        return Ok(ToolBatchTransition {
+                            resolution: resolve_tool_batch(batch, vec![action]),
+                            observations: Vec::new(),
+                        });
+                    }
+                    Err(not_started) => not_started,
                 }
             }
-            Ok(ApprovalOutcome::Reject) => permission_denied_result(),
+            Ok(ApprovalOutcome::Reject) => approval_rejected_result(),
             Err(failure_reason) => approval_failed_result(failure_reason),
         };
         let mut actions = Vec::new();
@@ -691,15 +719,17 @@ pub(crate) fn finish_tool_batch_approval(
                 observations: Vec::new(),
             });
         }
-        Ok(ApprovalOutcome::Reject) => permission_denied_result(),
+        Ok(ApprovalOutcome::Reject) => approval_rejected_result(),
         Err(failure_reason) => approval_failed_result(failure_reason),
     };
     execution.state = completed_external_tool_state(&execution.call, &result);
-    let observation = tool_execution_finished(tools.turn_id, &execution.call.id, result);
+    let committed =
+        accepted_direct_result(tools.turn_id, &execution.call.id, &call, result.clone());
+    let finished = tool_execution_finished(tools.turn_id, &execution.call.id, result);
 
     Ok(ToolBatchTransition {
         resolution: resolve_tool_batch(batch, Vec::new()),
-        observations: vec![observation],
+        observations: vec![committed, finished],
     })
 }
 
@@ -786,6 +816,12 @@ pub(crate) fn finish_tool_batch_hook(
                         }
                         PermissionResolution::Deny => {
                             let result = permission_denied_result();
+                            observations.push(accepted_direct_result(
+                                tools.turn_id,
+                                &execution.call.id,
+                                &effective_call,
+                                result.clone(),
+                            ));
                             execution.state =
                                 completed_external_tool_state(&execution.call, &result);
                             observations.push(tool_execution_finished(
@@ -1056,5 +1092,20 @@ mod tests {
         let message = step.state.context.messages().last().unwrap();
         assert_eq!(message_role(&message.message), Role::Tool);
         assert!(message_text(message).contains("EOF while parsing an object"));
+        assert!(message_text(message).contains("tool arguments are not valid JSON"));
+        assert!(message_text(message).contains("split long content"));
+    }
+
+    #[test]
+    fn invalid_json_reason_names_the_expected_shape() {
+        let reason = invalid_json_arguments_reason("expected value at line 1 column 1");
+        assert_eq!(
+            reason,
+            "tool arguments are not valid JSON (expected value at line 1 column 1). Send the arguments as one JSON object that matches the tool's input schema."
+        );
+        assert!(
+            invalid_json_arguments_reason("EOF while parsing a string at line 1 column 9")
+                .ends_with("split long content into several smaller tool calls.")
+        );
     }
 }

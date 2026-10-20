@@ -20,6 +20,7 @@ from vibe.app_server.protocol import (
     ConnectorAuthReadResponse,
     ConnectorCatalogAuthRequestParams,
     ConnectorCatalogAuthRequestResponse,
+    ConnectorCatalogConnectParams,
     ConnectorCatalogMutationResponse,
     ConnectorCatalogReadParams,
     ConnectorCatalogReadResponse,
@@ -998,6 +999,122 @@ async def test_busy_targeted_toggle_persists_and_converges_retained_candidate(
 
 
 @pytest.mark.asyncio
+async def test_connect_turns_a_no_auth_connector_into_a_connected_one(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_mistral_api,
+    respx_mock: respx.MockRouter,
+) -> None:
+    """*Prepare*: Bootstrap reports a no-auth connector that has no user connection yet.
+    *Do*: Read the catalog, then request `connector_catalog/connect` for it.
+    *Assert*: It reads as needing a connection, then the created connection makes it connected.
+    """
+    # Prepare
+    pending = _payload(
+        _connector("wiki/raw", "deepwiki", ready=False, auth_action="no_auth_connect")
+    )
+    bootstrap_route = respx_mock.get(f"{MISTRAL_BASE_URL}{CONNECTORS_BOOTSTRAP_PATH}")
+    bootstrap_route.mock(return_value=httpx.Response(200, json=pending))
+    credentials_route = respx_mock.post(
+        f"{MISTRAL_BASE_URL}/v1/connectors/wiki%2Fraw/user/credentials"
+    )
+
+    def connected(_request: httpx.Request) -> httpx.Response:
+        bootstrap_route.mock(
+            return_value=httpx.Response(
+                200, json=_payload(_connector("wiki/raw", "deepwiki"))
+            )
+        )
+        return httpx.Response(200, json={"message": "ok"})
+
+    credentials_route.mock(side_effect=connected)
+    session_id: str | None = None
+    try:
+        started = SessionStartResponse.model_validate(
+            await backend_contract_connection.client.request(
+                "session/start", SessionStartParams()
+            )
+        )
+        session_id = started.state.session.id
+        await backend_contract_connection.client.request(
+            "session/ready/wait", SessionReadyWaitParams(session_id=session_id)
+        )
+        await backend_contract_connection.client.request(
+            "connector_catalog/toggle",
+            ConnectorCatalogToggleParams(
+                session_id=session_id, alias="deepwiki", disabled=False
+            ),
+        )
+        before = ConnectorCatalogReadResponse.model_validate(
+            await backend_contract_connection.client.request(
+                "connector_catalog/read",
+                ConnectorCatalogReadParams(session_id=session_id),
+            )
+        )
+
+        # Do
+        response = ConnectorCatalogMutationResponse.model_validate(
+            await backend_contract_connection.client.request(
+                "connector_catalog/connect",
+                ConnectorCatalogConnectParams(session_id=session_id, alias="deepwiki"),
+            )
+        )
+
+        # Assert
+        assert before.catalog.connectors[0].readiness == "needs_connect"
+        assert _source(before, "deepwiki").status == "needs_connect"
+        assert credentials_route.call_count == 1
+        assert response.runtime is not None
+        source = next(
+            source
+            for source in response.runtime.mcp.sources
+            if source.kind is MCPSourceKind.CONNECTOR and source.name == "deepwiki"
+        )
+        assert source.status.value == "connected"
+        assert [tool.name for tool in source.tools] == ["search"]
+    finally:
+        if session_id is not None:
+            try:
+                await backend_contract_connection.client.request(
+                    "session/stop", SessionStopParams(session_id=session_id)
+                )
+            except (AppServerResponseError, RuntimeError):
+                pass
+
+
+@pytest.mark.asyncio
+async def test_connect_conflicts_for_a_connector_that_needs_no_connection(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_mistral_api,
+    respx_mock: respx.MockRouter,
+) -> None:
+    """*Prepare*: A live session accepted a catalog whose connector is ready.
+    *Do*: Request `connector_catalog/connect` for it.
+    *Assert*: The session rejects it as a conflict without creating a connection.
+    """
+    session, _ = await _open_connector_session(
+        backend_contract_connection,
+        respx_mock,
+        _payload(_connector("github/raw", "github")),
+    )
+    credentials_route = respx_mock.post(
+        f"{MISTRAL_BASE_URL}/v1/connectors/github%2Fraw/user/credentials"
+    )
+    try:
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await backend_contract_connection.client.request(
+                "connector_catalog/connect",
+                ConnectorCatalogConnectParams(
+                    session_id=session.session_id, alias="github"
+                ),
+            )
+
+        assert exc_info.value.error.code is ProtocolErrorCode.CONFLICT
+        assert credentials_route.call_count == 0
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_connector_authorization_acknowledges_before_notifications_and_compatibility_adapts(
     backend_contract_connection: BackendContractConnection,
     backend_contract_mistral_api,
@@ -1106,5 +1223,5 @@ async def test_connector_authorization_acknowledges_before_notifications_and_com
                 await backend_contract_connection.client.request(
                     "session/stop", SessionStopParams(session_id=session_id)
                 )
-            except AppServerResponseError, RuntimeError:
+            except (AppServerResponseError, RuntimeError):
                 pass

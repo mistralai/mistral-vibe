@@ -126,6 +126,6 @@ def is_dangerous_directory(path: Path | str = ".") -> tuple[bool, str]:
         try:
             if path == dangerous_path:
                 return True, f"You are in the {description}"
-        except OSError, ValueError:
+        except (OSError, ValueError):
             continue
     return False, ""

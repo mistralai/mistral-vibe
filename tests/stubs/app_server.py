@@ -7,6 +7,7 @@ from vibe.app_server._account import AccountGateway
 from vibe.app_server._identity import IdentityGateway
 from vibe.app_server._model import ProtocolModel
 from vibe.app_server._projector import EventProjector
+from vibe.app_server._session_spawn import SessionSpawnError
 from vibe.app_server.events import AppServerEvent, ClientProjection
 from vibe.app_server.models import (
     IdleSessionStatus,
@@ -15,9 +16,14 @@ from vibe.app_server.models import (
     PublicSession,
     PublicSessionState,
 )
-from vibe.app_server.protocol import ClientCapabilities, ClientInfo, Notification
-from vibe.core.tools.ui import ToolUIDataAdapter
-from vibe.core.types import BaseEvent, ToolCallEvent, ToolResultEvent
+from vibe.app_server.protocol import (
+    ClientCapabilities,
+    ClientInfo,
+    Notification,
+    SessionSpawnParams,
+    SessionSpawnResponse,
+)
+from vibe.core.types import BaseEvent
 
 
 class FakeSessionBackendServices:
@@ -52,6 +58,9 @@ class FakeSessionBackendServices:
     async def publish_callback(self, callback: PublicCallbackEntry) -> None:
         return None
 
+    async def spawn_session(self, params: SessionSpawnParams) -> SessionSpawnResponse:
+        raise SessionSpawnError("This client cannot start sessions")
+
 
 class CoreEventProjection:
     def __init__(self) -> None:
@@ -74,23 +83,6 @@ class CoreEventProjection:
         self._event_id = 0
 
     def project(self, event: BaseEvent) -> list[AppServerEvent]:
-        match event:
-            case ToolCallEvent(presentation=None):
-                event = event.model_copy(
-                    update={
-                        "presentation": ToolUIDataAdapter(
-                            event.tool_class
-                        ).get_call_presentation(event)
-                    }
-                )
-            case ToolResultEvent(presentation=None):
-                event = event.model_copy(
-                    update={
-                        "presentation": ToolUIDataAdapter(
-                            event.tool_class
-                        ).get_result_presentation(event)
-                    }
-                )
         projected: list[AppServerEvent] = []
         for update in self._projector.project(event):
             self._event_id += 1

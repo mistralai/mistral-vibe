@@ -22,6 +22,9 @@ pub enum OutputFormat {
     Text,
     Json,
     Streaming,
+    /// Nothing on stdout or stderr: the final response rides the report (`vibe run-server`).
+    #[value(skip)]
+    Silent,
 }
 
 /// Each option `overrides_with` itself, so a repeated flag keeps its last
@@ -178,6 +181,16 @@ pub enum CliCommand {
     Mcp {
         #[command(subcommand)]
         command: crate::mcp_command::McpCommand,
+    },
+    /// Serve many headless runs over JSON-RPC on stdin and stdout (experimental).
+    #[command(hide = true)]
+    RunServer {
+        /// Refuse a run while this many are live.
+        #[arg(long = "max-runs", value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+        max_runs: Option<u64>,
+        /// Runs one app-server process serves at most.
+        #[arg(long = "runs-per-app-server", value_name = "K", default_value_t = 16, value_parser = clap::value_parser!(u64).range(1..))]
+        runs_per_app_server: u64,
     },
 }
 

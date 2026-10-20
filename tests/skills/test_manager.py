@@ -455,7 +455,6 @@ class TestSkillModelInvocable:
 
         assert skill is not None
         assert skill.model_invocable is False
-        assert manager.get_model_invocable_skill("explicit-only") is None
         assert skill.user_invocable is True
 
     def test_openai_policy_disables_model_invocation(self, skills_dir: Path) -> None:

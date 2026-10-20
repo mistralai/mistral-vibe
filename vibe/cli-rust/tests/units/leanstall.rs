@@ -13,8 +13,8 @@ use vibe_rs::commands::{submission, CommandEvent};
 use vibe_rs::config;
 use vibe_rs::server::request_error::describe;
 use vibe_rs::server::{
-    AgentInstallParams, AgentSummary, AgentType, AgentsListResponse, Client, HistoryEntry,
-    MessageContent, RequestFailure, RpcError,
+    AgentSummary, AgentType, AgentsListResponse, Client, HistoryEntry, MessageContent,
+    RequestFailure, RpcError,
 };
 
 fn agent(name: &str) -> AgentSummary {
@@ -23,18 +23,6 @@ fn agent(name: &str) -> AgentSummary {
         display_name: name.to_owned(),
         ..AgentSummary::default()
     }
-}
-
-#[test]
-fn install_params_serialize_in_camel_case() {
-    let params = AgentInstallParams {
-        session_id: "session".to_owned(),
-        agent_name: "lean".to_owned(),
-    };
-    assert_eq!(
-        serde_json::to_value(params).unwrap(),
-        json!({"sessionId": "session", "agentName": "lean"})
-    );
 }
 
 #[test]
@@ -232,22 +220,6 @@ fn describe_prefers_the_server_message() {
     assert_eq!(
         describe(&anyhow::Error::new(RequestFailure::AppServerClosed)),
         RequestFailure::AppServerClosed.to_string()
-    );
-}
-
-#[test]
-fn short_circuit_only_when_the_command_has_nothing_to_do() {
-    let present = app_with(&["default", "lean"]);
-    let absent = app_with(&["default"]);
-    assert_eq!(
-        leanstall::short_circuit(&present, true),
-        Some("Lean agent is already installed.")
-    );
-    assert_eq!(leanstall::short_circuit(&absent, true), None);
-    assert_eq!(leanstall::short_circuit(&present, false), None);
-    assert_eq!(
-        leanstall::short_circuit(&absent, false),
-        Some("Lean agent is not installed.")
     );
 }
 
