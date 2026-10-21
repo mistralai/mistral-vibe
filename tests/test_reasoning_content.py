@@ -293,6 +293,45 @@ class TestLLMMessageReasoningContent:
 
         assert "reasoning_content" not in dumped
 
+    def test_llm_message_content_list_skips_thinking_chunk(self):
+        data = {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": [{"type": "text", "text": "Let me think..."}],
+                    "closed": True,
+                },
+                {"type": "text", "text": "The answer is 42."},
+            ],
+        }
+
+        msg = LLMMessage.model_validate(data)
+
+        assert msg.content == "The answer is 42."
+
+    def test_llm_message_content_never_falls_back_to_dict_repr(self):
+        thinking = {
+            "type": "thinking",
+            "thinking": [{"type": "text", "text": "Let me think..."}],
+        }
+        image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,"}}
+
+        assert (
+            LLMMessage.model_validate({
+                "role": "assistant",
+                "content": [thinking, image],
+            }).content
+            == ""
+        )
+        assert (
+            LLMMessage.model_validate({
+                "role": "assistant",
+                "content": thinking,
+            }).content
+            == ""
+        )
+
 
 class TestReasoningFieldNameConversion:
     def test_reasoning_to_api_keeps_default_field(self):
@@ -546,6 +585,186 @@ class TestReasoningFieldNameConversion:
 
             assert results[0].message.reasoning_content == "Thinking..."
             assert results[1].message.content == "Answer"
+
+
+def _thinking_chunk(text: str) -> dict[str, object]:
+    return {
+        "type": "thinking",
+        "thinking": [{"type": "text", "text": text}],
+        "closed": True,
+    }
+
+
+class TestOpenAIAdapterThinkingChunks:
+    """Mistral-compatible content lists parsed through the generic OpenAI style."""
+
+    @pytest.fixture
+    def provider(self) -> ProviderConfig:
+        return ProviderConfig(
+            name="mistral",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="MISTRAL_API_KEY",
+        )
+
+    def test_streaming_delta_splits_thinking_and_text(
+        self, provider: ProviderConfig
+    ) -> None:
+        data = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "content": [
+                            _thinking_chunk("Let me think..."),
+                            {"type": "text", "text": "The answer"},
+                            {"type": "text", "text": " is 42."},
+                        ]
+                    },
+                }
+            ]
+        }
+
+        chunk = OpenAIAdapter().parse_response(data, provider)
+
+        assert chunk.message.role == Role.assistant
+        assert chunk.message.content == "The answer is 42."
+        assert chunk.message.reasoning_content == "Let me think..."
+
+    def test_streaming_thinking_only_delta(self, provider: ProviderConfig) -> None:
+        data = {
+            "choices": [{"index": 0, "delta": {"content": [_thinking_chunk("Hmm...")]}}]
+        }
+
+        chunk = OpenAIAdapter().parse_response(data, provider)
+
+        assert chunk.message.content == ""
+        assert chunk.message.reasoning_content == "Hmm..."
+
+    def test_non_streamed_message_splits_thinking_and_text(
+        self, provider: ProviderConfig
+    ) -> None:
+        data = {
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            _thinking_chunk("Step one. "),
+                            _thinking_chunk("Step two."),
+                            {"type": "text", "text": "Done."},
+                        ],
+                    },
+                }
+            ]
+        }
+
+        chunk = OpenAIAdapter().parse_response(data, provider)
+
+        assert chunk.message.content == "Done."
+        assert chunk.message.reasoning_content == "Step one. Step two."
+
+    def test_custom_reasoning_field_is_not_overwritten(self) -> None:
+        provider = ProviderConfig(
+            name="test",
+            api_base="https://api.example.com/v1",
+            api_key_env_var="API_KEY",
+            reasoning_field_name="reasoning",
+        )
+        data = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "reasoning": "From the field.",
+                        "content": [
+                            _thinking_chunk("From the chunk."),
+                            {"type": "text", "text": "Answer"},
+                        ],
+                    },
+                }
+            ]
+        }
+
+        chunk = OpenAIAdapter().parse_response(data, provider)
+
+        assert chunk.message.content == "Answer"
+        assert chunk.message.reasoning_content == "From the field."
+
+    def test_custom_reasoning_field_absent_uses_thinking_chunks(self) -> None:
+        provider = ProviderConfig(
+            name="test",
+            api_base="https://api.example.com/v1",
+            api_key_env_var="API_KEY",
+            reasoning_field_name="reasoning",
+        )
+        data = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "content": [
+                            _thinking_chunk("From the chunk."),
+                            {"type": "text", "text": "Answer"},
+                        ]
+                    },
+                }
+            ]
+        }
+
+        chunk = OpenAIAdapter().parse_response(data, provider)
+
+        assert chunk.message.content == "Answer"
+        assert chunk.message.reasoning_content == "From the chunk."
+
+    @pytest.mark.asyncio
+    async def test_streaming_backend_never_emits_chunk_repr(self) -> None:
+        base_url = "https://api.example.com"
+        thinking = json.dumps({
+            "content": [_thinking_chunk("Let me think...")],
+            "role": "assistant",
+        })
+        text = json.dumps({"content": [{"type": "text", "text": "Answer"}]})
+        chunks = [
+            f'data: {{"id":"id1","object":"chat.completion.chunk","created":123,"model":"test","choices":[{{"index":0,"delta":{thinking},"finish_reason":null}}]}}'.encode(),
+            f'data: {{"id":"id1","object":"chat.completion.chunk","created":123,"model":"test","choices":[{{"index":0,"delta":{text},"finish_reason":null}}]}}'.encode(),
+            b'data: {"id":"id1","object":"chat.completion.chunk","created":123,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}',
+            b"data: [DONE]",
+        ]
+
+        with respx.mock(base_url=base_url) as mock_api:
+            mock_api.post(CHAT_COMPLETIONS_PATH).mock(
+                return_value=httpx.Response(
+                    status_code=200,
+                    stream=httpx.ByteStream(stream=b"\n\n".join(chunks)),
+                    headers={"Content-Type": "text/event-stream"},
+                )
+            )
+            provider = ProviderConfig(
+                name="mistral", api_base=f"{base_url}/v1", api_key_env_var="API_KEY"
+            )
+            backend = GenericBackend(provider=provider)
+            model = ModelConfig(name="test-model", provider="mistral", alias="test")
+            messages = [LLMMessage(role=Role.user, content="Stream please")]
+
+            results = [
+                chunk
+                async for chunk in backend.complete_streaming(
+                    model=model,
+                    messages=messages,
+                    temperature=0.2,
+                    tools=None,
+                    max_tokens=None,
+                    tool_choice=None,
+                    extra_headers=None,
+                )
+            ]
+
+            assert results[0].message.content == ""
+            assert results[0].message.reasoning_content == "Let me think..."
+            assert results[1].message.content == "Answer"
+            assert results[1].message.reasoning_content is None
 
 
 class TestMistralReasoningFieldNameValidation:
