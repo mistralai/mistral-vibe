@@ -56,8 +56,9 @@ class ConfigSchema(BaseModel):
         *,
         origins: dict[str, str],
         defined_entries: dict[str, dict[str, tuple[str, ...]]],
+        context: Mapping[str, Any] | None = None,
     ) -> Self:
-        config = cls.model_validate(data)
+        config = cls.model_validate(data, context=context)
         config._origins = origins
         config._defined_entries = defined_entries
         return config

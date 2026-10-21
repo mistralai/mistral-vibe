@@ -3,10 +3,14 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from enum import StrEnum, auto
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from vibe import VIBE_ROOT
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.utils.io import read_safe
+
+if TYPE_CHECKING:
+    from vibe.core.config.harness_files import HarnessFilesManager
 
 PROMPTS_DIR = VIBE_ROOT / "core" / "prompts"
 
@@ -74,10 +78,14 @@ def _validate_prompt_id(prompt_id: str, setting_name: str) -> None:
 
 
 def load_prompt(
-    prompt_id: str, *, setting_name: str, builtins: Mapping[str, Path]
+    prompt_id: str,
+    *,
+    setting_name: str,
+    builtins: Mapping[str, Path],
+    harness_files: HarnessFilesManager | None = None,
 ) -> str:
     _validate_prompt_id(prompt_id, setting_name)
-    mgr = get_harness_files_manager()
+    mgr = harness_files if harness_files is not None else get_harness_files_manager()
     custom_dirs = mgr.project_prompts_dirs + mgr.user_prompts_dirs
     for d in custom_dirs:
         path = (d / prompt_id).with_suffix(".md")
@@ -94,13 +102,20 @@ def load_prompt(
     )
 
 
-def load_system_prompt(prompt_id: str) -> str:
+def load_system_prompt(
+    prompt_id: str, *, harness_files: HarnessFilesManager | None = None
+) -> str:
     builtins: dict[str, Path] = {p.name.lower(): p.path for p in SystemPrompt}
     # Experiment variants may reference bundled .md files not in the enum.
     fallback = (PROMPTS_DIR / prompt_id).with_suffix(".md")
     if fallback.is_file():
         builtins.setdefault(prompt_id.lower(), fallback)
-    return load_prompt(prompt_id, setting_name="system_prompt_id", builtins=builtins)
+    return load_prompt(
+        prompt_id,
+        setting_name="system_prompt_id",
+        builtins=builtins,
+        harness_files=harness_files,
+    )
 
 
 __all__ = [

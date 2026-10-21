@@ -7,6 +7,7 @@ import pytest
 import tomli_w
 
 from tests.conftest import get_base_config
+from vibe.core.agents.manager import AgentManager
 from vibe.core.config import build_default_orchestrator
 from vibe.core.config.harness_files import (
     HarnessFilesManager,
@@ -278,3 +279,60 @@ class TestSuppliedUserConfig:
 
         # Assert
         assert session.user_config is supplied
+
+
+class TestSessionPromptResolution:
+    @pytest.mark.asyncio
+    async def test_project_prompt_wins_for_a_session_started_elsewhere(
+        self, config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Prompt validation and loading use the session workdir, not launch cwd."""
+        project_prompts = tmp_path / ".vibe" / "prompts"
+        project_prompts.mkdir(parents=True)
+        (project_prompts / "shared.md").write_text("Project prompt", encoding="utf-8")
+
+        user_prompts = config_dir / "prompts"
+        user_prompts.mkdir()
+        (user_prompts / "shared.md").write_text("User prompt", encoding="utf-8")
+
+        trusted_folders_manager.trust_for_session(tmp_path)
+        harness_files = HarnessFilesManager(sources=("user", "project")).for_session(
+            tmp_path
+        )
+
+        orchestrator = await build_default_orchestrator(
+            {"system_prompt_id": "shared"}, harness_files=harness_files
+        )
+
+        assert orchestrator.config.system_prompt == "Project prompt"
+
+    @pytest.mark.asyncio
+    async def test_custom_primary_agent_validates_its_project_prompt(
+        self, tmp_path: Path
+    ) -> None:
+        """Copied profile validation keeps the session prompt search context."""
+        project_vibe = tmp_path / ".vibe"
+        (project_vibe / "prompts").mkdir(parents=True)
+        (project_vibe / "prompts" / "agent.md").write_text(
+            "Project agent prompt", encoding="utf-8"
+        )
+        (project_vibe / "agents").mkdir()
+        (project_vibe / "agents" / "project-agent.toml").write_text(
+            'description = "Project agent"\n'
+            'agent_type = "agent"\n'
+            'system_prompt_id = "agent"\n',
+            encoding="utf-8",
+        )
+
+        trusted_folders_manager.trust_for_session(tmp_path)
+        harness_files = HarnessFilesManager(sources=("user", "project")).for_session(
+            tmp_path
+        )
+        orchestrator = await build_default_orchestrator(harness_files=harness_files)
+
+        agents = AgentManager(
+            orchestrator, initial_agent="project-agent", harness_files=harness_files
+        )
+
+        assert agents.active_profile.name == "project-agent"
+        assert orchestrator.config.system_prompt == "Project agent prompt"

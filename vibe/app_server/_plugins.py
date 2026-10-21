@@ -508,7 +508,10 @@ class UnifiedPluginProvider:
             # here on both halves at once.
             agent_profiles=(
                 *resolve_agent_types(
-                    workspace, tools, reserved=plugin_agent_names(agents)
+                    workspace,
+                    tools,
+                    reserved=plugin_agent_names(agents),
+                    harness_files=self._harness_files,
                 ).profiles,
                 *declared_agent_profiles(agents, tools),
             ),

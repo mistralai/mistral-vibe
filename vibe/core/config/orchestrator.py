@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 import copy
 from typing import Any
 
@@ -126,9 +126,10 @@ class ConfigOrchestrator[S: ConfigSchema]:
         layers: list[ConfigLayer[RawConfig]],
         default_layer_resolver: DefaultLayerResolver,
         bus: EventBus | None = None,
+        validation_context: Mapping[str, Any] | None = None,
     ) -> ConfigOrchestrator[S]:
         """Build an orchestrator from a schema and an ordered list of layers."""
-        builder = ConfigBuilder[S](schema)
+        builder = ConfigBuilder[S](schema, validation_context=validation_context)
         builder.add_layers(layers)
         config = await builder.build()
         instance = cls(builder, config, default_layer_resolver, bus)
