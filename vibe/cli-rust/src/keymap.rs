@@ -21,11 +21,12 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
     // Ctrl or Alt turns caret/delete keys into their word-wise variant.
     let word = ctrl || alt;
     match k.code {
-        // Newline insert: `shift+enter` or `ctrl+j`. In raw mode crossterm
-        // delivers Ctrl+J (byte \n) as Ctrl+'j'; Shift+Enter only reaches us on
-        // terminals that report it distinctly (plain Enter stays a submit).
-        KeyCode::Char('j') if ctrl && !alt => Some(Action::Insert('\n')),
-        KeyCode::Enter if shift => Some(Action::Insert('\n')),
+        // Newline insert: `ctrl+j` (byte \n), `ctrl+m` (byte \r, what some
+        // terminals send for Ctrl+Enter), `shift+enter`, or `alt+enter`. In raw
+        // mode crossterm delivers Ctrl+J as Ctrl+'j'; Shift+Enter only reaches us
+        // on terminals that report it distinctly (plain Enter stays a submit).
+        KeyCode::Char('j' | 'm') if ctrl && !alt && !shift => Some(Action::Insert('\n')),
+        KeyCode::Enter if shift || alt => Some(Action::Insert('\n')),
         // Ctrl+letter is a shortcut, never literal text (line-editing
         // bindings); Ctrl+C / Ctrl+D are intercepted before we get here.
         KeyCode::Char('a') if ctrl && !alt => Some(Action::CursorLineStart),
@@ -34,18 +35,29 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
         KeyCode::Char('k' | 'K') if ctrl && shift && !alt => Some(Action::DeleteLine),
         KeyCode::Char('k') if ctrl && !alt => Some(Action::DeleteToEndOfLine),
         KeyCode::Char('w') if ctrl && !alt => Some(Action::DeleteWordLeft),
+        // Ctrl+H (byte \x08) is the backspace some terminals send (QTerminal,
+        // some serial consoles); treat it as backspace.
+        KeyCode::Char('h') if ctrl && !alt && !shift => Some(Action::DeleteLeft),
+        // Alt+d deletes the word under/after the caret.
+        KeyCode::Char('d') if alt && !ctrl => Some(Action::DeleteWordRight),
         // Alt+b / Alt+f: emacs word nav. macOS terminals (Terminal.app, iTerm
         // "natural editing") send Option+Left/Right as ESC-b / ESC-f, which
         // crossterm decodes as Alt+'b' / Alt+'f'; treat them as
-        // Ctrl+Left / Ctrl+Right.
+        // Ctrl+Left / Ctrl+Right. Ctrl+Alt+H is the readline unix-word-rubout
+        // some terminals send for Alt+Backspace.
         KeyCode::Char('b') if alt && !ctrl => Some(Action::CursorWordLeft),
         KeyCode::Char('f') if alt && !ctrl => Some(Action::CursorWordRight),
+        KeyCode::Char('h') if ctrl && alt => Some(Action::DeleteWordLeft),
         KeyCode::Char(c) if (k.modifiers - KeyModifiers::SHIFT).is_empty() => {
             Some(Action::Insert(c))
         }
         KeyCode::Char(_) => None,
+        // Shift+Backspace/Delete still delete one char; Ctrl+Shift (xterm's
+        // modified keys) deletes a word.
+        KeyCode::Backspace if ctrl && shift => Some(Action::DeleteWordLeft),
         KeyCode::Backspace if word => Some(Action::DeleteWordLeft),
         KeyCode::Backspace => Some(Action::DeleteLeft),
+        KeyCode::Delete if ctrl && shift => Some(Action::DeleteWordRight),
         KeyCode::Delete if word => Some(Action::DeleteWordRight),
         KeyCode::Delete => Some(Action::DeleteRight),
         // Shift extends a selection; Shift+Ctrl/Alt extends by word.
@@ -53,6 +65,8 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
         // handles them as scroll.
         KeyCode::Left if command && shift => Some(Action::SelectLineStart),
         KeyCode::Right if command && shift => Some(Action::SelectLineEnd),
+        KeyCode::Left if alt && shift => Some(Action::SelectWordLeft),
+        KeyCode::Right if alt && shift => Some(Action::SelectWordRight),
         KeyCode::Left if shift && word => Some(Action::SelectWordLeft),
         KeyCode::Left if shift => Some(Action::SelectLeft),
         KeyCode::Right if shift && word => Some(Action::SelectWordRight),
@@ -64,6 +78,8 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
         // Kitty-protocol Cmd+Left/Right; other terminals send Ctrl+A/E or Home/End.
         KeyCode::Left if command => Some(Action::CursorLineStart),
         KeyCode::Right if command => Some(Action::CursorLineEnd),
+        KeyCode::Left if alt => Some(Action::CursorWordLeft),
+        KeyCode::Right if alt => Some(Action::CursorWordRight),
         KeyCode::Left if word => Some(Action::CursorWordLeft),
         KeyCode::Left => Some(Action::CursorLeft),
         KeyCode::Right if word => Some(Action::CursorWordRight),

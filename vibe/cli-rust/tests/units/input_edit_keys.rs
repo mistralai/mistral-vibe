@@ -117,6 +117,82 @@ fn home_and_delete_map_plain() {
     );
 }
 
+#[test]
+fn newline_aliases_insert_a_newline() {
+    let ctrl = KeyModifiers::CONTROL;
+    let alt = KeyModifiers::ALT;
+    assert_eq!(mapped(KeyCode::Char('j'), ctrl), Action::Insert('\n'));
+    assert_eq!(
+        mapped(KeyCode::Char('m'), ctrl),
+        Action::Insert('\n'),
+        "ctrl+m is byte \\r, the enter alias some terminals send"
+    );
+    assert_eq!(
+        mapped(KeyCode::Enter, KeyModifiers::SHIFT),
+        Action::Insert('\n')
+    );
+    assert_eq!(
+        mapped(KeyCode::Enter, alt),
+        Action::Insert('\n'),
+        "alt+enter is another newline alias"
+    );
+    assert_eq!(
+        action_for(&key(KeyCode::Enter, KeyModifiers::NONE)),
+        None,
+        "plain enter still submits"
+    );
+}
+
+#[test]
+fn ctrl_h_is_backspace() {
+    assert_eq!(
+        mapped(KeyCode::Char('h'), KeyModifiers::CONTROL),
+        Action::DeleteLeft,
+        "terminals that send byte \\x08 for backspace (QTerminal, ...)"
+    );
+    assert_eq!(
+        mapped(
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT
+        ),
+        Action::DeleteWordLeft,
+        "ctrl+alt+h is the readline unix-word-rubout some terminals send"
+    );
+}
+
+#[test]
+fn modified_delete_keys_delete_words() {
+    let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+    assert_eq!(
+        mapped(KeyCode::Backspace, ctrl_shift),
+        Action::DeleteWordLeft
+    );
+    assert_eq!(mapped(KeyCode::Delete, ctrl_shift), Action::DeleteWordRight);
+    assert_eq!(
+        mapped(KeyCode::Char('d'), KeyModifiers::ALT),
+        Action::DeleteWordRight,
+        "alt+d deletes the word after the caret"
+    );
+    assert_eq!(
+        action_for(&key(
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )),
+        None,
+        "ctrl+shift+h stays unbound"
+    );
+}
+
+#[test]
+fn alt_arrow_keys_move_and_select_by_word() {
+    let alt = KeyModifiers::ALT;
+    let alt_shift = KeyModifiers::ALT | KeyModifiers::SHIFT;
+    assert_eq!(mapped(KeyCode::Left, alt), Action::CursorWordLeft);
+    assert_eq!(mapped(KeyCode::Right, alt), Action::CursorWordRight);
+    assert_eq!(mapped(KeyCode::Left, alt_shift), Action::SelectWordLeft);
+    assert_eq!(mapped(KeyCode::Right, alt_shift), Action::SelectWordRight);
+}
+
 fn state(input: &str, cursor: usize) -> (String, usize, Option<usize>) {
     (input.to_string(), cursor, None)
 }

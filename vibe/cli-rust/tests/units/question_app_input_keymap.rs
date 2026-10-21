@@ -231,9 +231,21 @@ fn modified_enters_do_not_submit_the_focused_row() {
     harness.type_text("draft");
 
     harness.press(KeyCode::Enter, KeyModifiers::CONTROL);
-    harness.press(KeyCode::Enter, KeyModifiers::ALT);
 
     assert_eq!(harness.other(), "draft");
+    assert!(harness.app.question_app.answers.is_empty());
+    assert!(harness.app.question_app.open);
+}
+
+#[test]
+fn alt_enter_inserts_a_newline_on_the_focused_row() {
+    let mut harness = Harness::new(focused_other(question("Choose", false)));
+    harness.app.question_app.open = true;
+    harness.type_text("draft");
+
+    harness.press(KeyCode::Enter, KeyModifiers::ALT);
+
+    assert_eq!(harness.other(), "draft\n");
     assert!(harness.app.question_app.answers.is_empty());
     assert!(harness.app.question_app.open);
 }
