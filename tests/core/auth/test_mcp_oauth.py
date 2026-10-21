@@ -41,6 +41,7 @@ from vibe.core.auth.mcp_oauth import (
     MCPOAuthHeadlessError,
     MCPOAuthInvalidGrant,
     MCPOAuthLoginFailed,
+    MCPOAuthNotRequired,
     MCPOAuthPortInUse,
     MCPOAuthTransientRefreshError,
     build_oauth_provider,
@@ -1108,6 +1109,48 @@ class _RaisingStream:
 
 
 class TestPerformOAuthLogin:
+    @pytest.mark.parametrize(
+        ("status_code", "error_type"),
+        [(200, MCPOAuthNotRequired), (500, MCPOAuthLoginFailed)],
+    )
+    @pytest.mark.asyncio
+    async def test_no_challenge_is_only_not_required_after_successful_response(
+        self,
+        memory_keyring: _MemoryKeyring,
+        status_code: int,
+        error_type: type[MCPOAuthError],
+    ) -> None:
+        srv = _oauth_server(name="demo", scopes=[])
+
+        class ResponseStream:
+            async def __aenter__(self) -> httpx.Response:
+                return httpx.Response(status_code)
+
+            async def __aexit__(self, *_exc: object) -> None:
+                pass
+
+        class OAuthProbeClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            async def __aenter__(self) -> OAuthProbeClient:
+                return self
+
+            async def __aexit__(self, *_exc: object) -> None:
+                pass
+
+            def stream(self, *_args: object, **_kwargs: object) -> ResponseStream:
+                return ResponseStream()
+
+        async def on_url(_url: str) -> None:
+            pass
+
+        with patch(
+            "vibe.core.auth.mcp_oauth.VibeAsyncHTTPClient", new=OAuthProbeClient
+        ):
+            with pytest.raises(error_type):
+                await perform_oauth_login(srv, on_url=on_url)
+
     @pytest.mark.asyncio
     async def test_oauth_flow_error_becomes_login_failed(
         self, memory_keyring: _MemoryKeyring
@@ -1509,10 +1552,10 @@ class TestPerformOAuthLogin:
         assert await Fingerprint.load("demo") is None
 
     @pytest.mark.asyncio
-    async def test_probe_without_challenge_fails_instead_of_saving_fingerprint(
+    async def test_probe_without_challenge_fails_for_explicit_scopes(
         self, memory_keyring: _MemoryKeyring
     ) -> None:
-        # A probe the server never challenges leaves no token: login must fail, not save a fingerprint (VIBE-4667).
+        # Explicit OAuth scopes cannot be treated as an anonymous login.
         server_url = "https://mcp.example.com/mcp"
         srv = _oauth_server(name="demo", url=server_url, scopes=["read"])
 

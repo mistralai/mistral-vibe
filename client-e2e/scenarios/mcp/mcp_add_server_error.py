@@ -8,7 +8,7 @@ MESSAGE = "MCP server URL is already configured as `linear`."
 handshake = {"mcp/add": {"error": {"code": "invalid_params", "message": MESSAGE}}}
 request_methods = frozenset({"mcp_catalog/add"})
 screen_contains = (f"Error: {MESSAGE}",)
-screen_excludes = ("mcp_catalog/add failed", "Added OAuth MCP server")
+screen_excludes = ("mcp_catalog/add failed", "Added MCP server")
 timeline: Timeline = [
     "/mcp add https://mcp.linear.app/mcp --name lin2 --scope read --no-login\r"
 ]

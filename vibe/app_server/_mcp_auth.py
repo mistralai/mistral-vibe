@@ -551,21 +551,13 @@ class MCPAuthenticationService(MCPAuthorizationProvider):
     def _late_bound_oauth(
         self, server: MCPServer, *, plugin_owned: bool
     ) -> RemoteMCPServer | None:
-        # A plugin manifest describes a remote server with a url and headers
-        # and nothing else, so both adapters build static auth and a 401 would
-        # have no declared route to a login. Dynamic client registration is
-        # what the MCP spec prescribes for that 401. Config-owned servers are
-        # excluded: ``[[mcp_servers]]`` can say ``auth.type = "oauth"``, so a
-        # static entry there is a decision.
-        #
-        # Whose the server is comes from the caller, which found it in one
-        # catalog. Re-derived here from the process, a configured entry no
-        # session but another one has would answer for it.
-        if not plugin_owned:
-            return None
         if not isinstance(server, MCPHttp | MCPStreamableHttp):
             return None
         if not isinstance(server.auth, MCPStaticAuth):
+            return None
+        # Empty auth is the config default, not a declared credential choice.
+        # It may use OAuth only after a challenge or an explicit login request.
+        if not plugin_owned and (server.auth.headers or server.auth.api_key_env):
             return None
         return server.model_copy(update={"auth": MCPOAuth(type="oauth", scopes=[])})
 

@@ -11,7 +11,7 @@ MESSAGE = (
 handshake = {"mcp/add": {"error": {"code": "invalid_params", "message": MESSAGE}}}
 request_methods = frozenset({"mcp_catalog/add", "mcp_catalog/login"})
 screen_contains = ("Error: MCP server URL must use https", "--allow-insecure-http")
-screen_excludes = ("Added OAuth MCP server",)
+screen_excludes = ("Added MCP server",)
 timeline: Timeline = [
     "/mcp add http://192.168.0.8:3002/mcp --transport http --no-login\r"
 ]

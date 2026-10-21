@@ -10,6 +10,7 @@ from vibe.core.config.models import (
     MCPHttp,
     MCPOAuth,
     MCPServer,
+    MCPStaticAuth,
     MCPStdio,
     MCPStreamableHttp,
     normalize_mcp_server_name,
@@ -71,6 +72,51 @@ async def persist_oauth_mcp_server(
     startup_timeout_sec: float | None = None,
     tool_timeout_sec: float | None = None,
 ) -> PersistedMCPServerResult[MCPHttp | MCPStreamableHttp]:
+    return await _persist_remote_mcp_server_from_url(
+        orchestrator,
+        url=url,
+        name=name,
+        auth=MCPOAuth(type="oauth", scopes=scopes or []),
+        transport=transport,
+        allow_insecure_http=allow_insecure_http,
+        startup_timeout_sec=startup_timeout_sec,
+        tool_timeout_sec=tool_timeout_sec,
+    )
+
+
+async def persist_unauthenticated_mcp_server(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    *,
+    url: str,
+    name: str | None = None,
+    transport: MCPAddTransport = "streamable-http",
+    allow_insecure_http: bool = False,
+    startup_timeout_sec: float | None = None,
+    tool_timeout_sec: float | None = None,
+) -> PersistedMCPServerResult[MCPHttp | MCPStreamableHttp]:
+    return await _persist_remote_mcp_server_from_url(
+        orchestrator,
+        url=url,
+        name=name,
+        auth=MCPStaticAuth(),
+        transport=transport,
+        allow_insecure_http=allow_insecure_http,
+        startup_timeout_sec=startup_timeout_sec,
+        tool_timeout_sec=tool_timeout_sec,
+    )
+
+
+async def _persist_remote_mcp_server_from_url(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    *,
+    url: str,
+    name: str | None,
+    auth: MCPStaticAuth | MCPOAuth,
+    transport: MCPAddTransport,
+    allow_insecure_http: bool,
+    startup_timeout_sec: float | None,
+    tool_timeout_sec: float | None,
+) -> PersistedMCPServerResult[MCPHttp | MCPStreamableHttp]:
     _ensure_mcp_enabled(orchestrator.config)
     normalized_url = normalize_mcp_server_url(
         url, allow_insecure_http=allow_insecure_http
@@ -81,10 +127,19 @@ async def persist_oauth_mcp_server(
 
     active_servers = list(orchestrator.config.mcp_servers)
     if existing := _find_server_url(active_servers, normalized_url):
-        if not isinstance(existing.auth, MCPOAuth):
+        if isinstance(auth, MCPOAuth) and not isinstance(existing.auth, MCPOAuth):
             raise MCPServerAddError(
                 f"MCP server URL is already configured as `{existing.name}` "
                 "with static auth. `/mcp add` only supports OAuth MCP servers."
+            )
+        if isinstance(auth, MCPStaticAuth) and (
+            not isinstance(existing.auth, MCPStaticAuth)
+            or existing.auth.headers
+            or existing.auth.api_key_env
+        ):
+            raise MCPServerAddError(
+                f"MCP server URL is already configured as `{existing.name}` "
+                "with different authentication."
             )
         if requested_name is not None and requested_name != existing.name:
             raise MCPServerAddError(
@@ -101,7 +156,7 @@ async def persist_oauth_mcp_server(
             "name": server_name,
             "transport": transport,
             "url": normalized_url,
-            "auth": {"type": "oauth", "scopes": scopes or []},
+            "auth": auth,
             **{
                 name: value
                 for name, value in (
@@ -450,5 +505,6 @@ __all__ = [
     "persist_oauth_mcp_server",
     "persist_remote_mcp_server",
     "persist_stdio_mcp_server",
+    "persist_unauthenticated_mcp_server",
     "remove_mcp_server",
 ]

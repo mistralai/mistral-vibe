@@ -37,14 +37,22 @@ SCENARIOS = (
         args=("add", "https://example.invalid/mcp", "--no-login"),
         responses={"mcp_catalog/add": _ADDED},
         requests=(_ADD,),
-        stdout="Added MCP server `example`.\nRun `/mcp login example` to authenticate.\n",
+        stdout=(
+            "Added MCP server `example`.\n"
+            "OAuth login skipped. Run `/mcp login example` if the server later "
+            "requires authentication.\n"
+        ),
     ),
     MCPArgvScenario(
         name="add_existing",
         args=("add", "https://example.invalid/mcp", "--no-login"),
         responses={"mcp_catalog/add": {"name": "example", "created": False}},
         requests=(_ADD,),
-        stdout="MCP server `example` is already configured.\nRun `/mcp login example` to authenticate.\n",
+        stdout=(
+            "MCP server `example` is already configured.\n"
+            "OAuth login skipped. Run `/mcp login example` if the server later "
+            "requires authentication.\n"
+        ),
     ),
     MCPArgvScenario(
         name="add_flags",
@@ -75,7 +83,11 @@ SCENARIOS = (
                 },
             },
         ),
-        stdout="Added MCP server `example`.\nRun `/mcp login example` to authenticate.\n",
+        stdout=(
+            "Added MCP server `example`.\n"
+            "OAuth login skipped. Run `/mcp login example` if the server later "
+            "requires authentication.\n"
+        ),
     ),
     MCPArgvScenario(
         name="remove",

@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use crate::external_url;
@@ -153,19 +153,25 @@ async fn add(client: &Client, args: &McpAddArgs, params: Value) -> Result<()> {
         return Ok(());
     }
     if args.no_login {
-        println!("Run `/mcp login {name}` to authenticate.");
+        println!(
+            "OAuth login skipped. Run `/mcp login {name}` if the server later requires authentication."
+        );
         return Ok(());
     }
-    let login = tokio::time::timeout(
+    let response = tokio::time::timeout(
         LOGIN_TIMEOUT,
         client.request(method::MCP_LOGIN, json!({"name": name})),
     )
     .await
     .context("OAuth login timed out")
-    .and_then(|result| result);
-    if let Err(error) = login {
-        bail!("OAuth login failed: {error:#}\nRun `/mcp login {name}` to authenticate.");
+    .and_then(|result| result)
+    .map_err(|error| {
+        anyhow::anyhow!("OAuth login failed: {error:#}\nRun `/mcp login {name}` to authenticate.")
+    })?;
+    if response.get("authenticated").and_then(Value::as_bool) == Some(false) {
+        println!("MCP server `{name}` does not require OAuth authentication.");
+    } else {
+        println!("OAuth login completed.");
     }
-    println!("OAuth login completed.");
     Ok(())
 }

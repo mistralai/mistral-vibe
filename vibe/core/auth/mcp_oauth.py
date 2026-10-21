@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 import errno
 import functools
+from http import HTTPStatus
 import time
 from typing import TYPE_CHECKING, Final
 import urllib.parse
@@ -134,6 +135,15 @@ class MCPOAuthLoginFailed(MCPOAuthError):
             f"OAuth login failed for MCP server {self.server_alias!r}: {self.reason}. "
             f"Run `/mcp login {self.server_alias}` to retry."
         )
+
+
+class MCPOAuthNotRequired(MCPOAuthError):
+    def __init__(self, *, server_alias: str) -> None:
+        self.server_alias = server_alias
+        super().__init__(self._fmt())
+
+    def _fmt(self) -> str:
+        return f"MCP server {self.server_alias!r} did not request OAuth authentication."
 
 
 class MCPOAuthCredentialCleanupFailed(MCPOAuthError):
@@ -673,27 +683,35 @@ async def perform_oauth_login(
     declared = dict(headers or {})
     try:
         try:
-            await _attempt_oauth_login(server, auth, on_url, declared)
+            response_status = await _attempt_oauth_login(server, auth, on_url, declared)
         except MCPOAuthInvalidGrant:
             # invalid_grant already cleared the stored creds; retry runs fresh.
-            await _attempt_oauth_login(server, auth, on_url, declared)
+            response_status = await _attempt_oauth_login(server, auth, on_url, declared)
         except MCPOAuthTransientRefreshError:
             # A non-invalid_grant refresh failure (e.g. pruned DCR client -> 5xx)
             # keeps the creds, so a plain retry just re-refreshes and fails the
             # same way. Drop them and retry once as a fresh authorization.
             await delete_oauth_credentials(server.name)
-            await _attempt_oauth_login(server, auth, on_url, declared)
+            response_status = await _attempt_oauth_login(server, auth, on_url, declared)
     except MCPOAuthTransientRefreshError as exc:
         raise MCPOAuthLoginFailed(
             server_alias=server.name, reason=f"Transient error: {exc.reason}"
         ) from exc
     except (OAuthTokenError, OAuthFlowError, httpx.HTTPError, OSError) as exc:
         raise MCPOAuthLoginFailed(server_alias=server.name, reason=str(exc)) from exc
-    # A probe the server never challenges leaves no token, so fail loudly rather than save a false-success fingerprint.
+    # A successful unscoped probe can be anonymous; other missing-token probes fail.
     if await KeyringTokenStorage(alias=server.name).get_tokens() is None:
+        if (
+            not auth.scopes
+            and HTTPStatus.OK <= response_status < HTTPStatus.MULTIPLE_CHOICES
+        ):
+            raise MCPOAuthNotRequired(server_alias=server.name)
         raise MCPOAuthLoginFailed(
             server_alias=server.name,
-            reason="the server never issued an OAuth challenge, so no token was obtained",
+            reason=(
+                f"the server returned HTTP {response_status} without an OAuth challenge, "
+                "so no token was obtained"
+            ),
         )
     await Fingerprint.compute(server).save(server.name)
 
@@ -703,14 +721,14 @@ async def _attempt_oauth_login(
     auth: MCPOAuth,
     on_url: Callable[[str], Awaitable[None]],
     declared_headers: Mapping[str, str],
-) -> None:
+) -> int:
     # Fresh provider per attempt so a retry reads the current keyring state, not
     # the previous attempt's in-memory tokens.
     handler = LoopbackCallbackHandler(port=auth.redirect_port, server_alias=server.name)
     provider = build_oauth_provider(
         server, redirect_handler=on_url, callback_handler=handler.serve_once
     )
-    await _request_oauth_login(server, provider, declared_headers)
+    return await _request_oauth_login(server, provider, declared_headers)
 
 
 def _initialize_message() -> dict[str, object]:
@@ -732,7 +750,7 @@ async def _request_oauth_login(
     server: MCPHttp | MCPStreamableHttp,
     provider: OAuthClientProvider,
     declared_headers: Mapping[str, str],
-) -> None:
+) -> int:
     async with VibeAsyncHTTPClient(
         auth=provider, timeout=_LOGIN_TIMEOUT_SECONDS, verify=build_ssl_context()
     ) as client:
@@ -751,5 +769,5 @@ async def _request_oauth_login(
             server.url,
             json=_initialize_message(),
             headers={**declared_headers, "Accept": _MCP_ACCEPT},
-        ):
-            pass
+        ) as response:
+            return response.status_code

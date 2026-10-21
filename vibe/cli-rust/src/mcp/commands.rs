@@ -98,6 +98,11 @@ async fn login_event(client: &Arc<Client>, session_id: &str, alias: &str) -> Com
         )
         .await
     {
+        Ok(value) if value.get("authenticated").and_then(Value::as_bool) == Some(false) => {
+            CommandEvent::Result(format!(
+                "MCP server `{alias}` does not require OAuth authentication."
+            ))
+        }
         Ok(_) => CommandEvent::Result(format!("MCP server `{alias}` authenticated.")),
         Err(error) => CommandEvent::Error(error.message),
     }
@@ -175,14 +180,16 @@ fn add(app: &mut App, client: &Arc<Client>, raw_args: &str) {
             .to_owned();
         let created = added.get("created").and_then(Value::as_bool) == Some(true);
         let head = if created {
-            format!("Added OAuth MCP server `{name}`.")
+            format!("Added MCP server `{name}`.")
         } else {
-            format!("OAuth MCP server `{name}` is already configured.")
+            format!("MCP server `{name}` is already configured.")
         };
         let tail = if args.login {
-            "Starting OAuth login...".to_owned()
+            "Checking authentication requirements...".to_owned()
         } else {
-            format!("Run `/mcp login {name}` to authenticate, or `/mcp status` to inspect it.")
+            format!(
+                "OAuth login skipped. Run `/mcp login {name}` if the server requires authentication, or `/mcp status` to inspect it."
+            )
         };
         send(
             &tx,

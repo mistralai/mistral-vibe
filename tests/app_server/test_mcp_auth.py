@@ -431,6 +431,40 @@ async def test_a_config_server_that_declares_static_auth_is_never_late_bound() -
 
 
 @pytest.mark.asyncio
+async def test_a_config_server_with_empty_auth_can_be_late_bound() -> None:
+    service = MCPAuthenticationService()
+    server = MCPHttp(name="public", transport="http", url="https://mcp.example.test")
+    await service.bind_catalog([server])
+
+    with patch(
+        "vibe.app_server._mcp_auth.perform_oauth_login", new=AsyncMock()
+    ) as login:
+        await service.login("public", on_url=AsyncMock())
+
+    assert login.await_args is not None
+    assert login.await_args.args[0].auth == MCPOAuth(type="oauth", scopes=[])
+
+
+@pytest.mark.asyncio
+async def test_a_config_server_with_empty_auth_connects_without_a_saved_token() -> None:
+    service = MCPAuthenticationService()
+    server = MCPHttp(name="public", transport="http", url="https://mcp.example.test")
+    await service.bind_catalog([server])
+    storage = AsyncMock()
+    storage.get_tokens.return_value = None
+    storage.token_expiry_time = None
+
+    with (
+        patch.object(Fingerprint, "load", new=AsyncMock(return_value=None)),
+        patch("vibe.app_server._mcp_auth.KeyringTokenStorage", return_value=storage),
+    ):
+        result = await service.resolve(service.reference_for(server))
+
+    assert isinstance(result, MCPAuthorizationSnapshot)
+    assert result.headers == {}
+
+
+@pytest.mark.asyncio
 async def test_a_plugin_server_connects_on_its_declared_headers_before_any_login() -> (
     None
 ):

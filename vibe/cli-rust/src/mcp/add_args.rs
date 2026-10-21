@@ -6,7 +6,7 @@ pub const MCP_ADD_USAGE: &str = "Usage: /mcp add <url> [--name <alias>] [--scope
 /// the placeholders as HTML.
 pub fn add_help() -> String {
     format!(
-        "{}\n\nOAuth-only shortcut for hosted MCP servers.\nDefaults to streamable-http; pass --transport http for servers documented with\nHTTP transport.\nPass --allow-insecure-http to allow a plaintext http:// URL on a non-localhost\nhost, such as a server on the LAN.\nFor API-key/static auth, run in a shell:\nvibe mcp add NAME --url URL --api-key-env VAR",
+        "{}\n\nRegister a remote MCP server; OAuth login starts when the server requests it.\nDefaults to streamable-http; pass --transport http for servers documented with\nHTTP transport.\nPass --allow-insecure-http to allow a plaintext http:// URL on a non-localhost\nhost, such as a server on the LAN.\nFor API-key/static auth, run in a shell:\nvibe mcp add NAME --url URL --api-key-env VAR",
         MCP_ADD_USAGE.replace('<', "\\<")
     )
 }

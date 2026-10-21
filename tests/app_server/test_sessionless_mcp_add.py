@@ -528,7 +528,7 @@ async def test_named_oauth_readd_returns_existing_server(
 
 
 @pytest.mark.asyncio
-async def test_unnamed_oauth_add_accepts_timeouts_and_readds_by_url(
+async def test_unnamed_unauthenticated_add_accepts_timeouts_and_readds_by_url(
     mcp_client: AppServerClient, config_dir: Path
 ) -> None:
     params = {"url": "https://mcp.example.test/mcp", "startupTimeoutSec": 15}
@@ -539,7 +539,7 @@ async def test_unnamed_oauth_add_accepts_timeouts_and_readds_by_url(
     assert response["created"] is True
     persisted = (config_dir / "config.toml").read_bytes()
     server = tomllib.loads(persisted.decode())["mcp_servers"][0]
-    assert server["auth"] == {"type": "oauth", "scopes": []}
+    assert server["auth"] == {"type": "static"}
     assert server["startup_timeout_sec"] == 15.0
     readd = await mcp_client.request(
         "mcp_catalog/add", {**params, "name": "example", "startupTimeoutSec": 25}

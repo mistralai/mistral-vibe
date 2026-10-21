@@ -203,6 +203,22 @@ ADD_SCENARIOS = (
         ),
         stdout="Added MCP server `example`.\nOAuth login completed.\n",
     ),
+    MCPArgvScenario(
+        name="add_unauthenticated_remote",
+        args=("add", *_REMOTE),
+        responses={
+            "mcp_catalog/add": {"name": "example", "created": True},
+            "mcp_catalog/login": {"authenticated": False},
+        },
+        requests=(
+            {"method": "mcp_catalog/add", "params": _BASE_PARAMS},
+            {"method": "mcp_catalog/login", "params": {"name": "example"}},
+        ),
+        stdout=(
+            "Added MCP server `example`.\n"
+            "MCP server `example` does not require OAuth authentication.\n"
+        ),
+    ),
 )
 
 SERVER_ERRORS = (

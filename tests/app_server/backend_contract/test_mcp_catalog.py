@@ -29,6 +29,7 @@ from vibe.app_server.protocol import (
     MCPAddResponse,
     MCPCatalogMutationResponse,
     MCPLoginParams,
+    MCPLoginResponse,
     MCPLogoutParams,
     MCPReadParams,
     MCPReadResponse,
@@ -268,7 +269,7 @@ async def test_mcp_catalog_add_login_logout_aliases_and_notification_order(
         assert compatibility_add.runtime is not None
 
         start = len(connection.transport.timeline)
-        canonical_login = MCPCatalogMutationResponse.model_validate(
+        canonical_login = MCPLoginResponse.model_validate(
             await connection.client.request(
                 "mcp_catalog/login", MCPLoginParams(session_id=session_id, name="added")
             )
@@ -281,7 +282,7 @@ async def test_mcp_catalog_add_login_logout_aliases_and_notification_order(
         )
         _assert_login_wire_order(connection.transport.timeline[start:])
 
-        compatibility_login = MCPCatalogMutationResponse.model_validate(
+        compatibility_login = MCPLoginResponse.model_validate(
             await connection.client.request(
                 "mcp/login", MCPLoginParams(session_id=session_id, name="added")
             )
@@ -394,7 +395,7 @@ async def test_mcp_login_for_disabled_source_performs_no_runtime_authorization(
     monkeypatch.setattr(MCPAuthenticationService, "login", login)
     monkeypatch.setattr(MCPAuthenticationService, "resolve", track_resolve)
 
-    response = MCPCatalogMutationResponse.model_validate(
+    response = MCPLoginResponse.model_validate(
         await backend_contract_connection.client.request(
             "mcp_catalog/login",
             MCPLoginParams(session_id=session_id, name=_OAUTH_SERVER),
@@ -475,12 +476,12 @@ async def test_sessionless_mcp_mutations_do_not_build_a_session_runtime_and_boot
                 MCPToggleParams(name="sessionless", source="server", disabled=False),
             )
         )
-        logged_in = MCPCatalogMutationResponse.model_validate(
+        logged_in = MCPLoginResponse.model_validate(
             await connection.client.request(
                 "mcp_catalog/login", MCPLoginParams(name="sessionless")
             )
         )
-        alias_login = MCPCatalogMutationResponse.model_validate(
+        alias_login = MCPLoginResponse.model_validate(
             await connection.client.request(
                 "mcp/login", MCPLoginParams(name="sessionless")
             )

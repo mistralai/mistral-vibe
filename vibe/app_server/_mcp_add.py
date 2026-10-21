@@ -8,6 +8,7 @@ from vibe.core.config.mcp_servers import (
     persist_oauth_mcp_server,
     persist_remote_mcp_server,
     persist_stdio_mcp_server,
+    persist_unauthenticated_mcp_server,
 )
 from vibe.core.config.models import normalize_mcp_server_name
 from vibe.core.config.orchestrator import ConfigOrchestrator
@@ -73,11 +74,21 @@ async def persist_mcp_add(
     if static_requested and params.scopes:
         raise MCPServerAddError("OAuth scopes cannot be combined with static auth.")
     if not static_requested:
-        return await persist_oauth_mcp_server(
+        if params.scopes:
+            return await persist_oauth_mcp_server(
+                orchestrator,
+                url=params.url,
+                name=params.name,
+                scopes=params.scopes,
+                transport=params.transport,
+                allow_insecure_http=params.allow_insecure_http,
+                startup_timeout_sec=params.startup_timeout_sec,
+                tool_timeout_sec=params.tool_timeout_sec,
+            )
+        return await persist_unauthenticated_mcp_server(
             orchestrator,
             url=params.url,
             name=params.name,
-            scopes=params.scopes,
             transport=params.transport,
             allow_insecure_http=params.allow_insecure_http,
             startup_timeout_sec=params.startup_timeout_sec,

@@ -37,6 +37,7 @@ from vibe.app_server.protocol import (
     MCPAuthUrlParams,
     MCPCatalogMutationResponse,
     MCPLoginParams,
+    MCPLoginResponse,
     MCPLogoutParams,
     MCPReadParams,
     MCPReadResponse,
@@ -48,7 +49,7 @@ from vibe.app_server.protocol import (
     RuntimeSnapshot,
     RuntimeUpdatedParams,
 )
-from vibe.core.auth.mcp_oauth import MCPOAuthError
+from vibe.core.auth.mcp_oauth import MCPOAuthError, MCPOAuthNotRequired
 from vibe.core.config import MCPHttp, MCPOAuth, MCPServer, MCPStdio, MCPStreamableHttp
 from vibe.core.config.mcp_servers import (
     MCP_DISABLED_MESSAGE,
@@ -451,7 +452,7 @@ class MCPCatalogService:
 
     async def _login(
         self, params: MCPLoginParams, root: SessionBackend | None, notify: Notify
-    ) -> tuple[MCPCatalogMutationResponse, bool]:
+    ) -> tuple[MCPLoginResponse, bool]:
         context = await self._mutation_target(params.session_id, root)
         if not context.orchestrator.config.enable_mcp:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, MCP_DISABLED_MESSAGE)
@@ -473,10 +474,18 @@ class MCPCatalogService:
             descriptor_revision = await self._authentication.login(
                 params.name, on_url=publish_url, owner=owner
             )
+        except MCPOAuthNotRequired:
+            return MCPLoginResponse(authenticated=False), False
         except (MCPOAuthError, ValueError) as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
         if plugin_owned:
-            return await self._plugin_authorization_changed(context, params.name)
+            response, runtime_updated = await self._plugin_authorization_changed(
+                context, params.name
+            )
+            return (
+                MCPLoginResponse(authenticated=True, runtime=response.runtime),
+                runtime_updated,
+            )
         state = None
         if context.control is not None:
             try:
@@ -492,7 +501,7 @@ class MCPCatalogService:
             if state is not None
             else None
         )
-        return MCPCatalogMutationResponse(runtime=runtime), state is not None
+        return MCPLoginResponse(authenticated=True, runtime=runtime), state is not None
 
     async def _logout(
         self, params: MCPLogoutParams, root: SessionBackend | None

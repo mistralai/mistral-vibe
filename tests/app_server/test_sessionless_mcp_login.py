@@ -17,6 +17,7 @@ from vibe.app_server.protocol import (
     Notification,
 )
 from vibe.app_server.transport import memory_transport_pair
+from vibe.core.auth.mcp_oauth import MCPOAuthNotRequired
 from vibe.core.config import MCPHttp, MCPStreamableHttp, build_user_config_orchestrator
 
 
@@ -74,10 +75,51 @@ async def test_sessionless_login_delivers_auth_url_before_login_completes(
             }
         assert not pending_login.done()
         authorized.set()
-        assert await asyncio.wait_for(pending_login, timeout=1) == {"runtime": None}
+        assert await asyncio.wait_for(pending_login, timeout=1) == {
+            "authenticated": True,
+            "runtime": None,
+        }
     finally:
         authorized.set()
         await incoming.aclose()
         await client.close()
         if pending_login is not None:
             await asyncio.gather(pending_login, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_sessionless_login_reports_when_oauth_is_not_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_challenge(
+        server: MCPHttp | MCPStreamableHttp,
+        *,
+        on_url: Callable[[str], Awaitable[None]],
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        raise MCPOAuthNotRequired(server_alias=server.name)
+
+    monkeypatch.setattr("vibe.app_server._mcp_auth.perform_oauth_login", no_challenge)
+    client_transport, server_transport = memory_transport_pair()
+    process = HarnessProcess()
+    process.mcp_catalog = MCPCatalogService(
+        MCPAuthenticationService(),
+        sessionless_catalog_factory=build_user_config_orchestrator,
+    )
+    server = await create_harness_server(
+        server_transport, transport_kind="in_process", process=process
+    )
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    try:
+        await client.initialize(ClientInfo(name="test", version="1"))
+        await client.notify("initialized")
+        await client.request(
+            "mcp_catalog/add",
+            MCPAddParams(url="https://example.invalid/mcp", name="example"),
+        )
+        assert await client.request(
+            "mcp_catalog/login", MCPLoginParams(name="example")
+        ) == {"authenticated": False, "runtime": None}
+    finally:
+        await client.close()
+        await process.close()

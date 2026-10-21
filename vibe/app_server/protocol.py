@@ -1742,6 +1742,11 @@ class MCPLoginParams(ProtocolModel):
     name: str
 
 
+class MCPLoginResponse(ProtocolModel):
+    authenticated: bool = True
+    runtime: RuntimeSnapshot | None = None
+
+
 class MCPAuthUrlParams(ProtocolModel):
     name: str
     url: str
