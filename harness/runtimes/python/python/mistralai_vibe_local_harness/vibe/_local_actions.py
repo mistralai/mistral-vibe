@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+import json
 import logging
 from pathlib import Path
 import secrets
@@ -665,6 +666,15 @@ class _LocalActionState:
 
     async def execute(self, action: RustAction) -> RustEvent:
         try:
+            if self._config.tracing is not None and isinstance(
+                action, RustRuntimeBuiltinToolCallAction | RustProvidedToolCallAction
+            ):
+                async with self._config.tracing.tool_span(
+                    tool_name=gated_tool_name(action),
+                    call_id=action.call_id,
+                    arguments=json.dumps(action.call.arguments, sort_keys=True),
+                ):
+                    return await self._execute(action)
             return await self._execute(action)
         except SandboxUnavailableError as error:
             # Reported to the model, a lost sandbox would only be retried.

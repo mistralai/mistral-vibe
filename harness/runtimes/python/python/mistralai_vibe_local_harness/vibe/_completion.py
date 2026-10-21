@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from dataclasses import replace
 from http import HTTPStatus
 import json
@@ -288,41 +288,62 @@ async def execute_completion(  # noqa: PLR0914 - one local per step of the call'
     malformed = MalformedToolCalls()
     succeeded = False
     try:
-        if config.backend == "mistral":
-            result = await execute_mistral_completion(
-                messages,
-                tools,
-                config,
-                credential,
-                # The standalone request turns reasoning off below instead of
-                # through the route, so a route without reasoning sends none.
-                config.compaction_model if standalone else route,
-                # Watching reasoning needs the stream; other compaction calls
-                # wait for the whole answer.
-                stream=action.purpose == "agent" or reasoning_watch is not None,
-                disable_reasoning=standalone,
-                metadata=(
-                    config.completion_metadata(action.purpose, action.iteration)
-                    if config.completion_metadata is not None
-                    else None
-                ),
-                on_retry=retry_observer,
-                on_delta=on_delta,
-                malformed=malformed,
-            )
-        elif config.backend == "generic":
-            result = await execute_generic_completion(
-                messages,
-                tools,
-                config,
-                credential,
-                route=route,
-                on_retry=retry_observer,
-                on_delta=on_delta,
-                malformed=malformed,
-            )
-        else:
-            raise ValueError(f"Unsupported completion backend: {config.backend}")
+        async with AsyncExitStack() as spans:
+            if config.tracing is not None:
+                if action.purpose == "agent":
+                    await spans.enter_async_context(
+                        config.tracing.agent_span(model=route.model)
+                    )
+                await spans.enter_async_context(
+                    config.tracing.model_call_span(
+                        provider_name=config.provider,
+                        provider_api_style=config.api_style,
+                        model=route.model,
+                        streaming=action.purpose == "agent"
+                        or reasoning_watch is not None,
+                        temperature=route.temperature,
+                        max_tokens=config.output_token_cap(route),
+                        metadata={
+                            "call_type": action.purpose,
+                            "message_id": action.action_id,
+                        },
+                    )
+                )
+            if config.backend == "mistral":
+                result = await execute_mistral_completion(
+                    messages,
+                    tools,
+                    config,
+                    credential,
+                    # The standalone request turns reasoning off below instead of
+                    # through the route, so a route without reasoning sends none.
+                    config.compaction_model if standalone else route,
+                    # Watching reasoning needs the stream; other compaction calls
+                    # wait for the whole answer.
+                    stream=action.purpose == "agent" or reasoning_watch is not None,
+                    disable_reasoning=standalone,
+                    metadata=(
+                        config.completion_metadata(action.purpose, action.iteration)
+                        if config.completion_metadata is not None
+                        else None
+                    ),
+                    on_retry=retry_observer,
+                    on_delta=on_delta,
+                    malformed=malformed,
+                )
+            elif config.backend == "generic":
+                result = await execute_generic_completion(
+                    messages,
+                    tools,
+                    config,
+                    credential,
+                    route=route,
+                    on_retry=retry_observer,
+                    on_delta=on_delta,
+                    malformed=malformed,
+                )
+            else:
+                raise ValueError(f"Unsupported completion backend: {config.backend}")
         succeeded = True
     except Exception as exc:
         if isinstance(exc, ProviderRefusal) and emitter is not None:

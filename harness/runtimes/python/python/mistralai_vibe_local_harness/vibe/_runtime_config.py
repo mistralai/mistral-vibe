@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 from mistralai_vibe_local_harness.protocol import (
     RustHarnessConfig,
@@ -162,6 +163,46 @@ class MalformedToolCallsTelemetry:
 
 # Host sink for malformed tool call telemetry, called at most once per LLM call.
 type MalformedToolCallsSink = Callable[[MalformedToolCallsTelemetry], None]
+
+
+class AgentSpanFactory(Protocol):
+    def __call__(
+        self, *, model: str | None = None, session_id: str | None = None
+    ) -> AbstractAsyncContextManager[object]: ...
+
+
+class ModelCallSpanFactory(Protocol):
+    def __call__(
+        self,
+        *,
+        provider_name: str,
+        provider_api_style: str,
+        model: str,
+        streaming: bool,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        metadata: dict[str, str] | None = None,
+    ) -> AbstractAsyncContextManager[object]: ...
+
+
+class ToolSpanFactory(Protocol):
+    def __call__(
+        self, *, tool_name: str, call_id: str, arguments: str
+    ) -> AbstractAsyncContextManager[object]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class OtelTracingHooks:
+    """Host-owned OpenTelemetry span factories for Runtime actions.
+
+    The Runtime stays independent of Vibe's tracing implementation. The app
+    server supplies these factories when tracing is enabled, and the Runtime
+    only owns the action lifetime of each returned context manager.
+    """
+
+    agent_span: AgentSpanFactory
+    model_call_span: ModelCallSpanFactory
+    tool_span: ToolSpanFactory
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,6 +444,8 @@ class LocalRuntimeAdapterConfig:
     helper_crashes: HelperCrashCount = field(
         default_factory=HelperCrashCount, compare=False
     )
+    enable_otel: bool = False
+    tracing: OtelTracingHooks | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -594,6 +637,8 @@ _LOCAL_RUNTIME_ADAPTER_BEHAVIOR_FIELDS = frozenset({
     "stream_idle_timeout_s",
     "retry_max_elapsed_time_s",
     "enable_system_trust_store",
+    "enable_otel",
+    "tracing",
     "env",
     "command_environment",
     "shell",

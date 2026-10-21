@@ -127,6 +127,10 @@ async def execute_mistral_completion(  # noqa: PLR0913 - one keyword per request
             retry_config=_NO_SDK_RETRIES,
             timeout_ms=int(config.timeout_s * 1000),
         )
+        if config.enable_otel:
+            from mistralai.extra.observability.telemetry import configure_telemetry
+
+            configure_telemetry(client, provider="global")
         kwargs: dict[str, Any] = {
             "model": route.model,
             "messages": [_message_payload(message) for message in messages],

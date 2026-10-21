@@ -120,6 +120,7 @@ from vibe.core.telemetry.types import LaunchContext
 from vibe.core.tools.manager import FailedToolFile, ToolManager
 from vibe.core.tools.models import ToolPermission
 from vibe.core.tools.permissions import PermissionStore
+from vibe.core.tracing import setup_tracing
 from vibe.core.utils import get_windows_bash_path, is_windows
 from vibe.core.utils.matching import name_matches
 from vibe.observability.logging import logger
@@ -143,6 +144,20 @@ def _command_environment_mode() -> _CommandEnvironmentMode:
     if get_windows_bash_path() is not None:
         return "git_bash"
     return "powershell"
+
+
+def _otel_enabled(config: VibeConfigSchema) -> bool:
+    """Return whether this config can install the process-wide OTEL provider."""
+    if not (config.enable_telemetry and config.enable_otel):
+        return False
+    from vibe.core.tracing import build_otel_span_exporter_config
+
+    return (
+        build_otel_span_exporter_config(
+            config.otel_endpoint, config.get_mistral_provider()
+        )
+        is not None
+    )
 
 
 def _build_project_context_section(
@@ -756,6 +771,7 @@ class HarnessProcess:
         self._project_instructions = project_instructions
         self._close_lock = asyncio.Lock()
         self._closed = False
+        self._tracing_configured = False
         self._shared = shared
         self._experimental_harness_host: object | None = None
         self._throwaway_storage_root = ThrowawayStorageRoot()
@@ -950,6 +966,7 @@ class HarnessProcess:
             HelperCrashCount,
             LocalModelRoute,
             LocalRuntimeAdapterConfig,
+            OtelTracingHooks,
             SessionWorkspace,
             compile_foreign_hooks,
             sandbox_path,
@@ -978,6 +995,7 @@ class HarnessProcess:
             ProvidedToolNames,
             UnifiedPermissionResolver,
         )
+        from vibe.core.tracing import agent_span, model_call_span, tool_span
 
         route_type: Any = LocalModelRoute
         route_fields = getattr(LocalModelRoute, "__dataclass_fields__", {})
@@ -1259,6 +1277,7 @@ class HarnessProcess:
         def derive_config(  # noqa: PLR0914 - one cohesive config derivation
             config: VibeConfigSchema, settings: UnifiedSessionSettings
         ) -> UnifiedRuntimeDerivation:
+            otel_enabled = _otel_enabled(config)
             active_model = config.get_active_model()
             provider = config.get_provider_for_model(active_model)
             compaction_model = config.get_compaction_model()
@@ -1539,6 +1558,16 @@ class HarnessProcess:
                     stream_idle_timeout_s=config.api_stream_idle_timeout or None,
                     retry_max_elapsed_time_s=config.api_retry_max_elapsed_time,
                     enable_system_trust_store=config.enable_system_trust_store,
+                    enable_otel=otel_enabled,
+                    tracing=(
+                        OtelTracingHooks(
+                            agent_span=agent_span,
+                            model_call_span=model_call_span,
+                            tool_span=tool_span,
+                        )
+                        if otel_enabled
+                        else None
+                    ),
                     workspace=workspace,
                     # The library environment goes on top: a plugin that declares a
                     # Python or Node library is only usable if the search paths
@@ -1680,6 +1709,12 @@ class HarnessProcess:
             return sandbox_path(options.cwd or workspace, cwd=workspace)
         return Path(options.cwd or Path.cwd()).expanduser().resolve()
 
+    def _configure_tracing(self, config: VibeConfigSchema) -> None:
+        if self._tracing_configured or not _otel_enabled(config):
+            return
+        setup_tracing(config)
+        self._tracing_configured = True
+
     async def _build_session_config(self, options: SessionOptions) -> _SessionConfig:
         if self._agent_socket is not None:
             self._agent_socket.check()
@@ -1709,6 +1744,7 @@ class HarnessProcess:
         config_orchestrator = await build_default_orchestrator(
             overrides, harness_files=harness_files
         )
+        self._configure_tracing(config_orchestrator.config)
         if self._process_settings is not None:
             self._process_settings.check(config_orchestrator.config)
         await _apply_cached_experiment_variants(config_orchestrator)
