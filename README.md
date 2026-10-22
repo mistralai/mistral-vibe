@@ -19,7 +19,7 @@
 
 **Mistral's open-source CLI coding assistant.**
 
-Mistral Vibe is a command-line coding assistant powered by Mistral's models. It provides a conversational interface to your codebase, allowing you to use natural language to explore, modify, and interact with your projects through a powerful set of tools.
+Mistral Vibe is an open source command-line coding agent powered by Mistral's models. It provides a conversational interface to your codebase, allowing you to use natural language to explore, modify, and interact with your projects through a powerful set of tools.
 
 > [!WARNING]
 > Mistral Vibe works on Windows, but we officially support and target UNIX environments.
