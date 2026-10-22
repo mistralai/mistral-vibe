@@ -811,24 +811,17 @@ def _atomic_write_text(path: Path, content: str, encoding: str) -> None:
     temporary_path: Path | None = None
     try:
         mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
-        # New files follow the process umask; replacements stay private until
-        # the existing mode is restored. Do not change the process-wide umask.
-        creation_mode = 0o666 if mode is None else 0o600
-        for _ in range(100):
-            candidate = path.parent / f".vibe.{secrets.token_hex(16)}.tmp"
-            try:
-                descriptor = os.open(
-                    candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, creation_mode
-                )
-            except FileExistsError:
-                continue
-            temporary_path = candidate
-            break
-        else:
-            raise FileExistsError(f"Could not allocate a temporary file for {path}")
-        with os.fdopen(
-            descriptor, mode="w", encoding=encoding, errors="strict", newline=""
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding=encoding,
+            errors="strict",
+            newline="",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
         ) as handle:
+            temporary_path = Path(handle.name)
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
