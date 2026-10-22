@@ -63,6 +63,19 @@ fn is_ssh_session() -> bool {
     std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
 }
 
+/// The recovery hint for an unverified copy: over SSH the native tools are
+/// skipped by design, so the way out is the terminal's own selection; locally
+/// it names the tools to install.
+pub fn unverified_hint() -> &'static str {
+    if is_ssh_session() {
+        "if paste fails, hold Shift (Option in iTerm2, Fn in Terminal.app) \
+         while selecting for native copy"
+    } else {
+        "if paste fails, install xclip or wl-clipboard, \
+         or hold Shift while selecting for native copy"
+    }
+}
+
 /// Pipe `text` into the platform clipboard tool (pbcopy/wl-copy/xclip/xsel/clip).
 fn copy_native(text: &str) -> bool {
     let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {

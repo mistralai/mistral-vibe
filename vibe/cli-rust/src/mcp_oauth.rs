@@ -22,9 +22,6 @@ const HELP: &[hints::Hint] = &[
 const OPTION_PADDING: &str = "  ";
 /// Seconds the copy toast stays up.
 const COPY_TOAST_SECS: u64 = 2;
-/// Native-copy hint appended when the clipboard write is unverified.
-const NATIVE_COPY_HINT: &str = "if paste fails, hold Shift (Option in iTerm2, Fn in Terminal.app) \
-     while selecting for native copy";
 
 /// The answer of one `mcp/login` round-trip, applied on the main thread.
 pub struct Event {
@@ -192,7 +189,10 @@ fn copy_url(app: &mut App) {
     let message = if clipboard::copy_to_clipboard(&url) {
         "Auth URL copied to clipboard".to_owned()
     } else {
-        format!("Auth URL copied to clipboard · {NATIVE_COPY_HINT}")
+        format!(
+            "Auth URL copied to clipboard · {}",
+            clipboard::unverified_hint()
+        )
     };
     app.show_toast(message, ToastSeverity::Information, COPY_TOAST_SECS);
 }

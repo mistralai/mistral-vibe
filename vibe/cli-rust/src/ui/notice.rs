@@ -14,9 +14,6 @@ use crate::clipboard;
 
 /// Inline-notice timeout (4s).
 const NOTICE_TIMEOUT_SECS: u64 = 4;
-/// Native-copy hint.
-const NATIVE_COPY_HINT: &str = "if paste fails, hold Shift (Option in iTerm2, Fn in Terminal.app) \
-     while selecting for native copy";
 
 /// Copy `text` and surface the copy notice.
 pub fn copied(app: &mut App, text: &str) {
@@ -24,7 +21,7 @@ pub fn copied(app: &mut App, text: &str) {
     let message = if clipboard::copy_to_clipboard(text) {
         "Copied to clipboard".to_string()
     } else {
-        format!("Copied · {NATIVE_COPY_HINT}")
+        format!("Copied · {}", clipboard::unverified_hint())
     };
     show(app, &message, NOTICE_TIMEOUT_SECS);
 }

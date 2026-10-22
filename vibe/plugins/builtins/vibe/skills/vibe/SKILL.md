@@ -185,7 +185,7 @@ edit `config.toml` and run `/reload`; no restart is needed.
 
 ### Copy and Text Selection
 
-- **Copy shortcuts**: `Ctrl+Y` and `Ctrl+Shift+C` both copy the current selection to the clipboard. When autocopy is enabled (default), releasing the mouse over a selection also copies automatically. Each successful copy flashes a brief inline "Copied to clipboard" notice.
+- **Copy shortcuts**: `Ctrl+Y` and `Ctrl+Shift+C` both copy the current selection to the clipboard. When autocopy is enabled (default), releasing the mouse over a selection also copies automatically. Each successful copy flashes a brief inline "Copied to clipboard" notice. When the copy cannot be verified (no `xclip`/`wl-clipboard` installed locally and the terminal lacks OSC 52 support), the notice says so and suggests installing one.
 - **Multi-click selection**: Double-click selects a word, triple-click selects the current paragraph; dragging extends the selection at the same granularity.
 
 ```toml

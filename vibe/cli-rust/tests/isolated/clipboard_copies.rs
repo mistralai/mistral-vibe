@@ -72,7 +72,7 @@ fn a_verified_copy_shows_the_plain_notice_and_an_unverified_one_adds_the_hint() 
     recording(false);
     notice::copied(&mut app, "selected text");
     assert!(
-        notice_text(&app).starts_with("Copied · if paste fails, hold Shift"),
+        notice_text(&app).starts_with("Copied · if paste fails, "),
         "{}",
         notice_text(&app)
     );
