@@ -69,6 +69,16 @@ def test_config_view_projects_cursor_blink(enabled: bool) -> None:
     assert type(config).model_validate(legacy_payload).cursor_blink is True
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_config_view_projects_enable_mouse_capture(enabled: bool) -> None:
+    config = project_config_view(build_test_vibe_config(enable_mouse_capture=enabled))
+
+    payload = config.model_dump(mode="json", by_alias=True)
+    assert payload["enableMouseCapture"] is enabled
+    del payload["enableMouseCapture"]
+    assert type(config).model_validate(payload).enable_mouse_capture is True
+
+
 def test_config_view_projects_the_tls_trust_policy() -> None:
     config = project_config_view(build_test_vibe_config(enable_system_trust_store=True))
 
@@ -397,7 +407,7 @@ async def test_apply_cached_experiment_variants_sets_routed_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # End-to-end for the warm-cache startup path.
-    from vibe.app_server._runtime import _apply_cached_experiment_variants
+    from vibe.app_server._cached_layers import _apply_cached_experiment_variants
     from vibe.core.config import build_default_orchestrator
     from vibe.core.experiments import cache
     from vibe.core.experiments.active import ExperimentName
@@ -423,7 +433,7 @@ async def test_apply_cached_experiment_variants_sets_routed_model(
 async def test_apply_cached_experiment_variants_noop_on_cold_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from vibe.app_server._runtime import _apply_cached_experiment_variants
+    from vibe.app_server._cached_layers import _apply_cached_experiment_variants
     from vibe.core.config import build_default_orchestrator
     from vibe.core.experiments import cache
 
@@ -450,7 +460,7 @@ async def test_a_cached_system_prompt_variant_is_not_applied_when_experiments_ar
     """An evaluation run turns experiments off, so a system prompt variant cached
     by an earlier interactive session must not change its prompt.
     """
-    from vibe.app_server._runtime import _apply_cached_experiment_variants
+    from vibe.app_server._cached_layers import _apply_cached_experiment_variants
     from vibe.core.config import build_default_orchestrator
     from vibe.core.experiments import cache
     from vibe.core.experiments.active import ExperimentName

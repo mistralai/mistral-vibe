@@ -86,6 +86,14 @@ _CARGO_MISSING = (
     "See https://rust-lang.org/tools/install/ and CONTRIBUTING.md "
     '("Building distributions") for details.'
 )
+_ALSA_MISSING_WARNING = (
+    "warning: ALSA development files were not found through pkg-config, so the "
+    "Vibe terminal UI is built without voice mode.\n"
+    "To enable voice mode, install pkg-config and the ALSA development package "
+    "(Debian/Ubuntu: libasound2-dev, Fedora/RHEL: alsa-lib-devel, Arch: alsa-lib), "
+    "then rebuild: uv cache clean mistral-vibe, then reinstall.\n"
+    "Set CARGO_BUILD_FLAGS to choose the Cargo features explicitly."
+)
 
 
 class NativeBuildError(RuntimeError):
@@ -508,7 +516,7 @@ def _stage_rust_cli() -> None:
 
     environment = os.environ.copy()
     environment["CARGO_TARGET_DIR"] = str(_TUI_TARGET)
-    build_flags = shlex.split(os.environ.get("CARGO_BUILD_FLAGS", ""))
+    build_flags = _rust_cli_build_flags()
     command = [
         "cargo",
         "build",
@@ -539,6 +547,56 @@ def _stage_rust_cli() -> None:
         staged.replace(_BUNDLED_TUI)
     finally:
         staged.unlink(missing_ok=True)
+
+
+def _rust_cli_build_flags() -> list[str]:
+    # The default `voice` feature links ALSA on Linux through pkg-config. Without
+    # its development files, build like the published Linux wheels instead of
+    # failing, unless the caller already chose the features.
+    build_flags = shlex.split(os.environ.get("CARGO_BUILD_FLAGS", ""))
+    if _selects_cargo_features(build_flags) or not _is_native_linux_build(build_flags):
+        return build_flags
+    if _alsa_available():
+        return build_flags
+    print(_ALSA_MISSING_WARNING, file=sys.stderr)
+    return [*build_flags, "--no-default-features"]
+
+
+def _selects_cargo_features(arguments: list[str]) -> bool:
+    return any(
+        argument in {"--no-default-features", "--all-features"}
+        or argument.startswith(("--features", "-F"))
+        for argument in arguments
+    )
+
+
+def _is_native_linux_build(build_flags: list[str]) -> bool:
+    # Builds with an explicit target keep the default features and are left to
+    # CARGO_BUILD_FLAGS: the pkg-config crate reads per-target PKG_CONFIG_*
+    # variables that this host-side probe does not emulate.
+    if not sys.platform.startswith("linux"):
+        return False
+    return not (
+        _cargo_target_triple(build_flags) or os.environ.get("CARGO_BUILD_TARGET")
+    )
+
+
+def _alsa_available() -> bool:
+    # Mirrors how the pkg-config crate used by alsa-sys picks its binary:
+    # $PKG_CONFIG if set, otherwise pkg-config, then pkgconf if pkg-config
+    # cannot be run. Its PKG_CONFIG_<target> and HOST_/TARGET_PKG_CONFIG
+    # overrides are not emulated.
+    override = os.environ.get("PKG_CONFIG")
+    candidates = [override] if override is not None else ["pkg-config", "pkgconf"]
+    for executable in candidates:
+        try:
+            result = subprocess.run(
+                [executable, "--exists", "alsa"], check=False, capture_output=True
+            )
+        except OSError:
+            continue
+        return result.returncode == 0
+    return False
 
 
 def _cargo_target_triple(arguments: list[str]) -> str | None:

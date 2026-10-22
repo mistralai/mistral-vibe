@@ -55,18 +55,19 @@ pub(crate) use testing::{
     CommandState, CompactionBudget, CompactionPolicy, CompactionTrigger, CompletionActionKind,
     CompletionCandidate, CompletionFinishReason, CompletionHookOutput, CompletionPurpose,
     CompletionResult, CompletionResultPart, CompletionResultSemanticPart, ContextSettings,
-    ExternalTool, ExternalToolCall, HarnessConfigurationChange, HarnessSettings, HookBinding,
-    HookCall, HookPoint, HookResult, HookSelector, HookToolCall, HookToolKey, HookToolTarget,
-    ImageDeliveryMode, ImageDeliverySettings, ImageTokenCost, ModelInputUpdate, ModelMessageUpdate,
-    ModelToolCatalogUpdate, Notification, NotificationLevel, NotificationSource,
-    PendingActionInspection, PendingCompletionPurpose, PendingLifecycleHook, PreAgentTurnOutput,
-    PreToolCallOutput, ProcessTerminalStatus, ProgramExecution, ProgrammaticToolSettings,
-    ProtocolError, ProvidedToolCall, ProvidedToolDefinition, ProvidedToolExposure, QueuedTurn,
-    ReasoningContent, RuntimeBuiltinToolCall, RuntimeBuiltinToolName, SessionStatus,
-    SkillDefinition, StateInspection, StoredMessageSource, StructuredContent, SubagentMode,
-    TokenUsage, ToolArguments, ToolBatch, ToolCall, ToolContext, ToolDefinition, ToolExecution,
-    ToolExecutionState, ToolGroupDefinition, ToolGroupMetadata, ToolOrigin, ToolOutcome,
-    ToolResult, ToolSettings, ToolTarget, Turn, TurnOutcome, TurnSettings, UserMessageMode,
+    ExternalCallStage, ExternalTool, ExternalToolCall, HarnessConfigurationChange, HarnessSettings,
+    HookBinding, HookCall, HookPoint, HookResult, HookSelector, HookToolCall, HookToolKey,
+    HookToolTarget, ImageDeliveryMode, ImageDeliverySettings, ImageTokenCost, InputModality,
+    ModelInputUpdate, ModelMessageUpdate, ModelToolCatalogUpdate, Notification, NotificationLevel,
+    NotificationSource, PendingActionInspection, PendingCompletionPurpose, PendingLifecycleHook,
+    PreAgentTurnOutput, PreToolCallOutput, ProcessTerminalStatus, ProgramExecution,
+    ProgrammaticToolSettings, ProtocolError, ProvidedToolCall, ProvidedToolDefinition,
+    ProvidedToolExposure, QueuedTurn, ReasoningContent, RuntimeBuiltinToolCall,
+    RuntimeBuiltinToolName, SessionStatus, SkillDefinition, StateInspection, StoredMessageSource,
+    StructuredContent, SubagentMode, TokenUsage, ToolArguments, ToolBatch, ToolCall, ToolContext,
+    ToolDefinition, ToolExecution, ToolExecutionState, ToolGroupDefinition, ToolGroupMetadata,
+    ToolOrigin, ToolOutcome, ToolResult, ToolSettings, ToolTarget, Turn, TurnOutcome, TurnSettings,
+    UserMessageMode,
 };
 
 use crate::core::config::HarnessConfigUpdate;
@@ -88,6 +89,18 @@ use crate::core::wire::message::StoredMessage;
 
 pub(crate) fn hook_tool_catalog(config: &HarnessConfig) -> Vec<hooks::HookToolKey> {
     tools::resolved::hook_tool_catalog(config)
+}
+
+/// Checks one permission rule pattern with the same glob syntax that policy
+/// evaluation uses, so a Runtime can reject it before it creates a Session.
+/// An argument pattern must also use one separator spelling.
+pub(crate) fn validate_permission_pattern(pattern: &str, arguments: bool) -> Result<(), String> {
+    let field = if arguments {
+        features::permissions::PermissionPatternField::Arguments
+    } else {
+        features::permissions::PermissionPatternField::Tools
+    };
+    features::permissions::validate_permission_pattern(pattern, field)
 }
 
 pub(crate) fn initial_state(config: HarnessConfig) -> Result<HarnessState, CoreError> {
@@ -162,8 +175,9 @@ pub(crate) fn reconfigure_in_place(
     // compiled model tool list as well as the prompt and capability sources.
     let tool_catalog_changed = tool_catalog_source_changed(&state.config, &next_config)
         || state.resolved_tools.top_level_tools() != next_resolved_tools.top_level_tools();
-    let agent_image_delivery_changed = state.config.settings.context.image_delivery.agent
-        != next_config.settings.context.image_delivery.agent;
+    let current_image_delivery = state.config.settings.context.effective_image_delivery();
+    let next_image_delivery = next_config.settings.context.effective_image_delivery();
+    let agent_image_delivery_changed = current_image_delivery.agent != next_image_delivery.agent;
     state.config = next_config;
     state
         .notifications

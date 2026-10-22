@@ -400,3 +400,23 @@ fn for_cli_builds_the_run_right_after_parse() {
     let cli = Cli::parse_from(["vibe-rs"]);
     assert!(HeadlessRun::for_cli(&cli).is_none());
 }
+
+#[test]
+fn prompt_given_skips_stdin_only_for_text_or_a_non_empty_prompt_file() {
+    let dir = std::env::temp_dir().join(format!("vibe-test-prompt-given-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let full = dir.join("full.txt");
+    let empty = dir.join("empty.txt");
+    std::fs::write(&full, "task").unwrap();
+    std::fs::write(&empty, " \n").unwrap();
+    let given = |args: &[&str]| Cli::parse_from([&["vibe-rs"][..], args].concat()).prompt_given();
+
+    assert!(given(&["-p", "--prompt-file", full.to_str().unwrap()]));
+    assert!(given(&["-p", "hi"]));
+    assert!(given(&["--prompt-file", "/nonexistent/prompt.txt"]));
+    assert!(!given(&["--prompt-file", empty.to_str().unwrap()]));
+    assert!(!given(&["-p"]));
+    assert!(!given(&[]));
+
+    std::fs::remove_dir_all(&dir).ok();
+}

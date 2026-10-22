@@ -57,8 +57,12 @@ impl Startup {
     }
 
     fn ready(&mut self, is_cold_start: bool) {
+        self.ready_with(StartupConfig::default(), is_cold_start);
+    }
+
+    fn ready_with(&mut self, startup_cache: StartupConfig, is_cold_start: bool) {
         let ready = Ready {
-            startup_cache: StartupConfig::default(),
+            startup_cache,
             config: ConfigRead {
                 enable_update_checks: false,
                 show_greeting: false,
@@ -110,6 +114,19 @@ async fn ready_sends_one_startup_event_with_agent_ready_after_the_first_frame() 
     assert!(agent_ready >= first_frame);
     assert_eq!(properties["session_init_duration_ms"], Value::Null);
     assert_eq!(properties["is_cold_start"], true);
+    assert_eq!(properties["mouse_capture"], true);
+}
+
+#[tokio::test]
+async fn a_config_without_mouse_capture_reports_it_off() {
+    let mut startup = Startup::painted();
+    let config = StartupConfig {
+        enable_mouse_capture: false,
+        ..StartupConfig::default()
+    };
+    startup.ready_with(config, true);
+
+    assert_eq!(startup.startup_events()[0]["mouse_capture"], false);
 }
 
 #[tokio::test]

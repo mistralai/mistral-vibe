@@ -92,6 +92,23 @@ fn round_trips_through_the_cache_file_format() {
 }
 
 #[test]
+fn projects_mouse_capture_from_the_runtime_config() {
+    assert!(config_with(CLIENT_VERSION, 1000).enable_mouse_capture);
+    let mut disabled = runtime("safe");
+    disabled["runtime"]["config"]["enableMouseCapture"] = false.into();
+    let config = StartupConfig::from_runtime("1.0.0", &disabled).unwrap();
+    assert!(!config.enable_mouse_capture);
+}
+
+#[test]
+fn an_older_cache_without_mouse_capture_keeps_capturing() {
+    let mut cache = serde_json::to_value(config_with(CLIENT_VERSION, 1000)).unwrap();
+    cache.as_object_mut().unwrap().remove("enableMouseCapture");
+    let config: StartupConfig = serde_json::from_value(cache).unwrap();
+    assert!(config.enable_mouse_capture);
+}
+
+#[test]
 fn an_older_cache_without_cursor_blink_keeps_blinking_enabled() {
     let mut cache = serde_json::to_value(config_with(CLIENT_VERSION, 1000)).unwrap();
     cache.as_object_mut().unwrap().remove("cursorBlink");

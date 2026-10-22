@@ -1301,7 +1301,11 @@ class AgentInstallParams(ProtocolModel):
 
 
 class SkillsListParams(ProtocolModel):
-    session_id: str
+    """Without a session, lists what a session opened in ``cwd`` would offer."""
+
+    session_id: str | None = None
+    cwd: str | None = None
+    trust_workspace: bool = False
 
 
 class SkillsListResponse(ProtocolModel):

@@ -778,6 +778,13 @@ class VibeConfigSchema(ConfigSchema):
         description="Show greeting at startup (Mistral providers only, once per 24h).",
     )
     autocopy_to_clipboard: Annotated[bool, WithReplaceMerge()] = True
+    enable_mouse_capture: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
+        description=(
+            "Capture the mouse for scrolling, clicks and in-app selection. "
+            "Disable to keep the terminal's native text selection."
+        ),
+    )
     file_watcher_for_autocomplete: Annotated[bool, WithReplaceMerge()] = True
     ask_confirmation_on_exit: Annotated[bool, WithReplaceMerge()] = True
     displayed_workdir: Annotated[str, WithReplaceMerge()] = Field(
@@ -792,7 +799,7 @@ class VibeConfigSchema(ConfigSchema):
     )
     voice_mode_enabled: Annotated[bool, WithReplaceMerge()] = False
     narrator_enabled: Annotated[bool, WithReplaceMerge()] = False
-    show_thinking_nodes: Annotated[bool, WithReplaceMerge()] = False
+    show_thinking_nodes: Annotated[bool, WithReplaceMerge()] = True
     show_subagent_status_list: Annotated[bool, WithReplaceMerge()] = Field(
         default=True,
         description=(
@@ -828,6 +835,23 @@ class VibeConfigSchema(ConfigSchema):
         description=(
             "Offer the agent subagents (tools.subagent in run_typescript). Off, "
             "the agent works alone."
+        ),
+    )
+    max_subagents: Annotated[int, WithReplaceMerge()] = Field(
+        default=32,
+        ge=1,
+        description=(
+            "Maximum number of subagents that can be alive at once; a spawn "
+            "beyond this fails until a subagent is stopped."
+        ),
+    )
+    max_concurrent_subagents: Annotated[int, WithReplaceMerge()] = Field(
+        default=32,
+        ge=1,
+        description=(
+            "Maximum number of subagents running a turn at the same time; "
+            "spawning or messaging beyond this fails until a subagent "
+            "finishes its turn."
         ),
     )
     compaction_prompt_id: Annotated[str, WithReplaceMerge()] = UtilityPrompt.COMPACT
@@ -932,12 +956,6 @@ class VibeConfigSchema(ConfigSchema):
         into it without also flipping the availability flag.
         """
         return self.smart_approve_available or self.smart_approve_default
-
-    def resolve_default_agent(self) -> str:
-        """The default agent, honoring the smart-approve default experiment."""
-        if self.smart_approve_default:
-            return BuiltinAgentName.SMART_APPROVE
-        return self.default_agent
 
     def resolve_default_model_alias(self) -> str:
         available = self.available_models()

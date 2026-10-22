@@ -15,6 +15,8 @@ import pytest
 import tomli_w
 
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
+from vibe.app_server._missing_layers import reset_org_config_fetch_failed
+from vibe.app_server.connector_catalog import reset_bootstrap_failures
 from vibe.core.config import (
     SessionLoggingConfig,
     VibeConfigSchema,
@@ -99,6 +101,16 @@ def _reset_model_catalog_failed() -> None:
 @pytest.fixture(autouse=True)
 def _reset_experiments_eval_failed() -> None:
     reset_experiments_eval_failed()
+
+
+@pytest.fixture(autouse=True)
+def _reset_org_config_fetch_failed() -> None:
+    reset_org_config_fetch_failed()
+
+
+@pytest.fixture(autouse=True)
+def _reset_connector_bootstrap_failures() -> None:
+    reset_bootstrap_failures()
 
 
 @pytest.fixture(autouse=True)
@@ -269,6 +281,21 @@ def _mock_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "mock")
     monkeypatch.setenv("VERTEX_API_KEY", "mock")
     monkeypatch.setenv("REASONING_API_KEY", "mock")
+
+
+@pytest.fixture(autouse=True)
+def _no_managed_config_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every session start fetches the org config; with the mock key above that
+    would be a real request. Fail it at once, as offline. Tests that serve an
+    org config patch the same name and take precedence.
+    """
+    from vibe.app_server import _admin_config
+    from vibe.core.config.admin_config import ManagedConfigResult
+
+    async def offline(_base_url: str, _api_key: str) -> ManagedConfigResult:
+        return ManagedConfigResult(error="managed config fetch is not mocked")
+
+    monkeypatch.setattr(_admin_config, "fetch_managed_config", offline)
 
 
 @pytest.fixture(autouse=True)

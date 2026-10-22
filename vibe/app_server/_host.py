@@ -3,16 +3,18 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
+from vibe.app_server._cached_layers import apply_cached_layers
 from vibe.app_server._connection_protocol import ClientInfo
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
 from vibe.app_server._history_projection import project_message_history
+from vibe.app_server._missing_layers import MissingLayerFetches
 from vibe.app_server._model import ProtocolModel, validate_wire
 from vibe.app_server._project_links import (
     ProjectLinksAuthError,
@@ -21,7 +23,11 @@ from vibe.app_server._project_links import (
     ProjectLinksInternalError,
     ProjectLinksInvalidRequest,
 )
-from vibe.app_server._projection import project_agent_summaries, project_config_view
+from vibe.app_server._projection import (
+    project_agent_summaries,
+    project_config_view,
+    project_skill_summaries,
+)
 from vibe.app_server._session_model import active_model_is_pinned
 from vibe.app_server._setup import SetupRequestHandler
 from vibe.app_server._state import build_stored_public_state, history_page
@@ -68,6 +74,8 @@ from vibe.app_server.protocol import (
     SessionRelocateResponse,
     SessionTitleUpdateParams,
     SessionTitleUpdateResponse,
+    SkillsListParams,
+    SkillsListResponse,
     WorkspaceGitBranchChanges,
     WorkspaceGitCheckout,
     WorkspaceGitCheckoutsParams,
@@ -89,7 +97,7 @@ from vibe.app_server.protocol import (
 from vibe.core.agents.manager import AgentManager
 from vibe.core.config import VibeConfigSchema, build_default_orchestrator
 from vibe.core.config.harness_files import HarnessFilesManager
-from vibe.core.config.layers.model_catalog import apply_cached_model_catalog
+from vibe.core.config.layers.admin import enforced_keys
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.git.errors import (
     GitError,
@@ -139,6 +147,7 @@ _HOST_METHODS = frozenset({
     "setup/status",
     "setup/store-credential",
     "setup/submit-choices",
+    "skills/list",
     "workspace/trust/decision",
     "workspace/trust/untrustedConfig",
     "workspace/trust/status",
@@ -152,12 +161,18 @@ _HOST_METHODS = frozenset({
 
 class HostRequestHandler:
     def __init__(
-        self, harness_files: HarnessFilesManager, *, image_fallback: bool = False
+        self,
+        harness_files: HarnessFilesManager,
+        *,
+        image_fallback: bool = False,
+        builtin_plugin_roots: Sequence[Path] | None = None,
     ) -> None:
         self._harness_files = harness_files
         self._image_fallback = image_fallback
+        self._builtin_plugin_roots = builtin_plugin_roots
         self._project_links = ProjectLinksController()
         self._setup = SetupRequestHandler(harness_files)
+        self._missing_layers = MissingLayerFetches()
 
     def handles(self, method: str) -> bool:
         return method in _HOST_METHODS
@@ -204,11 +219,21 @@ class HostRequestHandler:
                 response: ProtocolModel = config_schema_response()
             case "config/read":
                 response = await self._read_config(
-                    validate_wire(ConfigReadParams, raw_params)
+                    validate_wire(ConfigReadParams, raw_params),
+                    client_info=client_info,
+                    attached_session_id=session_id,
                 )
             case "agents/list":
                 response = await self._list_agents(
-                    validate_wire(AgentsListParams, raw_params)
+                    validate_wire(AgentsListParams, raw_params),
+                    client_info=client_info,
+                    attached_session_id=session_id,
+                )
+            case "skills/list":
+                response = await self._list_skills(
+                    validate_wire(SkillsListParams, raw_params),
+                    client_info=client_info,
+                    attached_session_id=session_id,
                 )
             case _ if method.startswith("setup/"):
                 # The server rejects pre-initialize requests, so a live
@@ -284,28 +309,94 @@ class HostRequestHandler:
                 raise method_not_found(method)
         return response
 
-    async def _list_agents(self, params: AgentsListParams) -> AgentsListResponse:
+    async def _list_agents(
+        self,
+        params: AgentsListParams,
+        *,
+        client_info: ClientInfo | None,
+        attached_session_id: str | None,
+    ) -> AgentsListResponse:
         if params.session_id is not None:
             raise RequestFailure(
                 ProtocolErrorCode.NOT_FOUND, f"Session not found: {params.session_id}"
             )
-        orchestrator = await self._load_orchestrator(None)
-        agents = AgentManager(
-            orchestrator,
-            orchestrator.config.resolve_default_agent(),
-            harness_files=self._harness_files.for_session(self._cwd(None)),
+        orchestrator = await self._load_picker_orchestrator(
+            None, client_info=client_info, attached_session_id=attached_session_id
         )
+        harness_files = self._harness_files.for_session(self._cwd(None))
+        try:
+            agents = AgentManager(orchestrator, None, harness_files=harness_files)
+        except ValueError:
+            if not enforced_keys(orchestrator):
+                raise
+            # The org config leaves no mode this checkout can start: a session
+            # start here falls back to local config, so the list does too.
+            orchestrator = await self._load_orchestrator(
+                self._session_files(None), org_config=False
+            )
+            agents = AgentManager(orchestrator, None, harness_files=harness_files)
         active, available = project_agent_summaries(
             agents.active_profile, agents.available_agents.values()
         )
         return AgentsListResponse(active=active, agents=available)
 
-    async def _read_config(self, params: ConfigReadParams) -> ConfigReadResponse:
+    async def _list_skills(
+        self,
+        params: SkillsListParams,
+        *,
+        client_info: ClientInfo | None,
+        attached_session_id: str | None,
+    ) -> SkillsListResponse:
+        """``trust_workspace`` trusts ``cwd`` for this read only, never persisted."""
         if params.session_id is not None:
             raise RequestFailure(
                 ProtocolErrorCode.NOT_FOUND, f"Session not found: {params.session_id}"
             )
-        orchestrator = await self._load_orchestrator(params.cwd)
+        cwd = self._cwd(params.cwd)
+        session_files = self._session_files(params.cwd)
+        if params.trust_workspace:
+            session_files = replace(
+                session_files, trust_store=session_files.trust_store.for_session()
+            )
+            session_files.trust_store.trust_for_session(cwd)
+        orchestrator = await self._load_picker_orchestrator(
+            params.cwd,
+            client_info=client_info,
+            attached_session_id=attached_session_id,
+            session_files=session_files,
+        )
+        from vibe.app_server._plugins import resolve_plugin_skills
+        from vibe.app_server._skills import discover_session_skills
+
+        plugin_skills, plugin_contexts = await resolve_plugin_skills(
+            session_files,
+            config_orchestrator=orchestrator,
+            builtin_plugin_roots=self._builtin_plugin_roots,
+        )
+        _issues, projection = await asyncio.to_thread(
+            discover_session_skills,
+            lambda: orchestrator.config,
+            harness_files=session_files,
+            plugin_skills=plugin_skills,
+            plugin_contexts=plugin_contexts,
+            skill_tool_available=True,
+        )
+        return SkillsListResponse(skills=project_skill_summaries(projection.catalogue))
+
+    async def _read_config(
+        self,
+        params: ConfigReadParams,
+        *,
+        client_info: ClientInfo | None,
+        attached_session_id: str | None,
+    ) -> ConfigReadResponse:
+        if params.session_id is not None:
+            raise RequestFailure(
+                ProtocolErrorCode.NOT_FOUND, f"Session not found: {params.session_id}"
+            )
+        orchestrator = await self._load_picker_orchestrator(
+            params.cwd, client_info=client_info, attached_session_id=attached_session_id
+        )
         config = orchestrator.config
         view = project_config_view(
             config,
@@ -440,7 +531,7 @@ class HostRequestHandler:
                 )
             case "workspace/git/worktrees/limit/update":
                 params = validate_wire(WorkspaceWorktreeLimitUpdateParams, raw_params)
-                orchestrator = await self._load_orchestrator(None)
+                orchestrator = await self._load_orchestrator(self._session_files(None))
                 failures = await orchestrator.set_field(
                     "/worktree_limit",
                     params.limit,
@@ -453,7 +544,7 @@ class HostRequestHandler:
             case "workspace/git/worktrees/prune":
                 validate_wire(WorkspaceWorktreePruneParams, raw_params)
                 worktree_cleanup().sweep()
-                orchestrator = await self._load_orchestrator(None)
+                orchestrator = await self._load_orchestrator(self._session_files(None))
                 removed = await asyncio.to_thread(
                     ManagedWorktree.prune,
                     orchestrator.config.worktree_limit,
@@ -588,20 +679,37 @@ class HostRequestHandler:
         return messages, SessionMetadata.model_validate(raw_metadata)
 
     async def _load_config(self, cwd: str | None) -> VibeConfigSchema:
-        return (await self._load_orchestrator(cwd)).config
+        return (await self._load_orchestrator(self._session_files(cwd))).config
+
+    def _session_files(self, cwd: str | None) -> HarnessFilesManager:
+        return self._harness_files.for_session(self._cwd(cwd))
 
     async def _load_orchestrator(
-        self, cwd: str | None
+        self, session_files: HarnessFilesManager, *, org_config: bool = True
     ) -> ConfigOrchestrator[VibeConfigSchema]:
-        session_files = self._harness_files.for_session(self._cwd(cwd))
         orchestrator = await build_default_orchestrator(harness_files=session_files)
         # Match the session path so host reads (agents/list) see rollout flags
-        # like smart_approve_available. Lazy import: _runtime imports _host.
-        from vibe.app_server._runtime import _apply_cached_experiment_variants
-
-        await _apply_cached_experiment_variants(orchestrator)
-        await apply_cached_model_catalog(orchestrator)
+        # like smart_approve_available and the enforced default agent.
+        await apply_cached_layers(orchestrator, org_config=org_config)
         return orchestrator
+
+    async def _load_picker_orchestrator(
+        self,
+        cwd: str | None,
+        *,
+        client_info: ClientInfo | None,
+        attached_session_id: str | None,
+        session_files: HarnessFilesManager | None = None,
+    ) -> ConfigOrchestrator[VibeConfigSchema]:
+        files = session_files or self._session_files(cwd)
+        if attached_session_id is not None:
+            # Not the new-session picker: the connection's own session is
+            # fetching the same config, and a second fetch would only race it.
+            return await self._load_orchestrator(files)
+        # The server rejects pre-initialize requests, so a live picker read
+        # always carries the handshake's client info.
+        assert client_info is not None
+        return await self._missing_layers.load(files, client_info)
 
     @staticmethod
     def _cwd(value: str | None) -> Path:

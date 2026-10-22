@@ -7,6 +7,9 @@ use crate::core::features::large_output::{CharacterLimits, PendingWrite};
 use crate::core::features::permissions::GrantKey;
 use crate::core::hooks::HookPoint;
 use crate::core::hooks::hook_action_id;
+use crate::core::tools::execution::external_call::{
+    ApprovalName, ExternalCallStage, PendingExternalCall,
+};
 use crate::core::tools::execution::{
     LargeOutputSource, ToolBatch, ToolExecution, ToolExecutionState,
 };
@@ -100,61 +103,73 @@ impl CheckpointToolExecutionState {
     fn capture(state: &ToolExecutionState, model_call: &ToolCall) -> Result<Self, String> {
         let model_call_id = &model_call.id;
         match state {
-            ToolExecutionState::DirectAwaitingApproval {
-                approval_action_id,
-                grant_key,
-                call,
-            } => {
-                let expected_action_id = action_id::approval(&call.action_id);
+            ToolExecutionState::Direct(PendingExternalCall { call, stage }) => match stage {
+                ExternalCallStage::AwaitingApproval {
+                    approval_action_id,
+                    grant_key,
+                    ..
+                } => {
+                    let expected_action_id = action_id::approval(&call.action_id);
 
-                if approval_action_id != &expected_action_id {
-                    return Err(format!(
-                        "checkpoint approval action ID {approval_action_id:?} does not match derived action ID {expected_action_id:?}"
-                    ));
+                    if approval_action_id != &expected_action_id {
+                        return Err(format!(
+                            "checkpoint approval action ID {approval_action_id:?} does not match derived action ID {expected_action_id:?}"
+                        ));
+                    }
+
+                    Ok(Self::DirectAwaitingApproval {
+                        grant_key: grant_key.as_str().to_owned(),
+                        call: capture_external_tool_call(
+                            call,
+                            model_call_id,
+                            ToolOrigin::TopLevel,
+                        )?,
+                    })
                 }
-
-                Ok(Self::DirectAwaitingApproval {
-                    grant_key: grant_key.as_str().to_owned(),
-                    call: capture_external_tool_call(call, model_call_id, ToolOrigin::TopLevel)?,
-                })
-            }
-            ToolExecutionState::DirectAwaitingPreHook {
-                hook_action_id,
-                hook_binding_ids,
-                call,
-            } => {
-                validate_tool_hook_action_id(
+                ExternalCallStage::AwaitingPreHook {
                     hook_action_id,
-                    model_call_id,
-                    ToolOrigin::TopLevel,
-                    HookPoint::PreToolCall,
-                )?;
-                Ok(Self::DirectAwaitingPreHook {
-                    hook_binding_ids: hook_binding_ids.clone(),
+                    hook_binding_ids,
+                } => {
+                    validate_tool_hook_action_id(
+                        hook_action_id,
+                        model_call_id,
+                        ToolOrigin::TopLevel,
+                        HookPoint::PreToolCall,
+                    )?;
+                    Ok(Self::DirectAwaitingPreHook {
+                        hook_binding_ids: hook_binding_ids.clone(),
+                        call: capture_external_tool_call(
+                            call,
+                            model_call_id,
+                            ToolOrigin::TopLevel,
+                        )?,
+                    })
+                }
+                ExternalCallStage::Pending => Ok(Self::DirectPending {
                     call: capture_external_tool_call(call, model_call_id, ToolOrigin::TopLevel)?,
-                })
-            }
-            ToolExecutionState::DirectPending { call } => Ok(Self::DirectPending {
-                call: capture_external_tool_call(call, model_call_id, ToolOrigin::TopLevel)?,
-            }),
-            ToolExecutionState::DirectAwaitingPostHook {
-                hook_action_id,
-                hook_binding_ids,
-                call,
-                result,
-            } => {
-                validate_tool_hook_action_id(
+                }),
+                ExternalCallStage::AwaitingPostHook {
                     hook_action_id,
-                    model_call_id,
-                    ToolOrigin::TopLevel,
-                    HookPoint::PostToolCall,
-                )?;
-                Ok(Self::DirectAwaitingPostHook {
-                    hook_binding_ids: hook_binding_ids.clone(),
-                    call: capture_external_tool_call(call, model_call_id, ToolOrigin::TopLevel)?,
-                    result: CheckpointToolResult::capture(result),
-                })
-            }
+                    hook_binding_ids,
+                    result,
+                } => {
+                    validate_tool_hook_action_id(
+                        hook_action_id,
+                        model_call_id,
+                        ToolOrigin::TopLevel,
+                        HookPoint::PostToolCall,
+                    )?;
+                    Ok(Self::DirectAwaitingPostHook {
+                        hook_binding_ids: hook_binding_ids.clone(),
+                        call: capture_external_tool_call(
+                            call,
+                            model_call_id,
+                            ToolOrigin::TopLevel,
+                        )?,
+                        result: CheckpointToolResult::capture(result),
+                    })
+                }
+            },
             ToolExecutionState::ProgramPending { execution } => Ok(Self::ProgramPending {
                 execution: CheckpointProgramExecution::capture(execution, model_call)?,
             }),
@@ -186,64 +201,47 @@ impl CheckpointToolExecutionState {
 
     fn restore(self, model_call: &ToolCall) -> Result<ToolExecutionState, String> {
         let model_call_id = &model_call.id;
+        let restore_call = |call| {
+            restore_external_tool_call(
+                call,
+                model_call_id,
+                ToolOrigin::TopLevel,
+                model_call.name.clone(),
+            )
+        };
         match self {
-            Self::DirectAwaitingApproval { grant_key, call } => {
-                let call = restore_external_tool_call(
-                    call,
-                    model_call_id,
-                    ToolOrigin::TopLevel,
-                    model_call.name.clone(),
-                );
-                let approval_action_id = action_id::approval(&call.action_id);
-
-                Ok(ToolExecutionState::DirectAwaitingApproval {
-                    approval_action_id,
-                    grant_key: GrantKey::try_from(grant_key)?,
-                    call,
-                })
-            }
+            Self::DirectAwaitingApproval { grant_key, call } => Ok(ToolExecutionState::Direct(
+                PendingExternalCall::awaiting_approval(
+                    restore_call(call),
+                    GrantKey::try_from(grant_key)?,
+                    ApprovalName::Direct,
+                ),
+            )),
             Self::DirectAwaitingPreHook {
                 hook_binding_ids,
                 call,
-            } => Ok(ToolExecutionState::DirectAwaitingPreHook {
-                hook_action_id: hook_action_id(
-                    &effect_id_for_operation(ToolOrigin::TopLevel, model_call_id),
-                    HookPoint::PreToolCall,
-                ),
-                hook_binding_ids,
-                call: restore_external_tool_call(
-                    call,
-                    model_call_id,
-                    ToolOrigin::TopLevel,
-                    model_call.name.clone(),
-                ),
-            }),
-            Self::DirectPending { call } => Ok(ToolExecutionState::DirectPending {
-                call: restore_external_tool_call(
-                    call,
-                    model_call_id,
-                    ToolOrigin::TopLevel,
-                    model_call.name.clone(),
-                ),
-            }),
+            } => Ok(ToolExecutionState::Direct(
+                PendingExternalCall::awaiting_pre_hook(restore_call(call), hook_binding_ids),
+            )),
+            Self::DirectPending { call } => Ok(ToolExecutionState::Direct(
+                PendingExternalCall::pending(restore_call(call)),
+            )),
             Self::DirectAwaitingPostHook {
                 hook_binding_ids,
                 call,
                 result,
-            } => Ok(ToolExecutionState::DirectAwaitingPostHook {
-                hook_action_id: hook_action_id(
-                    &effect_id_for_operation(ToolOrigin::TopLevel, model_call_id),
-                    HookPoint::PostToolCall,
-                ),
-                hook_binding_ids,
-                call: restore_external_tool_call(
+            } => {
+                let call = restore_call(call);
+                let stage = ExternalCallStage::AwaitingPostHook {
+                    hook_action_id: hook_action_id(&call.action_id, HookPoint::PostToolCall),
+                    hook_binding_ids,
+                    result: result.restore(),
+                };
+                Ok(ToolExecutionState::Direct(PendingExternalCall {
                     call,
-                    model_call_id,
-                    ToolOrigin::TopLevel,
-                    model_call.name.clone(),
-                ),
-                result: result.restore(),
-            }),
+                    stage,
+                }))
+            }
             Self::ProgramPending { execution } => Ok(ToolExecutionState::ProgramPending {
                 execution: execution.restore(model_call)?,
             }),
@@ -491,11 +489,8 @@ fn validate_tool_execution(execution: &ToolExecution) -> Result<(), String> {
         );
     }
     match &execution.state {
-        ToolExecutionState::DirectAwaitingApproval { call, .. }
-        | ToolExecutionState::DirectAwaitingPreHook { call, .. }
-        | ToolExecutionState::DirectPending { call }
-        | ToolExecutionState::DirectAwaitingPostHook { call, .. } => {
-            validate_direct_tool_call(model_call, call)?;
+        ToolExecutionState::Direct(pending) => {
+            validate_direct_tool_call(model_call, &pending.call)?;
             return Ok(());
         }
         ToolExecutionState::ProgramPending { .. } => return Ok(()),

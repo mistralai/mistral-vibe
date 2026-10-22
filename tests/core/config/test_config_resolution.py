@@ -200,6 +200,52 @@ class TestSaveUpdates:
         assert orch.config.installed_agents == ["lean"]
 
 
+class TestMouseCaptureConfig:
+    @pytest.mark.asyncio
+    async def test_defaults_to_capturing_the_mouse(
+        self,
+        make_orchestrator: Callable[
+            [], Awaitable[ConfigOrchestrator[VibeConfigSchema]]
+        ],
+    ) -> None:
+        orch = await make_orchestrator()
+
+        assert orch.config.enable_mouse_capture is True
+
+    @pytest.mark.asyncio
+    async def test_reads_the_setting_from_toml(
+        self,
+        config_dir: Path,
+        make_orchestrator: Callable[
+            [], Awaitable[ConfigOrchestrator[VibeConfigSchema]]
+        ],
+    ) -> None:
+        config_file = config_dir / "config.toml"
+        with config_file.open("rb") as f:
+            data = tomllib.load(f)
+        data["enable_mouse_capture"] = False
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        orch = await make_orchestrator()
+
+        assert orch.config.enable_mouse_capture is False
+
+    @pytest.mark.asyncio
+    async def test_reads_the_setting_from_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        make_orchestrator: Callable[
+            [], Awaitable[ConfigOrchestrator[VibeConfigSchema]]
+        ],
+    ) -> None:
+        monkeypatch.setenv("VIBE_ENABLE_MOUSE_CAPTURE", "false")
+
+        orch = await make_orchestrator()
+
+        assert orch.config.enable_mouse_capture is False
+
+
 class TestSystemTrustStoreConfig:
     @pytest.mark.asyncio
     async def test_build_configures_ssl_context_from_toml(

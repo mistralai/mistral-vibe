@@ -67,6 +67,12 @@ def _assert_scenario_expectations(captured: Capture, scenario: Scenario) -> None
         assert snapshot.rows[row] == text, f"screen row {row} differs"
     if (cursor := scenario.screen_cursor) is not None:
         assert snapshot.cursor == cursor, f"cursor {snapshot.cursor} != {cursor}"
+    if (mouse := scenario.mouse_tracking) is not None:
+        assert snapshot.mouse_tracking == mouse, f"mouse tracking is not {mouse}"
+    if (seen := scenario.mouse_tracking_seen) is not None:
+        assert snapshot.mouse_tracking_seen == seen, (
+            f"mouse tracking seen is not {seen}"
+        )
 
     clipboard_expected = (
         scenario.expected_clipboard is not None
@@ -126,6 +132,24 @@ def test_scenario_expectations_reject_wrong_clipboard() -> None:
 def test_scenario_expectations_reject_wrong_cursor() -> None:
     scenario = Scenario(name="test", steps=[], screen_cursor=(0, 0))
     captured = Capture([Snapshot("final", (), cursor=(0, 1))], [], [])
+
+    with pytest.raises(AssertionError):
+        _assert_scenario_expectations(captured, scenario)
+
+
+@pytest.mark.parametrize("tracking", [False, True])
+def test_scenario_expectations_reject_wrong_mouse_tracking(tracking: bool) -> None:
+    scenario = Scenario(name="test", steps=[], mouse_tracking=not tracking)
+    captured = Capture([Snapshot("final", (), mouse_tracking=tracking)], [], [])
+
+    with pytest.raises(AssertionError):
+        _assert_scenario_expectations(captured, scenario)
+
+
+@pytest.mark.parametrize("seen", [False, True])
+def test_scenario_expectations_reject_wrong_mouse_tracking_seen(seen: bool) -> None:
+    scenario = Scenario(name="test", steps=[], mouse_tracking_seen=not seen)
+    captured = Capture([Snapshot("final", (), mouse_tracking_seen=seen)], [], [])
 
     with pytest.raises(AssertionError):
         _assert_scenario_expectations(captured, scenario)

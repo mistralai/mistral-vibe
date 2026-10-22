@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
+use tokio::sync::mpsc::error::TrySendError;
 
 use crate::app::App;
 use crate::server::{method, Client, TelemetryRecordParams};
@@ -34,8 +35,15 @@ pub fn enqueue(
     let Some(tx) = tx else {
         return;
     };
-    if tx.try_send(TelemetryEvent { name, properties }).is_err() {
-        tracing::warn!(name, "telemetry queue full; dropping event");
+    if let Err(error) = tx.try_send(TelemetryEvent { name, properties }) {
+        match error {
+            TrySendError::Full(_) => {
+                tracing::warn!(name, "telemetry queue full; dropping event");
+            }
+            TrySendError::Closed(_) => {
+                tracing::debug!(name, "telemetry channel closed; dropping event");
+            }
+        }
     }
 }
 

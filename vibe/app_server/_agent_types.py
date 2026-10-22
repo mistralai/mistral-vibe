@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         RustAgentTypeDefinition,
         RustRuntimeBuiltinToolName,
     )
+    from mistralai_vibe_local_harness.vibe._permissions import PermissionResolver
     from mistralai_vibe_local_harness.vibe.plugins import DeclaredAgentTypeProfile
     from vibe.app_server.models import ConfigIssue
     from vibe.core.agents.manager import AgentManager
@@ -43,16 +44,21 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class AgentToolCatalogue:
-    """The tools a ceiling is measured against.
+    """The tools a profile is measured against, and how its calls are decided.
 
     Handed in rather than derived here: the catalogue is a function of the
     session's live config, and this module resolves agents, not tools. One
     snapshot serves a whole resolve, so its profiles cannot disagree about which
     tools exist.
+
+    ``permission_resolver`` turns a profile's overrides into the resolver its
+    child's calls go through. The ceiling only says whether a tool may run; the
+    resolver decides each call to it under the profile's ``[tools.*]`` rules.
     """
 
     available: frozenset[str]
     permission_of: Callable[[str], ToolPermission]
+    permission_resolver: Callable[[Mapping[str, Any]], PermissionResolver] | None = None
 
 
 WORKSPACE_OWNER = "workspace"
@@ -77,6 +83,7 @@ class ResolvedAgentTypes:
     definitions: tuple[RustAgentTypeDefinition, ...]
     profiles: tuple[DeclaredAgentTypeProfile, ...]
     issues: tuple[ConfigIssue, ...]
+    permission_resolvers: Mapping[str, PermissionResolver]
 
 
 def workspace_agent_types(agents: AgentManager) -> tuple[AgentTypeSource, ...]:
@@ -137,6 +144,7 @@ def resolve_agent_types(
     definitions: list[RustAgentTypeDefinition] = []
     profiles: list[DeclaredAgentTypeProfile] = []
     issues: list[ConfigIssue] = []
+    permission_resolvers: dict[str, PermissionResolver] = {}
 
     for source in sources:
         if source.name in reserved:
@@ -160,9 +168,16 @@ def resolve_agent_types(
             continue
         definitions.append(definition)
         profiles.append(profile)
+        if tools.permission_resolver is not None:
+            permission_resolvers[profile.agent_type] = tools.permission_resolver(
+                source.profile.overrides
+            )
 
     return ResolvedAgentTypes(
-        definitions=tuple(definitions), profiles=tuple(profiles), issues=tuple(issues)
+        definitions=tuple(definitions),
+        profiles=tuple(profiles),
+        issues=tuple(issues),
+        permission_resolvers=permission_resolvers,
     )
 
 
@@ -241,24 +256,11 @@ def _profile(
     # first is a widening, since the policy ceiling grants exactly one completion, and
     # the second gates nothing today.
     from mistralai_vibe_local_harness.vibe.plugins import DeclaredAgentTypeProfile
-    from vibe.app_server._runtime import (
-        agent_ceiling_downgrades,
-        rust_agent_tool_ceiling,
-    )
+    from vibe.app_server._runtime import rust_agent_tool_ceiling
 
-    overrides = source.profile.overrides
-    available = set(tools.available)
-    ceiling = rust_agent_tool_ceiling(available, tools.permission_of, overrides)
-    if downgraded := agent_ceiling_downgrades(
-        available, tools.permission_of, overrides
-    ):
-        issues.append(
-            _issue(
-                source,
-                f"{', '.join(downgraded)} narrowed by an allowlist the child cannot "
-                "carry, so it asks for approval instead of running unattended",
-            )
-        )
+    ceiling = rust_agent_tool_ceiling(
+        set(tools.available), tools.permission_of, source.profile.overrides
+    )
     path = str(source.path)
     try:
         return DeclaredAgentTypeProfile(
@@ -267,6 +269,9 @@ def _profile(
             profile_path=path,
             instructions=instructions,
             tool_ceiling=ceiling,
+            # Discovery already validated these against the config schema.
+            enabled_skills=source.profile.overrides.get("enabled_skills", []),
+            disabled_skills=source.profile.overrides.get("disabled_skills", []),
             authority_digest=_authority_digest(source, path, ceiling, instructions),
         )
     except ValidationError as error:

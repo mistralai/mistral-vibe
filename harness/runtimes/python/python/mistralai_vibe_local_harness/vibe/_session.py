@@ -1156,13 +1156,23 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         *,
         force_remote_discovery: bool,
         push_to_core: bool = True,
+        cached_only: bool = False,
     ) -> MCPRouteSnapshot:
         self._reject_active_turn()
         return await self._require_mcp_runtime().reconfigure(
             configuration,
             force_remote_discovery=force_remote_discovery,
             push_to_core=push_to_core,
+            cached_only=cached_only,
         )
+
+    async def discover_pending_mcp(self) -> MCPRouteSnapshot:
+        """Discover the MCP servers the session opened without.
+
+        Routes only: Core is left alone, so this may run during a turn. Publish
+        the result with ``push_mcp_capabilities`` once no turn is running.
+        """
+        return await self._require_mcp_runtime().discover_pending(push_to_core=False)
 
     async def push_mcp_capabilities(self) -> None:
         await self._require_mcp_runtime().push_snapshot_to_core()
@@ -1191,7 +1201,11 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         *,
         push_to_core: bool = True,
     ) -> ConnectorRouteSnapshot:
-        self._reject_active_turn()
+        # Before promotion no Core holds the routes: a reserved turn's Runtime
+        # is built from this snapshot, so changing it cannot split a turn.
+        # During promotion the Runtime is being built from it, so it can.
+        if self._runtime is not None or self._promotion_conflict_id is not None:
+            self._reject_active_turn()
         return await self._require_connector_runtime().reconfigure(
             catalog, selection, push_to_core=push_to_core
         )
@@ -2020,14 +2034,20 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     async def _settle_callback_response(self, params: object) -> object:
         result = _field(params, "result")
         callback_id = _required_str(result, "callback_id")
+        cancel_turn = _approval_result_decision_type(result) == "cancel_turn"
         async with self._callback_lock:
             callback = self._open_callbacks.get(callback_id)
-            response = await self._respond_to_callback(params)
-        if (
-            callback is not None
-            and _approval_result_decision_type(result) == "cancel_turn"
-        ):
+            try:
+                response = await self._respond_to_callback(params)
+            except HarnessCallbackClosedError:
+                # A refused answer still carries the user's request to stop.
+                if callback is None or not cancel_turn:
+                    raise
+                response = None
+        if callback is not None and cancel_turn:
             await self._interrupt_active_turn_from_callback(callback)
+            if response is None:
+                raise HarnessCallbackClosedError(callback_id)
             return _SessionBackendResult(
                 response={"accepted": True, "last_event_id": self._current_event_id()}
             )
@@ -2065,11 +2085,17 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 if hasattr(raw_result, "model_dump")
                 else result
             )
-            await resolve_callback(
+            recorded = await resolve_callback(
                 callback_id,
                 cast(JsonValue, dumped_result),
                 failed=_field(result, "error", default=None) is not None,
             )
+            if not recorded:
+                # The store has no pending registration for this callback, so the
+                # answer is not acted on: the callback is closed as denied, which
+                # also releases the Turn waiting on it.
+                self._close_callback_locally(callback_id, "Callback closed")
+                raise HarnessCallbackClosedError(callback_id)
         self._approval_waiters.pop(callback_id, None)
         self._user_input_waiters.pop(callback_id, None)
         self._open_callbacks.pop(callback_id, None)
@@ -2913,6 +2939,20 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 waiter.set_result((False, {"message": reason}))
         self._user_input_waiters.clear()
         if callbacks:
+            self._publish_session_state_update()
+
+    def _close_callback_locally(self, callback_id: str, reason: str) -> None:
+        callback = self._open_callbacks.pop(callback_id, None)
+        self._closed_callback_ids.add(callback_id)
+        if callback is not None:
+            self._publish_event(_callback_cancelled_event(callback, reason))
+        approval_waiter = self._approval_waiters.pop(callback_id, None)
+        if approval_waiter is not None and not approval_waiter.done():
+            approval_waiter.set_result(ApprovalGrant.DENY)
+        user_input_waiter = self._user_input_waiters.pop(callback_id, None)
+        if user_input_waiter is not None and not user_input_waiter.done():
+            user_input_waiter.set_result((False, {"message": reason}))
+        if callback is not None:
             self._publish_session_state_update()
 
     async def _settle_inactive_turn_tasks(self) -> None:

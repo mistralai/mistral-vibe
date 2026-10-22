@@ -1,5 +1,6 @@
 //! Paint-ordered mouse routing with gesture capture.
 
+mod capture;
 mod dispatch;
 mod option_gesture;
 pub mod pixels;
@@ -8,6 +9,7 @@ mod scrollbar;
 pub use option_gesture::option_gesture;
 pub use scrollbar::{drag_scroll, register_scrollbar, scrollbar_tracks};
 
+pub(crate) use capture::cancel_capture;
 pub use dispatch::toggle_effect_at;
 
 use std::sync::Arc;
@@ -93,6 +95,11 @@ impl MouseState {
     pub fn is_dragging_scrollbar(&self) -> bool {
         matches!(self.capture, Some(Capture::Scrollbar))
     }
+
+    /// A press on a target owns the pointer until its release: the gesture that holds cell reports.
+    pub fn holds_target(&self) -> bool {
+        matches!(self.capture, Some(Capture::Target(_)))
+    }
 }
 
 /// Register a mouse target in paint order; later overlaps win.
@@ -154,13 +161,18 @@ pub fn route_at(app: &mut App, event: MouseEvent, row: f64) -> Option<MouseTarge
     let at = (event.column, event.row);
     if event.kind == MouseEventKind::Moved {
         app.view.mouse_position = Some(at);
+        // No button is held, so the release was lost (pixel reports drop one past the top or left edge).
+        if app.view.mouse.capture.is_some() {
+            cancel_capture(app, true);
+        }
     }
     if handle_wheel(app, event) {
         return None;
     }
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            cancel_capture(app);
+            cancel_capture(app, true);
+            selection::honor_pending_copy(app);
             if scrollbar::contains_track(app, at) {
                 if scrollbar::begin(app, at, row) {
                     app.view.mouse.capture = Some(Capture::Scrollbar);
@@ -274,41 +286,6 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         | MouseTarget::TodoRow => {}
     }
     true
-}
-
-pub(crate) fn cancel_capture(app: &mut App) {
-    if let Some(Capture::Target(target)) = app.view.mouse.capture.take() {
-        if target == MouseTarget::RemoteProject {
-            app.vibe_code_project.list.cancel();
-            app.vibe_code_project.dragged_field = None;
-        }
-        if matches!(
-            target,
-            MouseTarget::Transcript
-                | MouseTarget::Toast
-                | MouseTarget::Composer
-                | MouseTarget::Trust
-                | MouseTarget::RemoteProject
-                | MouseTarget::BottomBar
-                | MouseTarget::Loading
-                | MouseTarget::Question
-                | MouseTarget::Approval
-                | MouseTarget::BottomApp
-                | MouseTarget::ProxySetup
-                | MouseTarget::ThemePicker
-                | MouseTarget::ModelPicker
-                | MouseTarget::ThinkingPicker
-                | MouseTarget::LogLevelPicker
-                | MouseTarget::ResumePicker
-                | MouseTarget::Mcp
-                | MouseTarget::Plugins
-                | MouseTarget::McpOAuth
-                | MouseTarget::ConnectorAuth
-        ) {
-            selection::cancel_drag(app);
-        }
-    }
-    scrollbar::cancel(app);
 }
 
 fn cancel_scrollbar_capture(app: &mut App) {

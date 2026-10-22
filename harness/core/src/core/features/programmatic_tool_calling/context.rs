@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::core::error::CoreError;
-use crate::core::features::permissions::PermissionResolution;
+use crate::core::tools::execution::external_call::Admission;
 use crate::core::tools::external::{ExternalTool, ExternalToolCall};
 
 use super::descriptor::{ProgrammaticName, TypeScriptTool};
@@ -28,9 +28,9 @@ impl ResolvedProgramOperation {
 /// The session coordinator builds this value from its resolved tools and hook
 /// index. The feature only sees its own settings and program
 /// descriptors plus narrow callbacks for resolving operations, selecting
-/// post-tool hooks, validating hook-rewritten arguments, and enforcing tool
-/// permissions. Tool discovery is dispatched before program execution and is
-/// never retained by replay continuations.
+/// post-tool hooks, validating hook-rewritten arguments, and admitting tool
+/// calls under the permission policy. Tool discovery is dispatched before
+/// program execution and is never retained by replay continuations.
 #[derive(Clone, Copy)]
 pub(crate) struct ProgramContext<'a> {
     descriptors: &'a [TypeScriptTool],
@@ -40,7 +40,7 @@ pub(crate) struct ProgramContext<'a> {
     resolve_operation: &'a dyn Fn(&str, Value) -> Option<ResolvedProgramOperation>,
     post_hook_binding_ids: &'a dyn Fn(&ExternalToolCall) -> Vec<String>,
     effective_call: &'a dyn Fn(&ExternalToolCall, Value) -> Result<ExternalToolCall, CoreError>,
-    permission_resolution: &'a dyn Fn(&ExternalToolCall) -> PermissionResolution,
+    admit: &'a dyn Fn(&ExternalToolCall) -> Admission,
 }
 
 impl<'a> ProgramContext<'a> {
@@ -53,7 +53,7 @@ impl<'a> ProgramContext<'a> {
         resolve_operation: &'a dyn Fn(&str, Value) -> Option<ResolvedProgramOperation>,
         post_hook_binding_ids: &'a dyn Fn(&ExternalToolCall) -> Vec<String>,
         effective_call: &'a dyn Fn(&ExternalToolCall, Value) -> Result<ExternalToolCall, CoreError>,
-        permission_resolution: &'a dyn Fn(&ExternalToolCall) -> PermissionResolution,
+        admit: &'a dyn Fn(&ExternalToolCall) -> Admission,
     ) -> Self {
         Self {
             descriptors,
@@ -63,7 +63,7 @@ impl<'a> ProgramContext<'a> {
             resolve_operation,
             post_hook_binding_ids,
             effective_call,
-            permission_resolution,
+            admit,
         }
     }
 
@@ -103,8 +103,8 @@ impl<'a> ProgramContext<'a> {
         (self.effective_call)(original, arguments)
     }
 
-    pub(crate) fn permission_resolution(self, call: &ExternalToolCall) -> PermissionResolution {
-        (self.permission_resolution)(call)
+    pub(crate) fn admit(self, call: &ExternalToolCall) -> Admission {
+        (self.admit)(call)
     }
 
     pub(crate) fn resolve_programmatic_name(

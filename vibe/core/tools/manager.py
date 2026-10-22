@@ -227,6 +227,10 @@ class ToolManager:
             yield from _discover_tools_in(base, builtin_dir).tools
 
     @property
+    def search_paths(self) -> tuple[Path, ...]:
+        return tuple(self._search_paths)
+
+    @property
     def failed_custom_tool_files(self) -> list[FailedToolFile]:
         builtin_dir = DEFAULT_TOOL_DIR.path.resolve()
         return [

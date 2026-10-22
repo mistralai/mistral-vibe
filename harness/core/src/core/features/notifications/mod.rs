@@ -107,6 +107,20 @@ impl NotificationState {
         self.ready_for_model = false;
         self.pending_bytes = 0;
         let notifications = std::mem::take(&mut self.pending);
+        // The Runtime's process record, not Core, keeps a delivered process
+        // notification from being submitted again.
+        let delivered_process_ids = notifications
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.notification.source,
+                    NotificationSource::BackgroundProcess { .. }
+                )
+            })
+            .map(|entry| entry.notification.id.as_str())
+            .collect::<BTreeSet<_>>();
+        self.received_ids
+            .retain(|id| !delivered_process_ids.contains(id.as_str()));
         self.retain_recent(recent_limit);
         notifications
     }

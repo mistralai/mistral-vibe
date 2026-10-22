@@ -262,6 +262,8 @@ def _environment(
         "VIBE_REPLAY_NOW_MS": str(REPLAY_NOW_MS),
         "VIBE_E2E_ACTION_LOG": os.fspath(action_log),
         "VIBE_REPLAY_REQUEST_LOG": os.fspath(request_log),
+        # Replay types at machine speed, so the trust gate answers at once.
+        "VIBE_TEST_TRUST_GRACE_MS": "0",
         **overrides,
         # Keep clipboard assertions inside the PTY instead of mutating the host.
         "SSH_TTY": "/dev/pts/0",

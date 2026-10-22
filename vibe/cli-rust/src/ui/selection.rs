@@ -69,22 +69,26 @@ pub fn overlay_region(app: &mut App, f: &mut Frame, owner: RegionId) {
 /// the transcript slice, so it must not run on every drag frame or spinner tick.
 /// Returns false once a pending release turned out empty and cleared the selection.
 fn cache_and_copy(app: &mut App, f: &mut Frame, spans: &[RowSpan]) -> bool {
-    if !app
+    let Some((pending, owner)) = app
         .selection
         .region
         .as_ref()
-        .is_some_and(|sel| sel.pending_copy)
-    {
+        .map(|sel| (sel.pending_copy, sel.owner))
+    else {
+        return true;
+    };
+    // A frame-owned selection is cheap to read: cache it every paint for `honor_pending_copy`.
+    if !pending && region::get(app, owner).document {
         return true;
     }
-    let text = region::extract_document(app).unwrap_or_else(|| {
-        let owner = app
-            .selection
-            .region
-            .as_ref()
-            .map_or(RegionId::Main, |sel| sel.owner);
-        fold::extract(f.buffer_mut(), spans, &region::folds(app, owner))
-    });
+    let text = region::extract_document(app)
+        .unwrap_or_else(|| fold::extract(f.buffer_mut(), spans, &region::folds(app, owner)));
+    if !pending {
+        if let Some(selection) = app.selection.region.as_mut() {
+            selection.text = text;
+        }
+        return true;
+    }
     if text.is_empty() {
         app.selection.region = None;
         return false;

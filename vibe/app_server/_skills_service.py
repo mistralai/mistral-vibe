@@ -198,6 +198,10 @@ class SkillsController:
         return DispatchResult(response, runtime_updated=runtime_updated)
 
     def _list(self, params: SkillsListParams) -> SkillsListResponse:
+        if params.session_id is None:
+            raise RequestFailure(
+                ProtocolErrorCode.INVALID_PARAMS, "skills/list needs a sessionId here"
+            )
         self._host.require_session(params.session_id)
         return SkillsListResponse(skills=self._host.list_skills())
 

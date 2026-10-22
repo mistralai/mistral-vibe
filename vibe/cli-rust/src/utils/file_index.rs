@@ -3,14 +3,22 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{mpsc, Arc, RwLock};
+use std::time::Instant;
 
 use ignore::{IncrementalIgnore, WalkBuilder};
+use notify::event::ModifyKind;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::watch;
 
 use crate::utils::file_match;
+
+mod git;
+mod metrics;
+
+pub use git::{git_ls_files, rebuild_index};
+pub use metrics::BatchStats;
+use metrics::{report_batch, report_started};
 
 #[derive(Clone, Default)]
 pub struct FileIndex {
@@ -58,11 +66,13 @@ fn watch_files(
     }
 
     let mut ignore = ignore_matcher(&root);
+    let started = Instant::now();
     let (initial, mut git_backed) = rebuild_index(&root);
     if let Ok(mut current) = paths.write() {
         *current = initial;
     }
     bump(&version);
+    report_started(git_backed, &paths, started.elapsed());
 
     while let Ok(first) = event_rx.recv() {
         let Ok(first) = first else { continue };
@@ -72,11 +82,15 @@ fn watch_files(
                 events.push(event);
             }
         }
-        git_backed = apply_events(&root, &paths, events, &version, &mut ignore, git_backed);
+        let applied = Instant::now();
+        let (still_git, stats) =
+            apply_events_tracked(&root, &paths, events, &version, &mut ignore, git_backed);
+        git_backed = still_git;
+        report_batch(&stats, applied.elapsed(), &paths);
     }
 }
 
-// One git rebuild per drained burst, not one per event.
+// One full rebuild per drained burst, not one per event.
 pub fn apply_events(
     root: &Path,
     paths: &RwLock<BTreeMap<String, bool>>,
@@ -85,18 +99,38 @@ pub fn apply_events(
     ignore: &mut IncrementalIgnore,
     git_backed: bool,
 ) -> bool {
-    if git_backed {
-        if !events.iter().any(tracks_files) {
-            return git_backed;
+    apply_events_tracked(root, paths, events, version, ignore, git_backed).0
+}
+
+// `apply_events` plus what the burst cost, for the watch thread's telemetry.
+pub fn apply_events_tracked(
+    root: &Path,
+    paths: &RwLock<BTreeMap<String, bool>>,
+    events: Vec<Event>,
+    version: &watch::Sender<u64>,
+    ignore: &mut IncrementalIgnore,
+    git_backed: bool,
+) -> (bool, BatchStats) {
+    let mut stats = BatchStats::new(events.len() as u64);
+    let rescan = events.iter().any(Event::need_rescan);
+    if git_backed || rescan {
+        if !rescan && !events.iter().any(tracks_files) {
+            return (git_backed, stats);
+        }
+        // A rescan means events were dropped; an ignore-file edit may have
+        // been lost with them, so the matcher needs a rebuild too.
+        if rescan {
+            *ignore = ignore_matcher(root);
         }
         let (replacement, still_git) = rebuild_index(root);
+        stats.rebuild(&replacement);
         replace_index(paths, replacement, version);
-        return still_git;
+        return (still_git, stats);
     }
     for event in events {
-        apply_event(root, paths, event, version, ignore);
+        apply_event(root, paths, event, version, ignore, &mut stats);
     }
-    git_backed
+    (git_backed, stats)
 }
 
 fn apply_event(
@@ -105,31 +139,41 @@ fn apply_event(
     event: Event,
     version: &watch::Sender<u64>,
     ignore: &mut IncrementalIgnore,
+    stats: &mut BatchStats,
 ) {
     if !tracks_files(&event) {
         return;
     }
     if event.paths.iter().any(|path| is_ignore_file(root, path)) {
         *ignore = ignore_matcher(root);
-        replace_index(paths, collect_files(root, root), version);
+        let replacement = collect_files(root, root);
+        stats.rebuild(&replacement);
+        replace_index(paths, replacement, version);
         return;
     }
 
-    let mut additions = BTreeMap::new();
-    let mut removals = Vec::new();
+    let (mut additions, mut removals, kind) = (BTreeMap::new(), Vec::new(), event.kind);
     for path in event.paths {
-        let Ok(relative) = path.strip_prefix(root) else {
+        let Some(relative) = path.strip_prefix(root).ok().filter(|r| !is_git_path(r)) else {
             continue;
         };
         if path.exists() {
             let is_dir = path.is_dir();
-            if is_dir {
-                *ignore = ignore_matcher(root);
-            }
-            if is_git_path(relative) || ignore.matched(relative, is_dir).is_ignore() {
+            if ignore.matched(relative, is_dir).is_ignore() {
                 continue;
             }
-            additions.extend(collect_files(&path, root));
+            if is_dir {
+                // A Modify on a directory means a child changed; children arrive per-path.
+                let created = matches!(kind, EventKind::Create(_));
+                let renamed = matches!(kind, EventKind::Modify(ModifyKind::Name(_)));
+                if created || renamed {
+                    let found = collect_files(&path, root);
+                    stats.walk(&found);
+                    additions.extend(found);
+                }
+            } else if let Some(relative) = display_path(relative) {
+                additions.insert(relative, false);
+            }
         } else if let Some(relative) = display_path(relative) {
             removals.push(relative);
         }
@@ -143,9 +187,14 @@ fn apply_event(
     let mut changed = false;
     for relative in removals {
         let prefix = format!("{relative}/");
-        let previous_len = current.len();
-        current.retain(|entry, _| entry != &relative && !entry.starts_with(&prefix));
-        changed |= previous_len != current.len();
+        let stale: Vec<String> = current
+            .range(prefix.clone()..)
+            .take_while(|(key, _)| key.starts_with(&prefix))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in stale.iter().chain([&relative]) {
+            changed |= current.remove(key).is_some();
+        }
     }
     for (path, is_dir) in additions {
         changed |= current.insert(path, is_dir) != Some(is_dir);
@@ -173,55 +222,6 @@ fn replace_index(
         drop(current);
         bump(version);
     }
-}
-
-pub fn rebuild_index(root: &Path) -> (BTreeMap<String, bool>, bool) {
-    match git_ls_files(root) {
-        Some(entries) => (entries, true),
-        None => (collect_files(root, root), false),
-    }
-}
-
-pub fn git_ls_files(root: &Path) -> Option<BTreeMap<String, bool>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ])
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let mut entries = BTreeMap::new();
-    for raw in output.stdout.split(|byte| *byte == 0) {
-        if raw.is_empty() {
-            continue;
-        }
-        let rel = String::from_utf8_lossy(raw).into_owned();
-        let path = root.join(&rel);
-        if !path.exists() {
-            continue;
-        }
-        // Parent dirs exist only as ancestors of a listed file.
-        let parts: Vec<&str> = rel.split('/').collect();
-        let mut parent = String::new();
-        for part in &parts[..parts.len() - 1] {
-            if !parent.is_empty() {
-                parent.push('/');
-            }
-            parent.push_str(part);
-            entries.entry(parent.clone()).or_insert(true);
-        }
-        entries.insert(rel, path.is_dir());
-    }
-    Some(entries)
 }
 
 fn collect_files(scan_root: &Path, workspace_root: &Path) -> BTreeMap<String, bool> {

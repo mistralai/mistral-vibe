@@ -165,14 +165,14 @@ fn derived_identities_are_absent_from_json_and_reconstructed_exactly() {
     let crate::core::ActivePhase::AwaitingToolBatch { batch, .. } = &active.phase else {
         panic!("expected direct tool batch");
     };
-    let crate::core::ToolExecutionState::DirectAwaitingPostHook {
-        hook_action_id,
-        call,
-        ..
-    } = &batch.executions[0].state
+    let crate::core::ToolExecutionState::Direct(pending) = &batch.executions[0].state else {
+        panic!("expected pending direct call");
+    };
+    let crate::core::ExternalCallStage::AwaitingPostHook { hook_action_id, .. } = &pending.stage
     else {
         panic!("expected pending direct post-tool hook");
     };
+    let call = &pending.call;
     let direct_action_id = crate::core::tools::external::effect_id_for_operation(
         crate::core::ToolOrigin::TopLevel,
         "call-1",
@@ -226,14 +226,12 @@ fn derived_identities_are_absent_from_json_and_reconstructed_exactly() {
         "operation-1",
     );
     assert_eq!(id, "operation-1");
-    let crate::core::features::programmatic_tool_calling::PendingProgramRecord::AwaitingPreHook {
-        call,
-        hook_action_id,
-        ..
-    } = pending.as_ref()
+    let crate::core::ExternalCallStage::AwaitingPreHook { hook_action_id, .. } =
+        &pending.external.stage
     else {
         panic!("expected pending program pre-tool hook");
     };
+    let call = &pending.external.call;
     assert_eq!(call.call_id, "operation-1");
     assert_eq!(call.action_id, program_action_id);
     assert_eq!(
@@ -424,12 +422,10 @@ fn capture_rejects_noncanonical_derived_tool_identities() {
     let crate::core::ActivePhase::AwaitingToolBatch { batch, .. } = &mut active.phase else {
         panic!("expected tool batch");
     };
-    let crate::core::ToolExecutionState::DirectAwaitingPostHook { call, .. } =
-        &mut batch.executions[0].state
-    else {
+    let crate::core::ToolExecutionState::Direct(pending) = &mut batch.executions[0].state else {
         panic!("expected pending direct hook");
     };
-    call.call_id = "other-call".to_string();
+    pending.call.call_id = "other-call".to_string();
     assert!(Checkpoint::capture(&wrong_call_id).is_err());
 
     let mut wrong_action_id = state.clone();
@@ -439,12 +435,10 @@ fn capture_rejects_noncanonical_derived_tool_identities() {
     let crate::core::ActivePhase::AwaitingToolBatch { batch, .. } = &mut active.phase else {
         panic!("expected tool batch");
     };
-    let crate::core::ToolExecutionState::DirectAwaitingPostHook { call, .. } =
-        &mut batch.executions[0].state
-    else {
+    let crate::core::ToolExecutionState::Direct(pending) = &mut batch.executions[0].state else {
         panic!("expected pending direct hook");
     };
-    call.action_id = "other-action".to_string();
+    pending.call.action_id = "other-action".to_string();
     assert!(Checkpoint::capture(&wrong_action_id).is_err());
 
     let mut wrong_hook_action_id = state;
@@ -454,8 +448,10 @@ fn capture_rejects_noncanonical_derived_tool_identities() {
     let crate::core::ActivePhase::AwaitingToolBatch { batch, .. } = &mut active.phase else {
         panic!("expected tool batch");
     };
-    let crate::core::ToolExecutionState::DirectAwaitingPostHook { hook_action_id, .. } =
-        &mut batch.executions[0].state
+    let crate::core::ToolExecutionState::Direct(crate::core::testing::PendingExternalCall {
+        stage: crate::core::ExternalCallStage::AwaitingPostHook { hook_action_id, .. },
+        ..
+    }) = &mut batch.executions[0].state
     else {
         panic!("expected pending direct hook");
     };

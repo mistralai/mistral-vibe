@@ -121,7 +121,7 @@ pub fn read_show_thinking_nodes(result: &Value) -> bool {
     result
         .pointer("/runtime/config/showThinkingNodes")
         .and_then(Value::as_bool)
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// Whether the subagent status list is shown (config `show_subagent_status_list`).

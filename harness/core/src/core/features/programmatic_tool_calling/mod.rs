@@ -19,7 +19,7 @@ pub(crate) use execution::{
 pub(crate) use prompt::{Prompts, tool_group_inventory_prompt};
 pub(crate) use settings::Settings;
 pub(crate) use state::{
-    PendingProgramRecord, ProgramCapture, ProgramExecution, ProgramFunctionRecord,
+    PendingProgramOperation, ProgramCapture, ProgramExecution, ProgramFunctionRecord,
     ProgramOperationRecord,
 };
 pub(crate) use time_budget::ProgramClock;

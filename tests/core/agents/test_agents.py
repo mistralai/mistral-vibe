@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from tests.conftest import ConfigBuilder, OrchestratorLoader
-from vibe.core.agents.manager import AgentManager
+from vibe.core.agents.manager import AgentManager, resolve_default_agent
 from vibe.core.agents.models import (
     BUILTIN_AGENTS,
     EXPLORE,
     AgentProfile,
     AgentSafety,
     AgentType,
+    BuiltinAgentName,
 )
 from vibe.core.config import VibeConfigSchema
+from vibe.core.config.layers.admin import AdminConfigLayer
+from vibe.core.config.layers.growthbook import GrowthbookLayer
+from vibe.core.config.layers.overrides import OverridesLayer
+from vibe.core.config.orchestrator import ConfigOrchestrator
 
 
 class TestAgentProfile:
@@ -132,8 +138,9 @@ class TestAgentManager:
     ) -> None:
         """The default flag both exposes smart approve and makes it the resolved default."""
         config = build_config(smart_approve_default=True)
+        orchestrator = load_orchestrator(config)
         manager = AgentManager(
-            load_orchestrator(config), initial_agent=config.resolve_default_agent()
+            orchestrator, initial_agent=resolve_default_agent(orchestrator)
         )
 
         assert "smart-approve" in manager.available_agents
@@ -367,8 +374,9 @@ class TestAgentManager:
     ) -> None:
         config = build_config(default_agent="plan")
         with caplog.at_level("WARNING"):
+            orchestrator = load_orchestrator(config)
             manager = AgentManager(
-                load_orchestrator(config), initial_agent=config.resolve_default_agent()
+                orchestrator, initial_agent=resolve_default_agent(orchestrator)
             )
 
         assert manager.active_profile.name == "ask"
@@ -396,8 +404,9 @@ class TestAgentManager:
         )
         config = build_config(default_agent="plan", agent_paths=[agents_dir])
 
+        orchestrator = load_orchestrator(config)
         manager = AgentManager(
-            load_orchestrator(config), initial_agent=config.resolve_default_agent()
+            orchestrator, initial_agent=resolve_default_agent(orchestrator)
         )
 
         assert manager.active_profile.name == "plan"
@@ -433,3 +442,268 @@ class TestAgentManager:
         with pytest.raises(ValueError, match="requires installation") as exc_info:
             AgentManager(load_orchestrator(config), initial_agent="lean")
         assert "disabled_agents" not in str(exc_info.value)
+
+
+async def _org_orchestrator(
+    *, local: dict[str, Any] | None = None, policy: str = "", cohort: bool = False
+) -> ConfigOrchestrator[VibeConfigSchema]:
+    growthbook = GrowthbookLayer()
+    growthbook.set_variants({"vibe_cli_smart_approve_default": cohort})
+    admin = AdminConfigLayer()
+    admin.load_managed_toml(policy)
+    return await ConfigOrchestrator.create(
+        schema=VibeConfigSchema,
+        layers=[growthbook, OverridesLayer(data=local or {}), admin],
+        default_layer_resolver=lambda: admin,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("local", "policy", "cohort", "expected"),
+    [
+        ({}, "", False, BuiltinAgentName.ACCEPT_EDITS),
+        ({"default_agent": "ask"}, "", False, BuiltinAgentName.ASK),
+        # The smart-approve experiment's cohort default beats the local one.
+        ({"default_agent": "ask"}, "", True, BuiltinAgentName.SMART_APPROVE),
+        # An org-enforced default beats the experiment.
+        ({}, 'default_agent = "ask"\n', True, BuiltinAgentName.ASK),
+        # Even when the org also enforces the experiment's flag: an org that
+        # wants smart-approve as the default enforces it as default_agent.
+        (
+            {},
+            'default_agent = "ask"\nsmart_approve_default = true\n',
+            True,
+            BuiltinAgentName.ASK,
+        ),
+        # An org config without default_agent leaves the experiment alone.
+        ({}, 'theme = "nord"\n', True, BuiltinAgentName.SMART_APPROVE),
+    ],
+)
+async def test_resolve_default_agent(
+    local: dict[str, Any], policy: str, cohort: bool, expected: str
+) -> None:
+    orchestrator = await _org_orchestrator(local=local, policy=policy, cohort=cohort)
+
+    assert resolve_default_agent(orchestrator) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("policy", "requested", "started"),
+    [
+        # The user's own default, excluded by the org: a builtin mode.
+        ('disabled_agents = ["auto-approve"]\n', None, "accept-edits"),
+        # An --agent choice the org excludes: a builtin mode.
+        ('disabled_agents = ["auto-approve"]\n', "auto-approve", "accept-edits"),
+        # ... or the org's own default, when it enforces one.
+        (
+            'default_agent = "ask"\ndisabled_agents = ["auto-approve"]\n',
+            "auto-approve",
+            "ask",
+        ),
+        (
+            'default_agent = "ask"\nenabled_agents = ["ask", "accept-edits"]\n',
+            "auto-approve",
+            "ask",
+        ),
+    ],
+)
+async def test_an_agent_the_org_excludes_starts_another_mode(
+    policy: str, requested: str | None, started: str
+) -> None:
+    orchestrator = await _org_orchestrator(
+        local={"default_agent": "auto-approve"}, policy=policy
+    )
+
+    agents = AgentManager(orchestrator, requested)
+
+    assert agents.active_profile.name == started
+    assert agents.excluded_agent == requested
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested", [None, "auto-approve"])
+async def test_an_enforced_plan_default_runs_as_ask_under_agent_lists(
+    requested: str | None,
+) -> None:
+    # "plan" starts as ask, which the org's list allows, whether it is the
+    # starting mode or the fallback for an excluded --agent choice.
+    orchestrator = await _org_orchestrator(
+        policy='default_agent = "plan"\nenabled_agents = ["ask", "accept-edits"]\n'
+    )
+
+    agents = AgentManager(orchestrator, requested)
+
+    assert agents.active_profile.name == BuiltinAgentName.ASK
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "policy", ['disabled_agents = ["ask"]\n', 'enabled_agents = ["accept-edits"]\n']
+)
+async def test_a_saved_plan_default_the_org_excludes_as_ask_starts_another_mode(
+    policy: str,
+) -> None:
+    # A pre-3.0 saved "plan" starts as ask: the org's lists are checked on ask.
+    orchestrator = await _org_orchestrator(
+        local={"default_agent": "plan"}, policy=policy
+    )
+
+    agents = AgentManager(orchestrator, None)
+
+    assert agents.active_profile.name == BuiltinAgentName.ACCEPT_EDITS
+    assert agents.excluded_agent is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("local", "requested"),
+    [({"default_agent": "auto-approve"}, None), ({}, "auto-approve")],
+)
+async def test_an_org_that_forbids_auto_approve_starts_another_mode(
+    local: dict[str, Any], requested: str | None
+) -> None:
+    # The org's enable_auto_approve = false excludes the yolo mode like its
+    # agent lists do: the session starts another mode under the org config,
+    # instead of failing and falling back to local config, where YOLO is on.
+    orchestrator = await _org_orchestrator(
+        local=local, policy="enable_auto_approve = false\n"
+    )
+
+    agents = AgentManager(orchestrator, requested)
+
+    assert agents.active_profile.name == BuiltinAgentName.ACCEPT_EDITS
+    assert agents.excluded_agent == requested
+    assert orchestrator.config.enable_auto_approve is False
+
+
+@pytest.mark.asyncio
+async def test_an_org_that_forbids_auto_approve_excludes_custom_yolo_agents(
+    tmp_path: Path,
+) -> None:
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "reckless.toml").write_text('safety = "yolo"\n', encoding="utf-8")
+    orchestrator = await _org_orchestrator(
+        local={"agent_paths": [str(agents_dir)]}, policy="enable_auto_approve = false\n"
+    )
+
+    agents = AgentManager(orchestrator, "reckless")
+
+    assert agents.active_profile.name == BuiltinAgentName.ACCEPT_EDITS
+    assert agents.excluded_agent == "reckless"
+    with pytest.raises(
+        ValueError, match="Agent 'reckless' is disabled by your organization."
+    ):
+        agents.switch_profile("reckless")
+
+
+@pytest.mark.asyncio
+async def test_a_local_enabled_agents_does_not_widen_the_orgs() -> None:
+    # The merged list joins both: auto-approve would pass a check on it.
+    orchestrator = await _org_orchestrator(
+        local={"enabled_agents": ["auto-approve"]}, policy='enabled_agents = ["ask"]\n'
+    )
+
+    agents = AgentManager(orchestrator, "auto-approve")
+
+    assert agents.active_profile.name == BuiltinAgentName.ASK
+    assert agents.excluded_agent == "auto-approve"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("policy", "requested", "cohort"),
+    [
+        # Asking for smart-approve opts in past the rollout gate, not past the
+        # org's agent lists.
+        ('disabled_agents = ["smart-approve"]\n', "smart-approve", False),
+        # Nor does the experiment's cohort default.
+        ('disabled_agents = ["smart-approve"]\n', None, True),
+        ('enabled_agents = ["ask", "accept-edits"]\n', None, True),
+        # A fallback the org excludes is skipped too.
+        ('disabled_agents = ["auto-approve", "smart-approve"]\n', "auto-approve", True),
+    ],
+)
+async def test_smart_approve_the_org_excludes_never_starts(
+    policy: str, requested: str | None, cohort: bool
+) -> None:
+    orchestrator = await _org_orchestrator(policy=policy, cohort=cohort)
+
+    agents = AgentManager(orchestrator, requested)
+
+    assert agents.active_profile.name == BuiltinAgentName.ACCEPT_EDITS
+    assert agents.excluded_agent == requested
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("policy", "requested", "error"),
+    [
+        # A typo is not the org's doing.
+        (
+            'default_agent = "ask"\ndisabled_agents = ["auto-approve"]\n',
+            "auto-aprove",  # typos:disable-line
+            "not found",
+        ),
+        # Nor is asking for a subagent as the primary agent.
+        (
+            'default_agent = "ask"\ndisabled_agents = ["auto-approve"]\n',
+            "explore",
+            "cannot be used as the primary agent",
+        ),
+        # Even when the org's mode list leaves the subagent out.
+        (
+            'enabled_agents = ["ask", "accept-edits"]\n',
+            "explore",
+            "'explore' is disabled by your organization",
+        ),
+    ],
+)
+async def test_a_failure_the_org_did_not_cause_stays_loud(
+    policy: str, requested: str, error: str
+) -> None:
+    orchestrator = await _org_orchestrator(policy=policy)
+
+    with pytest.raises(ValueError, match=error):
+        AgentManager(orchestrator, requested)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("default_agent", "error"),
+    [
+        ("acept-edits", "not found"),  # typos:disable-line
+        ("explore", "disabled by your organization"),
+    ],
+)
+async def test_a_broken_saved_default_stays_loud_under_org_agent_lists(
+    default_agent: str, error: str
+) -> None:
+    # The org's list leaves the name out, but the user's own config is what
+    # needs fixing.
+    orchestrator = await _org_orchestrator(
+        local={"default_agent": default_agent},
+        policy='enabled_agents = ["ask", "accept-edits"]\n',
+    )
+
+    with pytest.raises(ValueError, match=error):
+        AgentManager(orchestrator, None)
+
+
+@pytest.mark.asyncio
+async def test_the_orgs_agent_lists_bound_every_mode_switch() -> None:
+    # The user's own list widens the merged one; the picker, mode cycling and
+    # a restored session mode still never reach what the org excludes.
+    orchestrator = await _org_orchestrator(
+        local={"enabled_agents": ["auto-approve", "accept-edits", "ask"]},
+        policy='disabled_agents = ["auto-approve"]\n',
+    )
+    agents = AgentManager(orchestrator, "accept-edits")
+
+    assert "auto-approve" not in agents.available_agents
+    with pytest.raises(
+        ValueError, match="Agent 'auto-approve' is disabled by your organization."
+    ):
+        agents.switch_profile("auto-approve")

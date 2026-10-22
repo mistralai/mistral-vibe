@@ -11,6 +11,7 @@ mod compaction;
 mod completion_and_tools;
 mod conversation;
 mod hooks;
+mod input_modalities;
 mod large_output;
 mod model_wait;
 mod permissions;

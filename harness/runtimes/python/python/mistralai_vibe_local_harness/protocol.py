@@ -389,6 +389,9 @@ class RustNotificationSettings(RustProtocolModel):
     recent_ids: int = Field(default=1000, gt=0)
 
 
+type RustInputModality = Literal["text", "image"]
+
+
 class RustContextSettings(RustProtocolModel):
     compaction: RustCompactionPolicy
     # Mirrors Core: omitted for `resend`, the default for Runtimes that predate
@@ -404,6 +407,9 @@ class RustContextSettings(RustProtocolModel):
         default_factory=RustNotificationSettings
     )
     image_token_cost: Literal["serialized_bytes", "fixed"] = "serialized_bytes"
+    input_modalities: list[RustInputModality] = Field(
+        default_factory=lambda: ["text", "image"]
+    )
 
 
 class RustProgrammaticToolSettings(RustProtocolModel):
@@ -2119,6 +2125,7 @@ __all__ = [
     "RustImageDeliverySettings",
     "RustInMemoryBashCommandEnvironment",
     "RustInputConflictRejection",
+    "RustInputModality",
     "RustInterruptEvent",
     "RustInterruptedTurn",
     "RustInvalidCommandRejection",

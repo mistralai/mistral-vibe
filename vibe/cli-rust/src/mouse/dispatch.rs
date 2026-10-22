@@ -347,6 +347,8 @@ pub fn toggle_effect_at(app: &mut App, row: u16) {
     if reveal {
         app.view.expanded.insert(id.clone());
     }
+    // A toggling click ends the chain, so the next click toggles again instead of selecting a word.
+    app.selection.chain = Default::default();
     anchor_toggle(app, row, id, reveal);
 }
 

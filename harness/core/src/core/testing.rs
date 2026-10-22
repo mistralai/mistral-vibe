@@ -19,8 +19,8 @@ pub(crate) use crate::core::action_id::{
 pub(crate) use crate::core::capabilities::{HookBinding, HookSelector};
 pub(crate) use crate::core::config::{
     ContextSettings, HarnessConfig, HarnessConfigUpdate, HarnessSettings, ImageDeliveryMode,
-    ImageDeliverySettings, ImageTokenCost, ProvidedToolDefinition, ProvidedToolExposure,
-    ToolGroupDefinition, ToolGroupMetadata, ToolSettings, TurnSettings,
+    ImageDeliverySettings, ImageTokenCost, InputModality, ProvidedToolDefinition,
+    ProvidedToolExposure, ToolGroupDefinition, ToolGroupMetadata, ToolSettings, TurnSettings,
 };
 pub(crate) use crate::core::error::CoreError;
 pub(crate) use crate::core::features::background_processes::Mode as BackgroundProcessMode;
@@ -61,6 +61,9 @@ pub(crate) use crate::core::step_protocol::{
 };
 pub(crate) use crate::core::tools::command_environment::CommandEnvironment;
 pub(crate) use crate::core::tools::context::ToolContext;
+pub(crate) use crate::core::tools::execution::external_call::{
+    ExternalCallStage, PendingExternalCall,
+};
 pub(crate) use crate::core::tools::execution::{ToolBatch, ToolExecution, ToolExecutionState};
 pub(crate) use crate::core::tools::external::{
     ExternalTool, ExternalToolCall, HookToolCall, ProvidedToolCall, RuntimeBuiltinToolCall,
@@ -282,6 +285,7 @@ pub(crate) fn config() -> HarnessConfig {
                     recent_ids: 1000,
                 },
                 image_token_cost: ImageTokenCost::SerializedBytes,
+                input_modalities: vec![InputModality::Text, InputModality::Image],
             },
             tools: ToolSettings {
                 max_wait_ms: 3_600_000,
@@ -398,14 +402,9 @@ pub(crate) fn awaiting_action_id(state: &HarnessState) -> String {
             .executions
             .iter()
             .find_map(|execution| match &execution.state {
-                ToolExecutionState::DirectAwaitingApproval {
-                    approval_action_id, ..
-                } => Some(approval_action_id.clone()),
-                ToolExecutionState::DirectAwaitingPreHook { hook_action_id, .. }
-                | ToolExecutionState::DirectAwaitingPostHook { hook_action_id, .. } => {
-                    Some(hook_action_id.clone())
+                ToolExecutionState::Direct(pending) => {
+                    Some(pending.action(&active.turn_id).action_id().to_string())
                 }
-                ToolExecutionState::DirectPending { call } => Some(call.action_id.clone()),
                 ToolExecutionState::ProgramPending { execution } => execution
                     .pending_actions(&active.turn_id)
                     .first()

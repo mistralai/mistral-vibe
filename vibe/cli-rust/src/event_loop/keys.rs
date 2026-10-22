@@ -101,7 +101,10 @@ pub(super) fn handle_input_batch(
     let mut handled = 0;
     loop {
         let burst = event.as_ref().is_some_and(is_pointer_burst);
-        match handle_input_event(app, client, config_tx, event, replaying) {
+        let outcome = handle_input_event(app, client, config_tx, event, replaying);
+        // Any input can start or end a gesture: cell reports are held exactly while one is captured.
+        crate::terminal::hold_cell_reports(app.view.mouse.holds_target());
+        match outcome {
             InputOutcome::Exit => return None,
             outcome => reset_blink |= state.apply_input(outcome),
         }
@@ -162,7 +165,8 @@ fn handle_input_event(
             if input::request_suspend(app, &key) {
                 return InputOutcome::Activity { reset_blink: false };
             }
-            crate::mouse::cancel_capture(app);
+            // Esc aborts a drag in flight; any other key ends it like a release.
+            crate::mouse::cancel_capture(app, key.code != KeyCode::Esc);
             if dispatch_key(app, client, config_tx, key) {
                 return InputOutcome::Exit;
             }
@@ -215,7 +219,7 @@ fn handle_input_event(
         Some(Event::FocusLost) => {
             app.terminal_notifier.set_focus(false);
             app.set_app_focus(false);
-            crate::mouse::cancel_capture(app);
+            crate::mouse::cancel_capture(app, true);
             app.view.mouse_position = None;
             InputOutcome::Redraw { reset_blink: false }
         }

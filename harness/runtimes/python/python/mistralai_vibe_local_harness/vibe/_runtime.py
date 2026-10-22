@@ -1342,9 +1342,19 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
 
     def resolve_callback(
         self, callback_id: str, result: JsonValue, *, failed: bool = False
-    ) -> None:
+    ) -> bool:
+        """Store a callback result; return whether the store recorded it."""
         self._guard_open()
-        self._store.resolve_callback(callback_id, result, failed=failed)
+        if self._store.resolve_callback(callback_id, result, failed=failed) is None:
+            logger.warning(
+                "Unified callback result dropped; the callback is not pending",
+                extra={
+                    "harness_backend": "unified",
+                    "session_id": self._store.session_id,
+                    "callback_id": callback_id,
+                },
+            )
+            return False
         logger.info(
             "Unified callback state changed",
             extra={
@@ -1354,17 +1364,19 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 "callback_state": "failed" if failed else "resolved",
             },
         )
+        return True
 
     async def resolve_callback_durable(
         self, callback_id: str, result: JsonValue, *, failed: bool = False
-    ) -> None:
+    ) -> bool:
         async with self._lock:
             owner = self._process_callback_reservations.get(callback_id)
             with self._store.use_journal_reservation(owner):
-                await asyncio.to_thread(
+                recorded = await asyncio.to_thread(
                     self.resolve_callback, callback_id, result, failed=failed
                 )
             self._process_callback_reservations.pop(callback_id, None)
+            return recorded
 
     async def reconfigure_skills(self, skills: Sequence[RustSkillDefinition]) -> None:
         await self.reconfigure_capability_dimension(
@@ -3212,6 +3224,11 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 item.process_id == process.process_id
                 for item in stored.runtime_state.submitted_process_notifications
             ):
+                # Already journalled with its Core input; finish the bookkeeping a
+                # failed acknowledgement write left behind.
+                await self._record_process_notification_submitted(
+                    process.process_id, notification.id
+                )
                 return
             with self._store.use_journal_reservation(process.process_id):
                 await self._apply(RustNotificationEvent(notification=notification))

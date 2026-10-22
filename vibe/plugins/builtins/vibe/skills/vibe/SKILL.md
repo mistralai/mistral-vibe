@@ -174,7 +174,8 @@ theme = "auto"  # Follow terminal background, then OS light/dark preference
 disable_welcome_banner_animation = false
 cursor_blink = true  # Blink the input cursor; false keeps it steady
 autocopy_to_clipboard = true  # Enable automatic copying of selected text to clipboard
-file_watcher_for_autocomplete = true  # Refresh @ suggestions after workspace changes
+enable_mouse_capture = true  # Capture the mouse for scrolling, clicks and selection; false keeps the terminal's native selection
+file_watcher_for_autocomplete = true  # Refresh @ suggestions and pick up skill changes after workspace changes
 ask_confirmation_on_exit = true  # Require a second Ctrl+D to quit (Ctrl+C always confirms)
 show_greeting = true  # Show "Hello {name}" greeting below the banner at startup (Mistral providers, once per 24h)
 log_level = "WARNING"  # Optional. DEBUG | INFO | WARNING | ERROR | CRITICAL — log level for ~/.vibe/logs/vibe.log
@@ -185,8 +186,10 @@ edit `config.toml` and run `/reload`; no restart is needed.
 
 ### Copy and Text Selection
 
-- **Copy shortcuts**: `Ctrl+Y` and `Ctrl+Shift+C` both copy the current selection to the clipboard. When autocopy is enabled (default), releasing the mouse over a selection also copies automatically. Each successful copy flashes a brief inline "Copied to clipboard" notice.
-- **Multi-click selection**: Double-click selects a word, triple-click selects the current paragraph; dragging extends the selection at the same granularity.
+- **Copy shortcuts**: `Ctrl+Y` and `Ctrl+Shift+C` both copy the current selection to the clipboard. When autocopy is enabled (default), releasing the mouse over a selection also copies automatically, as does a drag that ends without a release (the terminal losing focus, or a key other than `Esc`, which aborts the drag without copying). Each successful copy flashes a brief inline "Copied to clipboard" notice.
+- **Multi-click selection**: Double-click selects a word, triple-click selects the current paragraph; dragging extends the selection at the same granularity. Clicking a collapsible transcript entry (tool group, tool call, reasoning) toggles it on every click; drag to select its text.
+- **Terminal-native selection**: `enable_mouse_capture = false` (or `VIBE_ENABLE_MOUSE_CAPTURE=false`) turns mouse capture off, so the terminal's own selection and copy work instead of in-app selection; depending on the terminal, some other mouse interactions such as clicks are disabled too. It applies live from `/config` or `/reload`. Native selection only covers the visible screen; `Shift+Up/Down` always scrolls the transcript. In some terminals the mouse wheel then sends Up/Down keys, which recall prompt history in the input box.
+- **Clipboard tools**: Copies use `pbcopy` on macOS and `clip` on Windows; on Linux they try `wl-copy`, then `xclip`, then `xsel`. Vibe always also sends the text through OSC 52, and over SSH it relies on OSC 52 alone. When no native copy succeeds, the notice reads `Copied · <hint>` instead (auth URL toasts read `Auth URL copied to clipboard · <hint>`). On local Linux the hint is `if paste fails, Shift+select or install xclip`; elsewhere, including over SSH, it is `if paste fails, Shift+select (Option in iTerm2, Fn in Terminal.app)`. Shift+select uses the terminal's native selection.
 
 ```toml
 # Behavior
@@ -335,6 +338,18 @@ shell = "C:\Program Files\Git\bin\bash.exe"
 permission = "ask"
 shell = "powershell.exe"
 ```
+
+Two tool settings have no effect, and Vibe reports each as a config issue (a
+toast in the TUI, a warning in the `-p` export):
+
+- `[tools.grep]` (for example `exclude_patterns`): there is no `grep` tool. The
+  agent searches through the shell, so `rg` and `grep` commands follow the shell
+  tool's settings (`[tools.bash]` on POSIX).
+- A `prompts/task.md` in a tool directory (`.vibe/tools/prompts/task.md`): it
+  overrode the description of the former `task` tool. Subagents are started
+  with the built-in `agents.spawn` tool, whose description cannot be
+  overridden; put delegation guidance in `AGENTS.md` or in the agent's
+  instructions instead.
 
 The built-in shell surface is controlled by the `managed_shell_tools_enabled` config
 field and the `vibe_cli_managed_shell_tools` GrowthBook experiment. The default variant
@@ -635,7 +650,7 @@ description = "Run ESLint"          # Optional.
 [[hooks]]
 name = "deny-rm-rf"
 type = "pre_tool"
-match = "bash"                      # Tool-name matcher (tool hooks only, default "*").
+match = "re:bash|process_start"     # Tool-name matcher (tool hooks only, default "*").
 strict = true                       # Tool hooks only: escalate any failure to deny/clear.
 command = "uv run python /path/to/guard-bash"
 ```
@@ -644,21 +659,32 @@ command = "uv run python /path/to/guard-bash"
 |---|---|
 | `post_agent` | Once per turn, after the agent finishes responding (no pending tool calls). |
 | `pre_tool` | Per tool call, before the user permission prompt. |
-| `post_tool` | Per tool call, **iff the tool body actually ran**. `tool_status` is `success`, `failure`, or `cancelled`. Does not fire when the tool never executed (`pre_tool` denial, user denial at the approval prompt, permission `NEVER`, or cancellation before the body started). |
+| `post_tool` | Per tool call, **iff the tool body actually ran**. `tool_status` is `success` or `failure`; a shell command that exits non-zero is still `success` (read `tool_output.returncode`). Does not fire when the tool never executed (`pre_tool` denial, user denial at the approval prompt, permission `NEVER`, or cancellation before the body started). |
 
 **Matcher syntax** (same as `enabled_tools`): fnmatch glob by default
 (`"bash"`, `"read_*"`, case-insensitive), or a regex full-match when the
-pattern starts with `re:` (`"re:(read_file|grep)"`). `match` is forbidden on
+pattern starts with `re:` (`"re:(read_file|write_file)"`). `match` is forbidden on
 `post_agent`.
 
 **Tool name conventions** for matchers:
-- Built-in tools use their bare name (`bash`, `read_file`, …); see the Tools
-  section above for the full list.
-- MCP tools: `{server-name}_{raw-tool-name}` (e.g. `linear_create-issue`).
+- `match` accepts a tool's short name (`bash`, `read_file`, `process_start`, …)
+  or its qualified name (`file_system.bash`). The `tool_name` field in the
+  payload is always the qualified name (`file_system.bash`, `mcp_<server>.<tool>`
+  for MCP tools), so scripts that read it must expect that form.
+- Commands the agent starts in the background go through `process_start`,
+  which `match = "bash"` does not catch. Shell guards should use
+  `match = "re:bash|process_start"`.
+- MCP tools: `mcp_{server}.{tool}`, with characters other than letters,
+  digits, `_` and `$` replaced by `_` in both parts (e.g. `mcp_linear.create_issue`
+  for the `create-issue` tool of the `linear` server). Match it as
+  `mcp_linear.create_issue`, `mcp_linear_create_issue`, the bare `create_issue`,
+  or a glob such as `mcp_linear.*`.
 - Connector tools: `connector_{normalized-name}_{remote-tool-name}` (e.g.
   `connector_Google_Drive_search_files`).
-- Subagents all route through `task`. Match with `match = "task"` and read
-  `tool_input.agent` to discriminate by subagent.
+- There is no `task` tool. Subagents are spawned through `agents_spawn`
+  (`agents.spawn` in the payload). Match with `match = "agents_spawn"` and read
+  `tool_input.config_name` (absent for a generic subagent) to discriminate by
+  subagent.
 
 Subagent invocations inherit the parent's hook config. Their hook events are
 logged to the subagent's session log and don't propagate to the parent's UI.
@@ -676,19 +702,20 @@ discriminated by `hook_event_name`:
 // pre_tool
 {"hook_event_name": "pre_tool", "session_id": "...", "parent_session_id": null,
  "transcript_path": "...", "cwd": "...",
- "tool_name": "bash", "tool_call_id": "call_42",
+ "tool_name": "file_system.bash", "tool_call_id": "call_42",
  "tool_input": {"command": "ls"}}
 
 // post_tool
 {"hook_event_name": "post_tool", "session_id": "...", "parent_session_id": null,
  "transcript_path": "...", "cwd": "...",
- "tool_name": "bash", "tool_call_id": "call_42",
+ "tool_name": "file_system.bash", "tool_call_id": "call_42",
  "tool_input": {"command": "ls"},
- "tool_status": "success",         // success | failure | cancelled
- "tool_output": {"output": "..."},  // the tool's serialized result (success/cancelled); null otherwise
+ "tool_status": "success",         // success | failure; a non-zero exit code is still success
+ "tool_output": {"command": "ls", "stdout": "...", "stderr": "", "returncode": 0,
+                 "was_truncated": false, "timed_out": false},  // structured result on success; null on failure
  "tool_output_text": "...",         // current text the LLM will see; mutable by prior hooks
- "tool_error": null,                // populated on failure/skipped
- "duration_ms": 42.5}
+ "tool_error": null,                // populated on failure
+ "duration_ms": 0}                  // not reported yet: always 0
 ```
 
 `parent_session_id` is set when running inside a subagent. Exceeding
@@ -733,7 +760,7 @@ will produce ``hook 'guard': guard: refused...`` downstream.
 |---|---|
 | `pre_tool` | Deny the tool call; `reason` is the tool error returned to the LLM. First deny short-circuits the remaining `pre_tool` hooks for this call. |
 | `post_tool` | Replace `tool_output_text` with `reason`. Pipeline continues; subsequent hooks see the replacement. |
-| `post_agent` | Inject `reason` as a retry user message. Capped at 3 retries per hook per user turn. |
+| `post_agent` | Inject `reason` as a retry user message. First deny short-circuits the remaining `post_agent` hooks. Capped at 3 retries per turn across all `post_agent` hooks; past the cap, the answer is accepted. |
 
 Event-specific payloads:
 
@@ -831,7 +858,23 @@ There are two kinds of agents:
 - **explore**: Read-only codebase exploration subagent with grep, file reading,
   and skill loading. Spawned by the model, not selectable by the user.
 
-Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
+Custom agents are TOML files in `~/.vibe/agents/NAME.toml`. One with
+`agent_type = "subagent"` is a custom subagent the model can spawn. It can load
+every skill the parent session has, unless its file sets `enabled_skills` or
+`disabled_skills`; these accept the same patterns as in `config.toml`.
+
+A custom subagent (`agent_type = "subagent"`) runs with the session's hooks.
+Each of its tool calls must pass both the session's rules and its own
+`[tools.NAME]` rules (`permission`, `allowlist`, `denylist`): a profile can
+refuse or prompt for what the session allows, never allow what the session
+refuses or prompts for. `enabled_tools`/`disabled_tools` likewise only narrow
+the session's tools. Approvals given to a subagent's prompts apply to the whole
+session. Under `--auto-approve`, a subagent's calls run without consulting
+allowlists or denylists, like the main agent's; a tool its profile sets to
+`never` stays refused.
+To use a custom subagent, the model must spawn it by its agent type
+(`config_name`); a subagent spawned with only a name inherits the main agent's
+configuration.
 
 ## Built-in Slash Commands
 
@@ -840,7 +883,7 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/model` - Select active model
 - `/thinking` - Select thinking level
 - `/theme` - Select UI theme; `auto` follows terminal/OS appearance (persisted in config)
-- `/reload` - Reload configuration, agent instructions, and skills from disk
+- `/reload` - Reload configuration, agent instructions, and skills from disk (skills added or edited on disk are also picked up on their own while `file_watcher_for_autocomplete` is on, except in sandboxed sessions)
 - `/clear`, `/new` - Start a new conversation. Optionally pass a prompt to seed it
 - `/log` - Show path to current interaction log file
 - `/log-level` - Show or set the log level. `/log-level` prints the full chain

@@ -1,8 +1,12 @@
+use std::borrow::Cow;
+
 use crate::core::config::ImageDeliveryMode;
 use crate::core::wire::content::ContentBlock;
 use crate::core::wire::message::{AssistantPart, Message, StoredMessage};
 
 const FILE_IMAGE_RESOURCE_LINK_META_KEY: &str = "mistralai.vibe.harness/file-image-resource-link";
+/// What a model without image input receives for an image that has no file link.
+const IMAGE_PLACEHOLDER: &str = "[image]";
 
 pub(crate) fn project_model_input_messages(
     messages: &[StoredMessage],
@@ -14,15 +18,20 @@ pub(crate) fn project_model_input_messages(
         .collect()
 }
 
+/// Returns the block the model receives in place of `block`. Under
+/// `ResourceLink` delivery no image block reaches the model: an image becomes
+/// its file link, or the `[image]` text placeholder when it has none. The
+/// result borrows `block` unless image delivery replaces it.
 pub(crate) fn project_model_input_content(
     block: &ContentBlock,
     image_delivery: ImageDeliveryMode,
-) -> ContentBlock {
-    match image_delivery {
-        ImageDeliveryMode::Native => block.clone(),
-        ImageDeliveryMode::ResourceLink => {
-            file_image_resource_link(block).unwrap_or_else(|| block.clone())
-        }
+) -> Cow<'_, ContentBlock> {
+    match (image_delivery, block) {
+        (ImageDeliveryMode::ResourceLink, ContentBlock::Image(_)) => Cow::Owned(
+            file_image_resource_link(block)
+                .unwrap_or_else(|| ContentBlock::text(IMAGE_PLACEHOLDER)),
+        ),
+        _ => Cow::Borrowed(block),
     }
 }
 
@@ -34,8 +43,11 @@ fn project_model_input_message(message: &Message, image_delivery: ImageDeliveryM
         }
         Message::Assistant { content } => {
             for part in content {
-                if let AssistantPart::Content(block) = part {
-                    *block = project_model_input_content(block, image_delivery);
+                if let AssistantPart::Content(block) = part
+                    && let Cow::Owned(projected) =
+                        project_model_input_content(block, image_delivery)
+                {
+                    *block = projected;
                 }
             }
         }
@@ -48,7 +60,9 @@ fn project_model_input_message(message: &Message, image_delivery: ImageDeliveryM
 
 fn project_content(content: &mut [ContentBlock], image_delivery: ImageDeliveryMode) {
     for block in content {
-        *block = project_model_input_content(block, image_delivery);
+        if let Cow::Owned(projected) = project_model_input_content(block, image_delivery) {
+            *block = projected;
+        }
     }
 }
 

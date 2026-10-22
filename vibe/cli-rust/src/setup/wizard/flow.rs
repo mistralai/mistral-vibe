@@ -107,6 +107,7 @@ pub async fn run_wizard(
                     let held = matches!(event, Event::Key(key) if key.code == KeyCode::F(HOLD_KEY));
                     state.apply_input(InputOutcome::Marker(held));
                 } else if let Event::Mouse(mouse) = event {
+                    mouse::end_dropped_gesture(app, &event);
                     let (mouse, row) = crate::mouse::pixels::to_cells(mouse);
                     // The wizard ignores pointer movement entirely: a move
                     // neither repaints nor tracks hover.
@@ -138,13 +139,17 @@ pub async fn run_wizard(
                     // Paste goes to the focused single-line input.
                     screens::paste(wizard, &text);
                     state.apply_input(InputOutcome::Activity { reset_blink: false });
-                } else if let Some(close) =
-                    wizard_key(wizard, &mut sign_in_rx, client.as_ref(), event).await
-                {
-                    return Ok(close);
                 } else {
+                    mouse::end_dropped_gesture(app, &event);
+                    if let Some(close) =
+                        wizard_key(wizard, &mut sign_in_rx, client.as_ref(), event).await
+                    {
+                        return Ok(close);
+                    }
                     state.apply_input(InputOutcome::Activity { reset_blink: false });
                 }
+                // Cell reports are held exactly while a gesture is captured.
+                crate::terminal::hold_cell_reports(app.view.mouse.holds_target());
             }
             Some(event) = async {
                 match &mut sign_in_rx {

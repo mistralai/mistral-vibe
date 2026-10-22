@@ -37,9 +37,7 @@ pub struct ListState {
     pub area: ratatui::layout::Rect,
 }
 
-/// Hold children that were active in this batch listed
-/// until the batch ends; brand-new ids join only while some child is active;
-/// the selected child stays listed. Passes idle children through.
+/// List every child but stopped ones; a stopped child stays while its batch runs or while viewed.
 pub fn active_batch(
     known: &mut HashSet<String>,
     batch: &mut HashSet<String>,
@@ -65,7 +63,8 @@ pub fn active_batch(
         .iter()
         .filter(|session| {
             batch.contains(&session.id)
-                || session.status == SessionStatus::Idle
+                // Only stopped children leave; failed and unknown ones stay listed.
+                || session.status != SessionStatus::Archived
                 // The viewed child stays listed whatever its status, so the
                 // read-only notice survives the child being killed, even once
                 // it left the batch.

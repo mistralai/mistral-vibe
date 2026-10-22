@@ -68,13 +68,14 @@ impl CheckpointV1 {
         state.compaction_count = self.compaction_count;
         state.last_reported_context_tokens = self.last_reported_context_tokens;
         let generated_system = state.generated_system_message();
+        let image_delivery = state.config.settings.context.effective_image_delivery();
         state.turn = self.turn.restore(
             &state.context,
             generated_system,
             state.resolved_tools.top_level_tools(),
             CompactionBudget {
                 token_threshold: state.config.settings.context.compaction.token_threshold(),
-                image_delivery: state.config.settings.context.image_delivery.compaction,
+                image_delivery: image_delivery.compaction,
                 image_cost: state.config.settings.context.image_token_cost,
             },
         )?;
@@ -192,26 +193,8 @@ fn collect_tool_execution_action_ids(
     turn_id: &str,
     ids: &mut HashSet<String>,
 ) -> Result<(), String> {
-    match &execution.state {
-        ToolExecutionState::DirectAwaitingApproval {
-            approval_action_id, ..
-        } => insert_pending_action_id(ids, approval_action_id),
-        ToolExecutionState::DirectAwaitingPreHook {
-            hook_action_id,
-            hook_binding_ids,
-            ..
-        }
-        | ToolExecutionState::DirectAwaitingPostHook {
-            hook_action_id,
-            hook_binding_ids,
-            ..
-        } => {
-            validate_hook_binding_ids(hook_binding_ids)?;
-            insert_pending_action_id(ids, hook_action_id)
-        }
-        ToolExecutionState::DirectPending { call } => {
-            insert_pending_action_id(ids, &call.action_id)
-        }
+    let actions = match &execution.state {
+        ToolExecutionState::Direct(pending) => vec![pending.action(turn_id)],
         ToolExecutionState::ProgramPending { execution } => {
             let actions = execution.pending_actions(turn_id);
             if actions.is_empty() {
@@ -219,44 +202,41 @@ fn collect_tool_execution_action_ids(
                     "pending program checkpoint must contain at least one operation".to_string(),
                 );
             }
-            for action in actions {
-                match action {
-                    Action::Hook {
-                        effect_id,
-                        hook_binding_ids,
-                        ..
-                    } => {
-                        validate_hook_binding_ids(&hook_binding_ids)?;
-                        insert_pending_action_id(ids, &effect_id)?;
-                    }
-                    Action::RuntimeBuiltinTool { effect_id, .. }
-                    | Action::ProvidedTool { effect_id, .. } => {
-                        insert_pending_action_id(ids, &effect_id)?;
-                    }
-                    Action::Completion { .. } => {
-                        return Err(
-                            "pending program checkpoint cannot contain a completion action"
-                                .to_string(),
-                        );
-                    }
-                    Action::Approval { effect_id, .. } => {
-                        insert_pending_action_id(ids, &effect_id)?;
-                    }
-                    Action::Filesystem { .. } => {
-                        return Err(
-                            "pending program checkpoint cannot contain a filesystem action"
-                                .to_string(),
-                        );
-                    }
-                }
-            }
-            Ok(())
+            actions
         }
         ToolExecutionState::AwaitingLargeOutputWrite { action_id, .. } => {
-            insert_pending_action_id(ids, action_id)
+            return insert_pending_action_id(ids, action_id);
         }
-        ToolExecutionState::Completed { .. } => Ok(()),
+        ToolExecutionState::Completed { .. } => return Ok(()),
+    };
+    for action in actions {
+        match action {
+            Action::Hook {
+                effect_id,
+                hook_binding_ids,
+                ..
+            } => {
+                validate_hook_binding_ids(&hook_binding_ids)?;
+                insert_pending_action_id(ids, &effect_id)?;
+            }
+            Action::RuntimeBuiltinTool { effect_id, .. }
+            | Action::ProvidedTool { effect_id, .. }
+            | Action::Approval { effect_id, .. } => {
+                insert_pending_action_id(ids, &effect_id)?;
+            }
+            Action::Completion { .. } => {
+                return Err(
+                    "pending tool checkpoint cannot contain a completion action".to_string()
+                );
+            }
+            Action::Filesystem { .. } => {
+                return Err(
+                    "pending tool checkpoint cannot contain a filesystem action".to_string()
+                );
+            }
+        }
     }
+    Ok(())
 }
 
 fn insert_pending_action_id(ids: &mut HashSet<String>, id: &str) -> Result<(), String> {

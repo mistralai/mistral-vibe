@@ -82,8 +82,8 @@ async def fetch_managed_config(base_url: str, api_key: str) -> ManagedConfigResu
 
     Transient failures (network errors, 5xx, 429) are retried with exponential
     backoff. On any failure the returned result carries an ``error`` message and
-    no config, so the admin layer stays empty and a fetch problem has no impact
-    on the client.
+    no config: the caller keeps what the admin layer already holds (the cached
+    copy, at a session start), and a fetch problem never stops the client.
     """
     url = f"{base_url.rstrip('/')}{MANAGED_CONFIG_PATH}"
     headers = {"Authorization": f"Bearer {api_key}"}

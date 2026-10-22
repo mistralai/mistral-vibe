@@ -53,9 +53,9 @@ fn notification_replay_is_bounded_without_losing_pending_delivery() {
     let turn_id = "notification-retention";
     let first = runtime.start_turn(turn_id, "collect results");
     let notifications = [
-        process_notification("old", "process-old", "old result"),
-        process_notification("middle", "process-middle", "middle result"),
-        process_notification("recent", "process-recent", "recent result"),
+        subagent_notification("old", "researcher", "old result"),
+        subagent_notification("middle", "researcher", "middle result"),
+        subagent_notification("recent", "researcher", "recent result"),
     ];
     for notification in &notifications {
         runtime.receive_notification(turn_id, notification, &[&first]);
@@ -106,6 +106,50 @@ fn notification_replay_is_bounded_without_losing_pending_delivery() {
         ],
     );
     runtime.finish_turn_with_text(turn_id, &third, "done");
+}
+
+/// *Prepare*: A delivered background-process notification and a restored received-only ID.
+/// *Do*: Retry the delivered ID, then restore a checkpoint that still lists the other ID.
+/// *Assert*: Delivery releases the process ID; a received entry from the checkpoint still suppresses.
+#[test]
+fn delivered_process_notification_ids_are_released_but_restored_ids_still_suppress() {
+    // Prepare
+    let turn_id = "process-notification-identity";
+    let mut runtime = SynchronousRuntime::new(config());
+    let first = runtime.start_turn(turn_id, "collect results");
+    let delivered = process_notification("delivered", "process-delivered", "build done");
+    let restored = process_notification("restored", "process-restored", "test done");
+    runtime.receive_notification(turn_id, &delivered, &[&first]);
+    let second = runtime
+        .apply(
+            text_completion(&first, "continue"),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(assistant_text_committed(turn_id, &first, "continue"))
+                .observe(notification_delivered(
+                    turn_id,
+                    observed_notification(&delivered),
+                )),
+        )
+        .only_action();
+    let released_checkpoint = runtime.checkpoint_value();
+    let mut checkpoint = released_checkpoint.clone();
+    checkpoint["notifications"]
+        .as_array_mut()
+        .expect("checkpoint notifications are an array")
+        .push(json!({"type": "received", "id": "restored"}));
+
+    // Do
+    runtime.receive_notification(turn_id, &delivered, &[&second]);
+    runtime.restore_checkpoint_value(checkpoint, config());
+    runtime.apply(restored.clone(), running(turn_id).keep(&second));
+
+    // Assert
+    assert_eq!(released_checkpoint["notifications"], json!([]));
+    assert_eq!(
+        runtime.checkpoint_value()["notifications"],
+        json!([{"type": "received", "id": "restored"}])
+    );
 }
 
 /// *Prepare*: An active Session with room for one pending notification.

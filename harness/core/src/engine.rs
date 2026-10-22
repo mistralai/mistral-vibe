@@ -200,7 +200,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::core::ImageDeliverySettings;
+    use crate::core::{ImageDeliverySettings, InputModality};
 
     fn config(task_id: &str) -> HarnessConfig {
         HarnessConfig {
@@ -221,6 +221,7 @@ mod tests {
                         recent_ids: 1000,
                     },
                     image_token_cost: ImageTokenCost::SerializedBytes,
+                    input_modalities: vec![InputModality::Text, InputModality::Image],
                 },
                 tools: ToolSettings {
                     max_wait_ms: 3_600_000,

@@ -7,6 +7,7 @@ where those features silently do nothing.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -180,3 +181,39 @@ async def test_a_disabled_skill_stays_listed_so_it_can_be_turned_back_on(
     )
 
     assert {s.name: s for s in restored.skills}["code-review"].enabled is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+async def test_a_skill_written_after_the_session_opened_is_picked_up_without_reload(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_session: AppServerSession,
+    tmp_path: Path,
+) -> None:
+    """Prepare an idle session, then write a second ``SKILL.md`` into the workspace.
+
+    Do nothing else.
+
+    Assert ``skills/list`` soon reports it. The session follows its skill
+    directories, so a newly authored skill is invocable without ``/reload``.
+    """
+    _write_skill(tmp_path, "release-notes", "Draft release notes.", "Group by theme.")
+
+    session_id = backend_contract_session.state.session.id
+    for attempt in range(100):
+        # The watch starts after the open response, so a write landing first
+        # is only seen on the next save; re-saving is what an author does.
+        if attempt % 10 == 9:
+            _write_skill(
+                tmp_path, "release-notes", "Draft release notes.", "Group by theme."
+            )
+        listed = validate_wire(
+            SkillsListResponse,
+            await backend_contract_connection.client.request(
+                "skills/list", SkillsListParams(session_id=session_id)
+            ),
+        )
+        if "release-notes" in {skill.name for skill in listed.skills}:
+            return
+        await asyncio.sleep(0.1)
+    pytest.fail("the new skill never reached skills/list")

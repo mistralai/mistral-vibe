@@ -38,7 +38,7 @@ pub(crate) fn estimate_model_content_tokens(
     image_delivery: ImageDeliveryMode,
     image_cost: ImageTokenCost,
 ) -> Result<u64, CoreError> {
-    let mut block = project_model_input_content(block, image_delivery);
+    let mut block = project_model_input_content(block, image_delivery).into_owned();
     if let Some(tokens) = budget_block(&mut block, image_cost) {
         return Ok(tokens);
     }

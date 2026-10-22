@@ -103,6 +103,7 @@ from mistralai_vibe_local_harness.vibe._local_actions import (
     ProvidedToolExecutorFactory,
 )
 from mistralai_vibe_local_harness.vibe._mcp_models import (
+    MCP_DISCOVERY_PENDING,
     MCPAuthorizationProvider,
     MCPAuthorizationRef,
     MCPAuthorizationRequired,
@@ -165,6 +166,7 @@ __all__ = [
     "CLASSIFICATION_EVENT_TYPE",
     "DEFAULT_SMART_APPROVE_MODEL",
     "INVALID_API_KEY_MESSAGE",
+    "MCP_DISCOVERY_PENDING",
     "SANDBOX_FAILURES",
     "SANDBOX_UNAVAILABLE_CODE",
     "AcceptOrRetryPostAgentHandler",

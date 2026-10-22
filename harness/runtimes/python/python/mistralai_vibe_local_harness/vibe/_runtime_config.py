@@ -383,6 +383,11 @@ class LocalRuntimeAdapterConfig:
     # them all. Per-tool decisions come from ``permission_resolver`` instead, and a
     # Host can override the mode per group via ``configure_provided_tool_executor``.
     provided_tool_mode: ToolApprovalMode = "allow"
+    # Subagent admission limits for the session's controller, resolved into
+    # ``SubagentLimits`` when the subagent configuration is built. ``None``
+    # keeps the Runtime default.
+    subagent_max_children: int | None = None
+    subagent_max_concurrent_turns: int | None = None
     # Host-bound per-call permission resolver: refines an ``ask`` call into allow/ask/deny
     # (main's Vibe rules — .env prompt, denylists, allowlist grants), named by a builtin's
     # name or a provided tool's full route. Under smart approve it runs first, and only
@@ -415,6 +420,13 @@ class LocalRuntimeAdapterConfig:
             and self.compaction_reasoning_limit_tokens < 1
         ):
             raise ValueError("compaction_reasoning_limit_tokens must be positive")
+        if self.subagent_max_children is not None and self.subagent_max_children < 1:
+            raise ValueError("subagent_max_children must be positive")
+        if (
+            self.subagent_max_concurrent_turns is not None
+            and self.subagent_max_concurrent_turns < 1
+        ):
+            raise ValueError("subagent_max_concurrent_turns must be positive")
         # ``sandbox`` decides where tools run; the workspace and the process
         # tools have to agree with it.
         if self.workspace.path_space != self.path_space:
@@ -601,6 +613,8 @@ _LOCAL_RUNTIME_ADAPTER_BEHAVIOR_FIELDS = frozenset({
     "bypass_approval",
     "tool_modes",
     "provided_tool_mode",
+    "subagent_max_children",
+    "subagent_max_concurrent_turns",
     "skills",
 })
 

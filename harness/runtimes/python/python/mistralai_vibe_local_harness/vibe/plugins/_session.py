@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import partial
 import logging
@@ -24,6 +24,7 @@ from mistralai_vibe_local_harness.session_protocol import (
     ResolvedPluginDefinition,
 )
 from mistralai_vibe_local_harness.vibe._errors import HarnessSessionError
+from mistralai_vibe_local_harness.vibe._permissions import PermissionResolver
 from mistralai_vibe_local_harness.vibe._storage import PluginLockEntryV1, PluginLockV1
 from mistralai_vibe_local_harness.vibe._subagents import DeclaredAgentTypeProfile
 from mistralai_vibe_local_harness.vibe.plugins._store import (
@@ -68,6 +69,13 @@ class SessionPluginProjection:
     # Runtime cannot execute.
     definitions: tuple[PluginContextDefinition, ...] = ()
     agent_profiles: tuple[DeclaredAgentTypeProfile, ...] = ()
+    # Keyed by agent type. A profile's ``tool_ceiling`` says which tools its child
+    # may run; this answers the per-call question for one of them (a command, a
+    # path), under the profile's own rules. A type with no entry keeps the
+    # parent's resolver.
+    agent_permission_resolvers: Mapping[str, PermissionResolver] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +199,10 @@ class SessionPluginBinding:
     @property
     def agent_profiles(self) -> tuple[DeclaredAgentTypeProfile, ...]:
         return self.projection.agent_profiles
+
+    @property
+    def agent_permission_resolvers(self) -> Mapping[str, PermissionResolver]:
+        return self.projection.agent_permission_resolvers
 
 
 def empty_plugin_binding() -> SessionPluginBinding:

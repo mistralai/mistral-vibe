@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import copy
 import tomllib
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vibe.core.config.fingerprint import create_dict_fingerprint
 from vibe.core.config.layer import ConfigLayer, RawConfig
 from vibe.core.config.layers._base import _internal_toml_document
 from vibe.core.config.types import LayerConfigSnapshot
+
+if TYPE_CHECKING:
+    from vibe.core.config.orchestrator import ConfigOrchestrator
 
 
 class AdminConfigLayer(ConfigLayer[RawConfig]):
@@ -15,8 +18,9 @@ class AdminConfigLayer(ConfigLayer[RawConfig]):
 
     Populated at runtime from the admin-managed config endpoint. Values it sets
     shadow every other layer in the merged config; that precedence is the whole
-    enforcement mechanism. Never persisted: data lives only for the session and
-    is refetched on next startup. Read-only from the patch path.
+    enforcement mechanism. The layer itself never persists: every session build
+    loads it from the managed-config cache, and a session start from the
+    endpoint's answer. Read-only from the patch path.
     """
 
     NAME = "admin"
@@ -49,3 +53,17 @@ class AdminConfigLayer(ConfigLayer[RawConfig]):
 
     def restore(self, data: dict[str, Any]) -> None:
         self._data = data
+
+
+def admin_layer(orchestrator: ConfigOrchestrator[Any]) -> AdminConfigLayer | None:
+    try:
+        layer = orchestrator.get_layer(AdminConfigLayer.NAME)
+    except KeyError:
+        return None
+    return layer if isinstance(layer, AdminConfigLayer) else None
+
+
+def enforced_keys(orchestrator: ConfigOrchestrator[Any]) -> list[str]:
+    """The keys the org config currently enforces; empty without an admin layer."""
+    layer = admin_layer(orchestrator)
+    return layer.enforced_keys if layer is not None else []

@@ -141,6 +141,20 @@ fn tables_split_headers_from_rows() {
 }
 
 #[test]
+fn tables_inside_list_items_keep_their_cells() {
+    let blocks = parse("- intro\n\n  | a | b |\n  | --- | --- |\n  | 1 | 2 |");
+    let Block::List { items, .. } = &blocks[0] else {
+        panic!("expected a list");
+    };
+    assert_eq!(text(&items[0].inline), "intro");
+    let Block::Table { headers, rows } = &items[0].children[0] else {
+        panic!("expected a nested table");
+    };
+    assert_eq!(text(&headers[1]), "b");
+    assert_eq!(text(&rows[0][0]), "1");
+}
+
+#[test]
 fn bare_urls_autolink_inside_paragraphs() {
     let blocks = parse("see https://example.com/x now");
     let Block::Paragraph(inline) = &blocks[0] else {

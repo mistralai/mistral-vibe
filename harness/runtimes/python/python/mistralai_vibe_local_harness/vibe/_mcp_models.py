@@ -219,6 +219,10 @@ class MCPToolGroup:
     tools: tuple[MCPToolDescriptor, ...]
 
 
+# The source error of a server a cached-only reconfigure did not contact.
+MCP_DISCOVERY_PENDING = "mcp_discovery_pending"
+
+
 @dataclass(frozen=True, slots=True)
 class MCPSourceState:
     name: str
@@ -332,6 +336,7 @@ class MCPTransportFactory(Protocol):
 
 
 __all__ = [
+    "MCP_DISCOVERY_PENDING",
     "JsonObject",
     "JsonSchema",
     "MCPAuthorizationProvider",

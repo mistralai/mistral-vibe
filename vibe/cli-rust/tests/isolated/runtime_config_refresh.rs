@@ -1,4 +1,4 @@
-//! Config changes reach the live UI: model window, caret blink and theme.
+//! Config changes reach the live UI: model window, caret blink, mouse capture and theme.
 
 use std::sync::{Arc, Mutex, MutexGuard, Once};
 
@@ -64,6 +64,23 @@ fn a_config_screen_write_turning_cursor_blink_off_steadies_the_caret() {
     let written = runtime(json!({"cursorBlink": true}), 600_000);
     model_picker::apply_event(&mut app, model_picker::Event::Written(written));
     assert!(!app.main_input_cursor_on());
+}
+
+#[test]
+fn a_config_screen_write_toggles_mouse_capture() {
+    let _guard = isolated();
+    let mut app = App::default();
+    assert!(app.session.startup_config.enable_mouse_capture);
+
+    app.commit_started();
+    let written = runtime(json!({"enableMouseCapture": false}), 600_000);
+    model_picker::apply_event(&mut app, model_picker::Event::Written(written));
+    assert!(!app.session.startup_config.enable_mouse_capture);
+
+    app.commit_started();
+    let written = runtime(json!({"enableMouseCapture": true}), 600_000);
+    model_picker::apply_event(&mut app, model_picker::Event::Written(written));
+    assert!(app.session.startup_config.enable_mouse_capture);
 }
 
 #[test]

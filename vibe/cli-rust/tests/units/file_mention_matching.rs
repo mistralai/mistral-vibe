@@ -79,6 +79,31 @@ fn matching_lists_immediate_children_of_a_path_prefix() {
     assert_eq!(found, vec!["@src/main.rs", "@src/util/"]);
 }
 
+fn tree_with_a_large_early_directory() -> BTreeMap<String, bool> {
+    let mut index = paths(&[
+        ("README.md", false),
+        ("data", true),
+        ("data/zz", true),
+        ("data/zz/last.txt", false),
+        ("zebra.txt", false),
+    ]);
+    // More entries than the fuzzy scan cap.
+    index.extend((0..40_000).map(|n| (format!("data/{n:05}.bin"), false)));
+    index
+}
+
+#[test]
+fn matching_lists_root_entries_sorted_after_a_large_directory() {
+    let found = matching(&tree_with_a_large_early_directory(), "", 100);
+    assert_eq!(found, vec!["@README.md", "@data/", "@zebra.txt"]);
+}
+
+#[test]
+fn matching_lists_children_sorted_after_a_large_sibling_tree() {
+    let found = matching(&tree_with_a_large_early_directory(), "data/zz/", 100);
+    assert_eq!(found, vec!["@data/zz/last.txt"]);
+}
+
 #[test]
 fn matching_falls_back_to_fuzzy_when_the_prefix_has_no_children() {
     let index = paths(&[("src/main.rs", false)]);

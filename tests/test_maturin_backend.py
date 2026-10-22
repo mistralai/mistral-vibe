@@ -216,6 +216,214 @@ def test_stage_rust_cli_finds_a_cross_target_build(
     assert bundled.read_bytes() == b"cross-rust-cli"
 
 
+ALSA_PROBE = ["pkg-config", "--exists", "alsa"]
+PKGCONF_PROBE = ["pkgconf", "--exists", "alsa"]
+
+
+def _stage_rust_cli_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    platform: str,
+    flags: str,
+    probes: dict[str, int],
+    build_target: str | None = None,
+    pkg_config: str | None = None,
+) -> list[list[str]]:
+    backend = _load_backend(monkeypatch)
+    project = tmp_path / "project"
+    manifest = project / "vibe/cli-rust/Cargo.toml"
+    target = project / ".native-build/vibe-rs-target"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("[package]\nname='vibe-rs'\n")
+    commands: list[list[str]] = []
+
+    def run(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        commands.append(command)
+        if command[0] != "cargo":
+            if command[0] not in probes:
+                raise FileNotFoundError(command[0])
+            return subprocess.CompletedProcess(command, probes[command[0]])
+        triple = backend._cargo_target_triple(command) or build_target
+        built = (target / triple if triple else target) / "release" / backend._TUI_NAME
+        built.parent.mkdir(parents=True)
+        built.write_bytes(b"rust-cli")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(backend.sys, "platform", platform)
+    monkeypatch.setattr(backend, "_PROJECT_ROOT", project)
+    monkeypatch.setattr(backend, "_TUI_MANIFEST", manifest)
+    monkeypatch.setattr(backend, "_TUI_TARGET", target)
+    monkeypatch.setattr(backend, "_BUNDLED_TUI", project / "vibe/_bin/vibe-rs")
+    monkeypatch.setattr(backend.subprocess, "run", run)
+    monkeypatch.setenv("CARGO_BUILD_FLAGS", flags)
+    if build_target is None:
+        monkeypatch.delenv("CARGO_BUILD_TARGET", raising=False)
+    else:
+        monkeypatch.setenv("CARGO_BUILD_TARGET", build_target)
+    if pkg_config is None:
+        monkeypatch.delenv("PKG_CONFIG", raising=False)
+    else:
+        monkeypatch.setenv("PKG_CONFIG", pkg_config)
+
+    backend._stage_rust_cli()
+
+    return commands
+
+
+def _assert_voice_disabled_warning(capsys: pytest.CaptureFixture[str]) -> None:
+    warning = capsys.readouterr().err
+    assert "without voice mode" in warning
+    assert "libasound2-dev" in warning
+    assert "alsa-lib-devel" in warning
+
+
+@pytest.mark.parametrize("flags", ["", "--jobs 2", "--frozen"])
+def test_linux_build_without_alsa_disables_voice_and_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    flags: str,
+) -> None:
+    commands = _stage_rust_cli_commands(
+        monkeypatch, tmp_path, platform="linux", flags=flags, probes={"pkg-config": 1}
+    )
+
+    probe, cargo = commands
+    assert probe == ALSA_PROBE
+    assert cargo[0] == "cargo"
+    assert cargo[-1] == "--no-default-features"
+    assert cargo[len(cargo) - 1 - len(flags.split()) : -1] == flags.split()
+    _assert_voice_disabled_warning(capsys)
+
+
+def test_linux_build_without_pkg_config_or_pkgconf_disables_voice(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    commands = _stage_rust_cli_commands(
+        monkeypatch, tmp_path, platform="linux", flags="", probes={}
+    )
+
+    *probes, cargo = commands
+    assert probes == [ALSA_PROBE, PKGCONF_PROBE]
+    assert cargo[-1] == "--no-default-features"
+    _assert_voice_disabled_warning(capsys)
+
+
+def test_linux_build_falls_back_to_pkgconf(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    commands = _stage_rust_cli_commands(
+        monkeypatch, tmp_path, platform="linux", flags="", probes={"pkgconf": 0}
+    )
+
+    *probes, cargo = commands
+    assert probes == [ALSA_PROBE, PKGCONF_PROBE]
+    assert "--no-default-features" not in cargo
+    assert capsys.readouterr().err == ""
+
+
+def test_linux_build_probes_alsa_with_pkg_config_override_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    override = "/opt/cross/bin/pkg-config"
+    commands = _stage_rust_cli_commands(
+        monkeypatch,
+        tmp_path,
+        platform="linux",
+        flags="",
+        probes={override: 1, "pkg-config": 0, "pkgconf": 0},
+        pkg_config=override,
+    )
+
+    probe, cargo = commands
+    assert probe == [override, "--exists", "alsa"]
+    assert cargo[-1] == "--no-default-features"
+    _assert_voice_disabled_warning(capsys)
+
+
+def test_linux_build_with_alsa_keeps_voice(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    commands = _stage_rust_cli_commands(
+        monkeypatch,
+        tmp_path,
+        platform="linux",
+        flags="--jobs 2",
+        probes={"pkg-config": 0},
+    )
+
+    probe, cargo = commands
+    assert probe == ALSA_PROBE
+    assert cargo[-2:] == ["--jobs", "2"]
+    assert "--no-default-features" not in cargo
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        "--features voice",
+        "--features=voice",
+        "-F voice",
+        "-Fvoice",
+        "--all-features",
+        "--no-default-features",
+    ],
+)
+def test_linux_build_respects_explicit_cargo_features(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    flags: str,
+) -> None:
+    commands = _stage_rust_cli_commands(
+        monkeypatch, tmp_path, platform="linux", flags=flags, probes={"pkg-config": 1}
+    )
+
+    [cargo] = commands
+    assert cargo[-len(flags.split()) :] == flags.split()
+    assert cargo.count("--no-default-features") == flags.count("--no-default-features")
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(
+    ("platform", "flags", "build_target"),
+    [
+        ("darwin", "", None),
+        ("win32", "", None),
+        ("linux", "--target x86_64-apple-darwin", None),
+        ("linux", "", "x86_64-pc-windows-msvc"),
+        ("linux", "--target aarch64-linux-android", None),
+        ("linux", "--target aarch64-unknown-linux-gnu", None),
+        ("linux", "", "x86_64-unknown-linux-gnu"),
+        ("darwin", "--target=aarch64-unknown-linux-gnu", None),
+    ],
+)
+def test_non_native_linux_build_keeps_voice_without_probing_alsa(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    platform: str,
+    flags: str,
+    build_target: str | None,
+) -> None:
+    commands = _stage_rust_cli_commands(
+        monkeypatch,
+        tmp_path,
+        platform=platform,
+        flags=flags,
+        probes={"pkg-config": 1},
+        build_target=build_target,
+    )
+
+    [cargo] = commands
+    assert "--no-default-features" not in cargo
+    assert capsys.readouterr().err == ""
+
+
 def test_stage_rust_cli_skip_preserves_existing_binary(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

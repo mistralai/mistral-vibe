@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 import logging
 from pathlib import Path
 from typing import Literal, cast
@@ -21,6 +21,7 @@ from mistralai_vibe_local_harness.vibe._connector_models import (
     ResolvedConnectorSelection,
 )
 from mistralai_vibe_local_harness.vibe._mcp_models import ResolvedMCPCatalog
+from mistralai_vibe_local_harness.vibe._permissions import PermissionResolver
 from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
 from mistralai_vibe_local_harness.vibe._storage import sha256_json
 from mistralai_vibe_local_harness.vibe._subagents._host import (
@@ -34,6 +35,7 @@ from mistralai_vibe_local_harness.vibe._subagents._models import (
     ResolvedSourceGrant,
     ResolvedSubagentPolicyCeiling,
     ResolvedToolGrant,
+    SubagentLimits,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,26 @@ class ResolvedSubagentConfiguration:
     root_config: RustHarnessConfig
     policy_ceiling: ResolvedSubagentPolicyCeiling
     bindings: dict[str | None, LocalChildSessionBinding]
+    # Admission limits for the session's controller; the adapter config sets
+    # them, and unset fields keep the ``SubagentLimits`` defaults.
+    limits: SubagentLimits = field(default_factory=SubagentLimits)
+
+
+def _adapter_limits(adapter: LocalRuntimeAdapterConfig) -> SubagentLimits:
+    """The adapter's subagent admission limits, or the Runtime defaults."""
+    defaults = SubagentLimits()
+    return SubagentLimits(
+        max_children=(
+            adapter.subagent_max_children
+            if adapter.subagent_max_children is not None
+            else defaults.max_children
+        ),
+        max_concurrent_turns=(
+            adapter.subagent_max_concurrent_turns
+            if adapter.subagent_max_concurrent_turns is not None
+            else defaults.max_concurrent_turns
+        ),
+    )
 
 
 def resolve_subagent_configuration(
@@ -111,7 +133,10 @@ def resolve_subagent_configuration(
     # (``_runtime_config`` and the promotion path), which is where a name with
     # no binding actually has to disappear.
     return ResolvedSubagentConfiguration(
-        root_config=config, policy_ceiling=policy, bindings=bindings
+        root_config=config,
+        policy_ceiling=policy,
+        bindings=bindings,
+        limits=_adapter_limits(adapter),
     )
 
 
@@ -119,6 +144,7 @@ def resolve_declared_agent_types(
     configuration: ResolvedSubagentConfiguration,
     adapter: LocalRuntimeAdapterConfig,
     profiles: Sequence[DeclaredAgentTypeProfile],
+    permission_resolvers: Mapping[str, PermissionResolver] | None = None,
 ) -> ResolvedSubagentConfiguration:
     # The ceiling is reused verbatim, digest included: a declared profile is a point
     # inside the envelope the Host resolved, so a session can extend its own table
@@ -143,12 +169,17 @@ def resolve_declared_agent_types(
             )
             continue
         bindings[profile.agent_type] = _declared_binding(
-            configuration.root_config, adapter, profile, policy_digest=policy_digest
+            configuration.root_config,
+            adapter,
+            profile,
+            policy_digest=policy_digest,
+            permission_resolver=(permission_resolvers or {}).get(profile.agent_type),
         )
     return ResolvedSubagentConfiguration(
         root_config=configuration.root_config,
         policy_ceiling=configuration.policy_ceiling,
         bindings=bindings,
+        limits=configuration.limits,
     )
 
 
@@ -158,6 +189,7 @@ def _declared_binding(
     profile: DeclaredAgentTypeProfile,
     *,
     policy_digest: str,
+    permission_resolver: PermissionResolver | None,
 ) -> LocalChildSessionBinding:
     child_config = _child_core_config(
         config,
@@ -167,10 +199,19 @@ def _declared_binding(
             else config.system_instructions
         ),
     )
+    # Filter both what Core advertises and what the Runtime answers ``skill.read`` with.
     child_config = child_config.model_copy(
         update={
             "capabilities": child_config.capabilities.model_copy(
-                update={"tool_groups": []}, deep=True
+                update={
+                    "tool_groups": [],
+                    "skills": [
+                        skill
+                        for skill in child_config.capabilities.skills
+                        if profile.allows_skill(skill.name)
+                    ],
+                },
+                deep=True,
             ),
             "plugins": [],
         },
@@ -179,10 +220,23 @@ def _declared_binding(
     child_adapter = replace(
         adapter,
         env=dict(adapter.env),
+        skills={
+            name: content
+            for name, content in adapter.skills.items()
+            if profile.allows_skill(name)
+        },
         tool_modes={
             name: _narrow(mode, profile.tool_ceiling.get(name, "deny"))
             for name, mode in adapter.tool_modes.items()
         },
+        # The ceiling decides whether a tool may run; this decides each call to it
+        # under the profile's rules. A port, not behavior: the template digest is
+        # unchanged by it, as by the parent's resolver.
+        permission_resolver=(
+            adapter.permission_resolver
+            if permission_resolver is None
+            else permission_resolver
+        ),
     )
     return LocalChildSessionBinding(
         template_digest=_binding_digest(

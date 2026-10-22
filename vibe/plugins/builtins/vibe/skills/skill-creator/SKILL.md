@@ -107,7 +107,7 @@ them with `read_file` on demand.
 ## Applying changes
 
 Writing under a skills directory goes through the normal `write_file` / `edit`
-permission prompts — there is no separate proposal step. After changes, tell the
-user they can run `/reload` to pick up the new or edited skill without
-restarting. Keep the final summary brief; do not paste full file contents unless
+permission prompts — there is no separate proposal step. A running session
+picks up the new or edited skill on its own; if it does not (sandboxed session,
+or `file_watcher_for_autocomplete` off), tell the user to run `/reload`. Keep the final summary brief; do not paste full file contents unless
 the user asks.

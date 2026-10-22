@@ -1,5 +1,7 @@
 //! Trust-folder keyboard navigation behavior.
 
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
@@ -66,5 +68,22 @@ fn deciding_clears_the_trust_selection() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
     ));
     assert!(app.selection.region.is_none());
+    assert!(!app.trust.open);
+}
+
+#[test]
+fn decisions_wait_for_the_grace_period() {
+    let mut app = App::default();
+    app.trust.open = true;
+    app.trust.options = vec![(TRUST_CWD, "Trust folder".to_owned())];
+    app.trust.accepts_at = Some(Instant::now() + Duration::from_secs(3600));
+
+    for code in [KeyCode::Enter, KeyCode::Char('1')] {
+        trust_folders::handle_key(&mut app, KeyEvent::new(code, KeyModifiers::NONE));
+        assert!(app.trust.open);
+    }
+
+    app.trust.accepts_at = Some(Instant::now());
+    trust_folders::handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(!app.trust.open);
 }

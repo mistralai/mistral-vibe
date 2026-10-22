@@ -15,7 +15,7 @@ def build_test_app_config(
     *,
     voice_mode_enabled: bool = False,
     narrator_enabled: bool = False,
-    show_thinking_nodes: bool = False,
+    show_thinking_nodes: bool = True,
     show_subagent_status_list: bool = True,
 ) -> ConfigView:
     return ConfigView(

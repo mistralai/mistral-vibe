@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from functools import cached_property, lru_cache
 from itertools import product
-from typing import NamedTuple, cast
+from typing import Any, NamedTuple, cast
 import unicodedata
 
 import pyte
@@ -19,6 +19,8 @@ _SGR_RESET_DIM = {0, 22}
 _SGR_EXTENDED_COLOR = {38, 48, 58}
 _SGR_TRUECOLOR = 2
 _VS16 = "\ufe0f"
+# pyte stores private DECSET modes shifted left by 5; 1000 is X11 mouse reporting.
+_MOUSE_TRACKING = 1000 << 5
 # Marks pyte treats as unprintable and drops, including the keycap U+20E3.
 _EMOJI_MARK_CATEGORIES = {"Mn", "Me", "Cf"}
 
@@ -82,6 +84,10 @@ class Snapshot:
     title: str = ""
     cursor: tuple[int, int] | None = None
     """Terminal cursor as ``(row, column)``, where IME and dead-key previews draw."""
+    mouse_tracking: bool = False
+    """Whether the client asked the terminal for mouse reports (DECSET 1000)."""
+    mouse_tracking_seen: bool = False
+    """Whether mouse reports were turned on at any point up to this snapshot."""
 
     @cached_property
     def rows(self) -> tuple[str, ...]:
@@ -133,6 +139,12 @@ def _cell(character: pyte.screens.Char) -> Cell:
 
 class _TrackedScreen(pyte.Screen):
     """A pyte screen whose characters retain dim and OSC 8 state."""
+
+    mouse_tracking_seen: bool = False
+
+    def set_mode(self, *modes: int, **kwargs: Any) -> None:
+        super().set_mode(*modes, **kwargs)
+        self.mouse_tracking_seen |= _MOUSE_TRACKING in self.mode
 
     @property
     def default_char(self) -> pyte.screens.Char:
@@ -269,7 +281,16 @@ class Terminal:
             for y in range(self._rows)
         )
         cursor = (screen.cursor.y, screen.cursor.x)
-        return Snapshot(label, cells, clipboard, screen.title, cursor)
+        mouse_tracking = _MOUSE_TRACKING in screen.mode
+        return Snapshot(
+            label,
+            cells,
+            clipboard,
+            screen.title,
+            cursor,
+            mouse_tracking,
+            screen.mouse_tracking_seen,
+        )
 
 
 def _osc8_prefix_length(data: bytearray) -> int:

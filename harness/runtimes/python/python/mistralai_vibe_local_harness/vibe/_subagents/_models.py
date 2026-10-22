@@ -18,6 +18,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustHarnessNotification,
     RustRuntimeBuiltinToolName,
 )
+from mistralai_vibe_local_harness.vibe._mcp_models import _pattern_matches
 
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
@@ -494,7 +495,15 @@ class DeclaredAgentTypeProfile(SubagentModel):
     tool_ceiling: dict[RustRuntimeBuiltinToolName, Literal["allow", "ask", "deny"]] = (
         Field(default_factory=dict)
     )
+    # Like the Host's skill config: enabled wins, an invalid ``re:`` is skipped.
+    enabled_skills: list[str] = Field(default_factory=list)
+    disabled_skills: list[str] = Field(default_factory=list)
     authority_digest: str = Field(min_length=1)
+
+    def allows_skill(self, name: str) -> bool:
+        if self.enabled_skills:
+            return _pattern_matches(name, tuple(self.enabled_skills))
+        return not _pattern_matches(name, tuple(self.disabled_skills))
 
     @field_validator("agent_type", "description", "profile_path")
     @classmethod
@@ -506,8 +515,8 @@ class DeclaredAgentTypeProfile(SubagentModel):
 
 class SubagentLimits(SubagentModel):
     max_depth: Literal[1] = 1
-    max_children: int = Field(default=8, gt=0)
-    max_concurrent_turns: int = Field(default=4, gt=0)
+    max_children: int = Field(default=32, gt=0)
+    max_concurrent_turns: int = Field(default=32, gt=0)
     max_lifetime_names: int = Field(default=128, gt=0)
 
 

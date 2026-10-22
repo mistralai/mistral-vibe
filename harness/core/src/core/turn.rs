@@ -139,7 +139,14 @@ pub(crate) fn dispatch(
         TurnEvent::Interrupt {
             expected_turn_id,
             reason,
-        } if state.active().is_some() => interrupt(state, expected_turn_id, reason, determinism),
+        } if state.active().is_some() => abandon_turn(
+            state,
+            expected_turn_id,
+            TurnAbandonment::Interrupt {
+                reason: reason.filter(|reason| !reason.trim().is_empty()),
+            },
+            determinism,
+        ),
         TurnEvent::Interrupt {
             expected_turn_id, ..
         } if state.is_idempotent_late_interrupt(&expected_turn_id) => Ok(Outcome::quiet()),
@@ -149,9 +156,12 @@ pub(crate) fn dispatch(
             expected_turn_id,
             action_id,
             error,
-        } if state.active().is_some() => {
-            fail_turn(state, expected_turn_id, action_id, error, determinism)
-        }
+        } if state.active().is_some() => abandon_turn(
+            state,
+            expected_turn_id,
+            TurnAbandonment::RuntimeFailure { action_id, error },
+            determinism,
+        ),
         TurnEvent::FailTurn { .. } => Err(invalid_state(state)),
 
         TurnEvent::Completion { action_id, result } => {
@@ -211,6 +221,7 @@ fn finish_pending_completion(
             let candidate = parse_completion_result(result)?;
             let tools = state.resolved_tools.top_level_tools().to_vec();
             let token_threshold = state.config.settings.context.compaction.token_threshold();
+            let image_delivery = state.config.settings.context.effective_image_delivery();
             let resolution = finish_compaction(
                 &mut state.context,
                 &mut state.last_reported_context_tokens,
@@ -219,7 +230,7 @@ fn finish_pending_completion(
                 &tools,
                 CompactionBudget {
                     token_threshold,
-                    image_delivery: state.config.settings.context.image_delivery.agent,
+                    image_delivery: image_delivery.agent,
                     image_cost: state.config.settings.context.image_token_cost,
                 },
                 state.config.settings.context.compaction_fallback,
@@ -412,10 +423,11 @@ fn model_input_reaches_compaction_threshold(state: &HarnessState) -> Result<bool
     // The serialized-bytes estimate under-counts for tokenizers that pack
     // more tokens per byte than the fixed ratio assumes, so trust whichever
     // is larger: the estimate or the provider's last reported context size.
+    let image_delivery = state.config.settings.context.effective_image_delivery();
     let estimate = estimate_model_input_tokens(
         state.context.messages(),
         state.resolved_tools.top_level_tools(),
-        state.config.settings.context.image_delivery.agent,
+        image_delivery.agent,
         state.config.settings.context.image_token_cost,
     )?;
     let reported = state.last_reported_context_tokens.unwrap_or(0);
@@ -431,6 +443,7 @@ fn start_automatic_compaction(
     let generated_system = state.generated_system_message();
     let tools = state.resolved_tools.top_level_tools().to_vec();
     let token_threshold = state.config.settings.context.compaction.token_threshold();
+    let image_delivery = state.config.settings.context.effective_image_delivery();
     start_compaction(
         &mut state.context,
         &mut state.compaction_count,
@@ -441,12 +454,12 @@ fn start_automatic_compaction(
         CompactionBudgets {
             request: CompactionBudget {
                 token_threshold,
-                image_delivery: state.config.settings.context.image_delivery.compaction,
+                image_delivery: image_delivery.compaction,
                 image_cost: state.config.settings.context.image_token_cost,
             },
             replacement: CompactionBudget {
                 token_threshold,
-                image_delivery: state.config.settings.context.image_delivery.agent,
+                image_delivery: image_delivery.agent,
                 image_cost: state.config.settings.context.image_token_cost,
             },
         },
@@ -502,6 +515,7 @@ fn start_manual_compaction(
     let generated_system = state.generated_system_message();
     let tools = state.resolved_tools.top_level_tools().to_vec();
     let token_threshold = state.config.settings.context.compaction.token_threshold();
+    let image_delivery = state.config.settings.context.effective_image_delivery();
     match start_compaction(
         &mut state.context,
         &mut state.compaction_count,
@@ -512,12 +526,12 @@ fn start_manual_compaction(
         CompactionBudgets {
             request: CompactionBudget {
                 token_threshold,
-                image_delivery: state.config.settings.context.image_delivery.compaction,
+                image_delivery: image_delivery.compaction,
                 image_cost: state.config.settings.context.image_token_cost,
             },
             replacement: CompactionBudget {
                 token_threshold,
-                image_delivery: state.config.settings.context.image_delivery.agent,
+                image_delivery: image_delivery.agent,
                 image_cost: state.config.settings.context.image_token_cost,
             },
         },
@@ -1107,88 +1121,55 @@ fn commit_turn(
     Ok(outcome)
 }
 
-fn interrupt(
-    state: &mut HarnessState,
-    expected_turn_id: String,
-    reason: Option<String>,
-    determinism: DeterminismContext,
-) -> Result<Outcome, CoreError> {
-    let mut outcome = Outcome::quiet();
-    validate_turn_id(&expected_turn_id, "interrupt expected_turn_id")?;
-    require_active_turn_id(state, &expected_turn_id, "interrupt")?;
-    let abandoned_action_ids = state.pending_action_ids();
-    let interruption_message = reason
-        .as_deref()
-        .filter(|reason| !reason.trim().is_empty())
-        .unwrap_or("Interrupted by the runtime before completion.");
-    let resolution = state
-        .active()
-        .ok_or_else(|| {
-            CoreError::invalid_command("cannot interrupt a session without an active turn")
-        })?
-        .phase
-        .interrupt(&state.tool_context()?, interruption_message, determinism)?;
-    match resolution {
-        InterruptionResolution::Quiet => {}
-        InterruptionResolution::DiscardCompletion { action_id } => {
-            outcome.observe(Observation::AgentCompletionCandidateDiscarded {
-                turn_id: expected_turn_id.clone(),
-                action_id,
-                cause: CandidateDiscardCause::Interrupt,
-            });
-        }
-        InterruptionResolution::CommitToolMessages { messages } => {
-            state
-                .context
-                .extend_current_turn(messages.into_iter().map(StoredMessage::visible));
-        }
-    }
-    let reason = reason.filter(|reason| !reason.trim().is_empty());
-    outcome.observe(Observation::TurnInterrupted {
-        turn_id: expected_turn_id.clone(),
-        reason: reason.clone(),
-        output: state.context.latest_assistant_content_in_current_turn(),
-    });
-    let turn_id = state.finish_turn(TurnOutcome::Interrupted {
-        reason: reason.clone(),
-    })?;
-    outcome.complete_turn(turn_id, TurnOutcome::Interrupted { reason });
-    for action_id in abandoned_action_ids {
-        outcome.observe(Observation::ActionAbandoned {
-            turn_id: expected_turn_id.clone(),
-            action_id,
-            cause: ActionAbandonedCause::Interrupt,
-        });
-    }
-    Ok(outcome)
+/// Why the Runtime closes the active turn before the turn completes.
+enum TurnAbandonment {
+    /// `reason` is `None` or has non-blank text.
+    Interrupt { reason: Option<String> },
+    RuntimeFailure {
+        action_id: String,
+        error: ProtocolError,
+    },
 }
 
-fn fail_turn(
+fn abandon_turn(
     state: &mut HarnessState,
     expected_turn_id: String,
-    action_id: String,
-    error: ProtocolError,
+    abandonment: TurnAbandonment,
     determinism: DeterminismContext,
 ) -> Result<Outcome, CoreError> {
-    validate_turn_id(&expected_turn_id, "fail_turn expected_turn_id")?;
-    require_active_turn_id(state, &expected_turn_id, "fail_turn")?;
-    if !state
-        .pending_action_ids()
-        .iter()
-        .any(|pending_action_id| pending_action_id == &action_id)
+    let (command, turn_id_label, message, discard_cause, abandoned_cause) = match &abandonment {
+        TurnAbandonment::Interrupt { reason } => (
+            "interrupt",
+            "interrupt expected_turn_id",
+            reason
+                .as_deref()
+                .unwrap_or("Interrupted by the runtime before completion."),
+            CandidateDiscardCause::Interrupt,
+            ActionAbandonedCause::Interrupt,
+        ),
+        TurnAbandonment::RuntimeFailure { error, .. } => (
+            "fail_turn",
+            "fail_turn expected_turn_id",
+            error.message.as_str(),
+            CandidateDiscardCause::Failure {
+                error: error.clone(),
+            },
+            ActionAbandonedCause::RuntimeFailure,
+        ),
+    };
+    validate_turn_id(&expected_turn_id, turn_id_label)?;
+    require_active_turn_id(state, &expected_turn_id, command)?;
+    let pending_ids = state.pending_action_ids();
+    if let TurnAbandonment::RuntimeFailure { action_id, .. } = &abandonment
+        && !pending_ids.contains(action_id)
     {
-        return Err(CoreError::invalid_correlation(
-            &action_id,
-            state.pending_action_ids(),
-        ));
+        return Err(CoreError::invalid_correlation(action_id, pending_ids));
     }
-
-    let abandoned_action_ids = state.pending_action_ids();
-    let resolution = state
-        .active()
-        .ok_or_else(|| CoreError::invalid_command("cannot fail a session without an active turn"))?
-        .phase
-        .interrupt(&state.tool_context()?, &error.message, determinism)?;
+    let resolution =
+        state
+            .require_active()?
+            .phase
+            .interrupt(&state.tool_context()?, message, determinism)?;
     let mut outcome = Outcome::quiet();
     match resolution {
         InterruptionResolution::Quiet => {}
@@ -1196,9 +1177,7 @@ fn fail_turn(
             outcome.observe(Observation::AgentCompletionCandidateDiscarded {
                 turn_id: expected_turn_id.clone(),
                 action_id,
-                cause: CandidateDiscardCause::Failure {
-                    error: error.clone(),
-                },
+                cause: discard_cause,
             });
         }
         InterruptionResolution::CommitToolMessages { messages } => {
@@ -1207,19 +1186,31 @@ fn fail_turn(
                 .extend_current_turn(messages.into_iter().map(StoredMessage::visible));
         }
     }
-    outcome.observe(Observation::TurnFailed {
-        turn_id: expected_turn_id.clone(),
-        error: error.clone(),
-    });
-    let turn_id = state.finish_turn(TurnOutcome::Failed {
-        error: error.clone(),
-    })?;
-    outcome.complete_turn(turn_id, TurnOutcome::Failed { error });
-    for action_id in abandoned_action_ids {
+    // The interrupted output is read after the tool messages are committed.
+    let (terminal, turn_outcome) = match abandonment {
+        TurnAbandonment::Interrupt { reason } => (
+            Observation::TurnInterrupted {
+                turn_id: expected_turn_id.clone(),
+                reason: reason.clone(),
+                output: state.context.latest_assistant_content_in_current_turn(),
+            },
+            TurnOutcome::Interrupted { reason },
+        ),
+        TurnAbandonment::RuntimeFailure { error, .. } => (
+            Observation::TurnFailed {
+                turn_id: expected_turn_id.clone(),
+                error: error.clone(),
+            },
+            TurnOutcome::Failed { error },
+        ),
+    };
+    outcome.observe(terminal);
+    outcome.complete_turn(state.finish_turn(turn_outcome.clone())?, turn_outcome);
+    for action_id in pending_ids {
         outcome.observe(Observation::ActionAbandoned {
             turn_id: expected_turn_id.clone(),
             action_id,
-            cause: ActionAbandonedCause::RuntimeFailure,
+            cause: abandoned_cause,
         });
     }
     Ok(outcome)

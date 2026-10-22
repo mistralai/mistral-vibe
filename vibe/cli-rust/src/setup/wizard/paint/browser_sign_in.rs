@@ -27,11 +27,9 @@ const STEP_DONE_DETAILS: [&str; 3] = ["Browser opened", "Sign-in confirmed.", "S
 pub(super) const STEPS_HEIGHT: u16 = STEP_TITLES.len() as u16 * 4;
 /// The waiting-for-authentication message, painted as a gradient.
 const WAITING_FOR_AUTHENTICATION: &str = "Waiting for authentication...";
-/// The sign-in URL fallback prefix and the capitalized native-copy hint that
-/// follows the raw URL once the copy key revealed it.
+/// The sign-in URL fallback prefix that precedes the raw URL once the copy key revealed it.
 const URL_FALLBACK_PREFIX: &str =
     "If copying to the clipboard was not successful, copy the following URL:";
-const NATIVE_COPY_HINT: &str = "If paste fails, hold Shift (Option in iTerm2, Fn in Terminal.app) while selecting for native copy";
 
 /// The URL row is visible once the copy help delay passed, or right after a
 /// copy reveals it.
@@ -50,10 +48,11 @@ fn reveal_lines(state: &BrowserSignInState) -> Vec<String> {
     let Some(url) = state.sign_in_url.as_deref() else {
         return Vec::new();
     };
-    crate::utils::text::wrap_hard(
-        &format!("{URL_FALLBACK_PREFIX} {url}. {NATIVE_COPY_HINT}."),
-        68,
-    )
+    let mut hint = crate::clipboard::unverified_hint().to_owned();
+    if let Some(first) = hint.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    crate::utils::text::wrap_hard(&format!("{URL_FALLBACK_PREFIX} {url}. {hint}."), 68)
 }
 
 /// Draw the browser sign-in step tracker screen.

@@ -77,6 +77,9 @@ pub struct StartupConfig {
     pub disable_welcome_banner_animation: bool,
     /// Whether a mouse selection copies itself on release.
     pub autocopy_to_clipboard: bool,
+    /// Whether the TUI captures the mouse; older caches keep capturing.
+    #[serde(default = "default_enable_mouse_capture")]
+    pub enable_mouse_capture: bool,
     /// Main input blink preference; older caches keep the default blinking caret.
     #[serde(default = "default_cursor_blink")]
     pub cursor_blink: bool,
@@ -113,6 +116,7 @@ impl Default for StartupConfig {
             theme: "auto".into(),
             disable_welcome_banner_animation: false,
             autocopy_to_clipboard: true,
+            enable_mouse_capture: default_enable_mouse_capture(),
             cursor_blink: default_cursor_blink(),
             active_model: String::new(),
             active_model_display_name: String::new(),
@@ -130,6 +134,10 @@ impl Default for StartupConfig {
 }
 
 fn default_cursor_blink() -> bool {
+    true
+}
+
+fn default_enable_mouse_capture() -> bool {
     true
 }
 
@@ -220,6 +228,10 @@ impl StartupConfig {
                 .get("autocopyToClipboard")
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
+            enable_mouse_capture: config
+                .get("enableMouseCapture")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(default_enable_mouse_capture),
             cursor_blink: config
                 .get("cursorBlink")
                 .and_then(Value::as_bool)

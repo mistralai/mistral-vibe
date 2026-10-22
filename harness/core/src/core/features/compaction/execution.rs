@@ -6,6 +6,7 @@ use super::{
     CompactionProjectionFit, CompactionTrigger, NewestToolExchange, SummaryAcceptance,
     SummaryRejection, accept_summary, minimum_replacement_fits,
 };
+
 use crate::core::model_context::ModelContext;
 use crate::core::step_protocol::{Observation, Outcome, ToolDefinition};
 use crate::core::wire::completion::CompletionCandidate;

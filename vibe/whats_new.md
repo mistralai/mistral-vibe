@@ -1,4 +1,4 @@
-# What's new in v3.0.1
+# What's new in v3.0.2
 
 Vibe 3.0 is here: a brand-new terminal UI, and one agent harness across the CLI, VS Code and the browser.
 
@@ -18,5 +18,11 @@ Vibe 3.0 is here: a brand-new terminal UI, and one agent harness across the CLI,
 **Out with the old**
 
 - The Python TUI, the legacy harness and plan mode are gone. Your config, skills, agents, MCP servers and sessions carry over.
+
+**New in 3.0.2**
+
+- **Native terminal selection**: set `enable_mouse_capture = false` in `/config` to select and copy text with your terminal instead of Vibe
+- **Visible reasoning**: the model's reasoning now shows by default, as a collapsible "Thought" row
+- **More subagents**: up to 32 subagents can now be alive and running at once, configurable with `max_subagents` and `max_concurrent_subagents`
 
 Something off? Tell us on [GitHub](https://github.com/mistralai/mistral-vibe/issues).

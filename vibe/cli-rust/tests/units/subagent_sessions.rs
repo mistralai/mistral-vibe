@@ -158,7 +158,7 @@ fn batch_holds_children_until_the_batch_ends() {
         &[
             child("a", SessionStatus::Idle, 1),
             child("b", SessionStatus::Idle, 2),
-            child("c", SessionStatus::Failed, 3),
+            child("c", SessionStatus::Archived, 3),
         ],
         None,
     );
@@ -174,6 +174,46 @@ fn batch_holds_children_until_the_batch_ends() {
         None,
     );
     assert_eq!(ids(&rows), ["a", "b", "c"]);
+}
+
+#[test]
+fn only_stopped_children_leave_the_list_once_the_batch_ends() {
+    let mut known = HashSet::new();
+    let mut batch = HashSet::new();
+    active_batch(
+        &mut known,
+        &mut batch,
+        &[
+            child("a", SessionStatus::Running, 1),
+            child("b", SessionStatus::Running, 2),
+            child("c", SessionStatus::Running, 3),
+        ],
+        None,
+    );
+    // A stopped child stays listed while its batch still runs.
+    let rows = active_batch(
+        &mut known,
+        &mut batch,
+        &[
+            child("a", SessionStatus::Running, 1),
+            child("b", SessionStatus::Running, 2),
+            child("c", SessionStatus::Archived, 3),
+        ],
+        None,
+    );
+    assert_eq!(ids(&rows), ["a", "b", "c"]);
+    // The batch ends: failed and unknown children stay, the stopped one leaves.
+    let rows = active_batch(
+        &mut known,
+        &mut batch,
+        &[
+            child("a", SessionStatus::Failed, 1),
+            child("b", SessionStatus::Unknown, 2),
+            child("c", SessionStatus::Archived, 3),
+        ],
+        None,
+    );
+    assert_eq!(ids(&rows), ["a", "b"]);
 }
 
 #[test]

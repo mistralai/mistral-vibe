@@ -230,6 +230,8 @@ pub struct Session {
     pub resume_picker_shown: bool,
     /// `vibe.startup` properties held until the first frame is painted.
     pub startup_telemetry: Option<std::collections::BTreeMap<String, Value>>,
+    /// Telemetry queued before the session id exists, flushed by `set_session_id`.
+    pub held_telemetry: Vec<crate::telemetry::TelemetryEvent>,
     /// Whether the last turn was interrupted, so `/retry` can continue it.
     pub can_retry: bool,
     /// The active turn's latest assistant row.
@@ -877,6 +879,10 @@ impl App {
             let _ = session_tx.send(session_id.clone());
         }
         self.session.session_id = Some(session_id);
+        // Background emitters can queue before the handshake lands.
+        for event in self.session.held_telemetry.drain(..) {
+            crate::telemetry::enqueue(self.telemetry_tx.as_ref(), event.name, event.properties);
+        }
     }
 
     /// Transition status; entering `Generating` resets the spinner, re-entering keeps the original start.

@@ -88,11 +88,18 @@ fn entry_heights(app: &App, width: u16) -> Vec<usize> {
     entries
         .iter()
         .map(|entry| {
-            wrap_hard(&entry.label, cmd_w)
-                .len()
-                .max(wrap_hard(&entry.description, desc_w).len())
+            let (label_lines, desc_lines) = wrapped(entry, cmd_w, desc_w);
+            label_lines.len().max(desc_lines.len())
         })
         .collect()
+}
+
+/// Wrapped label and description rows of one entry, shared by scroll math and drawing.
+fn wrapped(entry: &CompletionEntry, cmd_w: usize, desc_w: usize) -> (Vec<String>, Vec<String>) {
+    (
+        wrap_hard(display_label(&entry.label), cmd_w),
+        wrap_hard(&entry.description, desc_w),
+    )
 }
 
 /// Flatten entries into rendered terminal rows, wrapping label and description.
@@ -105,8 +112,7 @@ fn build_lines(app: &App, width: u16) -> Vec<VisualLine> {
     let desc_w = (width as usize).saturating_sub(7 + cmd_w);
     let mut out: Vec<VisualLine> = Vec::new();
     for (idx, entry) in entries.iter().enumerate() {
-        let label_lines = wrap_hard(display_label(&entry.label), cmd_w);
-        let desc_lines = wrap_hard(&entry.description, desc_w);
+        let (label_lines, desc_lines) = wrapped(entry, cmd_w, desc_w);
         for line_idx in 0..label_lines.len().max(desc_lines.len()) {
             out.push(VisualLine {
                 label: label_lines.get(line_idx).cloned(),

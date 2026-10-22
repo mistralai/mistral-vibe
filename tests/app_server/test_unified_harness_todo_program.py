@@ -21,6 +21,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustTextContentBlock,
     RustTokenUsage,
 )
+from vibe.app_server._admin_config import OrgConfigSource
 from vibe.app_server._runtime import HarnessProcess
 from vibe.app_server._session_backend_port import SessionBackend, SessionBackendHost
 from vibe.app_server._unified_harness_backend_adapter import (
@@ -250,8 +251,9 @@ async def _todo_host(tmp_path: Path) -> SessionBackendHost:
         *,
         require_api_key: bool = True,
         entrypoint: Any = "cli",
+        org_config: OrgConfigSource,
     ) -> UnifiedSessionContext:
-        del options, require_api_key, entrypoint
+        del options, require_api_key, entrypoint, org_config
         return context
 
     return adapt_harness_host(vibe_runtime.create_harness_host(), build_context)

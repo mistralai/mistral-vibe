@@ -281,6 +281,32 @@ pub fn cancel_drag(app: &mut App) {
     stop_auto_scroll(app);
 }
 
+/// End a gesture whose release never arrived: keep and copy what it selected, run no click.
+pub fn end_drag(app: &mut App) {
+    if app.selection.drag.is_none() {
+        return cancel_drag(app);
+    }
+    release(app);
+}
+
+/// Copy a selection whose copy is still armed before a new press replaces it, since its paint never comes.
+pub fn honor_pending_copy(app: &mut App) {
+    crate::ui::bottom_bar::honor_pending_copy(app);
+    let Some(selection) = app.selection.region.as_ref().filter(|sel| sel.pending_copy) else {
+        return;
+    };
+    let text = region::extract_document(app).unwrap_or_else(|| selection.text.clone());
+    // Nothing read yet: leave the copy armed for the paint, which reads the frame.
+    if text.is_empty() {
+        return;
+    }
+    if let Some(selection) = app.selection.region.as_mut() {
+        selection.text = text.clone();
+        selection.pending_copy = false;
+    }
+    crate::ui::notice::copy_if_autocopy(app, &text);
+}
+
 /// Clear a selection when its rendered region disappears or changes content.
 pub fn clear_region(app: &mut App, owner: RegionId) {
     if app

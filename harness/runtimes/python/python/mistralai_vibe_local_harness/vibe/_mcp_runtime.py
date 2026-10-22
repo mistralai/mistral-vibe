@@ -14,6 +14,7 @@ from typing import Literal
 
 from mistralai_vibe_local_harness.vibe._mcp_cache import MCPDescriptorCache
 from mistralai_vibe_local_harness.vibe._mcp_models import (
+    MCP_DISCOVERY_PENDING,
     JsonObject,
     MCPAuthorizationProvider,
     MCPAuthorizationRejected,
@@ -115,6 +116,7 @@ class MCPRuntime:
         *,
         force_remote_discovery: bool,
         push_to_core: bool = True,
+        cached_only: bool = False,
     ) -> MCPRouteSnapshot:
         """Resolve the catalog and store the resulting route snapshot.
 
@@ -123,7 +125,14 @@ class MCPRuntime:
         capability reconfigure. This lets a caller ready the routes while Core is
         mid-turn (which rejects reconfigure) and publish them once Core is idle
         via ``push_snapshot_to_core``.
+
+        With ``cached_only`` no server is contacted and no authorization is
+        resolved: one without fresh cached descriptors is reported unavailable
+        with ``mcp_discovery_pending``. A session can then open without waiting
+        on the network and discover those servers with ``discover_pending``.
         """
+        if cached_only and force_remote_discovery:
+            raise ValueError("cached_only cannot force remote discovery")
         forced_names = (
             frozenset(server.name for server in configuration.servers)
             if force_remote_discovery
@@ -132,7 +141,58 @@ class MCPRuntime:
         async with self._lock:
             self._guard_open()
             return await self._reconfigure(
-                configuration, forced_names=forced_names, push_to_core=push_to_core
+                configuration,
+                forced_names=forced_names,
+                push_to_core=push_to_core,
+                cached_only=cached_only,
+            )
+
+    async def discover_pending(self, *, push_to_core: bool) -> MCPRouteSnapshot:
+        """Discover the servers a cached-only reconfigure left pending.
+
+        The servers are contacted without holding the runtime lock, so a slow or
+        unreachable one never holds up a login, a toggle or a reload meanwhile.
+        A result is kept only if its server is still configured the same way and
+        still pending; anything that changed it in between has the last word.
+        """
+        async with self._lock:
+            self._guard_open()
+            pending = tuple(
+                server
+                for server in self._configuration.servers
+                if _is_discovery_pending(self._source_state(server.name))
+            )
+        if not pending:
+            return self._snapshot
+        semaphore = asyncio.Semaphore(self._discovery_concurrency)
+        discovered = await asyncio.gather(
+            *(
+                self._resolve_isolated(
+                    server, semaphore, forced=False, cached_only=False
+                )
+                for server in pending
+            )
+        )
+        async with self._lock:
+            self._guard_open()
+            accepted = {
+                server.name: resolution
+                for server, resolution in zip(pending, discovered, strict=True)
+                if server in self._configuration.servers
+                and _is_discovery_pending(self._source_state(server.name))
+            }
+            if not accepted:
+                return self._snapshot
+            configuration = self._configuration
+            resolutions = [
+                accepted.get(server.name) or self._routed_resolution(server)
+                for server in configuration.servers
+            ]
+            return await self._accept_resolutions(
+                configuration,
+                resolutions,
+                previous_configuration=configuration,
+                push_to_core=push_to_core,
             )
 
     async def push_snapshot_to_core(self) -> None:
@@ -281,49 +341,106 @@ class MCPRuntime:
         *,
         forced_names: frozenset[str],
         push_to_core: bool = True,
+        cached_only: bool = False,
     ) -> MCPRouteSnapshot:
         _validate_configuration(configuration)
         previous_configuration = self._configuration
         semaphore = asyncio.Semaphore(self._discovery_concurrency)
-
-        async def resolve(server: ResolvedMCPServerConfig) -> _ServerResolution:
-            forced = server.name in forced_names
-            if server.disabled and not forced:
-                descriptors = self._accepted_descriptors.get(server.name)
-                return (
-                    server,
-                    descriptors,
-                    MCPSourceState(
-                        name=server.name,
-                        status="disabled",
-                        descriptors=descriptors or (),
-                        descriptor_revision=server.authorization.descriptor_revision,
-                    ),
-                    None,
-                )
-            async with semaphore:
-                try:
-                    result = await self._resolve_server(
-                        server, force_remote_discovery=forced
-                    )
-                except Exception as exc:
-                    # A single source must never abort reconfiguration of the others:
-                    # a failing MCP connection is isolated as an unavailable source so
-                    # the session and every healthy source stay usable. CancelledError
-                    # is a BaseException and is intentionally left to propagate.
-                    result = self._unavailable_resolution(server, error=exc)
-            if server.disabled and result[1] is not None:
-                return result[0], result[1], replace(result[2], status="disabled"), None
-            return result
-
         results = await asyncio.gather(
-            *(resolve(server) for server in configuration.servers)
+            *(
+                self._resolve_isolated(
+                    server,
+                    semaphore,
+                    forced=server.name in forced_names,
+                    cached_only=cached_only,
+                )
+                for server in configuration.servers
+            )
         )
         return await self._accept_resolutions(
             configuration,
             results,
             previous_configuration=previous_configuration,
             push_to_core=push_to_core,
+        )
+
+    async def _resolve_isolated(
+        self,
+        server: ResolvedMCPServerConfig,
+        semaphore: asyncio.Semaphore,
+        *,
+        forced: bool,
+        cached_only: bool,
+    ) -> _ServerResolution:
+        if server.disabled and not forced:
+            descriptors = self._accepted_descriptors.get(server.name)
+            return (
+                server,
+                descriptors,
+                MCPSourceState(
+                    name=server.name,
+                    status="disabled",
+                    descriptors=descriptors or (),
+                    descriptor_revision=server.authorization.descriptor_revision,
+                ),
+                None,
+            )
+        async with semaphore:
+            try:
+                result = await self._resolve_server(
+                    server, force_remote_discovery=forced, cached_only=cached_only
+                )
+            except Exception as exc:
+                # A single source must never abort reconfiguration of the others:
+                # a failing MCP connection is isolated as an unavailable source so
+                # the session and every healthy source stay usable. CancelledError
+                # is a BaseException and is intentionally left to propagate.
+                result = self._unavailable_resolution(server, error=exc)
+        if server.disabled and result[1] is not None:
+            return result[0], result[1], replace(result[2], status="disabled"), None
+        return result
+
+    def _current_resolution(self, server: ResolvedMCPServerConfig) -> _ServerResolution:
+        descriptors = self._accepted_descriptors.get(server.name)
+        return (
+            server,
+            descriptors,
+            self._source_state(server.name)
+            or MCPSourceState(
+                name=server.name,
+                status="disabled" if server.disabled else "unavailable",
+                descriptors=descriptors or (),
+                descriptor_revision=server.authorization.descriptor_revision,
+            ),
+            None,
+        )
+
+    def _routed_resolution(self, server: ResolvedMCPServerConfig) -> _ServerResolution:
+        """A server as the current snapshot routes it, suspensions included.
+
+        A suspension changes the snapshot alone, so a rebuild from the
+        configuration would route again what it took away.
+        """
+        _, descriptors, source, _ = self._current_resolution(server)
+        routed = {
+            route.descriptor.remote_name
+            for route in self._snapshot.routes.values()
+            if route.descriptor.server_name == server.name
+        }
+        if descriptors is None:
+            return server, None, source, None
+        if not routed:
+            return replace(server, disabled=True), descriptors, source, None
+        unrouted = frozenset(
+            descriptor.remote_name
+            for descriptor in descriptors
+            if descriptor.remote_name not in routed
+        )
+        return (
+            replace(server, disabled_tools=server.disabled_tools | unrouted),
+            descriptors,
+            source,
+            None,
         )
 
     def _authorization_required_resolution(
@@ -408,20 +525,7 @@ class MCPRuntime:
                     )
                 )
                 continue
-            descriptors = self._accepted_descriptors.get(server.name)
-            source = self._source_state(server.name)
-            resolutions.append((
-                server,
-                descriptors,
-                source
-                or MCPSourceState(
-                    name=server.name,
-                    status="disabled" if server.disabled else "unavailable",
-                    descriptors=descriptors or (),
-                    descriptor_revision=server.authorization.descriptor_revision,
-                ),
-                None,
-            ))
+            resolutions.append(self._current_resolution(server))
         return await self._accept_resolutions(
             configuration, resolutions, previous_configuration=previous_configuration
         )
@@ -475,7 +579,10 @@ class MCPRuntime:
         *,
         force_remote_discovery: bool,
         authorization: MCPAuthorizationSnapshot | None = None,
+        cached_only: bool = False,
     ) -> _ServerResolution:
+        if cached_only:
+            return await self._resolve_from_cache(server)
         authorization_result: MCPAuthorizationSnapshot | MCPAuthorizationRequired = (
             authorization
             if authorization is not None
@@ -551,6 +658,40 @@ class MCPRuntime:
                 status=_available_status(server),
                 descriptors=descriptors,
                 descriptor_revision=discovery_authorization.descriptor_revision,
+            ),
+            None,
+        )
+
+    async def _resolve_from_cache(
+        self, server: ResolvedMCPServerConfig
+    ) -> _ServerResolution:
+        """Route a server from its cached descriptors, contacting nothing.
+
+        Authorization is not resolved either: refreshing a token is a network
+        call. A call through these routes resolves it, as every call does.
+        """
+        revision = server.authorization.descriptor_revision
+        cached = await self._read_descriptor(_cache_key(server), server.name)
+        if cached is None:
+            return (
+                server,
+                None,
+                MCPSourceState(
+                    name=server.name,
+                    status="unavailable",
+                    descriptor_revision=revision,
+                    error=MCP_DISCOVERY_PENDING,
+                ),
+                None,
+            )
+        return (
+            server,
+            cached.descriptors,
+            MCPSourceState(
+                name=server.name,
+                status=_available_status(server),
+                descriptors=cached.descriptors,
+                descriptor_revision=revision,
             ),
             None,
         )
@@ -830,6 +971,15 @@ class MCPRuntime:
     async def _accept(self, snapshot: MCPRouteSnapshot) -> None:
         if self._accept_snapshot is not None:
             await self._accept_snapshot(snapshot)
+
+
+def _is_discovery_pending(source: MCPSourceState | None) -> bool:
+    # The status as well: a suspension keeps the source's error.
+    return (
+        source is not None
+        and source.status == "unavailable"
+        and source.error == MCP_DISCOVERY_PENDING
+    )
 
 
 def _available_status(

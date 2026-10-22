@@ -96,6 +96,22 @@ pub(crate) struct ContextSettings {
     pub image_delivery: ImageDeliverySettings,
     #[serde(default, skip_serializing_if = "ImageTokenCost::is_serialized_bytes")]
     pub image_token_cost: ImageTokenCost,
+    pub input_modalities: Vec<InputModality>,
+}
+
+impl ContextSettings {
+    /// The image delivery Core applies. When the model does not accept image
+    /// input, both completion purposes use `ResourceLink`, so no image block
+    /// reaches the model.
+    pub(crate) fn effective_image_delivery(&self) -> ImageDeliverySettings {
+        if self.input_modalities.contains(&InputModality::Image) {
+            return self.image_delivery;
+        }
+        ImageDeliverySettings {
+            agent: ImageDeliveryMode::ResourceLink,
+            compaction: ImageDeliveryMode::ResourceLink,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -103,6 +119,8 @@ pub(crate) struct ContextSettings {
 pub(crate) enum ImageDeliveryMode {
     #[default]
     Native,
+    /// The model reads no image block: an image becomes its file link, or a
+    /// text placeholder when it has none.
     ResourceLink,
 }
 
@@ -144,6 +162,14 @@ impl ImageTokenCost {
     pub(crate) fn is_serialized_bytes(&self) -> bool {
         matches!(self, Self::SerializedBytes)
     }
+}
+
+/// A kind of content that a model can interact with.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum InputModality {
+    Text,
+    Image,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -380,6 +406,27 @@ mod tests {
             initial_state(config).unwrap_err().detail(),
             "automatic compaction token_threshold must be greater than zero"
         );
+    }
+
+    #[test]
+    fn input_modalities_is_required_and_rejects_unknown_modalities() {
+        let mut omitted = serde_json::to_value(config()).unwrap();
+        omitted["settings"]["context"]
+            .as_object_mut()
+            .unwrap()
+            .remove("input_modalities");
+        let mut audio = serde_json::to_value(config()).unwrap();
+        audio["settings"]["context"]["input_modalities"] = json!(["text", "audio"]);
+
+        let omitted_error = serde_json::from_value::<HarnessConfig>(omitted).unwrap_err();
+        let audio_error = serde_json::from_value::<HarnessConfig>(audio).unwrap_err();
+
+        assert!(
+            omitted_error
+                .to_string()
+                .contains("missing field `input_modalities`")
+        );
+        assert!(audio_error.to_string().contains("unknown variant `audio`"));
     }
 
     #[test]

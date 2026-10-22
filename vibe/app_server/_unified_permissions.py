@@ -391,6 +391,23 @@ class UnifiedPermissionResolver:
     def provided_names(self) -> ProvidedToolNames:
         return self._provided_names
 
+    def under(
+        self, tools: ToolManager, config: ConfigOrchestrator[VibeConfigSchema]
+    ) -> UnifiedPermissionResolver:
+        """The same session's rules read against another configuration.
+
+        Shares this resolver's store, so a grant answers both, and its workspace
+        and shell, which belong to the session rather than to a configuration.
+        """
+        return UnifiedPermissionResolver(
+            tools,
+            self._store,
+            config,
+            self._provided_names,
+            path_space=self._path_space,
+            command_environment=self._command_environment,
+        )
+
     def vibe_tool_names(self, builtin: str) -> tuple[str, ...]:
         sources = RUST_BUILTIN_TOOL_SOURCES.get(
             cast(RustRuntimeBuiltinToolName, builtin), frozenset()

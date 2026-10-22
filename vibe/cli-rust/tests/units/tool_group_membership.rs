@@ -1,4 +1,4 @@
-//! Which runs fold into a tool group, and how its header counts their calls.
+//! Which runs fold into a tool group, and how its header counts calls and distinct files.
 
 use serde_json::{json, Value};
 use vibe_rs::transcript::Transcript;
@@ -69,7 +69,8 @@ fn a_call_groups_with_reasoning_only_while_reasoning_shows() {
     transcript.set_show_reasoning(true);
     let group = transcript.entry(1).unwrap().group.expect("groups");
     assert!(group.reasoning);
-    assert_eq!(group.kinds, vec![("shell", 1)]);
+    let header = transcript.entry(0).unwrap().group.expect("groups");
+    assert_eq!(header.kinds, vec![("shell", 1)]);
 }
 
 /// Hiding thinking drops a reasoning-only run entirely but keeps the calls of a mixed one.
@@ -143,6 +144,54 @@ fn kinds_sharing_a_verb_merge_into_one_segment() {
         group.label(true),
         "Running 2 commands, 1 search and 1 web search, reading 1 file"
     );
+}
+
+fn file_call(id: &str, kind: &str, path: Option<&str>) -> Value {
+    let mut call = effect_of_kind(id, "completed", Some(kind));
+    call["detail"]["input"] = json!(path.map(|path| json!({"filePath": path})));
+    call
+}
+
+#[test]
+fn file_kinds_count_distinct_paths() {
+    let transcript = live(&[
+        file_call("e1", "file_edit", Some("a.py")),
+        file_call("e2", "file_read", Some("a.py")),
+        file_call("e3", "file_edit", Some("a.py")),
+        file_call("e4", "file_read", Some("b.py")),
+        file_call("e5", "file_edit", Some("a.py")),
+        file_call("e6", "file_read", Some("a.py")),
+        file_call("e7", "file_write", Some("c.py")),
+        file_call("e8", "file_write", Some("c.py")),
+        effect("e9", "completed"),
+        effect("e10", "completed"),
+    ]);
+    let group = transcript.group_of("e1").expect("groups");
+    assert_eq!(
+        group.kinds,
+        vec![
+            ("file_edit", 1),
+            ("file_read", 2),
+            ("file_write", 1),
+            ("shell", 2)
+        ]
+    );
+    assert_eq!(
+        group.label(true),
+        "Editing 1 file, reading 2 files, writing 1 file, running 2 commands"
+    );
+}
+
+#[test]
+fn file_calls_without_a_path_count_each_call() {
+    let transcript = live(&[
+        file_call("e1", "file_read", None),
+        file_call("e2", "file_read", None),
+        file_call("e3", "file_read", Some("a.py")),
+        file_call("e4", "file_read", Some("a.py")),
+    ]);
+    let group = transcript.group_of("e1").expect("groups");
+    assert_eq!(group.label(false), "Read 3 files");
 }
 
 #[test]

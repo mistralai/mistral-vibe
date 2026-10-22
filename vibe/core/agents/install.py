@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from vibe.core.agents.manager import AgentManager
-from vibe.core.agents.models import AgentType, BuiltinAgentName
+from vibe.core.agents.manager import (
+    FALLBACK_AGENTS,
+    AgentManager,
+    resolve_default_agent,
+)
+from vibe.core.agents.models import REMOVED_BUILTIN_AGENTS, AgentType
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.orchestrator import ConfigOrchestrator
 
@@ -67,7 +71,7 @@ def plan_installed_agents_change(
         next_names = [name for name in previous if name != agent_name]
     switch_to = None
     if not installed and agents.active_profile.name == agent_name:
-        switch_to = _replacement_agent(orchestrator.config, agents, agent_name)
+        switch_to = _replacement_agent(orchestrator, agents, agent_name)
     return InstalledAgentsChange(
         previous=previous, next=next_names, switch_to=switch_to
     )
@@ -98,9 +102,15 @@ def verify_installed_agents_change(
 
 
 def _replacement_agent(
-    config: VibeConfigSchema, agents: AgentManager, excluded: str
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    agents: AgentManager,
+    excluded: str,
 ) -> str:
-    for name in (config.resolve_default_agent(), BuiltinAgentName.ACCEPT_EDITS):
+    default = resolve_default_agent(orchestrator)
+    # A removed builtin default (``"plan"``) runs as its replacement, as at
+    # session start.
+    replacement = REMOVED_BUILTIN_AGENTS.get(default, default)
+    for name in (default, replacement, *FALLBACK_AGENTS):
         if name != excluded and _is_selectable(agents, name):
             return name
     for name, profile in agents.available_agents.items():

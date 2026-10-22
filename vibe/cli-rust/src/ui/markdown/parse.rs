@@ -80,8 +80,11 @@ impl Builder {
         *self.styles.last().unwrap()
     }
 
-    /// The inline buffer to append text to: innermost open item, else the scratch.
+    /// The inline buffer to append text to: the scratch inside a table, else innermost open item.
     fn inline_mut(&mut self) -> &mut Vec<Sc> {
+        if self.table.is_some() {
+            return &mut self.inline;
+        }
         match self.stack.last_mut() {
             Some(Frame::Item { inline, .. }) => inline,
             _ => &mut self.inline,

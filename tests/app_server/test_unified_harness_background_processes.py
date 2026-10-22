@@ -26,6 +26,7 @@ from mistralai_vibe_local_harness.protocol import (
 )
 from mistralai_vibe_local_harness.vibe._processes._output import ProcessOutputStore
 from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
+from vibe.app_server._admin_config import OrgConfigSource
 from vibe.app_server._runtime import HarnessProcess
 from vibe.app_server._session_backend_port import (
     SessionBackend,
@@ -368,8 +369,9 @@ async def _process_host(
         *,
         require_api_key: bool = True,
         entrypoint: Any = "cli",
+        org_config: OrgConfigSource,
     ) -> UnifiedSessionContext:
-        del options, require_api_key, entrypoint
+        del options, require_api_key, entrypoint, org_config
         return context
 
     return adapt_harness_host(

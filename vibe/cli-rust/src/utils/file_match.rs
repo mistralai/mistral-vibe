@@ -76,11 +76,18 @@ fn ranked_matches(
     limit: usize,
 ) -> Vec<(String, MatchRank)> {
     let mut matches = Vec::new();
-    for (path, is_dir) in paths.iter().take(MAX_ENTRIES_TO_PROCESS) {
+    let listing = context.search_pattern.is_empty();
+    // Listings must reach entries sorted after large subtrees; fuzzy scoring keeps the cap.
+    let budget = if listing {
+        usize::MAX
+    } else {
+        MAX_ENTRIES_TO_PROCESS
+    };
+    for (path, is_dir) in paths.iter().take(budget) {
         if !matches_context(path, *is_dir, context) || !is_visible(path, context) {
             continue;
         }
-        let fuzzy_score = if context.search_pattern.is_empty() {
+        let fuzzy_score = if listing {
             0
         } else if let Some(score) = fuzzy::score(context.search_pattern, path) {
             score
@@ -89,7 +96,7 @@ fn ranked_matches(
         };
         let label = mention(path, *is_dir);
         matches.push((label, match_rank(path, *is_dir, context, fuzzy_score)));
-        if context.search_pattern.is_empty() && matches.len() >= limit {
+        if listing && matches.len() >= limit {
             break;
         }
     }

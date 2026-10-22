@@ -626,21 +626,22 @@ impl Transcript {
         }
         let (first_index, first_entry) = visible.first()?;
         let last_index = visible.last()?.0;
-        let mut kinds: Vec<(&str, usize)> = Vec::new();
-        let mut reasoning = false;
-        for (_, entry) in &visible {
-            if let HistoryEntry::Effect(effect) = &entry.typed {
-                let kind = grouping::label_kind(effect.kind());
-                match kinds.iter_mut().find(|(seen, _)| *seen == kind) {
-                    Some((_, count)) => *count += 1,
-                    None => kinds.push((kind, 1)),
-                }
-            }
-            reasoning |= matches!(entry.typed, HistoryEntry::Reasoning(_));
-        }
+        let first = index == *first_index;
+        let effects = visible.iter().filter_map(|(_, entry)| match &entry.typed {
+            HistoryEntry::Effect(effect) => Some(effect.as_ref()),
+            _ => None,
+        });
+        let kinds = if first {
+            grouping::count_kinds(effects)
+        } else {
+            Vec::new()
+        };
+        let reasoning = visible
+            .iter()
+            .any(|(_, entry)| matches!(entry.typed, HistoryEntry::Reasoning(_)));
         Some(Group {
             key: format!("{}{}", grouping::KEY_PREFIX, first_entry.id),
-            first: index == *first_index,
+            first,
             last: index == last_index,
             finalized: stored.local
                 || stored.historical

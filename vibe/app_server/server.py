@@ -178,6 +178,7 @@ _SESSION_BACKEND_HOST_LIFECYCLE_METHODS = frozenset({
 _SESSION_OPTIONAL_METHODS = frozenset({
     "agents/list",
     "config/read",
+    "skills/list",
     "workspace/trust/decision",
 })
 
@@ -814,7 +815,14 @@ class AppServer:
                 raise method_not_found(method)
             return await self._leases.subscribe(host)
         if _omits_session_id(method, raw_params):
-            return await self._host_handler.dispatch(method, raw_params)
+            # The attached session, if any, tells the config reads the
+            # connection's own session is already fetching what they would.
+            return await self._host_handler.dispatch(
+                method,
+                raw_params,
+                session_id=self._root.session_id if self._root is not None else None,
+                client_info=self._client_info,
+            )
         if self._root is None:
             return await self._dispatch_without_root(method, raw_params)
         result = await self._dispatch_to_root(method, raw_params)
@@ -879,7 +887,9 @@ class AppServer:
         if method == "session/history/list":
             return await self._dispatch_stored_session(method, raw_params)
         if self._host_handler.handles(method):
-            return await self._host_handler.dispatch(method, raw_params)
+            return await self._host_handler.dispatch(
+                method, raw_params, client_info=self._client_info
+            )
         return await self._open_initial_session(method, raw_params)
 
     async def _dispatch_to_root(

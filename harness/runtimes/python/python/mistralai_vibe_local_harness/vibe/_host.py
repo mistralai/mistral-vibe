@@ -16,7 +16,7 @@ from pathlib import Path
 import threading
 import time
 from typing import Any, Literal, cast
-from weakref import WeakKeyDictionary
+from weakref import WeakKeyDictionary, WeakValueDictionary
 
 from pydantic import JsonValue, TypeAdapter
 
@@ -388,7 +388,9 @@ def _extend_subagent_bindings(
         or not plugins.agent_profiles
     ):
         return configured
-    return resolve_declared_agent_types(configured, adapter, plugins.agent_profiles)
+    return resolve_declared_agent_types(
+        configured, adapter, plugins.agent_profiles, plugins.agent_permission_resolvers
+    )
 
 
 def _fork_live_session_config(
@@ -437,6 +439,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         self._plugin_provider: SessionPluginProvider | None = None
         self._requested_plugins: tuple[ResolvedPluginDefinition, ...] = ()
         self._mcp_catalog: ResolvedMCPCatalog | None = None
+        self._mcp_open_from_cache = False
         self._mcp_authorization_provider: MCPAuthorizationProvider | None = None
         self._mcp_cache_root = self._storage_root / "mcp-descriptors"
         self._mcp_cache_policy = MCPDescriptorCachePolicy()
@@ -463,6 +466,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             SubagentController,
             tuple[ResolvedSubagentConfiguration, LocalRuntimeAdapterConfig],
         ] = WeakKeyDictionary()
+        # Roots whose subagent controller is open but which are not registered yet.
+        # Restoring a root reopens its unsettled children before the root itself is
+        # registered, and each child takes its hooks from that root.
+        self._opening_parents: WeakValueDictionary[
+            str, UnifiedHarnessSessionBackend
+        ] = WeakValueDictionary()
         self._child_lock = asyncio.Lock()
         self._tree_deletion_leases: dict[str, _TreeDeletionLeases] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -576,8 +585,16 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         http_transport_policy: MCPHTTPTransportPolicy | None = None,
         sampling_completion: MCPSamplingCompletion | None = None,
         transport_factory: MCPTransportFactory | None = None,
+        open_from_cache: bool = False,
     ) -> None:
+        """Install the MCP catalog every session opened from now on resolves.
+
+        With ``open_from_cache`` a root session opens on cached descriptors
+        only, and the caller discovers the rest through
+        ``discover_pending_mcp``, so a slow server never holds up opening one.
+        """
         self._mcp_catalog = catalog
+        self._mcp_open_from_cache = open_from_cache
         self._mcp_authorization_provider = authorization_provider
         if cache_root is not None:
             self._mcp_cache_root = Path(cache_root).expanduser().resolve()
@@ -1810,7 +1827,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         core_config, adapter_config = child_config(binding, identity.session_id)
         if not isinstance(binding, LocalChildSessionBinding):
             raise TypeError("local child Host requires a local child binding")
-        hook_handlers = self._child_hook_handlers(identity, core_config)
+        core_config, hook_handlers = self._inherit_parent_hooks(identity, core_config)
         async with self._child_lock:
             live = self._live_session(identity.session_id)
             if live is not None:
@@ -1900,7 +1917,9 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                     # compose onto, so a push that goes first is rolled straight
                     # back off. Publish once the settle leaves Core on that base,
                     # the way resume does for a root.
-                    await self._initialize_integrations(session, push_to_core=False)
+                    await self._initialize_integrations(
+                        session, push_to_core=False, mcp_from_cache=False
+                    )
                 await self._register(session)
                 await session._restore_child_execution(
                     start_new_actions=start_new_actions,
@@ -1919,20 +1938,41 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 raise
             return ChildSessionHandle(session_id=identity.session_id)
 
-    def _child_hook_handlers(
+    def _inherit_parent_hooks(
         self, identity: SubagentSessionIdentity, core_config: RustHarnessConfig
-    ) -> HookHandlers | None:
-        # ``_child_core_config`` copies the parent's capability set and clears only
-        # ``agent_types``, so the child's Core carries the parent's ``hook_bindings``
-        # verbatim while their handlers live on the parent Session. An unresolvable
-        # binding is skipped, not fatal (``_resolve_hooks``), so without this the guards
-        # would silently stop guarding the moment the model delegates.
-        if not core_config.capabilities.hook_bindings:
-            return None
-        parent = self._live_session(identity.parent_session_id)
+    ) -> tuple[RustHarnessConfig, HookHandlers]:
+        """The child's Core config with every hook its parent runs, and their handlers.
+
+        A child binding is resolved beneath the Host's configuration, which holds no
+        session hooks: those are bound to each root when it starts or resumes. The
+        child therefore takes them from its parent, both the bindings its Core
+        dispatches and the handlers behind them. Missing either half fails open, since
+        Core asks for no hook it has no binding for and an unresolvable binding is
+        skipped rather than fatal, so a guard would stop guarding the moment the model
+        delegates. A parent that cannot be found is an error for the same reason.
+        """
+        parent = self._live_session(
+            identity.parent_session_id
+        ) or self._opening_parents.get(identity.parent_session_id)
         if parent is None:
             raise HarnessSessionNotFoundError(identity.parent_session_id)
-        return parent.foreign_hook_handlers
+        own = core_config.capabilities.hook_bindings
+        known = {binding.id for binding in own}
+        inherited = [
+            binding
+            for binding in parent._runtime_for_host().config.capabilities.hook_bindings
+            if binding.id not in known
+        ]
+        if inherited:
+            core_config = core_config.model_copy(
+                update={
+                    "capabilities": core_config.capabilities.model_copy(
+                        update={"hook_bindings": [*own, *inherited]}, deep=True
+                    )
+                },
+                deep=True,
+            )
+        return core_config, parent.foreign_hook_handlers
 
     async def start_child_turn(
         self,
@@ -2886,6 +2926,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             if action_adapter is not None
             else adapter_config,
             core_config=runtime_config_template,
+            foreign_hook_handlers=hook_handlers,
             release_plugins=self._release_plugins(session_id),
             read_plugin_info=self._read_plugin_info(session_id),
             on_reconfigure_subagents=lambda cfg, sid=session_id: (
@@ -3319,7 +3360,11 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         return session
 
     async def _initialize_integrations(
-        self, session: UnifiedHarnessSessionBackend, *, push_to_core: bool = True
+        self,
+        session: UnifiedHarnessSessionBackend,
+        *,
+        push_to_core: bool = True,
+        mcp_from_cache: bool = True,
     ) -> None:
         """Resolve MCP and connector catalogs into dispatchable route snapshots.
 
@@ -3328,6 +3373,10 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         routes available before recovering an in-flight turn (Core rejects
         reconfigure while a turn is running); ``_push_integration_capabilities``
         then publishes them once recovery leaves Core idle.
+
+        With ``mcp_from_cache`` and a catalog configured to open from cache, MCP
+        servers resolve from cached descriptors only and one without them is
+        left pending for the caller to discover.
         """
         if self._mcp_catalog is not None and self._mcp_catalog.servers:
             logger.debug(
@@ -3339,6 +3388,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 self._mcp_catalog,
                 force_remote_discovery=False,
                 push_to_core=push_to_core,
+                cached_only=mcp_from_cache and self._mcp_open_from_cache,
             )
             logger.debug("MCP integrations initialized for %s", session.session_id)
         if (
@@ -3381,6 +3431,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         session: UnifiedHarnessSessionBackend,
         plugins: SessionPluginBinding | None = None,
     ) -> None:
+        self._opening_parents[session.session_id] = session
         await self._initialize_subagent_runtime(
             session._runtime_for_host(),
             self._subagent_configuration,
@@ -3403,6 +3454,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             child_host=self,
             bindings=configured.bindings,
             policy_ceiling=configured.policy_ceiling,
+            limits=configured.limits,
         )
         if base is not None and adapter is not None:
             self._subagent_pins[controller] = (base, adapter)
@@ -4022,6 +4074,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             self._sessions[session.session_id] = _LoadedSessionEntry(
                 session=session, attachments=1
             )
+            self._opening_parents.pop(session.session_id, None)
         session._configure_work_state_callback(self._session_work_state_changed)
         if not session.ephemeral:
             self._connect_child_events(session)

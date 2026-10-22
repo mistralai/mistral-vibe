@@ -7,10 +7,11 @@ use crate::core::features::compaction::{
 };
 use crate::core::features::notifications::NotificationState;
 use crate::core::features::programmatic_tool_calling::{
-    PendingProgramRecord, ProgramExecution, ProgramFunctionRecord, ProgramOperationRecord,
+    PendingProgramOperation, ProgramExecution, ProgramFunctionRecord, ProgramOperationRecord,
 };
 use crate::core::features::skills;
 use crate::core::hooks::hook_action_id;
+use crate::core::tools::execution::external_call::{ExternalCallStage, PendingExternalCall};
 use crate::core::tools::external::RuntimeBuiltinToolName;
 use crate::core::{
     ActivePhase, ActiveTurn, AssistantPart, AssistantRole, AssistantSemanticPart, CandidateMessage,
@@ -420,11 +421,10 @@ fn direct_pre_hook_execution() -> ToolExecution {
     let call = external_read_call(call_id, ToolOrigin::TopLevel, "pre.txt");
     ToolExecution {
         call: model_tool_call(call_id, "read_file", json!({ "path": "pre.txt" })),
-        state: ToolExecutionState::DirectAwaitingPreHook {
-            hook_action_id: hook_action_id(&call.action_id, HookPoint::PreToolCall),
-            hook_binding_ids: vec!["hook-direct-pre".to_string()],
+        state: ToolExecutionState::Direct(PendingExternalCall::awaiting_pre_hook(
             call,
-        },
+            vec!["hook-direct-pre".to_string()],
+        )),
     }
 }
 
@@ -432,9 +432,11 @@ fn direct_pending_execution() -> ToolExecution {
     let call_id = "direct-pending";
     ToolExecution {
         call: model_tool_call(call_id, "read_file", json!({ "path": "pending.txt" })),
-        state: ToolExecutionState::DirectPending {
-            call: external_read_call(call_id, ToolOrigin::TopLevel, "pending.txt"),
-        },
+        state: ToolExecutionState::Direct(PendingExternalCall::pending(external_read_call(
+            call_id,
+            ToolOrigin::TopLevel,
+            "pending.txt",
+        ))),
     }
 }
 
@@ -443,21 +445,19 @@ fn direct_skill_pending_execution() -> ToolExecution {
     let arguments = json!({ "name": "zeta-review" });
     ToolExecution {
         call: model_tool_call(call_id, "skill", arguments.clone()),
-        state: ToolExecutionState::DirectPending {
-            call: ExternalToolCall {
-                action_id: crate::core::tools::external::effect_id_for_operation(
-                    ToolOrigin::TopLevel,
-                    call_id,
-                ),
-                call_id: call_id.to_string(),
-                origin: ToolOrigin::TopLevel,
-                call: ExternalTool::RuntimeBuiltin {
-                    name: skills::ToolName::Read.runtime_tool(),
-                    invocation_name: "skill".to_string(),
-                    arguments,
-                },
+        state: ToolExecutionState::Direct(PendingExternalCall::pending(ExternalToolCall {
+            action_id: crate::core::tools::external::effect_id_for_operation(
+                ToolOrigin::TopLevel,
+                call_id,
+            ),
+            call_id: call_id.to_string(),
+            origin: ToolOrigin::TopLevel,
+            call: ExternalTool::RuntimeBuiltin {
+                name: skills::ToolName::Read.runtime_tool(),
+                invocation_name: "skill".to_string(),
+                arguments,
             },
-        },
+        })),
     }
 }
 
@@ -466,12 +466,14 @@ fn direct_post_hook_execution() -> ToolExecution {
     let call = external_read_call(call_id, ToolOrigin::TopLevel, "post.txt");
     ToolExecution {
         call: model_tool_call(call_id, "read_file", json!({ "path": "post.txt" })),
-        state: ToolExecutionState::DirectAwaitingPostHook {
-            hook_action_id: hook_action_id(&call.action_id, HookPoint::PostToolCall),
-            hook_binding_ids: vec!["hook-direct-post".to_string()],
+        state: ToolExecutionState::Direct(PendingExternalCall {
+            stage: ExternalCallStage::AwaitingPostHook {
+                hook_action_id: hook_action_id(&call.action_id, HookPoint::PostToolCall),
+                hook_binding_ids: vec!["hook-direct-post".to_string()],
+                result: successful_tool_result("raw direct result"),
+            },
             call,
-            result: successful_tool_result("raw direct result"),
-        },
+        }),
     }
 }
 
@@ -545,28 +547,38 @@ fn program_execution(message_count: usize) -> ToolExecution {
         ProgramOperationRecord::ExternalPending {
             id: pre_call.call_id.clone(),
             function: program_function("read_file", json!({ "path": "pre.txt" })),
-            pending: Box::new(PendingProgramRecord::AwaitingPreHook {
-                hook_action_id: hook_action_id(&pre_call.action_id, HookPoint::PreToolCall),
-                hook_binding_ids: vec!["hook-program-pre".to_string()],
-                call: pre_call,
+            pending: Box::new(PendingProgramOperation {
+                external: PendingExternalCall::awaiting_pre_hook(
+                    pre_call,
+                    vec!["hook-program-pre".to_string()],
+                ),
+                requested_sleep_seconds: None,
             }),
         },
         ProgramOperationRecord::ExternalPending {
             id: pending_call.call_id.clone(),
             function: program_function("read_file", json!({ "path": "pending.txt" })),
-            pending: Box::new(PendingProgramRecord::Pending {
-                call: pending_call,
+            pending: Box::new(PendingProgramOperation {
+                external: PendingExternalCall::pending(pending_call),
                 requested_sleep_seconds: None,
             }),
         },
         ProgramOperationRecord::ExternalPending {
             id: post_call.call_id.clone(),
             function: program_function("read_file", json!({ "path": "original-post.txt" })),
-            pending: Box::new(PendingProgramRecord::AwaitingPostHook {
-                hook_action_id: hook_action_id(&post_call.action_id, HookPoint::PostToolCall),
-                hook_binding_ids: vec!["hook-program-post".to_string()],
-                result: successful_tool_result("raw program result"),
-                call: post_call,
+            pending: Box::new(PendingProgramOperation {
+                external: PendingExternalCall {
+                    stage: ExternalCallStage::AwaitingPostHook {
+                        hook_action_id: hook_action_id(
+                            &post_call.action_id,
+                            HookPoint::PostToolCall,
+                        ),
+                        hook_binding_ids: vec!["hook-program-post".to_string()],
+                        result: successful_tool_result("raw program result"),
+                    },
+                    call: post_call,
+                },
+                requested_sleep_seconds: None,
             }),
         },
         ProgramOperationRecord::ExternalResolved {

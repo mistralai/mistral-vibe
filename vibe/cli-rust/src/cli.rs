@@ -423,6 +423,16 @@ impl Cli {
         self.prompt.is_some() || self.prompt_file.is_some()
     }
 
+    /// Whether `-p TEXT` or a non-empty `--prompt-file` already gives the prompt, so stdin is never read.
+    /// An unreadable prompt file counts too: its usage error comes later.
+    pub fn prompt_given(&self) -> bool {
+        if let Some(path) = &self.prompt_file {
+            return crate::headless_prompt::read_prompt_file(path)
+                .map_or(true, |text| !text.is_empty());
+        }
+        matches!(&self.prompt, Some(Some(text)) if !text.is_empty())
+    }
+
     /// Resolve the prompt: `--prompt-file` content, `-p` flag value, or stdin
     /// if piped. An empty `--prompt ""` counts as absent, so it falls back to
     /// stdin. The error is the message a usage error reports.

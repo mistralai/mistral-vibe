@@ -107,6 +107,8 @@ impl EventLoop {
                 // convergence, and every wizard round painted its relaunch
                 // before re-entering.
                 _ = redraw_tick.tick(), if state.redraw_pending => {
+                    let mouse = self.app.session.startup_config.enable_mouse_capture;
+                    self.terminal_guard.set_mouse_capture(mouse)?;
                     let (animating, mounting, indexing) = redraw_frame(
                         &mut self.app,
                         &self.client,
@@ -193,9 +195,12 @@ impl EventLoop {
                     state.real_event_pending = true;
                 }
                 // Draws nothing and settles nothing: analytics never alter the UI.
+                // Pre-session events are held until `set_session_id` flushes them.
                 Some(event) = sources.telemetry.recv() => {
                     if let Some(session_id) = self.app.session.session_id.clone() {
                         crate::telemetry::send(&self.client, &session_id, event);
+                    } else {
+                        self.app.session.held_telemetry.push(event);
                     }
                 }
                 Some(event) = sources.narrator.recv() => {

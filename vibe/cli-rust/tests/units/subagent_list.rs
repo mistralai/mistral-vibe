@@ -327,15 +327,13 @@ fn ids(rows: &[PublicChildSession]) -> Vec<&str> {
 #[test]
 fn killing_the_viewed_child_keeps_it_listed_until_the_view_closes() {
     let mut app = App::default();
-    // The child runs and finishes while nobody views it, so the batch clears
-    // and only the idle filter keeps it listed.
+    // The child runs and finishes unviewed: the batch clears but a ready child stays listed.
     upsert(&mut app, running("a"));
     upsert(&mut app, child("a", SessionStatus::Idle));
     subagents::show_subagent_chat(&mut app, "a");
     assert_eq!(ids(&app.subagents.list.rows), ["a"]);
 
-    // Killed while viewed: the archived child is neither active nor idle, but
-    // the read-only notice needs its row until the user returns to Main.
+    // Killed while viewed: the stopped child keeps its row for the read-only notice.
     upsert(&mut app, child("a", SessionStatus::Archived));
     assert_eq!(app.subagents.viewed_subagent_id.as_deref(), Some("a"));
     assert_eq!(ids(&app.subagents.list.rows), ["a"]);

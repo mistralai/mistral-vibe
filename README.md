@@ -176,8 +176,9 @@ controlled directly; return to Main and ask the main agent to stop one. Press
 Ctrl+C again to quit Vibe. After
 opening Main conversation, press Up from its row to focus the prompt. While a
 subagent view is open, Up stops at the Main row. Idle subagents remain listed as
-**ready** because the main agent can send them more instructions. Explicitly
-stopped subagents leave the list after you return to Main. The first subagent
+**ready** because the main agent can send them more instructions, and subagents
+whose last turn failed remain listed as **failed**. Explicitly stopped subagents
+leave the list after you return to Main. The first subagent
 update does not add a local information message. When a subagent becomes ready,
 its transcript shows a local information message explaining how to give it a
 new goal or stop it from Main. Set `show_subagent_status_list = false` in
@@ -273,7 +274,8 @@ Rust binary (`vibe-rs`) bundled with the package.
 ### Copying & Text Selection
 
 - **Copy**: Use `Ctrl+Y` or `Ctrl+Shift+C` to copy the current selection to clipboard. With autocopy enabled (default via `autocopy_to_clipboard = true`), mouse selection automatically copies on release and shows a brief confirmation.
-- **Multi-click selection**: Double-click selects a word, triple-click selects the paragraph. Dragging extends the selection at the same granularity.
+- **Multi-click selection**: Double-click selects a word, triple-click selects the paragraph. Dragging extends the selection at the same granularity. Clicking a collapsible transcript entry (tool group, tool call, reasoning) toggles it on every click; drag to select its text.
+- **Linux clipboard**: In a local Linux session, Vibe copies through `wl-copy`, `xclip`, or `xsel`. If pasting fails, install `xclip` (or `wl-clipboard`), or hold Shift while selecting to use your terminal's native selection. Over SSH, Vibe relies on OSC 52 alone, so your terminal must support it.
 
 You can start Vibe with a prompt using the following command:
 
@@ -1187,7 +1189,7 @@ Declared in `<project>/.vibe/hooks.toml` (project, loaded first; trusted only) a
 [[hooks]]
 name = "deny-rm-rf"
 type = "pre_tool"
-match = "bash"                       # tool-name matcher (fnmatch glob + `re:` regex escape, case-insensitive)
+match = "re:bash|process_start"      # tool-name matcher (fnmatch glob + `re:` regex escape, case-insensitive)
 command = "uv run python /path/to/guard-bash"
 timeout = 60.0                       # seconds; default 60 for all hooks
 strict = false                       # tool hooks only: turn failures into denials (pre) / text-clears (post)
@@ -1195,6 +1197,8 @@ description = "Reject dangerous shell commands."
 ```
 
 Subagents inherit the parent's hook config so policies apply transitively.
+
+`match` is tested against a tool's qualified name (`file_system.bash`, `process.start`, `mcp_<server>.<tool>`, `connector_<alias>.<tool>`), its underscore form (`process_start`), its bare leaf (`bash`), and for built-ins the name the model sees (`edit`). Commands the agent starts in the background go through `process_start`, which `match = "bash"` does not catch. The `tool_name` field sent to the hook is always the qualified name.
 
 #### Common ground
 
@@ -1219,7 +1223,7 @@ Fires after every assistant turn that ends without pending tool calls.
 
 - **Receives** (in addition to the session context): no extra fields.
 - **Can return**:
-  - `decision: "deny"` + `reason` — `reason` is injected as a new user message asking for a retry. Capped at **3 retries per hook per user turn**; further denies become terminal warnings.
+  - `decision: "deny"` + `reason` — `reason` is injected as a new user message asking for a retry. First deny short-circuits remaining `post_agent` hooks. Capped at **3 retries per turn across all `post_agent` hooks**; past the cap, the answer is accepted.
   - `system_message` — UI-only.
 
 #### `pre_tool`
@@ -1234,9 +1238,9 @@ Fires per tool call, **before** the user permission prompt. First deny short-cir
 
 #### `post_tool`
 
-Fires per tool call **if and only if the tool body actually ran**. `tool_status` is `success`, `failure`, or `cancelled` (cancellation during the tool body — cancellation is shielded so audit hooks still run). Does not fire when the tool never executed: `pre_tool` denial, user denial at the approval prompt, permission `NEVER`, or cancellation before the body started.
+Fires per tool call **if and only if the tool body actually ran**. `tool_status` is `success` or `failure`; a shell command that exits non-zero is still `success` (read `tool_output.returncode`). Does not fire when the tool never executed: `pre_tool` denial, user denial at the approval prompt, permission `NEVER`, or cancellation before the body started.
 
-- **Receives** (in addition to the session context): `tool_name`, `tool_call_id`, `tool_input` (post-rewrite), `tool_status`, `tool_output` (structured result dict; null on failure), `tool_output_text` (the running text the LLM will see, mutable by prior hooks), `tool_error`, `duration_ms`.
+- **Receives** (in addition to the session context): `tool_name`, `tool_call_id`, `tool_input` (post-rewrite), `tool_status`, `tool_output` (structured result dict; null on failure), `tool_output_text` (the running text the LLM will see, mutable by prior hooks), `tool_error`, `duration_ms` (not reported yet: always `0`).
 - **Can return**:
   - `decision: "deny"` + `reason` — replaces `tool_output_text` with `reason`. Pipeline continues; subsequent hooks see the replacement.
   - `hook_specific_output.additional_context` (string) — **appended** (with a `\n` separator) to `tool_output_text`. Composes with a same-hook deny: deny replaces first, then `additional_context` is appended to the replacement.
@@ -1404,7 +1408,7 @@ Mistral Vibe can be used in text editors and IDEs that support [Agent Client Pro
 ## Resources
 
 - [CHANGELOG](CHANGELOG.md) - See what's new in each version
-- [CONTRIBUTING](CONTRIBUTING.md) - Guidelines for feature requests, feedback and bug reports
+- [CONTRIBUTING](CONTRIBUTING.md) - Guidelines for feature requests, feedback and bug reports (we do not accept pull requests)
 
 ## Data collection & usage
 

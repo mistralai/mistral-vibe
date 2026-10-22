@@ -23,6 +23,25 @@ def test_terminal_title_survives_every_stream_boundary(code: str, ending: str) -
         assert snapshot.rows[:2] == ("line one", "line two")
 
 
+def test_mouse_tracking_follows_decset_1000() -> None:
+    terminal = Terminal(ROWS, COLUMNS)
+    assert not terminal.snapshot("initial").mouse_tracking
+
+    terminal.feed(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h")
+    assert terminal.snapshot("enabled").mouse_tracking
+
+    terminal.feed(b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l")
+    disabled = terminal.snapshot("disabled")
+    assert not disabled.mouse_tracking
+    assert disabled.mouse_tracking_seen
+
+
+def test_mouse_tracking_seen_stays_off_until_decset_1000() -> None:
+    terminal = Terminal(ROWS, COLUMNS)
+    terminal.feed(b"\x1b[?2004h\x1b[?1004h")
+    assert not terminal.snapshot("other modes").mouse_tracking_seen
+
+
 def test_dimmed_text_is_retained_without_changing_the_grid() -> None:
     terminal = Terminal(ROWS, COLUMNS)
     terminal.feed(b"before \x1b[2mdim\x1b[22m after")

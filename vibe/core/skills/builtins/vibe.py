@@ -181,7 +181,8 @@ theme = "auto"  # Follow terminal background, then OS light/dark preference
 disable_welcome_banner_animation = false
 cursor_blink = true  # Blink the input cursor; false keeps it steady
 autocopy_to_clipboard = true  # Enable automatic copying of selected text to clipboard
-file_watcher_for_autocomplete = true  # Refresh @ suggestions after workspace changes
+enable_mouse_capture = true  # Capture the mouse for scrolling, clicks and selection; false keeps the terminal's native selection
+file_watcher_for_autocomplete = true  # Refresh @ suggestions and pick up skill changes after workspace changes
 ask_confirmation_on_exit = true  # Require a second Ctrl+D to quit (Ctrl+C always confirms)
 show_greeting = true  # Show "Hello {name}" greeting below the banner at startup (Mistral providers, once per 24h)
 log_level = "WARNING"  # Optional. DEBUG | INFO | WARNING | ERROR | CRITICAL — log level for ~/.vibe/logs/vibe.log
@@ -192,8 +193,9 @@ edit `config.toml` and run `/reload`; no restart is needed.
 
 ### Copy and Text Selection
 
-- **Copy shortcuts**: `Ctrl+Y` and `Ctrl+Shift+C` both copy the current selection to the clipboard. When autocopy is enabled (default), releasing the mouse over a selection also copies automatically. Each successful copy flashes a brief inline "Copied to clipboard" notice.
-- **Multi-click selection**: Double-click selects a word, triple-click selects the current paragraph; dragging extends the selection at the same granularity.
+- **Copy shortcuts**: `Ctrl+Y` and `Ctrl+Shift+C` both copy the current selection to the clipboard. When autocopy is enabled (default), releasing the mouse over a selection also copies automatically, as does a drag that ends without a release (the terminal losing focus, or a key other than `Esc`, which aborts the drag without copying). Each successful copy flashes a brief inline "Copied to clipboard" notice.
+- **Multi-click selection**: Double-click selects a word, triple-click selects the current paragraph; dragging extends the selection at the same granularity. Clicking a collapsible transcript entry (tool group, tool call, reasoning) toggles it on every click; drag to select its text.
+- **Terminal-native selection**: `enable_mouse_capture = false` (or `VIBE_ENABLE_MOUSE_CAPTURE=false`) turns mouse capture off, so the terminal's own selection and copy work instead of in-app selection; depending on the terminal, some other mouse interactions such as clicks are disabled too. It applies live from `/config` or `/reload`. Native selection only covers the visible screen; `Shift+Up/Down` always scrolls the transcript. In some terminals the mouse wheel then sends Up/Down keys, which recall prompt history in the input box.
 
 ```toml
 # Behavior
@@ -205,6 +207,8 @@ title_prompt_id = "session_title" # Session title prompt: built-in "session_titl
 enable_telemetry = true
 enable_background_processes = true  # false: no tools.process in run_typescript; commands only run to completion in the foreground
 enable_subagents = true            # false: no tools.subagent in run_typescript; the agent works alone
+max_subagents = 32                 # Maximum subagents alive at once; a spawn beyond this fails until one is stopped
+max_concurrent_subagents = 32      # Maximum subagents running a turn at the same time
 enable_update_checks = true       # Daily update check (uv or PyPI); prompts on next launch when a newer release exists
 enable_notifications = true
 experimental_enable_tab_status = true  # Experimental: update the terminal tab title with state indicators (>> running, ? waiting)
@@ -884,8 +888,9 @@ controlled directly; return to Main and ask the main agent to stop one. Press
 Ctrl+C again to quit Vibe. After
 opening Main conversation, press Up from its row to focus the prompt. While a
 subagent view is open, Up stops at the Main row. Idle subagents remain listed as
-**ready** because the main agent can send them more instructions. Explicitly
-stopped subagents leave the list after you return to Main. The first subagent
+**ready** because the main agent can send them more instructions, and subagents
+whose last turn failed remain listed as **failed**. Explicitly stopped subagents
+leave the list after you return to Main. The first subagent
 update does not add a local information message. When a subagent becomes ready,
 its transcript shows a local information message explaining how to give it a
 new goal or stop it from Main. Set `show_subagent_status_list = false` in
@@ -908,10 +913,13 @@ mode's prompt from the start.
 On the Unified Harness a custom subagent runs on built-in tools only, with no
 MCP, connector, or plugin tools, and a per-tool `allowlist` or `denylist` caps
 the tool at "ask" rather than narrowing it, because the child runs under the
-parent's configuration. An agent file that cannot be honored (no description, a
-prompt id that resolves nowhere) is dropped and reported in the session's config
-issues. The built-in `explore` subagent is not offered there: a plain spawn
-already starts a child that inherits the parent's prompt and tools.
+parent's configuration. A subagent sees the parent's skills unless its file sets
+`enabled_skills` or `disabled_skills`, which narrow them with the same patterns
+as the config keys (`enabled_skills` wins when both are set). An agent file
+that cannot be honored (no description, a prompt id that resolves nowhere) is
+dropped and reported in the session's config issues. The built-in `explore`
+subagent is not offered there: a plain spawn already starts a child that
+inherits the parent's prompt and tools.
 
 ## Built-in Slash Commands
 
@@ -920,7 +928,7 @@ already starts a child that inherits the parent's prompt and tools.
 - `/model` - Select active model
 - `/thinking` - Select thinking level
 - `/theme` - Select UI theme; `auto` follows terminal/OS appearance (persisted in config)
-- `/reload` - Reload configuration, agent instructions, and skills from disk
+- `/reload` - Reload configuration, agent instructions, and skills from disk (skills added or edited on disk are also picked up on their own while `file_watcher_for_autocomplete` is on, except in sandboxed sessions)
 - `/clear`, `/new` - Start a new conversation. Optionally pass a prompt to seed it
 - `/log` - Show path to current interaction log file
 - `/log-level` - Show or set the log level. `/log-level` prints the full chain

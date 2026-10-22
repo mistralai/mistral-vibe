@@ -723,7 +723,13 @@ class VibeAcpAgent(AcpAgent):
 
     async def _forward_event(self, session: AcpSession, event: AppServerEvent) -> None:
         if isinstance(event, CallbackRequested):
-            await self._answer_callback(session, event.callback)
+            try:
+                await self._answer_callback(session, event.callback)
+            except AppServerResponseError as exc:
+                # A cancel that lands while the client is still answering closes
+                # the callback first; the turn then reports its own stop reason.
+                if exc.error.code is not ProtocolErrorCode.CALLBACK_CLOSED:
+                    raise
             return
         if isinstance(event, TurnRetrying):
             await self._send_retrying(session, event)

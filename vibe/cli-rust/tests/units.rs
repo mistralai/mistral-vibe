@@ -52,6 +52,8 @@ mod command_submission;
 mod compact_handoff;
 #[path = "units/compaction_checkpoint.rs"]
 mod compaction_checkpoint;
+#[path = "units/completion_popup.rs"]
+mod completion_popup;
 #[path = "units/composer_blur.rs"]
 mod composer_blur;
 #[path = "units/composer_clicks.rs"]
@@ -86,10 +88,16 @@ mod effect_entry;
 mod effect_output;
 #[path = "units/external_editor.rs"]
 mod external_editor;
+#[path = "units/file_index_metrics.rs"]
+mod file_index_metrics;
+#[path = "units/file_index_rescan_ignore.rs"]
+mod file_index_rescan_ignore;
 #[path = "units/file_mention_matching.rs"]
 mod file_mention_matching;
 #[path = "units/focus.rs"]
 mod focus;
+#[path = "units/fold_clicks.rs"]
+mod fold_clicks;
 #[path = "units/foreign_session.rs"]
 mod foreign_session;
 #[path = "units/frames_oversized.rs"]
@@ -328,6 +336,8 @@ mod scrollbar_track_click;
 mod search_field;
 #[path = "units/selection_folds.rs"]
 mod selection_folds;
+#[path = "units/selection_lost_release.rs"]
+mod selection_lost_release;
 #[path = "units/selection_prompt_marker.rs"]
 mod selection_prompt_marker;
 #[path = "units/selection_spans.rs"]

@@ -1,44 +1,27 @@
 use crate::core::error::CoreError;
 pub(crate) mod batch;
 mod direct;
+pub(crate) mod external_call;
 
 use serde_json::json;
 
 use crate::core::features::large_output::PendingWrite;
-use crate::core::features::permissions::GrantKey;
 use crate::core::features::programmatic_tool_calling::{
     ProgramExecution, interrupted_program_content,
 };
-use crate::core::hooks::HookCall;
 use crate::core::step_protocol::{Action, DeterminismContext};
 use crate::core::tools::context::ToolContext;
 use crate::core::tools::external::ExternalToolCall;
 use crate::core::wire::content::text_content;
 use crate::core::wire::message::Message;
-use crate::core::wire::tool::{ToolCall, ToolResult};
+use crate::core::wire::tool::ToolCall;
+
+use self::external_call::PendingExternalCall;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ToolExecutionState {
-    DirectAwaitingApproval {
-        approval_action_id: String,
-        grant_key: GrantKey,
-        call: ExternalToolCall,
-    },
-    DirectAwaitingPreHook {
-        hook_action_id: String,
-        hook_binding_ids: Vec<String>,
-        call: ExternalToolCall,
-    },
-    DirectPending {
-        call: ExternalToolCall,
-    },
-    DirectAwaitingPostHook {
-        hook_action_id: String,
-        hook_binding_ids: Vec<String>,
-        call: ExternalToolCall,
-        result: ToolResult,
-    },
+    Direct(PendingExternalCall),
     ProgramPending {
         execution: ProgramExecution,
     },
@@ -86,49 +69,7 @@ impl ToolBatch {
         self.executions
             .iter()
             .flat_map(|execution| match &execution.state {
-                ToolExecutionState::DirectAwaitingApproval {
-                    approval_action_id,
-                    grant_key,
-                    call,
-                    ..
-                } => vec![Action::approval(
-                    approval_action_id.clone(),
-                    turn_id,
-                    grant_key,
-                    call,
-                    call.call
-                        .direct_model_name()
-                        .expect("direct approval call has a model-visible name"),
-                )],
-                ToolExecutionState::DirectAwaitingPreHook {
-                    hook_action_id,
-                    hook_binding_ids,
-                    call,
-                } => vec![Action::Hook {
-                    effect_id: hook_action_id.clone(),
-                    turn_id: turn_id.to_string(),
-                    hook_binding_ids: hook_binding_ids.clone(),
-                    call: HookCall::PreToolCall {
-                        tool_call: call.into(),
-                    },
-                }],
-                ToolExecutionState::DirectPending { call } => {
-                    vec![Action::external_tool(call, turn_id)]
-                }
-                ToolExecutionState::DirectAwaitingPostHook {
-                    hook_action_id,
-                    hook_binding_ids,
-                    call,
-                    result,
-                } => vec![Action::Hook {
-                    effect_id: hook_action_id.clone(),
-                    turn_id: turn_id.to_string(),
-                    hook_binding_ids: hook_binding_ids.clone(),
-                    call: HookCall::PostToolCall {
-                        tool_call: call.into(),
-                        tool_result: result.clone(),
-                    },
-                }],
+                ToolExecutionState::Direct(pending) => vec![pending.action(turn_id)],
                 ToolExecutionState::ProgramPending { execution } => {
                     execution.pending_actions(turn_id)
                 }

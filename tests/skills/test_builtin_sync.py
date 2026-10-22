@@ -133,3 +133,13 @@ class TestBuiltinSkillsShippedAsPluginSkills:
         body = str(self._plugin_skill("vibe")["body"])
         assert "__VIBE_VERSION__" not in body
         assert "https://github.com/mistralai/mistral-vibe/blob/main/README.md" in body
+
+    def test_the_vibe_copy_documents_the_unified_hook_payload(self) -> None:
+        body = str(self._plugin_skill("vibe")["body"])
+        assert '"tool_name": "file_system.bash"' in body
+        assert '"duration_ms": 0' in body
+        assert '"returncode": 0' in body
+        assert "re:bash|process_start" in body
+        assert '{"output": "..."}' not in body
+        assert "success | failure | cancelled" not in body
+        assert 'match = "task"' not in body

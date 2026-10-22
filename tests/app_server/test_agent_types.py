@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -22,7 +22,9 @@ from vibe.core.tools.models import ToolPermission
 from vibe.core.trusted_folders import trusted_folders_manager
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
+
+    from mistralai_vibe_local_harness.vibe._permissions import PermissionResolver
 
 pytestmark = pytest.mark.usefixtures("config_dir")
 
@@ -278,15 +280,15 @@ def test_a_subagent_without_a_description_is_dropped_and_reported(
     assert "description" in resolved.issues[0].message
 
 
-def test_a_granted_tool_narrowed_by_an_allowlist_is_capped_at_ask(
+def test_a_granted_tool_narrowed_by_an_allowlist_keeps_its_grant(
     tmp_path: Path, manager_for: ManagerFor
 ) -> None:
     """*Prepare*: A subagent grants bash outright but narrows it to a command list.
     *Do*: Resolve the workspace's agent types.
-    *Assert*: The child has to ask, because a ceiling cannot carry the list, and
-    the user is told the narrowing is approximated.
+    *Assert*: The ceiling still allows bash and nothing is reported: the list is
+    per-call policy, which the child's own resolver applies, not the ceiling.
     """
-    path = _write_agent(
+    _write_agent(
         tmp_path,
         "reviewer",
         'description = "Reads the tree"\n'
@@ -301,9 +303,123 @@ def test_a_granted_tool_narrowed_by_an_allowlist_is_capped_at_ask(
         workspace_agent_types(manager_for(tmp_path)), _tools()
     )
 
-    assert resolved.profiles[0].tool_ceiling["file_system.bash"] == "ask"
-    assert [issue.file for issue in resolved.issues] == [str(path)]
-    assert "bash" in resolved.issues[0].message
+    assert resolved.profiles[0].tool_ceiling["file_system.bash"] == "allow"
+    assert resolved.issues == ()
+
+
+def test_an_asked_tool_narrowed_by_a_denylist_stays_asked(
+    tmp_path: Path, manager_for: ManagerFor
+) -> None:
+    """*Prepare*: A subagent asks for reads and denies a directory, in a session
+    that reads anything unattended.
+    *Do*: Resolve the workspace's agent types.
+    *Assert*: The ceiling asks, so the child's resolver is consulted for every
+    read, and nothing is reported.
+    """
+    _write_agent(
+        tmp_path,
+        "reviewer",
+        'description = "Reads the tree"\n'
+        'agent_type = "subagent"\n'
+        'enabled_tools = ["read_file"]\n'
+        "[tools.read_file]\n"
+        'permission = "ask"\n'
+        'denylist = ["secret/*"]\n',
+    )
+
+    resolved = resolve_agent_types(
+        workspace_agent_types(manager_for(tmp_path)),
+        _tools(permission=ToolPermission.ALWAYS),
+    )
+
+    assert resolved.profiles[0].tool_ceiling["file_system.read_file"] == "ask"
+    assert resolved.issues == ()
+
+
+def test_each_profile_gets_a_resolver_built_from_its_own_overrides(
+    tmp_path: Path, manager_for: ManagerFor
+) -> None:
+    """*Prepare*: Two subagents with different tool rules, and a catalogue that
+    builds a resolver from a profile's overrides.
+    *Do*: Resolve the workspace's agent types.
+    *Assert*: Each agent type is handed the resolver built from its own file.
+    """
+    _write_agent(
+        tmp_path,
+        "reader",
+        'description = "Reads"\n'
+        'agent_type = "subagent"\n'
+        "[tools.read_file]\n"
+        'denylist = ["secret/*"]\n',
+    )
+    _write_agent(tmp_path, "reviewer", REVIEWER)
+    built: dict[PermissionResolver, Mapping[str, Any]] = {}
+
+    def resolver_for(overrides: Mapping[str, Any]) -> PermissionResolver:
+        async def resolve(_name: str, _arguments: Mapping[str, Any]) -> Any:
+            raise AssertionError("not called while resolving agent types")
+
+        built[resolve] = overrides
+        return resolve
+
+    resolved = resolve_agent_types(
+        workspace_agent_types(manager_for(tmp_path)),
+        AgentToolCatalogue(
+            available=frozenset({"read_file", "grep"}),
+            permission_of=lambda _name: ToolPermission.ASK,
+            permission_resolver=resolver_for,
+        ),
+    )
+
+    reader = built[resolved.permission_resolvers["reader"]]
+    reviewer = built[resolved.permission_resolvers["reviewer"]]
+    assert reader["tools"]["read_file"]["denylist"] == ["secret/*"]
+    assert reviewer["enabled_tools"] == ["read_file", "grep"]
+
+
+def test_without_a_resolver_factory_no_profile_gets_a_resolver(
+    tmp_path: Path, manager_for: ManagerFor
+) -> None:
+    """*Prepare*: A subagent, and a catalogue that cannot build resolvers.
+    *Do*: Resolve the workspace's agent types.
+    *Assert*: The profile is bound with no resolver of its own, so its child
+    keeps the parent's.
+    """
+    _write_agent(tmp_path, "reviewer", REVIEWER)
+
+    resolved = resolve_agent_types(
+        workspace_agent_types(manager_for(tmp_path)), _tools()
+    )
+
+    assert [profile.agent_type for profile in resolved.profiles] == ["reviewer"]
+    assert resolved.permission_resolvers == {}
+
+
+def test_a_refused_tool_with_an_allowlist_is_denied_without_a_report(
+    tmp_path: Path, manager_for: ManagerFor
+) -> None:
+    """*Prepare*: A subagent refuses writes except for an allowlist.
+    *Do*: Resolve the workspace's agent types.
+    *Assert*: The child is denied writes and nothing is reported: the profile
+    already refuses the tool, so the list loosens nothing the child relies on.
+    """
+    _write_agent(
+        tmp_path,
+        "reviewer",
+        'description = "Reads the tree"\n'
+        'agent_type = "subagent"\n'
+        'enabled_tools = ["write_file"]\n'
+        "[tools.write_file]\n"
+        'permission = "never"\n'
+        'allowlist = ["notes/*"]\n',
+    )
+
+    resolved = resolve_agent_types(
+        workspace_agent_types(manager_for(tmp_path)), _tools()
+    )
+
+    assert resolved.profiles[0].tool_ceiling["file_system.write_file"] == "deny"
+    assert resolved.issues == ()
 
 
 def test_a_granted_tool_with_no_list_stays_granted(
@@ -350,6 +466,49 @@ def test_a_tool_the_profile_disables_is_denied_to_the_child(
     assert ceiling["file_system.bash"] == "deny"
 
 
+def test_the_skills_a_subagent_enables_reach_its_binding(
+    tmp_path: Path, manager_for: ManagerFor
+) -> None:
+    """*Prepare*: A subagent enables one skill and disables another.
+    *Do*: Resolve the workspace's agent types.
+    *Assert*: The binding carries both filters, so the Runtime narrows the child's skills.
+    """
+    _write_agent(
+        tmp_path,
+        "reviewer",
+        REVIEWER + 'enabled_skills = ["alpha-skill"]\ndisabled_skills = ["bravo-*"]\n',
+    )
+
+    resolved = resolve_agent_types(
+        workspace_agent_types(manager_for(tmp_path)), _tools()
+    )
+
+    profile = resolved.profiles[0]
+    assert profile.enabled_skills == ["alpha-skill"]
+    assert profile.disabled_skills == ["bravo-*"]
+    assert profile.allows_skill("alpha-skill")
+    assert not profile.allows_skill("charlie-skill")
+
+
+def test_a_subagent_without_skill_filters_keeps_every_skill(
+    tmp_path: Path, manager_for: ManagerFor
+) -> None:
+    """*Prepare*: A subagent that sets no skill filter.
+    *Do*: Resolve the workspace's agent types.
+    *Assert*: Its binding allows any skill, as the parent's catalogue holds it.
+    """
+    _write_agent(tmp_path, "reviewer", REVIEWER)
+
+    resolved = resolve_agent_types(
+        workspace_agent_types(manager_for(tmp_path)), _tools()
+    )
+
+    profile = resolved.profiles[0]
+    assert profile.enabled_skills == []
+    assert profile.disabled_skills == []
+    assert profile.allows_skill("charlie-skill")
+
+
 def test_a_name_an_installed_plugin_claims_is_refused(
     tmp_path: Path, manager_for: ManagerFor
 ) -> None:
@@ -374,13 +533,12 @@ def test_a_name_an_installed_plugin_claims_is_refused(
     assert "plugin" in resolved.issues[0].message
 
 
-def test_a_tool_the_profile_disables_is_not_reported_as_downgraded(
+def test_a_tool_the_profile_disables_stays_denied_whatever_its_stanza(
     tmp_path: Path, manager_for: ManagerFor
 ) -> None:
-    """*Prepare*: A subagent disables bash and still carries a stanza for it.
+    """*Prepare*: A subagent disables bash and still grants it in a stanza.
     *Do*: Resolve the workspace's agent types.
-    *Assert*: The tool is denied and nothing is reported, because a message
-    about a tool asking for approval describes a call the child cannot make.
+    *Assert*: The tool is denied and nothing is reported.
     """
     _write_agent(
         tmp_path,

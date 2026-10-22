@@ -1454,7 +1454,7 @@
             },
             {
               "layer": "default",
-              "value": false
+              "value": true
             }
           ]
         },

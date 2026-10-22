@@ -1,9 +1,8 @@
 use crate::core::error::CoreError;
 
-use crate::core::hooks::{HookCall, HookPoint, hook_action_id};
-use crate::core::step_protocol::Action;
+use crate::core::hooks::HookPoint;
 use crate::core::tools::context::ToolContext;
-use crate::core::tools::execution::ToolExecutionState;
+use crate::core::tools::execution::external_call::PendingExternalCall;
 use crate::core::tools::external::{ExternalToolCall, ToolOrigin, effect_id_for_operation};
 use crate::core::wire::tool::ToolCall;
 
@@ -11,7 +10,7 @@ pub(crate) fn direct_tool_execution_from_resolved_tools(
     tools: ToolContext<'_>,
     call: &ToolCall,
     determinism: crate::core::step_protocol::DeterminismContext,
-) -> Result<(ToolExecutionState, Action), CoreError> {
+) -> Result<PendingExternalCall, CoreError> {
     let mut tool = tools.resolve_direct_call(call)?;
     if let crate::core::tools::external::ExternalTool::RuntimeBuiltin {
         name: crate::core::tools::external::RuntimeBuiltinToolName::SelfWait,
@@ -30,44 +29,13 @@ pub(crate) fn direct_tool_execution_from_resolved_tools(
         origin: ToolOrigin::TopLevel,
         call: tool,
     };
-    start_direct_external_tool(tools, external_call)
-}
-
-pub(crate) fn start_direct_external_tool(
-    tools: ToolContext<'_>,
-    call: ExternalToolCall,
-) -> Result<(ToolExecutionState, Action), CoreError> {
     let hook_binding_ids =
-        tools.hook_binding_ids(HookPoint::PreToolCall, Some(&call.hook_tool_key()));
-    if !hook_binding_ids.is_empty() {
-        let hook_action_id = hook_action_id(&call.action_id, HookPoint::PreToolCall);
-        return Ok((
-            ToolExecutionState::DirectAwaitingPreHook {
-                hook_action_id: hook_action_id.clone(),
-                hook_binding_ids: hook_binding_ids.clone(),
-                call: call.clone(),
-            },
-            Action::hook(
-                hook_action_id,
-                tools.turn_id,
-                hook_binding_ids,
-                HookCall::PreToolCall {
-                    tool_call: (&call).into(),
-                },
-            )?,
-        ));
-    }
-    Ok((
-        ToolExecutionState::DirectPending { call: call.clone() },
-        external_tool_effect(tools, &call)?,
-    ))
-}
-
-pub(crate) fn external_tool_effect(
-    tools: ToolContext<'_>,
-    call: &ExternalToolCall,
-) -> Result<Action, CoreError> {
-    Ok(Action::external_tool(call, tools.turn_id))
+        tools.hook_binding_ids(HookPoint::PreToolCall, Some(&external_call.hook_tool_key()));
+    Ok(if hook_binding_ids.is_empty() {
+        PendingExternalCall::pending(external_call)
+    } else {
+        PendingExternalCall::awaiting_pre_hook(external_call, hook_binding_ids)
+    })
 }
 
 #[cfg(test)]

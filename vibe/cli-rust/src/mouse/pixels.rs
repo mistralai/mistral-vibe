@@ -1,6 +1,7 @@
 //! SGR-pixels mouse reports (DECSET 1016) for sub-cell scrollbar drags.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
 
@@ -15,6 +16,27 @@ pub const QUERY: &[u8] = b"\x1b[?1016$p\x1b[16t\x1b[c";
 static CELL: AtomicU32 = AtomicU32::new(0);
 /// The packed `Grid` while pixel reports are on, 0 while off.
 static GRID: AtomicU64 = AtomicU64::new(0);
+/// Whether the TUI captures the mouse; pixel reports stay off while it does not.
+static CAPTURE: AtomicBool = AtomicBool::new(true);
+/// The packed `Grid` pixel reports would use, kept while a gesture holds cell reports.
+static VALID: AtomicU64 = AtomicU64::new(0);
+/// A gesture holds cell reports: terminals clamp them, so no negative release is dropped by crossterm.
+static HELD: AtomicBool = AtomicBool::new(false);
+/// A report-unit switch the terminal may not have applied yet, and the last pointer cell.
+struct Settling {
+    /// The pixel grid and whether the switch goes to pixels, until a report arrives in the new units.
+    switch: Option<(Grid, bool)>,
+    /// Reports still read by nearness before the new units are assumed.
+    budget: u8,
+    last: (u16, u16),
+}
+static SETTLING: Mutex<Settling> = Mutex::new(Settling {
+    switch: None,
+    budget: 0,
+    last: (0, 0),
+});
+/// Reports a switch may leave in flight; bounds a misread when both units land near the top-left.
+const IN_FLIGHT: u8 = 64;
 
 /// The terminal's text area, in cells and in pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,13 +136,62 @@ pub fn cell_size(response: &[u8]) -> Option<(u16, u16)> {
     (size.0 > 0 && size.1 > 0).then_some(size)
 }
 
+/// Follow mouse capture: `sync` keeps pixel reports off while the mouse is not captured.
+pub fn set_capture(on: bool) {
+    CAPTURE.store(on, Ordering::Relaxed);
+}
+
 /// Match pixel reports to the current window; the sequence the caller must send, if any.
 pub fn sync() -> Option<&'static str> {
     let packed = CELL.load(Ordering::Relaxed);
     let cell = (packed != 0).then_some(((packed >> 16) as u16, packed as u16));
-    let grid = validated(cell, Grid::current());
-    let was_on = GRID.swap(grid.map_or(0, Grid::pack), Ordering::Relaxed) != 0;
-    transition(was_on, grid.is_some())
+    resync(validated(cell, Grid::current()))
+}
+
+/// Match pixel reports to `grid`, the validated window grid if any; the sequence to send, if any.
+fn resync(grid: Option<Grid>) -> Option<&'static str> {
+    VALID.store(grid.map_or(0, Grid::pack), Ordering::Relaxed);
+    let (held, capture) = (
+        HELD.load(Ordering::Relaxed),
+        CAPTURE.load(Ordering::Relaxed),
+    );
+    switch(reported_grid(grid, held, capture))
+}
+
+/// Hold cell reports for a gesture, or go back to pixel reports after it; the sequence to send, if any.
+pub fn hold_cells(held: bool) -> Option<&'static str> {
+    let Some(grid) = Grid::unpack(VALID.load(Ordering::Relaxed)) else {
+        // A resize can invalidate the grid mid-gesture: its end must still let pixel reports back.
+        if !held && HELD.load(Ordering::Relaxed) {
+            HELD.store(false, Ordering::Relaxed);
+        }
+        return None;
+    };
+    if HELD.swap(held, Ordering::Relaxed) == held {
+        return None;
+    }
+    switch(reported_grid(
+        Some(grid),
+        held,
+        CAPTURE.load(Ordering::Relaxed),
+    ))
+}
+
+/// Turn pixel reports on over `grid`, or off, reading the reports still in flight by nearness.
+fn switch(grid: Option<Grid>) -> Option<&'static str> {
+    let previous = Grid::unpack(GRID.swap(grid.map_or(0, Grid::pack), Ordering::Relaxed));
+    let sequence = transition(previous.is_some(), grid.is_some());
+    if let Some(pixels) = grid.or(previous).filter(|_| sequence.is_some()) {
+        let mut settling = SETTLING.lock().unwrap_or_else(PoisonError::into_inner);
+        settling.switch = Some((pixels, grid.is_some()));
+        settling.budget = IN_FLIGHT;
+    }
+    sequence
+}
+
+/// The grid pixel reports use: the validated window, unless a gesture holds cells or the mouse is not captured.
+pub fn reported_grid(valid: Option<Grid>, held: bool, capture: bool) -> Option<Grid> {
+    valid.filter(|_| !held && capture)
 }
 
 /// The sequence that moves mouse reports from pixels `was_on` to pixels `on`, if they differ.
@@ -140,6 +211,11 @@ pub fn validated(cell: Option<(u16, u16)>, grid: Option<Grid>) -> Option<Grid> {
 
 /// Stop converting pixel reports; true when the caller must send `DISABLE`.
 pub fn disable() -> bool {
+    HELD.store(false, Ordering::Relaxed);
+    SETTLING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .switch = None;
     GRID.swap(0, Ordering::Relaxed) != 0
 }
 
@@ -149,7 +225,43 @@ pub fn grid() -> Option<Grid> {
 
 /// The cell event for a terminal mouse event, and its pointer row in fractional cells.
 pub fn to_cells(event: MouseEvent) -> (MouseEvent, f64) {
-    cells(grid(), event)
+    if VALID.load(Ordering::Relaxed) == 0 {
+        return cells(grid(), event);
+    }
+    let mut settling = SETTLING.lock().unwrap_or_else(PoisonError::into_inner);
+    let converted = match settling.switch.filter(|_| settling.budget > 0) {
+        Some((pixels, to_pixels)) => {
+            settling.budget -= 1;
+            let (converted, pixel) = settle(pixels, settling.last, event, to_pixels);
+            if pixel == to_pixels {
+                // The terminal switched: every later report is in the new units.
+                settling.switch = None;
+            }
+            converted
+        }
+        None => cells(grid(), event),
+    };
+    settling.last = (converted.0.column, converted.0.row);
+    converted
+}
+
+/// Read a report sent around a switch in the units nearer the last cell (ties: new units); true for pixels.
+pub fn settle(
+    grid: Grid,
+    last: (u16, u16),
+    event: MouseEvent,
+    to_pixels: bool,
+) -> ((MouseEvent, f64), bool) {
+    let distance =
+        |(cell, _): &(MouseEvent, f64)| cell.column.abs_diff(last.0).max(cell.row.abs_diff(last.1));
+    let as_pixels = cells(Some(grid), event);
+    let as_cells = cells(None, event);
+    let (pixel, cell) = (distance(&as_pixels), distance(&as_cells));
+    if pixel < cell || (pixel == cell && to_pixels) {
+        (as_pixels, true)
+    } else {
+        (as_cells, false)
+    }
 }
 
 /// The cell event for a mouse event reported over `grid`'s pixels, or cells without a grid.
@@ -192,3 +304,6 @@ impl Coalesce {
         true
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

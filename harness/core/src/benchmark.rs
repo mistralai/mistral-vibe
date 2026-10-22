@@ -149,7 +149,8 @@ fn config(index: usize) -> HarnessConfig {
             "turn": { "max_iterations": 4 },
             "context": {
                 "compaction": { "mode": "disabled" },
-                "notifications": { "pending_count": 1000, "pending_bytes": 1048576, "recent_ids": 1000 }
+                "notifications": { "pending_count": 1000, "pending_bytes": 1048576, "recent_ids": 1000 },
+                "input_modalities": ["text", "image"]
             },
             "tools": {
                 "programmatic": { "max_effects": 16, "max_operations": 64, "max_elapsed_ms": 60000, "max_sleep_ms": 30000 },

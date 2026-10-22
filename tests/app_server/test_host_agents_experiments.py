@@ -13,8 +13,9 @@ from typing import cast
 
 import pytest
 
+import vibe.app_server._cached_layers as cached_layers_module
+from vibe.app_server._connection_protocol import ClientInfo
 from vibe.app_server._host import HostRequestHandler
-import vibe.app_server._runtime as runtime_module
 from vibe.app_server.protocol import AgentsListParams, AgentsListResponse
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.experiments.active import ExperimentName
@@ -36,14 +37,16 @@ async def test_agents_list_offers_smart_approve_from_cached_experiment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        runtime_module,
+        cached_layers_module,
         "load_cached_eval_response",
         lambda _config: _smart_approve_available_response(),
     )
     handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
 
     result = await handler.dispatch(
-        "agents/list", AgentsListParams().model_dump(mode="json", by_alias=True)
+        "agents/list",
+        AgentsListParams().model_dump(mode="json", by_alias=True),
+        client_info=ClientInfo(name="test-client", version="0.0.0"),
     )
 
     response = cast(AgentsListResponse, result.response)

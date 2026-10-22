@@ -2,15 +2,22 @@
 
 Thank you for your interest in Mistral Vibe! We appreciate your enthusiasm and support.
 
-## Current Status
+## We Do Not Accept Pull Requests
 
-**Mistral Vibe is in active development** — our team is iterating quickly and making lots of changes under the hood. Because of this pace, we may be slower than usual when reviewing PRs and issues.
+**Mistral Vibe does not accept pull requests from the community.** Only maintainers can open pull requests on this repository.
+
+Instead, tell us what you need, and our team will take it from there:
+
+- **Found a bug?** [Open an issue](https://github.com/mistralai/mistral-vibe/issues/new/choose).
+- **Want a feature or a documentation improvement?** [Start a discussion](https://github.com/mistralai/mistral-vibe/discussions/new?category=ideas) in the Ideas category.
 
 **We especially encourage**:
 
 - **Bug reports** – Help us uncover and squash issues
 - **Feedback & ideas** – Tell us what works, what doesn't, and what could be even better
 - **Documentation improvements** – Suggest clarity improvements or highlight missing pieces
+
+Mistral Vibe is in active development and our team iterates quickly, so we may take some time to answer issues and discussions.
 
 ## How to Provide Feedback
 
@@ -40,7 +47,7 @@ We'd love to hear your ideas! When submitting feedback or feature request discus
 
 ## Development Setup
 
-This section is for developers who want to set up the repository for local development, even though we're not currently accepting contributions.
+This section is for developers who want to set up the repository for local development, for example to reproduce a bug before reporting it. We do not accept pull requests.
 
 ### Prerequisites
 
@@ -81,7 +88,8 @@ This section is for developers who want to set up the repository for local devel
 
    In a source checkout, the first run builds the `vibe-rs` terminal UI from
    `vibe/cli-rust` with cargo. After changing the Rust sources, rebuild it with
-   `make build`.
+   `make build`. On Linux without the ALSA development files, set
+   `CARGO_BUILD_FLAGS=--no-default-features` to build it without voice mode.
 
 ### Building distributions
 
@@ -89,7 +97,11 @@ This section is for developers who want to set up the repository for local devel
 package (`vibe-acp` and `vibe-app-server`), the Rust terminal UI, and the
 Unified Harness runtime. The build requires a working Rust toolchain and fails
 if either native component cannot be built.
-On Linux, set `CARGO_BUILD_FLAGS=--no-default-features` to build without ALSA.
+On Linux, voice mode needs pkg-config and the ALSA development files
+(`libasound2-dev` or `alsa-lib-devel`); without them, the build prints a warning
+and builds the terminal UI without voice mode, like the published Linux wheels.
+Setting `CARGO_BUILD_FLAGS` to select features (`--features`/`-F`,
+`--no-default-features`, `--all-features`) or a `--target` skips this detection.
 
 `VIBE_SKIP_RUST_TUI=1` may be used by development-only checks that do not need
 the terminal binary, and by CI builds that package only vibe-acp (it does not
@@ -241,14 +253,10 @@ See `pyproject.toml` for detailed configuration of Ruff and Pyright.
 
 ## Code Contributions
 
-While we're not accepting code contributions at the moment, we may open up contributions in the future. When that happens, we'll update this document with:
-
-- Pull request process
-- Contribution guidelines
-- Review process
+We do not accept code contributions, and pull requests are restricted to maintainers. To report a bug, open an issue; to propose an improvement, start a discussion in the Ideas category. Give as much context as possible (use case, reproduction steps, suggested approach).
 
 ## Questions?
 
-If you have questions about using Mistral Vibe, please check the [README](README.md) first. For other inquiries, feel free to open a discussion or issue.
+If you have questions about using Mistral Vibe, please check the [README](README.md) first. For other inquiries, feel free to open a discussion.
 
 Thank you for helping make Mistral Vibe better! 🙏

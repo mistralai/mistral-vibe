@@ -4,11 +4,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::slice::from_ref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use notify::event::{AccessKind, CreateKind, EventKind, ModifyKind};
+use notify::event::{AccessKind, CreateKind, EventKind, Flag, ModifyKind, RemoveKind, RenameMode};
 use notify::Event;
 use tokio::sync::watch;
 
@@ -49,6 +50,21 @@ fn git(root: &Path, args: &[&str]) {
         .status()
         .expect("git binary available");
     assert!(status.success(), "git {args:?} failed: {status}");
+}
+
+fn ev(kind: EventKind, paths: &[PathBuf]) -> Event {
+    let mut event = Event::new(kind);
+    event.paths = paths.to_vec();
+    event
+}
+
+macro_rules! harness {
+    ($root:expr, $paths:ident, $rx:ident, $apply:ident) => {
+        let $paths = RwLock::new(BTreeMap::new());
+        let (tx, mut $rx) = watch::channel(0u64);
+        let mut ignore = ignore_matcher(&$root);
+        let mut $apply = |e: Event| apply_events(&$root, &$paths, vec![e], &tx, &mut ignore, false);
+    };
 }
 
 #[test]
@@ -181,5 +197,103 @@ fn non_git_batch_keeps_incremental_event_application() {
 
     let current = paths.read().unwrap();
     assert_eq!(current.get("plain.md"), Some(&false));
+    cleanup(&root);
+}
+
+#[test]
+fn dir_create_indexes_the_subtree_once_and_dir_modify_does_not_rewalk() {
+    let root = temp_root();
+    fs::create_dir_all(root.join("sub/nested")).unwrap();
+    fs::write(root.join("sub/nested/b.txt"), "b").unwrap();
+    harness!(root, paths, version_rx, apply);
+
+    apply(ev(EventKind::Create(CreateKind::Any), &[root.join("sub")]));
+    assert_eq!(*version_rx.borrow_and_update(), 1);
+    assert!(paths.read().unwrap().contains_key("sub/nested/b.txt"));
+    // A dir Modify must not re-walk: the new file stays unindexed, no bump fires.
+    fs::write(root.join("sub/new.txt"), "n").unwrap();
+    apply(ev(EventKind::Modify(ModifyKind::Any), &[root.join("sub")]));
+    assert!(!version_rx.has_changed().unwrap());
+    assert!(!paths.read().unwrap().contains_key("sub/new.txt"));
+    cleanup(&root);
+}
+
+#[test]
+fn rename_event_prunes_the_source_and_indexes_the_destination() {
+    let root = temp_root();
+    fs::create_dir_all(root.join("old/nested")).unwrap();
+    fs::write(root.join("old/a.txt"), "a").unwrap();
+    fs::write(root.join("old/nested/b.txt"), "b").unwrap();
+    harness!(root, paths, version_rx, apply);
+
+    apply(ev(EventKind::Create(CreateKind::Any), &[root.join("old")]));
+    fs::rename(root.join("old"), root.join("new")).unwrap();
+    let rename = EventKind::Modify(ModifyKind::Name(RenameMode::Both));
+    apply(ev(rename, &[root.join("old"), root.join("new")]));
+    for gone in ["old", "old/a.txt", "old/nested", "old/nested/b.txt"] {
+        assert!(!paths.read().unwrap().contains_key(gone));
+    }
+    for fresh in ["new", "new/a.txt", "new/nested", "new/nested/b.txt"] {
+        assert!(paths.read().unwrap().contains_key(fresh));
+    }
+    // fsevents/kqueue deliver one path per rename: existing walks, gone prunes.
+    fs::rename(root.join("new"), root.join("final")).unwrap();
+    let any = EventKind::Modify(ModifyKind::Name(RenameMode::Any));
+    apply(ev(any, &[root.join("final")]));
+    assert!(paths.read().unwrap().contains_key("final/nested/b.txt"));
+    apply(ev(any, &[root.join("new")]));
+    assert!(!paths.read().unwrap().contains_key("new/nested/b.txt"));
+    assert_eq!(*version_rx.borrow_and_update(), 4);
+    cleanup(&root);
+}
+
+#[test]
+fn file_events_upsert_one_path_and_remove_prunes_descendants() {
+    let root = temp_root();
+    fs::create_dir_all(root.join("d")).unwrap();
+    fs::write(root.join("d/x.txt"), "x").unwrap();
+    harness!(root, paths, version_rx, apply);
+    let file = root.join("d/x.txt");
+    // Create and Modify upsert exactly the event path.
+    apply(ev(EventKind::Create(CreateKind::Any), from_ref(&file)));
+    apply(ev(EventKind::Modify(ModifyKind::Any), from_ref(&file)));
+    assert_eq!(paths.read().unwrap().len(), 1);
+    assert_eq!(*version_rx.borrow_and_update(), 1);
+
+    // Remove prunes the path and its descendants.
+    fs::remove_dir_all(root.join("d")).unwrap();
+    apply(ev(EventKind::Remove(RemoveKind::Any), &[root.join("d")]));
+    assert_eq!(paths.read().unwrap().len(), 0);
+    assert_eq!(*version_rx.borrow_and_update(), 2);
+    cleanup(&root);
+}
+
+#[test]
+fn ignore_file_event_still_rebuilds_the_whole_index() {
+    let root = temp_root();
+    git(&root, &["init", "--quiet"]);
+    let keep = root.join("keep.txt");
+    let gitignore = root.join(".gitignore");
+    fs::write(&keep, "k").unwrap();
+    fs::write(root.join("secret.log"), "s").unwrap();
+    fs::write(&gitignore, "secret.log\n").unwrap();
+    harness!(root, paths, version_rx, apply);
+    apply(ev(EventKind::Create(CreateKind::Any), &[keep]));
+    apply(ev(EventKind::Create(CreateKind::Any), &[gitignore]));
+    assert!(paths.read().unwrap().contains_key("keep.txt"));
+    assert!(paths.read().unwrap().contains_key(".gitignore"));
+    assert!(!paths.read().unwrap().contains_key("secret.log"));
+    assert_eq!(*version_rx.borrow_and_update(), 2);
+    cleanup(&root);
+}
+
+#[test]
+fn rescan_notice_rebuilds_the_whole_index() {
+    let root = temp_root();
+    harness!(root, paths, version_rx, apply);
+    fs::write(root.join("unseen.txt"), "u").unwrap();
+    apply(Event::new(EventKind::Other).set_flag(Flag::Rescan));
+    assert!(paths.read().unwrap().contains_key("unseen.txt"));
+    assert_eq!(*version_rx.borrow_and_update(), 1);
     cleanup(&root);
 }

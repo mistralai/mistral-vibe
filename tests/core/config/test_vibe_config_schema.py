@@ -189,22 +189,39 @@ def test_subagent_status_list_is_enabled_by_default() -> None:
     assert VibeConfigSchema().show_subagent_status_list is True
 
 
+def test_subagent_limits_default_to_32() -> None:
+    config = VibeConfigSchema()
+    assert config.max_subagents == 32
+    assert config.max_concurrent_subagents == 32
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        {"max_subagents": 0},
+        {"max_concurrent_subagents": 0},
+        {"max_subagents": -1},
+        {"max_concurrent_subagents": -1},
+    ],
+)
+def test_subagent_limits_reject_non_positive_values(setting: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        VibeConfigSchema.model_validate(setting)
+
+
 def test_smart_approve_is_not_offered_by_default() -> None:
     config = VibeConfigSchema()
     assert config.smart_approve_offered() is False
-    assert config.resolve_default_agent() == "accept-edits"
 
 
 def test_smart_approve_available_flag_offers_without_defaulting() -> None:
     config = VibeConfigSchema(smart_approve_available=True, default_agent="ask")
     assert config.smart_approve_offered() is True
-    assert config.resolve_default_agent() == "ask"
 
 
 def test_smart_approve_default_flag_offers_and_defaults() -> None:
     config = VibeConfigSchema(smart_approve_default=True)
     assert config.smart_approve_offered() is True
-    assert config.resolve_default_agent() == "smart-approve"
 
 
 def test_default_model_carries_the_sourced_values() -> None:

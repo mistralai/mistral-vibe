@@ -29,7 +29,8 @@ fn canonical_config() -> HarnessConfig {
             "turn": { "max_iterations": 42 },
             "context": {
                 "compaction": { "mode": "automatic", "token_threshold": 120000 },
-                "notifications": { "pending_count": 1000, "pending_bytes": 1048576, "recent_ids": 1000 }
+                "notifications": { "pending_count": 1000, "pending_bytes": 1048576, "recent_ids": 1000 },
+                "input_modalities": ["text", "image"]
             },
             "tools": {
                 "programmatic": { "max_effects": 64, "max_operations": 512, "max_elapsed_ms": 60000, "max_sleep_ms": 30000 },

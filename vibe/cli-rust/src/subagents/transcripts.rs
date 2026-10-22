@@ -47,6 +47,13 @@ impl SubagentTranscripts {
             .map(|(_, transcript)| transcript)
     }
 
+    /// Apply `show_thinking_nodes` to every cached child.
+    pub fn set_show_reasoning(&mut self, show: bool) {
+        for (_, child) in &mut self.ordered {
+            child.transcript.set_show_reasoning(show);
+        }
+    }
+
     /// Drop the previous selection's
     /// completeness, keep the picked one most recent; false when not cached.
     pub fn select(&mut self, session_id: Option<&str>) -> bool {

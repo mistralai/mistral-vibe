@@ -140,6 +140,7 @@ impl HarnessSession {
                 let turn = self.state.turn_view(None).map_err(|error| {
                     core_rejection(error, "completion_model_input_resync_requested")
                 })?;
+                let settings = &self.state.config.settings;
                 let source = ModelInputSource {
                     context: &self.state.context,
                     compaction: self.state.pending_compaction().map(|pending| {
@@ -148,7 +149,7 @@ impl HarnessSession {
                             messages: pending.projection().model_messages(),
                         }
                     }),
-                    image_delivery: self.state.config.settings.context.image_delivery,
+                    image_delivery: settings.context.effective_image_delivery(),
                     tools: self.state.resolved_tools.top_level_tools(),
                     tool_catalog_revision: self.state.tool_catalog.revision,
                 };
@@ -168,6 +169,7 @@ impl HarnessSession {
                     .into_iter()
                     .map(|action| action.action_id().to_string())
                     .collect();
+                let settings = &self.state.config.settings;
                 let source = ModelInputSource {
                     context: &self.state.context,
                     compaction: self.state.pending_compaction().map(|pending| {
@@ -176,7 +178,7 @@ impl HarnessSession {
                             messages: pending.projection().model_messages(),
                         }
                     }),
-                    image_delivery: self.state.config.settings.context.image_delivery,
+                    image_delivery: settings.context.effective_image_delivery(),
                     tools: self.state.resolved_tools.top_level_tools(),
                     tool_catalog_revision: self.state.tool_catalog.revision,
                 };

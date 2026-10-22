@@ -85,11 +85,11 @@ if TYPE_CHECKING:
         ResolvedPluginDefinition,
     )
     from mistralai_vibe_local_harness.vibe.plugins import (
-        DeclaredAgentTypeProfile,
         PinnedPlugins,
         RestoredPlugins,
         SessionPluginProjection,
     )
+    from vibe.app_server._agent_types import ResolvedAgentTypes
     from vibe.app_server._plugin_mcp import PluginMCPCatalog
     from vibe.app_server._sandbox_skills import SandboxSkills
     from vibe.core.config.models import MCPServer
@@ -195,6 +195,24 @@ def _resolve_installed(
         data_root_base=VIBE_HOME.path / "plugin-data",
         config_orchestrator=config_orchestrator,
     ).resolve()
+
+
+async def resolve_plugin_skills(
+    harness_files: HarnessFilesManager,
+    *,
+    config_orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    builtin_plugin_roots: Sequence[Path] | None = None,
+) -> tuple[Mapping[str, SkillInfo], list[RustPluginContextDefinition]]:
+    """Plugin skills only: listing must not connect MCP servers or seed libraries."""
+    roots = (
+        packaged_builtin_plugin_roots()
+        if builtin_plugin_roots is None
+        else list(builtin_plugin_roots)
+    )
+    resolution = await asyncio.to_thread(
+        _resolve_installed, harness_files, config_orchestrator, roots
+    )
+    return resolution.skills, _plugin_contexts(resolution, knowledge={}, agents={})
 
 
 def installed_plugin_scopes(plugins: SessionPlugins) -> dict[str, SkillScope]:
@@ -499,19 +517,25 @@ class UnifiedPluginProvider:
             )
             return SessionPluginProjection(definitions=definitions)
         tools = self._agent_tools()
+        # A plugin advertises its agent types inside its own capabilities,
+        # which this module cannot edit, so a workspace agent cannot take a
+        # name a plugin claims without the model reading one owner's
+        # description and getting the other's behaviour. It loses the name
+        # here on every half at once.
+        resolved = (
+            resolve_agent_types(workspace, tools, reserved=plugin_agent_names(agents)),
+            declared_agent_types(agents, tools),
+        )
         return SessionPluginProjection(
             definitions=definitions,
-            # A plugin advertises its agent types inside its own capabilities,
-            # which this module cannot edit, so a workspace agent cannot take a
-            # name a plugin claims without the model reading one owner's
-            # description and getting the other's behaviour. It loses the name
-            # here on both halves at once.
-            agent_profiles=(
-                *resolve_agent_types(
-                    workspace, tools, reserved=plugin_agent_names(agents)
-                ).profiles,
-                *declared_agent_profiles(agents, tools),
+            agent_profiles=tuple(
+                profile for types in resolved for profile in types.profiles
             ),
+            agent_permission_resolvers={
+                name: resolver
+                for types in resolved
+                for name, resolver in types.permission_resolvers.items()
+            },
         )
 
     async def info(self, *, session_id: str) -> HarnessPluginInfo:
@@ -937,16 +961,27 @@ def core_plugins(plugins: SessionPlugins) -> list[RustPluginContextDefinition]:
     turns rather than run anything. The tool catalogue still reaches the
     snapshot and ``plugin/info``.
     """
+    resolution = plugins.materialized.resolution
+    return _plugin_contexts(
+        resolution,
+        knowledge=_core_knowledge(plugins.materialized.knowledge),
+        agents=_core_agents(resolution.agents),
+    )
+
+
+def _plugin_contexts(
+    resolution: ResolvedPluginSet,
+    *,
+    knowledge: Mapping[str, list[RustKnowledgeFolderDefinition]],
+    agents: Mapping[str, list[RustAgentTypeDefinition]],
+) -> list[RustPluginContextDefinition]:
     from mistralai_vibe_local_harness.protocol import (
         RustHarnessCapabilitySet,
         RustPluginContextDefinition,
     )
 
-    resolution = plugins.materialized.resolution
     owners = {plugin.namespace: plugin.name for plugin in resolution.plugins}
     skills = _core_skills(resolution.skills, owners)
-    knowledge = _core_knowledge(plugins.materialized.knowledge)
-    agents = _core_agents(resolution.agents)
     return [
         RustPluginContextDefinition(
             name=plugin.name,
@@ -954,8 +989,8 @@ def core_plugins(plugins: SessionPlugins) -> list[RustPluginContextDefinition]:
             path=str(plugin.root),
             capabilities=RustHarnessCapabilitySet(
                 skills=skills[plugin.name],
-                knowledge_folders=knowledge[plugin.name],
-                agent_types=agents[plugin.name],
+                knowledge_folders=knowledge.get(plugin.name, []),
+                agent_types=agents.get(plugin.name, []),
             ),
         )
         for plugin in sorted(resolution.plugins, key=lambda item: item.name)
@@ -1059,11 +1094,11 @@ def _core_agents(
     return grouped
 
 
-def declared_agent_profiles(
+def declared_agent_types(
     definitions: Iterable[PluginAgentDefinition], tools: AgentToolCatalogue
-) -> tuple[DeclaredAgentTypeProfile, ...]:
+) -> ResolvedAgentTypes:
     """The bindings behind a plugin's agent types."""
-    return resolve_agent_types(_plugin_agent_sources(definitions), tools).profiles
+    return resolve_agent_types(_plugin_agent_sources(definitions), tools)
 
 
 def _accept[T](model: type[T], plugin: str, **fields: object) -> T | None:

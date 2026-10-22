@@ -146,7 +146,14 @@ impl Drop for PyHarnessSession {
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyHarnessSession>()?;
-    module.add_function(wrap_pyfunction!(hook_tool_catalog, module)?)
+    module.add_function(wrap_pyfunction!(hook_tool_catalog, module)?)?;
+    module.add_function(wrap_pyfunction!(validate_permission_pattern, module)?)
+}
+
+#[pyfunction]
+#[pyo3(signature = (pattern, *, arguments = false))]
+fn validate_permission_pattern(pattern: &str, arguments: bool) -> PyResult<()> {
+    crate::core::validate_permission_pattern(pattern, arguments).map_err(PyValueError::new_err)
 }
 
 #[pyfunction]

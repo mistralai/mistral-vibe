@@ -1,9 +1,11 @@
 //! Which entries render, and the summary of each packed tool group.
 
+use std::collections::HashSet;
+
 use serde_json::Value;
 
 use super::StoredEntry;
-use crate::server::{CheckpointEntry, HistoryEntry, NoticeDetail};
+use crate::server::{CheckpointEntry, EffectEntry, HistoryEntry, NoticeDetail};
 
 pub(crate) const KEY_PREFIX: &str = "tool-group:";
 
@@ -12,7 +14,7 @@ pub struct Group<'a> {
     pub first: bool,
     pub last: bool,
     pub finalized: bool,
-    /// Each effect kind in first-seen order, with how many calls it made.
+    /// Header counts per kind in first-seen order; empty except on the group's first entry.
     pub kinds: Vec<(&'a str, usize)>,
     pub reasoning: bool,
 }
@@ -114,6 +116,31 @@ pub fn label_kind(kind: Option<&str>) -> &str {
         Some(kind) if category(kind).is_some() => kind,
         _ => "tool",
     }
+}
+
+/// Kinds in first-seen order: file kinds count distinct paths, the rest count calls.
+pub(super) fn count_kinds<'a>(
+    effects: impl Iterator<Item = &'a EffectEntry>,
+) -> Vec<(&'a str, usize)> {
+    let mut kinds: Vec<(&str, usize)> = Vec::new();
+    let mut paths = HashSet::new();
+    for effect in effects {
+        let kind = label_kind(effect.kind());
+        let repeat = file_path(kind, effect).is_some_and(|path| !paths.insert((kind, path)));
+        match kinds.iter_mut().find(|(seen, _)| *seen == kind) {
+            Some((_, count)) => *count += usize::from(!repeat),
+            None => kinds.push((kind, 1)),
+        }
+    }
+    kinds
+}
+
+/// The target of a call whose kind counts files (`read 2 files`).
+fn file_path<'a>(kind: &str, effect: &'a EffectEntry) -> Option<&'a str> {
+    if !matches!(kind, "file_read" | "file_edit" | "file_write") {
+        return None;
+    }
+    effect.input()?.get("filePath")?.as_str()
 }
 
 /// The verb and noun of `{verb} {count} {noun}`, e.g. `read 10 files`.
