@@ -815,7 +815,7 @@ def _atomic_write_text(path: Path, content: str, encoding: str) -> None:
         # the existing mode is restored. Do not change the process-wide umask.
         creation_mode = 0o666 if mode is None else 0o600
         for _ in range(100):
-            candidate = path.parent / f".{path.name}.{secrets.token_hex(16)}.tmp"
+            candidate = path.parent / f".vibe.{secrets.token_hex(16)}.tmp"
             try:
                 descriptor = os.open(
                     candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, creation_mode
