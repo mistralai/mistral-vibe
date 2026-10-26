@@ -10,9 +10,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 __all__ = [
+    "OutsideWorkdirPolicy",
     "PathGrantScope",
     "PermissionScope",
     "RequiredPermission",
+    "parse_path_grant_pattern",
     "path_grant_pattern",
     "path_grant_pattern_matches",
     "path_pattern_matches",
@@ -33,6 +35,13 @@ class PermissionScope(StrEnum):
     OUTSIDE_DIRECTORY = auto()
     FILE_PATTERN = auto()
     URL_PATTERN = auto()
+
+
+class OutsideWorkdirPolicy(StrEnum):
+    """What a tool call reaching outside the working directory gets instead of running."""
+
+    ASK = auto()
+    DENY = auto()
 
 
 class RequiredPermission(BaseModel):
@@ -57,6 +66,18 @@ class RequiredPermission(BaseModel):
     resolves the permission afresh from the call. Putting it on the wire would
     add a field to the ACP and Runtime payloads that nothing downstream reads.
     """
+    supplied_pattern: str | None = Field(default=None, exclude=True)
+    """The spelling the call supplied, when it differs from ``invocation_pattern``.
+
+    ``invocation_pattern`` stays the resolved path so stored grants keep
+    matching it, but a denial sent to the model reports this spelling instead:
+    naming the resolved path would tell it where a symlink points without its
+    ever being able to read the target.
+
+    Excluded from serialization: only the outside-workdir refusal reads it, and
+    every consumer that round-trips a permission (approval grants, the ACP and
+    Runtime payloads) matches the resolved ``invocation_pattern``.
+    """
     path_scope_root: str | None = None
 
 
@@ -75,7 +96,7 @@ def path_grant_pattern(path: str, scope: PathGrantScope) -> str:
     return f"{_PATH_GRANT_PREFIX}:{scope.value}:{_normalized_path(path)}"
 
 
-def _parse_path_grant_pattern(pattern: str) -> tuple[PathGrantScope, str] | None:
+def parse_path_grant_pattern(pattern: str) -> tuple[PathGrantScope, str] | None:
     prefix, separator, remainder = pattern.partition(":")
     if prefix != _PATH_GRANT_PREFIX or not separator:
         return None
@@ -91,7 +112,7 @@ def _parse_path_grant_pattern(pattern: str) -> tuple[PathGrantScope, str] | None
 def path_pattern_matches(path: str, pattern: str) -> bool:
     """Match encoded grants and legacy path globs without crossing separators."""
     normalized = _normalized_path(path)
-    if parsed := _parse_path_grant_pattern(pattern):
+    if parsed := parse_path_grant_pattern(pattern):
         scope, granted = parsed
         if scope is PathGrantScope.EXACT:
             return normalized == granted
@@ -132,7 +153,7 @@ def path_grant_pattern_matches(path: str, pattern: str) -> bool:
     must not become path grants merely because their text equals a path.
     """
     return (
-        _parse_path_grant_pattern(pattern) is not None
+        parse_path_grant_pattern(pattern) is not None
         or _is_legacy_path_grant_pattern(pattern)
     ) and path_pattern_matches(path, pattern)
 

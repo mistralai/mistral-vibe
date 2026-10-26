@@ -21,6 +21,8 @@ import tempfile
 import threading
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from pydantic import ValidationError
+
 from vibe import __version__
 from vibe._experimental_harness import (
     create_experimental_harness_host,
@@ -36,6 +38,7 @@ from vibe.app_server._admin_config import (
 from vibe.app_server._agent_types import (
     AgentToolCatalogue,
     resolve_agent_types,
+    workspace_agent_rejections,
     workspace_agent_types,
 )
 from vibe.app_server._cached_layers import apply_cached_layers
@@ -84,6 +87,7 @@ from vibe.app_server.run_export import HeadlessUsageError, RunOutcome
 from vibe.app_server.transport import JsonRpcTransport, memory_transport_pair
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
+from vibe.core.agents.registry import apply_profile_overrides
 from vibe.core.config import (
     MCPHttp,
     MCPServer,
@@ -97,14 +101,16 @@ from vibe.core.config import (
     resolve_api_key,
 )
 from vibe.core.config.admin_config import AdminConfigApplyResult, AdminConfigOutcome
+from vibe.core.config.builder import InvalidConfigError
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.layers.admin import enforced_keys
 from vibe.core.config.managed_config_cache import store_cached_managed_config
 from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.config.shell_timeouts import shell_timeout_seconds
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import ExperimentManager
 from vibe.core.hooks.config import load_hooks_file, load_hooks_from_fs
-from vibe.core.hooks.models import HookConfigResult
+from vibe.core.hooks.models import HookConfigResult, HookType
 from vibe.core.llm.utility_completion import (
     ensure_utility_models_probed,
     select_utility_model,
@@ -146,6 +152,39 @@ def _command_environment_mode() -> _CommandEnvironmentMode:
     if get_windows_bash_path() is not None:
         return "git_bash"
     return "powershell"
+
+
+def _command_tool_name(mode: _CommandEnvironmentMode) -> str:
+    """The Vibe tool whose settings configure the command environment's tool."""
+    return "bash" if mode == "unix" else mode
+
+
+def _bash_timeout(
+    tool_name: str, overrides: Mapping[str, object] | None
+) -> RustBashTimeoutSettings:
+    """The command tool's default and maximum timeouts, in seconds, for Core.
+
+    Both as the user set them in the configuration (or the agent profile), or
+    Vibe's own when neither is set; the native tool's defaults do not apply.
+    Each is read as the config schema reads it at load, exactly, so Core gets
+    the number in the config. The local harness's ``bash_timeout`` holds the
+    rule: one set without the other is an error, which the config schema
+    already reports at load.
+    """
+    from mistralai_vibe_local_harness.vibe import bash_timeout
+
+    overrides = overrides or {}
+    seconds = {
+        key: shell_timeout_seconds(tool_name, key, overrides[key])
+        for key in ("default_timeout", "max_timeout_seconds")
+        if overrides.get(key) is not None
+    }
+    return bash_timeout(
+        seconds.get("default_timeout"),
+        seconds.get("max_timeout_seconds"),
+        default_setting=f"tools.{tool_name}.default_timeout",
+        max_setting=f"tools.{tool_name}.max_timeout_seconds",
+    )
 
 
 def _build_project_context_section(
@@ -244,6 +283,8 @@ def _build_unified_system_instructions(
     sandbox_workspace: SandboxWorkspaceContext | None = None,
     sandbox_roots: Sequence[Path] = (),
     project_instructions: str | None = None,
+    background_processes: bool = False,
+    command_environment: str = "unix",
 ) -> str:
     """The session's system instructions.
 
@@ -251,8 +292,14 @@ def _build_unified_system_instructions(
     docs come from the sandbox the tools run in rather than the host's disk;
     ``sandbox_roots`` are the session's open directories other than the cwd.
     ``project_instructions`` go with the project AGENTS.md docs, ahead of them.
+    Only with ``background_processes``, in a ``command_environment`` the
+    Harness Core advises the process tools for, does the shell guidance say to
+    start long work in the background.
     """
-    from mistralai_vibe_local_harness.vibe import build_vibe_code_system_instructions
+    from mistralai_vibe_local_harness.vibe import (
+        build_vibe_code_system_instructions,
+        with_shell_guidance,
+    )
 
     # The Vibe config layer resolves the GrowthBook system-prompt variant before
     # the experimental Runtime is composed. The SDK owns the corresponding text,
@@ -261,8 +308,10 @@ def _build_unified_system_instructions(
     # instructions: the harness core never loads them, so parity with the legacy
     # prompt is restored here. The core appends its capability sections after
     # this text, keeping the docs above skills/plugins in the final prompt.
-    instructions = base or build_vibe_code_system_instructions(
-        variant=config.system_prompt_id
+    instructions = with_shell_guidance(
+        base or build_vibe_code_system_instructions(variant=config.system_prompt_id),
+        background_processes=background_processes,
+        command_environment=command_environment,
     )
     if extra:
         instructions = f"{instructions}\n\n{extra}"
@@ -368,14 +417,31 @@ def _utility_provider_route(
     )
 
 
+def _compaction_model_input_modalities(
+    agent: ModelFacts, compaction: ModelFacts
+) -> list[RustInputModality] | None:
+    """What the compaction model reads, when it differs from the agent model."""
+    from mistralai_vibe_local_harness.vibe import rust_input_modalities
+
+    if list(compaction.input_modalities) == list(agent.input_modalities):
+        return None
+    return rust_input_modalities(compaction.input_modalities)
+
+
 if TYPE_CHECKING:
-    from mistralai_vibe_local_harness.protocol import RustRuntimeBuiltinToolName
+    from mistralai_vibe_local_harness.protocol import (
+        RustBashTimeoutSettings,
+        RustInputModality,
+        RustRuntimeBuiltinToolName,
+    )
     from mistralai_vibe_local_harness.vibe import (
         HelperCrashCount,
         LocalProviderRoute,
         ProviderCredentialProvider,
         SandboxAdapter,
     )
+    from mistralai_vibe_local_harness.vibe.completion_profile import ModelFacts
+    from mistralai_vibe_local_harness.vibe.plugins import DeclaredCompletionRoute
     from vibe.app_server._account import AccountGateway
     from vibe.app_server._agent_socket import AgentSocketMount
     from vibe.app_server._identity import IdentityGateway
@@ -803,6 +869,31 @@ class HarnessProcess:
             sessionless_catalog_factory=self.build_sessionless_mcp_catalog,
         )
         self.plugin_catalog = PluginCatalogService()
+        self._connector_warm_up: asyncio.Task[None] | None = None
+
+    def start_connector_warm_up(self) -> None:
+        """Fetch the connector catalog now, before any session needs it.
+
+        A session's first turn waits for the catalog when nothing is cached,
+        and every session joins this fetch rather than starting its own. Its
+        failure is not memoized, so a session's own load retries at once and
+        reports it.
+
+        Only the stdio servers start it; the process is left to end with them.
+        """
+        if self._connector_warm_up is None and not self._closed:
+            self._connector_warm_up = asyncio.create_task(
+                self._warm_connector_catalog(), name="vibe-connector-warm-up"
+            )
+
+    async def _warm_connector_catalog(self) -> None:
+        try:
+            orchestrator = await self.build_sessionless_mcp_catalog()
+            await self.connector_catalog.resolve_catalog(
+                orchestrator, remember_failure=False
+            )
+        except Exception as exc:
+            logger.info("Connector catalog warm-up failed: %s", exc)
 
     def create_session_backend_host(
         self, services: SessionBackendServices
@@ -853,6 +944,10 @@ class HarnessProcess:
             if self._closed:
                 return
             self._closed = True
+        if (warm_up := self._connector_warm_up) is not None:
+            warm_up.cancel()
+            # Not ``suppress``: a cancellation of ``close`` itself must still land.
+            await asyncio.wait([warm_up])
         errors: list[BaseException] = []
         try:
             await self.imports.close()
@@ -1003,7 +1098,6 @@ class HarnessProcess:
         from mistralai_vibe_local_harness.protocol import (
             RustAutomaticCompactionPolicy,
             RustContextSettings,
-            RustDisabledCompactionPolicy,
             RustDisabledOutputLimitRecovery,
             RustDisabledRuntimeToolFeature,
             RustEnabledAgentTools,
@@ -1029,10 +1123,16 @@ class HarnessProcess:
             LocalRuntimeAdapterConfig,
             SessionWorkspace,
             compile_foreign_hooks,
+            rust_model_facts,
             sandbox_path,
             tool_catalog_for_config,
         )
         from vibe.app_server._agents_md_hooks import merge_agents_md_hook
+        from vibe.app_server._completion_facts import (
+            ModelFactsError,
+            SavedCatalogue,
+            compile_session_model_facts,
+        )
         from vibe.app_server._plugins import (
             core_plugins,
             plugin_agent_names,
@@ -1056,69 +1156,6 @@ class HarnessProcess:
             ProvidedToolNames,
             UnifiedPermissionResolver,
         )
-
-        route_type: Any = LocalModelRoute
-        route_fields = getattr(LocalModelRoute, "__dataclass_fields__", {})
-        context_settings_type: Any = RustContextSettings
-        context_settings_fields = getattr(RustContextSettings, "model_fields", {})
-
-        def local_model_route(
-            *,
-            model: str,
-            temperature: float,
-            thinking: str,
-            supports_images: bool,
-            top_p: float | None = None,
-            max_output_tokens: int | None = None,
-            context_window: int | None = None,
-        ) -> LocalModelRoute:
-            route_kwargs: dict[str, object] = {
-                "model": model,
-                "temperature": temperature,
-                "thinking": thinking,
-            }
-            # The released runtime may lag behind Vibe while a new Harness field
-            # is being prepared. Pass each field only when that runtime accepts
-            # it; the editable frontier job exercises the new field immediately.
-            optional_fields = {
-                "supports_images": supports_images,
-                "top_p": top_p,
-                "max_output_tokens": max_output_tokens,
-                "context_window": context_window,
-            }
-            for name, value in optional_fields.items():
-                if name in route_fields:
-                    route_kwargs[name] = value
-            return route_type(**route_kwargs)
-
-        def core_context_settings(
-            *,
-            compaction: object,
-            agent_supports_images: bool,
-            compaction_supports_images: bool,
-        ) -> RustContextSettings:
-            context_kwargs: dict[str, object] = {"compaction": compaction}
-            # The local Runtime shapes the standalone compaction request, so
-            # Core may fall back to it after a failed in-context attempt.
-            if "compaction_fallback" in context_settings_fields:
-                context_kwargs["compaction_fallback"] = "standalone"
-            if "image_delivery" in context_settings_fields:
-                context_kwargs["image_delivery"] = {
-                    "agent": "native" if agent_supports_images else "resource_link",
-                    "compaction": "native"
-                    if compaction_supports_images
-                    else "resource_link",
-                }
-            if "image_token_cost" in context_settings_fields:
-                context_kwargs["image_token_cost"] = "fixed"
-            if "input_modalities" in context_settings_fields:
-                # One shared list for both completion purposes; the compaction
-                # model's own image support only steers image delivery.
-                context_kwargs["input_modalities"] = (
-                    ["text", "image"] if agent_supports_images else ["text"]
-                )
-            return context_settings_type(**context_kwargs)
-
         from vibe.questions import UserQuestionRequest, UserQuestionResult
 
         config_orchestrator = session_config.config_orchestrator
@@ -1172,6 +1209,65 @@ class HarnessProcess:
             )
             if enabled
         )
+
+        def completion_route(
+            overrides: Mapping[str, Any],
+        ) -> DeclaredCompletionRoute | None:
+            # Resolved as the session resolves its own model, from the profile's
+            # layer over the session's config; only the alias lookup differs, as
+            # a model the allowlist excludes is refused rather than replaced.
+            from mistralai_vibe_local_harness.vibe.plugins import (
+                DeclaredCompletionRoute,
+            )
+
+            alias = overrides.get("active_model")
+            if alias is None:
+                return None
+            profile_config = config_orchestrator.copy()
+            apply_profile_overrides(profile_config, dict(overrides))
+            config = profile_config.config
+            model = config.models.get(alias) if isinstance(alias, str) else None
+            if model is None:
+                raise ValueError(
+                    f"active_model: {alias!r} is not an alias defined in [[models]]"
+                )
+            if alias not in config.available_models():
+                raise ValueError(
+                    f"active_model: {alias!r} ({model.name}) is excluded by "
+                    "allowed_models"
+                )
+            session = config_orchestrator.config
+            # The destination comes from the session's own providers: the session's
+            # key for a provider must not follow an endpoint the profile redefined.
+            provider_cfg = session.get_provider_for_model(model)
+            # Compiled as the session compiles its own agent route, so the child
+            # gets the same fitted thinking level, output cap and Core facts.
+            try:
+                facts = compile_session_model_facts(provider_cfg, model, model)
+            except ModelFactsError as error:
+                raise ValueError(
+                    f"active_model: {alias!r} ({model.name}): {error}"
+                ) from error
+            return DeclaredCompletionRoute(
+                model=LocalModelRoute(
+                    model=model.name,
+                    temperature=model.temperature,
+                    thinking=facts.agent_thinking,
+                    top_p=model.top_p,
+                    max_output_tokens=facts.agent.max_output_tokens,
+                    reasoning=facts.agent_reasoning,
+                ),
+                provider=_utility_provider_route(
+                    provider_cfg,
+                    session_provider_name=session.get_provider_for_model(
+                        session.get_active_model()
+                    ).name,
+                    credentials=credentials_for(provider_cfg.name),
+                    enabled=True,
+                ),
+                model_facts=rust_model_facts(facts.agent),
+            )
+
         # A sandbox is a POSIX environment whatever the host runs.
         command_environment_mode: _CommandEnvironmentMode = (
             "unix" if sandbox is not None else _command_environment_mode()
@@ -1211,6 +1307,7 @@ class HarnessProcess:
                 workspace.cwd,
                 agents=agents,
                 subagent_permissions=subagent_permissions,
+                completion_route=completion_route,
             ),
             ensure_utility_models_probed(config, features=probe_features),
         )
@@ -1252,6 +1349,9 @@ class HarnessProcess:
         # appends each request's shape here, the adapter drains it to telemetry.
         request_sent = RequestSentQueue()
         malformed_tool_calls = MalformedToolCallsQueue()
+        # The catalogue answer a reopened session saved; the adapter sets it from
+        # the session's pin before the derivation that restores it.
+        saved_catalogue = SavedCatalogue()
         # The root and its subagents share the sink: it counts each subagent's
         # agent model calls for ``session/subagents/read``.
         subagent_steps = SubagentSteps()
@@ -1365,15 +1465,13 @@ class HarnessProcess:
             )
             # Only settings the model accepts: Mistral rejects greedy sampling
             # (temperature 0.0) unless top_p is 1, and some models reject "off".
-            # Without "off", the model's own level is the safe one: its lowest
-            # is not, since the Mistral backend sends "low" as "none".
-            title_model = local_model_route(
+            # Without "off", the title keeps the model's own level.
+            title_model = LocalModelRoute(
                 model=title_model_config.name,
                 temperature=title_model_config.temperature,
                 thinking="off"
                 if "off" in title_model_config.thinking_levels
                 else title_model_config.thinking,
-                supports_images=title_model_config.supports_images,
                 top_p=title_model_config.top_p,
             )
             auto_title_enabled = _auto_titles_enabled(config, entrypoint)
@@ -1382,12 +1480,9 @@ class HarnessProcess:
             title_prompt = config.title_prompt
             if title_prompt == UtilityPrompt.SESSION_TITLE.read():
                 title_prompt = None
-            compaction_policy = (
-                RustAutomaticCompactionPolicy(
-                    token_threshold=active_model.auto_compact_threshold
-                )
-                if active_model.auto_compact_threshold > 0
-                else RustDisabledCompactionPolicy()
+            # Both routes run on the active model's provider.
+            model_facts = compile_session_model_facts(
+                provider, active_model, compaction_model, saved=saved_catalogue.snapshot
             )
             derived_tools = ToolManager(
                 lambda: config,
@@ -1396,6 +1491,10 @@ class HarnessProcess:
                 harness_files=harness_files,
             )
             available_tools = set(derived_tools.available_tools)
+            command_tool_name = _command_tool_name(command_environment_mode)
+            bash_timeout = _bash_timeout(
+                command_tool_name, config.tools.get(command_tool_name)
+            )
             bypass_approval = _effective_bypass_tool_permissions(
                 config, options.auto_approve
             )
@@ -1429,6 +1528,7 @@ class HarnessProcess:
                     permission_of=lambda name: (
                         derived_tools.get_tool_config(name).permission
                     ),
+                    completion_route=completion_route,
                 ),
                 reserved=plugin_agent_names(
                     session_plugins.materialized.resolution.agents
@@ -1442,6 +1542,10 @@ class HarnessProcess:
                     issues=[
                         *plugin_issues(session_plugins),
                         *skill_issues,
+                        *(
+                            rejection.issue()
+                            for rejection in workspace_agent_rejections(agents)
+                        ),
                         *agent_types.issues,
                         *([prompt_issue] if prompt_issue is not None else []),
                         *_hook_config_issues(hook_result),
@@ -1458,8 +1562,11 @@ class HarnessProcess:
                     custom_tool_names=frozenset(derived_tools.custom_tool_names),
                     hooks_count=len(hook_result.hooks),
                     auto_approve=options.auto_approve,
+                    compaction_threshold=model_facts.agent.compaction_threshold,
                 ),
                 skill_payloads=skills.payloads,
+                profile_warnings=model_facts.warnings,
+                completion_catalogue=model_facts.catalogue,
                 core_config=RustHarnessConfig(
                     task_id="runtime-template",
                     system_instructions=_build_unified_system_instructions(
@@ -1471,6 +1578,8 @@ class HarnessProcess:
                         sandbox_workspace=sandbox_workspace,
                         sandbox_roots=sandbox_roots,
                         project_instructions=self._project_instructions,
+                        background_processes=config.enable_background_processes,
+                        command_environment=command_environment_mode,
                     ),
                     settings=RustHarnessSettings(
                         turn=RustTurnSettings(
@@ -1485,10 +1594,14 @@ class HarnessProcess:
                                 else RustDisabledOutputLimitRecovery()
                             ),
                         ),
-                        context=core_context_settings(
-                            compaction=compaction_policy,
-                            agent_supports_images=active_model.supports_images,
-                            compaction_supports_images=compaction_model.supports_images,
+                        context=RustContextSettings(
+                            compaction=RustAutomaticCompactionPolicy(),
+                            model_facts=rust_model_facts(model_facts.agent),
+                            compaction_model_input_modalities=(
+                                _compaction_model_input_modalities(
+                                    model_facts.agent, model_facts.compaction
+                                )
+                            ),
                         ),
                         tools=RustToolSettings(
                             # The local Runtime answers `self.wait` from committed
@@ -1517,6 +1630,7 @@ class HarnessProcess:
                                 max_output_tokens=_LARGE_OUTPUT_MAX_TOKENS,
                                 model_visible_output_tokens=_LARGE_OUTPUT_VISIBLE_TOKENS,
                             ),
+                            bash_timeout=bash_timeout,
                         ),
                     ),
                     capabilities=RustHarnessCapabilitySet(
@@ -1574,24 +1688,22 @@ class HarnessProcess:
                     # ``/config`` provider switch has no derivation to ride in
                     # on. Resolution happens at the model call instead.
                     credentials=credentials,
-                    active_model=local_model_route(
+                    active_model=LocalModelRoute(
                         model=active_model.name,
                         temperature=active_model.temperature,
-                        thinking=active_model.thinking,
-                        supports_images=active_model.supports_images,
+                        thinking=model_facts.agent_thinking,
                         top_p=active_model.top_p,
-                        max_output_tokens=active_model.max_output_tokens,
-                        context_window=active_model.max_context_length,
+                        max_output_tokens=model_facts.agent.max_output_tokens,
+                        reasoning=model_facts.agent_reasoning,
                     ),
                     active_agent=agents.active_profile.name,
-                    compaction_model=local_model_route(
+                    compaction_model=LocalModelRoute(
                         model=compaction_model.name,
                         temperature=compaction_model.temperature,
-                        thinking=compaction_model.thinking,
-                        supports_images=compaction_model.supports_images,
+                        thinking=model_facts.compaction_thinking,
                         top_p=compaction_model.top_p,
-                        max_output_tokens=compaction_model.max_output_tokens,
-                        context_window=compaction_model.max_context_length,
+                        max_output_tokens=model_facts.compaction.max_output_tokens,
+                        reasoning=model_facts.compaction_reasoning,
                     ),
                     title_model=title_model if auto_title_enabled else None,
                     title_prompt=title_prompt,
@@ -1613,26 +1725,23 @@ class HarnessProcess:
                     # the turn's model, which matches the turn's provider.
                     classifier_model=classifier_model_config.name,
                     max_tokens=settings.max_tokens,
-                    # 0 is how a TOML file turns each of these off.
-                    compaction_max_output_tokens=(
-                        config.compaction_max_output_tokens or None
-                    ),
-                    compaction_thinking=config.compaction_thinking,
+                    # 0 is how a TOML file turns the limit off.
                     compaction_reasoning_limit_tokens=(
                         config.compaction_reasoning_limit_tokens or None
                     ),
-                    output_token_reserve=config.output_token_reserve,
                     subagent_max_children=config.max_subagents,
                     subagent_max_concurrent_turns=config.max_concurrent_subagents,
-                    thinking=active_model.thinking,
+                    thinking=model_facts.agent_thinking,
                     reasoning_field_name=provider.reasoning_field_name,
                     emits_finish_reason=provider.emits_finish_reason,
                     extra_headers=dict(provider.extra_headers),
                     project_id=provider.project_id,
                     region=provider.region,
                     timeout_s=config.api_timeout,
-                    # 0 is how a TOML file turns the limit off.
+                    # 0 sets no separate idle limit: silence after the first
+                    # output then gets the api_timeout wait too.
                     stream_idle_timeout_s=config.api_stream_idle_timeout or None,
+                    # A budget of 0 turns retries off, the stall retry included.
                     retry_max_elapsed_time_s=config.api_retry_max_elapsed_time,
                     enable_system_trust_store=config.enable_system_trust_store,
                     workspace=workspace,
@@ -1654,13 +1763,7 @@ class HarnessProcess:
                     ),
                     command_environment=command_environment_mode,
                     shell=getattr(
-                        derived_tools.get_tool_config(
-                            "bash"
-                            if command_environment_mode == "unix"
-                            else command_environment_mode
-                        ),
-                        "shell",
-                        None,
+                        derived_tools.get_tool_config(command_tool_name), "shell", None
                     ),
                     process_authority=(
                         "host_shell" if workspace.path_space == "host" else "sandbox"
@@ -1688,7 +1791,7 @@ class HarnessProcess:
 
         async def preflight(
             candidate: VibeConfigSchema, settings: UnifiedSessionSettings
-        ) -> None:
+        ) -> UnifiedRuntimeDerivation:
             derivation = await asyncio.to_thread(derive_config, candidate, settings)
 
             def validate_core_config() -> None:
@@ -1698,6 +1801,7 @@ class HarnessProcess:
                 core.close()
 
             await asyncio.to_thread(validate_core_config)
+            return derivation
 
         # Compile the discovered hooks into Core bindings + Runtime handlers. The
         # catalogue provider is lazy: it only runs the native call when a hook
@@ -1719,6 +1823,9 @@ class HarnessProcess:
         # subdirectory docs (see _agents_md_hooks). The handler is registered
         # Host-globally, so only the binding rides the session here.
         hooks = merge_agents_md_hook(hooks)
+        scoped_post_agent_hooks, main_post_agent_hooks = _post_agent_hook_counts(
+            hook_result
+        )
         return UnifiedSessionContext(
             storage_root=self._unified_storage_root(config.session_logging),
             session_logging_enabled=config.session_logging.enabled,
@@ -1738,6 +1845,8 @@ class HarnessProcess:
             client_tools=self._client_tools,
             session_spawner=session_spawner,
             hooks=hooks,
+            post_agent_scoped_hooks_count=scoped_post_agent_hooks,
+            post_agent_main_hooks_count=main_post_agent_hooks,
             mcp_catalog=mcp_catalog,
             mcp_authorization_provider=self.mcp_authentication,
             mcp_authentication=self.mcp_authentication,
@@ -1767,6 +1876,7 @@ class HarnessProcess:
             request_sent=request_sent,
             malformed_tool_calls=malformed_tool_calls,
             subagent_steps=subagent_steps,
+            saved_catalogue=saved_catalogue,
         )
 
     def _session_cwd(self, options: SessionOptions) -> Path:
@@ -1812,12 +1922,15 @@ class HarnessProcess:
             # hooks are in the sandbox, and the host's disk at the same path is
             # not them.
             harness_files = self.harness_files.for_session(cwd)
-        config_orchestrator = await build_default_orchestrator(
-            overrides, harness_files=harness_files
-        )
-        cache_key, saved, saved_failure = await apply_cached_layers(
-            config_orchestrator, org_config=org_config is not OrgConfigSource.NONE
-        )
+        try:
+            config_orchestrator = await build_default_orchestrator(
+                overrides, harness_files=harness_files
+            )
+            cache_key, saved, saved_failure = await apply_cached_layers(
+                config_orchestrator, org_config=org_config is not OrgConfigSource.NONE
+            )
+        except ValidationError as exc:
+            raise InvalidConfigError.from_validation_error(exc) from exc
         # A session start is built from the org config the server answers now,
         # loaded over the cached copy above, which is only what a failed fetch
         # falls back to. Reads outside a session never fetch, except the
@@ -1855,6 +1968,7 @@ class HarnessProcess:
         *,
         agents: AgentManager,
         subagent_permissions: SubagentPermissions,
+        completion_route: Callable[[Mapping[str, Any]], DeclaredCompletionRoute | None],
     ) -> tuple[SessionPlugins, UnifiedPluginProvider, PluginMCPCatalog]:
         """The Host's own resolve, and the provider the Runtime binds through.
 
@@ -1895,6 +2009,7 @@ class HarnessProcess:
                 available=frozenset(tools.available_tools),
                 permission_of=lambda name: tools.get_tool_config(name).permission,
                 permission_resolver=subagent_permissions.resolver_for,
+                completion_route=completion_route,
             )
 
         return (
@@ -1918,6 +2033,7 @@ class HarnessProcess:
                 # Read per bind for the same reason as the catalogue above: an
                 # agent file edited mid-session reaches the next bind.
                 agent_types=lambda: workspace_agent_types(agents),
+                agent_rejections=lambda: workspace_agent_rejections(agents),
                 sandbox_skills=self._sandbox_skills,
             ),
             plugin_mcp,
@@ -2115,6 +2231,29 @@ def _foreign_hook_definitions(
     ]
 
 
+def _post_agent_hook_counts(result: HookConfigResult) -> tuple[int, int]:
+    """Count the scoped post_agent hooks (a ``match`` other than ``*``), and those
+    selecting ``main``.
+
+    ``main`` is tested the way the Runtime tests a main session with no agent name, so a
+    broad pattern such as ``re:.*`` counts in both.
+    """
+    from mistralai_vibe_local_harness.vibe._hook_matcher import (
+        is_unscoped,
+        selects_agent,
+    )
+
+    scoped = [
+        hook.match
+        for hook in result.hooks
+        if hook.type is HookType.POST_AGENT and not is_unscoped(hook.match)
+    ]
+    targeting_main = [
+        match for match in scoped if selects_agent(match, None, main=True)
+    ]
+    return len(scoped), len(targeting_main)
+
+
 def _effective_bypass_tool_permissions(
     config: VibeConfigSchema, requested: bool
 ) -> bool:
@@ -2154,6 +2293,7 @@ def build_unified_runtime_snapshot(
     custom_tool_names: frozenset[str] = frozenset(),
     hooks_count: int = 0,
     auto_approve: bool = False,
+    compaction_threshold: int | None = None,
 ) -> RuntimeSnapshot:
     """Project the layered config into the runtime state the client observes.
 
@@ -2161,8 +2301,10 @@ def build_unified_runtime_snapshot(
     executable tool modes. ``skills`` and ``issues`` are supplied by the caller
     because they come from discovery and plugin resolution, not from the layered
     config. ``hooks_count`` is supplied by the caller because hook discovery
-    happens outside the layered config. Integration projections are filled by
-    their owning adapters.
+    happens outside the layered config. ``compaction_threshold`` is the active
+    route's compiled one, which the client shows context use against; a caller
+    that has not compiled the route yet leaves it unset to compile it here.
+    Integration projections are filled by their owning adapters.
     """
     config = config_orchestrator.config
     active_model = config.get_active_model()
@@ -2180,6 +2322,12 @@ def build_unified_runtime_snapshot(
                     "on."
                 ),
             )
+        )
+    if compaction_threshold is None:
+        from vibe.app_server._completion_facts import compile_agent_compaction_threshold
+
+        compaction_threshold = compile_agent_compaction_threshold(
+            config.get_provider_for_model(active_model), active_model
         )
     return RuntimeSnapshot(
         config=project_config_view(
@@ -2199,7 +2347,7 @@ def build_unified_runtime_snapshot(
             output_price_per_million=active_model.output_price,
             cached_input_price_per_million=active_model.cached_input_price,
         ),
-        context_window=active_model.auto_compact_threshold,
+        context_window=compaction_threshold,
         issues=runtime_issues,
         hooks_count=hooks_count,
         connectors=ConnectorCounts(),

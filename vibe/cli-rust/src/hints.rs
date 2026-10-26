@@ -32,6 +32,7 @@ pub mod key {
 pub mod action {
     pub const NAVIGATE: &str = "navigate";
     pub const SELECT: &str = "select";
+    pub const OPEN: &str = "open";
     pub const SAVE: &str = "save";
     pub const SESSION_ONLY: &str = "session only";
     pub const CANCEL: &str = "cancel";

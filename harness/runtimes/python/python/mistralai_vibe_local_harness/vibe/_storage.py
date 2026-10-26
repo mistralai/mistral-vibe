@@ -49,7 +49,6 @@ from mistralai_vibe_local_harness.protocol import (
     RustHarnessInput,
     RustHarnessSettings,
     RustImageContentBlock,
-    RustInputModality,
     RustKeepActionDirective,
     RustLLMCallAction,
     RustModelToolCallPart,
@@ -74,9 +73,6 @@ from mistralai_vibe_local_harness.vibe._errors import (
     HarnessSessionBusyError,
     HarnessStoreRequiresNewerReaderError,
 )
-from mistralai_vibe_local_harness.vibe._file_image_fallback import (
-    export_file_image_fallback,
-)
 from mistralai_vibe_local_harness.vibe._process_actions import (
     process_id as expected_process_id,
 )
@@ -90,6 +86,12 @@ from mistralai_vibe_local_harness.vibe._subagents import (
     SubagentRuntimeState,
     SubagentSessionIdentity,
 )
+from mistralai_vibe_local_harness.vibe.completion_profile import (
+    DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_IMAGE_TOKENS,
+    SUMMARY_HEADROOM_CAP,
+    threshold_bounds,
+)
 
 STORE_FORMAT = "mistral.vibe.unified-session-store/v1"
 # Readers accept lower minor versions and reject higher ones.
@@ -100,11 +102,15 @@ STORE_FORMAT = "mistral.vibe.unified-session-store/v1"
 # 8: pruned request and result bodies on any settled Action but a process, and
 #    pooled capability catalogs.
 # 9: atomic session relocation and system-instruction baselines.
+# 10: a generation's first Core input leaves out each configuration baseline the
+#     generation already records.
 # An additive field needs no bump: an older reader keeps what it cannot
 # interpret and writes it back. Bump only for a change an older reader must not
 # attempt, which is the one thing this number is allowed to mean.
 # Downgrading after a newer build writes the store is unsupported.
-STORE_FORMAT_MINOR = 9
+STORE_FORMAT_MINOR = 10
+# A reader before this minor replays a missing baseline under its own configuration.
+_GENERATION_BASELINE_MINOR = 10
 # Sealing a chunk once its contents pass this size makes a chunk's identity a
 # function of the list prefix alone, so appending leaves every sealed chunk
 # byte-identical and only the open tail is rewritten.
@@ -158,19 +164,71 @@ type Timestamp = Annotated[
 # journaled settings changes, and as reserved command parameters, and every one
 # of those reads goes through `_fill_program_time_limits`.
 _PROGRAM_TIME_LIMIT_DEFAULTS = {"max_elapsed_ms": 60_000, "max_sleep_ms": 30_000}
-# Settings stored before input modalities existed come from a Core that did not
-# check modalities; they read back as accepting every modality.
-_UNRECORDED_INPUT_MODALITIES: list[RustInputModality] = ["text", "image"]
+# Settings stored before model facts existed held the threshold in the
+# compaction policy and the image cost in a context field. They convert to
+# model facts here, since the stored settings name no model to compile. The old
+# threshold is kept as it was. Its window is the default one, or the smallest
+# window whose largest threshold still holds it. That Core sent images, and they
+# then cost a fixed 8192 tokens, the only rule left. Old context fields drop
+# whether or not the settings hold model facts, since builds with facts still
+# named the compaction fallback: a failed compaction now always falls back to
+# the standalone request. The input modalities they named are dropped too; the
+# model facts carry them now. Vibe 3.0.2 and earlier P0 builds also chose the
+# image delivery here; Core now projects images from the input of the model
+# that serves each request.
+_OLD_CONTEXT_FIELDS = (
+    "image_token_cost",
+    "compaction_fallback",
+    "input_modalities",
+    "image_delivery",
+)
+# Model facts stored by earlier builds that still carried these two; they read
+# back without them.
+_OLD_MODEL_FACTS_FIELDS = ("max_output_tokens", "reports_cutoff")
 
 
-def _fill_input_modalities(value: dict[str, Any]) -> dict[str, Any]:
+def _fill_model_facts(value: dict[str, Any]) -> dict[str, Any]:
     context = value.get("context")
-    if not isinstance(context, dict) or "input_modalities" in context:
+    if not isinstance(context, dict):
         return value
-    return {
-        **value,
-        "context": {**context, "input_modalities": _UNRECORDED_INPUT_MODALITIES},
+    if any(name in context for name in _OLD_CONTEXT_FIELDS):
+        context = {n: f for n, f in context.items() if n not in _OLD_CONTEXT_FIELDS}
+        value = {**value, "context": context}
+    facts = context.get("model_facts")
+    if isinstance(facts, dict):
+        kept = {n: f for n, f in facts.items() if n not in _OLD_MODEL_FACTS_FIELDS}
+        return {**value, "context": {**context, "model_facts": kept}}
+    if "model_facts" in context:
+        return value
+    compaction = context.get("compaction")
+    old_threshold = (
+        compaction.get("token_threshold") if isinstance(compaction, dict) else None
+    )
+    default_bounds = threshold_bounds(DEFAULT_CONTEXT_WINDOW)
+    if isinstance(old_threshold, int) and old_threshold > 0:
+        threshold = old_threshold
+    else:
+        threshold = default_bounds.default
+    window = (
+        DEFAULT_CONTEXT_WINDOW
+        if threshold <= default_bounds.maximum
+        else threshold + SUMMARY_HEADROOM_CAP
+    )
+    filled = dict(context)
+    if isinstance(compaction, dict):
+        filled["compaction"] = {
+            name: field
+            for name, field in compaction.items()
+            if name != "token_threshold"
+        }
+    filled["model_facts"] = {
+        "context_window": window,
+        "compaction_threshold": threshold,
+        "compaction_threshold_max": threshold_bounds(window).maximum,
+        "input_modalities": ["text", "image"],
+        "image_cost": {"kind": "fixed", "tokens": DEFAULT_IMAGE_TOKENS},
     }
+    return {**value, "context": filled}
 
 
 def _fill_program_time_limits(value: dict[str, Any]) -> dict[str, Any]:
@@ -191,7 +249,7 @@ def _fill_program_time_limits(value: dict[str, Any]) -> dict[str, Any]:
 def _fill_stored_settings(value: object) -> object:
     if not isinstance(value, dict):
         return value
-    return _fill_input_modalities(_fill_program_time_limits(value))
+    return _fill_model_facts(_fill_program_time_limits(value))
 
 
 def _fill_stored_input_settings(value: object) -> object:
@@ -211,6 +269,41 @@ def _fill_stored_input_settings(value: object) -> object:
         for change in changes
     ]
     return {**value, "command": {**command, "changes": filled}}
+
+
+# What a reply recorded before usage was required reads back as: the zero usage
+# the adapters already report for a provider that counts nothing.
+_ZERO_USAGE: dict[str, Any] = {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "cached_input_tokens": 0,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": 0,
+}
+
+
+def stored_reply(event: JsonValue) -> JsonValue:
+    """A stored Action result, a reply without token usage given the zero usage."""
+    if not isinstance(event, dict) or event.get("type") != "completion_succeeded":
+        return event
+    result = event.get("result")
+    if not isinstance(result, dict) or result.get("usage") is not None:
+        return event
+    return {**event, "result": {**result, "usage": dict(_ZERO_USAGE)}}
+
+
+def _fill_completion_usage(value: object) -> object:
+    """Give a journaled reply without token usage the zero usage."""
+    if not isinstance(value, dict):
+        return value
+    command = value.get("command")
+    filled = stored_reply(cast(JsonValue, command))
+    return value if filled is command else {**value, "command": filled}
+
+
+def _fill_stored_input(value: object) -> object:
+    return _fill_completion_usage(_fill_stored_input_settings(value))
 
 
 def _drop_commits_without_call(value: object) -> object:
@@ -243,7 +336,7 @@ type StoredHarnessSettings = Annotated[
     RustHarnessSettings, BeforeValidator(_fill_stored_settings)
 ]
 type StoredHarnessInput = Annotated[
-    RustHarnessInput, BeforeValidator(_fill_stored_input_settings)
+    RustHarnessInput, BeforeValidator(_fill_stored_input)
 ]
 type StoredSessionTransition = Annotated[
     RustSessionTransition, BeforeValidator(_drop_commits_without_call)
@@ -658,6 +751,7 @@ class SessionPin(StrEnum):
     ACTIVE_MODEL = "active_model"
     AGENT_NAME = "agent_name"
     REASONING_EFFORT = "reasoning_effort"
+    COMPLETION_CATALOGUE = "completion_catalogue"
 
 
 class ExternalImportMetadataV1(_StoredModel):
@@ -679,6 +773,9 @@ class SessionMetadataV1(_StoredModel):
     # older snapshots load as ``None`` and keep their configured default agent.
     agent_name: str | None = None
     reasoning_effort: str | None = None
+    # What the provider's catalogue said about the active model, as JSON, so a
+    # reopen reuses it instead of asking again.
+    completion_catalogue: str | None = None
     root_session_id: str
     parent_session_id: str | None = None
     subagent_spawn_key: str | None = None
@@ -1153,6 +1250,8 @@ class InteropFileImageFallbackV1(_StoredModel):
 
 
 class InteropImageContentBlockV1(RustImageContentBlock):
+    # Written by earlier exporters for an image kept with its file; read only.
+    # Import turns it into the embedded file image current builds store.
     file_fallback: InteropFileImageFallbackV1 | None = None
 
 
@@ -1294,6 +1393,13 @@ def shape_divergence(
 
 
 class CoreInputPayloadV1(_StoredModel):
+    """One accepted Core input, and on a generation's first, its configuration.
+
+    Each ``checkpoint_*`` baseline is the value in force when the generation's
+    first input was applied. One left out equals the value the generation
+    records for it, which is where replay reads it from instead.
+    """
+
     input: StoredHarnessInput
     transition_sha256: Sha256
     replay_transition_sha256: Sha256 | None = None
@@ -1542,17 +1648,25 @@ def restore_core_from_checkpoint(
     checkpoint: dict[str, JsonValue],
     *,
     resume_input_id: int = 0,
+    moved_from: RustHarnessConfig | None = None,
 ) -> HarnessSession:
     """Build a Core from a configuration and a checkpoint, reading nothing from disk.
 
     The checkpoint holds no delivery state, so `resume_input_id` is the last input ID
     the Runtime durably accepted for this session; zero starts a fresh sequence. The
     Core still opens with a full model-input replacement either way.
+
+    `moved_from` is the configuration the checkpoint was taken under, when it differs
+    from `config`: Core then moves the context onto `config` by the rule a
+    reconfiguration applies.
     """
     return HarnessSession.restore(
         config.model_dump_json(by_alias=True, exclude_none=False),
         canonical_json(checkpoint).decode(),
         resume_input_id,
+        None
+        if moved_from is None
+        else moved_from.model_dump_json(by_alias=True, exclude_none=False),
     )
 
 
@@ -1563,6 +1677,9 @@ class StoredSession:
     runtime_state: RuntimeStateV3
     projection_state: ProjectionStateV1
     journal: tuple[JournalRecordV1, ...]
+    store_format_minor: int
+    """The minor the store's pointer records, which bounds the readers it admits."""
+
     published_runtime_state: RuntimeStateV3 | None = None
     """The generation's own Runtime state, before its journal was folded in.
 
@@ -1612,41 +1729,37 @@ class StoredSession:
 
     @property
     def checkpoint_capabilities(self) -> RustHarnessCapabilitySet | None:
-        """Capabilities recorded beside this generation's first replayed input.
+        """Capabilities in force when this generation's first input was applied.
 
-        A generation folded from an empty journal has no such input, and answers
-        from the set stamped on the runtime state instead.
+        The generation's own stamp answers when its first input left the
+        baseline out, and when a fold left no input at all.
         """
         payload = self._checkpoint_payload
-        if payload is None:
+        if payload is None or payload.checkpoint_capabilities is None:
             return self.runtime_state.core_capabilities
         return payload.checkpoint_capabilities
 
     @property
     def checkpoint_settings(self) -> RustHarnessSettings | None:
-        """Settings recorded beside this generation's first replayed input.
-
-        Falls back to the generation's own stamp for the same reason the
-        capability baseline does: a fold leaves no input to carry it.
-        """
+        """Settings in force when this generation's first input was applied."""
         payload = self._checkpoint_payload
-        if payload is None:
+        if payload is None or payload.checkpoint_settings is None:
             return self.runtime_state.core_settings
         return payload.checkpoint_settings
 
     @property
     def checkpoint_plugins(self) -> list[RustPluginContextDefinition] | None:
-        """Plugin contexts recorded beside this generation's first replayed input."""
+        """Plugin contexts in force when this generation's first input was applied."""
         payload = self._checkpoint_payload
-        if payload is None:
+        if payload is None or payload.checkpoint_plugins is None:
             return self.runtime_state.core_plugins
         return payload.checkpoint_plugins
 
     @property
     def checkpoint_system_instructions(self) -> str | None:
-        """System instructions recorded at the start of this generation."""
+        """System instructions in force when the first input was applied."""
         payload = self._checkpoint_payload
-        if payload is None:
+        if payload is None or payload.checkpoint_system_instructions is None:
             return self.runtime_state.core_system_instructions
         return payload.checkpoint_system_instructions
 
@@ -1741,6 +1854,7 @@ class StoredSession:
             runtime_state=runtime_state,
             projection_state=projection_state,
             journal=prefix,
+            store_format_minor=self.store_format_minor,
             published_runtime_state=base_runtime,
             published_projection_state=base_projection,
         )
@@ -1756,6 +1870,7 @@ class StoredSession:
             resume_input_id=self.runtime_state.core_last_input_id,
         )
         transitions: list[RustSessionTransition] = []
+        performed_after = _actions_performed_after_each_core_input(self.journal)
         for record in self.journal:
             if not isinstance(record, CoreInputRecordV1):
                 continue
@@ -1772,6 +1887,25 @@ class StoredSession:
                 result.transition, record.payload, self.runtime_state.actions
             ):
                 transitions.append(result.transition)
+                continue
+            if isinstance(
+                result, RustAcceptedApplyResult
+            ) and _transition_matches_recorded_decision(
+                result.transition,
+                record.payload,
+                self.runtime_state.actions,
+                performed_after.get(record.sequence, ()),
+            ):
+                transitions.append(result.transition)
+                # Logged as it is accepted: a later divergence truncates the
+                # session, and this is the only trace of what replay let through.
+                logger.warning(
+                    "Core replay accepted a record whose transition digest differs but whose decision matches",
+                    extra={
+                        "session_id": self.manifest.session_id,
+                        "sequence": record.sequence,
+                    },
+                )
                 continue
             divergence: dict[str, JsonValue] = (
                 shape_divergence(
@@ -2332,6 +2466,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
                     runtime_state=runtime_state,
                     projection_state=projection_state,
                     journal=(),
+                    store_format_minor=STORE_FORMAT_MINOR,
                     published_runtime_state=runtime_state,
                     published_projection_state=projection_state,
                 ),
@@ -2454,6 +2589,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             runtime_state=effective_runtime,
             projection_state=effective_projection,
             journal=journal,
+            store_format_minor=current.store_format_minor,
             published_runtime_state=runtime_state,
             published_projection_state=projection_state,
         )
@@ -2678,6 +2814,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
                     runtime_state=runtime_state,
                     projection_state=projection_state,
                     journal=stored.journal + (record,),
+                    store_format_minor=stored.store_format_minor,
                     published_runtime_state=stored.published_runtime_state,
                     published_projection_state=stored.published_projection_state,
                 ),
@@ -2950,20 +3087,22 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             input=input,
             transition_sha256=transition_sha256(transition),
             replay_transition_sha256=_replay_transition_sha256(transition),
-            checkpoint_capabilities=checkpoint_capabilities
-            if opens_generation
-            else None,
-            checkpoint_settings=checkpoint_settings if opens_generation else None,
-            checkpoint_plugins=(
-                list(checkpoint_plugins)
-                if opens_generation and checkpoint_plugins is not None
-                else None
-            ),
-            checkpoint_system_instructions=(
-                checkpoint_system_instructions if opens_generation else None
-            ),
             transition_shape=transition_shape(transition),
         )
+        if opens_generation:
+            payload = payload.model_copy(
+                update=_unrecorded_baselines(
+                    stored,
+                    capabilities=checkpoint_capabilities,
+                    settings=checkpoint_settings,
+                    plugins=(
+                        list(checkpoint_plugins)
+                        if checkpoint_plugins is not None
+                        else None
+                    ),
+                    system_instructions=checkpoint_system_instructions,
+                )
+            )
         try:
             record = self.append_record("core_input", payload)
         except Exception:
@@ -3359,6 +3498,22 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             raise TypeError("journal record parser returned the wrong type")
         return record
 
+    def update_session_metadata(
+        self, metadata: SessionMetadataV1
+    ) -> SessionRelocatedRecordV1:
+        """Journal new session metadata, keeping the plugin lock and projection.
+
+        The metadata is journalled rather than republished so that a session
+        stopped mid-Turn keeps that Turn recoverable.
+        """
+        stored = self.load()
+        return self.relocate_session(
+            metadata,
+            stored.runtime_state.plugin_lock,
+            stored.projection_state.watermark,
+            (),
+        )
+
 
 def empty_runtime_state(  # noqa: PLR0913 - explicit Runtime state fields
     session_id: str,
@@ -3483,26 +3638,13 @@ def committed_history_from_checkpoint(
         if not isinstance(raw_message, dict):
             raise ValueError("Core checkpoint contains an invalid context message")
         message = dict(cast(dict[str, JsonValue], raw_message))
-        raw_content = message.get("content")
-        if isinstance(raw_content, list):
-            message["content"] = [
-                export_file_image_fallback(cast(dict[str, JsonValue], block))
-                if isinstance(block, dict)
-                else block
-                for block in cast(list[JsonValue], raw_content)
-            ]
         if message.get("role") == "assistant":
             raw_parts = message.pop("content", [])
             if not isinstance(raw_parts, list):
                 raise ValueError("Core checkpoint contains invalid assistant content")
             message["parts"] = [
                 (
-                    {
-                        "type": "content",
-                        "content": export_file_image_fallback(
-                            cast(dict[str, JsonValue], part)
-                        ),
-                    }
+                    {"type": "content", "content": part}
                     if isinstance(part, dict)
                     and part.get("type") in _CONTENT_PART_TYPES
                     else part
@@ -3682,6 +3824,62 @@ def _transition_matches_recorded_digest(
     payload: CoreInputPayloadV1,
     durable_actions: list[RuntimeActionV1],
 ) -> bool:
+    if _transition_matches_digest(transition, payload, durable_actions):
+        return True
+    # Journals recorded before replies required token usage: the reply read
+    # back with the zero usage, which the transition now carries wherever the
+    # reply's usage is copied.
+    recorded_shape = _without_zero_reply_usage(transition)
+    return recorded_shape is not None and _transition_matches_digest(
+        recorded_shape, payload, durable_actions
+    )
+
+
+def _without_zero_reply_usage(
+    transition: RustSessionTransition,
+) -> RustSessionTransition | None:
+    """The transition with each copy of a reply's zero usage as no usage.
+
+    Core copies a reply's usage into the committed candidate, into the candidate
+    a completion hook receives, and into the compaction it summarised.
+    """
+    value = cast(
+        dict[str, JsonValue], transition.model_dump(mode="json", by_alias=True)
+    )
+    holders: list[dict[str, JsonValue]] = []
+    observations = value.get("observations")
+    for observation in observations if isinstance(observations, list) else []:
+        if not isinstance(observation, dict):
+            continue
+        if observation.get("type") == "context_compacted":
+            holders.append(observation)
+        if isinstance(candidate := observation.get("candidate"), dict):
+            holders.append(candidate)
+    next_action = value.get("next")
+    directives = (
+        next_action.get("directives") if isinstance(next_action, dict) else None
+    )
+    for directive in directives if isinstance(directives, list) else []:
+        action = directive.get("action") if isinstance(directive, dict) else None
+        hook_input = action.get("input") if isinstance(action, dict) else None
+        candidate = (
+            hook_input.get("candidate") if isinstance(hook_input, dict) else None
+        )
+        if isinstance(candidate, dict):
+            holders.append(candidate)
+    changed = False
+    for holder in holders:
+        if holder.get("usage") == _ZERO_USAGE:
+            holder["usage"] = None
+            changed = True
+    return RustSessionTransition.model_validate(value) if changed else None
+
+
+def _transition_matches_digest(
+    transition: RustSessionTransition,
+    payload: CoreInputPayloadV1,
+    durable_actions: list[RuntimeActionV1],
+) -> bool:
     if transition_sha256(transition) == payload.transition_sha256:
         return True
     if payload.replay_transition_sha256 is not None:
@@ -3704,6 +3902,77 @@ def _transition_matches_recorded_digest(
         )
     legacy_digest = _legacy_transition_sha256(transition, durable_actions)
     return legacy_digest == payload.transition_sha256
+
+
+def _transition_matches_recorded_decision(
+    transition: RustSessionTransition,
+    payload: CoreInputPayloadV1,
+    durable_actions: list[RuntimeActionV1],
+    performed_after: Sequence[str],
+) -> bool:
+    """Whether replay reached the recorded decision, whatever it reported about it.
+
+    The digests also cover what Core reports beside a decision: the text of a
+    tool result it composed, or the size it measured. A Core release can change
+    either without changing the decision, and the journal would then never open
+    again. The decision is the shape -- the turn state, each directive and each
+    observation -- together with the Actions it dispatched. Every Action the
+    Runtime performed after this input must be one the transition holds, and one
+    it dispatched must carry the request recorded for it, or recovery would
+    perform a second Action in its place. A kept Action was dispatched, and
+    checked, by an earlier record.
+    """
+    recorded = payload.transition_shape
+    if recorded is None or recorded != transition_shape(transition):
+        return False
+    dispatched = {action.action_id: action for action in transition.actions}
+    held = dispatched.keys() | _kept_action_ids(transition)
+    if any(action_id not in held for action_id in performed_after):
+        return False
+    performed = {action.action_id: action for action in durable_actions}
+    for action_id, action in dispatched.items():
+        durable = performed.get(action_id)
+        # An Action never recorded was never performed, so recovery can still
+        # perform whichever one Core asks for now.
+        if durable is None:
+            continue
+        if durable.request_pruned or not isinstance(durable.request, dict):
+            return False
+        replayed = action.model_dump(mode="json", by_alias=True, exclude_none=True)
+        if _action_replay_identity(replayed) != _action_replay_identity(
+            durable.request
+        ):
+            return False
+    return True
+
+
+def _actions_performed_after_each_core_input(
+    journal: Sequence[JournalRecordV1],
+) -> dict[int, tuple[str, ...]]:
+    """The Actions the Runtime recorded performing after each journalled Core input.
+
+    Each is recorded before the next input applies, so the transition it follows
+    still holds it: that transition dispatched it, or keeps it from an earlier
+    one when a parallel result arrived first.
+    """
+    performed: dict[int, list[str]] = {}
+    current: int | None = None
+    for record in journal:
+        if isinstance(record, CoreInputRecordV1):
+            current = record.sequence
+        elif isinstance(record, ActionIntentRecordV1) and current is not None:
+            performed.setdefault(current, []).append(record.payload.action_id)
+    return {sequence: tuple(ids) for sequence, ids in performed.items()}
+
+
+def _kept_action_ids(transition: RustSessionTransition) -> set[str]:
+    if not isinstance(transition.next, RustActionsNextAction):
+        return set()
+    return {
+        directive.action_id
+        for directive in transition.next.directives
+        if isinstance(directive, RustKeepActionDirective)
+    }
 
 
 def _legacy_transition_sha256(  # noqa: PLR0911 - one return per legacy transition shape
@@ -3742,9 +4011,9 @@ def _legacy_transition_sha256(  # noqa: PLR0911 - one return per legacy transiti
             recorded = RustLLMCallAction.model_validate(durable.request)
         except ValueError:
             return None
-        if _llm_action_replay_identity(current) != _llm_action_replay_identity(
-            recorded
-        ):
+        if _action_replay_identity(
+            current.model_dump(mode="json", by_alias=True)
+        ) != _action_replay_identity(recorded.model_dump(mode="json", by_alias=True)):
             return None
         directive["action"] = cast(
             JsonValue, recorded.model_dump(mode="json", by_alias=True)
@@ -3753,9 +4022,11 @@ def _legacy_transition_sha256(  # noqa: PLR0911 - one return per legacy transiti
     return sha256_json(value) if replaced else None
 
 
-def _llm_action_replay_identity(action: RustLLMCallAction) -> dict[str, JsonValue]:
-    value = cast(dict[str, JsonValue], action.model_dump(mode="json", by_alias=True))
-    _normalize_llm_action_for_replay(value)
+def _action_replay_identity(action: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """An Action as replay compares it: without what a replayed Core recomputes."""
+    value = dict(action)
+    if value.get("type") == "llm_call":
+        _normalize_llm_action_for_replay(value)
     return value
 
 
@@ -4144,6 +4415,10 @@ def _apply_journal(  # noqa: PLR0912, PLR0914, PLR0915 - one branch per journal 
                 runtime = runtime.model_copy(
                     update={"plugin_lock": payload.plugin_lock}
                 )
+                if not payload.delta:
+                    # Moving the projection's sequence past Core inputs it has
+                    # not projected yet would hide them from replay catch-up.
+                    continue
                 current_projection = current_projection.model_copy(
                     update={
                         "snapshot_sequence": record.sequence,
@@ -4394,6 +4669,43 @@ def _append_journal_record(path: Path, data: bytes, *, protected_bytes: int = 0)
         file.write(data)
         os.fsync(file.fileno())
     return len(data)
+
+
+def _unrecorded_baselines(
+    stored: StoredSession,
+    *,
+    capabilities: RustHarnessCapabilitySet | None,
+    settings: RustHarnessSettings | None,
+    plugins: list[RustPluginContextDefinition] | None,
+    system_instructions: str | None,
+) -> dict[str, Any]:
+    """The baselines a generation's first Core input has to carry itself.
+
+    The generation is folded at every idle point, so its first input arrives
+    about once a turn, and the configuration the generation records is then
+    nearly always still in force. Repeating it would rewrite the whole tool
+    catalog on every turn. A store an older reader may still open keeps every
+    baseline, because that reader would replay a missing one under whatever
+    configuration it was started with.
+    """
+    baselines: dict[str, Any] = {
+        "checkpoint_capabilities": capabilities,
+        "checkpoint_settings": settings,
+        "checkpoint_plugins": plugins,
+        "checkpoint_system_instructions": system_instructions,
+    }
+    if stored.store_format_minor < _GENERATION_BASELINE_MINOR:
+        return baselines
+    recorded = stored.runtime_state
+    for field, value in (
+        ("checkpoint_capabilities", recorded.core_capabilities),
+        ("checkpoint_settings", recorded.core_settings),
+        ("checkpoint_plugins", recorded.core_plugins),
+        ("checkpoint_system_instructions", recorded.core_system_instructions),
+    ):
+        if baselines[field] == value:
+            baselines[field] = None
+    return baselines
 
 
 def _write_generation_record(
@@ -5061,5 +5373,6 @@ __all__ = [
     "empty_runtime_state",
     "parse_stored_settings",
     "sha256_json",
+    "stored_reply",
     "transition_sha256",
 ]

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+import json
 import logging
 import os
 import sys
@@ -9,7 +11,11 @@ from typing import cast
 
 from pydantic import BaseModel, Field, JsonValue, ValidationError
 
+from mistralai_vibe_local_harness._native import restored_bash_call
 from mistralai_vibe_local_harness.protocol import (
+    RustAction,
+    RustBashTimeoutSettings,
+    RustEvent,
     RustProtocolError,
     RustRuntimeBuiltinToolCallAction,
     RustToolFailedEvent,
@@ -25,6 +31,7 @@ from mistralai_vibe_local_harness.vibe._sandbox import (
     SandboxToolTimeoutError,
     run_helper,
 )
+from mistralai_vibe_local_harness.vibe._windows_path import with_registry_path
 
 SANDBOX_TIMEOUT_RESERVE_SECONDS = 30.0
 """Time the sandbox helper gets past the command's own timeout to report it."""
@@ -32,6 +39,88 @@ SANDBOX_LOGIN_ENV_TIMEOUT_SECONDS = _sandbox_helper.LOGIN_ENV_TIMEOUT_SECONDS + 
 """Time the helper call that reads the login profile in a sandbox gets: the
 profile's own limit, and time to start the helper."""
 DEFAULT_TIMEOUT_SECONDS = 120
+"""Seconds a bash command runs in a Vibe Session when the call does not say."""
+MAX_TIMEOUT_SECONDS = 300
+"""The longest timeout a bash call may ask for in a Vibe Session."""
+BASH_TIMEOUT = RustBashTimeoutSettings(
+    default_seconds=DEFAULT_TIMEOUT_SECONDS, max_seconds=MAX_TIMEOUT_SECONDS
+)
+"""The bash timeouts a Vibe Session runs unless the user sets their own; the
+Harness Core states them to the model and fills the default into a call
+without a timeout."""
+
+
+def bash_timeout(
+    default_seconds: int | None,
+    max_seconds: int | None,
+    *,
+    default_setting: str,
+    max_setting: str,
+) -> RustBashTimeoutSettings:
+    """The bash timeouts a Session runs: the default and maximum set in its Host's
+    configuration, or ``BASH_TIMEOUT`` when neither is set.
+
+    The default is what a call without a timeout gets; the maximum caps what a call
+    may ask for. They are set together: one without the other is a configuration
+    error naming both ``default_setting`` and ``max_setting``, the names they are set
+    by. Neither is worked out from the other.
+
+    The agents SDK runtime has a twin of this function; the bash timeout part of
+    agents/harness/runtimes/python/ARCHITECTURE.md says why and what keeps them equal.
+    """
+    if default_seconds is None and max_seconds is None:
+        return BASH_TIMEOUT
+    if default_seconds is None or max_seconds is None:
+        set_alone, missing = (
+            (default_setting, max_setting)
+            if max_seconds is None
+            else (max_setting, default_setting)
+        )
+        raise ValueError(f"{set_alone} is set without {missing}. Set both, or neither.")
+    return RustBashTimeoutSettings(
+        default_seconds=default_seconds, max_seconds=max_seconds
+    )
+
+
+def held_to_bash_limits(
+    execute: Callable[[RustAction], Awaitable[RustEvent]],
+    bash_timeout: Callable[[], RustBashTimeoutSettings | None],
+) -> Callable[[RustAction], Awaitable[RustEvent]]:
+    """``execute`` with each bash call held to the timeouts ``bash_timeout`` gives now,
+    as Core holds a fresh one: given the default when it sets no timeout, refused above
+    the maximum. Every other Action goes to ``execute`` unchanged.
+
+    Core fills and checks a call when the model makes it. A restored Session replays
+    under the settings its journal was written with and adopts the current ones only
+    once it is idle, so a bash call it saved under other timeouts, or none, is held to
+    the current ones before it runs. Core holds it (``restored_bash_call``), as it
+    does for the agents SDK runtime.
+    """
+
+    async def execute_held(action: RustAction) -> RustEvent:
+        if not (
+            isinstance(action, RustRuntimeBuiltinToolCallAction)
+            and action.call.name == "file_system.bash"
+        ):
+            return await execute(action)
+        limits = bash_timeout()
+        filled, refusal = restored_bash_call(
+            json.dumps(action.call.arguments),
+            bash_timeout_json=None if limits is None else limits.model_dump_json(),
+        )
+        if refusal is not None:
+            return RustToolFailedEvent(
+                action_id=action.action_id,
+                call_id=action.call_id,
+                result=RustToolFailureResult.model_validate_json(refusal),
+            )
+        if filled is not None:
+            call = action.call.model_copy(update={"arguments": json.loads(filled)})
+            action = action.model_copy(update={"call": call})
+        return await execute(action)
+
+    return execute_held
+
 
 logger = logging.getLogger(__name__)
 
@@ -96,13 +185,21 @@ async def execute_shell_tool(
     config: LocalRuntimeAdapterConfig,
     *,
     session: ShellSession | None = None,
+    timeout_advice: str | None = None,
 ) -> RustToolSucceededEvent | RustToolFailedEvent:
-    """Run a bash tool call, in ``session`` when given; see ``ShellSession``."""
+    """Run a bash tool call, in ``session`` when given; see ``ShellSession``.
+
+    ``timeout_advice`` ends a timeout note; it is the Harness Core's
+    ``process_tools_timeout_advice`` for the session, if any.
+    """
     try:
         if action.call.name != "file_system.bash":
             raise ValueError(f"Unsupported shell tool: {action.call.name}")
         result = await run_bash(
-            BashArgs.model_validate(action.call.arguments), config, session=session
+            BashArgs.model_validate(action.call.arguments),
+            config,
+            session=session,
+            timeout_advice=timeout_advice,
         )
         return _succeeded(action, result.model_dump(mode="json"))
     except asyncio.CancelledError:
@@ -116,6 +213,7 @@ async def run_bash(
     config: LocalRuntimeAdapterConfig,
     *,
     session: ShellSession | None = None,
+    timeout_advice: str | None = None,
 ) -> BashResult:
     """Run a bash command where the workspace lives.
 
@@ -123,10 +221,12 @@ async def run_bash(
     and the fixed non-interactive settings; neither the host's environment nor
     ``config.env`` is passed in. A command that runs past its timeout is
     stopped, and the result has what it printed until then; see
-    ``_sandbox_helper.collect_bash``.
+    ``_sandbox_helper.collect_bash``, also for ``timeout_advice``.
     """
     if config.sandbox is not None:
-        return await _run_bash_in_sandbox(args, config, config.sandbox, session=session)
+        return await _run_bash_in_sandbox(
+            args, config, config.sandbox, session=session, timeout_advice=timeout_advice
+        )
     spawned = await _spawn_bash_command(args.command, config)
     return BashResult.model_validate(
         await _sandbox_helper.collect_bash(
@@ -134,6 +234,7 @@ async def run_bash(
             command=args.command,
             timeout_seconds=args.timeout_seconds,
             output_encoding=spawned.output_encoding,
+            timeout_advice=timeout_advice or "",
         )
     )
 
@@ -144,6 +245,7 @@ async def _run_bash_in_sandbox(
     sandbox: SandboxAdapter,
     *,
     session: ShellSession | None,
+    timeout_advice: str | None,
 ) -> BashResult:
     # Without a Session, nothing keeps the profile between helper calls, so
     # the command's own call reads it.
@@ -161,6 +263,7 @@ async def _run_bash_in_sandbox(
                 "shell": config.shell,
                 "session_id": None if session is None else session.id,
                 "login_env": login_env,
+                "timeout_advice": timeout_advice or "",
             },
             timeout=args.timeout_seconds + SANDBOX_TIMEOUT_RESERVE_SECONDS,
             crashes=config.helper_crashes,
@@ -175,11 +278,13 @@ async def _run_bash_in_sandbox(
             if exc.timeout is None
             else f"after {exc.timeout:g}s, the sandbox's time limit"
         )
+        advice = f" {timeout_advice}" if timeout_advice else ""
         return BashResult(
             command=args.command,
             stdout="",
             stderr=(
-                f"[The command timed out {limit} and was stopped. Its output was lost.]"
+                f"[The command timed out {limit} and was stopped."
+                f" Its output was lost.{advice}]"
             ),
             returncode=-1,
             was_truncated=False,
@@ -285,8 +390,10 @@ def _shell_argv(
 
 
 def _shell_env(extra_env: dict[str, str]) -> dict[str, str]:
-    return _sandbox_helper.shell_env(
-        os.environ, extra_env, windows=sys.platform == "win32"
+    return with_registry_path(
+        _sandbox_helper.shell_env(
+            os.environ, extra_env, windows=sys.platform == "win32"
+        )
     )
 
 
@@ -316,4 +423,4 @@ def _failed(
     )
 
 
-__all__ = ["execute_shell_tool"]
+__all__ = ["BASH_TIMEOUT", "bash_timeout", "execute_shell_tool"]

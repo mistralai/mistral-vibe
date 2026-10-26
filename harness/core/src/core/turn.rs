@@ -17,14 +17,14 @@ use self::lifecycle_hooks::{
     HookResolution, resolve_failed_lifecycle_hook, resolve_lifecycle_hook,
 };
 use crate::core::features::compaction::{
-    CompactionAttemptResolution, CompactionBudget, CompactionBudgets, CompactionRequest,
-    CompactionResolution, CompactionStartResolution, PendingCompaction, fail_compaction,
-    fail_compaction_or_fall_back, finish_compaction, start_compaction,
+    AgentRefusal, CompactionAttemptResolution, CompactionResolution, CompactionStartResolution,
+    PendingCompaction, correct_refused_agent_request, finish_summary_request, is_context_overflow,
+    model_input_reaches_compaction_threshold, record_reply_size, start_automatic_compaction,
+    start_manual_compaction as start_manual_compaction_request,
 };
 use crate::core::features::notifications::notification_messages;
 use crate::core::features::permissions::{ApprovalFailureReason, ApprovalOutcome};
 use crate::core::hooks::{HookCall, HookPoint, HookResult};
-use crate::core::model_input_budget::estimate_model_input_tokens;
 use crate::core::state::hook_binding_ids;
 use crate::core::state::{
     ActivePhase, ActiveTurn, HarnessState, InterruptionResolution, QueuedTurn, TurnState,
@@ -217,41 +217,13 @@ fn finish_pending_completion(
         (PendingCompletion::Agent, result) => {
             finish_agent_completion(state, action_id, result, determinism)
         }
-        (PendingCompletion::Compaction(pending), Ok(result)) => {
-            let candidate = parse_completion_result(result)?;
-            let tools = state.resolved_tools.top_level_tools().to_vec();
-            let token_threshold = state.config.settings.context.compaction.token_threshold();
-            let image_delivery = state.config.settings.context.effective_image_delivery();
-            let resolution = finish_compaction(
-                &mut state.context,
-                &mut state.last_reported_context_tokens,
-                pending,
-                candidate,
-                &tools,
-                CompactionBudget {
-                    token_threshold,
-                    image_delivery: image_delivery.agent,
-                    image_cost: state.config.settings.context.image_token_cost,
-                },
-                state.config.settings.context.compaction_fallback,
-            )?;
-            apply_compaction_attempt_resolution(state, resolution)
-        }
-        (PendingCompletion::Compaction(pending), Err(error)) => {
-            let fallback = state.config.settings.context.compaction_fallback;
-            if fallback.is_resend() {
-                // Resending a request the provider just failed would not help.
-                return apply_compaction_resolution(state, fail_compaction(pending, error));
-            }
-            let token_threshold = state.config.settings.context.compaction.token_threshold();
-            let resolution = fail_compaction_or_fall_back(
-                &mut state.context,
-                pending,
-                fallback,
-                token_threshold,
-                error,
-            )?;
-            apply_compaction_attempt_resolution(state, resolution)
+        (PendingCompletion::Compaction(pending), result) => {
+            let reply = match result {
+                Ok(result) => Ok(parse_completion_result(result)?),
+                Err(error) => Err(error),
+            };
+            let (outcome, resolution) = finish_summary_request(state, pending, reply)?;
+            Ok(outcome.after(apply_compaction_attempt_resolution(state, resolution)?))
         }
     }
 }
@@ -262,7 +234,8 @@ fn apply_compaction_attempt_resolution(
 ) -> Result<Outcome, CoreError> {
     match resolution {
         CompactionAttemptResolution::Retry(pending) => install_compaction_retry(state, pending),
-        CompactionAttemptResolution::Resolve(resolution) => {
+        CompactionAttemptResolution::Compacted(resolution)
+        | CompactionAttemptResolution::Resolve(resolution) => {
             apply_compaction_resolution(state, *resolution)
         }
     }
@@ -416,56 +389,6 @@ fn next_completion(state: &HarnessState) -> Result<ActivePhase, CoreError> {
     ))
 }
 
-fn model_input_reaches_compaction_threshold(state: &HarnessState) -> Result<bool, CoreError> {
-    let Some(token_threshold) = state.config.settings.context.compaction.token_threshold() else {
-        return Ok(false);
-    };
-    // The serialized-bytes estimate under-counts for tokenizers that pack
-    // more tokens per byte than the fixed ratio assumes, so trust whichever
-    // is larger: the estimate or the provider's last reported context size.
-    let image_delivery = state.config.settings.context.effective_image_delivery();
-    let estimate = estimate_model_input_tokens(
-        state.context.messages(),
-        state.resolved_tools.top_level_tools(),
-        image_delivery.agent,
-        state.config.settings.context.image_token_cost,
-    )?;
-    let reported = state.last_reported_context_tokens.unwrap_or(0);
-    Ok(estimate.max(reported) >= token_threshold)
-}
-
-fn start_automatic_compaction(
-    state: &mut HarnessState,
-    turn_id: &str,
-    iterations: u32,
-) -> Result<CompactionStartResolution, CoreError> {
-    let task_id = state.config.task_id.clone();
-    let generated_system = state.generated_system_message();
-    let tools = state.resolved_tools.top_level_tools().to_vec();
-    let token_threshold = state.config.settings.context.compaction.token_threshold();
-    let image_delivery = state.config.settings.context.effective_image_delivery();
-    start_compaction(
-        &mut state.context,
-        &mut state.compaction_count,
-        generated_system,
-        &task_id,
-        CompactionRequest::automatic(turn_id, iterations),
-        &tools,
-        CompactionBudgets {
-            request: CompactionBudget {
-                token_threshold,
-                image_delivery: image_delivery.compaction,
-                image_cost: state.config.settings.context.image_token_cost,
-            },
-            replacement: CompactionBudget {
-                token_threshold,
-                image_delivery: image_delivery.agent,
-                image_cost: state.config.settings.context.image_token_cost,
-            },
-        },
-    )
-}
-
 fn plan_next_agent_completion(state: &HarnessState) -> Result<AgentCompletionPlan, CoreError> {
     plan_agent_completion(AgentCompletionRequest::new(
         &state.config.task_id,
@@ -511,34 +434,26 @@ fn start_manual_compaction(
     state: &mut HarnessState,
     extra_instructions: String,
 ) -> Result<Outcome, CoreError> {
-    let task_id = state.config.task_id.clone();
-    let generated_system = state.generated_system_message();
-    let tools = state.resolved_tools.top_level_tools().to_vec();
-    let token_threshold = state.config.settings.context.compaction.token_threshold();
-    let image_delivery = state.config.settings.context.effective_image_delivery();
-    match start_compaction(
-        &mut state.context,
-        &mut state.compaction_count,
-        generated_system,
-        &task_id,
-        CompactionRequest::manual(&extra_instructions),
-        &tools,
-        CompactionBudgets {
-            request: CompactionBudget {
-                token_threshold,
-                image_delivery: image_delivery.compaction,
-                image_cost: state.config.settings.context.image_token_cost,
-            },
-            replacement: CompactionBudget {
-                token_threshold,
-                image_delivery: image_delivery.agent,
-                image_cost: state.config.settings.context.image_token_cost,
-            },
-        },
-    )? {
+    match start_manual_compaction_request(state, &extra_instructions)? {
         CompactionStartResolution::Pending(pending) => {
             state.turn = TurnState::Compacting { pending };
             Ok(Outcome::action(pending_single_action(state)?))
+        }
+        CompactionStartResolution::Failed(resolution) => {
+            apply_compaction_resolution(state, *resolution)
+        }
+    }
+}
+
+/// Installs an automatic compaction started inside the active turn.
+fn apply_in_turn_compaction_start(
+    state: &mut HarnessState,
+    start: CompactionStartResolution,
+) -> Result<Outcome, CoreError> {
+    match start {
+        CompactionStartResolution::Pending(pending) => {
+            let action = install_active_phase(state, ActivePhase::AwaitingCompaction { pending })?;
+            Ok(Outcome::action(action))
         }
         CompactionStartResolution::Failed(resolution) => {
             apply_compaction_resolution(state, *resolution)
@@ -560,6 +475,18 @@ fn finish_agent_completion(
 ) -> Result<Outcome, CoreError> {
     let event = match result {
         Ok(result) => CompletionEvent::Succeeded { action_id, result },
+        Err(error) if is_context_overflow(&error) => {
+            return match correct_refused_agent_request(state, &action_id, error)? {
+                AgentRefusal::Fail { outcome, error } => Ok(outcome.after(apply_completion_event(
+                    state,
+                    CompletionEvent::Failed { action_id, error },
+                    determinism,
+                )?)),
+                AgentRefusal::Compact { outcome, start } => {
+                    Ok(outcome.after(apply_in_turn_compaction_start(state, start)?))
+                }
+            };
+        }
         Err(error) => CompletionEvent::Failed { action_id, error },
     };
     apply_completion_event(state, event, determinism)
@@ -764,15 +691,14 @@ fn apply_accepted_completion(
         action_id,
         next_iteration,
         context_tokens,
+        input_tokens,
         message,
         observable_candidate,
         continuation,
     } = accepted;
     state.require_active_mut()?.iterations = next_iteration;
+    record_reply_size(state, input_tokens, context_tokens)?;
     state.context.push_in_current_turn(message);
-    if let Some(tokens) = context_tokens {
-        state.last_reported_context_tokens = Some(tokens);
-    }
     let mut outcome = Outcome::quiet();
     if let Some(candidate) = observable_candidate {
         outcome.observe(Observation::AssistantMessageCommitted {
@@ -1001,15 +927,8 @@ fn preflight_agent_action(state: &mut HarnessState, action: Action) -> Result<Ou
     let active = state.require_active()?;
     let turn_id = active.turn_id.clone();
     let iterations = active.iterations;
-    match start_automatic_compaction(state, &turn_id, iterations)? {
-        CompactionStartResolution::Pending(pending) => {
-            let action = install_active_phase(state, ActivePhase::AwaitingCompaction { pending })?;
-            Ok(Outcome::action(action))
-        }
-        CompactionStartResolution::Failed(resolution) => {
-            apply_compaction_resolution(state, *resolution)
-        }
-    }
+    let start = start_automatic_compaction(state, &turn_id, iterations)?;
+    apply_in_turn_compaction_start(state, start)
 }
 
 fn start_turn(
@@ -1301,7 +1220,24 @@ fn finish_completed_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::features::compaction::record_exact_request_tokens;
     use crate::core::testing::*;
+
+    #[test]
+    fn an_exact_request_count_at_the_threshold_starts_compaction_on_its_own() {
+        let mut state = started_with(with_threshold(1_000_000));
+        let action = pending_single_action(&state).unwrap();
+        assert!(!model_input_reaches_compaction_threshold(&state).unwrap());
+
+        record_exact_request_tokens(&mut state, 1_000_000);
+        preflight_agent_action(&mut state, action).unwrap();
+
+        assert!(matches!(
+            state.require_active().unwrap().phase,
+            ActivePhase::AwaitingCompaction { .. }
+        ));
+    }
+
     #[test]
     fn queue_preserves_the_pending_action_and_starts_after_completion() {
         let state = started();

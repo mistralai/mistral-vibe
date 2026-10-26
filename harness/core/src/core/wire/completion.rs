@@ -12,6 +12,10 @@ pub(crate) struct TokenUsage {
     pub total_tokens: u64,
     #[serde(default)]
     pub cached_input_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
 }
 
 pub(crate) fn validate_token_usage(usage: Option<&TokenUsage>) -> Result<(), &'static str> {
@@ -69,8 +73,7 @@ pub(crate) enum CompletionResultPart {
 pub(crate) struct CompletionResult {
     pub parts: Vec<CompletionResultPart>,
     pub finish_reason: CompletionFinishReason,
-    #[serde(default)]
-    pub usage: Option<TokenUsage>,
+    pub usage: TokenUsage,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

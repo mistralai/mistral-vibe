@@ -103,7 +103,7 @@ fn done(app: &mut App, message: &str) {
 #[test]
 fn a_done_rewind_to_a_skill_reloads_it_in_slash_mode_with_it_selected() {
     let mut app = App::default();
-    app.completion.skills = vec![("code-review".into(), "Review.".into())];
+    app.completion.skills = vec![crate::skill::Skill::new("code-review", "Review.")];
     done(&mut app, "/code-review");
     assert_eq!(app.chat_input.mode, InputMode::Slash);
     assert_eq!(app.chat_input.cursor, "code-review".len());
@@ -124,7 +124,7 @@ fn a_done_rewind_to_a_literal_slash_message_reloads_it_as_a_prompt() {
 #[test]
 fn a_done_rewind_ending_on_a_mention_keeps_completions_closed() {
     let mut app = App::default();
-    app.completion.skills = vec![("code-review".into(), "Review.".into())];
+    app.completion.skills = vec![crate::skill::Skill::new("code-review", "Review.")];
     done(&mut app, "please run /code-review");
     assert_eq!(app.chat_input.cursor, "please run /code-review".len());
     assert!(app.completion.entries.is_empty());

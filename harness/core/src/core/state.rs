@@ -1,7 +1,9 @@
 use crate::core::capabilities::HookBindingIndex;
 use crate::core::config::HarnessConfig;
 use crate::core::error::CoreError;
-use crate::core::features::compaction::PendingCompaction;
+use crate::core::features::compaction::{
+    EstimateCorrection, ExactRequestTokens, PendingCompaction,
+};
 use crate::core::features::notifications::{Acceptance, Delivery, Notification, NotificationState};
 use crate::core::hooks::HookPoint;
 use crate::core::hooks::HookToolKey;
@@ -46,6 +48,19 @@ pub(crate) struct HarnessState {
     /// A failed or interrupted compaction keeps it, so the over-budget
     /// signal survives to the next turn.
     pub last_reported_context_tokens: Option<u64>,
+    /// How much larger the provider counts a request than Core's estimate:
+    /// every estimate the compaction check makes is multiplied by it. See
+    /// [`EstimateCorrection`].
+    pub estimate_correction: EstimateCorrection,
+    /// An exact count of the next agent request's input tokens, when a
+    /// Runtime counted it before sending. The check uses it in place of the
+    /// estimate while it still describes the context. Not checkpointed: it
+    /// holds for one request only.
+    pub exact_request_tokens: Option<ExactRequestTokens>,
+    /// Set when compaction rebuilds the history, cleared by the next accepted
+    /// agent reply. A refusal as too long while it is set ends the turn
+    /// instead of compacting again.
+    pub rebuilt_since_reply: bool,
     pub turn: TurnState,
     /// The last turn to reach a terminal state.
     ///
@@ -61,6 +76,13 @@ pub(crate) struct HarnessState {
 pub(crate) struct ToolCatalogLedger {
     pub(crate) revision: u64,
     changed: bool,
+}
+
+impl ToolCatalogLedger {
+    /// The revision, unless the catalog changed since it was committed.
+    pub(crate) fn committed_revision(&self) -> Option<u64> {
+        (!self.changed).then_some(self.revision)
+    }
 }
 
 // Model-input revisions are disposable transport bookkeeping. They do not

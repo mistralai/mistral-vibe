@@ -12,12 +12,15 @@ import time
 from mistralai_vibe_local_harness.protocol import (
     JsonObject,
     RustCompletionFailedEvent,
+    RustCompletionResult,
     RustCompletionSucceededEvent,
-    RustImageContentBlock,
     RustLLMCallAction,
     RustMessage,
     RustProtocolError,
+    RustReasoningPart,
+    RustReasoningTextContent,
     RustTextContentBlock,
+    RustTokenUsage,
     RustToolDefinition,
     RustUserMessage,
 )
@@ -55,6 +58,7 @@ from mistralai_vibe_local_harness.vibe.adapters.generic import (
 from mistralai_vibe_local_harness.vibe.adapters.mistral import (
     execute_mistral_completion,
 )
+from mistralai_vibe_local_harness.vibe.completion_profile import REASONING_LOWEST
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +115,8 @@ class _ProvisionalDeltaEmitter:
         self._pump = asyncio.create_task(self._drain_buffer())
 
     async def observe(self, delta: ProviderStreamDelta) -> None:
+        if not (delta.text or delta.reasoning):
+            return
         self._text += delta.text
         self._reasoning += delta.reasoning
         now = time.monotonic()
@@ -204,7 +210,7 @@ class _ProvisionalDeltaEmitter:
             )
 
 
-async def execute_completion(  # noqa: PLR0914 - one local per step of the call's setup and report
+async def execute_completion(
     action: RustLLMCallAction,
     messages: list[RustMessage],
     tools: list[RustToolDefinition],
@@ -222,12 +228,6 @@ async def execute_completion(  # noqa: PLR0914 - one local per step of the call'
     route = _request_route(action, config)
     if standalone:
         tools = []
-    config = _with_request_output_cap(
-        config, route, messages, tools, compaction=compaction
-    )
-    image_error = _validate_image_support(messages, route)
-    if image_error is not None:
-        return RustCompletionFailedEvent(action_id=action.action_id, error=image_error)
     try:
         credential: ProviderCredentialResult = await config.credentials.resolve()
     except Exception as exc:
@@ -298,11 +298,8 @@ async def execute_completion(  # noqa: PLR0914 - one local per step of the call'
                 tools,
                 config,
                 credential,
-                # The standalone request turns reasoning off below instead of
-                # through the route, so a route without reasoning sends none.
-                config.compaction_model if standalone else route,
+                route,
                 stream=True,
-                disable_reasoning=standalone,
                 metadata=(
                     config.completion_metadata(action.purpose, action.iteration)
                     if config.completion_metadata is not None
@@ -326,6 +323,12 @@ async def execute_completion(  # noqa: PLR0914 - one local per step of the call'
         else:
             raise ValueError(f"Unsupported completion backend: {config.backend}")
         succeeded = True
+    except CompactionReasoningLimitExceeded as stopped:
+        succeeded = True
+        return RustCompletionSucceededEvent(
+            action_id=action.action_id,
+            result=_reasoning_cut_off_result(stopped, messages, tools),
+        )
     except Exception as exc:
         if isinstance(exc, ProviderRefusal) and emitter is not None:
             # Text streamed before a refusal is not an answer. Withdraw it, as a
@@ -358,13 +361,6 @@ async def _call_failure(
     elapsed_s: float,
 ) -> RustCompletionFailedEvent:
     """Type a provider call's failure, and report a refused credential."""
-    if isinstance(exc, CompactionReasoningLimitExceeded):
-        return _logged_failure(
-            action,
-            _reasoning_limit_event(action, exc, provider=config.provider, route=route),
-            cause=exc,
-            elapsed_s=elapsed_s,
-        )
     rejection = credential_rejection(read_provider_failure(exc))
     if rejection is None:
         failure = (
@@ -414,17 +410,50 @@ class CompactionReasoningLimitExceeded(Exception):
     """An in-context compaction request reasoned past its limit.
 
     Raised from the stream observer, so the provider call stops reading the
-    stream and closes it. The call is not retried: Core answers the failure
-    with the standalone request, which runs without reasoning.
+    stream and closes it. The call is not retried: it is reported as a reply
+    cut off at its output limit, which Core answers with its cut-off retry, the
+    standalone request without reasoning. The limit needs no failure code.
     """
 
-    def __init__(self, limit_tokens: int, estimated_tokens: int) -> None:
+    def __init__(
+        self, limit_tokens: int, estimated_tokens: int, reasoning: str
+    ) -> None:
         super().__init__(
             f"Compaction reasoning reached about {estimated_tokens} tokens, past "
-            f"the {limit_tokens}-token limit; abandoned for the standalone request."
+            f"the {limit_tokens}-token limit."
         )
         self.limit_tokens = limit_tokens
         self.estimated_tokens = estimated_tokens
+        self.reasoning = reasoning
+
+
+def _reasoning_cut_off_result(
+    stopped: CompactionReasoningLimitExceeded,
+    messages: list[RustMessage],
+    tools: list[RustToolDefinition],
+) -> RustCompletionResult:
+    """The reply a stopped compaction request is reported as.
+
+    It holds the reasoning read so far and no answer, with the output limit as
+    its finish reason. The provider sent no usage, so the usage is estimated
+    from the request and the reasoning.
+    """
+    request_bytes = sum(len(message.model_dump_json().encode()) for message in messages)
+    request_bytes += sum(len(tool.model_dump_json().encode()) for tool in tools)
+    input_tokens = _approximate_tokens(request_bytes)
+    return RustCompletionResult(
+        parts=[
+            RustReasoningPart(
+                content=[RustReasoningTextContent(text=stopped.reasoning)]
+            )
+        ],
+        finish_reason="length",
+        usage=RustTokenUsage(
+            input_tokens=input_tokens,
+            output_tokens=stopped.estimated_tokens,
+            total_tokens=input_tokens + stopped.estimated_tokens,
+        ),
+    )
 
 
 class _ReasoningWatch:
@@ -433,21 +462,42 @@ class _ReasoningWatch:
     A summary needs little reasoning. A request that reasons for tens of
     thousands of tokens is spending its output budget on the conversation
     rather than summarizing it, so it is abandoned early instead of running to
-    the output cap.
+    the output cap. It stops on the delta that takes the count past the limit.
+
+    Only a reply that is still reasoning is stopped: once answer text or a tool
+    call arrives, what the model writes is kept whatever its reasoning cost, as
+    in the agents_sdk runtime. The chunk that starts the answer is not counted,
+    even when it carries reasoning too. Redacted reasoning carries no text, reasoning or
+    tool call, so the watch never sees it: it stays on and the opaque bytes,
+    which have no token meaning, are not counted.
     """
 
     def __init__(self, limit_tokens: int) -> None:
         self._limit_tokens = limit_tokens
+        self._reasoning: list[str] = []
         self._reasoning_bytes = 0
+        self._answering = False
 
     def restart(self) -> None:
+        self._reasoning = []
         self._reasoning_bytes = 0
+        self._answering = False
 
     async def observe(self, delta: ProviderStreamDelta) -> None:
+        if self._answering:
+            return
+        if delta.text or delta.tool_call:
+            # The answer has started: what this chunk reasons is not counted.
+            self._answering = True
+            return
+        if delta.reasoning:
+            self._reasoning.append(delta.reasoning)
         self._reasoning_bytes += len(delta.reasoning.encode())
         estimated_tokens = _approximate_tokens(self._reasoning_bytes)
         if estimated_tokens > self._limit_tokens:
-            raise CompactionReasoningLimitExceeded(self._limit_tokens, estimated_tokens)
+            raise CompactionReasoningLimitExceeded(
+                self._limit_tokens, estimated_tokens, "".join(self._reasoning)
+            )
 
 
 def _request_route(
@@ -455,95 +505,24 @@ def _request_route(
 ) -> LocalModelRoute:
     """The model route one Core request runs on.
 
-    Compaction runs on the compaction route. The in-context request takes the
-    compaction policy's thinking when it sets one; the standalone request runs
-    without reasoning.
+    Compaction runs on the compaction route. The in-context request keeps the
+    route's reasoning, so it shares the agent request's prefix; the standalone
+    request asks for the least reasoning the model takes. That is the request's
+    own setting, so the adapter still knows whether the route reasons.
     """
     if action.purpose != "compaction":
         return config.active_model
     route = config.compaction_model
     if action.request == "standalone":
-        return replace(route, thinking="off")
-    thinking = config.compaction_thinking
-    if thinking is None or thinking == route.thinking:
-        return route
-    return replace(route, thinking=thinking)
+        return replace(route, request_thinking=REASONING_LOWEST)
+    return route
 
 
-def _with_request_output_cap(
-    config: LocalRuntimeAdapterConfig,
-    route: LocalModelRoute,
-    messages: list[RustMessage],
-    tools: list[RustToolDefinition],
-    *,
-    compaction: bool,
-) -> LocalRuntimeAdapterConfig:
-    """The config whose output cap fits this request.
-
-    Adapters read the cap through ``output_token_cap``, so the request's cap
-    replaces ``max_tokens`` for this call only.
-    """
-    cap = config.request_output_token_cap(
-        route,
-        estimated_input_tokens=estimate_input_tokens(messages, tools),
-        compaction=compaction,
-    )
-    if cap is None or cap == config.output_token_cap(route):
-        return config
-    return replace(config, max_tokens=cap)
-
-
-# Images are sent as base64 but billed by size, not by encoded length. A fixed
-# estimate keeps one screenshot from looking like hundreds of thousands of
-# tokens; it is in the range providers charge for a large image.
-_IMAGE_TOKEN_ESTIMATE = 1_600
 _APPROX_BYTES_PER_TOKEN = 4
-
-
-def estimate_input_tokens(
-    messages: list[RustMessage], tools: list[RustToolDefinition]
-) -> int:
-    """Estimate a request's input tokens the way Core estimates its budget.
-
-    Counts the serialized messages and tools at about four bytes per token,
-    with each image counted at a fixed estimate instead of its encoded data.
-    """
-    serialized_bytes = 0
-    images = 0
-    for message in messages:
-        serialized_bytes += len(message.model_dump_json(exclude_none=True).encode())
-        for block in message.content:
-            if isinstance(block, RustImageContentBlock):
-                images += 1
-                serialized_bytes -= len(block.data)
-    for tool in tools:
-        serialized_bytes += len(tool.model_dump_json(exclude_none=True).encode())
-    return _approximate_tokens(serialized_bytes) + images * _IMAGE_TOKEN_ESTIMATE
 
 
 def _approximate_tokens(byte_count: int) -> int:
     return -(-max(byte_count, 0) // _APPROX_BYTES_PER_TOKEN)
-
-
-def _validate_image_support(
-    messages: list[RustMessage], route: LocalModelRoute
-) -> RustProtocolError | None:
-    if route.supports_images:
-        return None
-
-    for message in messages:
-        for block in message.content:
-            if isinstance(block, RustImageContentBlock):
-                return RustProtocolError(
-                    code="images_not_supported",
-                    message=(
-                        f"Model {route.model} does not support images, but the completion "
-                        "input still contains an image"
-                    ),
-                    retryable=False,
-                    details={"model": route.model},
-                )
-    return None
 
 
 def _text_length(content: Iterable[object]) -> int:
@@ -725,34 +704,17 @@ def _stream_failed_event(
     provider: str,
     route: LocalModelRoute,
 ) -> RustCompletionFailedEvent:
+    failure = read_provider_failure(exc)
     return RustCompletionFailedEvent(
         action_id=action.action_id,
         error=RustProtocolError(
-            code="model_stream_failed",
-            message=read_provider_failure(exc).message,
+            # A prompt over the model's window fails the same way on every retry.
+            code="context_overflow"
+            if failure.context_overflow
+            else "model_stream_failed",
+            message=failure.message,
             retryable=False,
             details=_failure_details(action, provider, route, exc),
-        ),
-    )
-
-
-def _reasoning_limit_event(
-    action: RustLLMCallAction,
-    exc: CompactionReasoningLimitExceeded,
-    *,
-    provider: str,
-    route: LocalModelRoute,
-) -> RustCompletionFailedEvent:
-    details = _failure_details(action, provider, route, exc)
-    details["reasoningLimitTokens"] = exc.limit_tokens
-    details["estimatedReasoningTokens"] = exc.estimated_tokens
-    return RustCompletionFailedEvent(
-        action_id=action.action_id,
-        error=RustProtocolError(
-            code="compaction_reasoning_limit_exceeded",
-            message=str(exc),
-            retryable=False,
-            details=details,
         ),
     )
 
@@ -806,7 +768,6 @@ __all__ = [
     "INVALID_API_KEY_MESSAGE",
     "CompactionReasoningLimitExceeded",
     "credential_rejection",
-    "estimate_input_tokens",
     "execute_completion",
     "invalid_api_key_message",
 ]

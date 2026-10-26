@@ -225,7 +225,6 @@ async def execute_title_completion(
                 config=title_config,
                 credential=credential,
                 route=route,
-                stream=False,
                 metadata=metadata,
             )
         elif title_config.backend == "generic":

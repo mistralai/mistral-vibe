@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from vibe.core.platform_auth import (
+    MistralPlatformHTTPClient,
+    PlatformCredentialProvider,
+    PlatformCredentialUnavailable,
+)
 from vibe.observability.logging import logger
-from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 _IDENTITY_PATH = "/users/me"
 
@@ -39,23 +43,34 @@ class IdentityGatewayUnavailable(Exception):
 
 class IdentityGateway(Protocol):
     async def read(
-        self, *, base_url: str, api_key: str, timeout: float | None = None
+        self,
+        *,
+        base_url: str,
+        credentials: PlatformCredentialProvider,
+        timeout: float | None = None,
     ) -> IdentityResult: ...
 
 
 class HttpIdentityGateway:
     async def read(
-        self, *, base_url: str, api_key: str, timeout: float | None = None
+        self,
+        *,
+        base_url: str,
+        credentials: PlatformCredentialProvider,
+        timeout: float | None = None,
     ) -> IdentityResult:
-        url = f"{base_url.rstrip('/')}{_IDENTITY_PATH}"
-        client_kwargs: dict[str, object] = {"verify": build_ssl_context()}
+        client_kwargs: dict[str, Any] = {}
         if timeout is not None:
             client_kwargs["timeout"] = timeout
         try:
-            async with VibeAsyncHTTPClient(**client_kwargs) as client:
-                response = await client.get(
-                    url, headers={"Authorization": f"Bearer {api_key}"}
-                )
+            client = MistralPlatformHTTPClient(
+                base_url=base_url, credentials=credentials, **client_kwargs
+            )
+        except ValueError as exc:
+            raise IdentityGatewayUnavailable("Invalid platform base URL") from exc
+        try:
+            async with client:
+                response = await client.get(_IDENTITY_PATH.lstrip("/"))
         except httpx.RequestError as exc:
             raise IdentityGatewayUnavailable() from exc
 
@@ -75,7 +90,7 @@ class HttpIdentityGateway:
 async def fetch_identity(
     *,
     base_url: str,
-    api_key: str,
+    credentials: PlatformCredentialProvider,
     gateway: IdentityGateway | None = None,
     timeout: float | None = None,
 ) -> IdentityResult | None:
@@ -88,12 +103,14 @@ async def fetch_identity(
     """
     gateway = gateway or HttpIdentityGateway()
     try:
-        return await gateway.read(base_url=base_url, api_key=api_key, timeout=timeout)
-    except IdentityGatewayUnauthorized:
-        logger.info(
-            "Identity endpoint rejected the API key (401/403); "
-            "the key may be invalid or expired."
+        return await gateway.read(
+            base_url=base_url, credentials=credentials, timeout=timeout
         )
+    except IdentityGatewayUnauthorized:
+        logger.info("Identity endpoint rejected the platform credential (401/403).")
+        return None
+    except PlatformCredentialUnavailable as exc:
+        logger.info("Identity endpoint credential is %s.", exc.required.reason)
         return None
     except IdentityGatewayUnavailable as exc:
         logger.warning(

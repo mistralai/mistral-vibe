@@ -108,11 +108,15 @@ class _RecordingServices:
 
 # The shared test config keeps telemetry and the A/B opt-in off so a leaked key
 # can never reach GrowthBook; a test about experiments opts itself back in.
-def _enable_experiments(config_dir: Path, *, enable: bool = True) -> None:
+def _enable_experiments(
+    config_dir: Path, *, enable: bool = True, system_prompt_id: str | None = None
+) -> None:
     config_file = config_dir / "config.toml"
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
     config["enable_telemetry"] = True
     config["experiments"] = {"enable": enable}
+    if system_prompt_id is not None:
+        config["system_prompt_id"] = system_prompt_id
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
 
 
@@ -227,6 +231,44 @@ async def test_unified_experiment_reports_its_surface_to_growthbook(
     assert client.attributes.harness is ExperimentSurface.UNIFIED
     assert client.attributes.userId == "user-1"
     assert client.attributes.planName == "INDIVIDUAL"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("experiment_prompt", "user_prompt", "custom"),
+    [("cli_ml4_2026-10_v2", None, False), (None, "cli_2026-08_v3", True)],
+)
+async def test_unified_custom_system_prompt_ignores_the_experiment_prompt(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    experiment_prompt: str | None,
+    user_prompt: str | None,
+    custom: bool,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.core.config.layers.growthbook import GrowthbookLayer
+
+    _enable_experiments(config_dir, system_prompt_id=user_prompt)
+    adapter, client = await _build_adapter(
+        tmp_path,
+        response=_extra_models_response(),
+        session=_RecordingSession(),
+        monkeypatch=monkeypatch,
+    )
+    if experiment_prompt is not None:
+        # A session opens with the previous eval's cached variants applied.
+        orchestrator = adapter._context.config_orchestrator
+        layer = orchestrator.get_layer(GrowthbookLayer.NAME)
+        assert isinstance(layer, GrowthbookLayer)
+        layer.set_variants({"vibe_cli_system_prompt": experiment_prompt})
+        await orchestrator.reload()
+        assert orchestrator.config.system_prompt_id == experiment_prompt
+
+    await adapter.initialize_experiments(_launch_context())
+
+    assert client.attributes is not None
+    assert client.attributes.custom_system_prompt is custom
 
 
 @pytest.mark.asyncio

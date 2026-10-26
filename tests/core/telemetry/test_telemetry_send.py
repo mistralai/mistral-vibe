@@ -531,7 +531,13 @@ class TestTelemetryClient:
         )
 
         client.send_new_session(
-            has_agents_md=True, nb_skills=2, nb_mcp_servers=1, nb_models=3
+            has_agents_md=True,
+            nb_skills=2,
+            nb_mcp_servers=1,
+            nb_models=3,
+            has_outside_workdir_deny=False,
+            nb_post_agent_scoped_hooks=2,
+            nb_post_agent_main_hooks=1,
         )
 
         assert len(telemetry_events) == 1
@@ -542,11 +548,14 @@ class TestTelemetryClient:
         assert properties["nb_skills"] == 2
         assert properties["nb_mcp_servers"] == 1
         assert properties["nb_models"] == 3
+        assert properties["nb_post_agent_scoped_hooks"] == 2
+        assert properties["nb_post_agent_main_hooks"] == 1
         assert properties["entrypoint"] == "cli"
         assert properties["host_kind"] == "local"
         assert properties["client_name"] == "vscode"
         assert properties["client_version"] == "1.96.0"
         assert properties["terminal_emulator"] == "vscode"
+        assert properties["has_outside_workdir_deny"] is False
         assert "experimental_bash_tool" not in properties
         assert "version" in properties
         assert type(properties["terminal_emulator"]) is str
@@ -567,13 +576,20 @@ class TestTelemetryClient:
         )
 
         client.send_new_session(
-            has_agents_md=False, nb_skills=0, nb_mcp_servers=0, nb_models=1
+            has_agents_md=False,
+            nb_skills=0,
+            nb_mcp_servers=0,
+            nb_models=1,
+            has_outside_workdir_deny=True,
+            nb_post_agent_scoped_hooks=0,
+            nb_post_agent_main_hooks=0,
         )
 
         assert len(telemetry_events) == 1
         assert telemetry_events[0]["event_name"] == "vibe.new_session"
         properties = telemetry_events[0]["properties"]
         assert "experimental_bash_tool" not in properties
+        assert properties["has_outside_workdir_deny"] is True
         assert properties["experiments"] == {"vibe_cli_managed_shell_tools": "managed"}
         assert properties["experiment_assignments"] == [
             {

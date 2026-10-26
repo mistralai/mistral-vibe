@@ -70,11 +70,16 @@ def build_unsupported_provider() -> ProviderConfig:
 
 
 class MutableOnboardingContextLoader:
-    def __init__(self, provider: ProviderConfig) -> None:
+    def __init__(
+        self, provider: ProviderConfig, pinned_console_url: str | None = None
+    ) -> None:
         self.provider = provider
+        self.pinned_console_url = pinned_console_url
 
     def __call__(self) -> OnboardingContext:
-        return OnboardingContext(provider=self.provider)
+        return OnboardingContext(
+            provider=self.provider, pinned_console_url=self.pinned_console_url
+        )
 
 
 class FakeBrowserSignInService:
@@ -166,12 +171,14 @@ def build_acp_agent(
     provider: ProviderConfig | None = None,
     browser_sign_in: FakeBrowserSignInService | None = None,
     api_key_persister: InMemoryApiKeyPersister | None = None,
+    pinned_console_url: str | None = None,
 ) -> tuple[VibeAcpAgentLoop, MutableOnboardingContextLoader, InMemoryApiKeyPersister]:
     agent, context_loader, key_persister, _ = (
         build_acp_agent_with_credentials_persister(
             provider=provider,
             browser_sign_in=browser_sign_in,
             api_key_persister=api_key_persister,
+            pinned_console_url=pinned_console_url,
         )
     )
     return agent, context_loader, key_persister
@@ -183,6 +190,7 @@ def build_acp_agent_with_credentials_persister(
     browser_sign_in: FakeBrowserSignInService | None = None,
     api_key_persister: InMemoryApiKeyPersister | None = None,
     credentials_persister: InMemoryCredentialsPersister | None = None,
+    pinned_console_url: str | None = None,
 ) -> tuple[
     VibeAcpAgentLoop,
     MutableOnboardingContextLoader,
@@ -193,7 +201,7 @@ def build_acp_agent_with_credentials_persister(
     browser_sign_in = browser_sign_in or FakeBrowserSignInService()
     api_key_persister = api_key_persister or InMemoryApiKeyPersister()
     credentials_persister = credentials_persister or InMemoryCredentialsPersister()
-    context_loader = MutableOnboardingContextLoader(provider)
+    context_loader = MutableOnboardingContextLoader(provider, pinned_console_url)
 
     return (
         VibeAcpAgentLoop(
@@ -991,3 +999,189 @@ class TestACPAuthStatusCustomDomain:
         response = await acp_agent_loop.ext_method("auth/status", {})
 
         assert response["customDomain"] is None
+
+
+PINNED_CONSOLE_URL = "https://console.acme.internal"
+
+
+class TestACPAuthenticatePinnedConsoleUrl:
+    @pytest.mark.asyncio
+    async def test_start_without_target_uses_pinned_console_url(self) -> None:
+        captured: list[ProviderConfig] = []
+
+        def factory(provider: ProviderConfig) -> FakeBrowserSignInService:
+            captured.append(provider)
+            return FakeBrowserSignInService()
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(
+                build_mistral_provider(), PINNED_CONSOLE_URL
+            ),
+            browser_sign_in_service_factory=factory,
+        )
+
+        await acp_agent_loop.authenticate("browser-auth-delegated")
+
+        assert captured[0].browser_auth_base_url == PINNED_CONSOLE_URL
+        assert captured[0].browser_auth_api_base_url == f"{PINNED_CONSOLE_URL}/api"
+        assert captured[0].browser_auth_allow_origin_rewrite is False
+
+    @pytest.mark.asyncio
+    async def test_start_with_pin_ignores_requested_mistral_target(self) -> None:
+        captured: list[ProviderConfig] = []
+
+        def factory(provider: ProviderConfig) -> FakeBrowserSignInService:
+            captured.append(provider)
+            return FakeBrowserSignInService()
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(
+                build_mistral_provider(), PINNED_CONSOLE_URL
+            ),
+            browser_sign_in_service_factory=factory,
+        )
+
+        await acp_agent_loop.authenticate(
+            "browser-auth-delegated", action="start", signInTarget="mistral"
+        )
+
+        assert captured[0].browser_auth_base_url == PINNED_CONSOLE_URL
+        assert captured[0].browser_auth_api_base_url == f"{PINNED_CONSOLE_URL}/api"
+
+    @pytest.mark.asyncio
+    async def test_start_with_pin_overrides_requested_custom_domain(self) -> None:
+        captured: list[ProviderConfig] = []
+
+        def factory(provider: ProviderConfig) -> FakeBrowserSignInService:
+            captured.append(provider)
+            return FakeBrowserSignInService()
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(
+                build_mistral_provider(), PINNED_CONSOLE_URL
+            ),
+            browser_sign_in_service_factory=factory,
+        )
+
+        await acp_agent_loop.authenticate(
+            "browser-auth-delegated",
+            action="start",
+            signInTarget="custom",
+            domain="console.evil.example",
+        )
+
+        assert captured[0].browser_auth_base_url == PINNED_CONSOLE_URL
+        assert captured[0].browser_auth_api_base_url == f"{PINNED_CONSOLE_URL}/api"
+
+    @pytest.mark.asyncio
+    async def test_start_with_pin_preserves_a_split_horizon_api_base(self) -> None:
+        captured: list[ProviderConfig] = []
+
+        def factory(provider: ProviderConfig) -> FakeBrowserSignInService:
+            captured.append(provider)
+            return FakeBrowserSignInService()
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(
+                build_mistral_provider(
+                    browser_auth_base_url=PINNED_CONSOLE_URL,
+                    browser_auth_api_base_url="https://connector.acme.internal/api",
+                ),
+                PINNED_CONSOLE_URL,
+            ),
+            browser_sign_in_service_factory=factory,
+        )
+
+        await acp_agent_loop.authenticate("browser-auth-delegated")
+
+        # The pin fixes the browser sign-in host; the configured split API
+        # base of the same deployment survives.
+        assert captured[0].browser_auth_base_url == PINNED_CONSOLE_URL
+        assert (
+            captured[0].browser_auth_api_base_url
+            == "https://connector.acme.internal/api"
+        )
+        assert captured[0].browser_auth_allow_origin_rewrite is True
+
+    @pytest.mark.asyncio
+    async def test_start_with_pin_drops_a_split_api_base_of_another_deployment(
+        self,
+    ) -> None:
+        captured: list[ProviderConfig] = []
+
+        def factory(provider: ProviderConfig) -> FakeBrowserSignInService:
+            captured.append(provider)
+            return FakeBrowserSignInService()
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(
+                build_mistral_provider(
+                    browser_auth_base_url="https://console.other.internal",
+                    browser_auth_api_base_url="https://connector.other.internal/api",
+                ),
+                PINNED_CONSOLE_URL,
+            ),
+            browser_sign_in_service_factory=factory,
+        )
+
+        await acp_agent_loop.authenticate("browser-auth-delegated")
+
+        assert captured[0].browser_auth_base_url == PINNED_CONSOLE_URL
+        assert captured[0].browser_auth_api_base_url == f"{PINNED_CONSOLE_URL}/api"
+        assert captured[0].browser_auth_allow_origin_rewrite is False
+
+    @pytest.mark.asyncio
+    async def test_completion_with_pin_persists_pinned_provider_and_console(
+        self,
+    ) -> None:
+        (acp_agent_loop, _, api_key_persister, credentials_persister) = (
+            build_acp_agent_with_credentials_persister(
+                pinned_console_url=PINNED_CONSOLE_URL
+            )
+        )
+        start_response = await acp_agent_loop.authenticate(
+            "browser-auth-delegated", action="start", signInTarget="mistral"
+        )
+        attempt_id = require_auth_meta(start_response, "browser-auth-delegated")[
+            "attemptId"
+        ]
+
+        response = await acp_agent_loop.authenticate(
+            "browser-auth-delegated", action="complete", attemptId=attempt_id
+        )
+
+        assert require_auth_meta(response, "browser-auth-delegated") == {
+            "attemptId": attempt_id,
+            "persistResult": "completed",
+            "persistProviderResult": "completed",
+            "persistConsoleBaseUrlResult": "completed",
+            "status": "completed",
+        }
+        assert len(credentials_persister.saved) == 1
+        request = credentials_persister.saved[0]
+        assert request.provider.browser_auth_base_url == PINNED_CONSOLE_URL
+        assert request.console_base_url == PINNED_CONSOLE_URL
+        assert api_key_persister.custom_domain_flags == [True]
+
+    @pytest.mark.asyncio
+    async def test_status_reports_pinned_console_url_as_locked(self) -> None:
+        acp_agent_loop, _, _ = build_acp_agent(pinned_console_url=PINNED_CONSOLE_URL)
+
+        response = await acp_agent_loop.ext_method("auth/status", {})
+
+        assert response["customDomain"] == PINNED_CONSOLE_URL
+        assert response["customDomainLocked"] is True
+
+    @pytest.mark.asyncio
+    async def test_status_reports_configured_domain_unlocked_without_pin(self) -> None:
+        acp_agent_loop, _, _ = build_acp_agent(
+            provider=build_mistral_provider(
+                browser_auth_base_url="https://console.acme.internal",
+                browser_auth_api_base_url="https://console.acme.internal/api",
+            )
+        )
+
+        response = await acp_agent_loop.ext_method("auth/status", {})
+
+        assert response["customDomain"] == "https://console.acme.internal"
+        assert response["customDomainLocked"] is False

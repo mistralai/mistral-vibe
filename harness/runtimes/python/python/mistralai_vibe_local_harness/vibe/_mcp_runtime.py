@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
+import contextlib
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+import hashlib
 import inspect
 import logging
 import math
@@ -55,8 +57,111 @@ type _ServerResolution = tuple[
 ]
 
 
+type _Discovery = Callable[
+    [], Coroutine[object, object, tuple[MCPRemoteToolDescriptor, ...]]
+]
+# The server, and the credential the discovery runs with: a discovery is only
+# shared by runtimes that would send the same one.
+type _FlightKey = tuple[MCPDescriptorCacheKey, str]
+
+
+@dataclass(eq=False)
+class _Flight:
+    task: asyncio.Task[tuple[MCPRemoteToolDescriptor, ...]]
+    # Whether the runtime whose connections the discovery uses has closed;
+    # always false for one that uses none of its own.
+    closed: Callable[[], bool]
+    waiters: int = 0
+
+
+def _never_closed() -> bool:
+    return False
+
+
+class MCPDiscoveryFlights:
+    """Discoveries in progress, shared by the runtimes given the same instance.
+
+    A runtime that would contact a server another one is already discovering,
+    with the same descriptor cache key, joins that discovery instead: sessions
+    opened together contact each server once. Its outcome, a failure included,
+    goes to every runtime that joined, unless it ended for a reason of the
+    starting runtime's own: that runtime closed and the discovery ran over its
+    connections (stdio), or the discovery was cancelled. A runtime still
+    waiting then discovers again on its own.
+    A runtime that stops waiting leaves the others waiting; the discovery is
+    cancelled once no runtime waits for it.
+
+    The key is the descriptor cache key and the credential sent: runtimes
+    that would authenticate differently, one with a token another has just
+    refreshed say, never share a result, so a rejection of one credential is
+    never taken for a rejection of the other.
+    """
+
+    def __init__(self) -> None:
+        self._flights: dict[_FlightKey, _Flight] = {}
+
+    async def join(
+        self, key: _FlightKey, discover: _Discovery, *, closed: Callable[[], bool]
+    ) -> tuple[MCPRemoteToolDescriptor, ...]:
+        while True:
+            flight = self._flights.get(key)
+            # A flight of another event loop, one a test closed say, is never
+            # joined: its task cannot be awaited from this one.
+            joined = flight is not None and not (
+                flight.closed()
+                or flight.task.cancelled()
+                or flight.task.get_loop() is not asyncio.get_running_loop()
+            )
+            if flight is None or not joined:
+                flight = self._start(key, discover, closed)
+            flight.waiters += 1
+            try:
+                return await asyncio.shield(flight.task)
+            except (Exception, asyncio.CancelledError):
+                if not (joined and self._lost_for_its_starter(flight, closed)):
+                    raise
+            finally:
+                flight.waiters -= 1
+                if not flight.waiters and not flight.task.done():
+                    flight.task.cancel()
+                    self._forget(key, flight.task)
+
+    def _start(
+        self, key: _FlightKey, discover: _Discovery, closed: Callable[[], bool]
+    ) -> _Flight:
+        task = asyncio.create_task(discover())
+        flight = _Flight(task=task, closed=closed)
+        self._flights[key] = flight
+        task.add_done_callback(lambda done: self._forget(key, done))
+        return flight
+
+    @staticmethod
+    def _lost_for_its_starter(flight: _Flight, closed: Callable[[], bool]) -> bool:
+        """Whether a joined discovery ended for its starting runtime's reasons.
+
+        Its runtime closing under it, or its cancellation, which the joiner
+        did not ask for. A failure of the server's own is shared as is.
+        """
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            return False
+        if flight.task.cancelled():
+            return True
+        return flight.closed != closed and flight.closed()
+
+    def _forget(
+        self, key: _FlightKey, task: asyncio.Future[tuple[MCPRemoteToolDescriptor, ...]]
+    ) -> None:
+        flight = self._flights.get(key)
+        if flight is not None and flight.task is task:
+            del self._flights[key]
+        # Retrieved here so a discovery nobody waits for logs nothing.
+        if task.done() and not task.cancelled():
+            task.exception()
+
+
 class MCPRuntime:
-    def __init__(
+    def __init__(  # noqa: PLR0913 - explicit runtime dependencies
         self,
         *,
         cache_root: Path,
@@ -69,6 +174,7 @@ class MCPRuntime:
         event_sink: MCPRuntimeEventSink | None = None,
         claimed_groups: frozenset[str] = frozenset(),
         discovery_concurrency: int = 4,
+        discovery_flights: MCPDiscoveryFlights | None = None,
     ) -> None:
         if discovery_concurrency < 1:
             raise ValueError("MCP discovery concurrency must be positive")
@@ -84,6 +190,7 @@ class MCPRuntime:
         self._event_sink = event_sink
         self._claimed_groups = claimed_groups
         self._discovery_concurrency = discovery_concurrency
+        self._discovery_flights = discovery_flights
         self._memory_cache: dict[MCPDescriptorCacheKey, MCPDescriptorCacheRecordV1] = {}
         self._configuration = ResolvedMCPCatalog(revision="empty", servers=())
         self._accepted_descriptors: dict[str, tuple[MCPRemoteToolDescriptor, ...]] = {}
@@ -98,10 +205,24 @@ class MCPRuntime:
         self._accept_snapshot: Callable[[MCPRouteSnapshot], Awaitable[None]] | None = (
             None
         )
+        self._snapshot_deferred = False
+        # Servers a cached-only reconfigure routed from descriptors older than
+        # the policy's ``refresh_after_s``: ``discover_pending`` refreshes them.
+        self._refresh_due: set[str] = set()
+        # Servers a ``discover_pending`` is contacting, by name, each set once
+        # its result is accepted or dropped. A call to one waits for it.
+        self._discovering: dict[str, asyncio.Event] = {}
 
     @property
     def snapshot(self) -> MCPRouteSnapshot:
         return self._snapshot
+
+    @property
+    def discovery_due(self) -> bool:
+        """Whether ``discover_pending`` has a server to discover or refresh."""
+        return bool(self._refresh_due) or any(
+            _is_discovery_pending(source) for source in self._snapshot.sources
+        )
 
     def bind_snapshot_acceptor(
         self, acceptor: Callable[[MCPRouteSnapshot], Awaitable[None]]
@@ -147,53 +268,157 @@ class MCPRuntime:
                 cached_only=cached_only,
             )
 
-    async def discover_pending(self, *, push_to_core: bool) -> MCPRouteSnapshot:
+    async def discover_pending(
+        self, *, push_to_core: bool, refresh: bool = True
+    ) -> MCPRouteSnapshot:
         """Discover the servers a cached-only reconfigure left pending.
+
+        Also rediscovers the servers it routed from descriptors older than the
+        policy's ``refresh_after_s``, so a server that changed its tools is
+        caught up without every open contacting every server. With ``refresh``
+        false those are left for a later call, so waiting for this one waits
+        only for the servers with no tools yet.
 
         The servers are contacted without holding the runtime lock, so a slow or
         unreachable one never holds up a login, a toggle or a reload meanwhile.
-        A result is kept only if its server is still configured the same way and
-        still pending; anything that changed it in between has the last word.
+        A call to one of them waits for its own discovery instead (see
+        ``execute``). A result is kept only if its server is still configured
+        the same way and still pending or due a refresh; anything that changed
+        it in between has the last word.
         """
         async with self._lock:
             self._guard_open()
-            pending = tuple(
+            due = tuple(
                 server
                 for server in self._configuration.servers
-                if _is_discovery_pending(self._source_state(server.name))
+                if self._discovery_due_for(server.name, refresh=refresh)
             )
-        if not pending:
-            return self._snapshot
-        semaphore = asyncio.Semaphore(self._discovery_concurrency)
-        discovered = await asyncio.gather(
-            *(
-                self._resolve_isolated(
-                    server, semaphore, forced=False, cached_only=False
-                )
-                for server in pending
+            refreshing = frozenset(
+                server.name for server in due if server.name in self._refresh_due
             )
-        )
-        async with self._lock:
-            self._guard_open()
-            accepted = {
-                server.name: resolution
-                for server, resolution in zip(pending, discovered, strict=True)
-                if server in self._configuration.servers
-                and _is_discovery_pending(self._source_state(server.name))
-            }
-            if not accepted:
-                return self._snapshot
-            configuration = self._configuration
-            resolutions = [
-                accepted.get(server.name) or self._routed_resolution(server)
-                for server in configuration.servers
+            # A server another call is already discovering is waited for, not
+            # contacted again: two accepts would race to replace its routes.
+            in_flight = [
+                self._discovering[server.name]
+                for server in due
+                if server.name in self._discovering
             ]
-            return await self._accept_resolutions(
-                configuration,
-                resolutions,
-                previous_configuration=configuration,
-                push_to_core=push_to_core,
+            due = tuple(
+                server for server in due if server.name not in self._discovering
             )
+            started = {server.name: asyncio.Event() for server in due}
+            self._discovering.update(started)
+        semaphore = asyncio.Semaphore(self._discovery_concurrency)
+        # Each server's result is accepted as it arrives, so a call to it waits
+        # for its own discovery, not for the slowest server's. One failing to
+        # be accepted leaves the others accepted, and the caller still gets
+        # the snapshot that holds them.
+        try:
+            outcomes = await asyncio.gather(
+                *(
+                    self._discover_one(
+                        server,
+                        semaphore,
+                        refresh=server.name in refreshing,
+                        started=started[server.name],
+                        push_to_core=push_to_core,
+                    )
+                    for server in due
+                ),
+                *(event.wait() for event in in_flight),
+                return_exceptions=True,
+            )
+        finally:
+            # However this ends, a cancellation included, no waiter is left on
+            # a discovery that will never finish.
+            self._release_discoveries(started)
+        for outcome in outcomes:
+            if isinstance(outcome, asyncio.CancelledError):
+                raise outcome
+        outcomes = outcomes[: len(due)]
+        self._guard_open()
+        if not outcomes:
+            return self._snapshot
+        failures = [
+            outcome for outcome in outcomes if isinstance(outcome, BaseException)
+        ]
+        # As before per-server acceptance: nothing accepted is the caller's
+        # failure to handle, not a quiet return.
+        if failures and len(failures) == len(outcomes):
+            raise failures[0]
+        for failure in failures:
+            logger.warning("MCP discovery could not be accepted", exc_info=failure)
+        return self._snapshot
+
+    async def _discover_one(
+        self,
+        server: ResolvedMCPServerConfig,
+        semaphore: asyncio.Semaphore,
+        *,
+        refresh: bool,
+        started: asyncio.Event,
+        push_to_core: bool,
+    ) -> None:
+        try:
+            resolution = await self._resolve_isolated(
+                server,
+                semaphore,
+                # A refresh skips the cache it is refreshing.
+                forced=refresh,
+                cached_only=False,
+            )
+            async with self._lock:
+                self._guard_open()
+                due = server.name in self._refresh_due or _is_discovery_pending(
+                    self._source_state(server.name)
+                )
+                if not due or server not in self._configuration.servers:
+                    return
+                # A refresh that fails keeps the cached tools: losing them for
+                # the session would cost more than a call failing on its own.
+                if refresh and resolution[1] is None:
+                    self._refresh_due.discard(server.name)
+                    return
+                configuration = self._configuration
+                await self._accept_resolutions(
+                    configuration,
+                    [
+                        resolution
+                        if candidate.name == server.name
+                        else self._routed_resolution(candidate)
+                        for candidate in configuration.servers
+                    ],
+                    previous_configuration=configuration,
+                    push_to_core=push_to_core,
+                )
+                self._refresh_due.discard(server.name)
+        finally:
+            self._release_discoveries({server.name: started})
+
+    def _release_discoveries(self, started: Mapping[str, asyncio.Event]) -> None:
+        for name, event in started.items():
+            if self._discovering.get(name) is event:
+                del self._discovering[name]
+            event.set()
+
+    async def _wait_for_discovery(self, name: str) -> None:
+        """Hold a call to a server ``discover_pending`` is contacting.
+
+        Bounded by the server's startup timeout, the bound its discovery
+        already has. Calls to other servers do not wait.
+        """
+        event = self._discovering.get(name)
+        if event is None:
+            return
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(
+                event.wait(), timeout=self._server(name).startup_timeout_s
+            )
+
+    def _discovery_due_for(self, name: str, *, refresh: bool = True) -> bool:
+        return (refresh and name in self._refresh_due) or _is_discovery_pending(
+            self._source_state(name)
+        )
 
     async def push_snapshot_to_core(self) -> None:
         """Hand the current route snapshot to the capability acceptor.
@@ -204,6 +429,21 @@ class MCPRuntime:
         async with self._lock:
             self._guard_open()
             await self._accept(self._snapshot)
+            self._snapshot_deferred = False
+
+    async def publish_deferred_snapshot(self) -> None:
+        """Hand Core the routes an MCP call withdrew while Core was running.
+
+        An authorization failure during a call arrives while its provided-tool
+        Action is still pending, and Core rejects a capability reconfigure until
+        no Action is. The withdrawn routes apply to dispatch at once; call this
+        once Core is idle so the advertised capabilities catch up.
+        """
+        async with self._lock:
+            if self._closed or not self._snapshot_deferred:
+                return
+            await self._accept(self._snapshot)
+            self._snapshot_deferred = False
 
     async def authorization_changed(
         self, *, name: str, descriptor_revision: str
@@ -279,8 +519,12 @@ class MCPRuntime:
         self, *, group_name: str, tool_name: str, arguments: JsonObject
     ) -> MCPNormalizedResult:
         self._guard_open()
-        snapshot = self._snapshot
-        route = snapshot.routes.get((group_name, tool_name))
+        route = self._snapshot.routes.get((group_name, tool_name))
+        if route is not None:
+            await self._wait_for_discovery(route.descriptor.server_name)
+            self._guard_open()
+            # Read again: the discovery may have replaced the route.
+            route = self._snapshot.routes.get((group_name, tool_name))
         if route is None:
             raise MCPRuntimeFailure(
                 "mcp_unknown_route", "The provided tool route is not available"
@@ -295,11 +539,15 @@ class MCPRuntime:
         if isinstance(authorization, MCPAuthorizationRequired):
             async with self._lock:
                 self._accepted_descriptors.pop(server.name, None)
+                # Core is running this call's Action and rejects a capability
+                # reconfigure; ``publish_deferred_snapshot`` hands Core the
+                # withdrawn routes once it is idle.
                 await self._suspend_locked(
                     name=server.name,
                     tool_name=None,
                     source_status="needs_auth",
                     descriptor_revision=authorization.descriptor_revision,
+                    push_to_core=False,
                 )
             await self._authorization_required(server, authorization)
             raise MCPRuntimeFailure(
@@ -345,6 +593,8 @@ class MCPRuntime:
     ) -> MCPRouteSnapshot:
         _validate_configuration(configuration)
         previous_configuration = self._configuration
+        # This reconfigure decides afresh which servers are due a refresh.
+        self._refresh_due.clear()
         semaphore = asyncio.Semaphore(self._discovery_concurrency)
         results = await asyncio.gather(
             *(
@@ -560,6 +810,9 @@ class MCPRuntime:
             if descriptors is not None
         }
         self._snapshot = candidate
+        # Set with the snapshot, not after the awaits below: one failing or
+        # cancelled must not leave routes Core has not seen unflagged.
+        self._snapshot_deferred = not push_to_core
         for server, _, _, required in resolutions:
             if required is not None:
                 await self._authorization_required(server, required)
@@ -615,7 +868,7 @@ class MCPRuntime:
                     None,
                 )
         try:
-            descriptors = await self._discover(server, authorization)
+            descriptors = await self._discover_once(server, authorization, key)
             discovery_authorization = authorization
         except MCPAuthorizationRejected as rejected:
             retried = await self._retry_rejected_discovery(
@@ -684,6 +937,12 @@ class MCPRuntime:
                 ),
                 None,
             )
+        refresh_after_s = self._cache_policy.refresh_after_s
+        if (
+            refresh_after_s is not None
+            and (_utc_now() - cached.discovered_at).total_seconds() >= refresh_after_s
+        ):
+            self._refresh_due.add(server.name)
         return (
             server,
             cached.descriptors,
@@ -721,6 +980,24 @@ class MCPRuntime:
         if record is not None:
             self._memory_cache[key] = record
         return record
+
+    async def _discover_once(
+        self,
+        server: ResolvedMCPServerConfig,
+        authorization: MCPAuthorizationSnapshot,
+        key: MCPDescriptorCacheKey,
+    ) -> tuple[MCPRemoteToolDescriptor, ...]:
+        flights = self._discovery_flights
+        if flights is None:
+            return await self._discover(server, authorization)
+        return await flights.join(
+            (key, _credential_fingerprint(authorization)),
+            lambda: self._discover(server, authorization),
+            closed=self._is_closed if server.transport == "stdio" else _never_closed,
+        )
+
+    def _is_closed(self) -> bool:
+        return self._closed
 
     async def _discover(
         self, server: ResolvedMCPServerConfig, authorization: MCPAuthorizationSnapshot
@@ -871,7 +1148,10 @@ class MCPRuntime:
         await self._invalidate_descriptor(server, authorization.descriptor_revision)
         async with self._lock:
             await self._suspend_locked(
-                name=server.name, tool_name=None, source_status="needs_auth"
+                name=server.name,
+                tool_name=None,
+                source_status="needs_auth",
+                push_to_core=False,
             )
         await self._authorization_required(server, required)
         raise MCPRuntimeFailure(
@@ -885,8 +1165,11 @@ class MCPRuntime:
         tool_name: str | None,
         source_status: str,
         descriptor_revision: str | None = None,
+        push_to_core: bool = True,
     ) -> MCPRouteSnapshot:
         server = self._server(name)
+        # A refresh in flight must not route back what this takes away.
+        self._refresh_due.discard(name)
         if tool_name is None:
             replacement = replace(server, disabled=True)
         else:
@@ -923,8 +1206,10 @@ class MCPRuntime:
             claimed_groups=self._claimed_groups,
             tool_filter=self._configuration.tool_filter,
         )
-        await self._accept(candidate)
+        if push_to_core:
+            await self._accept(candidate)
         self._snapshot = candidate
+        self._snapshot_deferred = not push_to_core
         if (
             tool_name is None
             and self._lease is not None
@@ -986,6 +1271,17 @@ def _available_status(
     server: ResolvedMCPServerConfig,
 ) -> Literal["enabled", "connected"]:
     return "connected" if server.authorization.kind == "oauth" else "enabled"
+
+
+def _credential_fingerprint(authorization: MCPAuthorizationSnapshot) -> str:
+    """A digest of the headers a discovery sends, so none is kept in clear."""
+    digest = hashlib.sha256()
+    for name, value in sorted(authorization.headers.items()):
+        digest.update(name.lower().encode())
+        digest.update(b"\0")
+        digest.update(value.encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _cache_key(server: ResolvedMCPServerConfig) -> MCPDescriptorCacheKey:

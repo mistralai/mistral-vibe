@@ -387,7 +387,7 @@ def _normalize_result(value: object) -> MCPNormalizedResult:
             raise MCPRuntimeFailure(
                 "mcp_invalid_result", "MCP tool result has an unsupported content block"
             )
-        content.append(cast(JsonObject, normalized))
+        content.append(_without_unset_fields(normalized))
     structured = _JSON_VALUE.validate_python(raw.get("structuredContent"))
     meta_raw = _JSON_VALUE.validate_python(raw.get("_meta"))
     if meta_raw is not None and not isinstance(meta_raw, dict):
@@ -401,6 +401,34 @@ def _normalize_result(value: object) -> MCPNormalizedResult:
         meta=cast(JsonObject | None, meta_raw),
         is_error=is_error,
     )
+
+
+def _without_unset_fields(block: dict[str, JsonValue]) -> JsonObject:
+    """``block`` without the null fields the SDK dump fills in for unset ones.
+
+    The dump keeps ``None`` fields, so a resource link without icons arrives
+    as ``"icons": null`` where the Harness block wants a list, and would fail
+    the whole call. Only the block and its SDK-modelled parts (annotations,
+    embedded resource, icons) are cleaned: ``_meta`` and the other values are
+    the server's own JSON and keep their nulls.
+    """
+    cleaned: JsonObject = {}
+    for key, value in block.items():
+        if value is None:
+            continue
+        if key in {"annotations", "resource"} and isinstance(value, dict):
+            value = _without_nulls(value)
+        elif key == "icons" and isinstance(value, list):
+            value = [
+                _without_nulls(icon) if isinstance(icon, dict) else icon
+                for icon in value
+            ]
+        cleaned[key] = value
+    return cleaned
+
+
+def _without_nulls(value: dict[str, JsonValue]) -> JsonObject:
+    return {key: inner for key, inner in value.items() if inner is not None}
 
 
 def _model_dump(value: object) -> dict[str, Any]:

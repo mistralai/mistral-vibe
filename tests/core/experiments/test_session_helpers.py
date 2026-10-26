@@ -17,6 +17,7 @@ from vibe.core.experiments.session import (
 from vibe.core.experiments.wait import experiments_eval_failed
 from vibe.core.identity import IdentityResult
 from vibe.core.paths import EXPERIMENT_EVAL_CACHE_FILE
+from vibe.core.platform_auth import PlatformCredentialSnapshot, PlatformCredentialTarget
 from vibe.core.telemetry.types import LaunchContext, TerminalEmulator
 from vibe.setup.auth.whoami import WhoAmIResult, store_cached_whoami
 
@@ -423,18 +424,22 @@ async def test_initialize_uses_provided_terminal_emulator(
 async def test_initialize_includes_organization_id_from_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    provider = MagicMock(
+        api_base="https://api.mistral.ai/v1", api_key_env_var="MISTRAL_API_KEY"
+    )
+    monkeypatch.setenv("MISTRAL_API_KEY", "fake-key")
     monkeypatch.setattr(
         "vibe.core.experiments.session.get_mistral_provider_and_api_key",
-        lambda _config: (MagicMock(), "fake-key"),
+        lambda _config: (provider, "fake-key"),
+    )
+    resolve_identity = AsyncMock(
+        return_value=IdentityResult.model_validate({
+            "id": "user-1",
+            "organization": {"id": "org-123", "name": "Acme"},
+        })
     )
     monkeypatch.setattr(
-        "vibe.core.experiments.session.fetch_identity",
-        AsyncMock(
-            return_value=IdentityResult.model_validate({
-                "id": "user-1",
-                "organization": {"id": "org-123", "name": "Acme"},
-            })
-        ),
+        "vibe.core.experiments.session.fetch_identity", resolve_identity
     )
     session_logger = MagicMock()
     session_logger.persist_experiments = AsyncMock()
@@ -456,6 +461,15 @@ async def test_initialize_includes_organization_id_from_identity(
     assert client.attributes is not None
     assert client.attributes.organizationId == "org-123"
     assert client.attributes.userId == "user-1"
+    resolve_identity.assert_awaited_once()
+    identity_call = resolve_identity.await_args
+    assert identity_call is not None
+    credentials = identity_call.kwargs["credentials"]
+    snapshot = await credentials.resolve(
+        PlatformCredentialTarget(base_url=provider.api_base)
+    )
+    assert isinstance(snapshot, PlatformCredentialSnapshot)
+    assert snapshot.cache_namespace == "api_key:MISTRAL_API_KEY"
 
 
 @pytest.mark.asyncio
@@ -825,9 +839,15 @@ async def test_fetch_and_cache_takes_the_plan_from_the_whoami_disk_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # As on a session start: the cached /whoami answer, not a live call.
+    monkeypatch.setenv("MISTRAL_API_KEY", "fake-key")
     monkeypatch.setattr(
         "vibe.core.experiments.session.get_mistral_provider_and_api_key",
-        lambda _config: (MagicMock(), "fake-key"),
+        lambda _config: (
+            MagicMock(
+                api_base="https://api.mistral.ai/v1", api_key_env_var="MISTRAL_API_KEY"
+            ),
+            "fake-key",
+        ),
     )
     monkeypatch.setattr(
         "vibe.core.identity_cache.fetch_identity", AsyncMock(return_value=None)

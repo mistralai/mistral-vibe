@@ -23,10 +23,7 @@ from vibe.user_content import UserDisplayContent
 
 def make_config() -> VibeConfigSchema:
     return build_test_vibe_config(
-        include_model_info=False,
-        include_commit_signature=False,
-        enabled_tools=[],
-        tools={},
+        include_commit_signature=False, enabled_tools=[], tools={}
     )
 
 

@@ -153,6 +153,9 @@ pub(in crate::core::turn) struct AcceptedCompletion {
     /// when the provider reported usage. Feeds the automatic compaction
     /// trigger so it reacts to the real context size, not only the estimate.
     pub(in crate::core::turn) context_tokens: Option<u64>,
+    /// Provider-reported input size of the request, when reported. Measures
+    /// the session's estimate correction.
+    pub(in crate::core::turn) input_tokens: Option<u64>,
     pub(in crate::core::turn) message: StoredMessage,
     pub(in crate::core::turn) observable_candidate: Option<CompletionCandidate>,
     pub(in crate::core::turn) continuation: AcceptedCompletionContinuation,
@@ -326,18 +329,12 @@ fn output_limit_retry(
     action_id: String,
     candidate: &CompletionCandidate,
 ) -> CompletionResolution {
-    let cut_off_tool = candidate
-        .message
-        .tool_calls()
-        .into_iter()
-        .last()
-        .map(|call| call.name);
     let output_tokens = candidate.usage.as_ref().map(|usage| usage.output_tokens);
     CompletionResolution::Retry {
         action_id,
         next_iteration: context.turn.iterations + 1,
         feedback: StoredMessage::injected(Message::user(output_limit_recovery::feedback(
-            cut_off_tool.as_deref(),
+            output_limit_recovery::CutOffAt::of(&candidate.message),
             output_tokens,
         ))),
         output_limit: true,
@@ -385,6 +382,7 @@ fn resolve_accepted(
         ));
     }
     let context_tokens = candidate.usage.as_ref().map(|usage| usage.total_tokens);
+    let input_tokens = candidate.usage.as_ref().map(|usage| usage.input_tokens);
     let message = Message::assistant(candidate.message.content.clone());
     message.validate()?;
     let tool_calls = candidate.message.tool_calls();
@@ -408,6 +406,7 @@ fn resolve_accepted(
         action_id,
         next_iteration,
         context_tokens,
+        input_tokens,
         message: StoredMessage::visible(message),
         observable_candidate,
         continuation,
@@ -428,7 +427,7 @@ fn apply_acceptance(
 pub(in crate::core::turn) fn parse_completion_result(
     result: CompletionResult,
 ) -> Result<CompletionCandidate, CoreError> {
-    validate_token_usage(result.usage.as_ref()).map_err(CoreError::invalid_command)?;
+    validate_token_usage(Some(&result.usage)).map_err(CoreError::invalid_command)?;
     if result.parts.is_empty() {
         return Err(CoreError::invalid_command(
             "completion result must contain at least one part",
@@ -468,6 +467,13 @@ pub(in crate::core::turn) fn parse_completion_result(
                     )));
                 }
                 let arguments = match serde_json::from_str(&arguments_json) {
+                    // Some providers stream a call to a tool without parameters
+                    // as empty arguments. Store `{}` so the call runs and is
+                    // replayed as valid JSON to any provider.
+                    Err(_) if arguments_json.trim().is_empty() => ToolArguments::Json {
+                        raw: "{}".to_string(),
+                        value: serde_json::json!({}),
+                    },
                     Ok(value) => ToolArguments::Json {
                         raw: arguments_json,
                         value,
@@ -514,7 +520,7 @@ pub(in crate::core::turn) fn parse_completion_result(
     Ok(CompletionCandidate {
         message,
         finish_reason: result.finish_reason,
-        usage: result.usage,
+        usage: Some(result.usage),
     })
 }
 
@@ -539,7 +545,7 @@ mod tests {
         CompletionResult {
             parts: vec![CompletionResultPart::Content(ContentBlock::text(text))],
             finish_reason: CompletionFinishReason::Stop,
-            usage: None,
+            usage: test_usage(),
         }
     }
 

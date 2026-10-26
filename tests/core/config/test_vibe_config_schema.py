@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 from types import UnionType
-from typing import Union, get_args, get_origin
+from typing import Any, Union, get_args, get_origin
 from unittest.mock import patch
 
 import keyring
@@ -19,13 +19,13 @@ from vibe.core.config import (
     ProviderConfig,
     UtilityFeature,
 )
-from vibe.core.config._defaults import DEFAULT_AUTO_COMPACT_THRESHOLD
 from vibe.core.config.layers.environment import EnvironmentLayer
 from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.schema import MergeFieldMetadata
-from vibe.core.config.vibe_schema import VibeConfigSchema
+from vibe.core.config.vibe_schema import VibeConfigSchema, outside_workdir_denied
 from vibe.core.utils.merge import MergeStrategy
+from vibe.permissions import OutsideWorkdirPolicy
 
 _ROUTED_TEST_ALIAS = "target-testing-model-alias"
 
@@ -35,6 +35,8 @@ def test_retired_settings_stay_loadable_and_are_deprecated_in_public_schema() ->
         "displayed_workdir": "/old/display/path",
         "context_warnings": True,
         "raise_on_compaction_failure": True,
+        "include_model_info": False,
+        "include_prompt_detail": False,
     }
     config = VibeConfigSchema.model_validate(values)
     serialized = config.model_dump()
@@ -46,8 +48,6 @@ def test_retired_settings_stay_loadable_and_are_deprecated_in_public_schema() ->
         assert "no effect" in schema["properties"][name]["description"]
 
 
-# The schema resolves unset thresholds to the floor, so the expected model
-# carries it explicitly.
 _ROUTED_TEST_MODEL = ModelConfig(
     name="target-testing-model-name",
     provider="mistral",
@@ -55,7 +55,6 @@ _ROUTED_TEST_MODEL = ModelConfig(
     input_price=0.0,
     output_price=0.0,
     supports_images=False,
-    auto_compact_threshold=DEFAULT_AUTO_COMPACT_THRESHOLD,
 )
 _ROUTED_TEST_MODEL_JSON = _ROUTED_TEST_MODEL.model_dump_json()
 
@@ -103,30 +102,20 @@ provider = "mistral"
     assert config.enable_otel is True
 
 
-def test_stream_idle_timeout_is_off_by_default_and_never_negative() -> None:
-    assert VibeConfigSchema().api_stream_idle_timeout == 0.0
+def test_stream_idle_timeout_defaults_to_300_seconds_and_is_never_negative() -> None:
+    assert VibeConfigSchema().api_stream_idle_timeout == 300.0
     with pytest.raises(ValidationError):
         VibeConfigSchema(api_stream_idle_timeout=-1.0)
 
 
 def test_compaction_and_output_limits_default_on() -> None:
     config = VibeConfigSchema()
-    assert config.compaction_max_output_tokens == 80_000
-    assert config.compaction_thinking is None
     assert config.compaction_reasoning_limit_tokens == 32_000
     assert config.output_limit_retries == 6
-    assert config.output_token_reserve == 4_096
 
 
 @pytest.mark.parametrize(
-    "setting",
-    [
-        {"compaction_max_output_tokens": -1},
-        {"compaction_reasoning_limit_tokens": -1},
-        {"output_limit_retries": -1},
-        {"output_token_reserve": -1},
-        {"compaction_thinking": "extreme"},
-    ],
+    "setting", [{"compaction_reasoning_limit_tokens": -1}, {"output_limit_retries": -1}]
 )
 def test_compaction_and_output_limits_reject_invalid_values(
     setting: dict[str, object],
@@ -187,6 +176,35 @@ def test_file_watcher_for_autocomplete_is_enabled_by_default() -> None:
 
 def test_subagent_status_list_is_enabled_by_default() -> None:
     assert VibeConfigSchema().show_subagent_status_list is True
+
+
+def test_outside_workdir_access_is_asked_about_by_default() -> None:
+    assert VibeConfigSchema().outside_workdir is OutsideWorkdirPolicy.ASK
+
+
+def test_outside_workdir_accepts_deny_and_rejects_unknown_policies() -> None:
+    config = VibeConfigSchema.model_validate({"outside_workdir": "deny"})
+    assert config.outside_workdir is OutsideWorkdirPolicy.DENY
+    with pytest.raises(ValidationError):
+        VibeConfigSchema.model_validate({"outside_workdir": "allow"})
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ({}, False),
+        ({"outside_workdir": "deny"}, True),
+        ({"tools": {"bash": {"outside_workdir": "deny"}}}, True),
+        (
+            {"outside_workdir": "deny", "tools": {"bash": {"outside_workdir": "ask"}}},
+            True,
+        ),
+    ],
+)
+def test_outside_workdir_denied_reads_the_global_and_per_tool_policies(
+    config: dict[str, Any], expected: bool
+) -> None:
+    assert outside_workdir_denied(VibeConfigSchema.model_validate(config)) is expected
 
 
 def test_subagent_limits_default_to_32() -> None:
@@ -1081,14 +1099,12 @@ async def test_a_shell_default_timeout_above_its_maximum_is_a_config_error(
     [
         {"default_timeout": 300, "max_timeout_seconds": 1_200},
         {"default_timeout": 600, "max_timeout_seconds": 600},
-        {"default_timeout": 1_200},
-        {"max_timeout_seconds": 60},
     ],
 )
 def test_shell_timeouts_within_their_maximum_load_unchanged(
     settings: dict[str, int],
 ) -> None:
-    """*Prepare*: Shell timeouts with the default at most the maximum, or only one set.
+    """*Prepare*: Shell timeouts with the default at most the maximum.
     *Do*: Load the config.
     *Assert*: They load as given.
     """
@@ -1322,11 +1338,83 @@ async def test_a_mistyped_group_alone_is_reported_as_a_validation_error(
     assert "session_logging" in str(exc_info.value)
 
 
-def test_published_schema_does_not_advertise_the_unset_sentinel() -> None:
-    """The sentinel is a merge-internal blank, not a setting default."""
+def test_an_unset_compaction_threshold_stays_unset() -> None:
+    """*Prepare*: A config that sets no threshold, globally or on its model.
+    *Do*: Validate it.
+    *Assert*: Both stay None, so the threshold is derived from the model's
+    context window when the session starts, and the published default is null.
+    """
+    # Do
+    config = VibeConfigSchema.model_validate({
+        "models": [{"name": "m", "provider": "mistral", "alias": "m"}]
+    })
     schema = VibeConfigSchema.model_json_schema(mode="serialization", by_alias=True)
 
-    assert "default" not in schema["properties"]["auto_compact_threshold"]
+    # Assert
+    assert config.auto_compact_threshold is None
+    assert config.models["m"].auto_compact_threshold is None
+    assert schema["properties"]["auto_compact_threshold"]["default"] is None
+
+
+def test_the_global_compaction_threshold_fills_models_without_their_own() -> None:
+    """*Prepare*: A global threshold, one model with its own and one without.
+    *Do*: Validate the config.
+    *Assert*: The model without one takes the global; the other keeps its own.
+    """
+    # Do
+    config = VibeConfigSchema.model_validate({
+        "auto_compact_threshold": 150_000,
+        "models": [
+            {"name": "a", "provider": "mistral", "alias": "a"},
+            {
+                "name": "b",
+                "provider": "mistral",
+                "alias": "b",
+                "auto_compact_threshold": 90_000,
+            },
+        ],
+    })
+
+    # Assert
+    assert config.models["a"].auto_compact_threshold == 150_000
+    assert config.models["b"].auto_compact_threshold == 90_000
+
+
+@pytest.mark.parametrize("threshold", [0, -1])
+def test_a_non_positive_compaction_threshold_is_rejected(threshold: int) -> None:
+    """*Prepare*: A threshold of 0 or below, globally and on a model.
+    *Do*: Validate each config.
+    *Assert*: Both are validation errors: compaction is always on, and 0 no
+    longer turns it off.
+    """
+    # Do / Assert
+    with pytest.raises(ValidationError, match="auto_compact_threshold"):
+        VibeConfigSchema.model_validate({"auto_compact_threshold": threshold})
+    with pytest.raises(ValidationError, match="auto_compact_threshold"):
+        ModelConfig(
+            name="m", provider="mistral", alias="m", auto_compact_threshold=threshold
+        )
+
+
+def test_a_zero_compaction_threshold_names_the_setting_and_the_fix() -> None:
+    """*Prepare*: A threshold of 0, globally and on a model.
+    *Do*: Validate each config.
+    *Assert*: The error names the setting, says 0 is not allowed and asks for
+    a positive threshold, since 0 used to turn compaction off.
+    """
+    for build in (
+        lambda: VibeConfigSchema.model_validate({"auto_compact_threshold": 0}),
+        lambda: ModelConfig(
+            name="m", provider="mistral", alias="m", auto_compact_threshold=0
+        ),
+    ):
+        with pytest.raises(ValidationError) as exc_info:
+            build()
+        message = str(exc_info.value)
+        assert "auto_compact_threshold" in message
+        assert "0 is not allowed" in message
+        assert 'no "off" value' in message
+        assert "set a positive threshold" in message
 
 
 @pytest.mark.asyncio

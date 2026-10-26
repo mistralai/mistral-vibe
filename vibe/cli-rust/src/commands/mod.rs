@@ -17,5 +17,7 @@ pub mod simple;
 pub mod stress;
 pub mod submission;
 
-pub use commands::{argument_hint, builtin, entries, has_command, is_side_channel, parse};
+pub use commands::{
+    argument_hint, builtin, entries, has_command, is_side_channel, parse, waits_for_jobs,
+};
 pub use event::CommandEvent;

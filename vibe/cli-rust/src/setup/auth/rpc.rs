@@ -53,6 +53,10 @@ pub struct SetupStatus {
     /// effective config, not just env var and user config.toml.
     #[serde(default)]
     pub enable_system_trust_store: bool,
+    /// The administrator-pinned console URL (`VIBE_CUSTOM_CONSOLE_URL`), when
+    /// the server resolved one: the wizard locks its sign-in domain to it.
+    #[serde(default)]
+    pub pinned_console_url: Option<String>,
 }
 
 /// `setup/store-credential`'s outcome, the server's key-persist contract

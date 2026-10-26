@@ -21,11 +21,12 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
     // Ctrl or Alt turns caret/delete keys into their word-wise variant.
     let word = ctrl || alt;
     match k.code {
-        // Newline insert: `shift+enter` or `ctrl+j`. In raw mode crossterm
-        // delivers Ctrl+J (byte \n) as Ctrl+'j'; Shift+Enter only reaches us on
-        // terminals that report it distinctly (plain Enter stays a submit).
-        KeyCode::Char('j') if ctrl && !alt => Some(Action::Insert('\n')),
-        KeyCode::Enter if shift => Some(Action::Insert('\n')),
+        // Newline insert: `ctrl+j`, `ctrl+m`, `shift+enter` or `alt+enter`. In raw
+        // mode crossterm delivers Ctrl+J (byte \n) as Ctrl+'j'; Ctrl+M and
+        // Shift+Enter only reach us on terminals that report them distinctly
+        // (plain Enter stays a submit).
+        KeyCode::Char('j' | 'm') if ctrl && !alt && !shift => Some(Action::Insert('\n')),
+        KeyCode::Enter if shift || alt => Some(Action::Insert('\n')),
         // Ctrl+letter is a shortcut, never literal text (line-editing
         // bindings); Ctrl+C / Ctrl+D are intercepted before we get here.
         KeyCode::Char('a') if ctrl && !alt => Some(Action::CursorLineStart),
@@ -34,6 +35,14 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
         KeyCode::Char('k' | 'K') if ctrl && shift && !alt => Some(Action::DeleteLine),
         KeyCode::Char('k') if ctrl && !alt => Some(Action::DeleteToEndOfLine),
         KeyCode::Char('w') if ctrl && !alt => Some(Action::DeleteWordLeft),
+        // Ctrl+H (byte \x08) is the backspace some terminals send (QTerminal,
+        // some serial consoles); treat it as backspace.
+        KeyCode::Char('h') if ctrl && !alt && !shift => Some(Action::DeleteLeft),
+        // Ctrl+Alt+H is the readline unix-word-rubout some terminals send for
+        // Alt+Backspace.
+        KeyCode::Char('h') if ctrl && alt => Some(Action::DeleteWordLeft),
+        // Alt+d deletes the word under/after the caret.
+        KeyCode::Char('d') if alt && !ctrl => Some(Action::DeleteWordRight),
         // Alt+b / Alt+f: emacs word nav. macOS terminals (Terminal.app, iTerm
         // "natural editing") send Option+Left/Right as ESC-b / ESC-f, which
         // crossterm decodes as Alt+'b' / Alt+'f'; treat them as

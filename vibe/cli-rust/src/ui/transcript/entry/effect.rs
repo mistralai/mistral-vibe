@@ -147,8 +147,8 @@ pub(super) fn push_effect(
     }
     // Rows after the first hang under the message column.
     let mut hanging = Vec::new();
-    // An expanded header ends with its suffix; any other header's first row does.
-    let trailing = !in_progress && shown && !message.is_empty() && !suffix.is_empty();
+    // A running or expanded header ends with its suffix; a collapsed header's single row does.
+    let trailing = (in_progress || shown) && !message.is_empty() && !suffix.is_empty();
     if !message.is_empty() {
         spans.push(Span::raw(" "));
         let indent: usize = spans.iter().map(|span| span.content.width()).sum();
@@ -291,7 +291,7 @@ fn push_result(
     );
 }
 
-/// Collapsed settled headers flatten to one ellipsized row; expanded ones keep their newlines.
+/// Collapsed settled headers flatten to one ellipsized row; the others keep their newlines and wrap.
 fn header_message(
     message: &str,
     settled: bool,
@@ -300,13 +300,7 @@ fn header_message(
     indent: usize,
 ) -> Vec<(String, Option<u16>)> {
     let available = (width as usize).saturating_sub(indent);
-    if !settled {
-        return message
-            .lines()
-            .map(|line| (line.to_owned(), None))
-            .collect();
-    }
-    if !expanded {
+    if settled && !expanded {
         return vec![(
             text::ellipsize(&text::single_line(message), available),
             None,

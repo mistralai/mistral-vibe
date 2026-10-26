@@ -538,7 +538,7 @@ fn checkpoint_round_trips_a_reasoning_only_completion_candidate() {
 }
 
 #[test]
-fn restore_defaults_cached_input_tokens_for_older_checkpoints() {
+fn restore_defaults_optional_usage_counters_for_older_checkpoints() {
     let mut checkpoint = restorable_active_candidate_checkpoint();
     checkpoint["turn"]["phase"]["pending"]["candidate"]["usage"] = json!({
         "input_tokens": 10,
@@ -551,8 +551,15 @@ fn restore_defaults_cached_input_tokens_for_older_checkpoints() {
     let recaptured = serde_json::to_value(Checkpoint::capture(&restored).unwrap()).unwrap();
 
     assert_eq!(
-        recaptured["turn"]["phase"]["pending"]["candidate"]["usage"]["cached_input_tokens"],
-        0
+        recaptured["turn"]["phase"]["pending"]["candidate"]["usage"],
+        json!({
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "total_tokens": 12,
+            "cached_input_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0
+        })
     );
 }
 

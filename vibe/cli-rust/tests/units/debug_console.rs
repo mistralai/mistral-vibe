@@ -931,6 +931,7 @@ async fn an_open_completion_popup_keeps_the_navigation_keys() {
     app.completion.entries = vec![CompletionEntry {
         label: "/debug".to_owned(),
         description: String::new(),
+        origin: None,
     }];
     let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
     assert!(!input::handle_key(&mut app, &client, &config_tx, up));

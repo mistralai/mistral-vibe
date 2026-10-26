@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 import tomli_w
 
-from vibe.config_values import THINKING_LEVELS
+from vibe.config_values import DEFAULT_THINKING_LEVELS
 from vibe.core.config import (
     VibeConfigSchema,
     _model_aliases,
@@ -105,14 +105,15 @@ async def test_entry_maps_onto_a_mistral_model() -> None:
     assert model.thinking == "high"
     assert model.supports_images is True
     assert model.max_context_length == 262144
-    assert model.auto_compact_threshold == int(262144 * 0.8)
+    # Unset: the session derives it from the window.
+    assert model.auto_compact_threshold is None
     assert config.catalog_model_aliases == {_MEDIUM: ["mistral-medium"]}
 
 
 @pytest.mark.parametrize(
     ("reasoning", "levels", "thinking"),
     [
-        (None, list(THINKING_LEVELS), "off"),
+        (None, list(DEFAULT_THINKING_LEVELS), "off"),
         ([], ["off"], "off"),
         (["none"], ["off"], "off"),
         (["none", "high"], ["off", "high"], "high"),
@@ -131,6 +132,32 @@ async def test_reasoning_becomes_the_offered_thinking_levels(
 
 
 @pytest.mark.asyncio
+async def test_an_entry_without_reasoning_leaves_the_levels_to_the_known_model() -> (
+    None
+):
+    """*Prepare*: A catalog entry for Mistral Large 2512, which takes no reasoning,
+    that lists no reasoning, so the layers fill in the default five levels.
+    *Do*: Compile the route facts of the merged model.
+    *Assert*: The picker offers off only, from the known-model table, not the
+    default five: only a set other than the default says which levels a model
+    takes.
+    """
+    from vibe.app_server._completion_facts import compile_agent_route_facts
+
+    # Prepare
+    large = "mistral-large-2512"
+    config = await _config(_catalog(_entry(large, parameters={"reasoning": None})))
+    model = config.models[large]
+
+    # Do
+    facts = compile_agent_route_facts(config.get_provider_for_model(model), model)
+
+    # Assert
+    assert model.thinking_levels == list(DEFAULT_THINKING_LEVELS)
+    assert facts.thinking_levels == ("off",)
+
+
+@pytest.mark.asyncio
 async def test_unknown_reasoning_values_are_dropped_with_a_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -138,7 +165,7 @@ async def test_unknown_reasoning_values_are_dropped_with_a_warning(
         config = await _config(
             _catalog(
                 _entry(_GLM, parameters={"reasoning": ["minimal", "high"]}),
-                _entry(_MEDIUM, parameters={"reasoning": ["xhigh"]}),
+                _entry(_MEDIUM, parameters={"reasoning": ["ultra"]}),
             )
         )
 
@@ -163,7 +190,7 @@ async def test_null_values_take_the_field_defaults_over_a_built_in_model() -> No
     model = config.models[builtin.alias]
     assert model.name == builtin.alias
     assert model.temperature == 0.2
-    assert model.thinking_levels == list(THINKING_LEVELS)
+    assert model.thinking_levels == list(DEFAULT_THINKING_LEVELS)
     assert model.thinking == "off"
     assert model.max_context_length is None
 

@@ -39,7 +39,8 @@ from mistralai_vibe_local_harness.vibe._permissions import PermissionOutcome
 from vibe.app_server._cron import CRON_TOOL_NAME
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.orchestrator import ConfigOrchestrator
-from vibe.core.tools.base import BaseTool
+from vibe.core.scratchpad import is_scratchpad_path
+from vibe.core.tools.base import BaseTool, BaseToolConfig
 from vibe.core.tools.builtins._shell_permission_analysis import redirect_writes
 from vibe.core.tools.builtins.windows_shell import windows_redirect_writes
 from vibe.core.tools.manager import NoSuchToolError, ToolManager
@@ -50,8 +51,13 @@ from vibe.core.tools.models import (
     ToolPermission,
 )
 from vibe.core.tools.permissions import PermissionStore, wildcard_match
+from vibe.core.tools.utils import (
+    is_path_within_workdir,
+    resolve_tool_path,
+    ungranted_paths,
+)
 from vibe.observability.logging import logger
-from vibe.permissions import RequiredPermission
+from vibe.permissions import OutsideWorkdirPolicy, RequiredPermission
 
 # The Rust Runtime's builtin tools and Vibe's tool catalogue are separate
 # namespaces; this is the only overlap the local adapter can currently execute.
@@ -64,7 +70,7 @@ _SHELL_TOOL_SOURCES = frozenset({"bash", "powershell", "git_bash"})
 RUST_BUILTIN_TOOL_SOURCES: dict[RustRuntimeBuiltinToolName, frozenset[str]] = {
     "file_system.read_file": frozenset({"read_file"}),
     "file_system.write_file": frozenset({"write_file"}),
-    "file_system.search_replace": frozenset({"edit"}),
+    "file_system.edit": frozenset({"edit"}),
     "file_system.bash": _SHELL_TOOL_SOURCES,
     "skill.read": frozenset({"skill"}),
     "process.start": _SHELL_TOOL_SOURCES,
@@ -111,7 +117,7 @@ _PROCESS_SESSION_GRANT_BUILTINS: frozenset[RustRuntimeBuiltinToolName] = frozens
 ALLOWLIST_EXEMPTED_BUILTINS: frozenset[RustRuntimeBuiltinToolName] = frozenset({
     "file_system.read_file",
     "file_system.write_file",
-    "file_system.search_replace",
+    "file_system.edit",
 })
 
 
@@ -145,20 +151,12 @@ class ProvidedToolNames:
         return route
 
 
-def _first_block(arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-    content = arguments.get("content")
-    if isinstance(content, list) and content and isinstance(content[0], dict):
-        return content[0]
-    return {}
-
-
-def _search_replace_args(arguments: Mapping[str, Any]) -> dict[str, Any]:
-    block = _first_block(arguments)
+def _edit_args(arguments: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "file_path": arguments.get("file_path"),
-        "old_string": block.get("old_str", ""),
-        "new_string": block.get("new_str", ""),
-        "replace_all": block.get("replace_all", False),
+        "old_string": arguments.get("old_string", ""),
+        "new_string": arguments.get("new_string", ""),
+        "replace_all": arguments.get("replace_all", False),
     }
 
 
@@ -173,7 +171,7 @@ _ARGUMENT_TRANSLATORS: dict[
         "file_path": args.get("path"),
         "content": args.get("content", ""),
     },
-    "file_system.search_replace": _search_replace_args,
+    "file_system.edit": _edit_args,
     "file_system.bash": lambda args: {"command": args.get("command", "")},
     "skill.read": lambda args: {"name": args.get("name", "")},
     # A background start is the shell's own question: the command it will run.
@@ -351,6 +349,45 @@ def git_bash_windows_path(target: str, *, temp_moved: bool) -> str | None:
     if target == "/tmp" or target.startswith("/tmp/"):
         return None if temp_moved else tempfile.gettempdir() + target[len("/tmp") :]
     return target if _DRIVE_ROOT.match(target) else None
+
+
+def _outside_workdir_refusal(paths: Sequence[str]) -> PermissionContext:
+    """The refusal sent back to the model as a tool error, so the turn keeps going."""
+    verb = "is" if len(paths) == 1 else "are"
+    return PermissionContext(
+        permission=ToolPermission.NEVER,
+        reason=(
+            f"Access denied: {', '.join(paths)} {verb} outside the working "
+            'directory, and outside_workdir = "deny" forbids access there. Do not '
+            "retry this path or work around the restriction; use paths inside the "
+            "working directory. Only the user can open access, by allowlisting the "
+            "path or changing outside_workdir in the Vibe configuration."
+        ),
+    )
+
+
+def _apply_outside_workdir_policy(
+    context: PermissionContext, policy: OutsideWorkdirPolicy
+) -> PermissionContext:
+    """Turn an outside-workdir prompt into a refusal when the policy denies it.
+
+    Only an ``ask`` reaches here with outside paths still in it: allowlisted
+    paths and added directories never become a permission to begin with.
+    """
+    if policy is not OutsideWorkdirPolicy.DENY:
+        return context
+    if context.permission is not ToolPermission.ASK:
+        return context
+    outside = [
+        # The refusal is the model's only feedback, and it must not reveal where
+        # a symlink resolves: report the spelling the call supplied.
+        rp.supplied_pattern or rp.invocation_pattern
+        for rp in context.required_permissions
+        if rp.scope is PermissionScope.OUTSIDE_DIRECTORY
+    ]
+    if not outside:
+        return context
+    return _outside_workdir_refusal(outside)
 
 
 class UnifiedPermissionResolver:
@@ -567,8 +604,9 @@ class UnifiedPermissionResolver:
         ask unscoped instead of running the call off the command alone. A
         working directory that is the shell's own adds nothing the tool does
         not already run in, so only a start run from somewhere else counts as
-        hidden. A configured deny of the command still denies, and the ask
-        carrying no permissions means ``grant`` records nothing -- the answer
+        hidden. A configured deny of the command still denies, as does a working
+        directory outside the workdir under ``outside_workdir = "deny"``, and the
+        ask carrying no permissions means ``grant`` records nothing -- the answer
         releases exactly this call.
         """
         if builtin != "process.start":
@@ -597,7 +635,33 @@ class UnifiedPermissionResolver:
             )
             if _OUTCOME_BY_PERMISSION.get(context.permission) == "deny":
                 return PermissionOutcome(decision="deny", reason=context.reason)
+            if refusal := self._start_cwd_refusal(name, arguments.get("cwd")):
+                return PermissionOutcome(decision="deny", reason=refusal.reason)
         return PermissionOutcome(decision="ask")
+
+    def _start_cwd_refusal(self, name: str, cwd: object) -> PermissionContext | None:
+        """Refuse a start run from outside the working directory, if the policy does.
+
+        The tool reads the command's paths from its own directory, so a working
+        directory elsewhere is an outside access no command rule sees.
+        """
+        tool_config = self._tools.get_tool_config(name)
+        if not isinstance(cwd, str) or (
+            self._outside_workdir_policy(tool_config) is not OutsideWorkdirPolicy.DENY
+        ):
+            return None
+        try:
+            tool = self._tools.get(name)
+            target = str(resolve_tool_path(cwd, tool.cwd))
+        except (NoSuchToolError, ValueError, OSError):
+            return None
+        if (
+            is_path_within_workdir(target, workspace=tool.workspace)
+            or is_scratchpad_path(target, scratchpad_dir=tool.scratchpad_dir)
+            or not ungranted_paths({target: cwd}, tool_config.allowlist, tool.workspace)
+        ):
+            return None
+        return _outside_workdir_refusal([cwd])
 
     def _fallback_permission(
         self, builtin: str, arguments: Mapping[str, Any]
@@ -685,9 +749,8 @@ class UnifiedPermissionResolver:
         self, name: str, pair: tuple[BaseTool, BaseModel] | None
     ) -> PermissionContext:
         """One Vibe tool's verdict on this call, falling back to its config."""
-        configured = PermissionContext(
-            permission=self._tools.get_tool_config(name).permission
-        )
+        tool_config = self._tools.get_tool_config(name)
+        configured = PermissionContext(permission=tool_config.permission)
         if pair is None:
             return configured
         tool, args = pair
@@ -714,7 +777,14 @@ class UnifiedPermissionResolver:
             # `ask` through would turn a configured refusal into a prompt nobody
             # authorised -- legacy prompts there, this is deliberately stricter.
             return configured
-        return resolved
+        return _apply_outside_workdir_policy(
+            resolved, self._outside_workdir_policy(tool_config)
+        )
+
+    def _outside_workdir_policy(
+        self, tool_config: BaseToolConfig
+    ) -> OutsideWorkdirPolicy:
+        return tool_config.outside_workdir or self._config.config.outside_workdir
 
     async def grant(
         self,

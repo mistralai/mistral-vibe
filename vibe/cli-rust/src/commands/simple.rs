@@ -179,7 +179,12 @@ pub(super) fn reload_config(app: &mut App, client: &Arc<Client>) {
             .await;
         let event = match result {
             Ok(value) => reload_result(value),
-            Err(error) => CommandEvent::Result(format!("Failed to reload config: {error}")),
+            // The server's reason, say a config the running agent refuses;
+            // the context alone would only say the request failed.
+            Err(error) => CommandEvent::Result(format!(
+                "Failed to reload config: {}",
+                crate::server::request_error::describe(&error)
+            )),
         };
         let _ = tx.try_send(event);
     });

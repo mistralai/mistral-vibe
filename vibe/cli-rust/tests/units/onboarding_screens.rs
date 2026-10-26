@@ -2,7 +2,7 @@
 
 #[allow(dead_code)]
 #[path = "../onboarding_common/keys.rs"]
-mod keys;
+pub(crate) mod keys;
 
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,

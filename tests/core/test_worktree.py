@@ -33,9 +33,11 @@ from vibe.core.git.worktree.record import (
     WorktreeClaim,
     WorktreeRecord,
     WorktreeRecordError,
+    WorktreeRecoveryRecord,
     managed_bucket_name,
 )
 import vibe.core.git.worktree.repository as worktree_module
+from vibe.core.trusted_folders import TrustedFoldersManager
 
 _OPEN_REPOS: list[Repo] = []
 
@@ -326,6 +328,455 @@ def test_worktree_creation_does_not_run_the_repository_fsmonitor_command(
 
     assert not marker.exists()
     assert Path(worktree.root).is_dir()
+
+
+def _commit_filtered_text(repo: Repo, root: Path) -> None:
+    (root / ".gitattributes").write_text("*.txt filter=probe\n")
+    repo.index.add([".gitattributes"])
+    repo.index.commit("select the probe filter")
+
+
+def test_worktree_creation_does_not_run_a_repository_filter_driver(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    _commit_filtered_text(repo, tmp_path)
+    marker = tmp_path / "filter-ran"
+    smudge = tmp_path / "smudge"
+    smudge.write_text(f'#!/bin/sh\necho ran > "{marker}"\ncat\n')
+    smudge.chmod(0o755)
+    with repo.config_writer() as config:
+        config.set_value('filter "probe"', "smudge", str(smudge))
+        config.set_value('filter "probe"', "required", "true")
+    _skip_unless_control_fires(
+        tmp_path,
+        marker,
+        ("worktree", "add", str(tmp_path / "control"), "-b", "control"),
+    )
+
+    worktree = _prepare("filtered-worktree", tmp_path, branch="feat/filtered")
+
+    assert not marker.exists()
+    assert (Path(worktree.root) / "file.txt").read_text() == "hello\n"
+
+
+def test_worktree_creation_keeps_a_filter_driver_the_user_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    global_config = tmp_path / "global.gitconfig"
+    global_config.write_text('[filter "probe"]\n\tsmudge = tr a-z A-Z\n')
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    repo = _init_repo(tmp_path / "repo")
+    _commit_filtered_text(repo, tmp_path / "repo")
+
+    worktree = _prepare("user-filter", tmp_path / "repo", branch="feat/user-filter")
+
+    assert (Path(worktree.root) / "file.txt").read_text() == "HELLO\n"
+
+
+@pytest.mark.parametrize("auto", [False, True])
+@pytest.mark.parametrize("condition", ["gitdir:./worktrees/", "onbranch:vibe/**"])
+def test_worktree_creation_blocks_filters_in_worktree_conditional_includes(
+    tmp_path: Path, condition: str, auto: bool
+) -> None:
+    root = tmp_path / "repo"
+    repo = _init_repo(root)
+    _commit_filtered_text(repo, root)
+    marker = tmp_path / "conditional-filter-ran"
+    smudge = tmp_path / "smudge"
+    smudge.write_text(f'#!/bin/sh\necho ran > "{marker}"\ncat\n')
+    smudge.chmod(0o755)
+    included = root / "attacker-filters"
+    included.write_text(f'[filter "probe"]\nsmudge = "{smudge}"\nrequired = true\n')
+    with repo.config_writer() as config:
+        config.set_value(f'includeIf "{condition}"', "path", "../attacker-filters")
+    # Confirm Git activates the payload only after entering a linked worktree.
+    control = tmp_path / "control"
+    repo.git.worktree("add", str(control), "-b", "vibe/control")
+    assert marker.exists()
+    marker.unlink()
+    repo.git.worktree("remove", "--force", str(control))
+
+    worktree = (
+        _prepare_auto(root, suggested_name="conditional-filter")
+        if auto
+        else _prepare("conditional-filter", root, branch="vibe/named-filter")
+    )
+
+    assert not marker.exists()
+    assert (worktree.root / "file.txt").read_text() == "hello\n"
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+@pytest.mark.parametrize("driver", ["lfs", "user-lfs-alias"])
+def test_release_handles_repository_lfs_extensions_safely(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trusted: bool, driver: str
+) -> None:
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    if shutil.which("git-lfs") is None:
+        pytest.skip("git-lfs is not installed")
+    global_config = tmp_path / "global.gitconfig"
+    global_config.write_text(
+        f'[filter "{driver}"]\n'
+        "clean = git-lfs clean -- %f\n"
+        "smudge = git-lfs smudge -- %f\n"
+        "process = git-lfs filter-process\n"
+        "required = true\n"
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    root = tmp_path / "repo"
+    repo = _init_repo(root)
+    (root / ".gitattributes").write_text(f"*.txt filter={driver}\n")
+    repo.git.add(".gitattributes", "file.txt")
+    repo.index.commit("LFS pointer")
+    worktree = _prepare_auto(root, suggested_name="lfs-extension")
+    _hold(worktree.root, "session")
+    marker = tmp_path / "lfs-extension-ran"
+    clean = tmp_path / "extension-clean"
+    clean.write_text(f'#!/bin/sh\necho ran > "{marker}"\ntr a-z A-Z\n')
+    clean.chmod(0o755)
+    with repo.config_writer() as config:
+        config.set_value('lfs.extension "probe"', "clean", str(clean))
+        config.set_value('lfs.extension "probe"', "priority", "1")
+    # Exercise the real installed LFS extension, without fetching any object.
+    subprocess.run(
+        ["git", "lfs", "clean", "--", "file.txt"],
+        cwd=root,
+        input=b"control\n",
+        check=True,
+        capture_output=True,
+    )
+    assert marker.exists()
+    marker.unlink()
+    if trusted:
+        trusted_folders_manager.add_trusted(root)
+    (worktree.root / "file.txt").write_text("changed\n")
+
+    release = _release(worktree.root, "session")
+
+    assert marker.exists() is trusted
+    if trusted:
+        assert release.outcome is WorktreeReleaseOutcome.REMOVED
+        assert release.snapshot_ref is not None
+        saved = repo.commit(release.snapshot_ref).tree["file.txt"].data_stream.read()
+        assert saved.startswith(b"version https://git-lfs.github.com/spec/v1\n")
+    else:
+        assert release.outcome is WorktreeReleaseOutcome.KEPT_DIRTY
+        assert release.snapshot_ref is None
+        assert (worktree.root / "file.txt").read_text() == "changed\n"
+
+
+def test_conditional_filter_can_depend_on_a_global_remote_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    global_config = tmp_path / "global.gitconfig"
+    global_config.write_text('[remote "user"]\nurl = https://example.invalid/repo\n')
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    root = tmp_path / "repo"
+    repo = _init_repo(root)
+    _commit_filtered_text(repo, root)
+    included = root / "attacker-filters"
+    included.write_text('[filter "probe"]\nsmudge = tr a-z A-Z\n')
+    repo.git.config(
+        "includeIf.hasconfig:remote.*.url:https://example.invalid/**.path",
+        "../attacker-filters",
+    )
+    try:
+        repo.git.config("--includes", "--get-regexp", r"^filter\.")
+    except GitCommandError:
+        pytest.skip("Git does not support includeIf hasconfig")
+    control = tmp_path / "control"
+    repo.git.worktree("add", str(control), "-b", "control")
+    assert (control / "file.txt").read_text() == "HELLO\n"
+    repo.git.worktree("remove", "--force", str(control))
+
+    # Exercise the guard directly: GitPython's unrelated config_reader recurses
+    # on hasconfig includes while selecting checkout worker settings.
+    target = tmp_path / "filtered-worktree"
+    repo.git.worktree("add", "--no-checkout", str(target), "-b", "feat/filter")
+    git_repo_module.sanitized_git(repo, cwd=target).checkout("--force")
+
+    assert (target / "file.txt").read_text() == "hello\n"
+
+
+def test_old_git_filter_discovery_falls_back_safely(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    global_config = tmp_path / "global.gitconfig"
+    global_config.write_text('[filter "probe"]\nsmudge = tr a-z A-Z\n')
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    _init_repo(tmp_path / "repo")
+    execute = Git.execute
+
+    def without_scopes(self: Git, command: Any, **kwargs: Any) -> Any:
+        if "--show-scope" in command:
+            raise GitCommandError(command, 129, stderr="unknown option: show-scope")
+        return execute(self, command, **kwargs)
+
+    monkeypatch.setattr(Git, "execute", without_scopes)
+    repo = _track_repo(Repo(tmp_path / "repo"))
+
+    overrides = git_repo_module._repository_filter_overrides(repo)
+
+    assert "filter.probe.smudge=" in overrides
+    assert "filter.probe.required=false" in overrides
+
+
+def test_git_filter_discovery_errors_do_not_run_the_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    execute = Git.execute
+    status_called = False
+
+    def failing_config(self: Git, command: Any, **kwargs: Any) -> Any:
+        nonlocal status_called
+        if "--show-scope" in command:
+            raise GitCommandError(command, 128, stderr="bad config")
+        if "status" in command:
+            status_called = True
+        return execute(self, command, **kwargs)
+
+    monkeypatch.setattr(Git, "execute", failing_config)
+    with pytest.raises(GitError, match="Failed to read"):
+        git_repo_module.sanitized_git(repo).status("--porcelain")
+    assert not status_called
+
+
+def test_worktree_creation_keeps_a_trusted_repository_filter_driver(
+    tmp_path: Path,
+) -> None:
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    repo = _init_repo(tmp_path)
+    _commit_filtered_text(repo, tmp_path)
+    with repo.config_writer() as config:
+        config.set_value('filter "probe"', "smudge", "tr a-z A-Z")
+    trusted_folders_manager.trust_for_session(tmp_path)
+
+    worktree = _prepare("trusted-filter", tmp_path, branch="feat/trusted-filter")
+
+    assert (Path(worktree.root) / "file.txt").read_text() == "HELLO\n"
+
+
+def test_status_stays_out_of_an_untrusted_repository_s_submodules(
+    tmp_path: Path,
+) -> None:
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    repo = _init_repo(tmp_path)
+
+    assert git_repo_module.untrusted_status_options(repo) == (
+        "--ignore-submodules=all",
+    )
+    trusted_folders_manager.trust_for_session(tmp_path)
+    assert git_repo_module.untrusted_status_options(repo) == ()
+
+
+def test_worktree_checkout_and_snapshot_use_the_session_trust_store(
+    tmp_path: Path,
+) -> None:
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    root = tmp_path / "repo"
+    repo = _init_repo(root)
+    _commit_filtered_text(repo, root)
+    with repo.config_writer() as config:
+        config.set_value('filter "probe"', "smudge", "tr a-z A-Z")
+        config.set_value('filter "probe"', "clean", "tr A-Z a-z")
+    store = trusted_folders_manager.for_session()
+    store.trust_for_session(root)
+    assert trusted_folders_manager.is_trusted(root) is not True
+
+    with WorktreeRepository.open(root, trust_store=store) as repository:
+        worktree = repository.prepare("session-trust")
+    assert (worktree.root / "file.txt").read_text() == "HELLO\n"
+    (worktree.root / "file.txt").write_text("CHANGED\n")
+    ref = worktree.snapshot()
+    assert repo.git.show(f"{ref}:file.txt") == "changed"
+
+
+def test_snapshot_uses_persisted_source_trust(tmp_path: Path) -> None:
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    root = tmp_path / "repo"
+    repo = _init_repo(root)
+    _commit_filtered_text(repo, root)
+    worktree = _prepare_auto(root, suggested_name="source-trust")
+    with repo.config_writer() as config:
+        config.set_value('filter "probe"', "clean", "tr a-z A-Z")
+    trusted_folders_manager.add_trusted(root)
+    (worktree.root / "file.txt").write_text("changed\n")
+    ref = worktree.snapshot()
+    assert repo.git.show(f"{ref}:file.txt") == "CHANGED"
+
+
+def test_trusting_the_managed_parent_does_not_trust_the_source(tmp_path: Path) -> None:
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    root = tmp_path / "repo"
+    repo = _init_repo(root)
+    _commit_filtered_text(repo, root)
+    worktree = _prepare_auto(root, suggested_name="untrusted-source")
+    trusted_folders_manager.add_trusted(worktree.root.parent)
+    trusted_folders_manager.add_untrusted(root)
+    with repo.config_writer() as config:
+        config.set_value('filter "probe"', "clean", "tr a-z A-Z")
+    (worktree.root / "file.txt").write_text("changed\n")
+    with pytest.raises(WorktreeError, match="untrusted Git filters"):
+        worktree.snapshot()
+    assert (worktree.root / "file.txt").read_text() == "changed\n"
+
+
+@pytest.mark.parametrize("operation", ["snapshot", "inspect_for_cleanup"])
+def test_worktree_wraps_filter_discovery_errors(tmp_path: Path, operation: str) -> None:
+    root = tmp_path / "repo"
+    repo = _init_repo(root)
+    worktree = _prepare_auto(root, suggested_name="bad-filter")
+    repo.git.config("filter.a=b.clean", "cat")
+    with pytest.raises(WorktreeError, match="filter"):
+        getattr(worktree, operation)()
+
+
+@pytest.mark.parametrize("removal", ["none", "staged", "committed"])
+def test_untrusted_submodules_are_kept_without_inspecting_their_filters(
+    tmp_path: Path, removal: str
+) -> None:
+    root = tmp_path / "repo"
+    repo = _init_repo(root)
+    repo.git.update_index(
+        "--add", "--cacheinfo", f"160000,{repo.head.commit.hexsha},sub"
+    )
+    repo.index.commit("submodule")
+    worktree = _prepare_auto(root, suggested_name="retained-checkout")
+    _finish_starts(worktree)
+    _init_repo(worktree.root / "sub")
+    (worktree.root / "sub" / "file.txt").write_text("unsaved submodule work\n")
+    if removal != "none":
+        checkout = _track_repo(Repo(worktree.root))
+        checkout.git.rm("--cached", "sub")
+        if removal == "committed":
+            checkout.index.commit("remove submodule from tracking")
+    state = worktree.inspect_for_cleanup()
+    assert state.has_uncommitted_changes
+    with pytest.raises(WorktreeError) as refusal:
+        worktree.snapshot()
+    assert str(refusal.value) == (
+        "Cannot safely snapshot untrusted submodule contents; keep the worktree."
+    )
+    assert refusal.value.__cause__ is None
+    assert _release(worktree.root).outcome is WorktreeReleaseOutcome.KEPT_DIRTY
+    assert worktree.root.is_dir()
+    assert (
+        worktree.root / "sub" / "file.txt"
+    ).read_text() == "unsaved submodule work\n"
+
+
+def test_session_git_trust_does_not_spread_to_other_sessions_or_storage(
+    tmp_path: Path,
+) -> None:
+    from vibe.app_server._unified_harness_backend_adapter import _worktree_git_trust
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    root = tmp_path / "repo"
+    _init_repo(root)
+    store = trusted_folders_manager.for_session()
+    store.trust_for_session(root)
+    worktree = _prepare_auto(root, suggested_name="isolated-trust")
+    git_store = _worktree_git_trust(root, store)
+    store.revoke_session_trust(root)
+    store.trust_for_session(worktree.root)
+    assert git_store.is_trusted(root) is True
+    assert trusted_folders_manager.for_session().is_trusted(root) is not True
+    assert _worktree_git_trust(worktree.root, store).is_trusted(root) is not True
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+@pytest.mark.parametrize(
+    "destination_kind", ["same", "subdirectory", "unrelated", "missing"]
+)
+def test_relocation_git_trust_is_scoped_to_the_source_repository(
+    tmp_path: Path,
+    trusted: bool,
+    destination_kind: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from vibe.app_server._unified_harness_backend_adapter import (
+        _relocated_worktree_git_trust,
+    )
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    root = tmp_path / "repo"
+    _init_repo(root)
+    prepared = _prepare_auto(root, suggested_name="source-checkout")
+    previous_store = trusted_folders_manager.for_session()
+    if trusted:
+        previous_store.trust_for_session(root)
+    store = trusted_folders_manager.for_session()
+    if destination_kind in {"same", "subdirectory"}:
+        destination = prepared.root
+        if destination_kind == "subdirectory":
+            destination = destination / "nested"
+            destination.mkdir()
+    else:
+        destination = tmp_path / destination_kind
+        if destination_kind == "unrelated":
+            _init_repo(destination)
+    store.trust_for_session(destination)
+    caplog.set_level("DEBUG")
+    scoped = _relocated_worktree_git_trust(root, destination, previous_store, store)
+    if destination_kind == "missing":
+        assert "Dropping relocated source Git trust" in caplog.text
+        assert str(root) in caplog.text and str(destination) in caplog.text
+    expected_source_trust = trusted and destination_kind in {"same", "subdirectory"}
+    assert (scoped.is_trusted(root) is True) == expected_source_trust
+    if destination_kind == "unrelated":
+        assert scoped.is_trusted(destination) is True
+    elif destination_kind == "missing":
+        assert scoped.is_trusted(destination) is not True
+    assert store.is_trusted(root) is not True
+    assert trusted_folders_manager.is_trusted(root) is not True
+
+
+@pytest.mark.parametrize("operation", ["remove", "forget", "discard"])
+def test_ref_cleanup_honors_explicit_session_git_trust(
+    tmp_path: Path, operation: str
+) -> None:
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    root = tmp_path / "repo"
+    repo = _init_repo(root)
+    store = trusted_folders_manager.for_session()
+    store.trust_for_session(root)
+    with WorktreeRepository.open(root, trust_store=store) as repository:
+        prepared = repository.prepare("cleanup")
+    _finish_starts(prepared)
+    # An unoverridable filter name fails sanitization only without the grant.
+    repo.git.config("filter.a=b.clean", "cat")
+    assert trusted_folders_manager.is_trusted(root) is not True
+    if operation == "remove":
+        prepared.remove()
+        assert not prepared.root.exists()
+    elif operation == "forget":
+        admin = worktree_module._checkout_admin_dir(prepared.root)
+        shutil.rmtree(prepared.root)
+        worktree_module._forget_checkout(
+            admin, root, prepared.branch, trust_store=store
+        )
+    else:
+        managed = ManagedWorktree.at(prepared.root)
+        assert managed is not None
+        record = managed.claim.read()
+        assert record is not None
+        ref = prepared.snapshot()
+        recovery = WorktreeRecoveryRecord.new(record, snapshot_ref=ref)
+        managed.claim.write_recovery(recovery)
+        managed._discard_retained_snapshot(recovery, trust_store=store)
+        assert not managed.claim.has_recovery()
+        assert ref not in repo.git.for_each_ref("--format=%(refname)").splitlines()
+        return
+    assert prepared.branch not in (head.name for head in repo.heads)
 
 
 def test_creates_named_worktree_for_separate_branch(tmp_path: Path) -> None:
@@ -1366,9 +1817,15 @@ def test_restore_waits_for_in_flight_prune(
         assert finish_snapshot.wait(timeout=5)
         return snapshot(prepared)
 
-    def observe_restore(managed: ManagedWorktree, requested: Path, root: Path) -> bool:
+    def observe_restore(
+        managed: ManagedWorktree,
+        requested: Path,
+        root: Path,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
+    ) -> bool:
         restore_entered.set()
-        return restore_locked(managed, requested, root)
+        return restore_locked(managed, requested, root, trust_store=trust_store)
 
     monkeypatch.setattr(PreparedWorktree, "snapshot", pause_snapshot)
     monkeypatch.setattr(ManagedWorktree, "_restore_locked", observe_restore)
@@ -2412,9 +2869,11 @@ def _record_checkout_config(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     extra: list[str] = []
     sanitized = git_repo_module.sanitized_git
 
-    def record(repo: Repo, *extra_config: str, cwd: Path | None = None) -> Git:
+    def record(
+        repo: Repo, *extra_config: str, cwd: Path | None = None, **kwargs: Any
+    ) -> Git:
         extra.extend(extra_config)
-        return sanitized(repo, *extra_config, cwd=cwd)
+        return sanitized(repo, *extra_config, cwd=cwd, **kwargs)
 
     monkeypatch.setattr(git_repo_module, "sanitized_git", record)
     return extra
@@ -3174,3 +3633,128 @@ def test_inspecting_a_worktree_does_not_execute_a_malicious_fsmonitor_hook(
 
     assert not payload.exists(), "the worktree's fsmonitor hook was executed"
     assert repo.working_dir is not None
+
+
+def _session_filtered_checkout(
+    tmp_path: Path,
+) -> tuple[Repo, PreparedWorktree, TrustedFoldersManager]:
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    root = tmp_path / "source"
+    repo = _init_repo(root)
+    repo.git.config("filter.round3.clean", "sed 's/^S://'")
+    repo.git.config("filter.round3.smudge", "sed 's/^/S:/'")
+    (root / ".gitattributes").write_text("*.txt filter=round3\n")
+    repo.index.add([".gitattributes"])
+    repo.index.commit("filtered files")
+    store = trusted_folders_manager.for_session()
+    store.trust_for_session(root)
+    assert trusted_folders_manager.is_trusted(root) is not True
+    with WorktreeRepository.open(root, trust_store=store) as repository:
+        prepared = repository.prepare_auto(suggested_name="filtered-release")
+    _finish_starts(prepared)
+    assert (prepared.root / "file.txt").read_text() == "S:hello\n"
+    return repo, prepared, store
+
+
+@pytest.mark.parametrize("operation", ["release", "prune", "reap"])
+def test_public_cleanup_preserves_session_filtered_content(
+    tmp_path: Path, operation: str
+) -> None:
+    from vibe.core.git.worktree.repository import RefreshedBase
+
+    repo, prepared, store = _session_filtered_checkout(tmp_path)
+    managed = ManagedWorktree.at(prepared.root)
+    assert managed is not None
+    (prepared.root / "file.txt").write_text("S:changed\n")
+    if operation == "release":
+        result = managed.release(trust_store=store)
+        assert result.outcome is WorktreeReleaseOutcome.REMOVED
+        ref = result.snapshot_ref
+    elif operation == "prune":
+        assert ManagedWorktree.prune(0, trust_store=store) == 1
+        recovery = managed.claim.read_recovery()
+        assert recovery is not None
+        ref = recovery.snapshot_ref
+    else:
+        managed.hold("finished", session_dir=tmp_path / "finished-session")
+        managed.release_holder("finished")
+        result = managed.reap_if_finished(lambda _: True, trust_store=store)
+        assert result is not None and result.outcome is WorktreeReleaseOutcome.REMOVED
+        ref = result.snapshot_ref
+    assert ref is not None
+    assert repo.git.show(f"{ref}:file.txt") == "changed"
+    if operation == "release":
+        with WorktreeRepository.open(
+            Path(repo.working_dir), trust_store=store
+        ) as repository:
+            restored = repository.prepare_auto(
+                suggested_name="recovered-release", base=RefreshedBase(ref)
+            )
+        assert (restored.root / "file.txt").read_text() == "S:changed\n"
+    else:
+        assert managed.restore(prepared.root, trust_store=store)
+        assert (prepared.root / "file.txt").read_text() == "S:changed\n"
+
+
+@pytest.mark.parametrize("operation", ["prune", "reap"])
+def test_background_cleanup_keeps_content_when_filters_would_be_disabled(
+    tmp_path: Path, operation: str
+) -> None:
+    _, prepared, store = _session_filtered_checkout(tmp_path)
+    managed = ManagedWorktree.at(prepared.root)
+    assert managed is not None
+    (prepared.root / "file.txt").write_text("S:changed\n")
+    persisted = store.for_session()
+    assert persisted.is_trusted(prepared.repo_root) is not True
+    if operation == "prune":
+        assert ManagedWorktree.prune(0, trust_store=persisted) == 0
+    else:
+        managed.hold("finished", session_dir=tmp_path / "finished-session")
+        managed.release_holder("finished")
+        result = managed.reap_if_finished(lambda _: True, trust_store=persisted)
+        assert (
+            result is not None and result.outcome is WorktreeReleaseOutcome.KEPT_DIRTY
+        )
+    assert prepared.root.is_dir()
+    assert (prepared.root / "file.txt").read_text() == "S:changed\n"
+    assert managed.claim.read_recovery() is None
+
+
+@pytest.mark.parametrize("operation", ["probe", "force", "missing", "discard"])
+def test_public_ref_cleanup_uses_selected_store(tmp_path: Path, operation: str) -> None:
+    repo, prepared, store = _session_filtered_checkout(tmp_path)
+    managed = ManagedWorktree.at(prepared.root)
+    assert managed is not None
+    repo.git.config("filter.a=b.clean", "cat")
+    if operation == "probe":
+        result = managed.probe_release(trust_store=store)
+        assert result.outcome is WorktreeReleaseOutcome.REMOVED
+        assert prepared.root.exists()
+    elif operation == "force":
+        result = managed.force_release(trust_store=store)
+        assert result.outcome is WorktreeReleaseOutcome.REMOVED
+        assert prepared.branch not in (head.name for head in repo.heads)
+    elif operation == "missing":
+        admin = worktree_module._checkout_admin_dir(prepared.root)
+        record = managed.claim.read()
+        assert record is not None
+        managed.claim.write(record.model_copy(update={"moved_checkout_admin": admin}))
+        shutil.rmtree(prepared.root)
+        assert (
+            managed.release(trust_store=store).outcome
+            is WorktreeReleaseOutcome.NOT_FOUND
+        )
+        assert prepared.branch not in (head.name for head in repo.heads)
+    else:
+        assert ManagedWorktree.prune(0, trust_store=store) == 1
+        recovery = managed.claim.read_recovery()
+        assert recovery is not None
+        assert (
+            managed.release(trust_store=store).outcome is WorktreeReleaseOutcome.REMOVED
+        )
+        assert not managed.claim.has_recovery()
+        assert (
+            recovery.snapshot_ref
+            not in repo.git.for_each_ref("--format=%(refname)").splitlines()
+        )

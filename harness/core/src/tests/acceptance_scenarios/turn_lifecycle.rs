@@ -273,7 +273,7 @@ fn iteration_limit_output_is_the_latest_assistant_text() {
             json!({
                 "type": "completion_succeeded",
                 "action_id": action_id(&completion),
-                "result": {"parts": parts, "finish_reason": "tool_call", "usage": null},
+                "result": {"parts": parts, "finish_reason": "tool_call", "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0}},
             }),
             running(turn_id)
                 .dispatch(runtime_tool("file_system.read_file", arguments))
@@ -328,7 +328,7 @@ fn interrupted_turn_output_is_the_latest_assistant_text() {
             json!({
                 "type": "completion_succeeded",
                 "action_id": action_id(&completion),
-                "result": {"parts": [text.clone(), call], "finish_reason": "tool_call", "usage": null},
+                "result": {"parts": [text.clone(), call], "finish_reason": "tool_call", "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0}},
             }),
             running(turn_id)
                 .dispatch(runtime_tool("file_system.read_file", arguments))

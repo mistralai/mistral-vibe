@@ -365,7 +365,15 @@ class TelemetryClient:
         self.send_telemetry_event("vibe.compaction_failed", payload)
 
     def send_new_session(
-        self, has_agents_md: bool, nb_skills: int, nb_mcp_servers: int, nb_models: int
+        self,
+        has_agents_md: bool,
+        nb_skills: int,
+        nb_mcp_servers: int,
+        nb_models: int,
+        *,
+        has_outside_workdir_deny: bool,
+        nb_post_agent_scoped_hooks: int,
+        nb_post_agent_main_hooks: int,
     ) -> None:
         lc = self._launch_context
         payload = {
@@ -373,6 +381,9 @@ class TelemetryClient:
             "nb_skills": nb_skills,
             "nb_mcp_servers": nb_mcp_servers,
             "nb_models": nb_models,
+            "has_outside_workdir_deny": has_outside_workdir_deny,
+            "nb_post_agent_scoped_hooks": nb_post_agent_scoped_hooks,
+            "nb_post_agent_main_hooks": nb_post_agent_main_hooks,
             "entrypoint": lc.agent_entrypoint if lc else "unknown",
             "host_kind": "local",
             "version": __version__,

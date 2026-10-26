@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import json
+import logging
 import re
 from typing import Any, ClassVar
 
@@ -29,6 +30,24 @@ def _parse_stop_info(reason: str | None, raw: Any) -> StopInfo | None:
 
 
 REASONING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+
+logger = logging.getLogger(__name__)
+
+_LOWEST_THINKING_LEVEL = "low"
+
+
+def can_turn_thinking_off(model_name: str) -> bool:
+    """Whether the model accepts `thinking: {"type": "disabled"}`.
+
+    Reads the Harness's known-model table, the one source of this fact. A model
+    the table does not know, or knows without reasoning facts, counts as able.
+    """
+    # Deferred: the Harness runtime loads its native module on import, and
+    # only side calls to Anthropic need this fact.
+    from mistralai_vibe_local_harness.vibe.completion_profile import find_known_model
+
+    known = find_known_model(model_name)
+    return known is None or known.reasoning is None or known.reasoning.can_turn_off
 
 
 class AnthropicMapper:
@@ -235,19 +254,6 @@ class AnthropicAdapter(APIAdapter):
         self._open_reasoning_blocks: dict[int, dict[str, Any]] = {}
 
     @staticmethod
-    def _has_thinking_content(messages: list[dict[str, Any]]) -> bool:
-        for msg in messages:
-            if msg.get("role") != "assistant":
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if block.get("type") in REASONING_BLOCK_TYPES:
-                    return True
-        return False
-
-    @staticmethod
     def _build_system_blocks(system_prompt: str | None) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
         if system_prompt:
@@ -276,25 +282,31 @@ class AnthropicAdapter(APIAdapter):
         self,
         payload: dict[str, Any],
         *,
-        messages: list[dict[str, Any]],
+        model_name: str,
         max_tokens: int | None,
         thinking: str,
     ) -> None:
-        has_thinking = self._has_thinking_content(messages)
-        thinking_level = thinking
-
-        if thinking_level == "off" and not has_thinking:
-            payload["max_tokens"] = (
-                max_tokens if max_tokens is not None else self.DEFAULT_MAX_TOKENS
+        level = thinking
+        if level == "off":
+            if can_turn_thinking_off(model_name):
+                payload["thinking"] = {"type": "disabled"}
+                payload["max_tokens"] = (
+                    max_tokens if max_tokens is not None else self.DEFAULT_MAX_TOKENS
+                )
+                return
+            # Every request through this backend is one of Vibe's own (image
+            # descriptions, worktree names, teleport summaries, the model
+            # probe), so off asks for as little thinking as the model allows
+            # rather than failing the call.
+            logger.info(
+                "%s cannot turn thinking off; using its lowest level, %r",
+                model_name,
+                _LOWEST_THINKING_LEVEL,
             )
-            return
-
-        # Resolve effective level: use config, or fallback to "medium" when
-        # forced by thinking content in history
-        effective_level = thinking_level if thinking_level != "off" else "medium"
+            level = _LOWEST_THINKING_LEVEL
 
         payload["thinking"] = {"type": "adaptive", "display": "summarized"}
-        payload["output_config"] = {"effort": effective_level}
+        payload["output_config"] = {"effort": level}
         payload["max_tokens"] = (
             max_tokens if max_tokens is not None else self.DEFAULT_ADAPTIVE_MAX_TOKENS
         )
@@ -314,7 +326,7 @@ class AnthropicAdapter(APIAdapter):
         payload: dict[str, Any] = {"model": model_name, "messages": messages}
 
         self._apply_thinking_config(
-            payload, messages=messages, max_tokens=max_tokens, thinking=thinking
+            payload, model_name=model_name, max_tokens=max_tokens, thinking=thinking
         )
 
         if system_blocks := self._build_system_blocks(system_prompt):

@@ -20,7 +20,7 @@ _PROMPT = "run it"
 # The answer opens with a code block whose own first line is blank: content, not spacing.
 _ANSWER = "```\n\nhi\n```"
 # Drag from the second prompt's first letter to the last transcript row (1-based SGR).
-_SELECT = "\x1b[<0;3;26M\x1b[<32;119;34M\x1b[<0;119;34m"
+_SELECT = "\x1b[<0;3;24M\x1b[<32;119;33M\x1b[<0;119;33m"
 # The collapsed group copies its label; the gaps around it and above the answer are layout.
 expected_clipboard = f"{_PROMPT}\nRan 2 commands\n\nhi"
 

@@ -112,6 +112,25 @@ fn git_index_skips_stale_index_entries() {
     cleanup(&root);
 }
 
+// The hook is a POSIX `touch` command, so it only runs on Unix.
+#[cfg(unix)]
+#[test]
+fn git_index_never_runs_the_repository_fsmonitor() {
+    let root = temp_root();
+    git(&root, &["init", "--quiet"]);
+    fs::write(root.join("tracked.txt"), "t").unwrap();
+    git(&root, &["add", "tracked.txt"]);
+    let marker = root.join(".git").join("fsmonitor-ran");
+    let hook = format!("touch '{}'", marker.display());
+    git(&root, &["config", "core.fsmonitor", &hook]);
+
+    let entries = git_ls_files(&root).unwrap();
+
+    assert!(!marker.exists(), "the repository's fsmonitor command ran");
+    assert_eq!(entries.get("tracked.txt"), Some(&false));
+    cleanup(&root);
+}
+
 #[test]
 fn non_git_roots_fall_back_to_the_filesystem_walk() {
     let root = temp_root();

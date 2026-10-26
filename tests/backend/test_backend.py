@@ -17,6 +17,7 @@ from typing import ClassVar, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import httpx2
 from mistralai.client.errors import SDKError
 from mistralai.client.models import AssistantMessage
 from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
@@ -38,7 +39,7 @@ from tests.backend.data.mistral import (
     TOOL_CONVERSATION_PARAMS as MISTRAL_TOOL_CONVERSATION_PARAMS,
 )
 from tests.constants import CHAT_COMPLETIONS_PATH
-from vibe.config_values import THINKING_LEVELS, ThinkingLevel
+from vibe.config_values import DEFAULT_THINKING_LEVELS, ThinkingLevel
 from vibe.core.config import ModelConfig, ProviderConfig
 from vibe.core.llm.backend.base import build_chat_payload
 from vibe.core.llm.backend.factory import BACKEND_FACTORY, create_backend
@@ -1144,11 +1145,11 @@ class TestMistralBackendReasoningEffort:
             # The uncurated default set makes no claim about the model, so
             # "off" leaves the field unset for the server default: some
             # hosted models reject the explicit "none".
-            ("off", list(THINKING_LEVELS), None),
-            ("low", list(THINKING_LEVELS), "none"),
-            ("medium", list(THINKING_LEVELS), "high"),
-            ("high", list(THINKING_LEVELS), "high"),
-            ("max", list(THINKING_LEVELS), "high"),
+            ("off", list(DEFAULT_THINKING_LEVELS), None),
+            ("low", list(DEFAULT_THINKING_LEVELS), "none"),
+            ("medium", list(DEFAULT_THINKING_LEVELS), "high"),
+            ("high", list(DEFAULT_THINKING_LEVELS), "high"),
+            ("max", list(DEFAULT_THINKING_LEVELS), "high"),
             # A curated set offering "off" claims the model supports it.
             ("off", ["off", "high"], "none"),
             ("high", ["off", "high"], "high"),
@@ -1304,7 +1305,7 @@ class TestBuildHttpErrorBodyReading:
         tool_choice=None,
     )
 
-    def _make_sdk_error(self, response: httpx.Response) -> SDKError:
+    def _make_sdk_error(self, response: httpx2.Response) -> SDKError:
         return SDKError("sdk error", response)
 
     def _make_http_status_error(
@@ -1315,10 +1316,10 @@ class TestBuildHttpErrorBodyReading:
         )
 
     def test_sdk_error_readable_body(self) -> None:
-        response = httpx.Response(
+        response = httpx2.Response(
             400,
             json={"message": "invalid temperature"},
-            request=httpx.Request("POST", "https://api.test.com"),
+            request=httpx2.Request("POST", "https://api.test.com"),
         )
         err = BackendErrorBuilder.build_http_error(
             self._CALL, error=self._make_sdk_error(response), response=response
@@ -1341,10 +1342,10 @@ class TestBuildHttpErrorBodyReading:
         assert "invalid temperature" in err.body_text
 
     def test_sdk_error_stream_response_falls_back_to_read(self) -> None:
-        response = httpx.Response(
+        response = httpx2.Response(
             400,
-            stream=httpx.ByteStream(b'{"message": "context too long"}'),
-            request=httpx.Request("POST", "https://api.test.com"),
+            stream=httpx2.ByteStream(b'{"message": "context too long"}'),
+            request=httpx2.Request("POST", "https://api.test.com"),
         )
         sdk_err = SDKError(
             "sdk error", response, body='{"message": "context too long"}'

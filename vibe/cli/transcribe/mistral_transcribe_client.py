@@ -23,7 +23,13 @@ from vibe.cli.transcribe.transcribe_client_port import (
     TranscribeTextDelta,
 )
 from vibe.utils.api_keys import resolve_api_key
-from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context, get_user_agent
+from vibe.utils.http import (
+    VibeAsyncHTTPClient,
+    build_ssl_context,
+    disable_sdk_env_telemetry,
+    get_user_agent,
+    mistral_sdk_client,
+)
 
 # The server rejects an end-of-stream flush when no audio was captured (the user
 # released before speaking). This is a benign empty recording, not a failure.
@@ -56,8 +62,9 @@ class MistralTranscribeClient:
             self._client = Mistral(
                 api_key=self._api_key,
                 server_url=self._server_url,
-                async_client=self._http_client,
+                async_client=mistral_sdk_client(self._http_client),
             )
+            disable_sdk_env_telemetry(self._client)
         return self._client
 
     async def transcribe(

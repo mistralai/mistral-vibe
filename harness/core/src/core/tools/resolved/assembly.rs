@@ -76,18 +76,34 @@ fn file_system_specs(config: &HarnessConfig) -> Vec<file_system::ToolSpec> {
     if !config.settings.tools.file_system.is_enabled() {
         return Vec::new();
     }
-    file_system::tools(config.settings.tools.command_environment)
+    file_system::tools(
+        config.settings.tools.command_environment,
+        bash_timeout(config),
+        config.settings.tools.background_processes.is_enabled(),
+    )
+}
+
+pub(super) fn bash_timeout(config: &HarnessConfig) -> file_system::BashTimeout {
+    file_system::BashTimeout::from_settings(config.settings.tools.bash_timeout.as_ref())
 }
 
 fn session_filesystem_tools(config: &HarnessConfig) -> Vec<ToolBinding> {
     if !config.settings.tools.file_system.is_enabled() {
         return Vec::new();
     }
-    filesystem_tools(config.settings.tools.command_environment)
+    filesystem_tools(
+        config.settings.tools.command_environment,
+        bash_timeout(config),
+        config.settings.tools.background_processes.is_enabled(),
+    )
 }
 
-fn filesystem_tools(environment: CommandEnvironment) -> Vec<ToolBinding> {
-    file_system::tools(environment)
+fn filesystem_tools(
+    environment: CommandEnvironment,
+    timeout: file_system::BashTimeout,
+    background: bool,
+) -> Vec<ToolBinding> {
+    file_system::tools(environment, timeout, background)
         .into_iter()
         .map(|spec| {
             let name = spec.direct_name;
@@ -101,6 +117,7 @@ fn filesystem_tools(environment: CommandEnvironment) -> Vec<ToolBinding> {
                     description: spec.description.to_string(),
                     input_schema: spec.input_schema,
                     output_schema: Some(spec.output_schema),
+                    runtime_builtin: Some(spec.name.runtime_tool()),
                 },
                 target: ToolTarget::RuntimeBuiltin {
                     name: spec.name.runtime_tool(),
@@ -124,6 +141,7 @@ fn subagent_tools(mode: &subagents::Mode, prompts: &subagents::Prompts) -> Vec<T
                 description: spec.description.to_string(),
                 input_schema: spec.input_schema,
                 output_schema: Some(spec.output_schema),
+                runtime_builtin: Some(spec.name.runtime_tool()),
             },
             target: ToolTarget::RuntimeBuiltin {
                 name: spec.name.runtime_tool(),
@@ -145,6 +163,7 @@ fn background_process_tools() -> Vec<ToolBinding> {
                 description: spec.description.to_string(),
                 input_schema: spec.input_schema,
                 output_schema: Some(spec.output_schema),
+                runtime_builtin: Some(spec.name.runtime_tool()),
             },
             target: ToolTarget::RuntimeBuiltin {
                 name: spec.name.runtime_tool(),
@@ -165,6 +184,7 @@ fn skill_tool() -> ToolBinding {
             description: spec.description.to_string(),
             input_schema: spec.input_schema,
             output_schema: Some(spec.output_schema),
+            runtime_builtin: Some(spec.name.runtime_tool()),
         },
         target: ToolTarget::RuntimeBuiltin {
             name: spec.name.runtime_tool(),
@@ -276,9 +296,16 @@ pub(crate) fn hook_tool_catalog(config: &HarnessConfig) -> Vec<HookToolKey> {
     keys.into_iter().collect()
 }
 
-pub(super) fn non_filesystem_runtime_builtin_tools(max_sleep_ms: u64) -> Vec<ToolBinding> {
+/// Every built-in except the file system ones. Subagent tools are listed even
+/// when the session has them off; `conversation_forking` follows the session,
+/// so a pre-tool hook's result is checked against the spawn schema the model
+/// was offered.
+pub(super) fn non_filesystem_runtime_builtin_tools(
+    max_sleep_ms: u64,
+    conversation_forking: bool,
+) -> Vec<ToolBinding> {
     let mut tools = subagent_tools(
-        &subagents::Mode::enabled(),
+        &subagents::Mode::enabled().with_conversation_forking(conversation_forking),
         &crate::core::prompt::PromptSettings::default().agent_tools,
     );
     tools.extend(self_tools(max_sleep_ms));
@@ -346,18 +373,55 @@ Example:
         assert!(tool.parameters["properties"].get("content").is_none());
     }
 
+    ///
+    /// *Prepare*: A Unix configuration with background processes disabled, then enabled.
+    /// *Do*: Select the model-visible `bash` definition from each.
+    /// *Assert*: Only the enabled configuration tells the model to start long work in
+    /// the background, in the description and in `timeout_seconds`.
+    ///
+    #[test]
+    fn bash_advises_backgrounding_only_when_background_processes_are_enabled() {
+        // Prepare
+        let mut config = config();
+        config.settings.tools.background_processes = BackgroundProcessMode::Disabled;
+        let mut background = config.clone();
+        background.settings.tools.background_processes = BackgroundProcessMode::Enabled;
+
+        // Do
+        let bash = |config: &HarnessConfig| {
+            direct_tools(config)
+                .into_iter()
+                .find(|tool| tool.name == "bash")
+                .expect("Unix exposes bash")
+        };
+        let (foreground, background) = (bash(&config), bash(&background));
+
+        // Assert
+        for (tool, advised) in [(&foreground, false), (&background, true)] {
+            let timeout = tool.parameters["properties"]["timeout_seconds"]["description"]
+                .as_str()
+                .expect("the timeout is described");
+            assert_eq!(tool.description.contains("tools.process.start"), advised);
+            assert_eq!(timeout.contains("tools.process.start"), advised);
+        }
+    }
+
     #[test]
     fn builtin_catalog_should_be_covered_by_reserved_tool_namespaces() {
-        let bindings = filesystem_tools(CommandEnvironment::Unix)
-            .into_iter()
-            .chain(self_tools(30_000))
-            .chain(std::iter::once(skill_tool()))
-            .chain(background_process_tools())
-            .chain(subagent_tools(
-                &subagents::Mode::enabled(),
-                &crate::core::prompt::PromptSettings::default().agent_tools,
-            ))
-            .collect::<Vec<_>>();
+        let bindings = filesystem_tools(
+            CommandEnvironment::Unix,
+            file_system::BashTimeout::default(),
+            true,
+        )
+        .into_iter()
+        .chain(self_tools(30_000))
+        .chain(std::iter::once(skill_tool()))
+        .chain(background_process_tools())
+        .chain(subagent_tools(
+            &subagents::Mode::enabled(),
+            &crate::core::prompt::PromptSettings::default().agent_tools,
+        ))
+        .collect::<Vec<_>>();
         let mut stable_ids = BTreeSet::new();
         let mut namespaces = BTreeSet::new();
         for binding in &bindings {
@@ -413,11 +477,11 @@ Example:
                 },
                 HookToolKey {
                     target: HookToolTarget::Filesystem,
-                    qualified_name: "file_system.read_file".to_string(),
+                    qualified_name: "file_system.edit".to_string(),
                 },
                 HookToolKey {
                     target: HookToolTarget::Filesystem,
-                    qualified_name: "file_system.search_replace".to_string(),
+                    qualified_name: "file_system.read_file".to_string(),
                 },
                 HookToolKey {
                     target: HookToolTarget::Filesystem,
@@ -498,11 +562,11 @@ Example:
     #[test]
     fn runtime_builtin_names_round_trip_through_their_live_wire_encoding() {
         // Prepare
-        let names = file_system::runtime_contracts()
+        let names = file_system::runtime_contracts(file_system::BashTimeout::default())
             .into_iter()
             .map(|contract| contract.name)
             .chain(
-                non_filesystem_runtime_builtin_tools(30_000)
+                non_filesystem_runtime_builtin_tools(30_000, false)
                     .into_iter()
                     .map(|tool| match tool.target {
                         ToolTarget::RuntimeBuiltin { name } => name,

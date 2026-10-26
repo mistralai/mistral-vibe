@@ -10,8 +10,10 @@ from vibe.agents import AgentSafety, AgentType
 from vibe.app_server._agent_types import (
     WORKSPACE_OWNER,
     AgentToolCatalogue,
+    AgentTypeRejection,
     AgentTypeSource,
     resolve_agent_types,
+    workspace_agent_rejections,
     workspace_agent_types,
 )
 from vibe.core.agents.manager import AgentManager
@@ -278,6 +280,32 @@ def test_a_subagent_without_a_description_is_dropped_and_reported(
     assert resolved.definitions == ()
     assert [issue.file for issue in resolved.issues] == [str(path)]
     assert "description" in resolved.issues[0].message
+
+
+def test_a_subagent_with_one_bash_timeout_is_dropped_with_the_config_error(
+    tmp_path: Path, manager_for: ManagerFor
+) -> None:
+    """*Prepare*: A subagent file sets a bash ``default_timeout`` without
+    ``max_timeout_seconds``.
+    *Do*: Resolve the workspace's agent types.
+    *Assert*: It is not advertised, and it is reported once, with the main
+    config's error.
+    """
+    path = _write_agent(
+        tmp_path, "reviewer", REVIEWER + "[tools.bash]\ndefault_timeout = 600\n"
+    )
+    manager = manager_for(tmp_path)
+
+    resolved = resolve_agent_types(workspace_agent_types(manager), _tools())
+
+    assert resolved.definitions == ()
+    assert resolved.issues == ()
+    (rejection,) = workspace_agent_rejections(manager)
+    assert rejection.issue().file == str(path)
+    assert rejection.issue().message == (
+        "Agent 'reviewer': tools: tools.bash: default_timeout is set without"
+        " max_timeout_seconds. Set both, or neither."
+    )
 
 
 def test_a_granted_tool_narrowed_by_an_allowlist_keeps_its_grant(
@@ -573,3 +601,59 @@ def test_the_advertised_half_alone_needs_no_tool_catalogue(
 
     assert [definition.name for definition in resolved.definitions] == ["reviewer"]
     assert resolved.profiles == ()
+
+
+def test_a_subagent_whose_instructions_exceed_the_limit_is_rejected_with_its_size(
+    tmp_path: Path, manager_for: ManagerFor
+) -> None:
+    path = _write_agent(
+        tmp_path,
+        "reviewer",
+        REVIEWER + f'instructions = """{"x" * (64 * 1024 + 1)}"""\n',
+    )
+
+    resolved = resolve_agent_types(
+        workspace_agent_types(manager_for(tmp_path)), _tools()
+    )
+
+    assert resolved.definitions == ()
+    assert resolved.profiles == ()
+    reason = (
+        "its instructions are 65,537 characters long; a subagent's instructions "
+        "are limited to 65,536 characters"
+    )
+    assert resolved.rejections == (
+        AgentTypeRejection(name="reviewer", file=str(path), reason=reason),
+    )
+    assert [issue.message for issue in resolved.issues] == [
+        f"Agent 'reviewer': {reason}"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        (
+            'agent_type = "subagent"\ndescription = "d"\nsafety = "bogus"\n',
+            "safety: 'bogus' is not one of 'safe', 'neutral', 'destructive', "
+            "'smart', 'yolo'",
+        ),
+        (
+            'agent_type = "subagent"\ndescription = "d"\n'
+            'auto_compact_threshold = "lots"\n',
+            "auto_compact_threshold: Input should be a valid integer, unable to "
+            "parse string as an integer",
+        ),
+        ('agent_type = "subagent\n', "invalid TOML: "),
+    ],
+)
+def test_an_agent_file_that_does_not_load_is_reported_with_the_failing_field(
+    tmp_path: Path, manager_for: ManagerFor, body: str, reason: str
+) -> None:
+    path = _write_agent(tmp_path, "reviewer", body)
+
+    (rejection,) = workspace_agent_rejections(manager_for(tmp_path))
+
+    assert rejection.name == "reviewer"
+    assert rejection.file == str(path)
+    assert rejection.reason.startswith(reason)

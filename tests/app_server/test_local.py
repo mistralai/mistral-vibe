@@ -52,7 +52,7 @@ from vibe.core.session.worktrees import (
     SessionWorktrees as WorktreeLifecycle,
     UseExistingWorktree,
 )
-from vibe.core.trusted_folders import trusted_folders_manager
+from vibe.core.trusted_folders import TrustedFoldersManager, trusted_folders_manager
 
 
 def test_local_harness_options_preserves_client_positional_argument() -> None:
@@ -421,7 +421,10 @@ def test_worktree_remove_inspect_reports_a_git_failure_as_kept(
     _finish_worktree_start(worktree)
 
     def failing(
-        self: ManagedWorktree, session_id: str | None = None
+        self: ManagedWorktree,
+        session_id: str | None = None,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
     ) -> WorktreeRelease:
         raise GitError("git status failed")
 
@@ -558,8 +561,13 @@ async def test_passive_host_uses_worktree_limit(
 
     prune_response = cast(WorkspaceWorktreePruneResponse, prune_result.response)
     assert prune_response.removed == 2
-    prune.assert_called_once_with(25, session_finished)
-    cleanup.sweep.assert_called_once_with()
+    assert prune.call_args.args == (25, session_finished)
+    assert (
+        prune.call_args.kwargs["trust_store"] is not handler._harness_files.trust_store
+    )
+    cleanup.sweep.assert_called_once_with(
+        trust_store=handler._harness_files.trust_store
+    )
 
 
 @pytest.mark.asyncio

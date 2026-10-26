@@ -99,6 +99,7 @@ class SetupRequestHandler:
             # require_active_provider_api_key skips such providers.
             has_api_key=not env_var or resolve_api_key(env_var) is not None,
             enable_system_trust_store=config.enable_system_trust_store,
+            pinned_console_url=_pinned_console_url(),
         )
 
     async def _store_credential(
@@ -123,9 +124,17 @@ class SetupRequestHandler:
     ) -> SetupSubmitChoicesResponse:
         config = (await self._orchestrator()).config
         provider, provider_drift = _merged_provider(config, params.provider)
+        console_base_url = params.console_base_url
+        pin = _pinned_console_url()
+        if pin is not None:
+            # The same pin-wins rule as ACP's `_resolve_sign_in_provider`: a
+            # drifted client cannot persist another deployment.
+            pinned_provider = _pin_provider_to_console_url(provider, pin)
+            provider_drift = provider_drift or pinned_provider != provider
+            provider = pinned_provider
+            console_base_url = _pinned_console_account_base(provider, pin)
         console_drift = (
-            params.console_base_url is not None
-            and params.console_base_url != config.console_base_url
+            console_base_url is not None and console_base_url != config.console_base_url
         )
         vibe_drift = (
             params.vibe_base_url is not None
@@ -138,9 +147,7 @@ class SetupRequestHandler:
                     # The wizard always includes the provider; per-field drift
                     # is expressed by the URL fields below.
                     provider=provider,
-                    console_base_url=(
-                        params.console_base_url if console_drift else None
-                    ),
+                    console_base_url=console_base_url if console_drift else None,
                     vibe_base_url=params.vibe_base_url if vibe_drift else None,
                 ),
                 reason="onboarding",
@@ -203,6 +210,54 @@ def _named_provider(config: VibeConfigSchema, name: str) -> ProviderConfig:
             return provider
     raise RequestFailure(
         ProtocolErrorCode.INVALID_PARAMS, f"Unknown setup provider: {name}"
+    )
+
+
+def _pinned_console_url() -> str | None:
+    # Lazy import: the onboarding package would push
+    # `import vibe.app_server.stdio` over its startup import budget.
+    from vibe.setup.onboarding.context import pinned_console_url_from_env
+
+    return pinned_console_url_from_env()
+
+
+def _pin_provider_to_console_url(provider: ProviderConfig, pin: str) -> ProviderConfig:
+    """The provider's browser-auth URLs pinned to the admin console URL.
+
+    A split-horizon API base configured for the pinned console is preserved;
+    otherwise the API base is the pin's own `/api` (single host, no origin
+    rewrite).
+    """
+    from vibe.setup.onboarding.context import (
+        browser_auth_requires_origin_rewrite,
+        pinned_console_api_base,
+        resolve_browser_auth_urls,
+    )
+
+    browser_base, browser_api_base = resolve_browser_auth_urls(
+        pin, pinned_console_api_base(provider, pin)
+    )
+    return provider.model_copy(
+        update={
+            "browser_auth_base_url": browser_base,
+            "browser_auth_api_base_url": browser_api_base,
+            "browser_auth_allow_origin_rewrite": browser_auth_requires_origin_rewrite(
+                browser_base, browser_api_base
+            ),
+        }
+    )
+
+
+def _pinned_console_account_base(provider: ProviderConfig, pin: str) -> str:
+    """The console URL to persist under a pin: the CLI-reachable account base
+    of the pinned provider — the pin itself for a single-host console, the
+    preserved split API base's origin otherwise (mirrors
+    OnboardingApp.apply_custom_domain).
+    """
+    from vibe.setup.onboarding.context import browser_auth_account_base
+
+    return browser_auth_account_base(
+        provider.browser_auth_base_url or pin, provider.browser_auth_api_base_url
     )
 
 

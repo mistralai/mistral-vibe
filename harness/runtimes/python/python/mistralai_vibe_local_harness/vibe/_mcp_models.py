@@ -162,6 +162,9 @@ class MCPRemoteToolDescriptor:
 @dataclass(frozen=True, slots=True)
 class MCPDescriptorCachePolicy:
     ttl_s: float = 86_400.0
+    # A cached-only open still routes descriptors this old, and leaves them
+    # for ``discover_pending`` to refresh. None never refreshes them early.
+    refresh_after_s: float | None = None
     max_tools_per_record: int = 1_000
     max_record_bytes: int = 2 * 1024 * 1024
     max_files: int = 512

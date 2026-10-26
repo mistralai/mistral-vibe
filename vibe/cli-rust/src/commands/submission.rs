@@ -10,7 +10,7 @@ use crate::server::{
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use super::{dispatch, is_side_channel, parse};
+use super::{dispatch, is_side_channel, parse, waits_for_jobs};
 use crate::app::{App, QueuedPrompt, Status, ToastSeverity};
 use crate::input_modes::{classify, classify_submitted, submitted_value, ClassifiedInput};
 use crate::startup::banners;
@@ -62,15 +62,13 @@ pub fn flush_pending(
             continue;
         };
         // A queued prompt may have started a turn before deferred commands replay.
-        if !is_side_channel(command) {
-            if let Some(hint) = reject_hint(app) {
-                reject(
-                    app,
-                    value,
-                    format!("Slash commands cannot be queued — {hint}"),
-                );
-                continue;
-            }
+        if let Some(hint) = command_hint(app, command) {
+            reject(
+                app,
+                value,
+                format!("Slash commands cannot be queued — {hint}"),
+            );
+            continue;
         }
         if dispatch::run_command(app, client, config_tx, command, &value) {
             return true;
@@ -172,18 +170,16 @@ pub fn submit(
                 app.pending_commands.push(value);
                 return false;
             }
-            if !is_side_channel(command) {
-                if reject_while_shell_runs(app, &value) {
-                    return false;
-                }
-                if let Some(hint) = reject_hint(app) {
-                    reject_input(
-                        app,
-                        &value,
-                        format!("Slash commands cannot be queued — {hint}"),
-                    );
-                    return false;
-                }
+            if !is_side_channel(command) && reject_while_shell_runs(app, &value) {
+                return false;
+            }
+            if let Some(hint) = command_hint(app, command) {
+                reject_input(
+                    app,
+                    &value,
+                    format!("Slash commands cannot be queued — {hint}"),
+                );
+                return false;
             }
             return dispatch::run_command(app, client, config_tx, command, &value);
         }
@@ -240,8 +236,13 @@ pub fn submit(
     false
 }
 
+/// A `!` shell command is waiting for the session or still running.
+fn shell_in_flight(app: &App) -> bool {
+    app.session.shell_operation_id.is_some() || app.session.pending_shell.is_some()
+}
+
 fn reject_while_shell_runs(app: &mut App, value: &str) -> bool {
-    if app.session.shell_operation_id.is_none() && app.session.pending_shell.is_none() {
+    if !shell_in_flight(app) {
         return false;
     }
     reject_input(
@@ -269,6 +270,25 @@ fn reject_input(app: &mut App, value: &str, message: String) {
 
 fn teleport_rejection(hint: &str) -> String {
     format!("Teleport cannot be queued — {hint}")
+}
+
+/// Why this slash command cannot run now.
+fn command_hint(app: &App, command: &str) -> Option<&'static str> {
+    if !is_side_channel(command) {
+        return reject_hint(app);
+    }
+    let job_running = app.compacting
+        || app.teleport.is_some()
+        || app.vibe_code_project.pending
+        || app.agents.installing;
+    (job_running && waits_for_jobs(command)).then_some("wait for the current job to finish.")
+}
+
+/// Whether a typed non-side-channel command such as `/model` would run at once: `submit`'s gates, without deferring or rejecting.
+pub(crate) fn accepts_idle_command(app: &App) -> bool {
+    !matches!(app.session.status, Status::Starting | Status::Failed)
+        && !shell_in_flight(app)
+        && reject_hint(app).is_none()
 }
 
 /// Why a non-side-channel command cannot run now.

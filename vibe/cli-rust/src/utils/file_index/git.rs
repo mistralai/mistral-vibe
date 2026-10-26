@@ -17,6 +17,8 @@ pub fn git_ls_files(root: &Path) -> Option<BTreeMap<String, bool>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
+        // A repo's fsmonitor can run its own command or hang on a wedged daemon.
+        .args(["-c", "core.fsmonitor="])
         .args([
             "ls-files",
             "--cached",

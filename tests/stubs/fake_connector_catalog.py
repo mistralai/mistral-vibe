@@ -65,8 +65,9 @@ class FakeConnectorCatalogService(ConnectorCatalogService):
         orchestrator: ConfigOrchestrator[VibeConfigSchema],
         *,
         force_refresh: bool = False,
+        remember_failure: bool = True,
     ) -> ResolvedConnectorCatalog:
-        del orchestrator, force_refresh
+        del orchestrator, force_refresh, remember_failure
         if error := self._registry.bootstrap_error():
             raise ConnectorCatalogUnavailableError(error)
         return self._catalog

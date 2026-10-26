@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from vibe.app_server._account import AccountGateway
 from vibe.app_server._identity import IdentityGateway
@@ -13,6 +13,7 @@ from vibe.app_server.protocol import (
     SessionSpawnParams,
     SessionSpawnResponse,
 )
+from vibe.core.platform_auth import PlatformCredentialProvider
 
 
 class SessionBackendServices(Protocol):
@@ -35,3 +36,10 @@ class SessionBackendServices(Protocol):
     async def spawn_session(
         self, params: SessionSpawnParams
     ) -> SessionSpawnResponse: ...
+
+
+@runtime_checkable
+class SessionBackendPlatformCredentials(Protocol):
+    def platform_credentials(
+        self, api_key_env_var: str
+    ) -> PlatformCredentialProvider: ...

@@ -35,6 +35,7 @@ from mistralai_vibe_local_harness.vibe._processes._manager import (
 from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
 from mistralai_vibe_local_harness.vibe._sandbox import sandbox_path
 from mistralai_vibe_local_harness.vibe._sandbox_helper import PROCESS_ENV_DEFAULTS
+from mistralai_vibe_local_harness.vibe._windows_path import with_registry_path
 
 type ProcessToolName = Literal[
     "process.start", "process.output", "process.write", "process.list", "process.stop"
@@ -321,7 +322,7 @@ def _validate_start(
         cwd=cwd,
         explicit_env=explicit_env,
         process_env=_merge_process_environment(
-            config.env,
+            with_registry_path(config.env),
             explicit_env,
             command_environment=_process_command_environment(config),
         ),

@@ -1,6 +1,7 @@
 //! UI components; each submodule owns one region of the screen.
 
 pub mod approval;
+pub mod artifacts_modal;
 pub mod auth_app;
 pub mod banner;
 pub(crate) mod bottom_app;
@@ -133,6 +134,7 @@ fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect
         Focus::ModelPicker => model_picker::draw(app, f, area),
         Focus::LogLevelPicker => log_level_picker::draw(app, f, area),
         Focus::ThinkingPicker => thinking_picker::draw(app, f, area),
+        Focus::ArtifactsModal => artifacts_modal::draw(app, f, area),
         Focus::Config => {
             draw_base(app, f, area);
             config::draw(app, f, area);
@@ -158,7 +160,7 @@ fn draw_base(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
     f.buffer_mut().set_style(area, theme::screen_style());
 
     // `#loading-area`: 3 rows on a fresh session (narrator/hint), else 2.
-    let loading_height = loading_height(app);
+    let loading_height = loading_height(app, area.width);
     // The shared slash-command/file popup sits above the input box.
     completion_popup::reconcile_scroll(app, area.width);
     let popup_height = completion_popup::popup_height(app, area.width);
@@ -263,10 +265,9 @@ pub(crate) fn draw_loading_area(app: &mut App, f: &mut Frame, area: ratatui::lay
     notice::draw(app, f, loading_chunks[2]);
 }
 
-pub(crate) fn loading_height(app: &App) -> u16 {
-    if app.view.transcript.is_empty() {
-        3
-    } else {
-        2
-    }
+/// A failed startup grows the area so the whole error wraps under the
+/// padding row.
+pub(crate) fn loading_height(app: &App, width: u16) -> u16 {
+    let base = if app.view.transcript.is_empty() { 3 } else { 2 };
+    base.max(loading::failure::rows(app, width).saturating_add(1))
 }

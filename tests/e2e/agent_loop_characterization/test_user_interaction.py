@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
-import time
 
 import pexpect
 import pytest
 
 from tests.e2e.agent_loop_characterization.support import (
-    APPROVAL_INPUT_GRACE_PERIOD_S,
     assert_tool_result_contains,
     assistant_text_chunks,
     single_tool_call_chunks,
@@ -17,6 +15,7 @@ from tests.e2e.agent_loop_characterization.support import (
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
     send_ctrl_c_until_quit_confirmation,
+    wait_for_dialog_to_accept_keys,
     wait_for_main_screen,
     wait_for_rendered_text,
 )
@@ -27,9 +26,7 @@ QUESTION_TEXT = "Which mode should Vibe use?"
 
 
 def _answer_first_question_option(child: pexpect.spawn, captured: io.StringIO) -> None:
-    wait_for_rendered_text(child, captured, needle=QUESTION_TEXT, timeout=10)
-    wait_for_rendered_text(child, captured, needle="Fast", timeout=10)
-    time.sleep(APPROVAL_INPUT_GRACE_PERIOD_S)
+    wait_for_dialog_to_accept_keys(child, captured, needle=QUESTION_TEXT)
     child.send("\r")
 
 

@@ -11,8 +11,8 @@ from mistralai_vibe_local_harness.protocol import (
     RustToolFailureResult,
 )
 
-# Deprecated: retired `subagent.*` spellings, kept only to fail restored Actions
-# with a migration hint. New calls use `tools.agents.*`.
+# Deprecated: retired names, kept only to fail restored Actions with a
+# migration hint.
 _MIGRATION_GUIDANCE: dict[RustRuntimeBuiltinToolName, str] = {
     "subagent.list": "Use tools.agents.list.",
     "subagent.spawn": "Use tools.agents.spawn.",
@@ -20,16 +20,17 @@ _MIGRATION_GUIDANCE: dict[RustRuntimeBuiltinToolName, str] = {
     "subagent.interrupt": "Use tools.agents.interrupt.",
     "subagent.wait": "Use standalone wait outside run_typescript.",
     "subagent.stop": "No replacement exists for destructive stop or close.",
+    "file_system.search_replace": "Use edit, or tools.file_system.edit in run_typescript.",
 }
 
 
 def deprecated_tool_failure(
     action: RustRuntimeBuiltinToolCallAction,
 ) -> RustToolFailedEvent:
-    """Fail a restored Action that names a retired `subagent.*` tool.
+    """Fail a restored Action that names a retired tool.
 
     Deprecated: replay-only compatibility for sessions persisted before the
-    rename. New calls use `tools.agents.*`; there is nothing to migrate to here.
+    rename; there is nothing to migrate to here.
     """
     message = (
         f"{action.call.name} is deprecated and cannot execute. "

@@ -38,6 +38,11 @@ from vibe.utils.platform import resolve_windows_shell
 
 _TESTS_ROOT = Path(__file__).parent
 _HOST_PLATFORM = sys.platform
+# The `VIBE_<FIELD>` names the environment config layer reads; it also reads
+# `VIBE_<FIELD>__<SUBFIELD>`, case-insensitively.
+_CONFIG_ENV_NAMES = frozenset(
+    f"VIBE_{field.upper()}" for field in VibeConfigSchema.model_fields
+)
 _LOCAL_XDIST_GROUPS = {
     Path("core/test_history_properties.py"): "history_properties",
     Path("core/test_system_prompt.py"): "git_processes",
@@ -96,6 +101,21 @@ def _reset_model_catalog_failed() -> None:
     # A failed catalog fetch is remembered for the process; one test's failure
     # must not stop the next from waiting.
     reset_model_catalog_failed()
+
+
+@pytest.fixture(autouse=True)
+def _no_provider_model_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Sessions never ask a provider's model catalogue over the network; a test of
+    # the catalogue sets its own fetcher factory.
+    try:
+        from mistralai_vibe_local_harness.vibe.completion_profile import (
+            PROCESS_CATALOGUE_CACHE,
+        )
+        from vibe.app_server import _completion_facts
+    except ImportError:
+        return
+    monkeypatch.setattr(_completion_facts, "catalogue_fetcher_factory", None)
+    PROCESS_CATALOGUE_CACHE.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -216,6 +236,14 @@ def config_dir(
     config_file = config_dir / "config.toml"
     config_file.write_text(tomli_w.dumps(get_base_config()), encoding="utf-8")
 
+    # Variables exported in the developer's shell would otherwise reach every
+    # test: VIBE_HOME points them all at one directory, and config settings
+    # override the test config through the environment layer. Other VIBE_*
+    # variables, such as CI inputs, are left alone.
+    for name in list(os.environ):
+        key = name.upper()
+        if key == "VIBE_HOME" or key.split("__", 1)[0] in _CONFIG_ENV_NAMES:
+            monkeypatch.delenv(name)
     monkeypatch.setattr("vibe.utils.vibe_home._DEFAULT_VIBE_HOME", config_dir)
     agents_dir = tmp_path / ".agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
@@ -284,6 +312,16 @@ def _mock_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_connector_warm_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A served app server fetches the connector catalog at start; with the
+    mock key above that would be a real request.
+    """
+    from vibe.app_server._runtime import HarnessProcess
+
+    monkeypatch.setattr(HarnessProcess, "start_connector_warm_up", lambda _self: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_managed_config_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every session start fetches the org config; with the mock key above that
     would be a real request. Fail it at once, as offline. Tests that serve an
@@ -300,15 +338,12 @@ def _no_managed_config_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _mock_platform(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mock platform to be Linux with /bin/sh shell for consistent test behavior.
+    """Pin the platform to Linux with /bin/sh on POSIX hosts.
 
-    This ensures that platform-specific system prompt generation is consistent
-    across all tests regardless of the actual platform running the tests.
+    This keeps platform-specific system prompt generation consistent on the
+    Linux CI runners and macOS dev machines. On Windows the real platform
+    stays, so the suite exercises the Windows branches there (DSK-1495).
     """
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setenv("SHELL", "/bin/sh")
-    if not hasattr(os, "getuid"):
-        monkeypatch.setattr(os, "getuid", lambda: 0, raising=False)
     resolve_auto_theme.cache_clear()
     monkeypatch.setattr(
         "vibe.setup.onboarding.theme_detection.detect_terminal_dark", lambda: None
@@ -317,6 +352,10 @@ def _mock_platform(monkeypatch: pytest.MonkeyPatch) -> None:
         "vibe.setup.onboarding.theme_detection.detect_system_preferred_dark",
         lambda: None,
     )
+    if _HOST_PLATFORM == "win32":
+        return
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("SHELL", "/bin/sh")
 
 
 @pytest.fixture(autouse=True)
@@ -469,10 +508,9 @@ def _prepare_test_config_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     kwargs.setdefault("enable_telemetry", False)
     # Use the lightweight test system prompt unless a test asks for a real one.
     kwargs.setdefault("system_prompt_id", "tests")
-    # Keep the test prompt minimal: skip project-context discovery and prompt
-    # detail unless a test opts in.
+    # Keep the test prompt minimal: skip project-context discovery unless a
+    # test opts in.
     kwargs.setdefault("include_project_context", False)
-    kwargs.setdefault("include_prompt_detail", False)
     return kwargs
 
 

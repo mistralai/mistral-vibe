@@ -50,6 +50,10 @@ struct CheckpointTokenUsage {
     total_tokens: u64,
     #[serde(default)]
     cached_input_tokens: u64,
+    #[serde(default)]
+    cache_write_tokens: u64,
+    #[serde(default)]
+    reasoning_tokens: u64,
 }
 
 impl CheckpointTokenUsage {
@@ -59,6 +63,8 @@ impl CheckpointTokenUsage {
             output_tokens: usage.output_tokens,
             total_tokens: usage.total_tokens,
             cached_input_tokens: usage.cached_input_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
         }
     }
 
@@ -68,6 +74,8 @@ impl CheckpointTokenUsage {
             output_tokens: self.output_tokens,
             total_tokens: self.total_tokens,
             cached_input_tokens: self.cached_input_tokens,
+            cache_write_tokens: self.cache_write_tokens,
+            reasoning_tokens: self.reasoning_tokens,
         }
     }
 }

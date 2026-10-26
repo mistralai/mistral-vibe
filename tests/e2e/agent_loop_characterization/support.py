@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
-import time
 import tomllib
 from typing import Any
 
@@ -11,12 +10,10 @@ import pexpect
 import tomli_w
 
 from tests.e2e.common import (
-    wait_for_rendered_text,
+    wait_for_dialog_to_accept_keys,
     wait_for_request_count_while_draining_child_output as wait_for_request_count_while_draining_child_output,
 )
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
-
-APPROVAL_INPUT_GRACE_PERIOD_S = 0.65
 
 
 def assistant_text_chunks(text: str, *, created: int = 100) -> list[dict[str, object]]:
@@ -153,11 +150,9 @@ def answer_approval(
     names builtin tools by their canonical route (``file_system.bash`` stands
     for Vibe's ``bash``).
     """
-    wait_for_rendered_text(
-        child, captured, needle=f"Permission for the {tool_name} tool", timeout=10
+    wait_for_dialog_to_accept_keys(
+        child, captured, needle=f"Permission for the {tool_name} tool"
     )
-    wait_for_rendered_text(child, captured, needle="Deny", timeout=10)
-    time.sleep(APPROVAL_INPUT_GRACE_PERIOD_S)
     child.send(key)
     child.send("\r")
 

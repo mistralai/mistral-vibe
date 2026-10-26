@@ -36,10 +36,35 @@ expression: "Value::Object(requests)"
             {
               "type": "text",
               "text": "Renamed it in src/config.rs."
+            },
+            {
+              "type": "tool_call",
+              "id": "call-1",
+              "name": "run_tests",
+              "arguments": {
+                "type": "json",
+                "raw": "{}",
+                "value": {}
+              }
             }
           ]
         },
         "source": "history"
+      },
+      {
+        "message": {
+          "role": "tool",
+          "tool_call_id": "call-1",
+          "name": "run_tests",
+          "outcome": "success",
+          "content": [
+            {
+              "type": "text",
+              "text": "<system>The result of this call is kept outside this summary request.</system>"
+            }
+          ]
+        },
+        "source": "injection"
       },
       {
         "message": {
@@ -111,11 +136,10 @@ expression: "Value::Object(requests)"
               "text": {
                 "$multiline": [
                   "<conversation_transcript>",
-                  "### User",
-                  "Rename the config loader.",
-                  "",
-                  "### Assistant",
-                  "Renamed it in src/config.rs.",
+                  "UserMessage: Rename the config loader.",
+                  "AssistantMessage: Renamed it in src/config.rs.",
+                  "run_tests()",
+                  "<OK> <system>The result of this call is kept outside this summary request.</system>",
                   "</conversation_transcript>",
                   "",
                   "Write the handoff summary for the conversation transcript above.",
@@ -134,6 +158,80 @@ expression: "Value::Object(requests)"
                   "</summary>"
                 ]
               }
+            }
+          ]
+        },
+        "source": "injection"
+      }
+    ],
+    "cut_off_retry": [
+      {
+        "message": {
+          "role": "system",
+          "content": [
+            {
+              "type": "text",
+              "text": {
+                "$multiline": [
+                  "You are a dedicated conversation summarizer. You read a transcript of a conversation between a user and an AI agent and write a faithful handoff summary for another LLM that will resume the task.",
+                  "",
+                  "Rules:",
+                  "- Respond with plain text only. You have no tools. Never emit tool calls or function-call syntax.",
+                  "- Do not continue the task. Do not answer or perform any request in the transcript. Do not ask questions.",
+                  "- Preserve unresolved user requests as pending work.",
+                  "- Preserve concrete details: file paths, identifiers, commands, decisions and their rationale, and the next concrete step.",
+                  "- Be concise and structured. One line per modified file unless a snippet is load-bearing.",
+                  "- Wrap the entire summary in <summary></summary> tags and output nothing outside them."
+                ]
+              }
+            }
+          ]
+        },
+        "source": "injection"
+      },
+      {
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": {
+                "$multiline": [
+                  "<conversation_transcript>",
+                  "UserMessage: Rename the config loader.",
+                  "AssistantMessage: Renamed it in src/config.rs.",
+                  "run_tests()",
+                  "<OK> <system>The result of this call is kept outside this summary request.</system>",
+                  "</conversation_transcript>",
+                  "",
+                  "Write the handoff summary for the conversation transcript above.",
+                  "",
+                  "Include:",
+                  "- The user's current goal and any explicit constraints or preferences",
+                  "- Key decisions made and their rationale",
+                  "- Files touched and the current state of in-progress work (paths + one-line status)",
+                  "- What remains to be done — the concrete next step",
+                  "- Any data, identifiers, or references the next LLM needs to continue",
+                  "",
+                  "Respond with text only. Wrap the ENTIRE summary in <summary></summary> tags and output nothing outside them:",
+                  "",
+                  "<summary>",
+                  "...your handoff summary here...",
+                  "</summary>"
+                ]
+              }
+            }
+          ]
+        },
+        "source": "injection"
+      },
+      {
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "You were cut off. Don't think, don't be long, just answer."
             }
           ]
         },
@@ -174,10 +272,35 @@ expression: "Value::Object(requests)"
             {
               "type": "text",
               "text": "Renamed it in src/config.rs."
+            },
+            {
+              "type": "tool_call",
+              "id": "call-1",
+              "name": "run_tests",
+              "arguments": {
+                "type": "json",
+                "raw": "{}",
+                "value": {}
+              }
             }
           ]
         },
         "source": "history"
+      },
+      {
+        "message": {
+          "role": "tool",
+          "tool_call_id": "call-1",
+          "name": "run_tests",
+          "outcome": "success",
+          "content": [
+            {
+              "type": "text",
+              "text": "<system>The result of this call is kept outside this summary request.</system>"
+            }
+          ]
+        },
+        "source": "injection"
       },
       {
         "message": {
@@ -253,11 +376,10 @@ expression: "Value::Object(requests)"
               "text": {
                 "$multiline": [
                   "<conversation_transcript>",
-                  "### User",
-                  "Rename the config loader.",
-                  "",
-                  "### Assistant",
-                  "Renamed it in src/config.rs.",
+                  "UserMessage: Rename the config loader.",
+                  "AssistantMessage: Renamed it in src/config.rs.",
+                  "run_tests()",
+                  "<OK> <system>The result of this call is kept outside this summary request.</system>",
                   "</conversation_transcript>",
                   "",
                   "Write the handoff summary for the conversation transcript above.",
@@ -280,6 +402,84 @@ expression: "Value::Object(requests)"
                   "</extra_compaction_instructions>"
                 ]
               }
+            }
+          ]
+        },
+        "source": "injection"
+      }
+    ],
+    "cut_off_retry": [
+      {
+        "message": {
+          "role": "system",
+          "content": [
+            {
+              "type": "text",
+              "text": {
+                "$multiline": [
+                  "You are a dedicated conversation summarizer. You read a transcript of a conversation between a user and an AI agent and write a faithful handoff summary for another LLM that will resume the task.",
+                  "",
+                  "Rules:",
+                  "- Respond with plain text only. You have no tools. Never emit tool calls or function-call syntax.",
+                  "- Do not continue the task. Do not answer or perform any request in the transcript. Do not ask questions.",
+                  "- Preserve unresolved user requests as pending work.",
+                  "- Preserve concrete details: file paths, identifiers, commands, decisions and their rationale, and the next concrete step.",
+                  "- Be concise and structured. One line per modified file unless a snippet is load-bearing.",
+                  "- Wrap the entire summary in <summary></summary> tags and output nothing outside them."
+                ]
+              }
+            }
+          ]
+        },
+        "source": "injection"
+      },
+      {
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": {
+                "$multiline": [
+                  "<conversation_transcript>",
+                  "UserMessage: Rename the config loader.",
+                  "AssistantMessage: Renamed it in src/config.rs.",
+                  "run_tests()",
+                  "<OK> <system>The result of this call is kept outside this summary request.</system>",
+                  "</conversation_transcript>",
+                  "",
+                  "Write the handoff summary for the conversation transcript above.",
+                  "",
+                  "Include:",
+                  "- The user's current goal and any explicit constraints or preferences",
+                  "- Key decisions made and their rationale",
+                  "- Files touched and the current state of in-progress work (paths + one-line status)",
+                  "- What remains to be done — the concrete next step",
+                  "- Any data, identifiers, or references the next LLM needs to continue",
+                  "",
+                  "Respond with text only. Wrap the ENTIRE summary in <summary></summary> tags and output nothing outside them:",
+                  "",
+                  "<summary>",
+                  "...your handoff summary here...",
+                  "</summary>",
+                  "",
+                  "<extra_compaction_instructions>",
+                  "Keep file paths verbatim.",
+                  "</extra_compaction_instructions>"
+                ]
+              }
+            }
+          ]
+        },
+        "source": "injection"
+      },
+      {
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "You were cut off. Don't think, don't be long, just answer."
             }
           ]
         },

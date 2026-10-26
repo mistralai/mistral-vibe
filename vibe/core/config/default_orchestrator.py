@@ -86,6 +86,7 @@ async def build_default_orchestrator(
         schema=VibeConfigSchema,
         layers=layers,
         default_layer_resolver=default_layer_resolver,
+        harness_files=manager,
     )
     await asyncio.to_thread(
         configure_ssl_context,

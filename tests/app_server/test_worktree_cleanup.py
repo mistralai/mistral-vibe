@@ -18,6 +18,7 @@ from vibe.core.git.worktree import (
     WorktreeRepository,
 )
 from vibe.core.git.worktree.record import WorktreeClaim
+from vibe.core.trusted_folders import TrustedFoldersManager
 
 
 def _init_repo(root: Path) -> Repo:
@@ -199,10 +200,15 @@ def test_a_failed_reap_does_not_stop_later_cleanup(
     other, _ = _managed_worktree(tmp_path, "other")
     reap_if_finished = ManagedWorktree.reap_if_finished
 
-    def fail_first(managed: ManagedWorktree, finished: SessionFinished) -> object:
+    def fail_first(
+        managed: ManagedWorktree,
+        finished: SessionFinished,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
+    ) -> object:
         if managed.claim == failing_managed.claim:
             raise OSError("disk unavailable")
-        return reap_if_finished(managed, finished)
+        return reap_if_finished(managed, finished, trust_store=trust_store)
 
     monkeypatch.setattr(ManagedWorktree, "reap_if_finished", fail_first)
 
@@ -284,11 +290,16 @@ def test_a_reap_that_fails_once_is_retried(
     reap_if_finished = ManagedWorktree.reap_if_finished
     attempts: list[int] = []
 
-    def fail_once(target: ManagedWorktree, finished: SessionFinished) -> object:
+    def fail_once(
+        target: ManagedWorktree,
+        finished: SessionFinished,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
+    ) -> object:
         attempts.append(1)
         if len(attempts) == 1:
             raise OSError("index.lock exists")
-        return reap_if_finished(target, finished)
+        return reap_if_finished(target, finished, trust_store=trust_store)
 
     monkeypatch.setattr(ManagedWorktree, "reap_if_finished", fail_once)
 
@@ -309,7 +320,12 @@ def test_retries_stop_after_the_last_delay(
     worktree, _ = _managed_worktree(tmp_path, "broken")
     attempts: list[int] = []
 
-    def always_fail(_target: ManagedWorktree, _finished: SessionFinished) -> object:
+    def always_fail(
+        _target: ManagedWorktree,
+        _finished: SessionFinished,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
+    ) -> object:
         attempts.append(1)
         raise OSError("disk unavailable")
 
@@ -356,3 +372,45 @@ def test_a_session_with_unreadable_metadata_keeps_its_worktree(tmp_path: Path) -
     (session_dir / "meta.json").write_text("{not json")
 
     assert session_finished(session_dir) is False
+
+
+@pytest.mark.parametrize("trust", ["untrusted", "session", "persisted"])
+def test_background_worker_uses_injected_persisted_source_policy(
+    tmp_path: Path, trust: str
+) -> None:
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    root = tmp_path / "source"
+    repo = _init_repo(root)
+    marker = tmp_path / "clean-ran"
+    repo.git.config("filter.cleanup.clean", f"echo clean >> '{marker}'; sed 's/^S://'")
+    repo.git.config("filter.cleanup.smudge", "sed 's/^/S:/'")
+    (root / ".gitattributes").write_text("*.txt filter=cleanup\n")
+    repo.index.add([".gitattributes"])
+    repo.index.commit("filter")
+    store = trusted_folders_manager.for_session()
+    if trust == "persisted":
+        store.add_trusted(root)
+    elif trust == "session":
+        store.trust_for_session(root)
+    # The global singleton's temporary grant must never authorize this worker.
+    trusted_folders_manager.trust_for_session(root)
+    worktree, managed = _managed_worktree(root, "background-filter")
+    (worktree.root / "file.txt").write_text("S:changed\n")
+    marker.unlink(missing_ok=True)
+    service = WorktreeCleanup(
+        session_finished=_archived, retry_delays=(), trust_store=store
+    )
+    service.schedule(worktree.root)
+    assert service.wait_idle(timeout=30)
+    if trust == "persisted":
+        recovery = managed.claim.read_recovery()
+        assert recovery is not None
+        assert marker.exists()
+        assert repo.git.show(f"{recovery.snapshot_ref}:file.txt") == "changed"
+    else:
+        assert worktree.root.exists()
+        assert (worktree.root / "file.txt").read_text() == "S:changed\n"
+        assert managed.claim.read_recovery() is None
+        assert not marker.exists()
+    repo.close()

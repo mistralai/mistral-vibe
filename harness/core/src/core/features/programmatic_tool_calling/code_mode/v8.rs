@@ -41,6 +41,7 @@ use crate::core::features::programmatic_tool_calling::model::ToolState;
 use crate::core::features::programmatic_tool_calling::model::{ToolFunction, ToolKind};
 #[cfg(test)]
 use crate::core::step_protocol::DeterminismContext;
+use crate::core::tools::arguments::{ArgumentsRejection, validate_arguments, validate_json_schema};
 
 static INITIALIZE_V8: Once = Once::new();
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -274,32 +275,46 @@ fn reject_invalid_pending_tools(
     result
 }
 
+/// A program's tool call goes through the same argument check as a direct call
+/// (`validate_arguments`), worded for the program. A schema that does not
+/// compile leaves the call to the tool, as before.
+///
+/// A program can pass any JavaScript value, and the Runtime reads every tool's
+/// arguments as a JSON object, so a non-object value is rejected first, even
+/// when the tool's schema does not say `"type": "object"`.
 fn validate_tool_arguments(tool: &TypeScriptTool, arguments: &Value) -> Option<Value> {
-    let mut schema = serde_json::Map::from_iter([
-        (
-            "$schema".to_string(),
-            json!("http://json-schema.org/draft-07/schema#"),
+    let invalid = |summary: String| {
+        // Recorded like any other tool failure: `name` holds the error code.
+        json!({
+            "name": "invalid_arguments",
+            "message": format!(
+                "Invalid arguments for {}: {summary}",
+                tool.programmatic_name.display_name()
+            ),
+        })
+    };
+    let object = json!({"type": "object"});
+    let (schema, rejection) = match validate_json_schema(&object, arguments) {
+        Err(rejection) => (&object, rejection),
+        Ok(()) => (
+            &tool.input_schema,
+            validate_arguments(tool.runtime_builtin, &tool.input_schema, arguments).err()?,
         ),
-        ("type".to_string(), json!("object")),
-    ]);
-    for keyword in ["properties", "required", "additionalProperties"] {
-        if let Some(value) = tool.input_schema.get(keyword) {
-            schema.insert(keyword.to_string(), value.clone());
+    };
+    let summary = rejection.detail(schema);
+    match rejection {
+        ArgumentsRejection::InvalidSchema(_) => None,
+        ArgumentsRejection::Domain(_) => Some(invalid(summary)),
+        ArgumentsRejection::Schema { error, .. } => {
+            let mut rejection = invalid(summary);
+            rejection["details"] = json!({
+                "type": "jsonSchemaArgumentValidationError",
+                "functionName": tool.name,
+                "argumentsValidationErrors": format_ajv_validation_errors(error),
+            });
+            Some(rejection)
         }
     }
-    let validator = jsonschema::draft7::options()
-        .should_validate_formats(true)
-        .build(&Value::Object(schema))
-        .ok()?;
-    let error = validator.validate(arguments).err()?;
-    let errors = format_ajv_validation_errors(error);
-    Some({
-        json!({
-            "type": "jsonSchemaArgumentValidationError",
-            "functionName": tool.name,
-            "argumentsValidationErrors": errors,
-        })
-    })
 }
 
 fn format_ajv_validation_errors(error: jsonschema::ValidationError<'_>) -> Vec<Value> {
@@ -843,6 +858,17 @@ const RUNTIME_TEMPLATE: &str = r#"
 
   function __serializeError(error) {
     try {
+      if (error instanceof ToolError) {
+        return __serialize({
+          name: error.name,
+          message: error.message,
+          stack: error.stack,
+          code: error.code,
+          tool: error.tool,
+          details: error.details,
+          structuredContent: error.structuredContent,
+        });
+      }
       if (error instanceof Error) {
         return __serialize({ name: error.name, message: error.message, stack: error.stack });
       }
@@ -928,12 +954,73 @@ const RUNTIME_TEMPLATE: &str = r#"
 
   function __deserializeError(error) {
     if (error && typeof error === "object" && typeof error.message === "string") {
-      const replayed = new Error(error.message, { cause: error });
+      const replayed = error.name === "ToolError" && typeof error.code === "string"
+        ? new ToolError(error.message, {
+            code: error.code,
+            tool: error.tool,
+            details: error.details,
+            structuredContent: error.structuredContent,
+          })
+        : new Error(error.message, { cause: error });
       replayed.name = typeof error.name === "string" ? error.name : "Error";
       if (typeof error.stack === "string") replayed.stack = error.stack;
       return replayed;
     }
     return error;
+  }
+
+  // Every failed tool call rejects with a ToolError: `message` is readable,
+  // `code` is the stable error code, and `tool` names the called function.
+  // All fields are enumerable, so a returned or logged ToolError keeps them.
+  class ToolError extends Error {
+    constructor(message, options) {
+      super(message);
+      Object.defineProperty(this, "message", {
+        value: message,
+        writable: true,
+        configurable: true,
+        enumerable: true,
+      });
+      this.name = "ToolError";
+      this.code = options.code;
+      this.tool = options.tool;
+      if (options.details !== undefined && options.details !== null) this.details = options.details;
+      if (options.structuredContent !== undefined) this.structuredContent = options.structuredContent;
+    }
+  }
+  Object.defineProperty(globalThis, "ToolError", {
+    value: ToolError,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+
+  // A recorded rejection stores the error code in `name`. A checkpoint from
+  // before ToolError may hold a raw argument validation report without a
+  // `message`; replay rejects with it unchanged, as the program first saw it.
+  function __toolError(rejection, tool) {
+    if (rejection && typeof rejection === "object" && rejection.type === "jsonSchemaArgumentValidationError"
+      && typeof rejection.message !== "string") {
+      return rejection;
+    }
+    const record = rejection && typeof rejection === "object" ? rejection : {};
+    const code = typeof record.name === "string" ? record.name : "tool_error";
+    let message = record.message;
+    if (typeof message !== "string") {
+      let serialized;
+      try {
+        serialized = __OriginalJSONStringify(rejection);
+      } catch (_) {
+        serialized = String(rejection);
+      }
+      message = tool + " failed: " + serialized;
+    }
+    return new ToolError(message, {
+      code,
+      tool,
+      details: record.details,
+      structuredContent: record.structuredContent,
+    });
   }
 
   function __canonical(value) {
@@ -1056,7 +1143,7 @@ const RUNTIME_TEMPLATE: &str = r#"
     });
   }
 
-  function __callTool(name, argsInput) {
+  function __callTool(name, displayName, argsInput) {
     if (__stepDepth > 0) {
       return __OriginalPromiseReject(new Error(
         "Tool calls are not allowed inside step(). Call tools before or after step()."));
@@ -1080,7 +1167,7 @@ const RUNTIME_TEMPLATE: &str = r#"
         __index += 1;
         __replayed += 1;
         if (lookup.state.type === "resolved_tool") return __OriginalPromiseResolve(lookup.state.result);
-        return __OriginalPromiseReject(__deserializeError(lookup.state.error));
+        return __OriginalPromiseReject(__toolError(lookup.state.error, displayName));
       }
       if (lookup.type === "mismatch") __diverged = true;
     }
@@ -1203,7 +1290,8 @@ const RUNTIME_TEMPLATE: &str = r#"
     const namespace = binding.namespace;
     const functionName = binding.function_name;
     if (!tools[namespace]) tools[namespace] = {};
-    tools[namespace][functionName] = (args) => __callTool(binding.runtime_name, args);
+    const displayName = "tools." + namespace + "." + functionName;
+    tools[namespace][functionName] = (args) => __callTool(binding.runtime_name, displayName, args);
   }
   for (const namespace of Object.keys(tools)) Object.freeze(tools[namespace]);
   Object.freeze(tools);
@@ -1448,6 +1536,7 @@ const RUNTIME_TEMPLATE: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::tools::external::RuntimeBuiltinToolName;
 
     fn build_request<'a>(
         partial_evaluation: &'a PartialEvaluation,
@@ -1515,6 +1604,7 @@ mod tests {
             description: String::new(),
             input_schema: json!({"type": "object"}),
             output_schema: None,
+            runtime_builtin: None,
         }
     }
 
@@ -2645,6 +2735,184 @@ async function main() {
     }
 
     #[test]
+    fn tool_failures_reject_with_tool_error_instances() {
+        let source = r#"
+async function main() {
+  try {
+    await tools.test.failure({ value: 1 });
+    return "unreachable";
+  } catch (error) {
+    return {
+      isToolError: error instanceof ToolError,
+      isError: error instanceof Error,
+      name: error.name,
+      code: error.code,
+      tool: error.tool,
+      message: error.message,
+      details: error.details,
+    };
+  }
+}
+"#;
+        let mut state = pending(run(&partial(source), &[tool("failure")], "run"));
+        let ToolState::Pending { kind, id, function } = state.tool_state.remove(0) else {
+            panic!("expected a pending tool");
+        };
+        state.tool_state.push(ToolState::Rejected {
+            kind,
+            id,
+            function,
+            error: json!({
+                "name": "mcp_tool_execution_failed",
+                "message": "upstream timed out",
+                "details": {"server": "search"},
+            }),
+            content: Vec::new(),
+        });
+
+        let TypeScriptRunResult::CodeResult {
+            result: CodeResult::Success { value },
+            ..
+        } = run(&state, &[tool("failure")], "run")
+        else {
+            panic!("expected the program to catch the tool failure");
+        };
+        assert_eq!(
+            value,
+            json!({
+                "isToolError": true,
+                "isError": true,
+                "name": "ToolError",
+                "code": "mcp_tool_execution_failed",
+                "tool": "tools.test.failure",
+                "message": "upstream timed out",
+                "details": {"server": "search"},
+            })
+        );
+    }
+
+    #[test]
+    fn returned_tool_errors_keep_their_fields() {
+        let source = r#"
+async function main() {
+  const [result] = await Promise.allSettled([tools.test.failure({ value: 1 })]);
+  return result;
+}
+"#;
+        let mut state = pending(run(&partial(source), &[tool("failure")], "run"));
+        let ToolState::Pending { kind, id, function } = state.tool_state.remove(0) else {
+            panic!("expected a pending tool");
+        };
+        state.tool_state.push(ToolState::Rejected {
+            kind,
+            id,
+            function,
+            error: json!({"name": "tool_failed", "message": "disk full"}),
+            content: Vec::new(),
+        });
+
+        let TypeScriptRunResult::CodeResult {
+            result: CodeResult::Success { value },
+            ..
+        } = run(&state, &[tool("failure")], "run")
+        else {
+            panic!("expected the program to return the settled result");
+        };
+        assert_eq!(
+            value,
+            json!({
+                "status": "rejected",
+                "reason": {
+                    "message": "disk full",
+                    "name": "ToolError",
+                    "code": "tool_failed",
+                    "tool": "tools.test.failure",
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn uncaught_tool_failures_keep_their_code() {
+        let source = r#"
+async function main() {
+  await tools.test.failure({ value: 1 });
+}
+"#;
+        let mut state = pending(run(&partial(source), &[tool("failure")], "run"));
+        let ToolState::Pending { kind, id, function } = state.tool_state.remove(0) else {
+            panic!("expected a pending tool");
+        };
+        state.tool_state.push(ToolState::Rejected {
+            kind,
+            id,
+            function,
+            error: json!({
+                "name": "permission_denied",
+                "message": "denied by policy",
+                "structuredContent": {"policy": "read-only"},
+            }),
+            content: Vec::new(),
+        });
+
+        let TypeScriptRunResult::CodeResult {
+            result: CodeResult::Error { error },
+            ..
+        } = run(&state, &[tool("failure")], "run")
+        else {
+            panic!("expected an uncaught tool failure");
+        };
+        assert_eq!(error["name"], "ToolError");
+        assert_eq!(error["code"], "permission_denied");
+        assert_eq!(error["tool"], "tools.test.failure");
+        assert_eq!(error["message"], "denied by policy");
+        assert_eq!(error["structuredContent"], json!({"policy": "read-only"}));
+    }
+
+    /// *Prepare*: A checkpoint from before ToolError, whose call failed argument validation.
+    /// *Do*: Replay the program that reads the stored validation report.
+    /// *Assert*: The program sees the report it first saw, so the replay does not diverge.
+    #[test]
+    fn replays_an_older_validation_report_unchanged() {
+        let source = r#"
+async function main() {
+  try {
+    await tools.test.failure({ value: 1 });
+  } catch (error) {
+    return { isToolError: error instanceof ToolError, type: error.type };
+  }
+}
+"#;
+        let mut state = pending(run(&partial(source), &[tool("failure")], "run"));
+        let ToolState::Pending { kind, id, function } = state.tool_state.remove(0) else {
+            panic!("expected a pending tool");
+        };
+        state.tool_state.push(ToolState::Rejected {
+            kind,
+            id,
+            function,
+            error: json!({
+                "type": "jsonSchemaArgumentValidationError",
+                "functionName": "failure",
+                "argumentsValidationErrors": [],
+            }),
+            content: Vec::new(),
+        });
+
+        let TypeScriptRunResult::CodeResult {
+            result: CodeResult::Success { value },
+            ..
+        } = run(&state, &[tool("failure")], "run")
+        else {
+            panic!("expected the program to catch the stored report");
+        };
+        assert_eq!(
+            value,
+            json!({"isToolError": false, "type": "jsonSchemaArgumentValidationError"})
+        );
+    }
+
+    #[test]
     fn validates_tool_arguments_before_emitting_external_calls() {
         let source = r#"
 async function main() {
@@ -2669,11 +2937,21 @@ async function main() {
             panic!("expected invalid arguments to fail inside run_typescript");
         };
 
-        assert_eq!(error["type"], "jsonSchemaArgumentValidationError");
-        assert_eq!(error["functionName"], "search");
-        assert_eq!(error["argumentsValidationErrors"][0]["keyword"], "required");
+        assert_eq!(error["name"], "ToolError");
+        assert_eq!(error["code"], "invalid_arguments");
         assert_eq!(
-            error["argumentsValidationErrors"][0]["params"]["missingProperty"],
+            error["message"],
+            "Invalid arguments for tools.test.search: \"query\" is a required property"
+        );
+        let details = &error["details"];
+        assert_eq!(details["type"], "jsonSchemaArgumentValidationError");
+        assert_eq!(details["functionName"], "search");
+        assert_eq!(
+            details["argumentsValidationErrors"][0]["keyword"],
+            "required"
+        );
+        assert_eq!(
+            details["argumentsValidationErrors"][0]["params"]["missingProperty"],
             "query"
         );
         assert!(matches!(
@@ -2682,6 +2960,71 @@ async function main() {
                 kind: ToolKind::External,
                 ..
             }]
+        ));
+    }
+
+    ///
+    /// *Prepare*: The bash tool as Core gives it to programs, under a Host maximum of 300 s.
+    /// *Do*: Run a program that calls it with `timeout_seconds` 301, then one with 300.
+    /// *Assert*: 301 is rejected inside `run_typescript`, naming the maximum, before any
+    /// external call; 300 becomes a pending call.
+    ///
+    #[test]
+    fn a_program_bash_call_above_the_host_maximum_is_rejected() {
+        // Prepare
+        let config = crate::core::testing::config();
+        let max_seconds = config.settings.tools.bash_timeout.unwrap().max_seconds;
+        let tools = crate::core::tools::resolved::ResolvedTools::compile(&config).unwrap();
+        let bash = tools
+            .program_descriptors()
+            .iter()
+            .find(|tool| {
+                tool.programmatic_name.namespace == "file_system"
+                    && tool.programmatic_name.name == "bash"
+            })
+            .unwrap();
+        let call = |seconds: u64| {
+            format!(
+                "async function main() {{\n  return await tools.file_system.bash({{ command: \"ls\", timeout_seconds: {seconds} }});\n}}\n"
+            )
+        };
+
+        // Do
+        let above = run(
+            &partial(&call(max_seconds + 1)),
+            std::slice::from_ref(bash),
+            "above",
+        );
+        let at = run(
+            &partial(&call(max_seconds)),
+            std::slice::from_ref(bash),
+            "at",
+        );
+
+        // Assert
+        let TypeScriptRunResult::CodeResult {
+            result: CodeResult::Error { error },
+            tool_state,
+            ..
+        } = above
+        else {
+            panic!("expected a timeout above the maximum to fail inside run_typescript");
+        };
+        assert_eq!(error["code"], "invalid_arguments");
+        let details = &error["details"];
+        assert_eq!(details["type"], "jsonSchemaArgumentValidationError");
+        assert_eq!(
+            details["argumentsValidationErrors"][0]["keyword"],
+            "maximum"
+        );
+        assert!(matches!(
+            tool_state.as_slice(),
+            [ToolState::Rejected { .. }]
+        ));
+        let partial_evaluation = pending(at);
+        assert!(matches!(
+            partial_evaluation.tool_state.as_slice(),
+            [ToolState::Pending { .. }]
         ));
     }
 
@@ -2711,7 +3054,9 @@ async function main() {
         else {
             panic!("expected invalid arguments to fail inside run_typescript");
         };
-        let errors = error["argumentsValidationErrors"].as_array().unwrap();
+        let errors = error["details"]["argumentsValidationErrors"]
+            .as_array()
+            .unwrap();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0]["keyword"], "required");
         assert_eq!(errors[0]["params"]["missingProperty"], "limit");
@@ -2729,7 +3074,11 @@ async function main() {
         else {
             panic!("expected minLength validation to fail inside run_typescript");
         };
-        let error = &error["argumentsValidationErrors"][0];
+        assert_eq!(
+            error["message"],
+            "Invalid arguments for tools.test.search: at /query: \"\" is shorter than 1 character"
+        );
+        let error = &error["details"]["argumentsValidationErrors"][0];
         assert_eq!(error["keyword"], "minLength");
         assert_eq!(error["params"]["limit"], 1);
         assert_eq!(error["message"], "must NOT have fewer than 1 characters");
@@ -2759,10 +3108,45 @@ async function main() {
         else {
             panic!("expected non-object arguments to fail validation");
         };
-        let error = &error["argumentsValidationErrors"][0];
+        assert_eq!(
+            error["message"],
+            "Invalid arguments for tools.test.search: \"hello\" is not of type \"object\""
+        );
+        let error = &error["details"]["argumentsValidationErrors"][0];
         assert_eq!(error["keyword"], "type");
         assert_eq!(error["params"]["type"], "object");
         assert_eq!(error["message"], "must be object");
+        assert!(matches!(
+            tool_state.as_slice(),
+            [ToolState::Rejected { .. }]
+        ));
+    }
+
+    #[test]
+    fn non_object_tool_arguments_are_rejected_without_an_object_schema() {
+        let source = r#"
+async function main() {
+  return await tools.test.echo("hello");
+}
+"#;
+        let echo = tool_with_schema("echo", json!({}));
+
+        let TypeScriptRunResult::CodeResult {
+            result: CodeResult::Error { error },
+            tool_state,
+            ..
+        } = run(&partial(source), &[echo], "run")
+        else {
+            panic!("expected non-object arguments to fail validation");
+        };
+        assert_eq!(
+            error["message"],
+            "Invalid arguments for tools.test.echo: \"hello\" is not of type \"object\""
+        );
+        assert_eq!(
+            error["details"]["argumentsValidationErrors"][0]["keyword"],
+            "type"
+        );
         assert!(matches!(
             tool_state.as_slice(),
             [ToolState::Rejected { .. }]
@@ -2795,13 +3179,12 @@ async function main() {
         };
 
         assert_eq!(
-            error["argumentsValidationErrors"][0]["keyword"],
-            "additionalProperties"
+            error["message"],
+            "Invalid arguments for tools.test.search: Additional properties are not allowed ('max_results' was unexpected). Allowed fields: query."
         );
-        assert_eq!(
-            error["argumentsValidationErrors"][0]["params"]["additionalProperty"],
-            "max_results"
-        );
+        let errors = &error["details"]["argumentsValidationErrors"];
+        assert_eq!(errors[0]["keyword"], "additionalProperties");
+        assert_eq!(errors[0]["params"]["additionalProperty"], "max_results");
     }
 
     #[test]
@@ -2812,7 +3195,15 @@ async function main() {
     await tools.test.search({});
     return "unexpected";
   } catch (error) {
-    return error.type;
+    return {
+      isToolError: error instanceof ToolError,
+      isError: error instanceof Error,
+      name: error.name,
+      code: error.code,
+      tool: error.tool,
+      message: error.message,
+      type: error.details.type,
+    };
   }
 }
 "#;
@@ -2831,8 +3222,89 @@ async function main() {
                 result: CodeResult::Success { value },
                 tool_state,
                 ..
-            } if value == json!("jsonSchemaArgumentValidationError")
+            } if value == json!({
+                "isToolError": true,
+                "isError": true,
+                "name": "ToolError",
+                "code": "invalid_arguments",
+                "tool": "tools.test.search",
+                "message": "Invalid arguments for tools.test.search: \"query\" is a required property",
+                "type": "jsonSchemaArgumentValidationError",
+            })
                 && matches!(tool_state.as_slice(), [ToolState::Rejected { .. }])
+        ));
+    }
+
+    #[test]
+    fn a_built_in_tools_worded_schema_error_reaches_the_program_as_is() {
+        let source = r#"
+async function main() {
+  try {
+    await tools.test.spawn({ name: "a/b", message: "hi" });
+    return "unexpected";
+  } catch (error) {
+    return { code: error.code, message: error.message };
+  }
+}
+"#;
+        let spawn = TypeScriptTool {
+            runtime_builtin: Some(RuntimeBuiltinToolName::SubagentSpawn),
+            ..tool_with_schema(
+                "spawn",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "pattern": "^(?!\\.{1,2}$)[^/]+$"},
+                        "message": {"type": "string"},
+                    },
+                }),
+            )
+        };
+
+        assert!(matches!(
+            run(&partial(source), &[spawn], "run"),
+            TypeScriptRunResult::CodeResult {
+                result: CodeResult::Success { value },
+                ..
+            } if value == json!({
+                "code": "invalid_arguments",
+                "message": "Invalid arguments for tools.test.spawn: at /name: \"a/b\" is not a valid \
+                    name: use one path segment, without `/`, other than `.` or `..`",
+            })
+        ));
+    }
+
+    #[test]
+    fn a_program_call_is_checked_against_the_full_schema() {
+        let source = r#"
+async function main() {
+  try {
+    await tools.test.pick({ count: "two" });
+    return "unexpected";
+  } catch (error) {
+    return { code: error.code, message: error.message };
+  }
+}
+"#;
+        // The reference into `definitions` is followed.
+        let pick = tool_with_schema(
+            "pick",
+            json!({
+                "type": "object",
+                "properties": {"count": {"$ref": "#/definitions/count"}},
+                "definitions": {"count": {"type": "integer"}},
+            }),
+        );
+
+        assert!(matches!(
+            run(&partial(source), &[pick], "run"),
+            TypeScriptRunResult::CodeResult {
+                result: CodeResult::Success { value },
+                ..
+            } if value == json!({
+                "code": "invalid_arguments",
+                "message": "Invalid arguments for tools.test.pick: at /count: \"two\" is not of type \"integer\"",
+            })
         ));
     }
 

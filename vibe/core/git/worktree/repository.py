@@ -13,7 +13,17 @@ from typing import Any
 from uuid import uuid4
 
 from vibe.core.git.errors import GitError
-from vibe.core.git.repo import GitRepo, GitStatus, RepoPaths, _git_python, sanitized_git
+from vibe.core.git.repo import (
+    GitRepo,
+    GitStatus,
+    RepoPaths,
+    _git_python,
+    _repository_filter_overrides,
+    has_indexed_submodules,
+    repository_is_trusted,
+    sanitized_git,
+    untrusted_status_options,
+)
 from vibe.core.git.worktree.naming import (
     worktree_name_from_text,
     worktree_name_with_suffix,
@@ -32,6 +42,7 @@ from vibe.core.git.worktree.record import (
     worktree_prune_lock,
 )
 from vibe.core.paths import WORKTREES_DIR
+from vibe.core.trusted_folders import TrustedFoldersManager, trusted_folders_manager
 from vibe.core.utils.slug import create_slug
 from vibe.observability.logging import logger
 
@@ -93,6 +104,9 @@ class PreparedWorktree:
     branch_created: bool
     pending_hold: PendingSessionHold | None = None
     source_had_uncommitted_changes: bool = False
+    trust_store: TrustedFoldersManager | None = field(
+        default=None, compare=False, repr=False
+    )
 
     def inspect_for_cleanup(self) -> WorktreeCleanupState:
         """Inspect worktree state relative to the session-start HEAD.
@@ -103,9 +117,15 @@ class PreparedWorktree:
         git = _git_python()
         try:
             repo = git.repo(self.root)
+            options = untrusted_status_options(
+                repo, self.trust_store, trust_root=self.repo_root
+            )
+            has_ignored_submodules = bool(
+                options and has_indexed_submodules(repo, base_commit=self.base_commit)
+            )
             status_lines = (
-                _unhooked(repo)
-                .status("--porcelain", "--untracked-files=all")
+                _unhooked(repo, trust_store=self.trust_store, trust_root=self.repo_root)
+                .status("--porcelain", "--untracked-files=all", *options)
                 .splitlines()
             )
             new_commit_count = int(
@@ -114,14 +134,14 @@ class PreparedWorktree:
         except (
             git.invalid_git_repository_error,
             git.git_command_error,
+            GitError,
             ValueError,
         ) as e:
             raise WorktreeError(f"Failed to inspect worktree {self.name!r}: {e}") from e
 
         return WorktreeCleanupState(
-            has_uncommitted_changes=any(
-                not line.startswith("??") for line in status_lines
-            ),
+            has_uncommitted_changes=has_ignored_submodules
+            or any(not line.startswith("??") for line in status_lines),
             has_untracked_files=any(line.startswith("??") for line in status_lines),
             new_commit_count=new_commit_count,
         )
@@ -146,13 +166,31 @@ class PreparedWorktree:
         ref = f"{SNAPSHOT_REF_PREFIX}/{self.name}"
         try:
             repo = git.repo(self.root)
+            if not repository_is_trusted(
+                repo, self.trust_store, trust_root=self.repo_root
+            ):
+                if has_indexed_submodules(repo, base_commit=self.base_commit):
+                    raise WorktreeError(
+                        "Cannot safely snapshot untrusted submodule contents; keep the worktree."
+                    )
+                if _repository_filter_overrides(repo):
+                    # Disabled clean filters can leave already-smudged bytes in
+                    # the snapshot; a later trusted restore would smudge again.
+                    raise WorktreeError(
+                        "Cannot safely snapshot contents with untrusted Git filters; keep the worktree."
+                    )
+            guarded = partial(
+                _unhooked, trust_store=self.trust_store, trust_root=self.repo_root
+            )
             index = Path(repo.git.rev_parse("--absolute-git-dir").strip())
             with repo.git.custom_environment(
                 GIT_INDEX_FILE=str(index / "index.vibe-snapshot")
             ):
-                _unhooked(repo).read_tree("HEAD")
-                _unhooked(repo).add("--all", ".")
-                tree = repo.git.write_tree().strip()
+                guarded(repo).read_tree("HEAD")
+                guarded(repo).add("--all", ".")
+                # Writing a tree can refresh index entries and invoke clean
+                # filters too, even after the guarded add above.
+                tree = guarded(repo).write_tree().strip()
                 head = repo.git.rev_parse("HEAD").strip()
                 commit = repo.git.commit_tree(
                     tree,
@@ -161,8 +199,10 @@ class PreparedWorktree:
                     "-m",
                     f"vibe: state of worktree {self.name} before it was removed",
                 ).strip()
-            _unhooked(repo).update_ref(ref, commit)
-        except (git.invalid_git_repository_error, git.git_command_error) as e:
+            guarded(repo).update_ref(ref, commit)
+        except WorktreeError:
+            raise
+        except (git.invalid_git_repository_error, git.git_command_error, GitError) as e:
             raise WorktreeError(
                 f"Failed to snapshot worktree {self.name!r}: {e}"
             ) from e
@@ -174,8 +214,10 @@ class PreparedWorktree:
             repo = git.repo(self.repo_root)
             repo.git.worktree("remove", "--force", str(self.root))
             if delete_branch:
-                _unhooked(repo).branch("-D", self.branch)
-        except (git.invalid_git_repository_error, git.git_command_error) as e:
+                _unhooked(
+                    repo, trust_store=self.trust_store, trust_root=self.repo_root
+                ).branch("-D", self.branch)
+        except (git.invalid_git_repository_error, git.git_command_error, GitError) as e:
             raise WorktreeError(f"Failed to remove worktree {self.name!r}: {e}") from e
 
     # Callers that own the process working directory must invoke this before
@@ -274,9 +316,17 @@ class WorktreeRepository:
     @classmethod
     @contextmanager
     def open(
-        cls, base: Path, *, repository_root: Path | None = None
+        cls,
+        base: Path,
+        *,
+        repository_root: Path | None = None,
+        trust_store: TrustedFoldersManager | None = None,
     ) -> Iterator[WorktreeRepository]:
-        git = GitRepo.open(base if repository_root is None else repository_root)
+        git = GitRepo.open(
+            base if repository_root is None else repository_root,
+            trust_store=trust_store,
+            trust_root=repository_root,
+        )
         try:
             yield cls(git, base)
         finally:
@@ -431,7 +481,11 @@ class WorktreeRepository:
         # ``self._git`` may deliberately be opened at the primary checkout while
         # ``_base`` identifies a linked source worktree. HEAD and dirty state are
         # worktree-local, so inspect the source path in its own right.
-        with GitRepo.open(self._base) as source:
+        with GitRepo.open(
+            self._base,
+            trust_store=self._git.trust_store,
+            trust_root=self._paths.repo_root,
+        ) as source:
             source_head = source.head_commit()
             source_had_uncommitted_changes = source._has_uncommitted_changes()
         return replace(
@@ -709,6 +763,7 @@ class WorktreeRepository:
             created=created,
             branch_created=branch_created,
             pending_hold=pending_hold,
+            trust_store=self._git.trust_store,
         )
 
     def _claim_auto_name(self, base_name: str) -> tuple[str, str, Path]:
@@ -891,13 +946,18 @@ class ManagedWorktree:
 
     @classmethod
     def prune(
-        cls, limit: int, session_finished: Callable[[Path], bool] | None = None
+        cls,
+        limit: int,
+        session_finished: Callable[[Path], bool] | None = None,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
     ) -> int:
         """Snapshot and remove the oldest inactive managed worktrees over the limit.
 
         Worktrees whose sessions are all finished do not count: the cleanup
         worker reaps them outside this lock, which every session start needs.
         """
+        trust_store = trust_store or trusted_folders_manager.for_session()
         if limit < 0:
             raise ValueError("limit must be non-negative")
 
@@ -924,7 +984,9 @@ class ManagedWorktree:
                 if claim.is_starting():
                     continue
                 try:
-                    release = cls(claim=claim)._prune_with_snapshot()
+                    release = cls(claim=claim)._prune_with_snapshot(
+                        trust_store=trust_store
+                    )
                 except (GitError, OSError) as exc:
                     logger.warning(
                         "Keeping managed worktree %s/%s: retention cleanup failed",
@@ -1006,14 +1068,20 @@ class ManagedWorktree:
     def forget(self) -> None:
         self.claim.delete()
 
-    def release(self, session_id: str | None = None) -> WorktreeRelease:
+    def release(
+        self,
+        session_id: str | None = None,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
+    ) -> WorktreeRelease:
+        trust_store = trust_store or trusted_folders_manager.for_session()
         record = self.claim.read()
         if record is None:
             if (
                 session_id is None
                 and (recovery := self.claim.read_recovery()) is not None
             ):
-                self._discard_retained_snapshot(recovery)
+                self._discard_retained_snapshot(recovery, trust_store=trust_store)
                 return WorktreeRelease(
                     WorktreeReleaseOutcome.REMOVED, branch=recovery.branch
                 )
@@ -1037,15 +1105,21 @@ class ManagedWorktree:
                 WorktreeReleaseOutcome.KEPT_IN_USE, branch=record.branch
             )
 
-        return self._release_unheld(record)
+        return self._release_unheld(record, trust_store=trust_store)
 
-    def probe_release(self, session_id: str | None = None) -> WorktreeRelease:
+    def probe_release(
+        self,
+        session_id: str | None = None,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
+    ) -> WorktreeRelease:
         """The outcome a release would have, with no side effect at all.
 
         The exit prompt's progress line asks before it commits, like Python's
         inspect-then-remove: "removed" here means a removal now would succeed,
         not that anything was removed. Holders are discounted, never released.
         """
+        trust_store = trust_store or trusted_folders_manager.for_session()
         record = self.claim.read()
         if record is None:
             return WorktreeRelease(WorktreeReleaseOutcome.KEPT_UNMANAGED)
@@ -1073,6 +1147,7 @@ class ManagedWorktree:
             base_commit=record.base_commit,
             created=True,
             branch_created=record.branch_created,
+            trust_store=trust_store,
         )
         state = prepared.inspect_for_cleanup()
         if not state.is_clean:
@@ -1087,7 +1162,11 @@ class ManagedWorktree:
         )
 
     def force_release(
-        self, session_id: str | None = None, delete_branch: bool | None = None
+        self,
+        session_id: str | None = None,
+        delete_branch: bool | None = None,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
     ) -> WorktreeRelease:
         """Remove a managed worktree the caller confirmed discarding.
 
@@ -1096,6 +1175,7 @@ class ManagedWorktree:
         the worktree when Vibe created it, unless the caller answered the
         attached-branch question differently.
         """
+        trust_store = trust_store or trusted_folders_manager.for_session()
         record = self.claim.read()
         if record is None:
             return WorktreeRelease(WorktreeReleaseOutcome.KEPT_UNMANAGED)
@@ -1111,10 +1191,16 @@ class ManagedWorktree:
             current = self.claim.read()
             if current is None or current.claimed_at != record.claimed_at:
                 return WorktreeRelease(WorktreeReleaseOutcome.KEPT_UNMANAGED)
-            return self._force_remove(current, delete_branch=delete_branch)
+            return self._force_remove(
+                current, delete_branch=delete_branch, trust_store=trust_store
+            )
 
     def _force_remove(
-        self, record: WorktreeRecord, *, delete_branch: bool | None
+        self,
+        record: WorktreeRecord,
+        *,
+        delete_branch: bool | None,
+        trust_store: TrustedFoldersManager | None = None,
     ) -> WorktreeRelease:
         root = self.root
         if not root.is_dir():
@@ -1131,6 +1217,7 @@ class ManagedWorktree:
             base_commit=record.base_commit,
             created=True,
             branch_created=record.branch_created,
+            trust_store=trust_store,
         )
         resolved_delete_branch = (
             record.branch_created if delete_branch is None else delete_branch
@@ -1154,12 +1241,16 @@ class ManagedWorktree:
         )
 
     def reap_if_finished(
-        self, session_finished: Callable[[Path], bool]
+        self,
+        session_finished: Callable[[Path], bool],
+        *,
+        trust_store: TrustedFoldersManager | None = None,
     ) -> WorktreeRelease | None:
         """Snapshot and remove this worktree once every session that worked in
         it is finished, which the caller reads from each session's saved state.
         None when one of them is not.
         """
+        trust_store = trust_store or trusted_folders_manager.for_session()
         record = self.claim.read()
         if record is None or not _all_finished(record, session_finished):
             return None
@@ -1168,31 +1259,48 @@ class ManagedWorktree:
                 WorktreeReleaseOutcome.KEPT_IN_USE, branch=record.branch
             )
         return self._release_unheld(
-            record, snapshot_before_removal=True, session_finished=session_finished
+            record,
+            snapshot_before_removal=True,
+            session_finished=session_finished,
+            trust_store=trust_store,
         )
 
-    def _discard_retained_snapshot(self, recovery: WorktreeRecoveryRecord) -> None:
+    def _discard_retained_snapshot(
+        self,
+        recovery: WorktreeRecoveryRecord,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
+    ) -> None:
         self.claim.delete_recovery()
         git = _git_python()
         try:
             with git.repo(recovery.repo_root) as repository:
-                _unhooked(repository).update_ref("-d", recovery.snapshot_ref)
+                _unhooked(
+                    repository, trust_store=trust_store, trust_root=recovery.repo_root
+                ).update_ref("-d", recovery.snapshot_ref)
         except (
             git.invalid_git_repository_error,
             git.no_such_path_error,
             git.git_command_error,
+            GitError,
         ) as exc:
             logger.warning(
                 "Failed to delete retained snapshot %s: %s", recovery.snapshot_ref, exc
             )
 
-    def _prune_with_snapshot(self) -> WorktreeRelease:
+    def _prune_with_snapshot(
+        self, *, trust_store: TrustedFoldersManager | None = None
+    ) -> WorktreeRelease:
         record = self.claim.read()
         if record is None:
             return WorktreeRelease(WorktreeReleaseOutcome.KEPT_UNMANAGED)
-        return self._release_unheld(record, snapshot_before_removal=True)
+        return self._release_unheld(
+            record, snapshot_before_removal=True, trust_store=trust_store
+        )
 
-    def restore(self, cwd: Path) -> bool:
+    def restore(
+        self, cwd: Path, *, trust_store: TrustedFoldersManager | None = None
+    ) -> bool:
         requested = cwd.expanduser().resolve()
         root = self.root
         try:
@@ -1203,9 +1311,15 @@ class ManagedWorktree:
             ) from exc
 
         with worktree_prune_lock():
-            return self._restore_locked(requested, root)
+            return self._restore_locked(requested, root, trust_store=trust_store)
 
-    def _restore_locked(self, requested: Path, root: Path) -> bool:
+    def _restore_locked(
+        self,
+        requested: Path,
+        root: Path,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
+    ) -> bool:
         recovery = self.claim.read_recovery()
         if recovery is None:
             return False
@@ -1227,7 +1341,9 @@ class ManagedWorktree:
             record = self.claim.read()
             if record is None or record.base_commit is None:
                 raise WorktreeError(f"Cannot restore occupied worktree path {root}.")
-            with WorktreeRepository.open(record.repo_root) as repository:
+            with WorktreeRepository.open(
+                record.repo_root, trust_store=trust_store
+            ) as repository:
                 _validate_existing_worktree(
                     root, record.branch, repository._paths.common_git_dir
                 )
@@ -1235,7 +1351,9 @@ class ManagedWorktree:
             self.claim.delete_recovery()
             return False
 
-        with WorktreeRepository.open(recovery.repo_root) as repository:
+        with WorktreeRepository.open(
+            recovery.repo_root, trust_store=trust_store
+        ) as repository:
             repository.restore(self.claim, recovery)
         try:
             _ensure_saved_directory(requested)
@@ -1253,6 +1371,7 @@ class ManagedWorktree:
         record: WorktreeRecord,
         *,
         snapshot_before_removal: bool = False,
+        trust_store: TrustedFoldersManager | None = None,
         session_finished: Callable[[Path], bool] | None = None,
     ) -> WorktreeRelease:
         if not self.root.is_dir() and self.claim.is_starting():
@@ -1276,6 +1395,7 @@ class ManagedWorktree:
                 current,
                 snapshot_before_removal=snapshot_before_removal,
                 session_finished=session_finished,
+                trust_store=trust_store,
             )
 
     def _remove_unheld(
@@ -1283,6 +1403,7 @@ class ManagedWorktree:
         record: WorktreeRecord,
         *,
         snapshot_before_removal: bool,
+        trust_store: TrustedFoldersManager | None = None,
         session_finished: Callable[[Path], bool] | None,
     ) -> WorktreeRelease:
         root = self.root
@@ -1292,6 +1413,7 @@ class ManagedWorktree:
                     record.moved_checkout_admin,
                     record.repo_root,
                     record.branch if record.branch_created else None,
+                    trust_store=trust_store,
                 )
             self.claim.delete()
             return WorktreeRelease(WorktreeReleaseOutcome.NOT_FOUND)
@@ -1311,6 +1433,7 @@ class ManagedWorktree:
             base_commit=record.base_commit,
             created=True,
             branch_created=record.branch_created,
+            trust_store=trust_store,
         )
         state = prepared.inspect_for_cleanup()
         snapshot: str | None = None
@@ -1367,7 +1490,10 @@ class ManagedWorktree:
                 self.claim.delete_recovery()
             raise
         _forget_checkout(
-            admin, record.repo_root, record.branch if record.branch_created else None
+            admin,
+            prepared.repo_root,
+            prepared.branch if prepared.branch_created else None,
+            trust_store=prepared.trust_store,
         )
         self.claim.delete()
         _delete_trash_entry(trash)
@@ -1423,7 +1549,13 @@ def _move_to_trash(claim: WorktreeClaim, root: Path) -> Path:
     return trash
 
 
-def _forget_checkout(admin: Path, repo_root: Path, branch: str | None) -> None:
+def _forget_checkout(
+    admin: Path,
+    repo_root: Path,
+    branch: str | None,
+    *,
+    trust_store: TrustedFoldersManager | None = None,
+) -> None:
     """What `git worktree remove` does once the checkout itself is gone."""
     with suppress(FileNotFoundError):
         shutil.rmtree(admin)
@@ -1433,8 +1565,10 @@ def _forget_checkout(admin: Path, repo_root: Path, branch: str | None) -> None:
     try:
         with git.repo(repo_root) as repo:
             if branch in (head.name for head in repo.heads):
-                _unhooked(repo).branch("-D", branch)
-    except (git.invalid_git_repository_error, git.git_command_error) as e:
+                _unhooked(repo, trust_store=trust_store, trust_root=repo_root).branch(
+                    "-D", branch
+                )
+    except (git.invalid_git_repository_error, git.git_command_error, GitError) as e:
         raise WorktreeError(f"Failed to delete branch {branch!r}: {e}") from e
 
 
@@ -1467,7 +1601,12 @@ def _auto_worktree_candidates(base_name: str) -> Iterator[str]:
         yield worktree_name_with_suffix(base_name, suffix)
 
 
-def _unhooked(repo: Any) -> Any:
+def _unhooked(
+    repo: Any,
+    *,
+    trust_store: TrustedFoldersManager | None = None,
+    trust_root: Path | None = None,
+) -> Any:
     """This repository's git, with the repository-configured commands and
     hooks disabled.
 
@@ -1488,7 +1627,7 @@ def _unhooked(repo: Any) -> Any:
     Delegates to sanitized_git so the overridden keys have one
     definition.
     """
-    return sanitized_git(repo)
+    return sanitized_git(repo, trust_store=trust_store, trust_root=trust_root)
 
 
 def _report_checkout_progress(

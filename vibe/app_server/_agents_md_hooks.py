@@ -25,7 +25,7 @@ Adapter instead, between the read file's directory and the open root holding
 it, with the same rendering and dedup. Each of those reads is a round trip to
 the sandbox, so the session remembers which directories it has looked in and
 does not look again, with or without a doc there. A ``write_file`` or
-``search_replace`` on an AGENTS.md makes its directory unchecked again, and a
+``edit`` on an AGENTS.md makes its directory unchecked again, and a
 ``bash`` command whose text names AGENTS.md makes every directory unchecked
 again, so a doc the model writes is found on its next read below it. A doc
 that appears any other way (a script, ``git checkout``, an archive) in a
@@ -70,7 +70,7 @@ _BASH_TOOL_NAME = "file_system.bash"
 # The builtins that write a file, with the argument naming it.
 _WRITE_TOOL_PATH_ARGUMENTS = {
     "file_system.write_file": "path",
-    "file_system.search_replace": "file_path",
+    "file_system.edit": "file_path",
 }
 
 _AGENTS_MD_SECTION = "Contents of {directory}/AGENTS.md (project instructions for this directory):\n\n{content}"

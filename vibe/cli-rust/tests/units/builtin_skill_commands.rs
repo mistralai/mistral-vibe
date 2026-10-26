@@ -74,7 +74,7 @@ fn every_registered_command_is_documented() {
     let documented = documented();
     let missing: Vec<String> = entries(&[])
         .into_iter()
-        .map(|(label, _)| label)
+        .map(|entry| entry.label)
         .filter(|label| {
             parse(label) == Some(label.as_str())
                 && !documented.contains(label)

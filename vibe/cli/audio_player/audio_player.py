@@ -13,8 +13,10 @@ from vibe.cli.audio_player.audio_player_port import (
 )
 from vibe.cli.audio_player.utils import decode_wav
 from vibe.observability.logging import logger
+from vibe.utils.audio import miniaudio_unavailable_message
 
 # miniaudio raises OSError or ImportError on import when no audio driver is available.
+_MA_IMPORT_ERROR: OSError | ImportError | None = None
 try:
     import miniaudio as ma
 
@@ -22,6 +24,7 @@ try:
         from miniaudio import PlaybackDevice
 except (OSError, ImportError) as e:
     logger.warning("miniaudio unavailable, voice disabled: %r", e)
+    _MA_IMPORT_ERROR = e
     ma = None  # type: ignore[assignment]
 
 DEFAULT_BUFFER_MS = 200
@@ -78,9 +81,12 @@ class AudioPlayer:
                 self._stream = None
 
             if not ma:
-                error_message = "miniaudio is not available, audio playback disabled"
+                error_message = miniaudio_unavailable_message(
+                    "miniaudio is not available, audio playback disabled",
+                    _MA_IMPORT_ERROR,
+                )
                 logger.error(error_message)
-                raise AudioBackendUnavailableError(error_message)
+                raise AudioBackendUnavailableError(error_message) from _MA_IMPORT_ERROR
 
             self._guard_audio_output()
 

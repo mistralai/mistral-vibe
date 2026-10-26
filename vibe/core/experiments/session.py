@@ -16,6 +16,7 @@ from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
 from vibe.core.experiments.wait import mark_experiments_eval_failed
 from vibe.core.identity import IdentityResult, fetch_identity
 from vibe.core.identity_cache import IdentityCache
+from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
 from vibe.core.telemetry.send import get_mistral_provider_and_api_key
 from vibe.core.utils import get_platform_id
 from vibe.observability.logging import logger
@@ -60,6 +61,7 @@ async def _fetch_plan_attributes(
     resolve_identity: IdentityResolver | None,
     resolve_whoami: WhoAmIResolver | None,
     harness: ExperimentSurface,
+    experiment_system_prompt_id: str | None = None,
 ) -> tuple[ExperimentAttributes | None, str | None]:
     """Resolve the user-scoped attribute snapshot + user_plan from identity and
     ``/whoami`` (through their caches), independent of the session.
@@ -80,7 +82,11 @@ async def _fetch_plan_attributes(
     if provider_and_key is None:
         if config.get_mistral_provider() is None:
             sentinel = _build_attributes(
-                config, "", launch_context, harness=harness
+                config,
+                "",
+                launch_context,
+                harness=harness,
+                experiment_system_prompt_id=experiment_system_prompt_id,
             ).model_copy(update={"planType": NO_PLAN_DATA, "planName": NO_PLAN_DATA})
             return sentinel, NO_PLAN_DATA
         return None, None
@@ -90,7 +96,7 @@ async def _fetch_plan_attributes(
     identity, whoami = await asyncio.gather(
         _resolve_identity(
             base_url=provider.api_base,
-            api_key=api_key,
+            credentials=ApiKeyPlatformCredentialProvider(provider.api_key_env_var),
             timeout=EXPERIMENT_IDENTITY_TIMEOUT_S,
         ),
         _resolve_whoami(
@@ -111,6 +117,7 @@ async def _fetch_plan_attributes(
         harness=harness,
         identity=identity,
         whoami=whoami,
+        experiment_system_prompt_id=experiment_system_prompt_id,
     )
     return attributes, derive_user_plan(whoami)
 
@@ -124,6 +131,7 @@ async def initialize_experiments(
     harness: ExperimentSurface,
     resolve_identity: IdentityResolver | None = None,
     resolve_whoami: WhoAmIResolver | None = None,
+    experiment_system_prompt_id: str | None = None,
 ) -> tuple[bool, str | None]:
     if not config.enable_telemetry or not config.experiments.enable:
         # The `vibe` launcher reads this cache without the config, so opting out must drop it.
@@ -136,6 +144,7 @@ async def initialize_experiments(
         resolve_identity=resolve_identity,
         resolve_whoami=resolve_whoami,
         harness=harness,
+        experiment_system_prompt_id=experiment_system_prompt_id,
     )
     if attributes is None:
         # Mistral provider present but key missing — tried but failed.
@@ -217,6 +226,7 @@ def _build_attributes(
     harness: ExperimentSurface,
     identity: IdentityResult | None = None,
     whoami: WhoAmIResult | None = None,
+    experiment_system_prompt_id: str | None = None,
 ) -> ExperimentAttributes:
     from vibe.core.config import VibeConfigSchema
 
@@ -244,7 +254,9 @@ def _build_attributes(
         client_version=client_version,
         os=get_platform_id(),
         terminal_emulator=terminal_emulator,
-        custom_system_prompt=config.system_prompt_id != default_prompt_id,
+        # A prompt applied by an experiment (e.g. from the eval cache) is not the user's.
+        custom_system_prompt=config.system_prompt_id
+        not in {default_prompt_id, experiment_system_prompt_id},
         organizationId=organization_id,
         organizationKind=organization_kind,
         workspaceId=workspace_id,

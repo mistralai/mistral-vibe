@@ -93,6 +93,7 @@ from mistralai_vibe_local_harness.vibe._subagents._notifications import (
 )
 from mistralai_vibe_local_harness.vibe._subagents._operations import (
     AgentInput,
+    InterruptInput,
     ListInput,
     MessageInput,
     SpawnInput,
@@ -160,10 +161,12 @@ class SubagentController:
         bindings: Mapping[str | None, ResolvedChildSessionBinding],
         policy_ceiling: ResolvedSubagentPolicyCeiling,
         limits: SubagentLimits,
+        rejected_agent_types: Mapping[str, str] | None = None,
     ) -> None:
         self._runtime = runtime
         self._child_host = child_host
         self._bindings = dict(bindings)
+        self._rejected_agent_types = dict(rejected_agent_types or {})
         self._policy_ceiling = policy_ceiling
         self._limits = limits
         self._graph_lock = asyncio.Lock()
@@ -187,6 +190,7 @@ class SubagentController:
         bindings: Mapping[str | None, ResolvedChildSessionBinding],
         policy_ceiling: ResolvedSubagentPolicyCeiling,
         limits: SubagentLimits | None = None,
+        rejected_agent_types: Mapping[str, str] | None = None,
     ) -> SubagentController:
         def initialize_subagents(state: RuntimeStateV3) -> RuntimeStateV3:
             if isinstance(state.identity, SubagentSessionIdentity):
@@ -240,6 +244,7 @@ class SubagentController:
             bindings=bindings,
             policy_ceiling=policy_ceiling,
             limits=limits or SubagentLimits(),
+            rejected_agent_types=rejected_agent_types,
         )
         # A recovered notification can immediately ask the model for more child
         # work, so install the controller before replaying any queued delivery.
@@ -254,6 +259,8 @@ class SubagentController:
         self,
         bindings: Mapping[str | None, ResolvedChildSessionBinding],
         policy_ceiling: ResolvedSubagentPolicyCeiling,
+        *,
+        rejected_agent_types: Mapping[str, str] | None = None,
     ) -> None:
         # The ceiling is durable state every live child was admitted under.
         # A plugin re-pin must not silently change it, so a drift there is
@@ -264,11 +271,14 @@ class SubagentController:
                     "cannot rebind subagent agent types under a different policy ceiling"
                 )
             self._bindings = dict(bindings)
+            self._rejected_agent_types = dict(rejected_agent_types or {})
 
     async def reconfigure_agent_types(
         self,
         bindings: Mapping[str | None, ResolvedChildSessionBinding],
         policy_ceiling: ResolvedSubagentPolicyCeiling,
+        *,
+        rejected_agent_types: Mapping[str, str] | None = None,
     ) -> None:
         """Apply parent policy and child bindings without exposing mixed digests.
 
@@ -323,6 +333,7 @@ class SubagentController:
                 raise
             self._policy_ceiling = policy_ceiling
             self._bindings = dict(bindings)
+            self._rejected_agent_types = dict(rejected_agent_types or {})
 
     def handles(
         self, action: RustRuntimeBuiltinToolCallAction, *, recovering: bool = False
@@ -798,7 +809,7 @@ class SubagentController:
                 request = MessageInput.model_validate(action.call.arguments)
                 return await self._send(action, request, receipt), {}
             case "agents.interrupt":
-                request = AgentInput.model_validate(action.call.arguments)
+                request = InterruptInput.model_validate(action.call.arguments)
                 return await self._interrupt(action, request, receipt), {}
             # Deprecated: replay-only, see `subagent.wait` above.
             case "subagent.stop":
@@ -847,10 +858,8 @@ class SubagentController:
                     binding = self._bindings.get(request.agent_type)
                     if binding is None:
                         return error_output(
-                            failure(
-                                "subagent_type_not_found",
-                                "Unknown subagent type",
-                                retryable=False,
+                            _unbound_agent_type_failure(
+                                request.agent_type, self._rejected_agent_types
                             )
                         ), {}
                     state = self._subagents()
@@ -1182,7 +1191,7 @@ class SubagentController:
     async def _interrupt(
         self,
         action: RustRuntimeBuiltinToolCallAction,
-        request: AgentInput,
+        request: InterruptInput,
         receipt: SubagentOperationReceipt | None,
     ) -> dict[str, JsonValue]:
         return await self._interrupt_child(
@@ -1190,7 +1199,7 @@ class SubagentController:
             action.action_id,
             request_digest(action),
             receipt,
-            reason="interrupted by parent",
+            reason=request.reason or "interrupted by parent",
         )
 
     async def _interrupt_child(
@@ -1842,6 +1851,21 @@ class UnsafeSubagentRecovery(Exception):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(message)
+
+
+def _unbound_agent_type_failure(
+    agent_type: str | None, rejected_agent_types: Mapping[str, str]
+) -> SubagentFailure:
+    reason = rejected_agent_types.get(agent_type) if agent_type is not None else None
+    if reason is None:
+        return failure(
+            "subagent_type_not_found", "Unknown subagent type", retryable=False
+        )
+    return failure(
+        "subagent_type_rejected",
+        f"Subagent type {agent_type!r} was rejected: {reason}",
+        retryable=False,
+    )
 
 
 def _same_enforced_policy(

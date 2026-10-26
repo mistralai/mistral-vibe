@@ -6,6 +6,7 @@ from pydantic import Field
 
 from vibe.app_server._model import ProtocolModel
 from vibe.config_values import (
+    DEFAULT_THINKING_LEVELS as DEFAULT_THINKING_LEVELS,
     THINKING_LEVELS as THINKING_LEVELS,
     AudioClient,
     SpeechOutputFormat,
@@ -32,7 +33,7 @@ class ModelConfigView(ProtocolModel):
     # The levels the active model offers; defaulted so a client against an
     # older server still renders the five (ADR 0014).
     thinking_levels: list[ThinkingLevel] = Field(
-        default_factory=lambda: list(THINKING_LEVELS)
+        default_factory=lambda: list(DEFAULT_THINKING_LEVELS)
     )
     # Expected delivery of file-backed images; None means the runtime has not
     # advertised a delivery mode. Native model support alone is not a fallback policy.

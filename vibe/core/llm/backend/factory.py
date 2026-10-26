@@ -1,3 +1,17 @@
+"""Vibe's own model backends, for side calls only.
+
+These adapters serve the calls Vibe makes outside an agent Turn: narration,
+the teleport summary, worktree naming, the model availability probe and the
+image describer. The agent's Turns go through the Harness adapters
+(``mistralai_vibe_local_harness.vibe.adapters``), never through here.
+
+Token usage: a reply without usage reads as 0 here, and no caller turns that
+into session accounting. Core never reads this usage; it only reaches traces
+and the image describer's telemetry counts. The completion-config rules (a
+reply without usage fails the call, finish and overflow mapping, the stream
+guard) apply to the Harness adapters, not to these.
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any

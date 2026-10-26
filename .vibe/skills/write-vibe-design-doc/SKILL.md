@@ -30,7 +30,8 @@ the real code path, not on a plausible architecture invented from file names.
 1. Identify the user outcome, affected surfaces, requested deliverable, and
    destination. Default new proposals to `docs/design/<descriptive-slug>.md`.
    Honor response-only or alternate-destination requests without creating a
-   repository artifact.
+   repository artifact. Settle the target surfaces first, following the
+   "Cross-Surface Features" section of `AGENTS.md`.
 2. Collect named product specifications, issues, accepted decisions, and user
    corrections. Treat an explicitly named product source of truth as the target
    authority; use current code and ADRs to explain the starting point.
@@ -55,7 +56,7 @@ state a bounded assumption and continue.
 Trace the production path end to end across every affected boundary, such as:
 
 ```text
-Rust TUI / ACP / client -> app server -> owning port -> runtime/backend
+Rust TUI / Desktop / ACP -> app server -> owning port -> runtime/backend
                             -> effects/persistence -> public projection
 ```
 

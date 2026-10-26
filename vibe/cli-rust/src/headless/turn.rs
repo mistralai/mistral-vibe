@@ -1,11 +1,13 @@
 //! The turn loop: consume notifications until the turn ends, and finalize
 //! the output once it does.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+use super::drive::RunState;
+use super::pre_turn;
 use super::report::compute_session_cost;
 use super::subagents::wait_for_subagents;
 use super::usage::UsageBaseline;
@@ -43,6 +45,7 @@ pub(super) async fn run_turn_loop(
     stop: &Arc<StopRequests>,
     turn_id: &str,
     usage_baseline: &UsageBaseline,
+    state: &Mutex<RunState>,
 ) -> TurnEnd {
     let mut turns = TurnCounter::new(stop.limits().max_turns);
     let mut settled = settled.into_iter();
@@ -92,6 +95,12 @@ pub(super) async fn run_turn_loop(
                 // The outer race picks the stop up, like a SIGTERM.
                 let message = notification.params.get("message").and_then(Value::as_str);
                 stop.abort(message.unwrap_or_default());
+            }
+            // A load that ends after the run started: the export still lists it.
+            notification::WARNING if pre_turn::is_integrations_unavailable(&notification) => {
+                let unavailable =
+                    pre_turn::integrations_unavailable(&output.format(), &[notification]);
+                state.lock().unwrap().warnings.extend(unavailable);
             }
             notification::SESSION_STATS_UPDATED => {
                 // Observe usage for budget enforcement.

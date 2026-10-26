@@ -3,6 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::ChatInput;
+use crate::skill::Skill;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InputMode {
@@ -60,7 +61,7 @@ pub enum ClassifiedInput {
     Prompt { text: String },
 }
 
-pub fn classify(value: &str, skills: &[(String, String)]) -> ClassifiedInput {
+pub fn classify(value: &str, skills: &[Skill]) -> ClassifiedInput {
     if let Some(target) = value
         .strip_prefix('&')
         .filter(|_| crate::commands::has_command("/teleport"))
@@ -79,13 +80,13 @@ pub fn classify(value: &str, skills: &[(String, String)]) -> ClassifiedInput {
     }
     if let Some(rest) = value.strip_prefix('/') {
         let name = rest.split_whitespace().next().unwrap_or_default();
-        if let Some((skill, _)) = skills
+        if let Some(skill) = skills
             .iter()
-            .find(|(skill, _)| skill.eq_ignore_ascii_case(name))
+            .find(|skill| skill.name.eq_ignore_ascii_case(name))
         {
             return ClassifiedInput::Skill {
                 command: value.to_owned(),
-                name: skill.clone(),
+                name: skill.name.clone(),
             };
         }
     }
@@ -129,11 +130,7 @@ pub fn submitted_value(mode: InputMode, text: &str) -> String {
 }
 
 /// In prompt mode, a leading mode character (typed after the text or behind whitespace) is message text.
-pub fn classify_submitted(
-    mode: InputMode,
-    value: &str,
-    skills: &[(String, String)],
-) -> ClassifiedInput {
+pub fn classify_submitted(mode: InputMode, value: &str, skills: &[Skill]) -> ClassifiedInput {
     if literal_prefix(mode, value) {
         // The server still invokes a leading skill, so it keeps its skill telemetry.
         return match classify(value.trim_start(), skills) {
@@ -169,7 +166,10 @@ impl ChatInput {
 
     /// Open a typed mode over empty or fully selected text, or leave it on Backspace at the start.
     pub fn apply_mode_key(&mut self, key: &KeyEvent) -> bool {
-        if let KeyCode::Char(character) = key.code {
+        // Some terminals send Ctrl+H for Backspace.
+        let ctrl_h =
+            key.code == KeyCode::Char('h') && key.modifiers.contains(KeyModifiers::CONTROL);
+        if let (KeyCode::Char(character), false) = (key.code, ctrl_h) {
             let modified = key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
@@ -183,7 +183,10 @@ impl ChatInput {
         }
         let at_start = self.cursor == 0
             && crate::chat_input::selection_range(&self.input, self.cursor, self.anchor).is_none();
-        if key.code != KeyCode::Backspace || self.mode == InputMode::Prompt || !at_start {
+        if !(key.code == KeyCode::Backspace || ctrl_h)
+            || self.mode == InputMode::Prompt
+            || !at_start
+        {
             return false;
         }
         self.mode = InputMode::Prompt;

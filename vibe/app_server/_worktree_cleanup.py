@@ -8,6 +8,7 @@ import threading
 
 from vibe.core.git.worktree import ManagedWorktree, WorktreeReleaseOutcome
 from vibe.core.session.session_loader import SessionLoader
+from vibe.core.trusted_folders import TrustedFoldersManager, trusted_folders_manager
 from vibe.observability.logging import logger
 
 # None: every worktree a session joined.
@@ -31,27 +32,32 @@ class WorktreeCleanup:
         self,
         session_finished: Callable[[Path], bool] = session_finished,
         retry_delays: tuple[float, ...] = _RETRY_DELAYS,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
     ) -> None:
+        self._trust_store = trust_store or trusted_folders_manager
         self._session_finished = session_finished
         self._retry_delays = retry_delays
         self._condition = threading.Condition()
-        self._pending: dict[_Work, None] = {}
+        self._pending: dict[_Work, TrustedFoldersManager] = {}
         self._busy = False
         self._worker: threading.Thread | None = None
         self._failures: dict[Path, int] = {}
         self._retries: dict[Path, threading.Timer] = {}
 
-    def schedule(self, cwd: Path) -> None:
+    def schedule(
+        self, cwd: Path, *, trust_store: TrustedFoldersManager | None = None
+    ) -> None:
         managed = ManagedWorktree.at(cwd)
         if managed is None:
             return
         record = managed.claim.read()
         if record is None or not (record.session_dirs or record.reap_requested):
             return
-        self._enqueue(managed.root)
+        self._enqueue(managed.root, trust_store)
 
-    def sweep(self) -> None:
-        self._enqueue(None)
+    def sweep(self, *, trust_store: TrustedFoldersManager | None = None) -> None:
+        self._enqueue(None, trust_store)
 
     def wait_idle(self, timeout: float) -> bool:
         with self._condition:
@@ -60,9 +66,13 @@ class WorktreeCleanup:
                 timeout,
             )
 
-    def _enqueue(self, work: _Work) -> None:
+    def _enqueue(
+        self, work: _Work, trust_store: TrustedFoldersManager | None = None
+    ) -> None:
         with self._condition:
-            self._pending[work] = None
+            # Every queued/background operation drops temporary grants, even
+            # when scheduled by a live session or an injected host manager.
+            self._pending[work] = (trust_store or self._trust_store).for_session()
             if self._worker is not None:
                 return
             self._worker = threading.Thread(
@@ -78,14 +88,14 @@ class WorktreeCleanup:
                     self._condition.notify_all()
                     return
                 work = next(iter(self._pending))
-                del self._pending[work]
+                trust_store = self._pending.pop(work)
                 self._busy = True
             try:
                 if work is None:
                     ManagedWorktree.empty_trash()
                 for managed in self._targets(work):
-                    if not self._complete(managed):
-                        self._retry_later(managed.root)
+                    if not self._complete(managed, trust_store=trust_store):
+                        self._retry_later(managed.root, trust_store)
                         continue
                     with self._condition:
                         self._failures.pop(managed.root, None)
@@ -104,10 +114,14 @@ class WorktreeCleanup:
         managed = ManagedWorktree.at(work)
         return () if managed is None else (managed,)
 
-    def _complete(self, managed: ManagedWorktree) -> bool:
+    def _complete(
+        self, managed: ManagedWorktree, *, trust_store: TrustedFoldersManager
+    ) -> bool:
         # Broad: an escaping error would end the worker with work queued.
         try:
-            release = managed.reap_if_finished(self._session_finished)
+            release = managed.reap_if_finished(
+                self._session_finished, trust_store=trust_store
+            )
         except Exception as exc:
             logger.warning(
                 "Keeping worktree %s for now: its reap failed",
@@ -121,7 +135,7 @@ class WorktreeCleanup:
         # Only a failed snapshot can succeed on retry.
         return release.outcome is not WorktreeReleaseOutcome.KEPT_DIRTY
 
-    def _retry_later(self, root: Path) -> None:
+    def _retry_later(self, root: Path, trust_store: TrustedFoldersManager) -> None:
         with self._condition:
             if root in self._retries:
                 return
@@ -134,16 +148,16 @@ class WorktreeCleanup:
                 return
             self._failures[root] = attempt + 1
             timer = threading.Timer(
-                self._retry_delays[attempt], self._retry, args=(root,)
+                self._retry_delays[attempt], self._retry, args=(root, trust_store)
             )
             timer.daemon = True
             self._retries[root] = timer
             timer.start()
 
-    def _retry(self, root: Path) -> None:
+    def _retry(self, root: Path, trust_store: TrustedFoldersManager) -> None:
         with self._condition:
             self._retries.pop(root, None)
-            self._enqueue(root)
+            self._enqueue(root, trust_store)
 
 
 _PROCESS_CLEANUP = WorktreeCleanup()

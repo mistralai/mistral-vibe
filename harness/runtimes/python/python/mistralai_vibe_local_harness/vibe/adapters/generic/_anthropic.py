@@ -9,6 +9,9 @@ import logging
 import re
 from typing import Any, ClassVar
 
+from mistralai_vibe_local_harness.vibe.adapters._provider_failure import (
+    ProviderStreamError,
+)
 from mistralai_vibe_local_harness.vibe.adapters.generic._base import (
     APIAdapter,
     PreparedRequest,
@@ -19,15 +22,27 @@ from mistralai_vibe_local_harness.vibe.adapters.generic._model import (
     FunctionCall,
     LLMChunk,
     LLMMessage,
-    LLMUsage,
     Role,
     StopInfo,
     StrToolChoice,
     ToolCall,
 )
 from mistralai_vibe_local_harness.vibe.adapters.generic._provider import ProviderView
+from mistralai_vibe_local_harness.vibe.completion_profile import (
+    REQUIRED_MAX_TOKENS_FALLBACK,
+    ReasoningSetting,
+    ReasoningSupport,
+    anthropic_thinking_fields,
+    binds_thinking_blocks,
+)
 
 logger = logging.getLogger(__name__)
+
+# With thinking on, and only on a model that takes it (binds_thinking_blocks), a
+# replayed thinking block whose earlier context changed is dropped instead of
+# failing the request. The field needs this beta.
+THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
+THINKING_BLOCK_BINDING: dict[str, Any] = {"prefix_mismatch_behavior": "drop_block"}
 
 
 def _parse_stop_info(reason: str | None, raw: Any) -> StopInfo | None:
@@ -50,6 +65,20 @@ REASONING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 THINKING_MIN_TOP_P = 0.95
 
 
+def _image_blocks(msg: LLMMessage) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": att.mime_type,
+                "data": to_base64(att),
+            },
+        }
+        for att in msg.images or []
+    ]
+
+
 class AnthropicMapper:
     """Shared mapper for converting messages to/from Anthropic API format."""
 
@@ -67,18 +96,7 @@ class AnthropicMapper:
                     user_content: list[dict[str, Any]] = []
                     if msg.content:
                         user_content.append({"type": "text", "text": msg.content})
-                    if msg.images:
-                        user_content.extend(
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": att.mime_type,
-                                    "data": to_base64(att),
-                                },
-                            }
-                            for att in msg.images
-                        )
+                    user_content.extend(_image_blocks(msg))
                     converted.append({"role": "user", "content": user_content or ""})
                 case Role.assistant:
                     if assistant := self._convert_assistant_message(msg):
@@ -132,10 +150,22 @@ class AnthropicMapper:
     def _append_tool_result(
         self, converted: list[dict[str, Any]], msg: LLMMessage
     ) -> None:
+        content: str | list[dict[str, Any]] = msg.content or ""
+        if msg.images:
+            # A tool result takes text and image blocks; blank text blocks are
+            # rejected, so text is sent only when there is some.
+            content = [
+                *(
+                    [{"type": "text", "text": msg.content}]
+                    if msg.content and msg.content.strip()
+                    else []
+                ),
+                *_image_blocks(msg),
+            ]
         tool_result = {
             "type": "tool_result",
             "tool_use_id": self._sanitize_tool_call_id(msg.tool_call_id),
-            "content": msg.content or "",
+            "content": content,
         }
 
         if not converted or converted[-1]["role"] != "user":
@@ -208,21 +238,7 @@ class AnthropicMapper:
                     )
                 )
 
-        usage_data = data.get("usage", {})
-        # Anthropic excludes cached tokens from input_tokens, so fold cache
-        # creation and cache read back in to match the OpenTelemetry convention
-        # that prompt_tokens includes cached tokens.
-        total_input_tokens = (
-            usage_data.get("input_tokens", 0)
-            + usage_data.get("cache_creation_input_tokens", 0)
-            + usage_data.get("cache_read_input_tokens", 0)
-        )
-        usage = LLMUsage(
-            prompt_tokens=total_input_tokens,
-            completion_tokens=usage_data.get("output_tokens", 0),
-            cached_tokens=usage_data.get("cache_read_input_tokens", 0),
-        )
-
+        # The executor reads usage from the raw reply through the format's table.
         return LLMChunk(
             message=LLMMessage(
                 role=Role.assistant,
@@ -231,7 +247,6 @@ class AnthropicMapper:
                 reasoning_payloads=reasoning_payloads or None,
                 tool_calls=tool_calls if tool_calls else None,
             ),
-            usage=usage,
             stop=_parse_stop_info(data.get("stop_reason"), data.get("stop_details")),
         )
 
@@ -246,6 +261,12 @@ STREAMING_EVENT_TYPES = {
     "ping",
     "error",
 }
+
+
+def _thinks(payload: dict[str, Any]) -> bool:
+    """Whether the request thinks: it has a thinking field that is not disabled."""
+    thinking = payload.get("thinking")
+    return isinstance(thinking, dict) and thinking.get("type") != "disabled"
 
 
 @cache
@@ -267,8 +288,6 @@ class AnthropicAdapter(APIAdapter):
         "prompt-caching-2024-07-31,"
         "context-1m-2025-08-07"
     )
-    DEFAULT_ADAPTIVE_MAX_TOKENS: ClassVar[int] = 32_768
-    DEFAULT_MAX_TOKENS = 8192
 
     def __init__(self) -> None:
         self._mapper = AnthropicMapper()
@@ -276,19 +295,6 @@ class AnthropicAdapter(APIAdapter):
         # reassembled here and emitted once complete. This state is per-response,
         # which is why the adapter is built per request rather than shared.
         self._open_reasoning_blocks: dict[int, dict[str, Any]] = {}
-
-    @staticmethod
-    def _has_thinking_content(messages: list[dict[str, Any]]) -> bool:
-        for msg in messages:
-            if msg.get("role") != "assistant":
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if block.get("type") in REASONING_BLOCK_TYPES:
-                    return True
-        return False
 
     @staticmethod
     def _build_system_blocks(system_prompt: str | None) -> list[dict[str, Any]]:
@@ -319,34 +325,23 @@ class AnthropicAdapter(APIAdapter):
         self,
         payload: dict[str, Any],
         *,
-        messages: list[dict[str, Any]],
         max_tokens: int | None,
-        thinking: str,
+        thinking: ReasoningSetting | None,
+        reasoning_support: ReasoningSupport | None = None,
     ) -> None:
-        has_thinking = self._has_thinking_content(messages)
-        thinking_level = thinking
-
-        if thinking_level == "off" and not has_thinking:
-            payload["max_tokens"] = (
-                max_tokens if max_tokens is not None else self.DEFAULT_MAX_TOKENS
-            )
-            return
-
-        # Resolve effective level: use config, or fallback to "medium" when
-        # forced by thinking content in history
-        effective_level = thinking_level if thinking_level != "off" else "medium"
-
-        payload["thinking"] = {"type": "adaptive", "display": "summarized"}
-        payload["output_config"] = {"effort": effective_level}
-        payload["max_tokens"] = (
-            max_tokens if max_tokens is not None else self.DEFAULT_ADAPTIVE_MAX_TOKENS
+        wire_max_tokens = (
+            max_tokens if max_tokens is not None else REQUIRED_MAX_TOKENS_FALLBACK
+        )
+        payload["max_tokens"] = wire_max_tokens
+        payload.update(
+            anthropic_thinking_fields(thinking, reasoning_support, wire_max_tokens)
         )
 
     def _apply_top_p(self, payload: dict[str, Any], top_p: float | None) -> None:
         """Put ``top_p`` on a payload whose thinking config is already set."""
         if top_p is None:
             return
-        if "thinking" in payload and top_p < THINKING_MIN_TOP_P:
+        if _thinks(payload) and top_p < THINKING_MIN_TOP_P:
             _warn_top_p_left_off(top_p)
             return
         payload["top_p"] = top_p
@@ -361,13 +356,17 @@ class AnthropicAdapter(APIAdapter):
         max_tokens: int | None,
         tool_choice: dict[str, Any] | None,
         stream: bool,
-        thinking: str,
+        thinking: ReasoningSetting | None,
         top_p: float | None,
+        reasoning_support: ReasoningSupport | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"model": model_name, "messages": messages}
 
         self._apply_thinking_config(
-            payload, messages=messages, max_tokens=max_tokens, thinking=thinking
+            payload,
+            max_tokens=max_tokens,
+            thinking=thinking,
+            reasoning_support=reasoning_support,
         )
         self._apply_top_p(payload, top_p)
 
@@ -399,8 +398,9 @@ class AnthropicAdapter(APIAdapter):
         enable_streaming: bool,
         provider: ProviderView,
         api_key: str | None = None,
-        thinking: str = "off",
+        thinking: ReasoningSetting | None = None,
         top_p: float | None = None,
+        reasoning_support: ReasoningSupport | None = None,
     ) -> PreparedRequest:
         system_prompt, converted_messages = self._mapper.prepare_messages(messages)
         converted_tools = self._mapper.prepare_tools(tools)
@@ -416,12 +416,18 @@ class AnthropicAdapter(APIAdapter):
             stream=enable_streaming,
             thinking=thinking,
             top_p=top_p,
+            reasoning_support=reasoning_support,
         )
+
+        beta_features = self.BETA_FEATURES
+        if _thinks(payload) and binds_thinking_blocks(model_name):
+            payload["thinking"]["block_binding"] = dict(THINKING_BLOCK_BINDING)
+            beta_features = f"{beta_features},{THINKING_BINDING_BETA}"
 
         headers = {
             "Content-Type": "application/json",
             "anthropic-version": self.API_VERSION,
-            "anthropic-beta": self.BETA_FEATURES,
+            "anthropic-beta": beta_features,
         }
 
         if api_key:
@@ -456,30 +462,15 @@ class AnthropicAdapter(APIAdapter):
             error = data.get("error", {})
             error_type = error.get("type", "unknown_error")
             error_message = error.get("message", "Unknown streaming error")
-            raise RuntimeError(
-                f"Anthropic stream error ({error_type}): {error_message}"
+            raise ProviderStreamError(
+                f"Anthropic stream error ({error_type}): {error_message}", None
             )
         return empty_chunk
 
     def _parse_message_start(self, data: dict[str, Any]) -> LLMChunk:
+        # The executor reads the start's usage from the raw event.
         self._open_reasoning_blocks.clear()
-        message = data.get("message", {})
-        usage_data = message.get("usage", {})
-        if not usage_data:
-            return LLMChunk(message=LLMMessage(role=Role.assistant, content=None))
-        total_input_tokens = (
-            usage_data.get("input_tokens", 0)
-            + usage_data.get("cache_creation_input_tokens", 0)
-            + usage_data.get("cache_read_input_tokens", 0)
-        )
-        return LLMChunk(
-            message=LLMMessage(role=Role.assistant, content=None),
-            usage=LLMUsage(
-                prompt_tokens=total_input_tokens,
-                completion_tokens=0,
-                cached_tokens=usage_data.get("cache_read_input_tokens", 0),
-            ),
-        )
+        return LLMChunk(message=LLMMessage(role=Role.assistant, content=None))
 
     def _parse_content_block_start(self, data: dict[str, Any]) -> LLMChunk | None:
         content_block = data.get("content_block", {})
@@ -567,17 +558,8 @@ class AnthropicAdapter(APIAdapter):
 
     def _parse_message_delta(self, data: dict[str, Any]) -> LLMChunk:
         delta = data.get("delta", {})
-        usage_data = data.get("usage", {})
-        usage = (
-            LLMUsage(
-                prompt_tokens=0, completion_tokens=usage_data.get("output_tokens", 0)
-            )
-            if usage_data
-            else None
-        )
         return LLMChunk(
             message=LLMMessage(role=Role.assistant, content=None),
-            usage=usage,
             stop=_parse_stop_info(delta.get("stop_reason"), delta.get("stop_details")),
         )
 

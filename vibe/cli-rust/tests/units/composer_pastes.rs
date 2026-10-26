@@ -339,7 +339,7 @@ fn a_path_between_two_placeholders_is_rewritten_and_shell_mode_rewrites_nothing(
 #[test]
 fn moving_within_history_keeps_the_draft_for_when_recall_ends() {
     let mut harness = Harness::new();
-    harness.app.completion.skills = vec![("lint".into(), "Run the linters.".into())];
+    harness.app.completion.skills = vec![vibe_rs::skill::Skill::new("lint", "Run the linters.")];
     harness.app.chat_input.history.add("first");
     harness.app.chat_input.history.add("second");
     for character in "run /li".chars() {

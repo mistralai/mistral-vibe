@@ -4,10 +4,13 @@ from datetime import datetime
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.agent import SessionStarter, VibeAcpAgent
+from vibe.app_server import connector_catalog
+from vibe.utils.http import VibeAsyncHTTPClient
 
 
 def _create_acp_agent(session_starter: SessionStarter | None = None) -> VibeAcpAgent:
@@ -20,6 +23,26 @@ def _create_acp_agent(session_starter: SessionStarter | None = None) -> VibeAcpA
     agent.on_connect(client)
     client.on_connect(agent)
     return agent
+
+
+@pytest.fixture(autouse=True)
+def _no_connector_bootstrap_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every session start resolves the connector catalog, and each test's
+    fresh VIBE_HOME has no cached copy: with the mock key that would be a real
+    request to api.mistral.ai, with a 30 s timeout, and its DNS lookup, which
+    cancellation cannot stop, holds the closing test loop until it returns.
+    Fail it at once, as offline.
+    """
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connector bootstrap is not mocked", request=request)
+
+    def offline_client() -> VibeAsyncHTTPClient:
+        return VibeAsyncHTTPClient(transport=httpx.MockTransport(refuse))
+
+    monkeypatch.setattr(
+        connector_catalog, "_build_bootstrap_http_client", offline_client
+    )
 
 
 @pytest.fixture

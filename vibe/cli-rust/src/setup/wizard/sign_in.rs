@@ -108,3 +108,70 @@ impl Default for BrowserSignInState {
         }
     }
 }
+
+/// The step card titles and their detail one-liners, pending and done.
+pub const STEP_TITLES: [&str; 3] = ["Open browser", "Complete sign-in", "Finished setup"];
+pub const STEP_PENDING_DETAILS: [&str; 3] = [
+    "Your browser should open automatically",
+    "Waiting for authentication...",
+    "Vibe will start automatically",
+];
+pub const STEP_DONE_DETAILS: [&str; 3] =
+    ["Browser opened", "Sign-in confirmed.", "Setup complete."];
+/// The waiting-for-authentication message, painted as a gradient.
+pub const WAITING_FOR_AUTHENTICATION: &str = "Waiting for authentication...";
+
+/// The step card at `index`'s detail lines: the fixed one-liners everywhere
+/// except the active card, whose status message wraps to the card's content
+/// width (the border and padding inset the text by 4 on each side) and is
+/// clamped to `max_lines` lines so the cards fit a short terminal.
+pub fn step_detail_lines(
+    state: &BrowserSignInState,
+    step_idx: usize,
+    index: usize,
+    card_width: u16,
+    max_lines: usize,
+) -> Vec<String> {
+    if index < step_idx {
+        vec![STEP_DONE_DETAILS[index].to_owned()]
+    } else if index > step_idx {
+        vec![STEP_PENDING_DETAILS[index].to_owned()]
+    } else if state.variant == SignInVariant::Pending && state.step == SignInStep::Confirm {
+        vec![WAITING_FOR_AUTHENTICATION.to_owned()]
+    } else {
+        let mut lines = crate::utils::text::wrap_hard(
+            &state.message,
+            card_width.saturating_sub(8).max(1) as usize,
+        );
+        if lines.len() > max_lines {
+            lines.truncate(max_lines);
+            let last = lines.last_mut().expect("max_lines >= 1");
+            *last = format!("{}…", last.strip_suffix('…').unwrap_or(last));
+        }
+        lines
+    }
+}
+
+/// The wrapped-line allowance for the active card inside a `budget`-row
+/// steps stack: eleven rows are the borders and the two fixed cards.
+pub fn max_detail_lines(budget: u16) -> usize {
+    budget.saturating_sub(11).max(1) as usize
+}
+
+/// The three step cards' total height within a `budget`-row stack, so the
+/// walk never drops the whole stack for not fitting: each card is its
+/// border, its title, and its detail lines. `u16::MAX` leaves the message
+/// unclamped.
+pub fn steps_height(
+    state: &BrowserSignInState,
+    step_idx: usize,
+    card_width: u16,
+    budget: u16,
+) -> u16 {
+    let max_lines = max_detail_lines(budget);
+    (0..3)
+        .map(|index| {
+            step_detail_lines(state, step_idx, index, card_width, max_lines).len() as u16 + 3
+        })
+        .sum()
+}

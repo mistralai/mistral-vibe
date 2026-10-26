@@ -19,10 +19,11 @@ from mistralai_vibe_local_harness import HarnessSession
 from mistralai_vibe_local_harness._deprecated_tools import deprecated_tool_failure
 from mistralai_vibe_local_harness.protocol import (
     DEPRECATED_RUNTIME_BUILTIN_TOOL_NAMES,
-    RustAcceptedApplyResult,
     RustAction,
     RustActionsNextAction,
     RustBackgroundProcessNotificationSource,
+    RustBashTimeoutSettings,
+    RustBlobResourceContents,
     RustCapabilitiesChange,
     RustCompactEvent,
     RustCompletionFailedEvent,
@@ -30,6 +31,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustContextCompactedObservation,
     RustContextCompactionFailedObservation,
     RustDeterminismContext,
+    RustEmbeddedResourceContentBlock,
     RustEvent,
     RustFailTurnEvent,
     RustFilesystemAction,
@@ -41,7 +43,9 @@ from mistralai_vibe_local_harness.protocol import (
     RustHarnessSettings,
     RustHookCallActionBase,
     RustHookFailedEvent,
+    RustImageContentBlock,
     RustInterruptEvent,
+    RustInvalidCommandRejection,
     RustInvalidStateRejection,
     RustKeepActionDirective,
     RustLLMCallAction,
@@ -64,6 +68,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustToolFailedEvent,
     RustToolFailureResult,
     RustToolSucceededEvent,
+    RustWarningObservation,
     parse_apply_result,
 )
 from mistralai_vibe_local_harness.session_protocol import (
@@ -78,6 +83,7 @@ from mistralai_vibe_local_harness.session_protocol import (
     TitleSource,
 )
 from mistralai_vibe_local_harness.vibe._errors import (
+    HarnessConfigurationRejectedError,
     HarnessForkActiveTurnError,
     HarnessForkEntryNotFoundError,
     HarnessForkEntryRequiredError,
@@ -137,10 +143,13 @@ from mistralai_vibe_local_harness.vibe._self_tools import (
     execute_model_wait,
     execute_self_tool,
 )
+from mistralai_vibe_local_harness.vibe._shell_tools import held_to_bash_limits
 from mistralai_vibe_local_harness.vibe._storage import (
     CommandReservedRecordV1,
     CoreInputRecordV1,
     HarnessStoreCapacityError,
+    InteropToolMessageV1,
+    InteropUserMessageV1,
     JournalRecordExceedsPageError,
     JournalRecordV1,
     ManagedProcessV1,
@@ -162,6 +171,7 @@ from mistralai_vibe_local_harness.vibe._storage import (
     parse_stored_settings,
     restore_core_from_checkpoint,
     sha256_json,
+    stored_reply,
 )
 
 if TYPE_CHECKING:
@@ -202,10 +212,40 @@ _PROCESS_LIFETIME_OVERHEAD_BYTES = 128 * 1024
 # non-quiescent turn that crosses this mark folds the journal into a fresh
 # generation at the top of ``_apply`` rather than marching to the cap.
 _JOURNAL_COMPACTION_HIGH_WATER_BYTES = 32 * 1024 * 1024
+# Reopening replays every journalled Core input at a few milliseconds each, while
+# small inputs can pile up by the thousand without nearing the byte mark. Past
+# this many, a fold costs less than the replay it saves.
+_JOURNAL_COMPACTION_HIGH_WATER_CORE_INPUTS = 500
+# Only ``_resolve_action`` reads a stored result back, and only for an Action Core
+# still holds, so the result closing an Action Core dropped is never parsed and
+# needs no per-kind event shape.
+_STRANDED_ACTION_RESULT = cast(
+    JsonValue,
+    RustProtocolError(
+        code="effect_recovery_failed",
+        message="Action cancelled",
+        retryable=False,
+        details=None,
+    ).model_dump(mode="json", by_alias=True, exclude_none=True),
+)
 _PROCESS_DURABILITY_RETRY_DELAYS_SECONDS = (1, 2, 4, 8, 16, 30)
 
 logger = logging.getLogger(__name__)
 process_logger = logging.getLogger("vibe.unified_harness.processes")
+
+
+class _CoreRejectedInputError(RuntimeError):
+    """Core refused a durable input. Core refuses the same input every time."""
+
+    def __init__(self, result: RustRejectedApplyResult) -> None:
+        rejection = result.rejection
+        # Core's own words when it gave any: the repr is for the logs.
+        self.reason = (
+            rejection.error.message
+            if isinstance(rejection, RustInvalidCommandRejection)
+            else repr(rejection)
+        )
+        super().__init__(f"Core rejected durable input: {result!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,7 +336,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             replayed_transitions[-1] if replayed_transitions else None
         )
         self._replayed_core_inputs = replayed_core_inputs
-        self._execute_action = execute_action or _unavailable_action
+        self._use_action_executor(execute_action or _unavailable_action)
         self._recover_action = recover_action
         self._event_sink = event_sink
         self._process_manager = process_manager
@@ -359,6 +399,11 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     ) -> DurableSessionRuntime:
         core, transitions = stored.restore_core_with_transitions(config)
         replayed_config = stored.replayed_config(config)
+        try:
+            _check_context_moves_to_model(core, replayed_config, config)
+        except BaseException:
+            core.close()
+            raise
         records = tuple(
             record for record in stored.journal if isinstance(record, CoreInputRecordV1)
         )
@@ -583,7 +628,15 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         return self._config.model_copy(deep=True)
 
     def configure_action_executor(self, execute_action: ActionExecutor) -> None:
+        self._use_action_executor(execute_action)
+
+    def _use_action_executor(self, execute_action: ActionExecutor) -> None:
+        # A recovered effect is retried as it was saved; a new one runs under the
+        # current bash timeouts.
         self._execute_action = execute_action
+        self._execute_held_action = held_to_bash_limits(
+            execute_action, self._current_bash_timeout
+        )
 
     def configure_action_applied_sink(self, sink: ActionAppliedSink) -> None:
         self._action_applied_sink = sink
@@ -599,6 +652,24 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     @property
     def pending_action_ids(self) -> frozenset[str]:
         return frozenset(action.action_id for action in self.inspection.pending_actions)
+
+    async def history_holds_images(self) -> bool:
+        """Whether the committed history holds an image a model would read as one.
+
+        A running Turn has not committed its history, so it answers no.
+        """
+        if self.inspection.active_turn_id is not None:
+            return False
+        try:
+            snapshot = await self.snapshot_for_fork(None, include_entry=True)
+        except HarnessForkEntryRequiredError:
+            return False
+        return any(
+            is_image_block(block)
+            for message in snapshot.history
+            if isinstance(message, InteropUserMessageV1 | InteropToolMessageV1)
+            for block in message.content
+        )
 
     async def snapshot_for_fork(
         self, entry_id: str | None, *, include_entry: bool
@@ -840,6 +911,17 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         self._process_gate = process_gate
         self._process_note_rider = process_note_rider
 
+    @property
+    def runs_background_processes(self) -> bool:
+        """Whether this Session runs background processes now: they are enabled
+        in the Core configuration it runs, which a reconfigure such as `/reload`
+        may change, and the adapter has somewhere to run them.
+        """
+        return (
+            self._process_manager is not None
+            and self._config.settings.tools.background_processes.mode == "enabled"
+        )
+
     def configure_process_config(self, config: LocalRuntimeAdapterConfig) -> None:
         validate_process_config(config)
         if (
@@ -897,8 +979,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 self._guard_open()
                 await self._catch_up_projection()
                 if not self.inspection.pending_actions:
-                    await self._abandon_reservations_marked_for_restart_locked()
-                    await self._settle_idle_locked()
+                    await self._settle_restored_idle_locked()
                     record_session_operation(
                         time.perf_counter() - started,
                         operation="replay",
@@ -924,8 +1005,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 # A recovery that lands blocked (an approval still outstanding, say)
                 # keeps its pending actions, so the deferred configuration is adopted
                 # by whichever drive next leaves the session idle instead.
-                await self._abandon_reservations_marked_for_restart_locked()
-                await self._settle_idle_locked()
+                await self._settle_restored_idle_locked()
         except Exception as exc:
             add_recovery_failure(failure_code=type(exc).__name__, phase="replay")
             record_session_operation(
@@ -974,7 +1054,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         """
         async with self._lock:
             self._guard_open()
-            await self._settle_idle_locked()
+            await self._settle_restored_idle_locked()
 
     async def drive_transition(
         self, transition: RustSessionTransition
@@ -1465,6 +1545,24 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             )
             await self._accept_settings_config(params)
 
+    async def check_settings_fit(self, settings: RustHarnessSettings) -> None:
+        """Refuse settings for a model the current context cannot fit.
+
+        Nothing is applied: Core answers on a throwaway copy of the live
+        context, as a reconfigure to these settings would, so a caller can
+        refuse a model pick before persisting it. Mid-turn, the answer is for
+        the context so far; the reconfigure at the next idle point asks again.
+        """
+        async with self._lock:
+            self._guard_open()
+            candidate = self._config.model_copy(update={"settings": settings})
+            try:
+                await asyncio.to_thread(
+                    _check_context_moves_to_model, self._core, self._config, candidate
+                )
+            except ValueError as refused:
+                raise HarnessConfigurationRejectedError(str(refused)) from refused
+
     async def record_model_change(self, model: str) -> None:
         """Record a move to a different model. The Session decides it is one.
 
@@ -1717,6 +1815,50 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 },
             )
 
+    async def _settle_restored_idle_locked(self) -> None:
+        """Settle what a stopped process left open, then fold the journal.
+
+        Every path that leaves a restored Session idle runs this, so a Session
+        reopened through any of them can go quiescent again.
+        """
+        await self._abandon_reservations_marked_for_restart_locked()
+        await self._fail_actions_core_no_longer_holds_locked()
+        await self._settle_idle_locked()
+
+    async def _fail_actions_core_no_longer_holds_locked(self) -> None:
+        """Close the Action intents a stopped process left without a result.
+
+        Core redelivers only the Actions it still holds, so once it is idle an
+        intent still open in the ledger has nothing left to answer it, and it
+        holds the Session off quiescence for good.
+        """
+        if self.inspection.pending_actions:
+            return
+        stored = await asyncio.to_thread(self._store.load)
+        for durable in stored.runtime_state.actions:
+            if durable.state not in {"pending", "running"}:
+                continue
+            # A process result whose write is being retried is already on its way.
+            if durable.action_id in self._pending_process_action_results:
+                continue
+            await asyncio.to_thread(
+                self._store.record_action_result,
+                durable.action_id,
+                _STRANDED_ACTION_RESULT,
+                failed=True,
+            )
+            add_recovery_failure(failure_code="StrandedAction", phase="replay")
+            logger.warning(
+                "Unified session failed an Action Core no longer holds",
+                extra={
+                    "harness_backend": "unified",
+                    "session_id": self._store.session_id,
+                    "store_format": "mistral.vibe.unified-session-store/v1",
+                    "action_id": durable.action_id,
+                    "action_kind": durable.kind,
+                },
+            )
+
     async def _reconfigure_capabilities_locked(
         self, capabilities: RustHarnessCapabilitySet, revision: str
     ) -> None:
@@ -1771,7 +1913,9 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         controller = self._subagent_controller
         if controller is not None and subagents is not None:
             await controller.rebind_agent_types(
-                subagents.bindings, subagents.policy_ceiling
+                subagents.bindings,
+                subagents.policy_ceiling,
+                rejected_agent_types=subagents.rejected_agent_types,
             )
 
     async def interrupt(
@@ -1919,7 +2063,18 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         if reservation.newly_reserved or not await self._core_holds_input(
             client_command_id, command
         ):
-            transition = await self._apply(command)
+            try:
+                transition = await self._apply(command)
+            except _CoreRejectedInputError as rejected:
+                # Settled here, as the refusal is final: a reservation left
+                # pending is flushed again after every later turn, failing each
+                # one or applying the refused change once Core would take it.
+                await asyncio.to_thread(
+                    self._store.fail_command, client_command_id, str(rejected)
+                )
+                # Only configuration takes this path, and the Session keeps
+                # running the one it had: the caller drops the refused one.
+                raise HarnessConfigurationRejectedError(rejected.reason) from rejected
             if transition.actions:
                 raise RuntimeError("Core capability reconfiguration emitted actions")
         response = response_factory(transition) if transition is not None else {}
@@ -2119,7 +2274,16 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 ]
                 await _cancel_tasks(abandoned)
         except BaseException:
-            await self._settle_actions_after_drive_failure(in_flight)
+            # A second cancellation must not abandon this cleanup: an action task
+            # left running here never records its result, and its open intent
+            # keeps the store from ever folding again.
+            settlement = asyncio.ensure_future(
+                self._settle_actions_after_drive_failure(in_flight)
+            )
+            try:
+                await asyncio.shield(settlement)
+            except asyncio.CancelledError:
+                await settlement
             raise
 
     async def _start_transition_actions(
@@ -2262,7 +2426,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                     await self._ensure_action_started(tool_action)
                 elif compaction_action is not None:
                     await self._ensure_action_started(compaction_action)
-                return _EVENT_ADAPTER.validate_python(durable.result)
+                return _EVENT_ADAPTER.validate_python(stored_reply(durable.result))
             if (
                 durable is None
                 and isinstance(action, RustLLMCallAction)
@@ -2392,7 +2556,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                     max_sleep_ms=self._config.settings.tools.programmatic.max_sleep_ms,
                 )
             else:
-                event = await self._execute_action(action)
+                event = await self._execute_held_action(action)
         except asyncio.CancelledError:
             event = _failed_action_event(action, "Action cancelled")
             await self._record_action_result(
@@ -2424,6 +2588,13 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 action, durable, event, failed=failed
             )
         return event
+
+    def _current_bash_timeout(self) -> RustBashTimeoutSettings | None:
+        """The bash timeouts this Session runs now: those it adopts once idle after a
+        restore, else its config's.
+        """
+        settings = self._post_recovery_settings or self._config.settings
+        return settings.tools.bash_timeout
 
     async def _record_action_result(
         self,
@@ -3724,8 +3895,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 and rejection.state == "idle"
             ):
                 raise HarnessStaleTurnError(None)
-        if not isinstance(result, RustAcceptedApplyResult):
-            raise RuntimeError(f"Core rejected durable input: {result!r}")
+            raise _CoreRejectedInputError(result)
         transition = result.transition
         previous_transition = self._replayed_transition
         update = self._projector.apply(
@@ -3753,7 +3923,39 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             except asyncio.CancelledError:
                 await persistence
                 raise
+        await self._publish_core_warnings(transition)
         return transition
+
+    async def _publish_core_warnings(self, transition: RustSessionTransition) -> None:
+        """Show each Core warning as a notice, whatever its code.
+
+        A warning changes nothing in the session: it says why Core is doing
+        what it does next, such as compacting after a request was too long.
+        Hosts show it by code and message, so a new code needs no host change.
+        The step is already saved, so a sink failure is logged, not raised.
+        """
+        if self._event_sink is None:
+            return
+        for observation in transition.observations:
+            if not isinstance(observation, RustWarningObservation):
+                continue
+            try:
+                emitted = self._event_sink({
+                    "type": "notice",
+                    "level": "warning",
+                    "code": observation.code,
+                    "message": observation.message,
+                })
+                if isinstance(emitted, Awaitable):
+                    await emitted
+            except Exception:
+                logger.exception(
+                    "Failed to publish a committed Core warning",
+                    extra={
+                        "session_id": self._store.session_id,
+                        "code": observation.code,
+                    },
+                )
 
     async def _persist_core_transition(
         self,
@@ -4021,14 +4223,15 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         self._replayed_core_inputs = ()
 
     async def _maybe_compact_journal(self) -> None:
-        """Fold the journal into a fresh generation before it can reach the cap.
+        """Fold the journal into a fresh generation before it can reach the cap,
+        or before replaying it on reopen would cost more than a fold.
 
         Runs at the top of ``_apply``, the one boundary where the previous
         transition is fully persisted and no Core input is mid-flight, so folding
         cannot double-apply a journalled input. A process Core input awaiting
         durability or a live Action journal reservation means we are mid-flight;
-        skip and retry on a later clean boundary. Once deltas keep per-advance
-        records small this rarely fires; it is a safety valve, not routine cost.
+        skip and retry on a later clean boundary. Most turns reach an idle fold
+        long before either mark; it is a safety valve, not routine cost.
 
         Compaction resets ``_replayed_core_inputs``, so it must only run once
         their transitions are projected. Public entry points drain them via
@@ -4043,9 +4246,19 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         if self._replayed_core_inputs:
             return
         journal_bytes = await asyncio.to_thread(self._store.journal_bytes)
-        if journal_bytes < _JOURNAL_COMPACTION_HIGH_WATER_BYTES:
+        if (
+            journal_bytes < _JOURNAL_COMPACTION_HIGH_WATER_BYTES
+            and await asyncio.to_thread(self._journalled_core_inputs)
+            < _JOURNAL_COMPACTION_HIGH_WATER_CORE_INPUTS
+        ):
             return
         await self._compact_store(allow_recoverable=True)
+
+    def _journalled_core_inputs(self) -> int:
+        return sum(
+            isinstance(record, CoreInputRecordV1)
+            for record in self._store.load().journal
+        )
 
     async def _compact_store(self, allow_recoverable: bool = False) -> bool:
         """Fold the journal on a worker, without letting a canceller abandon it.
@@ -4133,10 +4346,20 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         # Building the replacement is the step that rejects a configuration the
         # new plugin set cannot satisfy, so it runs before anything durable is
         # written: a Core that will not build leaves the previous lock recorded.
+        # The re-pin can carry other settings than the live Core's, so Core
+        # moves the context onto them by the rule a reconfiguration applies:
+        # new model facts start the estimate correction over, and are refused
+        # when the next Turn could not carry the context under them.
         replacement = restore_core_from_checkpoint(
-            config, checkpoint, resume_input_id=core_last_input_id
+            config,
+            checkpoint,
+            resume_input_id=core_last_input_id,
+            moved_from=self._config,
         )
         try:
+            checkpoint = cast(
+                dict[str, JsonValue], json.loads(replacement.checkpoint())
+            )
             self._store.write_generation(
                 checkpoint=checkpoint,
                 runtime_state=stored.runtime_state.model_copy(
@@ -4247,6 +4470,29 @@ def _process_persistence_failure(
         action,
         process_error("process_io_failed", "Background process I/O failed", details),
     )
+
+
+def _check_context_moves_to_model(
+    core: HarnessSession, replayed: RustHarnessConfig, config: RustHarnessConfig
+) -> None:
+    """Refuse a restore onto model facts Core would not move the context onto.
+
+    Replay runs under the settings the journal was written with, and the new
+    settings only reach Core at the next idle point, through the reconfiguration
+    that also resets the estimate correction. A Session reopened under other
+    model facts would otherwise open and fail later, so a probe moves the
+    context onto the new facts now, by the same Core rule, before anything is
+    written.
+    """
+    if replayed.settings.context.model_facts == config.settings.context.model_facts:
+        return
+    HarnessSession.restore(
+        replayed.model_copy(update={"settings": config.settings}).model_dump_json(
+            by_alias=True, exclude_none=False
+        ),
+        core.checkpoint(),
+        moved_from_json=replayed.model_dump_json(by_alias=True, exclude_none=False),
+    ).close()
 
 
 def _rebuilt_core(core: HarnessSession, expected_last_input_id: int) -> HarnessSession:
@@ -4644,3 +4890,13 @@ __all__ = [
     "action_from_recovery_state",
     "build_terminal_notification",
 ]
+
+
+def is_image_block(block: object) -> bool:
+    if isinstance(block, RustImageContentBlock):
+        return True
+    return (
+        isinstance(block, RustEmbeddedResourceContentBlock)
+        and isinstance(block.resource, RustBlobResourceContents)
+        and (block.resource.mime_type or "").startswith("image/")
+    )

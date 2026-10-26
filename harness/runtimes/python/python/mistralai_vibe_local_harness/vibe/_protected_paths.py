@@ -46,7 +46,7 @@ _PROTECTED_PATH = re.compile(
 # Builtins that modify a file they name in an argument. Reads are excluded: opening
 # ``.vibe/config.toml`` decides nothing about what runs later, and prompting on it
 # spends the user's attention on a non-event.
-_WRITE_TOOLS = frozenset({"file_system.write_file", "file_system.search_replace"})
+_WRITE_TOOLS = frozenset({"file_system.write_file", "file_system.edit"})
 # Argument names carrying a path on those builtins.
 _PATH_ARGUMENTS = ("path", "file_path")
 

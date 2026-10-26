@@ -68,8 +68,13 @@ def test_build_field_wires_covers_schema_and_defaults(
 
     # ``max_context_length`` is per-model only, so it arrives as a synthetic
     # row on top of the schema's own fields.
+    retired = {
+        name for name, info in type(config).model_fields.items() if info.deprecated
+    }
+    assert {"include_model_info", "include_prompt_detail"} <= retired
     assert by_name.keys() == (
-        set(type(config).model_fields) - HIDDEN_SETTINGS | {"max_context_length"}
+        set(type(config).model_fields) - HIDDEN_SETTINGS - retired
+        | {"max_context_length"}
     )
     assert not HIDDEN_SETTINGS & by_name.keys()
     assert by_name["autocopy_to_clipboard"].kind is ConfigFieldKind.BOOL
@@ -148,7 +153,7 @@ def test_build_field_wires_keeps_admin_lock_for_global_compaction_threshold(
     assert threshold.value == 50_000
     assert threshold.path == "/auto_compact_threshold"
     assert threshold.origin == "admin"
-    # The unset sentinel is not a value a layer set; it must never surface as
+    # An unset threshold is not a value a layer set; it must never surface as
     # the row's default origin.
     assert [(entry.layer, entry.value) for entry in threshold.layer_values] == [
         ("admin", 50_000)
@@ -206,9 +211,9 @@ async def test_collect_layer_values_groups_fields_by_priority(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_collect_layer_values_hides_the_unset_threshold_sentinel() -> None:
-    # The default layer materializes the sentinel for every threshold; it
-    # means "no layer set one" and must never surface as provenance.
+async def test_collect_layer_values_hides_the_unset_threshold() -> None:
+    # The default layer materializes None for every threshold; it means "no
+    # layer set one" and must never surface as provenance.
     defaults = DefaultConfigLayer(schema=VibeConfigSchema)
 
     values = await collect_layer_values([defaults])
@@ -301,11 +306,11 @@ def test_build_field_wires_shows_an_unset_window_as_default(
     assert window.path == "/models/custom/max_context_length"
 
 
-def test_build_field_wires_shows_the_derived_threshold_on_the_global_row(
+def test_build_field_wires_shows_an_unset_threshold_as_default(
     make_config: Callable[..., VibeConfigSchema],
 ) -> None:
-    # Nothing is set anywhere, so the row must display the derived value,
-    # never the raw unset sentinel the merged config carries.
+    # Nothing is set anywhere: the row shows no value, and the session derives
+    # the threshold from the window when it starts.
     config = make_config(
         active_model="custom",
         models=[
@@ -324,7 +329,7 @@ def test_build_field_wires_shows_the_derived_threshold_on_the_global_row(
         if wire.name == "auto_compact_threshold"
     )
 
-    assert threshold.value == 209_715
+    assert threshold.value is None
     assert threshold.origin == DEFAULT_ORIGIN
 
 

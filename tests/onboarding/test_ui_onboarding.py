@@ -162,6 +162,21 @@ def _build_configured_custom_domain_app() -> OnboardingApp:
     )
 
 
+PINNED_CONSOLE_URL = "https://console.acme.internal"
+
+
+def _build_pinned_console_app() -> OnboardingApp:
+    schema = _build_onboarding_config(
+        browser_auth_base_url=CONSOLE_URL,
+        browser_auth_api_base_url=BROWSER_AUTH_API_URL,
+    )
+    return OnboardingApp(
+        config=OnboardingContext(
+            provider=schema.get_active_provider(), pinned_console_url=PINNED_CONSOLE_URL
+        )
+    )
+
+
 def _patch_failing_browser_sign_in_service(
     monkeypatch: pytest.MonkeyPatch, captured_base_urls: list[tuple[str, str]]
 ) -> None:
@@ -616,6 +631,153 @@ async def test_ui_mistral_override_warning_clears_on_navigation() -> None:
 
         await pilot.press("down")
         assert _sign_in_target_warning(app.screen) == ""
+
+
+@pytest.mark.asyncio
+async def test_ui_pinned_console_url_shows_locked_form_then_browser_sign_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_base_urls: list[tuple[str, str]] = []
+    _patch_failing_browser_sign_in_service(monkeypatch, captured_base_urls)
+    app = _build_pinned_console_app()
+
+    async with app.run_test() as pilot:
+        await _show_auth_method(pilot)
+        await pilot.press("enter")
+
+        # The target selection is skipped: the pinned console URL is shown
+        # prefilled and locked in the custom-domain form.
+        await _wait_for(
+            lambda: (
+                isinstance(pilot.app.screen, CustomDomainScreen)
+                and pilot.app.screen.is_mounted
+            ),
+            pilot,
+        )
+        screen = pilot.app.screen
+        assert isinstance(screen, CustomDomainScreen)
+        assert screen.domain_input.value == PINNED_CONSOLE_URL
+        assert screen.domain_input.disabled
+        assert screen.api_base_input.disabled
+
+        # The locked form submits through the screen-level Enter binding.
+        await pilot.press("enter")
+        await _wait_for(
+            lambda: isinstance(pilot.app.screen, BrowserSignInScreen), pilot
+        )
+        await _wait_for(lambda: bool(captured_base_urls), pilot)
+
+    assert app._provider.browser_auth_base_url == PINNED_CONSOLE_URL
+    assert app._console_base_url == PINNED_CONSOLE_URL
+    assert captured_base_urls == [(PINNED_CONSOLE_URL, f"{PINNED_CONSOLE_URL}/api")]
+
+
+@pytest.mark.asyncio
+async def test_ui_pinned_console_url_preserves_a_split_horizon_api_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_base_urls: list[tuple[str, str]] = []
+    _patch_failing_browser_sign_in_service(monkeypatch, captured_base_urls)
+    schema = _build_onboarding_config(
+        browser_auth_base_url=PINNED_CONSOLE_URL,
+        browser_auth_api_base_url="https://connector.acme.internal/api",
+        browser_auth_allow_origin_rewrite=True,
+    )
+    app = OnboardingApp(
+        config=OnboardingContext(
+            provider=schema.get_active_provider(), pinned_console_url=PINNED_CONSOLE_URL
+        )
+    )
+
+    async with app.run_test() as pilot:
+        await _show_auth_method(pilot)
+        await pilot.press("enter")
+        await _wait_for(
+            lambda: (
+                isinstance(pilot.app.screen, CustomDomainScreen)
+                and pilot.app.screen.is_mounted
+            ),
+            pilot,
+        )
+        await pilot.press("enter")
+        await _wait_for(
+            lambda: isinstance(pilot.app.screen, BrowserSignInScreen), pilot
+        )
+        await _wait_for(lambda: bool(captured_base_urls), pilot)
+
+    # The pin fixes the browser sign-in host; the configured split API base of
+    # the same deployment survives, and account calls keep the connector host.
+    assert app._provider.browser_auth_base_url == PINNED_CONSOLE_URL
+    assert (
+        app._provider.browser_auth_api_base_url == "https://connector.acme.internal/api"
+    )
+    assert app._provider.browser_auth_allow_origin_rewrite is True
+    assert app._console_base_url == "https://connector.acme.internal"
+    assert captured_base_urls == [
+        (PINNED_CONSOLE_URL, "https://connector.acme.internal/api")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ui_pinned_console_url_custom_domain_submit_applies_pinned_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_base_urls: list[tuple[str, str]] = []
+    _patch_failing_browser_sign_in_service(monkeypatch, captured_base_urls)
+    app = _build_pinned_console_app()
+
+    async with app.run_test() as pilot:
+        await _show_auth_method(pilot)
+        app.switch_screen("custom_domain")
+        await _wait_for(
+            lambda: (
+                isinstance(pilot.app.screen, CustomDomainScreen)
+                and pilot.app.screen.is_mounted
+            ),
+            pilot,
+        )
+        screen = pilot.app.screen
+        assert isinstance(screen, CustomDomainScreen)
+        # Drive the submit handler directly: it must apply the pinned domain,
+        # never a typed one.
+        screen.on_input_submitted(
+            Input.Submitted(screen.domain_input, screen.domain_input.value)
+        )
+
+        await _wait_for(
+            lambda: isinstance(pilot.app.screen, BrowserSignInScreen), pilot
+        )
+        await _wait_for(lambda: bool(captured_base_urls), pilot)
+
+    assert app._provider.browser_auth_base_url == PINNED_CONSOLE_URL
+    assert captured_base_urls == [(PINNED_CONSOLE_URL, f"{PINNED_CONSOLE_URL}/api")]
+
+
+@pytest.mark.asyncio
+async def test_ui_pinned_console_url_locked_form_back_returns_to_auth_method() -> None:
+    app = _build_pinned_console_app()
+
+    async with app.run_test() as pilot:
+        await _show_auth_method(pilot)
+        await pilot.press("enter")
+        await _wait_for(
+            lambda: (
+                isinstance(pilot.app.screen, CustomDomainScreen)
+                and pilot.app.screen.is_mounted
+            ),
+            pilot,
+        )
+
+        await pilot.press("escape")
+        await _wait_for(lambda: isinstance(pilot.app.screen, AuthMethodScreen), pilot)
+
+
+@pytest.mark.asyncio
+async def test_ui_pinned_console_url_still_allows_manual_api_key_path() -> None:
+    app = _build_pinned_console_app()
+
+    async with app.run_test() as pilot:
+        await _show_manual_api_key_screen(pilot)
 
 
 @pytest.mark.asyncio

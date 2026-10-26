@@ -55,6 +55,13 @@ async def read_response(
         return response
 
 
+def shell_probe_command() -> str:
+    # Works under the manual shell's POSIX shell, Git Bash, and cmd.
+    if platform.system() == "Windows":
+        return "echo vibe-smoke"
+    return "printf vibe-smoke"
+
+
 async def smoke_binary(binary: Path) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         env = os.environ.copy()
@@ -69,6 +76,7 @@ async def smoke_binary(binary: Path) -> None:
             env=env,
         )
         failure: str | None = None
+        session_id: str = ""
         try:
             await send_message(
                 proc,
@@ -114,11 +122,65 @@ async def smoke_binary(binary: Path) -> None:
                 result = response.get("result")
                 state = result.get("state") if isinstance(result, dict) else None
                 session = state.get("session") if isinstance(state, dict) else None
-                session_id = session.get("id") if isinstance(session, dict) else None
-                if not isinstance(session_id, str) or not session_id:
+                raw_session_id = (
+                    session.get("id") if isinstance(session, dict) else None
+                )
+                if not isinstance(raw_session_id, str) or not raw_session_id:
                     failure = f"unexpected session/start response: {response}"
                 else:
+                    session_id = raw_session_id
                     print("PASS: Unified Harness session/start")
+
+            if failure is None:
+                assert proc.stdout is not None
+                await send_message(
+                    proc,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "shell-command",
+                        "method": "session/shellCommand",
+                        "params": {
+                            "sessionId": session_id,
+                            "command": shell_probe_command(),
+                            "action": "run",
+                            "cwd": tmp,
+                        },
+                    },
+                )
+                # The output streams via history/entryUpdated notifications,
+                # not the response. The command text is echoed in the
+                # entryAdded detail and the terminal state's display, so only
+                # an append to /state/outputText proves the shell ran.
+                probe_seen = False
+                while True:
+                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=60)
+                    if not line:
+                        raise RuntimeError("shell-command returned no response")
+                    message = json.loads(line)
+                    if (
+                        isinstance(message, dict)
+                        and message.get("method") == "history/entryUpdated"
+                    ):
+                        for operation in message.get("params", {}).get("patch", []):
+                            if operation.get(
+                                "path"
+                            ) == "/state/outputText" and "vibe-smoke" in str(
+                                operation.get("value")
+                            ):
+                                probe_seen = True
+                    if (
+                        isinstance(message, dict)
+                        and message.get("id") == "shell-command"
+                    ):
+                        if "error" in message:
+                            raise RuntimeError(
+                                f"shell-command returned an error: {message['error']}"
+                            )
+                        break
+                if not probe_seen:
+                    failure = "session/shellCommand produced no shell output"
+                else:
+                    print("PASS: session/shellCommand ran the host shell")
         except (TimeoutError, json.JSONDecodeError, RuntimeError) as error:
             failure = f"binary smoke test failed: {error}"
         finally:

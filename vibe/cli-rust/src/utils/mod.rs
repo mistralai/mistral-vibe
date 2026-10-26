@@ -40,6 +40,7 @@ pub mod input_edit;
 pub mod paths;
 pub mod scroll;
 pub mod startup_cache;
+pub mod system_proxy;
 pub mod text;
 pub mod text_diff;
 pub mod tls;

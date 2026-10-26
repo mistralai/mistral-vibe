@@ -37,6 +37,10 @@ pub struct OnboardingContext {
     pub supports_browser_sign_in: bool,
     /// The server-resolved TLS trust flag (ADR 0015).
     pub enable_system_trust_store: bool,
+    /// The administrator-pinned console URL (`VIBE_CUSTOM_CONSOLE_URL`), when
+    /// the server resolved one: sign-in locks to it and the domain cannot be
+    /// modified.
+    pub pinned_console_url: Option<String>,
 }
 
 impl Default for OnboardingContext {
@@ -48,6 +52,7 @@ impl Default for OnboardingContext {
             theme: "auto".into(),
             supports_browser_sign_in: true,
             enable_system_trust_store: false,
+            pinned_console_url: None,
         }
     }
 }
@@ -69,6 +74,7 @@ impl OnboardingContext {
             theme,
             supports_browser_sign_in: status.supports_browser_sign_in,
             enable_system_trust_store: status.enable_system_trust_store,
+            pinned_console_url: status.pinned_console_url.clone(),
         }
     }
 }
@@ -186,6 +192,16 @@ pub fn configured_custom_api_base(provider: &ProviderView) -> Option<String> {
         return None;
     }
     Some(api.to_owned())
+}
+
+/// The configured split-horizon API base belonging to the admin-pinned
+/// console: the pin fixes the browser sign-in host and must not clobber an
+/// API base configured for the same deployment. Only returned when the
+/// configured browser base normalizes to the pin.
+pub fn pinned_console_api_base(provider: &ProviderView, pin: &str) -> Option<String> {
+    let browser_base = provider.browser_auth_base_url.as_deref()?;
+    let api_base = provider.browser_auth_api_base_url.as_deref()?;
+    (normalize_origin(browser_base) == pin).then(|| api_base.to_owned())
 }
 
 /// (scheme, host, normalized port) — the origin identity two URLs share or not.

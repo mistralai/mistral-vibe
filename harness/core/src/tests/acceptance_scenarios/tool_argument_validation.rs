@@ -333,3 +333,103 @@ fn mixed_valid_and_invalid_batch_dispatches_valid_work_and_preserves_result_orde
         &first_completion["model_input"]["tool_catalog"]["tools"],
     );
 }
+
+///
+/// *Prepare*: A direct provided tool takes no arguments.
+/// *Do*: The model calls it twice, once with empty arguments and once with only whitespace, then the tools return.
+/// *Assert*: Core runs both calls with `{}` and commits and replays `{}` as their arguments.
+///
+#[test]
+fn empty_tool_arguments_run_the_tool_with_an_empty_object() {
+    // Prepare
+    let turn_id = "turn-empty-tool-arguments";
+    let mut harness_config = config();
+    harness_config.capabilities.tool_groups = serde_json::from_value(json!([{
+        "name": "customers",
+        "description": "Customer tools",
+        "tools": [{
+            "name": "list_customers",
+            "description": "List all customers",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            },
+            "exposure": "direct",
+        }],
+    }]))
+    .expect("provided tool configuration is valid");
+    let mut runtime = SynchronousRuntime::new(harness_config);
+    let first_completion = runtime.start_turn(turn_id, "list the customers");
+    let sent_calls = ["", " \n"]
+        .iter()
+        .zip(["empty-arguments-call", "blank-arguments-call"])
+        .map(|(arguments_json, id)| {
+            json!({
+                "type": "tool_call",
+                "id": id,
+                "name": "list_customers",
+                "arguments_json": arguments_json,
+            })
+        })
+        .collect::<Vec<_>>();
+    let committed_calls = vec![
+        tool_call("empty-arguments-call", "list_customers", json!({})),
+        tool_call("blank-arguments-call", "list_customers", json!({})),
+    ];
+    let list_customers = json!({
+        "type": "provided_tool_call",
+        "call": {
+            "type": "provided",
+            "group_name": "customers",
+            "tool_name": "list_customers",
+            "arguments": {},
+        },
+    });
+
+    // Do
+    let [first_tool, second_tool]: [Value; 2] = runtime
+        .apply(
+            tool_call_completion(action_id(&first_completion), sent_calls),
+            running(turn_id)
+                .dispatch(list_customers.clone())
+                .dispatch(list_customers)
+                .observe(assistant_tool_calls_committed(
+                    turn_id,
+                    &first_completion,
+                    &committed_calls,
+                ))
+                .observe(tool_execution_started(turn_id, "empty-arguments-call"))
+                .observe(tool_execution_started(turn_id, "blank-arguments-call")),
+        )
+        .actions()
+        .try_into()
+        .expect("both calls dispatch the tool");
+    let first_result = text_tool_success(&first_tool, "Ada");
+    runtime.apply(
+        first_result.clone(),
+        running(turn_id)
+            .keep(&second_tool)
+            .observe_completed_tool_result(&first_tool, &first_result),
+    );
+    let second_result = text_tool_success(&second_tool, "Ada");
+    let next_completion = runtime
+        .apply(
+            second_result.clone(),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe_completed_tool_result(&second_tool, &second_result),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(
+        &next_completion,
+        "append",
+        &[
+            model_assistant_tool_calls(&committed_calls),
+            model_tool_text("empty-arguments-call", "list_customers", "Ada"),
+            model_tool_text("blank-arguments-call", "list_customers", "Ada"),
+        ],
+    );
+}

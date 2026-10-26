@@ -91,8 +91,8 @@ impl Harness {
             .await
             .expect("the switch settles")
             .expect("the event channel stays open");
-        if event.runtime.is_some() {
-            event.runtime = Some(runtime(&event.target));
+        if event.runtime.is_ok() {
+            event.runtime = Ok(runtime(&event.target));
         }
         let target = event.target.clone();
         agents::apply_event(&mut self.app, &self.client, event);
@@ -177,8 +177,15 @@ async fn a_failed_switch_clears_the_in_flight_state_and_restores_the_prompt() {
         .await
         .expect("no hang")
         .expect("the failure settles");
-    assert!(event.runtime.is_none());
+    assert!(event.runtime.is_err());
     agents::apply_event(&mut harness.app, &harness.client, event);
+    let toast = harness
+        .app
+        .overlays
+        .toasts
+        .back()
+        .expect("the failure is shown");
+    assert!(toast.text.starts_with("Failed to switch agent: "));
 
     assert!(!agents::switching(&harness.app));
     assert!(!harness.app.agents.switching_indicator);
@@ -193,7 +200,7 @@ async fn a_failed_switch_clears_the_in_flight_state_and_restores_the_prompt() {
 }
 
 #[tokio::test]
-async fn after_a_failed_switch_the_next_cycle_starts_from_the_active_agent() {
+async fn after_a_failed_switch_the_next_cycle_steps_past_the_refused_target() {
     let mut harness = Harness::new(false);
     harness.press(KeyCode::BackTab);
     let event = tokio::time::timeout(std::time::Duration::from_secs(5), harness.events.recv())
@@ -206,7 +213,9 @@ async fn after_a_failed_switch_the_next_cycle_starts_from_the_active_agent() {
     harness.client = Arc::new(client);
     harness.frames = Some(frames);
     harness.press(KeyCode::BackTab);
-    assert_eq!(harness.requested_agent().await, "plan");
+    assert_eq!(harness.requested_agent().await, "accept-edits");
+    harness.settle().await;
+    assert_eq!(harness.app.agents.active.name, "accept-edits");
 }
 
 #[tokio::test]

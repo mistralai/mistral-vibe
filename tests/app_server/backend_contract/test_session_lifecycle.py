@@ -36,13 +36,13 @@ async def test_session_start_returns_the_attached_public_session(
 async def test_unified_session_advertises_only_supported_agent_tools(
     backend_contract_mistral_api: respx.Route, tmp_path: Path
 ) -> None:
-    """*Prepare*: A local Unified Harness session and usage-free provider chunks.
+    """*Prepare*: A local Unified Harness session and scripted provider chunks.
     *Do*: Start a turn and discover the agent tool declarations.
     *Assert*: Local child tools are available without conversation forks; waiting
               is the standalone direct ``wait`` tool, not an ``agents`` function.
     """
     # Prepare
-    # Accounting is covered separately; optional provider usage is omitted here.
+    # Accounting is covered separately; every reply still reports its usage.
     choices = [
         {
             "index": 0,
@@ -86,6 +86,11 @@ async def test_unified_session_advertises_only_supported_agent_tools(
                     "created": 1234567890,
                     "model": "mistral-vibe-cli-latest",
                     "choices": [choice],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15,
+                    },
                 })
                 + "\n\ndata: [DONE]\n",
                 headers={"Content-Type": "text/event-stream"},
@@ -118,7 +123,7 @@ async def test_unified_session_advertises_only_supported_agent_tools(
     assert "declare namespace tools.agents" in declarations
     for operation in ("list", "spawn", "send_message", "interrupt"):
         assert f"function {operation}(" in declarations
-    assert "fork_turns" not in declarations
+    assert "context?:" not in declarations
     assert "function wait(" not in declarations
 
 

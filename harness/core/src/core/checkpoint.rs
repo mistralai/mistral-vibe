@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::core::config::HarnessConfig;
+use crate::core::config::{ContextSettings, HarnessConfig};
 use crate::core::state::HarnessState;
 
 mod v1;
@@ -26,9 +26,22 @@ impl Checkpoint {
         v1::CheckpointV1::capture(state).map(|checkpoint| Self(CheckpointVersion::V1(checkpoint)))
     }
 
+    /// Restores the checkpoint under `config` without a move.
+    #[cfg(test)]
     pub(crate) fn restore(self, config: HarnessConfig) -> Result<HarnessState, String> {
+        self.restore_moved_from(config, None)
+    }
+
+    /// Restores the checkpoint under `config`. With `moved_from`, the context
+    /// settings the checkpoint was taken under, the Session first moves to
+    /// `config` by the rule a reconfiguration applies.
+    pub(crate) fn restore_moved_from(
+        self,
+        config: HarnessConfig,
+        moved_from: Option<&ContextSettings>,
+    ) -> Result<HarnessState, String> {
         match self.0 {
-            CheckpointVersion::V1(checkpoint) => checkpoint.restore(config),
+            CheckpointVersion::V1(checkpoint) => checkpoint.restore(config, moved_from),
         }
     }
 }

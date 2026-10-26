@@ -278,3 +278,135 @@ class TestSuppliedUserConfig:
 
         # Assert
         assert session.user_config is supplied
+
+
+class TestSeededShellTimeout:
+    @pytest.mark.asyncio
+    async def test_a_seeded_bash_default_timeout_is_dropped_so_the_config_loads(
+        self, config_dir: Path
+    ) -> None:
+        """*Prepare*: A user config.toml that Vibe's first run wrote before July 2026,
+        with `[tools.bash] default_timeout = 300` and no maximum.
+        *Do*: Build the config from it.
+        *Assert*: It loads, and the seeded default is gone from the file, so bash keeps
+        Vibe's own default and maximum. The bash allowlist next to it stays.
+        """
+        # Prepare
+        _write_user_config(
+            config_dir,
+            {"tools": {"bash": {"default_timeout": 300, "allowlist": ["echo"]}}},
+        )
+
+        # Do
+        orch = await build_default_orchestrator()
+
+        # Assert
+        assert "default_timeout" not in orch.config.tools["bash"]
+        with (config_dir / "config.toml").open("rb") as f:
+            persisted_bash = tomllib.load(f)["tools"]["bash"]
+        assert "default_timeout" not in persisted_bash
+        assert "echo" in persisted_bash["allowlist"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("bash", "kept"),
+        [
+            ({"default_timeout": 300, "max_timeout_seconds": 600}, (300, 600)),
+            ({"default_timeout": 60, "max_timeout_seconds": 300}, (60, 300)),
+        ],
+    )
+    async def test_shell_timeouts_set_together_are_kept(
+        self, config_dir: Path, bash: dict[str, int], kept: tuple[int, int]
+    ) -> None:
+        """*Prepare*: A user config.toml whose bash default and maximum are both set.
+        *Do*: Build the config from it.
+        *Assert*: Both are kept as set.
+        """
+        # Prepare
+        _write_user_config(config_dir, {"tools": {"bash": bash}})
+
+        # Do
+        orch = await build_default_orchestrator()
+
+        # Assert
+        tool = orch.config.tools["bash"]
+        assert (tool["default_timeout"], tool["max_timeout_seconds"]) == kept
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("user_bash", "project_bash"),
+        [
+            ({"max_timeout_seconds": 600}, {"default_timeout": 300}),
+            ({"default_timeout": 300}, {"max_timeout_seconds": 600}),
+        ],
+        ids=["project-default", "user-default"],
+    )
+    async def test_a_300_default_paired_with_another_files_maximum_is_kept(
+        self,
+        config_dir: Path,
+        tmp_working_directory: Path,
+        user_bash: dict[str, int],
+        project_bash: dict[str, int],
+    ) -> None:
+        """*Prepare*: A bash `default_timeout = 300` in one config file and
+        `max_timeout_seconds = 600` in the other (user and project).
+        *Do*: Build the config from both.
+        *Assert*: It loads as 300 / 600; the 300 is not taken for the seeded value,
+        because the merged config sets both.
+        """
+        # Prepare
+        _write_user_config(config_dir, {"tools": {"bash": user_bash}})
+        _write_project_config(tmp_working_directory, {"tools": {"bash": project_bash}})
+        trusted_folders_manager.add_trusted(_project_vibe_dir(tmp_working_directory))
+
+        # Do
+        orch = await build_default_orchestrator()
+
+        # Assert
+        tool = orch.config.tools["bash"]
+        assert (tool["default_timeout"], tool["max_timeout_seconds"]) == (300, 600)
+
+    @pytest.mark.asyncio
+    async def test_a_project_bash_default_timeout_of_300_alone_still_fails(
+        self, config_dir: Path, tmp_working_directory: Path
+    ) -> None:
+        """*Prepare*: A trusted project config with `[tools.bash] default_timeout = 300`
+        alone. Vibe's first run seeded only the user config.toml.
+        *Do*: Build the config.
+        *Assert*: It is a config error naming both settings, and the project file
+        keeps its value.
+        """
+        # Prepare
+        _write_user_config(config_dir, {})
+        project_config = _write_project_config(
+            tmp_working_directory, {"tools": {"bash": {"default_timeout": 300}}}
+        )
+        trusted_folders_manager.add_trusted(_project_vibe_dir(tmp_working_directory))
+
+        # Do / Assert
+        with pytest.raises(
+            Exception,
+            match="tools.bash: default_timeout is set without max_timeout_seconds",
+        ):
+            await build_default_orchestrator()
+        with project_config.open("rb") as f:
+            assert tomllib.load(f)["tools"]["bash"] == {"default_timeout": 300}
+
+    @pytest.mark.asyncio
+    async def test_a_bash_default_timeout_other_than_the_seeded_one_alone_still_fails(
+        self, config_dir: Path
+    ) -> None:
+        """*Prepare*: A user config.toml with `[tools.bash] default_timeout = 600` alone.
+        *Do*: Build the config from it.
+        *Assert*: It is a config error naming both settings; the migration leaves a
+        value Vibe never wrote alone.
+        """
+        # Prepare
+        _write_user_config(config_dir, {"tools": {"bash": {"default_timeout": 600}}})
+
+        # Do / Assert
+        with pytest.raises(
+            Exception,
+            match="tools.bash: default_timeout is set without max_timeout_seconds",
+        ):
+            await build_default_orchestrator()

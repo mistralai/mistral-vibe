@@ -8,7 +8,10 @@ import httpx
 import pytest
 import respx
 
-from tests.app_server.backend_contract.conftest import BackendContractConnection
+from tests.app_server.backend_contract.conftest import (
+    BackendContractConnection,
+    wait_for_background_integrations,
+)
 from tests.constants import CONNECTORS_BOOTSTRAP_PATH, MISTRAL_BASE_URL
 from vibe.app_server._session_backend_port import SessionBackendError
 from vibe.app_server.client import AppServerClient
@@ -82,6 +85,8 @@ async def _open_connector_session(
     bootstrap_route.mock(return_value=httpx.Response(200, json=payload))
     session = await connection.host.open_session()
     await session.resources.runtime.wait_until_ready()
+    await wait_for_background_integrations()
+    await session.resources.runtime.refresh()
     return session, bootstrap_route
 
 
@@ -1014,7 +1019,7 @@ async def test_connect_turns_a_no_auth_connector_into_a_connected_one(
     )
     bootstrap_route = respx_mock.get(f"{MISTRAL_BASE_URL}{CONNECTORS_BOOTSTRAP_PATH}")
     bootstrap_route.mock(return_value=httpx.Response(200, json=pending))
-    credentials_route = respx_mock.post(
+    credentials_route = respx_mock.patch(
         f"{MISTRAL_BASE_URL}/v1/connectors/wiki%2Fraw/user/credentials"
     )
 
@@ -1038,6 +1043,7 @@ async def test_connect_turns_a_no_auth_connector_into_a_connected_one(
         await backend_contract_connection.client.request(
             "session/ready/wait", SessionReadyWaitParams(session_id=session_id)
         )
+        await wait_for_background_integrations()
         await backend_contract_connection.client.request(
             "connector_catalog/toggle",
             ConnectorCatalogToggleParams(
@@ -1096,7 +1102,7 @@ async def test_connect_conflicts_for_a_connector_that_needs_no_connection(
         respx_mock,
         _payload(_connector("github/raw", "github")),
     )
-    credentials_route = respx_mock.post(
+    credentials_route = respx_mock.patch(
         f"{MISTRAL_BASE_URL}/v1/connectors/github%2Fraw/user/credentials"
     )
     try:
@@ -1151,6 +1157,7 @@ async def test_connector_authorization_acknowledges_before_notifications_and_com
         await backend_contract_connection.client.request(
             "session/ready/wait", SessionReadyWaitParams(session_id=session_id)
         )
+        await wait_for_background_integrations()
         await backend_contract_connection.client.request(
             "connector_catalog/toggle",
             ConnectorCatalogToggleParams(

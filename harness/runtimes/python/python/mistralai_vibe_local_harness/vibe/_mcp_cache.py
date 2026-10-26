@@ -385,6 +385,11 @@ def _utc_now() -> datetime:
 def _validate_policy(policy: MCPDescriptorCachePolicy) -> None:
     if not math.isfinite(policy.ttl_s) or policy.ttl_s < 0:
         raise ValueError("descriptor cache TTL must be finite and non-negative")
+    refresh_after_s = policy.refresh_after_s
+    if refresh_after_s is not None and (
+        not math.isfinite(refresh_after_s) or refresh_after_s < 0
+    ):
+        raise ValueError("descriptor refresh age must be finite and non-negative")
     for name in (
         "max_tools_per_record",
         "max_record_bytes",

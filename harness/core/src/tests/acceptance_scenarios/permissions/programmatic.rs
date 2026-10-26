@@ -148,7 +148,7 @@ fn continues_programmatic_tool_call_after_approval() {
 fn does_not_run_post_tool_hook_when_programmatic_tool_approval_is_rejected() {
     let turn_id = "turn-rejected-programmatic-approval";
     let call_id = "program-rejected-approval";
-    let source = "async function main() { try { await tools.file_system.read_file({ path: 'secrets.txt' }); return 'unexpected'; } catch (error) { return { code: error.name, reason: error.message }; } }";
+    let source = "async function main() { try { await tools.file_system.read_file({ path: 'secrets.txt' }); return 'unexpected'; } catch (error) { return { code: error.code, reason: error.message }; } }";
     let mut config_value = serde_json::to_value(config()).unwrap();
     config_value["capabilities"]["hook_bindings"] = json!([{
         "id": "observe-read-result",
@@ -217,7 +217,7 @@ fn does_not_run_post_tool_hook_when_programmatic_tool_approval_is_rejected() {
 fn does_not_run_post_tool_hook_when_programmatic_tool_approval_times_out() {
     let turn_id = "turn-timed-out-programmatic-approval";
     let call_id = "program-timed-out-approval";
-    let source = "async function main() { try { await tools.file_system.read_file({ path: 'secrets.txt' }); return 'unexpected'; } catch (error) { return { code: error.name, reason: error.message }; } }";
+    let source = "async function main() { try { await tools.file_system.read_file({ path: 'secrets.txt' }); return 'unexpected'; } catch (error) { return { code: error.code, reason: error.message }; } }";
     let mut config_value = serde_json::to_value(config()).unwrap();
     config_value["capabilities"]["hook_bindings"] = json!([{
         "id": "observe-read-result",
@@ -402,7 +402,7 @@ async function main() {
 
     return results.map((result) => result.status === "fulfilled"
         ? result.value.content
-        : result.reason.name);
+        : result.reason.code);
 }
 "#;
     let mut config_value = serde_json::to_value(config()).unwrap();
@@ -844,7 +844,7 @@ fn uses_model_visible_name_for_programmatic_provided_tool_approval() {
 fn rejects_programmatic_tool_call_with_permission_denied() {
     let turn_id = "turn-denied-programmatic-tool";
     let call_id = "program-denied-read";
-    let source = "async function main() { try { await tools.file_system.read_file({ path: 'secrets.txt' }); return 'unexpected'; } catch (error) { return { code: error.name, reason: error.message }; } }";
+    let source = "async function main() { try { await tools.file_system.read_file({ path: 'secrets.txt' }); return 'unexpected'; } catch (error) { return { code: error.code, reason: error.message }; } }";
     let mut runtime = runtime_with_read_file_permission_policy("deny", "allow");
     let first_completion = runtime.start_turn(turn_id, "Read the secret file.");
 
@@ -894,7 +894,7 @@ async function main() {
         try {
             await tools.file_system.read_file({ path: "secrets.txt" });
         } catch (error) {
-            if (error.name !== "permission_denied") throw error;
+            if (error.code !== "permission_denied") throw error;
             denialCount += 1;
         }
     }
@@ -942,7 +942,7 @@ async function main() {
 fn skips_post_tool_hook_for_denied_programmatic_tool_call() {
     let turn_id = "turn-denied-programmatic-tool-with-post-hook";
     let call_id = "program-denied-read-with-post-hook";
-    let source = "async function main() { try { await tools.file_system.read_file({ path: 'secrets.txt' }); return 'unexpected'; } catch (error) { return error.name; } }";
+    let source = "async function main() { try { await tools.file_system.read_file({ path: 'secrets.txt' }); return 'unexpected'; } catch (error) { return error.code; } }";
     let mut config_value = serde_json::to_value(config()).unwrap();
     config_value["capabilities"]["hook_bindings"] = json!([{
         "id": "observe-read-result",
@@ -1075,7 +1075,7 @@ fn uses_arguments_rewritten_by_pre_tool_hook_for_programmatic_approval_and_dispa
 fn rejects_programmatic_tool_call_when_pre_hook_supplies_denied_arguments() {
     let turn_id = "turn-pre-hook-denied-programmatic-tool";
     let call_id = "program-rewritten-read";
-    let source = "async function main() { try { await tools.file_system.read_file({ path: 'public.txt' }); return 'unexpected'; } catch (error) { return error.name; } }";
+    let source = "async function main() { try { await tools.file_system.read_file({ path: 'public.txt' }); return 'unexpected'; } catch (error) { return error.code; } }";
     let mut config_value = serde_json::to_value(config()).unwrap();
     config_value["capabilities"]["hook_bindings"] = json!([{
         "id": "rewrite-read-path",
@@ -1161,7 +1161,7 @@ async function main() {
         path: paths[index],
         outcome: result.status === "fulfilled"
             ? result.value.content
-            : result.reason.name,
+            : result.reason.code,
     }));
 }
 "#;
@@ -1235,7 +1235,7 @@ async function main() {
     );
 
     return results.map((result) =>
-        result.status === "rejected" ? result.reason.name : "unexpected"
+        result.status === "rejected" ? result.reason.code : "unexpected"
     );
 }
 "#;

@@ -24,13 +24,13 @@ use crate::core::ProgrammaticToolSettings;
 #[cfg(test)]
 use crate::core::SubagentMode;
 #[cfg(test)]
+use crate::core::config::ContextSettings;
+#[cfg(test)]
 use crate::core::config::HarnessSettings;
 #[cfg(test)]
 use crate::core::config::ToolSettings;
 #[cfg(test)]
 use crate::core::config::TurnSettings;
-#[cfg(test)]
-use crate::core::config::{ContextSettings, ImageTokenCost};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct SessionHandle(u64);
@@ -85,9 +85,10 @@ impl HarnessEngine {
     pub(crate) fn export_conversation(
         &self,
         handle: SessionHandle,
-        fork_turns: &str,
+        context: &str,
     ) -> Result<crate::core::ConversationSeed, String> {
-        self.with_session(handle, |session| session.export_conversation(fork_turns))?
+        let context = crate::core::SpawnContext::from_json(context)?;
+        self.with_session(handle, |session| session.export_conversation(context))?
     }
 
     pub(crate) fn restore(
@@ -95,8 +96,14 @@ impl HarnessEngine {
         config: HarnessConfig,
         checkpoint: Checkpoint,
         resume_input_id: u64,
+        moved_from: Option<HarnessConfig>,
     ) -> Result<SessionHandle, String> {
-        let session = HarnessSession::restore(config, checkpoint, resume_input_id)?;
+        let session = HarnessSession::restore_moved_from(
+            config,
+            checkpoint,
+            resume_input_id,
+            moved_from.as_ref(),
+        )?;
         self.insert(session)
     }
 
@@ -200,7 +207,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::core::{ImageDeliverySettings, InputModality};
 
     fn config(task_id: &str) -> HarnessConfig {
         HarnessConfig {
@@ -213,15 +219,13 @@ mod tests {
                 },
                 context: ContextSettings {
                     compaction: CompactionPolicy::Disabled,
-                    compaction_fallback: Default::default(),
-                    image_delivery: ImageDeliverySettings::default(),
                     notifications: crate::core::config::NotificationSettings {
                         pending_count: 1000,
                         pending_bytes: 1024 * 1024,
                         recent_ids: 1000,
                     },
-                    image_token_cost: ImageTokenCost::SerializedBytes,
-                    input_modalities: vec![InputModality::Text, InputModality::Image],
+                    model_facts: crate::core::testing::test_model_facts(),
+                    compaction_model_input_modalities: None,
                 },
                 tools: ToolSettings {
                     max_wait_ms: 3_600_000,
@@ -240,6 +244,7 @@ mod tests {
                     file_system: Default::default(),
                     skills: Default::default(),
                     command_environment: CommandEnvironment::Unix,
+                    bash_timeout: None,
                     permissions: None,
                 },
                 prompts: Default::default(),
@@ -289,7 +294,9 @@ mod tests {
         engine.apply(original, input("turn-original")).unwrap();
         let checkpoint = engine.checkpoint(original).unwrap();
 
-        let restored = engine.restore(config("original"), checkpoint, 0).unwrap();
+        let restored = engine
+            .restore(config("original"), checkpoint, 0, None)
+            .unwrap();
 
         assert_ne!(restored, original);
         assert_eq!(inspection_value(&engine, restored)["last_input_id"], 0);
@@ -302,7 +309,9 @@ mod tests {
         engine.apply(original, input("turn-original")).unwrap();
         let checkpoint = engine.checkpoint(original).unwrap();
 
-        let restored = engine.restore(config("original"), checkpoint, 1).unwrap();
+        let restored = engine
+            .restore(config("original"), checkpoint, 1, None)
+            .unwrap();
 
         assert_eq!(inspection_value(&engine, restored)["last_input_id"], 1);
     }

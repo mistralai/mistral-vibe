@@ -333,10 +333,10 @@ impl SynchronousRuntime {
             .expect("Core checkpoint serializes")
     }
 
-    pub(super) fn export_conversation(&self, fork_turns: &str) -> Value {
+    pub(super) fn export_conversation(&self, context: Value) -> Value {
         serde_json::to_value(
             self.session
-                .export_conversation(fork_turns)
+                .export_conversation(serde_json::from_value(context).expect("a valid context"))
                 .expect("conversation exports"),
         )
         .expect("conversation serializes")
@@ -391,21 +391,51 @@ impl SynchronousRuntime {
 
     /// Restores Core with the Host's current configuration.
     pub(super) fn restart_from_checkpoint_with_config(&mut self, config: HarnessConfig) {
-        self.restore_checkpoint_value(self.checkpoint_value(), config);
+        self.restore_checkpoint_value_moved_from(self.checkpoint_value(), config, None);
+    }
+
+    /// Reopens the Session under `config` as a Runtime does after a model
+    /// change: it restores the checkpoint, moved from the configuration the
+    /// checkpoint was taken under.
+    pub(super) fn reopen_with_config(&mut self, config: HarnessConfig) {
+        let previous = self.config.clone();
+        self.restore_checkpoint_value_moved_from(self.checkpoint_value(), config, Some(&previous));
     }
 
     /// Restores a serialized checkpoint, including accepted earlier V1 shapes.
     pub(super) fn restore_checkpoint_value(&mut self, checkpoint: Value, config: HarnessConfig) {
+        self.restore_checkpoint_value_moved_from(checkpoint, config, None);
+    }
+
+    fn restore_checkpoint_value_moved_from(
+        &mut self,
+        checkpoint: Value,
+        config: HarnessConfig,
+        moved_from: Option<&HarnessConfig>,
+    ) {
         let checkpoint = crate::core::decode_checkpoint(&checkpoint.to_string())
             .expect("valid serialized checkpoint");
         self.hook_bindings = configured_hook_bindings(&config);
-        self.session = HarnessSession::restore(config.clone(), checkpoint, 0)
-            .expect("Core restores its checkpoint with current configuration");
+        self.session =
+            HarnessSession::restore_moved_from(config.clone(), checkpoint, 0, moved_from)
+                .expect("Core restores its checkpoint with current configuration");
         self.config = config;
         self.next_input_id = 1;
         self.model_input = ModelInputCache::default();
         self.model_requests.clear();
         self.assert_pending_actions_match_inspection();
+    }
+
+    /// The observations `command` would produce, from a copy of Core
+    /// restored from the current checkpoint. This runtime stays unchanged.
+    /// For facts a test cannot know before the transition, such as how far
+    /// Core cut a summary.
+    pub(super) fn preview_observations(&self, command: Value) -> Value {
+        let checkpoint = self.session.checkpoint().expect("Core checkpoints");
+        let mut session = HarnessSession::restore(self.config.clone(), checkpoint, 0)
+            .expect("Core restores its checkpoint");
+        let result = accepted_value(session.apply(input(1, command)));
+        result["transition"]["observations"].clone()
     }
 
     /// Returns the error from restoring the current checkpoint with `config`,

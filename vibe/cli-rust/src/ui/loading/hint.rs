@@ -22,6 +22,10 @@ pub(super) fn starting(app: &App) -> Vec<Hint> {
 
 /// A running turn or shell command; queue actions need a reachable, empty input.
 pub(super) fn running(app: &App) -> Vec<Hint> {
+    // A picker owns Esc and Ctrl+C, so neither interrupts nor cancels behind it.
+    if app.picker_focused() {
+        return Vec::new();
+    }
     // Ctrl+C cancels a queued prompt before interrupting.
     if !message_queue::has_removable(app) {
         return vec![(key::ESC_CTRL_C, action::INTERRUPT)];
@@ -40,12 +44,16 @@ pub(super) fn running(app: &App) -> Vec<Hint> {
     hints
 }
 
-/// Push `(prefix key to action · …)`; nothing when there are no hints.
+/// Push `(prefix key to action · …)`; only `(prefix)` without hints, nothing without either.
 pub(super) fn push(spans: &mut Vec<Span<'_>>, prefix: String, hints: &[Hint]) {
+    let muted = hint_line::action_style();
     if hints.is_empty() {
+        let prefix = prefix.trim_end();
+        if !prefix.is_empty() {
+            spans.push(Span::styled(format!("({prefix})"), muted));
+        }
         return;
     }
-    let muted = hint_line::action_style();
     let key = hint_line::key_style();
     spans.push(Span::styled(format!("({prefix}"), muted));
     for (index, (keys, action)) in hints.iter().enumerate() {

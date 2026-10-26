@@ -28,7 +28,9 @@ from pydantic import ValidationError
 from vibe.agents import AgentType
 from vibe.app_server._agent_types import (
     AgentToolCatalogue,
+    AgentTypeRejection,
     AgentTypeSource,
+    ResolvedAgentTypes,
     resolve_agent_types,
 )
 from vibe.app_server._skills import project_model_invocable_plugin_contexts
@@ -86,10 +88,10 @@ if TYPE_CHECKING:
     )
     from mistralai_vibe_local_harness.vibe.plugins import (
         PinnedPlugins,
+        RejectedAgentType,
         RestoredPlugins,
         SessionPluginProjection,
     )
-    from vibe.app_server._agent_types import ResolvedAgentTypes
     from vibe.app_server._plugin_mcp import PluginMCPCatalog
     from vibe.app_server._sandbox_skills import SandboxSkills
     from vibe.core.config.models import MCPServer
@@ -316,6 +318,7 @@ class UnifiedPluginProvider:
         harness_files: HarnessFilesManager | None = None,
         agent_tools: Callable[[], AgentToolCatalogue] | None = None,
         agent_types: Callable[[], Sequence[AgentTypeSource]] | None = None,
+        agent_rejections: Callable[[], Sequence[AgentTypeRejection]] | None = None,
         builtin_plugin_roots: list[Path] | None = None,
         sandbox_skills: SandboxSkills | None = None,
     ) -> None:
@@ -337,6 +340,9 @@ class UnifiedPluginProvider:
         # and read per bind for the same reason as the catalogue above: an edited
         # file has to reach the next bind.
         self._agent_types = agent_types
+        # The agent files that never loaded. The Runtime is told their names so
+        # a spawn reports why the type is missing rather than that it is unknown.
+        self._agent_rejections = agent_rejections
         # Set when the session runs its tools in a sandbox: Core is pointed at
         # the copies of the skills there.
         self._sandbox_skills = sandbox_skills
@@ -507,15 +513,24 @@ class UnifiedPluginProvider:
             )
         agents = list(bound.materialized.resolution.agents)
         workspace = list(self._agent_types() if self._agent_types is not None else ())
+        unloaded = tuple(
+            self._agent_rejections() if self._agent_rejections is not None else ()
+        )
         if not agents and not workspace:
-            return SessionPluginProjection(definitions=definitions)
+            return SessionPluginProjection(
+                definitions=definitions,
+                rejected_agent_types=_rejected_agent_types(unloaded),
+            )
         if self._agent_tools is None:
             logger.warning(
                 "Not binding %d agent type(s): no tool catalogue to "
                 "resolve their ceilings against",
                 len(agents) + len(workspace),
             )
-            return SessionPluginProjection(definitions=definitions)
+            return SessionPluginProjection(
+                definitions=definitions,
+                rejected_agent_types=_rejected_agent_types(unloaded),
+            )
         tools = self._agent_tools()
         # A plugin advertises its agent types inside its own capabilities,
         # which this module cannot edit, so a workspace agent cannot take a
@@ -536,6 +551,10 @@ class UnifiedPluginProvider:
                 for types in resolved
                 for name, resolver in types.permission_resolvers.items()
             },
+            rejected_agent_types=_rejected_agent_types((
+                *unloaded,
+                *(rejection for types in resolved for rejection in types.rejections),
+            )),
         )
 
     async def info(self, *, session_id: str) -> HarnessPluginInfo:
@@ -1094,10 +1113,22 @@ def _core_agents(
     return grouped
 
 
+def _rejected_agent_types(
+    rejections: Iterable[AgentTypeRejection],
+) -> tuple[RejectedAgentType, ...]:
+    from mistralai_vibe_local_harness.vibe.plugins import RejectedAgentType
+
+    return tuple(
+        RejectedAgentType(agent_type=rejection.name, reason=rejection.reason)
+        for rejection in rejections
+        if rejection.name.strip()
+    )
+
+
 def declared_agent_types(
     definitions: Iterable[PluginAgentDefinition], tools: AgentToolCatalogue
 ) -> ResolvedAgentTypes:
-    """The bindings behind a plugin's agent types."""
+    """The bindings behind a plugin's agent types, and the ones rejected."""
     return resolve_agent_types(_plugin_agent_sources(definitions), tools)
 
 

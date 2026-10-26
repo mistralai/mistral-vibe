@@ -100,10 +100,7 @@ class VertexAnthropicAdapter(AnthropicAdapter):
             "messages": converted_messages,
         }
         self._apply_thinking_config(
-            payload,
-            messages=converted_messages,
-            max_tokens=max_tokens,
-            thinking=thinking,
+            payload, model_name=model_name, max_tokens=max_tokens, thinking=thinking
         )
 
         if system_blocks := self._build_system_blocks(system_prompt):

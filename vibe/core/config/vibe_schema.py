@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, MutableMapping
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from enum import StrEnum
 import json
 import os
@@ -15,21 +15,18 @@ from pydantic import (
     Field,
     PrivateAttr,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
-from vibe.config_values import ThinkingLevel
 from vibe.core.agents.models import REMOVED_BUILTIN_AGENTS, BuiltinAgentName
 from vibe.core.config._defaults import (
-    AUTO_COMPACT_WINDOW_RATIO,
     DEFAULT_API_CONNECT_TIMEOUT,
     DEFAULT_API_POOL_TIMEOUT,
     DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
     DEFAULT_API_STREAM_IDLE_TIMEOUT,
     DEFAULT_API_TIMEOUT,
     DEFAULT_API_WRITE_TIMEOUT,
-    DEFAULT_AUTO_COMPACT_THRESHOLD,
-    DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
     DEFAULT_COMPACTION_REASONING_LIMIT_TOKENS,
     DEFAULT_CONSOLE_BASE_URL,
     DEFAULT_MISTRAL_API_ENV_KEY,
@@ -37,20 +34,23 @@ from vibe.core.config._defaults import (
     DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
     DEFAULT_MISTRAL_SERVER_URL,
     DEFAULT_OUTPUT_LIMIT_RETRIES,
-    DEFAULT_OUTPUT_TOKEN_RESERVE,
     DEFAULT_THEME,
     DEFAULT_VIBE_BASE_URL,
-    UNSET_AUTO_COMPACT_THRESHOLD,
+    SHELL_TOOLS,
 )
 
 # DEFAULT_LOG_LEVEL is not imported here to avoid a circular dependency
 # (vibe_schema.py imports from vibe.observability.logging). The constant
 # lives in vibe.config_values.
 from vibe.core.config._model_aliases import build_alias_index, warn_ignored_alias
-from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.config.harness_files import (
+    HarnessFilesManager,
+    get_harness_files_manager,
+)
 from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.models import (
     ACTIVE_MODEL_SELECTOR,
+    THINKING_LEVELS,
     ConnectorConfig,
     ExperimentsConfig,
     MCPServer,
@@ -67,6 +67,7 @@ from vibe.core.config.models import (
     UtilityFeature,
     UtilityModelsConfig,
     normalize_model_configs,
+    refuse_zero_auto_compact_threshold,
     serialize_model_configs,
 )
 from vibe.core.config.schema import (
@@ -77,6 +78,7 @@ from vibe.core.config.schema import (
     WithShallowMerge,
     WithUnionMerge,
 )
+from vibe.core.config.shell_timeouts import check_shell_timeout_pair
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.prompts import (
     SystemPrompt,
@@ -87,6 +89,7 @@ from vibe.core.prompts import (
 from vibe.core.types import Backend
 from vibe.core.utils.matching import name_matches
 from vibe.observability.logging import logger
+from vibe.permissions import OutsideWorkdirPolicy
 from vibe.utils.api_keys import resolve_api_key
 from vibe.utils.keyring import keyring_read_failure
 
@@ -309,9 +312,51 @@ def _without_orphan_model_overrides(
     return {**data, "models": kept}, orphans
 
 
-def _suppress_unset_default(schema: dict[str, Any]) -> None:
-    """Keep the unset sentinel out of the published config schema."""
-    schema.pop("default", None)
+def _without_unknown_thinking_levels(
+    data: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Drop thinking values Vibe has no level for, and say which.
+
+    One unknown word must not stop the config from loading: the session could
+    not open, and the pickers that would fix it with it. The model then runs at
+    its default level until the user picks one.
+    """
+    models = data.get("models")
+    if not isinstance(models, Mapping):
+        return data, []
+    warnings: list[str] = []
+    kept: dict[str, Any] = {}
+    for alias, payload in models.items():
+        if not isinstance(payload, Mapping):
+            kept[alias] = payload
+            continue
+        payload = dict(payload)
+        thinking = payload.get("thinking")
+        if "thinking" in payload and thinking not in THINKING_LEVELS:
+            del payload["thinking"]
+            warnings.append(
+                f"Model '{alias}': thinking {thinking!r} is not a thinking level "
+                f"({', '.join(THINKING_LEVELS)}); using the model's default. "
+                "Pick one with /thinking."
+            )
+        levels = payload.get("thinking_levels")
+        if isinstance(levels, list):
+            unknown = [level for level in levels if level not in THINKING_LEVELS]
+            if unknown:
+                known = [level for level in levels if level in THINKING_LEVELS]
+                if known:
+                    payload["thinking_levels"] = known
+                else:
+                    del payload["thinking_levels"]
+                warnings.append(
+                    f"Model '{alias}': thinking_levels "
+                    f"{', '.join(repr(level) for level in unknown)} ignored; "
+                    f"the levels are {', '.join(THINKING_LEVELS)}."
+                )
+        kept[alias] = payload
+    if not warnings:
+        return data, []
+    return {**data, "models": kept}, warnings
 
 
 def _expand_paths(v: Any) -> list[Path]:
@@ -326,23 +371,20 @@ def _normalize_tool_configs(v: Any) -> dict[str, dict[str, Any]]:
     return {name: cfg if isinstance(cfg, dict) else {} for name, cfg in v.items()}
 
 
-def _reject_shell_timeouts_above_their_maximum(
+def _reject_invalid_shell_timeouts(
     tools: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    """A shell tool's `default_timeout` set above its `max_timeout_seconds` is a
-    configuration error, not a value to lower quietly.
+    """A shell tool's `default_timeout` and `max_timeout_seconds` are finite
+    numbers of seconds above 0, set together or not at all, and the default is
+    not above the maximum. One without the other is a configuration error, and
+    neither is worked out from the other; a default above the maximum is not
+    lowered quietly.
+
+    Checked here so a config fails at load; the unified harness's own rule is
+    `bash_timeout` in the local harness's `vibe/_shell_tools.py`.
     """
-    for name, settings in tools.items():
-        default = settings.get("default_timeout")
-        maximum = settings.get("max_timeout_seconds")
-        if not isinstance(default, int | float) or not isinstance(maximum, int | float):
-            continue
-        if default > maximum:
-            raise ValueError(
-                f"tools.{name}: default_timeout {default:g} is above"
-                f" max_timeout_seconds {maximum:g}. Lower default_timeout or raise"
-                " max_timeout_seconds."
-            )
+    for name in SHELL_TOOLS:
+        check_shell_timeout_pair(name, tools.get(name, {}))
     return tools
 
 
@@ -422,6 +464,59 @@ class VibeConfigSchema(ConfigSchema):
     def defines_entry(cls, key: str, payload: Any) -> bool:
         return key != "models" or _defines_model(payload)
 
+    def check_layer_keys(
+        self,
+        layers: Sequence[tuple[str, Mapping[str, Any]]],
+        *,
+        harness_files: HarnessFilesManager | None = None,
+    ) -> None:
+        from vibe.core.config._setting_keys import (
+            UnusedConfigKeysError,
+            check_strict_config_env,
+            find_unused_keys,
+            notice,
+        )
+
+        check_strict_config_env()
+        issues = find_unused_keys(
+            type(self),
+            layers,
+            custom_tools=self._custom_tool_names(layers, harness_files),
+        )
+        if not issues:
+            return
+        if self.strict_config:
+            raise UnusedConfigKeysError(issues)
+        for issue in issues:
+            logger.warning(
+                "Config setting ignored: %s (%s)", issue.describe(), issue.layer
+            )
+        self._validation_warnings.extend(notice(issues))
+
+    def _custom_tool_names(
+        self,
+        layers: Sequence[tuple[str, Mapping[str, Any]]],
+        harness_files: HarnessFilesManager | None,
+    ) -> frozenset[str]:
+        """Names of the custom tools on the paths the session's tools load from.
+
+        ``harness_files`` are the session's, so its own project and trust
+        decide which tool directories count.
+
+        A builtin name counts only when the tool manager selects the custom
+        variant, so a misspelt builtin setting is still caught beside an
+        unavailable or lower-priority custom tool of the same name. Only looked
+        up when a layer configures tools, since it imports custom tool files;
+        the session's tool manager reuses what this discovers.
+        """
+        if not any(data.get("tools") for _, data in layers):
+            return frozenset()
+        from vibe.core.tools.manager import ToolManager
+
+        return ToolManager(
+            lambda: self, defer_mcp=True, harness_files=harness_files
+        ).custom_config_tool_names
+
     @classmethod
     def validate_merged(
         cls,
@@ -431,9 +526,13 @@ class VibeConfigSchema(ConfigSchema):
         defined_entries: dict[str, dict[str, tuple[str, ...]]],
     ) -> Self:
         data, orphans = _without_orphan_model_overrides(data)
+        data, thinking_warnings = _without_unknown_thinking_levels(data)
         config = super().validate_merged(
             data, origins=origins, defined_entries=defined_entries
         )
+        for message in thinking_warnings:
+            logger.warning("%s", message)
+            config._validation_warnings.append(message)
         # The missing-pin warning already named a pinned orphan: one notice
         # per model, not one per config value. Only the fallback's own alias
         # is skipped — a pin that resolves through a catalog alias fires no
@@ -534,17 +633,15 @@ class VibeConfigSchema(ConfigSchema):
             " Unset leaves the feature on automatic selection."
         ),
     )
-    auto_compact_threshold: Annotated[int, WithReplaceMerge()] = Field(
-        default=UNSET_AUTO_COMPACT_THRESHOLD,
+    auto_compact_threshold: Annotated[int | None, WithReplaceMerge()] = Field(
+        default=None,
+        gt=0,
         description=(
-            "Token count before automatic compaction for models that declare "
-            "neither their own threshold nor a context window. Models with a "
-            f"window compact at {int(AUTO_COMPACT_WINDOW_RATIO * 100)}% of it "
-            "instead."
+            "Token count before automatic compaction for models without their "
+            "own threshold. Unset uses each model's default, derived from its "
+            "context window. A threshold outside the range the window allows is "
+            "refused with an error that names the range."
         ),
-        # The sentinel means "no layer set one" and resolves to a rule, not a
-        # number; the published schema must not advertise it as the default.
-        json_schema_extra=_suppress_unset_default,
     )
     active_transcribe_model: Annotated[str, WithReplaceMerge()] = (
         DEFAULT_ACTIVE_TRANSCRIBE_MODEL_CONFIG.alias
@@ -574,8 +671,18 @@ class VibeConfigSchema(ConfigSchema):
         dict[str, dict[str, Any]],
         WithDeepMerge(),
         BeforeValidator(_normalize_tool_configs),
-        AfterValidator(_reject_shell_timeouts_above_their_maximum),
+        AfterValidator(_reject_invalid_shell_timeouts),
     ] = Field(default_factory=dict)
+    outside_workdir: Annotated[OutsideWorkdirPolicy, WithReplaceMerge()] = Field(
+        default=OutsideWorkdirPolicy.ASK,
+        description=(
+            "What happens when a file or shell tool call reaches a path outside the"
+            " working directory and its added directories: 'ask' prompts for"
+            " approval, 'deny' refuses the call and tells the agent why, so it keeps"
+            " working. Allowlisted paths are unaffected. Override per tool with"
+            " 'outside_workdir' under [tools.<name>]."
+        ),
+    )
     tool_paths: Annotated[
         list[Path], WithConcatMerge(), BeforeValidator(_expand_paths)
     ] = Field(
@@ -738,6 +845,26 @@ class VibeConfigSchema(ConfigSchema):
             " to local config."
         ),
     )
+    experimental_enable_pr_monitoring: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Experimental: detect pull requests and merge requests created during"
+            " a session (gh pr create, glab mr create) and discover the ones that"
+            " already exist for the session's repository at session load"
+            " (gh pr list, glab mr list), persist them as session artifacts, and"
+            " expose them via the artifacts/ RPC namespace. Requires gh/glab"
+            " (system-installed or bundled)."
+        ),
+    )
+    experimental_enable_pr_discovery: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Experimental: discover open pull requests / merge requests for the"
+            " session's repository at session load (gh pr list, glab mr list),"
+            " persist them as session artifacts, and notify clients. Runs only"
+            " when the session has no existing PR artifacts. Local only."
+        ),
+    )
 
     # Tracing
     enable_otel: Annotated[bool, WithReplaceMerge()] = Field(
@@ -857,9 +984,25 @@ class VibeConfigSchema(ConfigSchema):
     compaction_prompt_id: Annotated[str, WithReplaceMerge()] = UtilityPrompt.COMPACT
     title_prompt_id: Annotated[str, WithReplaceMerge()] = UtilityPrompt.SESSION_TITLE
     include_commit_signature: Annotated[bool, WithReplaceMerge()] = True
-    include_model_info: Annotated[bool, WithReplaceMerge()] = True
+    include_model_info: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
+        deprecated="No longer used; remove this setting from your config.",
+        description="Retired: accepted for older configs, with no effect.",
+    )
     include_project_context: Annotated[bool, WithReplaceMerge()] = True
-    include_prompt_detail: Annotated[bool, WithReplaceMerge()] = True
+    include_prompt_detail: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
+        deprecated="No longer used; remove this setting from your config.",
+        description="Retired: accepted for older configs, with no effect.",
+    )
+    strict_config: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Refuse a config with settings Vibe does not use (unknown, retired, or"
+            " without effect) instead of warning about them. For programmatic and"
+            " headless runs; also VIBE_STRICT_CONFIG=1."
+        ),
+    )
     enable_update_checks: Annotated[bool, WithReplaceMerge()] = True
     enable_auto_update: Annotated[bool, WithReplaceMerge()] = True
     enable_notifications: Annotated[bool, WithReplaceMerge()] = True
@@ -874,24 +1017,8 @@ class VibeConfigSchema(ConfigSchema):
         ge=0,
         description=(
             "Seconds of silence after the model starts answering before the "
-            "response counts as stalled. 0 disables the limit. Unified harness only."
-        ),
-    )
-    compaction_max_output_tokens: Annotated[int, WithReplaceMerge()] = Field(
-        default=DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
-        ge=0,
-        description=(
-            "Output token cap for compaction requests, below any model or session "
-            "cap. 0 leaves compaction at the same cap as other requests. Unified "
-            "harness only."
-        ),
-    )
-    compaction_thinking: Annotated[ThinkingLevel | None, WithReplaceMerge()] = Field(
-        default=None,
-        description=(
-            "Thinking level for the first compaction request. Unset keeps the "
-            "compaction model's own level. The fallback request always runs "
-            "without reasoning. Unified harness only."
+            "response counts as stalled and is retried once. 0 allows the same "
+            "silence as before the first output (api_timeout). Unified harness only."
         ),
     )
     compaction_reasoning_limit_tokens: Annotated[int, WithReplaceMerge()] = Field(
@@ -899,8 +1026,11 @@ class VibeConfigSchema(ConfigSchema):
         ge=0,
         description=(
             "Approximate reasoning tokens after which the first compaction "
-            "request is abandoned for a fallback request without tools or "
-            "reasoning. 0 disables the limit. Unified harness only."
+            "request is stopped, as if cut off at its output limit, and the "
+            "summary is asked for once more, briefly, without tools and with "
+            "reasoning off or at its lowest level. Reasoning is no longer "
+            "watched once the answer starts. 0 disables the limit. Unified "
+            "harness only."
         ),
     )
     output_limit_retries: Annotated[int, WithReplaceMerge()] = Field(
@@ -910,15 +1040,6 @@ class VibeConfigSchema(ConfigSchema):
             "Answers cut off at the output token limit that a turn discards and "
             "asks again for, with feedback asking for a shorter response. 0 ends "
             "the turn on the first cut-off answer. Unified harness only."
-        ),
-    )
-    output_token_reserve: Annotated[int, WithReplaceMerge()] = Field(
-        default=DEFAULT_OUTPUT_TOKEN_RESERVE,
-        ge=0,
-        description=(
-            "Tokens kept free when a request's output cap is clipped to the room "
-            "its input leaves in the model's context window. Clipping needs the "
-            "model's max_context_length. Unified harness only."
         ),
     )
     api_connect_timeout: Annotated[float, WithReplaceMerge()] = (
@@ -1244,33 +1365,24 @@ class VibeConfigSchema(ConfigSchema):
         object.__setattr__(self, "models", models)
         return self
 
+    _refuse_zero_threshold = field_validator("auto_compact_threshold", mode="before")(
+        refuse_zero_auto_compact_threshold
+    )
+
     @model_validator(mode="after")
     def _apply_auto_compact_threshold(self) -> VibeConfigSchema:
-        # A threshold is a deliberate cap when a layer actually provided it:
-        # UNSET marks "no layer set one" (the default layer materializes field
-        # defaults into the merge, so unset-ness must live in the value). A
-        # cap is honored while it can fire — at or above a declared window the
-        # provider rejects the request before compaction ever runs — and 0
-        # stays a cap meaning "never compact".
-        global_cap = self.auto_compact_threshold
-        global_set = global_cap != UNSET_AUTO_COMPACT_THRESHOLD
-        global_value = global_cap if global_set else DEFAULT_AUTO_COMPACT_THRESHOLD
-        models = {}
-        for alias, model in self.models.items():
-            window = model.max_context_length
-            cap = model.auto_compact_threshold
-            if cap != UNSET_AUTO_COMPACT_THRESHOLD and (window is None or cap < window):
-                models[alias] = model
-                continue
-            if global_set and (window is None or global_value < window):
-                threshold = global_value
-            elif window:
-                threshold = int(window * AUTO_COMPACT_WINDOW_RATIO)
-            else:
-                threshold = global_value
-            models[alias] = model.model_copy(
-                update={"auto_compact_threshold": threshold}
-            )
+        # A model without its own threshold takes the global one. With neither,
+        # the threshold stays unset and the session derives it from the model's
+        # context window; a threshold outside its window's range fails there.
+        threshold = self.auto_compact_threshold
+        if threshold is None:
+            return self
+        models = {
+            alias: model
+            if model.auto_compact_threshold is not None
+            else model.model_copy(update={"auto_compact_threshold": threshold})
+            for alias, model in self.models.items()
+        }
         object.__setattr__(self, "models", models)
         return self
 
@@ -1440,16 +1552,20 @@ class VibeConfigSchema(ConfigSchema):
         return self
 
 
+def outside_workdir_denied(config: VibeConfigSchema) -> bool:
+    """Whether outside-workdir access is refused globally or for any tool."""
+    return config.outside_workdir is OutsideWorkdirPolicy.DENY or any(
+        tool.get("outside_workdir") == OutsideWorkdirPolicy.DENY
+        for tool in config.tools.values()
+    )
+
+
 def create_default_config() -> dict[str, Any]:
     from vibe.core.tools.manager import ToolManager
 
     config_dict = VibeConfigSchema.model_construct().model_dump(
         mode="json", exclude_none=True
     )
-    # The unset sentinel is merge-internal; a default config handed to an
-    # external consumer must not carry it into a human-facing file.
-    if config_dict.get("auto_compact_threshold") == UNSET_AUTO_COMPACT_THRESHOLD:
-        del config_dict["auto_compact_threshold"]
     if isinstance(config_dict.get("models"), dict):
         config_dict["models"] = serialize_model_configs(config_dict["models"])
     if tool_defaults := ToolManager.discover_tool_defaults():

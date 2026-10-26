@@ -15,10 +15,6 @@ from vibe.app_server.protocol import (
     ConfigFieldWire,
     ConfigLayerValueWire,
 )
-from vibe.core.config._defaults import (
-    AUTO_COMPACT_WINDOW_RATIO,
-    UNSET_AUTO_COMPACT_THRESHOLD,
-)
 from vibe.core.config.layer import ConfigLayer, ConfigLayerError, RawConfig
 from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.patch import escape_json_pointer_token
@@ -101,9 +97,9 @@ async def collect_layer_values(
         except ConfigLayerError:
             continue
         for name, value in data.items():
-            # The default layer materializes UNSET for thresholds; it means
-            # "no layer set one" and must not surface in the settings UI.
-            if name == AUTO_COMPACT_THRESHOLD and value == UNSET_AUTO_COMPACT_THRESHOLD:
+            # The default layer materializes an unset threshold; it means "no
+            # layer set one" and must not surface in the settings UI.
+            if name == AUTO_COMPACT_THRESHOLD and value is None:
                 continue
             values.setdefault(name, []).append(
                 ConfigLayerValueWire(layer=layer.name, value=value)
@@ -115,10 +111,7 @@ async def collect_layer_values(
             if not isinstance(alias, str) or not isinstance(model, Mapping):
                 continue
             for field in (AUTO_COMPACT_THRESHOLD, MAX_CONTEXT_LENGTH):
-                if field not in model or (
-                    field == AUTO_COMPACT_THRESHOLD
-                    and model[field] == UNSET_AUTO_COMPACT_THRESHOLD
-                ):
+                if model.get(field) is None:
                     continue
                 path = _model_field_path(alias, field)
                 values.setdefault(path, []).append(
@@ -169,7 +162,8 @@ def build_field_wires(
     json_values = config.model_dump(mode="json")
     wires: list[ConfigFieldWire] = []
     for name, info in type(config).model_fields.items():
-        if name in HIDDEN_SETTINGS:
+        # A retired setting has no effect, so the UI does not offer it.
+        if name in HIDDEN_SETTINGS or info.deprecated:
             continue
         kind, choices = classify_annotation(info.annotation)
         value = json_values.get(name)
@@ -181,7 +175,8 @@ def build_field_wires(
             value = active_model.auto_compact_threshold
             description = (
                 "Token count before automatic compaction for the active model "
-                f"({active_model.alias}). Set to 0 to disable automatic compaction."
+                f"({active_model.alias}). Unset uses the default for the model's "
+                "context window."
             )
             model_values = layer_values.get(
                 _model_field_path(active_model.alias, name, prefix=path_prefix), []
@@ -239,7 +234,7 @@ def build_field_wires(
             description=(
                 "Context window of the active model "
                 f"({config.get_active_model().alias}). The compaction threshold "
-                f"defaults to {int(AUTO_COMPACT_WINDOW_RATIO * 100)}% of it."
+                "defaults to a value derived from it."
             ),
             path_prefix=path_prefix,
             popular=popular,

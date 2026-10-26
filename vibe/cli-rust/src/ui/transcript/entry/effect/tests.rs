@@ -78,11 +78,10 @@ fn expanded_header_moves_a_suffix_that_does_not_fit_to_its_own_row() {
     assert!(fits(&tagged), "{tagged:?}");
 }
 
-#[test]
-fn running_header_does_not_fold_its_second_row_across_the_suffix() {
+fn running(message: &str, suffix: &str) -> LinkedLines {
     let effect: EffectEntry = serde_json::from_value(json!({
         "detail": {"kind": "shell", "display": {"verb": "Running",
-            "message": "line one\nline two", "suffix": "(running)"}},
+            "message": message, "suffix": suffix}},
         "state": {"status": "running"}
     }))
     .unwrap();
@@ -91,19 +90,71 @@ fn running_header_does_not_fold_its_second_row_across_the_suffix() {
         rev: 0,
         in_progress: true,
         local: false,
-        expanded: true,
+        expanded: false,
         grouped: false,
         stream_delta: None,
     };
     let mut lines = LinkedLines::default();
     push_effect(&mut lines, &effect, view, None, 0, WIDTH, None);
+    lines
+}
+
+#[test]
+fn running_header_wraps_long_lines_under_the_message_column() {
+    let lines = running(&format!("set -e\n{COMMAND}"), "");
     let rows: Vec<String> = lines.lines().iter().map(ToString::to_string).collect();
-    assert!(rows[0].ends_with("line one (running)"), "{rows:?}");
-    assert!(rows[1].ends_with("line two"), "{rows:?}");
-    // The second row opens its own line, so a copy never joins it to the suffix.
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(fits(&rows), "{rows:?}");
+    let hang = " ".repeat("■ Running ".chars().count());
+    assert!(
+        rows[1..].iter().all(|row| row.starts_with(&hang)),
+        "{rows:?}"
+    );
+    // The command's own line opens a row; its wrapped rows fold back into it on copy.
     assert!(
         lines.folds()[1].is_some_and(|fold| fold.breaks),
         "{:?}",
         lines.folds()
+    );
+    assert!(
+        lines.folds()[2].is_some_and(|fold| !fold.breaks),
+        "{:?}",
+        lines.folds()
+    );
+}
+
+#[test]
+fn running_header_ends_with_its_suffix_after_the_last_word() {
+    let lines = running("line one\nline two", "(running)");
+    let rows: Vec<String> = lines.lines().iter().map(ToString::to_string).collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows[0].ends_with("line one"), "{rows:?}");
+    assert!(rows[1].ends_with("line two (running)"), "{rows:?}");
+    assert!(
+        lines.folds()[1].is_some_and(|fold| fold.breaks),
+        "{:?}",
+        lines.folds()
+    );
+}
+
+#[test]
+fn running_header_wraps_at_the_full_width_before_its_suffix() {
+    let plain = running(COMMAND, "");
+    let tagged = running(COMMAND, "(running)");
+    let plain: Vec<String> = plain.lines().iter().map(ToString::to_string).collect();
+    let rows: Vec<String> = tagged.lines().iter().map(ToString::to_string).collect();
+    assert!(rows.len() > 1, "{rows:?}");
+    assert_eq!(
+        rows[..plain.len() - 1],
+        plain[..plain.len() - 1],
+        "{rows:?}"
+    );
+    assert!(rows.last().unwrap().ends_with(" (running)"), "{rows:?}");
+    assert!(fits(&rows), "{rows:?}");
+    // The wrapped rows fold back into the command on copy, with no suffix between them.
+    assert!(
+        tagged.folds()[1].is_some_and(|fold| !fold.breaks),
+        "{:?}",
+        tagged.folds()
     );
 }

@@ -14,13 +14,13 @@ use self::contracts::{ToolContracts, validate_model_input};
 use self::program::ResolvedProgramTools;
 use crate::core::config::{HarnessConfig, ToolGroupMetadata};
 use crate::core::error::CoreError;
+use crate::core::features::large_output;
 use crate::core::features::programmatic_tool_calling;
 use crate::core::features::programmatic_tool_calling::{Settings, TypeScriptTool};
 use crate::core::features::skills::{self, SkillDefinition};
 use crate::core::features::tool_discovery::{
     self, SearchRequest, ToolDiscovery, ToolDiscoveryResult,
 };
-use crate::core::features::{file_system, large_output};
 use crate::core::step_protocol::ToolDefinition;
 use crate::core::tools::external::{
     ExternalTool, ExternalToolCall, RuntimeBuiltinToolName, ToolTarget,
@@ -96,13 +96,10 @@ impl ResolvedTools {
                     echoed_tool_name(&call.name)
                 ))
             })?;
-        if matches!(
-            target,
-            ToolTarget::RuntimeBuiltin {
-                name: RuntimeBuiltinToolName::FileSystemSearchReplace
-                    | RuntimeBuiltinToolName::SelfWait
-            }
-        ) {
+        if let ToolTarget::RuntimeBuiltin {
+            name: name @ RuntimeBuiltinToolName::SelfWait,
+        } = target
+        {
             let input_schema = self
                 .top_level_tools
                 .iter()
@@ -114,9 +111,10 @@ impl ResolvedTools {
                         call.name
                     ))
                 })?;
-            validate_model_input(input_schema, &call.arguments)?;
+            validate_model_input(Some(name), &call.name, input_schema, &call.arguments)?;
         } else {
-            self.contracts.validate_input(&target, &call.arguments)?;
+            self.contracts
+                .validate_input(&target, &call.name, &call.arguments)?;
         }
         if matches!(
             target,
@@ -125,11 +123,9 @@ impl ResolvedTools {
             skills::validate_request(&self.skills, &call.arguments)
                 .map_err(CoreError::invalid_command)?;
         }
-        Ok(resolve_external_tool(
-            target,
-            &call.name,
-            call.arguments.clone(),
-        ))
+        Ok(self
+            .contracts
+            .external_tool(target, &call.name, call.arguments.clone()))
     }
 
     #[cfg(test)]
@@ -168,7 +164,7 @@ impl ResolvedTools {
         arguments: Value,
     ) -> Option<ExternalTool> {
         let target = self.program.target(name)?;
-        Some(resolve_external_tool(target, name, arguments))
+        Some(self.contracts.external_tool(target, name, arguments))
     }
 
     pub(crate) fn validate_runtime_builtin_output(
@@ -178,20 +174,6 @@ impl ResolvedTools {
     ) -> Result<(), String> {
         self.contracts.validate_runtime_builtin_output(name, value)
     }
-}
-
-fn resolve_external_tool(
-    target: ToolTarget,
-    invocation_name: &str,
-    arguments: Value,
-) -> ExternalTool {
-    let arguments = match &target {
-        ToolTarget::RuntimeBuiltin {
-            name: RuntimeBuiltinToolName::FileSystemSearchReplace,
-        } => file_system::edit_runtime_arguments(arguments),
-        ToolTarget::RuntimeBuiltin { .. } | ToolTarget::Provided { .. } => arguments,
-    };
-    ExternalTool::from_target(target, invocation_name, arguments)
 }
 
 fn validate_tool_groups(config: &HarnessConfig) -> Result<(), CoreError> {

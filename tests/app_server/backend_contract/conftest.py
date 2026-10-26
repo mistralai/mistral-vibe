@@ -22,7 +22,7 @@ from tests.constants import (
 )
 from vibe.app_server._account import AccountGateway
 from vibe.app_server._identity import IdentityGateway
-from vibe.app_server._runtime import create_harness_server
+from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.host import AppServerHost
 from vibe.app_server.protocol import ClientCapabilities, ClientInfo, SessionOptions
@@ -83,6 +83,7 @@ async def connect_backend_contract_host(
     capabilities: ClientCapabilities,
     account_gateway: AccountGateway | None = None,
     identity_gateway: IdentityGateway | None = None,
+    process: HarnessProcess | None = None,
 ) -> BackendContractConnection:
     client_transport, server_transport = memory_transport_pair()
     harness = await create_harness_server(
@@ -90,6 +91,7 @@ async def connect_backend_contract_host(
         transport_kind="in_process",
         account_gateway=account_gateway,
         identity_gateway=identity_gateway,
+        process=process,
     )
     client = AppServerClient(client_transport, run_peer=harness.serve)
     host = await AppServerHost.connect(
@@ -118,6 +120,38 @@ async def connect_backend_contract_client(
         await client.close()
         raise
     return client
+
+
+_opened_backends: list[Any] = []
+
+
+@pytest.fixture(autouse=True)
+def _record_opened_backends(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+    )
+
+    _opened_backends.clear()
+    initialize = UnifiedHarnessBackendAdapter.initialize_integrations
+
+    async def recording(self: UnifiedHarnessBackendAdapter) -> None:
+        _opened_backends.append(self)
+        await initialize(self)
+
+    monkeypatch.setattr(
+        UnifiedHarnessBackendAdapter, "initialize_integrations", recording
+    )
+
+
+async def wait_for_background_integrations() -> None:
+    """Wait for the connector and MCP loads every opened session runs after open.
+
+    ``session/ready/wait`` does not cover them: turns never wait on them.
+    """
+    for backend in list(_opened_backends):
+        for task in (backend._connector_resolve_task, backend._mcp_discovery_task):
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.fixture

@@ -100,6 +100,104 @@ async fn branch_during_a_turn_is_refused_kept_and_never_forks() {
 }
 
 #[tokio::test]
+async fn display_settings_run_during_a_turn_and_with_a_paused_queue() {
+    let busy_states: [fn(&mut App); 2] = [
+        |app| {
+            app.session.active_turn_id = Some("turn".into());
+            app.session.status = Status::Generating {
+                since: std::time::Instant::now(),
+            };
+        },
+        |app| app.queue.paused = true,
+    ];
+    for make_busy in busy_states {
+        for command in [
+            "/theme",
+            "/log-level",
+            "/voice",
+            "/proxy-setup",
+            "/remote-project",
+        ] {
+            let mut harness = Harness::ready();
+            make_busy(&mut harness.app);
+
+            assert!(!harness.submit(command));
+
+            assert!(harness.app.chat_input.full_text().is_empty(), "{command}");
+            assert_eq!(harness.last_toast(), None, "{command} is not refused");
+        }
+        // The harness refuses MCP, connector and plugin changes during a turn.
+        for command in ["/mcp", "/connectors", "/plugins", "/reload-plugins"] {
+            let mut harness = Harness::ready();
+            make_busy(&mut harness.app);
+
+            assert!(!harness.submit(command));
+
+            assert_eq!(harness.app.chat_input.full_text(), command);
+            assert!(harness
+                .last_toast()
+                .is_some_and(|text| text.starts_with("Slash commands cannot be queued")));
+        }
+        let mut harness = Harness::ready();
+        make_busy(&mut harness.app);
+        for (command, open) in [
+            ("/theme", (|app| app.theme_picker.open) as fn(&App) -> bool),
+            ("/log-level", |app| app.log_level_picker.open),
+            ("/voice", |app| app.voice_app.open),
+        ] {
+            assert!(!harness.submit(command));
+            assert!(open(&harness.app), "{command} opens its picker");
+            harness.app.theme_picker.open = false;
+            harness.app.log_level_picker.open = false;
+            harness.app.voice_app.open = false;
+        }
+    }
+}
+
+#[tokio::test]
+async fn settings_wait_for_a_running_job_while_read_only_commands_still_run() {
+    let jobs: [fn(&mut App); 2] = [
+        |app| app.compacting = true,
+        |app| app.vibe_code_project.pending = true,
+    ];
+    for start_job in jobs {
+        for command in ["/theme", "/proxy-setup"] {
+            let mut harness = Harness::ready();
+            start_job(&mut harness.app);
+
+            assert!(!harness.submit(command));
+
+            assert_eq!(harness.app.chat_input.full_text(), command);
+            assert!(!harness.app.theme_picker.open);
+            assert!(harness
+                .last_toast()
+                .is_some_and(|text| text.starts_with("Slash commands cannot be queued")));
+        }
+        let mut harness = Harness::ready();
+        start_job(&mut harness.app);
+
+        assert!(!harness.submit("/help"));
+
+        assert!(harness.app.chat_input.full_text().is_empty());
+        assert_eq!(harness.last_toast(), None);
+    }
+}
+
+#[tokio::test]
+async fn a_command_read_during_a_turn_keeps_the_turn_loading_line() {
+    let mut harness = Harness::ready();
+    harness.app.session.status = Status::Generating {
+        since: std::time::Instant::now(),
+    };
+    harness.app.view.loading.set_label("Thinking");
+
+    assert!(!harness.submit("/whoami"));
+
+    assert!(!harness.app.view.command_loading);
+    assert_eq!(harness.app.view.loading.label(), "Thinking");
+}
+
+#[tokio::test]
 async fn whoami_shows_a_loading_line_only_while_it_reads_the_identity() {
     let mut harness = Harness::ready();
 

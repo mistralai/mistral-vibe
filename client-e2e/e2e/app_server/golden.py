@@ -13,7 +13,7 @@ from e2e.pty.screen import Snapshot
 
 
 def normalize_snapshot(snap: Snapshot) -> Snapshot:
-    """Mask volatile cells (PID digits, spinner, scrollbar) for stable SVG comparison."""
+    """Mask volatile cells (version digits, spinner, scrollbar) for stable SVG comparison."""
     cells = _normalized_cells(snap)
     return Snapshot(label=snap.label, cells=tuple(tuple(row) for row in cells))
 

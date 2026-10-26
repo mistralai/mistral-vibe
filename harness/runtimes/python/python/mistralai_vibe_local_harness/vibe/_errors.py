@@ -107,6 +107,17 @@ class HarnessTurnConflictError(HarnessSessionError):
         )
 
 
+class HarnessConfigurationRejectedError(HarnessSessionError):
+    """Core refused a configuration; the Session keeps the one it was running.
+
+    The refusal is deterministic: Core refuses the same configuration again
+    until the context changes, so a caller drops it rather than retrying it.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__("configuration_rejected", message)
+
+
 class HarnessForkEntryRequiredError(HarnessSessionError):
     def __init__(self) -> None:
         super().__init__(

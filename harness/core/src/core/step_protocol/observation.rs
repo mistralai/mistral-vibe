@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::core::features::compaction::CompactionTrigger;
 use crate::core::features::notifications::Notification;
@@ -147,6 +148,20 @@ pub(crate) struct ToolDiscoverySummary {
     pub group_namespaces: Vec<String>,
 }
 
+/// What a warning is about. Warnings report a degraded but handled situation;
+/// the session continues.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WarningCode {
+    /// The provider refused a request as too long. Core counts requests as
+    /// larger from now on and makes room.
+    RequestTooLong,
+    /// The summary was cut off twice and is kept truncated.
+    CompactionSummaryCutOff,
+    /// Items after the summary did not fit and are shown reduced.
+    CompactionInputsReduced,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Observation {
@@ -206,6 +221,14 @@ pub(crate) enum Observation {
         attempt: u32,
         trigger: CompactionTrigger,
         error: ProtocolError,
+    },
+    Warning {
+        /// Null for a warning outside a turn, such as from a between-turn
+        /// compaction.
+        turn_id: Option<String>,
+        code: WarningCode,
+        message: String,
+        details: Value,
     },
     TurnFailed {
         turn_id: String,

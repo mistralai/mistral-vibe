@@ -182,6 +182,11 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: crate::mcp_command::McpCommand,
     },
+    /// Describe Vibe's configuration without starting a session.
+    Config {
+        #[command(subcommand)]
+        command: crate::config_command::ConfigCommand,
+    },
     /// Serve many headless runs over JSON-RPC on stdin and stdout (experimental).
     #[command(hide = true)]
     RunServer {

@@ -216,7 +216,7 @@ fn a_sleep_a_pre_hook_lengthened_is_still_cut_to_the_time_budget_across_a_restor
     let source = r#"async function main() {
       await tools.file_system.read_file({ path: "slow.txt" });
       try { await tools.self.sleep({ seconds: 1 }); }
-      catch (error) { console.log(`sleep: ${error.name}`); }
+      catch (error) { console.log(`sleep: ${error.code}`); }
       return "continued";
     }"#;
     let mut runtime = SynchronousRuntime::new(pre_hook_config());
@@ -309,7 +309,7 @@ fn a_sleep_the_time_budget_cut_short_is_listed_as_never_started() {
     let source = r#"async function main() {
       await tools.file_system.read_file({ path: "slow.txt" });
       try { await tools.self.sleep({ seconds: 30 }); }
-      catch (error) { console.log(`sleep: ${error.name}`); }
+      catch (error) { console.log(`sleep: ${error.code}`); }
       await tools.file_system.write_file({ path: "out.txt", content: "x" });
       return "written";
     }"#;
@@ -383,7 +383,7 @@ fn sleep_beyond_the_time_budget_ends_early_and_the_program_continues() {
       await tools.self.sleep({ seconds: 30 });
       await tools.file_system.read_file({ path: "slow.txt" });
       try { await tools.self.sleep({ seconds: 30 }); }
-      catch (error) { console.log(`sleep: ${error.name}`); }
+      catch (error) { console.log(`sleep: ${error.code}`); }
       return "continued";
     }"#;
     let mut runtime = SynchronousRuntime::new(config());

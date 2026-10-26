@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 import logging
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, TypedDict, cast
 
 from pydantic import JsonValue
 
@@ -15,14 +15,21 @@ from mistralai_vibe_local_harness.protocol import (
     RustEnabledModelWait,
     RustHarnessCapabilitySet,
     RustHarnessConfig,
+    RustModelFacts,
 )
 from mistralai_vibe_local_harness.vibe._connector_models import (
     ResolvedConnectorCatalog,
     ResolvedConnectorSelection,
 )
+from mistralai_vibe_local_harness.vibe._credentials import ProviderCredentialProvider
 from mistralai_vibe_local_harness.vibe._mcp_models import ResolvedMCPCatalog
 from mistralai_vibe_local_harness.vibe._permissions import PermissionResolver
-from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
+from mistralai_vibe_local_harness.vibe._runtime_config import (
+    LocalModelRoute,
+    LocalProviderRoute,
+    LocalRuntimeAdapterConfig,
+    ThinkingLevel,
+)
 from mistralai_vibe_local_harness.vibe._storage import sha256_json
 from mistralai_vibe_local_harness.vibe._subagents._host import (
     ResolvedChildSessionBinding,
@@ -30,6 +37,8 @@ from mistralai_vibe_local_harness.vibe._subagents._host import (
 from mistralai_vibe_local_harness.vibe._subagents._models import (
     MAX_DECLARED_AGENT_TYPES,
     DeclaredAgentTypeProfile,
+    DeclaredCompletionRoute,
+    RejectedAgentType,
     ResolvedContentGrant,
     ResolvedHookGrant,
     ResolvedSourceGrant,
@@ -37,6 +46,7 @@ from mistralai_vibe_local_harness.vibe._subagents._models import (
     ResolvedToolGrant,
     SubagentLimits,
 )
+from mistralai_vibe_local_harness.vibe._system_instructions import with_shell_guidance
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +75,9 @@ class ResolvedSubagentConfiguration:
     # Admission limits for the session's controller; the adapter config sets
     # them, and unset fields keep the ``SubagentLimits`` defaults.
     limits: SubagentLimits = field(default_factory=SubagentLimits)
+    # Declared agent types the host rejected, by name, with the reason a spawn
+    # reports. A name never appears here and in ``bindings`` at once.
+    rejected_agent_types: dict[str, str] = field(default_factory=dict)
 
 
 def _adapter_limits(adapter: LocalRuntimeAdapterConfig) -> SubagentLimits:
@@ -145,11 +158,12 @@ def resolve_declared_agent_types(
     adapter: LocalRuntimeAdapterConfig,
     profiles: Sequence[DeclaredAgentTypeProfile],
     permission_resolvers: Mapping[str, PermissionResolver] | None = None,
+    rejected: Sequence[RejectedAgentType] = (),
 ) -> ResolvedSubagentConfiguration:
     # The ceiling is reused verbatim, digest included: a declared profile is a point
     # inside the envelope the Host resolved, so a session can extend its own table
     # without the ceiling moving under a controller that has already pinned it.
-    if not profiles:
+    if not profiles and not rejected:
         return configuration
 
     bindings = dict(configuration.bindings)
@@ -175,11 +189,17 @@ def resolve_declared_agent_types(
             policy_digest=policy_digest,
             permission_resolver=(permission_resolvers or {}).get(profile.agent_type),
         )
+    # A name another source binds is not missing, so its rejection is moot.
+    rejected_agent_types = dict(configuration.rejected_agent_types)
+    for rejection in rejected:
+        if rejection.agent_type not in bindings:
+            rejected_agent_types.setdefault(rejection.agent_type, rejection.reason)
     return ResolvedSubagentConfiguration(
         root_config=configuration.root_config,
         policy_ceiling=configuration.policy_ceiling,
         bindings=bindings,
         limits=configuration.limits,
+        rejected_agent_types=rejected_agent_types,
     )
 
 
@@ -194,7 +214,16 @@ def _declared_binding(
     child_config = _child_core_config(
         config,
         system_instructions=(
-            profile.instructions
+            # A profile may name a whole bundled prompt, written for a Session with
+            # background processes: the child has the parent's tools, so its shell
+            # guidance must say what they are.
+            with_shell_guidance(
+                profile.instructions,
+                background_processes=(
+                    config.settings.tools.background_processes.mode == "enabled"
+                ),
+                command_environment=config.settings.tools.command_environment.mode,
+            )
             if profile.instructions is not None
             else config.system_instructions
         ),
@@ -217,6 +246,13 @@ def _declared_binding(
         },
         deep=True,
     )
+    completion = profile.completion
+    if completion is not None and completion.model_facts is not None:
+        child_config = _child_model_facts(
+            child_config,
+            completion.model_facts,
+            compacts_on_route=_compacts_on_route(adapter, completion),
+        )
     child_adapter = replace(
         adapter,
         env=dict(adapter.env),
@@ -237,6 +273,10 @@ def _declared_binding(
             if permission_resolver is None
             else permission_resolver
         ),
+        # The child runs the declared configuration, not its parent's; post_agent hooks
+        # match on this name. It is a label, so it stays out of the binding digest.
+        active_agent=profile.agent_type,
+        **_completion_overlay(adapter, profile.completion),
     )
     return LocalChildSessionBinding(
         template_digest=_binding_digest(
@@ -303,6 +343,126 @@ def child_config(
         binding.core_config.model_copy(update={"task_id": session_id}, deep=True),
         replace(binding.adapter_config, env=dict(binding.adapter_config.env)),
     )
+
+
+class _CompletionOverlay(TypedDict, total=False):
+    """``LocalRuntimeAdapterConfig`` fields a declared route replaces in its children."""
+
+    active_model: LocalModelRoute
+    model: str
+    temperature: float
+    thinking: ThinkingLevel
+    compaction_model: LocalModelRoute
+    provider: str
+    backend: str
+    api_style: str
+    base_url: str
+    credentials: ProviderCredentialProvider
+    reasoning_field_name: str
+    emits_finish_reason: bool
+    extra_headers: dict[str, str]
+    project_id: str
+    region: str
+    title_provider: LocalProviderRoute | None
+    classifier_provider: LocalProviderRoute | None
+
+
+def _completion_overlay(
+    adapter: LocalRuntimeAdapterConfig, completion: DeclaredCompletionRoute | None
+) -> _CompletionOverlay:
+    """The adapter fields a declared route replaces in its children."""
+    if completion is None:
+        return {}
+    route = completion.model
+    # The direct fields follow the route: the adapter reads a route equal to the
+    # default as unset and would rebuild it from the session's direct fields.
+    overlay: _CompletionOverlay = {
+        "active_model": route,
+        "model": route.model,
+        "temperature": route.temperature,
+        "thinking": route.thinking,
+    }
+    if _compacts_on_route(adapter, completion):
+        overlay["compaction_model"] = completion.model
+    if (provider := completion.provider) is not None:
+        # Titles and the classify gate run on models the session's provider
+        # serves, so one without its own route stays on that destination.
+        session = _destination(adapter)
+        overlay.update({
+            "provider": provider.provider,
+            "backend": provider.backend,
+            "api_style": provider.api_style,
+            "base_url": provider.base_url,
+            "credentials": provider.credentials,
+            "reasoning_field_name": provider.reasoning_field_name,
+            "emits_finish_reason": provider.emits_finish_reason,
+            "extra_headers": dict(provider.extra_headers),
+            "project_id": provider.project_id,
+            "region": provider.region,
+            "title_provider": adapter.title_provider or session,
+            "classifier_provider": adapter.classifier_provider or session,
+        })
+    return overlay
+
+
+def _destination(adapter: LocalRuntimeAdapterConfig) -> LocalProviderRoute:
+    """The provider destination ``adapter`` completes on."""
+    return LocalProviderRoute(
+        provider=adapter.provider,
+        backend=adapter.backend,
+        api_style=adapter.api_style,
+        base_url=adapter.base_url,
+        credentials=adapter.credentials,
+        reasoning_field_name=adapter.reasoning_field_name,
+        emits_finish_reason=adapter.emits_finish_reason,
+        extra_headers=dict(adapter.extra_headers),
+        project_id=adapter.project_id,
+        region=adapter.region,
+    )
+
+
+def _compacts_on_route(
+    adapter: LocalRuntimeAdapterConfig, completion: DeclaredCompletionRoute
+) -> bool:
+    """Whether a child compacts on its declared route.
+
+    Compaction shares the child's one destination. It follows the child's model
+    when the session compacts on its own model, and whenever the route names
+    another provider, which cannot serve the session's compaction model.
+    """
+    return (
+        adapter.compaction_model == adapter.active_model
+        or completion.provider is not None
+    )
+
+
+def _child_model_facts(
+    config: RustHarnessConfig, facts: RustModelFacts, *, compacts_on_route: bool
+) -> RustHarnessConfig:
+    """Core settings for a child on its declared model.
+
+    The session's own facts follow the session's model, whose window, compaction
+    threshold and image support may all differ from the child's. A child that
+    keeps the session's compaction model keeps the input that model accepts.
+    """
+    context = config.settings.context
+    compaction_modalities = None
+    if not compacts_on_route:
+        session_compaction = (
+            context.compaction_model_input_modalities
+            or context.model_facts.input_modalities
+        )
+        if session_compaction != facts.input_modalities:
+            compaction_modalities = list(session_compaction)
+    context = context.model_copy(
+        update={
+            "model_facts": facts,
+            "compaction_model_input_modalities": compaction_modalities,
+        },
+        deep=True,
+    )
+    settings = config.settings.model_copy(update={"context": context}, deep=True)
+    return config.model_copy(update={"settings": settings}, deep=True)
 
 
 def _child_core_config(

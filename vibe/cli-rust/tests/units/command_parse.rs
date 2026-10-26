@@ -1,6 +1,6 @@
 //! Slash-command resolution: aliases, bare exit synonyms, arguments and side-channel routing.
 
-use vibe_rs::commands::{argument_hint, is_side_channel, parse};
+use vibe_rs::commands::{argument_hint, is_side_channel, parse, waits_for_jobs};
 use vibe_rs::input_modes::{classify, ClassifiedInput};
 
 #[test]
@@ -68,7 +68,7 @@ fn bare_exit_synonyms_exit_only_as_the_whole_input() {
 }
 
 #[test]
-fn read_only_commands_run_while_busy_and_pickers_wait_for_idle() {
+fn commands_a_turn_never_reads_run_while_busy_and_the_others_wait_for_idle() {
     for command in [
         "/help",
         "/status",
@@ -79,6 +79,11 @@ fn read_only_commands_run_while_busy_and_pickers_wait_for_idle() {
         "/rename",
         "/data-retention",
         "/exit",
+        "/theme",
+        "/log-level",
+        "/voice",
+        "/proxy-setup",
+        "/remote-project",
     ] {
         assert!(is_side_channel(command), "{command} runs while busy");
     }
@@ -86,15 +91,33 @@ fn read_only_commands_run_while_busy_and_pickers_wait_for_idle() {
         "/config",
         "/model",
         "/thinking",
-        "/theme",
-        "/voice",
         "/resume",
         "/clear",
         "/compact",
         "/rewind",
-        "/mcp",
         "/reload",
+        "/teleport",
+        "/mcp",
+        "/connectors",
+        "/plugins",
+        "/reload-plugins",
     ] {
         assert!(!is_side_channel(command), "{command} waits for idle");
+    }
+}
+
+#[test]
+fn side_channel_settings_wait_for_running_jobs() {
+    for command in [
+        "/theme",
+        "/log-level",
+        "/voice",
+        "/proxy-setup",
+        "/remote-project",
+    ] {
+        assert!(waits_for_jobs(command), "{command} waits for jobs");
+    }
+    for command in ["/help", "/exit", "/status"] {
+        assert!(!waits_for_jobs(command), "{command} runs during jobs");
     }
 }

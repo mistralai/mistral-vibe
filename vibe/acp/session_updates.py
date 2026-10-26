@@ -698,7 +698,7 @@ def _effect_meta(entry: PublicEffectEntry) -> dict[str, JsonValue]:
         "tool_name": {
             "file_system.read_file": "read_file",
             "file_system.write_file": "write_file",
-            "file_system.search_replace": "edit",
+            "file_system.edit": "edit",
             "file_system.bash": "bash",
             "skill.read": "skill",
         }.get(entry.detail.tool_name, entry.detail.tool_name),

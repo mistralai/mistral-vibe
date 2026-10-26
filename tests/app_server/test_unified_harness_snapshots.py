@@ -724,12 +724,12 @@ class TestTurnBoundaries:
         assert recorder.restorable_paths(_anchor("t1")) == [str(target.resolve())]
 
 
-class TestRealHarnessSearchReplace:
-    """Restores against the real harness ``search_replace``, end to end.
+class TestRealHarnessEdit:
+    """Restores against the real harness ``file_system.edit``, end to end.
 
     The hand-built fixtures above anchor whole lines; the real tool matches
     substrings that can start mid-line, computes its blocks' start lines on
-    the content after the effect's earlier blocks, and carries the pre-edit
+    the content after the edit's earlier matches, and carries the pre-edit
     text in its annotations. These run the tool, mirror the adapter's
     annotation-to-occurrence mapping, and assert the recorder restores the
     exact original file.
@@ -737,7 +737,7 @@ class TestRealHarnessSearchReplace:
 
     @staticmethod
     def _harness_edit_effect(
-        target: Path, *, turn: str, blocks: Sequence[Any]
+        target: Path, *, turn: str, edit: dict[str, Any]
     ) -> PublicEffectEntry:
         file_tools = pytest.importorskip(
             "mistralai_vibe_local_harness.vibe._file_tools"
@@ -745,9 +745,9 @@ class TestRealHarnessSearchReplace:
         sandbox_helper = pytest.importorskip(
             "mistralai_vibe_local_harness.vibe._sandbox_helper"
         )
-        args = file_tools.SearchReplaceArgs(file_path=str(target), content=blocks)
-        _, previews, previous_content = sandbox_helper.search_replace(
-            target, args.model_dump(mode="json")["content"]
+        args = file_tools.EditArgs(file_path=str(target), **edit)
+        _, previews, previous_content = sandbox_helper.edit(
+            target, args.old_string, args.new_string, replace_all=args.replace_all
         )
         occurrences = [
             (
@@ -766,12 +766,12 @@ class TestRealHarnessSearchReplace:
         )
 
     def _assert_restored(
-        self, tmp_path: Path, original: str, blocks: Sequence[Any]
+        self, tmp_path: Path, original: str, edit: dict[str, Any]
     ) -> None:
         target = tmp_path / "alpha.txt"
         target.write_bytes(original.encode("utf-8"))
         recorder = _recorder(tmp_path)
-        effect = self._harness_edit_effect(target, turn="t1", blocks=blocks)
+        effect = self._harness_edit_effect(target, turn="t1", edit=edit)
         post = target.read_bytes().decode("utf-8")
         assert post != original
 
@@ -782,51 +782,50 @@ class TestRealHarnessSearchReplace:
 
     def test_a_mid_line_edit_restores_exactly(self, tmp_path: Path) -> None:
         self._assert_restored(
-            tmp_path, "x = foo\ny = 1\n", [_block(old_str="foo", new_str="bar")]
+            tmp_path, "x = foo\ny = 1\n", _edit(old_string="foo", new_string="bar")
         )
 
     def test_a_replace_all_edit_restores_exactly(self, tmp_path: Path) -> None:
         self._assert_restored(
             tmp_path,
             "foo()\nz = foo + 1\n",
-            [_block(old_str="foo", new_str="qux", replace_all=True)],
+            _edit(old_string="foo", new_string="qux", replace_all=True),
         )
 
-    def test_a_multi_block_line_count_change_restores_exactly(
-        self, tmp_path: Path
-    ) -> None:
+    def test_a_line_count_change_restores_exactly(self, tmp_path: Path) -> None:
         self._assert_restored(
-            tmp_path,
-            "a\nb\nc\nd\n",
-            [_block(old_str="a", new_str="a1\na2"), _block(old_str="d", new_str="D")],
+            tmp_path, "a\nb\nc\nd\n", _edit(old_string="a", new_string="a1\na2")
         )
 
     def test_a_crlf_edit_restores_its_endings(self, tmp_path: Path) -> None:
         self._assert_restored(
             tmp_path,
             "one\r\ntwo\r\nthree\r\n",
-            [_block(old_str="two\r\n", new_str="TWO\r\n")],
+            _edit(old_string="two\r\n", new_string="TWO\r\n"),
         )
 
     def test_a_last_line_without_a_newline_restores_exactly(
         self, tmp_path: Path
     ) -> None:
         self._assert_restored(
-            tmp_path, "one\ntwo", [_block(old_str="two", new_str="TWO")]
+            tmp_path, "one\ntwo", _edit(old_string="two", new_string="TWO")
         )
 
     def test_a_bom_first_line_edit_restores_exactly(self, tmp_path: Path) -> None:
         self._assert_restored(
-            tmp_path, "\ufeffone\ntwo\n", [_block(old_str="one\n", new_str="ONE\n")]
+            tmp_path, "\ufeffone\ntwo\n", _edit(old_string="one\n", new_string="ONE\n")
         )
 
 
-def _block(*, old_str: str, new_str: str, replace_all: bool = False) -> Any:
-    """A search/replace block of the real harness's argument shape."""
-    file_tools = pytest.importorskip("mistralai_vibe_local_harness.vibe._file_tools")
-    return file_tools.SearchReplaceBlock(
-        old_str=old_str, new_str=new_str, replace_all=replace_all
-    )
+def _edit(
+    *, old_string: str, new_string: str, replace_all: bool = False
+) -> dict[str, Any]:
+    """The real harness edit's arguments, less the file path."""
+    return {
+        "old_string": old_string,
+        "new_string": new_string,
+        "replace_all": replace_all,
+    }
 
 
 class TestOccurrenceFallback:

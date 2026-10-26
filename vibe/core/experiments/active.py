@@ -24,6 +24,7 @@ class ExperimentName(StrEnum):
     # make-default).
     CLI_EXTRA_MODELS = "vibe_cli_extra_models"
     REGISTRY_SKILLS = "vibe_cli_registry_skills"
+    PR_MONITORING = "vibe_cli_pr_monitoring"
 
 
 DEFAULT_VARIANTS: Final[dict[ExperimentName, object]] = {
@@ -34,6 +35,7 @@ DEFAULT_VARIANTS: Final[dict[ExperimentName, object]] = {
     ExperimentName.SMART_APPROVE_DEFAULT: False,
     ExperimentName.CLI_EXTRA_MODELS: {},
     ExperimentName.REGISTRY_SKILLS: False,
+    ExperimentName.PR_MONITORING: False,
 }
 
 assert all(name in DEFAULT_VARIANTS for name in ExperimentName), (
@@ -55,6 +57,7 @@ EXPERIMENT_SURFACES: Final[dict[ExperimentName, frozenset[ExperimentSurface]]] =
     # the legacy backend has no classifier gate, so the variant only applies there.
     ExperimentName.SMART_APPROVE: frozenset({ExperimentSurface.UNIFIED}),
     ExperimentName.SMART_APPROVE_DEFAULT: frozenset({ExperimentSurface.UNIFIED}),
+    ExperimentName.PR_MONITORING: frozenset(ExperimentSurface),
 }
 
 assert all(name in EXPERIMENT_SURFACES for name in ExperimentName), (

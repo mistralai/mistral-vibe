@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from mistralai_vibe_local_harness.vibe._subagents._models import (
     MAX_DECLARED_AGENT_TYPES,
+    MAX_DECLARED_INSTRUCTION_CHARS,
     ActiveSessionLifecycle,
     ChildSessionRecord,
     ChildTombstone,
     DeclaredAgentTypeProfile,
+    DeclaredCompletionRoute,
     DeletingSessionTree,
     ForkSessionIdentity,
     ParentOriginatedChildCommandReceipt,
+    RejectedAgentType,
     ResolvedSubagentPolicyCeiling,
     RootSessionIdentity,
     SessionIdentity,
@@ -21,13 +24,16 @@ from mistralai_vibe_local_harness.vibe._subagents._models import (
 
 __all__ = [
     "MAX_DECLARED_AGENT_TYPES",
+    "MAX_DECLARED_INSTRUCTION_CHARS",
     "ActiveSessionLifecycle",
     "ChildSessionRecord",
     "ChildTombstone",
     "DeclaredAgentTypeProfile",
+    "DeclaredCompletionRoute",
     "DeletingSessionTree",
     "ForkSessionIdentity",
     "ParentOriginatedChildCommandReceipt",
+    "RejectedAgentType",
     "ResolvedSubagentPolicyCeiling",
     "RootSessionIdentity",
     "SessionIdentity",

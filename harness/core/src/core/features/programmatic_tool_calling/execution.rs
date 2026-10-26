@@ -391,9 +391,12 @@ fn failed_program_tool_result(
     tool_state: &[ToolState],
     error: Value,
 ) -> Result<ToolResult, CoreError> {
-    let code = error
-        .get("name")
-        .and_then(Value::as_str)
+    // A `ToolError` keeps the failed tool's code; other errors are named by their class.
+    let name = error.get("name").and_then(Value::as_str);
+    let code = (name == Some("ToolError"))
+        .then(|| error.get("code").and_then(Value::as_str))
+        .flatten()
+        .or(name)
         .unwrap_or("ExecutionError")
         .to_string();
     let message = error
@@ -474,10 +477,11 @@ const SUMMARY_HEAD_ENTRIES: usize = 8;
 const MAX_SUMMARY_NAME_CHARS: usize = 80;
 const CONSOLE_LOG: &str = "console.log";
 
-/// Error codes of operations Core settled without starting them.
-/// A sleep the time budget refused or cut short has no effects, so it counts
-/// as not started too.
-const UNSTARTED_ERROR_CODES: [&str; 4] = [
+/// Error codes of operations that never started. Core and the Runtime check
+/// arguments before any effect. A sleep the time budget refused or cut short
+/// has no effects, so it counts as not started too.
+const UNSTARTED_ERROR_CODES: [&str; 5] = [
+    "invalid_arguments",
     "permission_denied",
     "approval_failed",
     "tool_skipped",
@@ -725,9 +729,11 @@ fn omitted_entries_line(entries: &[SummaryEntry]) -> String {
 
 fn rejected_status(error: &Value) -> CallStatus {
     let name = error.get("name").and_then(Value::as_str);
-    let invalid_arguments =
+    // A checkpoint from before ToolError stores the argument validation report
+    // itself, without an error code.
+    let older_invalid_arguments =
         error.get("type").and_then(Value::as_str) == Some("jsonSchemaArgumentValidationError");
-    if invalid_arguments || name.is_some_and(|name| UNSTARTED_ERROR_CODES.contains(&name)) {
+    if older_invalid_arguments || name.is_some_and(|name| UNSTARTED_ERROR_CODES.contains(&name)) {
         return CallStatus::NotStarted;
     }
     CallStatus::Failed
@@ -1235,11 +1241,7 @@ mod tests {
         }
         tool_state.push(summary_call(7, "file_system.bash", CallStatus::Failed));
         for call in 8..=10 {
-            tool_state.push(summary_call(
-                call,
-                "file_system.search_replace",
-                CallStatus::Done,
-            ));
+            tool_state.push(summary_call(call, "file_system.edit", CallStatus::Done));
         }
         tool_state.push(summary_call(11, "file_system.read_file", CallStatus::Done));
         tool_state.push(summary_call(12, "file_system.bash", CallStatus::Running));
@@ -1258,13 +1260,65 @@ console.log 1
 tools.file_system.read_file 1-6: done
 tools.file_system.bash 7: failed, check effects
 console.log 2-3
-tools.file_system.search_replace 8-10: done
+tools.file_system.edit 8-10: done
 tools.file_system.read_file 11: done
 tools.file_system.bash 12: still running, check effects
 tools.file_system.write_file 13-15: never started
 Do not repeat done calls; continue with the rest."
         );
         assert_eq!(call_summary(&[], &[0]), None);
+    }
+
+    #[test]
+    fn a_call_rejected_for_invalid_arguments_never_started() {
+        let rejected = |name: &str, details: Value| ToolState::Rejected {
+            kind: ToolKind::External,
+            id: "operation-1".to_string(),
+            function: ToolFunction {
+                name: "self.sleep".to_string(),
+                arguments: json!({}),
+            },
+            error: json!({"name": name, "message": "rejected", "details": details}),
+            content: Vec::new(),
+        };
+        let invalid = rejected(
+            "invalid_arguments",
+            json!({"type": "jsonSchemaArgumentValidationError"}),
+        );
+        // A built-in tool's domain check, such as a spawn `turns` of `3.0`,
+        // gives no details; the Runtime's check gives its own.
+        let invalid_builtin = rejected("invalid_arguments", Value::Null);
+        let invalid_in_runtime = rejected(
+            "invalid_arguments",
+            json!({"tool": "self.sleep", "errors": []}),
+        );
+        let failed = rejected("tool_failed", json!({}));
+        let older_report = ToolState::Rejected {
+            kind: ToolKind::External,
+            id: "operation-1".to_string(),
+            function: ToolFunction {
+                name: "self.sleep".to_string(),
+                arguments: json!({}),
+            },
+            error: json!({"type": "jsonSchemaArgumentValidationError"}),
+            content: Vec::new(),
+        };
+
+        assert_eq!(
+            call_summary(&[invalid], &[]).unwrap(),
+            "Calls, in order:\ntools.self.sleep 1: never started"
+        );
+        for call in [invalid_builtin, invalid_in_runtime, older_report] {
+            assert_eq!(
+                call_summary(&[call], &[]).unwrap(),
+                "Calls, in order:\ntools.self.sleep 1: never started"
+            );
+        }
+        assert!(
+            call_summary(&[failed], &[])
+                .unwrap()
+                .ends_with("tools.self.sleep 1: failed, check effects")
+        );
     }
 
     #[test]

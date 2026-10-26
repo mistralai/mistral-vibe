@@ -48,7 +48,12 @@ from vibe.app_server.protocol import (
     TurnStartResponse,
 )
 from vibe.app_server.session import AppServerSession, AppServerTurnError
-from vibe.core.git.worktree import ManagedWorktree, WorktreeProgressCallback
+from vibe.core.git.worktree import (
+    ManagedWorktree,
+    WorktreeProgressCallback,
+    WorktreeRepository,
+)
+from vibe.core.trusted_folders import TrustedFoldersManager
 
 
 def _cwd(session: AppServerSession) -> Path:
@@ -95,6 +100,88 @@ async def test_a_session_starts_in_the_worktree_it_asked_for(tmp_path: Path) -> 
         assert cwd != tmp_path
         assert cwd.is_dir()
         assert Repo(cwd).active_branch.name == "jun/contract"
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trusted", [False, True])
+@pytest.mark.parametrize("relocate", [False, True])
+async def test_session_git_filters_survive_managed_move_and_live_fork(
+    tmp_path: Path, trusted: bool, relocate: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    from vibe.app_server._runtime import HarnessProcess
+    import vibe.app_server._unified_harness_backend_adapter as adapter_module
+    from vibe.core.config.harness_files import HarnessFilesManager
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    prepare_trust = adapter_module._relocated_worktree_git_trust
+    event_loop_thread = threading.get_ident()
+
+    def checked_prepare_trust(
+        previous_cwd: Path,
+        cwd: Path,
+        previous_store: TrustedFoldersManager,
+        store: TrustedFoldersManager,
+    ) -> TrustedFoldersManager:
+        assert threading.get_ident() != event_loop_thread
+        return prepare_trust(previous_cwd, cwd, previous_store, store)
+
+    monkeypatch.setattr(
+        adapter_module, "_relocated_worktree_git_trust", checked_prepare_trust
+    )
+    repo = _init_repo(tmp_path)
+    (tmp_path / ".gitattributes").write_text("*.txt filter=probe\n")
+    repo.index.add([".gitattributes"])
+    repo.index.commit("filter")
+    repo.git.config("filter.probe.smudge", "tr a-z A-Z")
+    trust_store = trusted_folders_manager.for_session()
+    harness_files = HarnessFilesManager(
+        sources=("user", "project"), trust_store=trust_store
+    )
+    destination = None
+    if relocate:
+        with WorktreeRepository.open(tmp_path, trust_store=trust_store) as worktrees:
+            destination = worktrees.prepare("relocated-filter").path
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            worktree=NewWorktreeInput(
+                name="session-filter", branch="vibe/session-filter"
+            ),
+            trust_workspace=trusted,
+        ),
+        capabilities=ClientCapabilities(),
+        process=HarnessProcess(harness_files),
+    )
+    try:
+        session = await connection.host.start_session()
+        cwd = await _settled_cwd(session, tmp_path)
+        assert trust_store is not trusted_folders_manager
+        assert trusted_folders_manager.is_trusted(tmp_path) is not True
+        assert (cwd / "file.txt").read_text() == ("HELLO\n" if trusted else "hello\n")
+        await session.resources.sessions.fork()
+        fork_cwd = _cwd(session)
+        assert fork_cwd != cwd
+        assert (fork_cwd / "file.txt").read_text() == (
+            "HELLO\n" if trusted else "hello\n"
+        )
+        if destination is not None:
+            # The first fork awaits initial deferred setup, including source
+            # grant revocation. A cwd notification alone precedes that boundary.
+            assert trust_store.is_trusted(tmp_path) is not True
+            await session.resources.sessions.relocate(str(destination))
+            assert _cwd(session) == destination
+            await session.resources.sessions.fork()
+            relocated_child = _cwd(session)
+            assert relocated_child != destination
+            assert (relocated_child / "file.txt").read_text() == (
+                "HELLO\n" if trusted else "hello\n"
+            )
+        assert trusted_folders_manager.is_trusted(tmp_path) is not True
     finally:
         await connection.host.close()
 
@@ -189,12 +276,16 @@ async def test_first_turn_response_does_not_wait_for_worktree_creation(
         worktrees: SessionWorktrees,
         options: SessionOptions,
         on_progress: WorktreeProgressCallback | None = None,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
     ) -> WorktreeResolution:
         if options.worktree is None:
-            return await original(worktrees, options, on_progress)
+            return await original(
+                worktrees, options, on_progress, trust_store=trust_store
+            )
         setup_started.set()
         await release_setup.wait()
-        return await original(worktrees, options, on_progress)
+        return await original(worktrees, options, on_progress, trust_store=trust_store)
 
     monkeypatch.setattr(SessionWorktrees, "resolve_for_start", blocked_resolve)
     connection = await connect_backend_contract_host(
@@ -247,12 +338,16 @@ async def test_an_agent_switch_does_not_wait_for_worktree_creation(
         worktrees: SessionWorktrees,
         options: SessionOptions,
         on_progress: WorktreeProgressCallback | None = None,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
     ) -> WorktreeResolution:
         if options.worktree is None:
-            return await original(worktrees, options, on_progress)
+            return await original(
+                worktrees, options, on_progress, trust_store=trust_store
+            )
         setup_started.set()
         await release_setup.wait()
-        return await original(worktrees, options, on_progress)
+        return await original(worktrees, options, on_progress, trust_store=trust_store)
 
     monkeypatch.setattr(SessionWorktrees, "resolve_for_start", blocked_resolve)
     connection = await connect_backend_contract_host(
@@ -305,9 +400,13 @@ async def test_a_turn_claimed_before_a_failed_worktree_reports_it_once(
         worktrees: SessionWorktrees,
         options: SessionOptions,
         on_progress: WorktreeProgressCallback | None = None,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
     ) -> WorktreeResolution:
         if options.worktree is None:
-            return await original(worktrees, options, on_progress)
+            return await original(
+                worktrees, options, on_progress, trust_store=trust_store
+            )
         setup_started.set()
         await release_setup.wait()
         raise RuntimeError("worktree preparation failed")
@@ -688,5 +787,62 @@ async def test_smart_approve_does_not_treat_the_worktree_as_agent_config(
         assert classifier_requests
         assert not approvals
         assert (cwd / "notes.md").read_text() == "written\n"
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trusted", [False, True])
+async def test_live_worktree_removal_uses_session_source_git_trust(
+    tmp_path: Path, trusted: bool
+) -> None:
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.core.config.harness_files import HarnessFilesManager
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    repo = _init_repo(tmp_path)
+    repo.git.config("filter.cleanup.clean", "sed 's/^S://'")
+    repo.git.config("filter.cleanup.smudge", "sed 's/^/S:/'")
+    (tmp_path / ".gitattributes").write_text("*.txt filter=cleanup\n")
+    repo.index.add([".gitattributes"])
+    repo.index.commit("filter")
+    process_store = trusted_folders_manager.for_session()
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            worktree=NewWorktreeInput(name="live-cleanup", branch="vibe/live-cleanup"),
+            trust_workspace=trusted,
+        ),
+        capabilities=ClientCapabilities(),
+        process=HarnessProcess(
+            HarnessFilesManager(sources=("user", "project"), trust_store=process_store)
+        ),
+    )
+    try:
+        session = await connection.host.start_session()
+        await _settled_cwd(session, tmp_path)
+        await session.resources.sessions.fork()
+        assert process_store.is_trusted(tmp_path) is not True
+        assert trusted_folders_manager.is_trusted(tmp_path) is not True
+        with WorktreeRepository.open(tmp_path) as repository:
+            target = repository.prepare_auto(suggested_name="closed-cleanup")
+        managed = ManagedWorktree.at(target.root)
+        assert managed is not None
+        managed.hold("completed-start")
+        managed.release_holder("completed-start")
+        (target.root / "file.txt").write_text("S:changed\n")
+        response = await connection.client.request(
+            "workspace/git/worktrees/remove", {"cwd": str(target.root)}
+        )
+        if trusted:
+            assert response["outcome"] == "removed"
+            assert not target.root.exists()
+            assert (
+                repo.git.show(f"refs/vibe/reaped/{target.name}:file.txt") == "changed"
+            )
+        else:
+            assert response["outcome"] == "kept_dirty"
+            assert (target.root / "file.txt").read_text() == "S:changed\n"
     finally:
         await connection.host.close()

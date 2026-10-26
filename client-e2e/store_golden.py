@@ -46,6 +46,9 @@ def main() -> None:
         except (TimeoutError, OSError) as exc:
             print(f"  FAIL {name}: {exc}")
             continue
+        if not captured.snapshots and not captured.requests:
+            print(f"  FAIL {name}: captured nothing, refusing to store an empty golden")
+            continue
         normalized = [normalize_snapshot(s) for s in captured.snapshots]
         path = store_golden(name, normalized, captured.requests)
         print(

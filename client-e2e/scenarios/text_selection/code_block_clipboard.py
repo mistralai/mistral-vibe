@@ -17,7 +17,7 @@ fn main() {
 
 _PROMPT = "show indented code"
 _ANSWER = f"```\n{expected_clipboard}\n```"
-_SELECT_CODE = "\x1b[<0;3;11M\x1b[<32;119;17M\x1b[<0;119;17m"
+_SELECT_CODE = "\x1b[<0;3;12M\x1b[<32;119;18M\x1b[<0;119;18m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

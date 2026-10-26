@@ -431,25 +431,27 @@ async def test_identity_read_projects_a_fetched_identity(
 
 
 @pytest.mark.asyncio
-async def test_identity_read_is_silent_when_the_key_is_rejected(
+async def test_identity_read_retries_a_key_rejected_by_an_earlier_read(
     backend_contract_mistral_api: respx.Route,
 ) -> None:
     """*Prepare*: A session over an identity gateway that rejects the key.
-    *Do*: Read the identity.
-    *Assert*: Nothing — ``/whoami`` reports no identity rather than failing.
+    *Do*: Read the identity twice.
+    *Assert*: Both reads fail open, and the later explicit read retries the key.
     """
     # Prepare
-    gateway = FakeIdentityGateway(unauthorized=True)
+    gateway = FakeIdentityGateway(unauthorized=True, reject_credentials=True)
     async with _connected(identity_gateway=gateway) as connection:
         session = await connection.host.open_session()
         try:
             # Do
             identity = await session.resources.identity.read()
+            repeated = await session.resources.identity.read()
         finally:
             await session.close()
 
     # Assert
-    assert identity is None
+    assert identity is repeated is None
+    assert gateway.calls == ["https://api.mistral.ai/v1"] * 2
 
 
 @pytest.mark.asyncio

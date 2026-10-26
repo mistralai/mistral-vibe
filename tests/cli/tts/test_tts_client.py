@@ -93,12 +93,12 @@ class TestMistralTTSClient:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
-        import httpx
+        import httpx2
         from mistralai.client.errors import SDKError
 
-        fake_response = httpx.Response(
+        fake_response = httpx2.Response(
             status_code=500,
-            request=httpx.Request("POST", "https://api.mistral.ai/v1/audio/speech"),
+            request=httpx2.Request("POST", "https://api.mistral.ai/v1/audio/speech"),
         )
         mock_complete_async = AsyncMock(
             side_effect=SDKError("API error", fake_response)

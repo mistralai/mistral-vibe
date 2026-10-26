@@ -259,7 +259,7 @@ Most modern terminals should work, but older or minimal terminal emulators may h
 Simply run `vibe` to enter the interactive chat loop. The terminal UI is a native
 Rust binary (`vibe-rs`) bundled with the package.
 
-- **Multi-line Input**: Press `Ctrl+J` or `Shift+Enter` for select terminals to insert a newline.
+- **Multi-line Input**: Press `Ctrl+J`, or `Shift+Enter` / `Alt+Enter` in terminals that report them, to insert a newline.
 - **Input Cursor**: The main input cursor blinks by default. Set `cursor_blink = false` in `config.toml` for a steady cursor. Changes apply without restarting through `/config` or `/reload`.
 - **File Paths**: Reference files in your prompt using the `@` symbol for smart autocompletion (e.g., `> Read the file @src/agent.py`). A bare `@` quickly lists immediate non-hidden entries; after a path character, Git workspaces suggest tracked and non-ignored files. Pasting a standalone existing absolute or home-relative file or folder also creates a mention.
 - **Shell Commands**: Prefix any command with `!` to execute it directly in your shell, bypassing the agent (e.g., `> !ls -l`).
@@ -632,6 +632,11 @@ by about 45 KiB per run; with two arenas it stays flat.
 
 Voice mode allows you to dictate input using your microphone instead of typing.
 
+In editor integrations (`vibe-acp`), dictation and narration use the `miniaudio`
+package, installed by default on macOS, Windows and x86_64 Linux. On other
+platforms, install the `voice` extra, which may build it from source:
+`uv tool install "mistral-vibe[voice]"`.
+
 ### Activating Voice Mode
 
 Toggle voice mode on or off with the `/voice` slash command:
@@ -906,22 +911,27 @@ use the latest compacted context followed by newer messages.
 These settings apply to the Unified Harness:
 
 ```toml
-compaction_max_output_tokens = 80000       # Output cap for compaction requests; 0: same cap as other requests
-# compaction_thinking = "low"              # Thinking for the first compaction request; unset keeps the compaction model's level
-compaction_reasoning_limit_tokens = 32000  # Reasoning after which compaction falls back; 0 disables
+# auto_compact_threshold = 200000         # Compaction threshold for models without their own; unset: derived from the window
+compaction_reasoning_limit_tokens = 32000  # Reasoning after which a compaction summary is asked for again, briefly; 0 disables
 output_limit_retries = 6                   # Cut-off answers a turn retries with feedback; 0 ends the turn on the first
-output_token_reserve = 4096                # Tokens kept free when the output cap is clipped to the context window
 ```
 
 The first compaction request reuses the conversation's prompt prefix, so the
-provider can serve most of it from its cache. If it fails, returns an invalid
-summary, or reasons past `compaction_reasoning_limit_tokens`, Vibe sends one
-fallback request instead: a summarizer prompt over a text transcript of the
-conversation, without tools and without reasoning. It differs from the first
-request, so a provider's response cache cannot hand back the same failed answer.
+provider can serve most of it from its cache. If it fails or returns an invalid
+summary, Vibe sends one fallback request instead: a summarizer prompt over a
+text transcript of the conversation, without tools and with reasoning off, or at
+the lowest level where the model cannot turn it off. It differs from the first
+request, so a provider's response cache cannot hand back the same failed answer. A summary cut off at the output limit, or a first
+request that reasons past `compaction_reasoning_limit_tokens`, is asked for once
+more as a fallback request that asks for a brief answer. A compaction request
+the provider refuses as too long is sent again, smaller.
 
-When a model declares `max_context_length`, each request's output cap is clipped
-to the room its input leaves in that window, less `output_token_reserve`.
+Compaction is always automatic. A model's context window is its
+`max_context_length`, else the known window of the model, else 262,144 tokens
+(Vibe then warns that it guessed). Without an `auto_compact_threshold`, the
+threshold is `min(256000, window - 60000)`, kept inside the range the window
+allows; an explicit threshold outside that range is refused with an error
+that names the range. `auto_compact_threshold` must be a positive number of tokens.
 
 ### Custom Title Prompts
 
@@ -1014,6 +1024,21 @@ process tools. It defaults to `true`.
 `enable_subagents = false` likewise takes subagents (`tools.subagent` in
 `run_typescript`) away from the agent on the default runtime: the system prompt
 no longer describes them, and the agent works alone. It defaults to `true`.
+
+`outside_workdir = "deny"` refuses file and shell tool calls that reach outside
+the working directory and its `--add-dir` directories instead of prompting: the
+agent gets a tool error explaining that access is denied by configuration, and
+keeps working. It defaults to `"ask"`. Set it per tool under `[tools.<name>]` to
+override the global value; allowlisted paths stay allowed. Under `"ask"`, a shell
+command reaching outside prompts for that path even when the command is
+allowlisted or the shell has `permission = "always"`.
+
+```toml
+outside_workdir = "deny"
+
+[tools.read_file]
+allowlist = ["vibe-path:directory_recursive:/abs/path/to/shared"]
+```
 
 #### Enable/Disable Tools with Patterns
 
@@ -1164,7 +1189,7 @@ permission = "ask"
 
 MCP server configurations support additional features:
 
-- **Environment variables**: Set environment variables for MCP servers
+- **Environment variables**: Set environment variables for stdio MCP servers
 - **Custom timeouts**: Configure startup and tool execution timeouts
 
 Example with environment variables and timeouts:
@@ -1172,8 +1197,9 @@ Example with environment variables and timeouts:
 ```toml
 [[mcp_servers]]
 name = "my_server"
-transport = "http"
-url = "http://localhost:8000"
+transport = "stdio"
+command = "uvx"
+args = ["mcp-server-fetch"]
 env = { "DEBUG" = "1", "LOG_LEVEL" = "info" }
 startup_timeout_sec = 15
 tool_timeout_sec = 120
@@ -1219,9 +1245,19 @@ Unknown JSON fields are tolerated at every level (forward-compatible). Fields th
 
 #### `post_agent`
 
-Fires after every assistant turn that ends without pending tool calls.
+Fires after every assistant turn that ends without pending tool calls, for the main agent and for every subagent.
 
-- **Receives** (in addition to the session context): no extra fields.
+- **Matches** (optional `match`): the agent that finished its turn, by agent configuration name, with the same glob / `re:` syntax as tool hooks. A main session (root or fork) answers to its current agent (`accept-edits`, `ask`, a custom agent) and to the reserved alias `main`; a subagent answers to its `config_name`, or to its parent's agent when spawned without one. `match = "main"` runs only after the main agent; a mode name such as `accept-edits` also matches the subagents that inherit it. Without `match`, the hook runs for every agent. No agent may be named `main`.
+
+  ```toml
+  [[hooks]]
+  name = "build-after-reviewer"
+  type = "post_agent"
+  match = "reviewer"
+  command = "make check"
+  ```
+
+- **Receives** (in addition to the session context): `agent_name`, the agent configuration name (`null` when unknown).
 - **Can return**:
   - `decision: "deny"` + `reason` — `reason` is injected as a new user message asking for a retry. First deny short-circuits remaining `post_agent` hooks. Capped at **3 retries per turn across all `post_agent` hooks**; past the cap, the answer is accepted.
   - `system_message` — UI-only.
@@ -1310,6 +1346,10 @@ vibe --worktree my-feature
 The worktree lives under `$VIBE_HOME/worktrees/<repo-name>-<repo-hash>/NAME` and is checked out on a branch named `NAME` (created if it doesn't exist, attached if it does). Vibe `cd`s into it before the session starts and trusts it for the session (no trust prompt). If you start Vibe from a subdirectory, Vibe enters the matching subdirectory inside the worktree.
 
 Existing worktrees are reused only when they belong to the same git repository and are checked out on branch `NAME`; otherwise Vibe exits with an error instead of running in the wrong checkout.
+
+Before a folder is trusted, worktree creation disables filters defined by its Git configuration, including conditional includes. If that configuration defines LFS extensions or custom transfers, all content filters are disabled for automatic checkout. Recovery snapshots keep the original checkout when source trust would require disabling filters: already-smudged bytes cannot safely be saved as canonical Git content and smudged again on restore. Ordinary user filters remain available otherwise, except that Git LFS content is left as pointer files until the folder is trusted. On older Git versions without config scope reporting, untrusted automatic operations conservatively disable all content filters. Trusted folders retain their configured filters.
+
+Git filter trust follows the source repository, including session-only trust for live worktree operations. Background recovery snapshots use persisted source trust. Untrusted status does not inspect submodule contents; indexed submodules conservatively count as uncommitted work for fork notices and prevent automatic snapshots and cleanup, even if they are clean or uninitialized.
 
 Pass `--worktree` with no name to have Vibe name one for you:
 

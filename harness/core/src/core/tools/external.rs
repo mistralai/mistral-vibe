@@ -10,7 +10,7 @@ pub(crate) enum RuntimeBuiltinToolName {
     SelfSleep,
     FileSystemReadFile,
     FileSystemWriteFile,
-    FileSystemSearchReplace,
+    FileSystemEdit,
     FileSystemBash,
     SkillRead,
     ProcessStart,
@@ -35,18 +35,22 @@ pub(crate) enum RuntimeBuiltinToolName {
     DeprecatedSubagentSendMessage,
     /// Deprecated: `subagent.interrupt` is replay-only; use `agents.interrupt`.
     DeprecatedSubagentInterrupt,
+    /// Deprecated: `file_system.search_replace` is replay-only; use `file_system.edit`.
+    DeprecatedFileSystemSearchReplace,
 }
 
 impl RuntimeBuiltinToolName {
     /// Deprecated: retired names that restore from older Sessions and fail
-    /// without executing; their replacements are the `agents.*` tools.
-    pub(crate) const DEPRECATED: [Self; 6] = [
+    /// without executing; their replacements are the `agents.*` tools and
+    /// `file_system.edit`.
+    pub(crate) const DEPRECATED: [Self; 7] = [
         Self::DeprecatedSubagentList,
         Self::DeprecatedSubagentSpawn,
         Self::DeprecatedSubagentSendMessage,
         Self::DeprecatedSubagentInterrupt,
         Self::SubagentWait,
         Self::SubagentStop,
+        Self::DeprecatedFileSystemSearchReplace,
     ];
 
     pub(crate) fn as_str(self) -> &'static str {
@@ -55,7 +59,7 @@ impl RuntimeBuiltinToolName {
             Self::SelfSleep => "self.sleep",
             Self::FileSystemReadFile => "file_system.read_file",
             Self::FileSystemWriteFile => "file_system.write_file",
-            Self::FileSystemSearchReplace => "file_system.search_replace",
+            Self::FileSystemEdit => "file_system.edit",
             Self::FileSystemBash => "file_system.bash",
             Self::SkillRead => "skill.read",
             Self::ProcessStart => "process.start",
@@ -74,6 +78,7 @@ impl RuntimeBuiltinToolName {
             Self::DeprecatedSubagentSpawn => "subagent.spawn",
             Self::DeprecatedSubagentSendMessage => "subagent.send_message",
             Self::DeprecatedSubagentInterrupt => "subagent.interrupt",
+            Self::DeprecatedFileSystemSearchReplace => "file_system.search_replace",
         }
     }
 
@@ -83,7 +88,7 @@ impl RuntimeBuiltinToolName {
             "self.sleep" => Some(Self::SelfSleep),
             "file_system.read_file" => Some(Self::FileSystemReadFile),
             "file_system.write_file" => Some(Self::FileSystemWriteFile),
-            "file_system.search_replace" => Some(Self::FileSystemSearchReplace),
+            "file_system.edit" => Some(Self::FileSystemEdit),
             "file_system.bash" => Some(Self::FileSystemBash),
             "skill.read" => Some(Self::SkillRead),
             "process.start" => Some(Self::ProcessStart),
@@ -102,12 +107,39 @@ impl RuntimeBuiltinToolName {
             "subagent.spawn" => Some(Self::DeprecatedSubagentSpawn),
             "subagent.send_message" => Some(Self::DeprecatedSubagentSendMessage),
             "subagent.interrupt" => Some(Self::DeprecatedSubagentInterrupt),
+            "file_system.search_replace" => Some(Self::DeprecatedFileSystemSearchReplace),
             _ => None,
         }
     }
 
     pub(crate) fn is_skill_read(self) -> bool {
         matches!(self, Self::SkillRead)
+    }
+
+    /// The tool's own sentence for a JSON Schema error, when the schema's text
+    /// would not tell the model what to send, such as a failed `pattern`.
+    /// `None` keeps the schema's text.
+    pub(crate) fn explain_schema_error(
+        self,
+        error: &jsonschema::ValidationError<'_>,
+    ) -> Option<String> {
+        match self {
+            Self::SubagentSpawn => {
+                crate::core::features::subagents::explain_spawn_schema_error(error)
+            }
+            Self::ProcessWrite => {
+                crate::core::features::background_processes::explain_write_schema_error(error)
+            }
+            _ => None,
+        }
+    }
+
+    /// Rules the tool's JSON Schema cannot state, checked once it passed.
+    pub(crate) fn check_domain(self, arguments: &Value) -> Result<(), String> {
+        match self {
+            Self::SubagentSpawn => crate::core::features::subagents::check_spawn_domain(arguments),
+            _ => Ok(()),
+        }
     }
 
     /// Whether the permission policy evaluates calls to this tool.
@@ -131,7 +163,8 @@ impl RuntimeBuiltinToolName {
             | Self::DeprecatedSubagentInterrupt => false,
             Self::FileSystemReadFile
             | Self::FileSystemWriteFile
-            | Self::FileSystemSearchReplace
+            | Self::FileSystemEdit
+            | Self::DeprecatedFileSystemSearchReplace
             | Self::FileSystemBash
             | Self::SkillRead
             | Self::ProcessStart
@@ -149,7 +182,9 @@ impl RuntimeBuiltinToolName {
             Self::SelfWait => Some("wait".to_string()),
             Self::FileSystemReadFile => Some("read_file".to_string()),
             Self::FileSystemWriteFile => Some("write_file".to_string()),
-            Self::FileSystemSearchReplace => Some("edit".to_string()),
+            Self::FileSystemEdit | Self::DeprecatedFileSystemSearchReplace => {
+                Some("edit".to_string())
+            }
             Self::FileSystemBash => command_invocation_name(invocation_name),
             Self::SkillRead => Some("skill".to_string()),
             Self::SelfSleep
@@ -178,7 +213,9 @@ impl RuntimeBuiltinToolName {
             Self::SelfSleep => Some("sleep".to_string()),
             Self::FileSystemReadFile => Some("read_file".to_string()),
             Self::FileSystemWriteFile => Some("write_file".to_string()),
-            Self::FileSystemSearchReplace => Some("edit".to_string()),
+            Self::FileSystemEdit | Self::DeprecatedFileSystemSearchReplace => {
+                Some("edit".to_string())
+            }
             Self::FileSystemBash => command_invocation_name(invocation_name),
             Self::SkillRead => None,
             Self::ProcessStart => Some("process_start".to_string()),
@@ -205,7 +242,8 @@ impl RuntimeBuiltinToolName {
             Self::SelfSleep | Self::SelfWait => HookToolTarget::SelfTool,
             Self::FileSystemReadFile
             | Self::FileSystemWriteFile
-            | Self::FileSystemSearchReplace
+            | Self::FileSystemEdit
+            | Self::DeprecatedFileSystemSearchReplace
             | Self::FileSystemBash => HookToolTarget::Filesystem,
             Self::SkillRead => HookToolTarget::Skill,
             Self::ProcessStart

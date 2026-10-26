@@ -5,6 +5,7 @@ from pathlib import Path
 import tomllib
 from uuid import uuid4
 
+from pydantic import ValidationError
 import pytest
 
 from vibe.core.config._migration import migrate_config_layers
@@ -15,8 +16,10 @@ from vibe.core.config.layer import (
     LayerNotLoadedError,
 )
 from vibe.core.config.layers import _base
+from vibe.core.config.layers.default import DefaultConfigLayer
 from vibe.core.config.layers.project import ProjectConfigLayer
 from vibe.core.config.layers.user import UserConfigLayer
+from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.patch import (
     AddOperationPatch,
     ConfigPatch,
@@ -24,6 +27,7 @@ from vibe.core.config.patch import (
     ReplaceOperationPatch,
 )
 from vibe.core.config.types import MISSING_BACKING_STORE_DATA_FINGERPRINT
+from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.trusted_folders import trusted_folders_manager
 
 
@@ -446,6 +450,70 @@ provider = "mistral"
     migrated_data = await layer.load()
     assert migrated_data.model_extra is not None
     assert migrated_data.model_extra["active_model"] == "mistral-medium-3.5"
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_unsets_the_old_unset_auto_compact_threshold(
+    tmp_working_directory: Path,
+) -> None:
+    """-1 was the old "no threshold" marker: it becomes the model default."""
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text(
+        "auto_compact_threshold = -1\n\n"
+        "[[models]]\n"
+        'name = "devstral"\n'
+        'alias = "mine"\n'
+        'provider = "llamacpp"\n'
+        "auto_compact_threshold = -1\n"
+    )
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert "auto_compact_threshold" not in persisted
+    assert "auto_compact_threshold" not in persisted["models"][0]
+    orchestrator = await ConfigOrchestrator.create(
+        schema=VibeConfigSchema,
+        layers=[DefaultConfigLayer(schema=VibeConfigSchema), layer],
+        default_layer_resolver=lambda: layer,
+    )
+    assert orchestrator.config.auto_compact_threshold is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("on_model", [False, True])
+async def test_a_saved_zero_auto_compact_threshold_is_a_config_error(
+    tmp_working_directory: Path, on_model: bool
+) -> None:
+    """0 meant "compaction off" in older versions; there is no "off" any more.
+
+    The migration must leave it in place so loading fails loudly, instead of
+    turning compaction on with the default threshold.
+    """
+    path = tmp_working_directory / random_config_file_name()
+    zero = "auto_compact_threshold = 0\n"
+    model = '[[models]]\nname = "devstral"\nalias = "mine"\nprovider = "llamacpp"\n'
+    path.write_text(model + zero if on_model else zero + "\n" + model)
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    saved = persisted["models"][0] if on_model else persisted
+    assert saved["auto_compact_threshold"] == 0
+    with pytest.raises(ValidationError) as exc_info:
+        await ConfigOrchestrator.create(
+            schema=VibeConfigSchema,
+            layers=[DefaultConfigLayer(schema=VibeConfigSchema), layer],
+            default_layer_resolver=lambda: layer,
+        )
+    message = str(exc_info.value)
+    assert "auto_compact_threshold" in message
+    assert "0 is not allowed" in message
+    assert "set a positive threshold" in message
 
 
 @pytest.mark.asyncio

@@ -49,6 +49,10 @@ class AgentInput(SubagentModel):
     agent_name: str = Field(alias="agentName", min_length=1)
 
 
+class InterruptInput(AgentInput):
+    reason: str | None = Field(default=None, min_length=1)
+
+
 def request_digest(action: RustRuntimeBuiltinToolCallAction) -> str:
     payload = {"name": action.call.name, "arguments": action.call.arguments}
     return hashlib.sha256(rfc8785.dumps(payload)).hexdigest()

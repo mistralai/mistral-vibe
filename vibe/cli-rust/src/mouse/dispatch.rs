@@ -15,8 +15,8 @@ use crate::server::Client;
 use crate::transcript::grouping::KEY_PREFIX;
 use crate::utils::scroll::ScrollAnchor;
 use crate::{
-    approval, connector_auth, external_url, mcp, mcp_oauth, model_picker, question_input,
-    resume_picker, thinking_picker,
+    approval, artifacts_modal, connector_auth, external_url, mcp, mcp_oauth, model_picker,
+    question_input, resume_picker, thinking_picker,
 };
 
 pub(super) fn dispatch(
@@ -80,6 +80,11 @@ pub(super) fn dispatch(
                 crate::log_level_picker::click(app, (event.column, event.row));
             }
         }
+        MouseTarget::ArtifactsModal => {
+            if picked(app, event, |app| &mut app.artifacts_modal.list) {
+                artifacts_modal::select(app);
+            }
+        }
         MouseTarget::BottomApp => bottom_app_event(app, event, |_, _| {}),
         MouseTarget::Trust => crate::trust_folders::handle_mouse(app, event),
         // A click on the pinned todo line opens the full plan.
@@ -132,6 +137,7 @@ pub(crate) fn option_list(app: &mut App, target: MouseTarget) -> Option<&mut dyn
         MouseTarget::ModelPicker => &mut app.model_picker.list,
         MouseTarget::ThinkingPicker => &mut app.thinking_picker.list,
         MouseTarget::LogLevelPicker => &mut app.log_level_picker.list,
+        MouseTarget::ArtifactsModal => &mut app.artifacts_modal.list,
         MouseTarget::ResumePicker => &mut app.resume_picker.list,
         MouseTarget::RemoteProject => &mut app.vibe_code_project.list,
         MouseTarget::Mcp => &mut app.mcp.list,
@@ -247,7 +253,41 @@ fn bottom_bar_event(app: &mut App, event: MouseEvent) {
         }
         MouseEventKind::Drag(MouseButton::Left) => selection::bottom_bar::drag(app, at),
         MouseEventKind::Up(MouseButton::Left) => {
-            selection::release(app);
+            // The press cell and drag flag are cleared by release; read them first.
+            let pressed = app.selection.press;
+            let dragged = app.selection.dragged;
+            let release = selection::release(app);
+            // A plain click (release on the pressed cell, no selection) on
+            // the painted PR/MR link opens it, or the artifacts modal when
+            // several artifacts share the slot.
+            if pressed == Some(at) && !matches!(release, Release::Selected) {
+                let action = app
+                    .view
+                    .bottom_bar_link
+                    .as_ref()
+                    .filter(|link| link.area.contains(at.into()))
+                    .map(|link| link.action.clone());
+                if let Some(action) = action {
+                    match action {
+                        crate::ui::bottom_bar::BarLinkAction::OpenUrl(url) => {
+                            external_url::open(&url)
+                        }
+                        crate::ui::bottom_bar::BarLinkAction::ListArtifacts => {
+                            artifacts_modal::open(app)
+                        }
+                    }
+                }
+            }
+            // A plain click on the model name opens `/model` and keeps the composer's draft.
+            let click = !dragged
+                && pressed.is_some_and(|press| crate::ui::bottom_bar::model_at(app, press))
+                && crate::ui::bottom_bar::model_at(app, at);
+            if matches!(release, Release::Nothing) && click {
+                // The second press of a double click starts afresh instead of selecting a word.
+                app.selection.chain = Default::default();
+                model_picker::open(app);
+                crate::telemetry::slash_command_clicked(app, "/model", "footer");
+            }
         }
         _ => {}
     }

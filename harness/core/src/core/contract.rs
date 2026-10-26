@@ -77,7 +77,7 @@ fn reducing_the_same_command_twice_from_equal_states_agrees() {
                 "same answer",
             ))],
             finish_reason: CompletionFinishReason::Stop,
-            usage: None,
+            usage: test_usage(),
         },
     };
 

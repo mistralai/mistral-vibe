@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use super::now_unix;
 use crate::server::{AgentSafety, AgentSummary};
+use crate::skill::Skill;
 use crate::utils::paths;
 
 const SCHEMA_VERSION: u32 = 9;
@@ -40,28 +41,17 @@ fn builtin_agents() -> Vec<AgentSummary> {
     .collect()
 }
 
-pub fn read_skills(response: &Value) -> Vec<(String, String)> {
+pub fn read_skills(response: &Value) -> Vec<Skill> {
     let Some(skills) = response
         .pointer("/runtime/skills")
         .and_then(Value::as_array)
     else {
         return Vec::new();
     };
-    skills
-        .iter()
-        .filter(|skill| skill.get("userInvocable").and_then(Value::as_bool) == Some(true))
-        .filter_map(|skill| {
-            let name = skill.get("name").and_then(Value::as_str)?;
-            let description = skill
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            Some((name.to_owned(), description.to_owned()))
-        })
-        .collect()
+    skills.iter().filter_map(Skill::from_wire).collect()
 }
 
-fn cached_skills(response: &Value) -> Vec<(String, String)> {
+fn cached_skills(response: &Value) -> Vec<Skill> {
     read_skills(response)
         .into_iter()
         .take(MAX_CACHED_SKILLS)
@@ -92,7 +82,7 @@ pub struct StartupConfig {
     /// The cycleable agents, so Shift+Tab works before the snapshot lands.
     pub agents: Vec<AgentSummary>,
     /// Bounded user-invocable skill metadata for `/` completion before readiness.
-    pub skills: Vec<(String, String)>,
+    pub skills: Vec<Skill>,
     pub context_window: u64,
     /// Whether the narrator requests turn summaries.
     pub narrator_enabled: bool,

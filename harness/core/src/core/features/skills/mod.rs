@@ -16,10 +16,10 @@ const MAX_SKILL_NAME_SUGGESTIONS: usize = 3;
 
 /// Whether the Session exposes the `skill` tool and its rules.
 ///
-/// `WhenConfigured` exposes them only while the catalog is not empty. It is the
-/// default, so settings recorded before this field existed keep their behavior.
-/// `Enabled` exposes them even with an empty catalog, so the tool set does not
-/// change when skills appear later. `Disabled` exposes nothing and rejects a
+/// `Enabled` and `WhenConfigured` expose them only while the catalog is not
+/// empty, so an agent with no skills is never offered a tool that has nothing
+/// to load. `WhenConfigured` is the default, so settings recorded before this
+/// field existed keep their behavior. `Disabled` exposes nothing and rejects a
 /// non-empty catalog.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
@@ -42,8 +42,7 @@ impl Mode {
     pub(crate) fn exposes<'a>(self, skills: impl IntoIterator<Item = &'a SkillDefinition>) -> bool {
         match self {
             Self::Disabled => false,
-            Self::WhenConfigured => skills.into_iter().next().is_some(),
-            Self::Enabled => true,
+            Self::WhenConfigured | Self::Enabled => skills.into_iter().next().is_some(),
         }
     }
 }

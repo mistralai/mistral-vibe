@@ -11,6 +11,11 @@ from vibe.core.agents._migration import (
     LEGACY_BASE_DISABLED_KEY,
     migrate_agent_profile_config,
 )
+from vibe.core.config._defaults import SHELL_TOOLS
+
+# A post_agent hook's `match = "main"` selects the user's agent, whatever its mode,
+# so no agent profile may take that name.
+RESERVED_AGENT_NAME = "main"
 
 
 class BuiltinAgentName(StrEnum):
@@ -39,9 +44,19 @@ class AgentProfile:
     file behind it, so a profile that reaches that surface has to remember where
     it came from.
     """
+    config_error: str | None = field(default=None, compare=False)
+    """The config error the profile's settings make, or ``None`` when they are
+    valid. A profile with one stays discovered, so choosing it gives this error
+    as a broken ``config.toml`` does, rather than "not found".
+    """
 
     @classmethod
     def from_toml(cls, path: Path) -> AgentProfile:
+        if path.stem.casefold() == RESERVED_AGENT_NAME:
+            raise ValueError(
+                f"'{RESERVED_AGENT_NAME}' is reserved for hook matching; "
+                "rename the agent file"
+            )
         with path.open("rb") as f:
             data = tomllib.load(f)
         migrate_agent_profile_config(data)
@@ -50,12 +65,23 @@ class AgentProfile:
             name=path.stem,
             display_name=data.pop("display_name", path.stem.replace("-", " ").title()),
             description=data.pop("description", ""),
-            safety=AgentSafety(data.pop("safety", AgentSafety.NEUTRAL)),
-            agent_type=AgentType(data.pop("agent_type", AgentType.AGENT)),
+            safety=_enum_field(data, "safety", AgentSafety, AgentSafety.NEUTRAL),
+            agent_type=_enum_field(data, "agent_type", AgentType, AgentType.AGENT),
             instructions=data.pop("instructions", None),
             overrides=data,
             source_path=path,
         )
+
+
+def _enum_field[E: StrEnum](
+    data: dict[str, Any], key: str, enum: type[E], default: E
+) -> E:
+    value = data.pop(key, default)
+    try:
+        return enum(value)
+    except ValueError:
+        allowed = ", ".join(repr(member.value) for member in enum)
+        raise ValueError(f"{key}: {value!r} is not one of {allowed}") from None
 
 
 ASK = AgentProfile(
@@ -141,7 +167,12 @@ LEAN = AgentProfile(
             "temperature": 0.2,
             "thinking": "off",
         },
-        "tools": {"bash": {"default_timeout": 1200}},
+        # Every shell tool: the command environment picks one (git_bash or
+        # powershell on Windows), whose settings give Core's bash timeouts.
+        "tools": {
+            name: {"default_timeout": 1200, "max_timeout_seconds": 1200}
+            for name in SHELL_TOOLS
+        },
     },
 )
 

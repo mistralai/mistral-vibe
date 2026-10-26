@@ -265,6 +265,32 @@ def wait_for_rendered_text(
     )
 
 
+# A tool approval or question ignores keys for this long after it opens, so
+# keys typed before it showed cannot answer it (`INPUT_GRACE_PERIOD` in
+# vibe/cli-rust/src/question_app/mod.rs).
+_INPUT_GRACE_PERIOD_MS = 500
+_INPUT_GRACE_PERIOD_ENV = "VIBE_INPUT_GRACE_PERIOD_MS"
+
+
+def wait_for_dialog_to_accept_keys(
+    child: pexpect.spawn, captured: io.StringIO, needle: str, timeout: float = 10
+) -> None:
+    """Wait until the approval or question showing `needle` takes keys.
+
+    The dialog starts its input grace before drawing its first frame, so the
+    grace ends at most one grace period after `needle` shows on screen. Keys
+    sent earlier are dropped. The child's output is drained meanwhile.
+    """
+    wait_for_rendered_text(child, captured, needle=needle, timeout=timeout)
+    grace_ms = int(os.environ.get(_INPUT_GRACE_PERIOD_ENV, _INPUT_GRACE_PERIOD_MS))
+    deadline = time.monotonic() + grace_ms / 1000
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            child.expect(r"\S", timeout=min(remaining, 0.05))
+        except pexpect.TIMEOUT:
+            pass
+
+
 def send_ctrl_c_until_quit_confirmation(
     child: pexpect.spawn, captured: io.StringIO, timeout: float = 3
 ) -> None:

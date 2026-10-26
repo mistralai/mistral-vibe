@@ -21,6 +21,7 @@ pub enum Focus {
     ModelPicker,
     LogLevelPicker,
     ThinkingPicker,
+    ArtifactsModal,
     SubagentList,
     Composer,
 }
@@ -46,10 +47,20 @@ impl App {
             (self.model_picker.open, Focus::ModelPicker),
             (self.log_level_picker.open, Focus::LogLevelPicker),
             (self.thinking_picker.open, Focus::ThinkingPicker),
+            (self.artifacts_modal.open, Focus::ArtifactsModal),
             (self.subagents.list.focused, Focus::SubagentList),
         ]
         .into_iter()
         .find_map(|(open, focus)| open.then_some(focus))
         .unwrap_or(Focus::Composer)
+    }
+
+    /// Whether a picker the user opened, or is opening, owns Esc and Ctrl+C over the turn.
+    pub fn picker_focused(&self) -> bool {
+        match self.focus() {
+            Focus::Approval | Focus::Question => false,
+            Focus::Composer | Focus::SubagentList => self.vibe_code_project.pending,
+            _ => true,
+        }
     }
 }

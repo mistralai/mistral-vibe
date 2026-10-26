@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from vibe.core.session.artifacts import sanitize_artifacts_in_raw_metadata
 from vibe.core.session.session_index import (
     MESSAGES_FILENAME,
     METADATA_FILENAME,
@@ -217,7 +218,11 @@ class SessionLoader:
 
         try:
             metadata_content = read_safe(metadata_path).text
-            return SessionMetadata.model_validate_json(metadata_content)
+            raw: dict = json.loads(metadata_content)
+            # Load-time resilience: drop artifacts that fail the current
+            # model instead of failing the whole session load.
+            sanitize_artifacts_in_raw_metadata(raw, session_dir=session_dir)
+            return SessionMetadata.model_validate(raw)
         except ValueError:
             raise
         except Exception as e:

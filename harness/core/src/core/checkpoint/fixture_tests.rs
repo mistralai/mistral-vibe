@@ -73,6 +73,120 @@ fn checkpoint_v1_fixtures_match_live_semantic_state() {
     }
 }
 
+/// A checkpoint written before the estimate correction existed restores with
+/// no correction; a stored factor below 1 is refused.
+#[test]
+fn checkpoint_estimate_correction_defaults_to_none_and_is_validated() {
+    let cases = fixture_cases();
+    let case = cases
+        .iter()
+        .find(|case| case.file_name == "active-awaiting-agent-completion.json")
+        .expect("agent completion fixture exists");
+    let stored = fs::read_to_string(fixture_path(case.file_name)).unwrap();
+    let mut value: Value = serde_json::from_str(&stored).unwrap();
+    let root = value.as_object_mut().unwrap();
+    assert_eq!(root["estimate_correction"], 1.25);
+
+    root.remove("estimate_correction");
+    let older = serde_json::to_string(&value).unwrap();
+    let restored = decode_checkpoint(&older)
+        .and_then(|checkpoint| checkpoint.restore(case.state.config.clone()))
+        .expect("a checkpoint without a correction restores");
+    assert_eq!(
+        restored.estimate_correction,
+        crate::core::features::compaction::EstimateCorrection::NONE
+    );
+
+    value["estimate_correction"] = serde_json::json!(0.5);
+    let invalid = serde_json::to_string(&value).unwrap();
+    let error = decode_checkpoint(&invalid)
+        .and_then(|checkpoint| checkpoint.restore(case.state.config.clone()))
+        .expect_err("a correction below 1 is refused");
+    assert!(error.contains("estimate correction"), "{error}");
+}
+
+/// A checkpoint written before the compaction phases named the standalone
+/// request under `request`, and an in-context resend at attempt 1. Both
+/// restore. A refit after a refusal keeps its phase at any attempt; a cut-off
+/// retry that cannot follow its attempt, or a refit limit no request fits, is
+/// refused.
+#[test]
+fn checkpoint_compaction_phase_accepts_the_earlier_shape_and_is_validated() {
+    let cases = fixture_cases();
+    let restore = |file_name: &str, edit: &dyn Fn(&mut Value)| {
+        let case = cases
+            .iter()
+            .find(|case| case.file_name == file_name)
+            .expect("compaction fixture exists");
+        let stored = fs::read_to_string(fixture_path(case.file_name)).unwrap();
+        let mut value: Value = serde_json::from_str(&stored).unwrap();
+        edit(&mut value["turn"]["phase"]["projection"]);
+        decode_checkpoint(&serde_json::to_string(&value).unwrap())
+            .and_then(|checkpoint| checkpoint.restore(case.state.config.clone()))
+    };
+
+    let standalone = restore(
+        "active-awaiting-compaction-completion.json",
+        &|projection| {
+            let phase = projection.as_object_mut().unwrap().remove("phase").unwrap();
+            projection["request"] = phase;
+        },
+    )
+    .expect("a standalone request stored under `request` restores");
+    let projection = Checkpoint::capture(&standalone).unwrap();
+    let projection = serde_json::to_value(projection).unwrap();
+    assert_eq!(
+        projection["turn"]["phase"]["projection"]["phase"],
+        "standalone"
+    );
+
+    restore(
+        "active-awaiting-compaction-in-context.json",
+        &|projection| {
+            projection["attempt"] = serde_json::json!(1);
+        },
+    )
+    .expect("an in-context resend at attempt 1 restores");
+    restore(
+        "active-awaiting-compaction-in-context.json",
+        &|projection| {
+            projection["attempt"] = serde_json::json!(2);
+            projection["refit_limit"] = serde_json::json!(1_000_000);
+        },
+    )
+    .expect("an in-context refit at attempt 2 restores");
+    restore(
+        "active-awaiting-compaction-completion.json",
+        &|projection| projection["attempt"] = serde_json::json!(0),
+    )
+    .expect("a first standalone request restores");
+
+    for (file_name, edit, expected) in [
+        (
+            "active-awaiting-compaction-cut-off-retry.json",
+            (&|projection: &mut Value| {
+                projection["cut_off_retry"]["attempt"] = serde_json::json!(2);
+            }) as &dyn Fn(&mut Value),
+            "cut-off retry",
+        ),
+        (
+            "active-awaiting-compaction-completion.json",
+            &|projection: &mut Value| projection["refit_limit"] = serde_json::json!(0),
+            "smallest compaction request",
+        ),
+        (
+            "active-awaiting-compaction-cut-off-retry.json",
+            &|projection: &mut Value| {
+                projection.as_object_mut().unwrap().remove("cut_off_retry");
+            },
+            "cut-off retry",
+        ),
+    ] {
+        let error = restore(file_name, edit).expect_err("an invalid phase is refused");
+        assert!(error.contains(expected), "{file_name}: {error}");
+    }
+}
+
 fn fixture_path(file_name: &str) -> PathBuf {
     Path::new(FIXTURE_DIRECTORY).join(file_name)
 }
@@ -105,8 +219,15 @@ fn assert_checkpoint_boundary(file_name: &str, value: &Value) {
         "notifications".to_string(),
         "turn".to_string(),
     ]);
-    if root.contains_key("last_finished_turn_id") {
-        expected_root_keys.insert("last_finished_turn_id".to_string());
+    for optional in [
+        "last_finished_turn_id",
+        "last_reported_context_tokens",
+        "estimate_correction",
+        "rebuilt_since_reply",
+    ] {
+        if root.contains_key(optional) {
+            expected_root_keys.insert(optional.to_string());
+        }
     }
     assert_eq!(
         root.keys().cloned().collect::<BTreeSet<_>>(),

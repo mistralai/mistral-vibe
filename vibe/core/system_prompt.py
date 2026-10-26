@@ -63,8 +63,9 @@ def git_metadata_args(num_commits: int) -> tuple[list[str], list[str], list[str]
     return (
         ["branch", "--show-current"],
         ["for-each-ref", "--format=%(refname)", *_DEFAULT_BRANCH_REFS],
-        # --no-decorate also overrides a user's log.decorate setting.
-        ["log", "--oneline", "--no-decorate", f"-{num_commits}"],
+        # Repository config can select a signature verifier executable.
+        # Metadata collection runs before trust and needs only summaries.
+        ["log", "--oneline", "--no-decorate", "--no-show-signature", f"-{num_commits}"],
     )
 
 

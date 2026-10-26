@@ -10,8 +10,9 @@ mod builtin_features;
 mod compaction;
 mod completion_and_tools;
 mod conversation;
+mod embedded_images;
 mod hooks;
-mod input_modalities;
+mod image_input;
 mod large_output;
 mod model_wait;
 mod permissions;
@@ -51,7 +52,7 @@ fn tool_call_completion(action_id: &str, calls: Vec<Value>) -> Value {
         "result": {
             "parts": calls,
             "finish_reason": "tool_call",
-            "usage": null,
+            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
         },
     })
 }
@@ -188,7 +189,7 @@ fn text_candidate(text: &str) -> Value {
             "content": [{"type": "text", "text": text}],
         },
         "finish_reason": "stop",
-        "usage": null,
+        "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
     })
 }
 
@@ -214,7 +215,7 @@ fn tool_calls_candidate(calls: &[Value]) -> Value {
     json!({
         "message": {"role": "assistant", "content": content},
         "finish_reason": "tool_call",
-        "usage": null,
+        "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
     })
 }
 

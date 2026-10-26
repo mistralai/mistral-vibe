@@ -22,5 +22,6 @@ pub(crate) fn default_status() -> SetupStatus {
         supports_browser_sign_in: true,
         has_api_key: false,
         enable_system_trust_store: false,
+        pinned_console_url: None,
     }
 }

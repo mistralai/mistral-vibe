@@ -163,6 +163,23 @@ prefix (e.g., `VIBE_ACTIVE_MODEL=my-local-model`).
 Custom prompt IDs are resolved from project-local `.vibe/prompts/` first, then
 from `~/.vibe/prompts/`, and finally from the built-in bundled prompts.
 
+### Settings Vibe does not use
+
+Vibe checks `~/.vibe/config.toml`, the trusted project `.vibe/config.toml` and
+the active agent profile for settings it does not use: a misspelt key (with the
+closest setting name), a retired setting such as `include_model_info`, or a
+setting with no effect such as `[tools.grep]`. Each one is a warning at startup,
+and `vibe -p` prints it on stderr. `[tools.<name>]` keys are not checked when a
+custom tool of that name is the one Vibe runs.
+
+To refuse a config with such settings instead, set `strict_config = true` in
+`config.toml` or `VIBE_STRICT_CONFIG=1` in the environment; Vibe then stops with
+the list. `VIBE_STRICT_CONFIG` takes a boolean: `1`, `true`, `yes` or `on` to
+refuse, `0`, `false`, `no` or `off` to warn; any other value is refused too.
+
+`vibe config schema` prints a JSON schema of every setting, including each
+built-in tool's settings, for an editor to validate `config.toml` against.
+
 ### Key Settings
 
 ```toml
@@ -194,6 +211,7 @@ edit `config.toml` and run `/reload`; no restart is needed.
 ```toml
 # Behavior
 bypass_tool_permissions = false    # Skip tool approval prompts
+outside_workdir = "ask"            # Outside-workdir file/shell access: "ask" prompts, "deny" refuses with a tool error
 system_prompt_id = "cli"          # System prompt: "cli", "lean", or custom .md filename
 compaction_prompt_id = "compact"  # Compaction prompt: built-in "compact" or custom .md filename
 enable_telemetry = true
@@ -202,21 +220,16 @@ enable_notifications = true
 enable_system_trust_store = false  # Use OS trust store for outbound HTTPS
 api_timeout = 720.0               # API request timeout in seconds
 api_retry_max_elapsed_time = 300.0  # Retry budget for retryable API failures in seconds
-api_stream_idle_timeout = 0.0     # Silence after the model starts answering that counts as a stall, in seconds; 0 disables
-auto_compact_threshold = 200000   # Fallback for models without their own threshold
-compaction_max_output_tokens = 80000     # Output cap for compaction requests; 0: same cap as other requests
-# compaction_thinking = "low"            # Thinking for the first compaction request; unset keeps the compaction model's level
-compaction_reasoning_limit_tokens = 32000  # Reasoning after which compaction falls back to a request without tools or reasoning; 0 disables
+api_stream_idle_timeout = 300.0   # Silence after the model starts answering that counts as a stall, in seconds; 0 allows api_timeout
+# auto_compact_threshold = 200000 # optional fallback for models without their own threshold; unset: derived from each model's context window
+compaction_reasoning_limit_tokens = 32000  # Reasoning after which a compaction summary is stopped and asked for once more, briefly, without tools and with reasoning off or lowest; 0 disables
 output_limit_retries = 6          # Answers cut off at the output limit that a turn retries with feedback; 0 ends the turn on the first
-output_token_reserve = 4096       # Tokens kept free when the output cap is clipped to a model's max_context_length
 
 # Git commit behavior
 include_commit_signature = true   # Add "Co-Authored-By" to commits
 
 # System prompt composition
-include_model_info = true         # Include model name in system prompt
 include_project_context = true    # Include project context (git info, cwd) in system prompt
-include_prompt_detail = true      # Include OS info, tool prompts, skills, and agents in system prompt
 
 # Voice features
 voice_mode_enabled = false
@@ -270,7 +283,11 @@ emits_finish_reason = false  # set false for OpenAI-compatible endpoints that en
 
 ```toml
 # Restrict selectable models by their canonical API names, not their aliases.
-# Glob patterns and regular expressions prefixed with "re:" are supported.
+# Glob and "re:" patterns, matched in full. The only way to hide server-routed
+# models; a hidden routed default falls back to the catalog recommendation,
+# then Mistral Medium 3.5, then the first allowed model. Keep one pattern per
+# model: a pattern matching
+# nothing warns — the drift signal; do not merge them to silence it.
 allowed_models = ["mistral-vibe-cli-*"]
 
 [[models]]
@@ -281,8 +298,8 @@ temperature = 1.0
 input_price = 1.5
 output_price = 7.5
 cached_input_price = 0.15         # per million cached input tokens; omit to bill at input_price
-thinking = "high"                 # "off", "low", "medium", "high", "max"
-auto_compact_threshold = 200000
+thinking = "high"                 # "off", "low", "medium", "high", "xhigh", "max"
+# auto_compact_threshold = 200000 # optional; unset: derived from the context window; a value outside the range the window allows is refused with an error: unset it or pick one in range
 supports_images = true            # vision-capable; allows @-mentioned images
 
 [[models]]
@@ -382,6 +399,12 @@ Output polling uses byte offset cursors
 Vibe detects `-exec`, `-execdir`, `-ok`, and `-okdir` predicates and will
 prompt for user permission before running the command.
 
+**Outside paths:** a shell command naming a path outside the working directory
+(`cat /etc/hosts`, `ls ../other`, or a workdir symlink pointing out such as
+`cat link`) asks for that path, even when the command is allowlisted or the
+shell is `permission = "always"`; `outside_workdir = "deny"` refuses it instead.
+`/dev/null` and the standard streams do not count.
+
 #### File Tool Permission Resolution
 
 File-based tools (`read`, `grep`, `write_file`, `edit`) resolve
@@ -391,12 +414,39 @@ permissions in this order (first match wins):
 2. **denylist** glob match → always denied
 3. **allowlist** glob match → always allowed
 4. **sensitive_patterns** match → requires approval
-5. **Outside workdir** → requires approval (or denied if `permission = "never"`)
+5. **Outside workdir** → requires approval, or denied if `permission = "never"`
+   or `outside_workdir = "deny"`
 6. **Default** → uses the tool's `permission` setting
 
 The **denylist** is checked before the allowlist — a path matching both lists
 is denied. Both are checked before the outside-workdir boundary, so the
 allowlist can still auto-approve access to directories outside the project.
+
+#### Outside-Workdir Access
+
+`outside_workdir` covers file and shell calls reaching outside the working
+directory and its `--add-dir` directories: `"ask"` (default) prompts, `"deny"`
+refuses with a tool error and the turn continues. Set it globally or per tool:
+
+```toml
+outside_workdir = "deny"
+
+[tools.read_file]
+outside_workdir = "ask"  # per-tool override
+allowlist = ["vibe-path:directory_recursive:/abs/path/to/shared"]  # stays allowed
+```
+
+- Allowlisted paths, `--add-dir` directories and the scratchpad are never
+  refused. `permission = "always"` does not bypass the check.
+- Shells only check paths they can read statically, such as the arguments of
+  `cat`, `cp` or `ls`. Anything else (interpreter code, dynamic paths, relative
+  paths after a `cd` in the same command, such as `cd sub && cat link` with
+  `link` pointing out) follows the shell's normal permission, so a shell that
+  must stay inside should not be `always`.
+- On Windows a call is refused if any shell tool denies it: override both
+  `git_bash` and `powershell`. PowerShell treats `/dev/null` as a path; use
+  `$null`.
+- Auto-approve skips the check, like the denylists.
 
 ### Skill Configuration
 
@@ -648,9 +698,15 @@ timeout = 60.0                      # Default: 60s for all hooks.
 description = "Run ESLint"          # Optional.
 
 [[hooks]]
+name = "build-after-reviewer"
+type = "post_agent"
+match = "reviewer"                  # Agent matcher on post_agent (default "*").
+command = "make check"
+
+[[hooks]]
 name = "deny-rm-rf"
 type = "pre_tool"
-match = "re:bash|process_start"     # Tool-name matcher (tool hooks only, default "*").
+match = "re:bash|process_start"     # Tool-name matcher on tool hooks (default "*").
 strict = true                       # Tool hooks only: escalate any failure to deny/clear.
 command = "uv run python /path/to/guard-bash"
 ```
@@ -663,8 +719,19 @@ command = "uv run python /path/to/guard-bash"
 
 **Matcher syntax** (same as `enabled_tools`): fnmatch glob by default
 (`"bash"`, `"read_*"`, case-insensitive), or a regex full-match when the
-pattern starts with `re:` (`"re:(read_file|write_file)"`). `match` is forbidden on
-`post_agent`.
+pattern starts with `re:` (`"re:(read_file|write_file)"`).
+
+**Agent matching on `post_agent`.** `post_agent` fires after the main agent's
+turns and after every subagent's turns. Its `match` selects the agent that
+finished its turn, by agent configuration name: the main session's current
+agent (`accept-edits`, `ask`, a custom agent file name), a subagent's
+`config_name` (e.g. `reviewer`, or `<namespace>:<name>` for a plugin agent), or,
+for a subagent spawned without one, its parent's agent. The reserved alias `main`
+matches the main session (root or fork) whatever its agent, and never a
+subagent; no agent may be named `main`. A mode name also matches the subagents
+that inherit it, so use `match = "main"` to run only after the main agent.
+Without `match` (or with `"*"`), a `post_agent` hook runs for every agent. A
+hook that does not match is skipped silently.
 
 **Tool name conventions** for matchers:
 - `match` accepts a tool's short name (`bash`, `read_file`, `process_start`, …)
@@ -697,7 +764,8 @@ discriminated by `hook_event_name`:
 ```json
 // post_agent
 {"hook_event_name": "post_agent", "session_id": "...",
- "parent_session_id": null, "transcript_path": "...", "cwd": "..."}
+ "parent_session_id": null, "transcript_path": "...", "cwd": "...",
+ "agent_name": "accept-edits"}    // agent configuration name; null when unknown
 
 // pre_tool
 {"hook_event_name": "pre_tool", "session_id": "...", "parent_session_id": null,
@@ -876,11 +944,30 @@ To use a custom subagent, the model must spawn it by its agent type
 (`config_name`); a subagent spawned with only a name inherits the main agent's
 configuration.
 
+A subagent's instructions (`instructions`, or the prompt `system_prompt_id`
+names) are limited to 65,536 characters; the primary agent's prompt has no such
+limit. An agent file that cannot be used (invalid TOML, an unknown `safety` or
+`agent_type`, an invalid setting, a missing prompt, instructions over the limit,
+no `description`) is not offered to the model. Vibe reports it as a config issue
+naming the file and the failing field: a toast in the TUI, a stderr line and an
+export warning with `-p`. Spawning that type fails with
+`subagent_type_rejected` and the same reason.
+
+A custom subagent runs on the session's model unless its file sets
+`active_model` to an alias from `[[models]]`; its children then run on that
+model (name, temperature, thinking, provider, and the model's context window,
+compaction threshold and image support). The provider's endpoint and
+credentials always come from the session's `[[providers]]`: a provider the
+agent file redefines is ignored for routing. An alias that is unknown, excluded
+by `allowed_models`, or served by a provider the session does not define
+rejects the agent file like the cases above; Vibe never falls back to the
+session's model.
+
 ## Built-in Slash Commands
 
 - `/help` - Show help message
 - `/config` - Full-screen settings browser. Fields show their value and origin layer (default / TOML / env / override). Type to filter, arrows to move, Enter to edit; booleans toggle, closed-set fields (theme, models) pick from a list, scalars edit inline, complex fields open a JSON editor. The edit modal shows an inspector of the layers setting the field; edits persist to the user config (`~/.vibe/config.toml`) by default, `Tab` cycles the save target through the project config (`.vibe/config.toml`, when the project layer is active) and the ephemeral session override (until restart), and `Ctrl+R` clears the field one writable layer at a time toward the default. The `tools` field opens a grouped tool list with a per-tool config editor (permission, allow/deny lists, `Ctrl+E` for raw JSON). Enabling/disabling whole MCP servers or connectors stays in `/mcp`.
-- `/model` - Select active model
+- `/model` - Select active model. The footer shows the active model and its thinking level (`Name[level]`) before the token counter; clicking it opens `/model` and keeps the prompt being typed (only while idle, like the typed command). On narrow terminals the model is shortened first, then the working directory, and the model is hidden before the working directory gets very short.
 - `/thinking` - Select thinking level
 - `/theme` - Select UI theme; `auto` follows terminal/OS appearance (persisted in config)
 - `/reload` - Reload configuration, agent instructions, and skills from disk (skills added or edited on disk are also picked up on their own while `file_watcher_for_autocomplete` is on, except in sandboxed sessions)
@@ -985,8 +1072,8 @@ Image attachments:
 
 - Require `supports_images = true` on the active model in `config.toml`.
   The legacy loop rejects an image its model cannot read; under
-  the Unified Harness the send always goes through, and the agent is
-  shown a description of the image or, failing that, a link to the file.
+  the Unified Harness the agent is shown a description of the image
+  instead, and with no describer reachable the CLI refuses a pasted image.
 - The describer is picked automatically: any `supports_images` model on
   the active model's **own** provider, no config needed. Same provider
   means same key and same endpoint, so no image goes anywhere the session
@@ -998,12 +1085,14 @@ Image attachments:
   for, and the description is reused for the rest of the session. The
   describer never reasons, whatever its `thinking` says: the trace is
   charged against the description budget and buys nothing on a
-  transcription.
+  transcription. Claude models that can't turn thinking off (Opus 5.5,
+  Sonnet 5.5, Fable 5) reason at their lowest level instead.
 - A describe that fails does not fail the turn. The agent gets a
   placeholder saying the image could not be read, and a warning names the
   image and the provider's reason.
-- With no describer reachable the image is left alone, and the harness
-  hands the model a `file://` link to it instead of the pixels.
+- With no describer reachable the image is left alone, and a model that
+  cannot read images gets `[Image]` and, for an image from a file, a
+  `file://` link to it.
 - Snapshotted into `<session_dir>/attachments/<sha1>.<ext>` so that
   resumed sessions stay reproducible even if the source file is moved.
 - Capped at 10 MiB per image and 8 images per message.
@@ -1046,15 +1135,18 @@ interrupts the active turn and pauses the remaining queue; pressing Enter
 (empty or not) on a paused queue resumes it.
 
 Allowlisted slash commands (`side_channel=True`) run immediately via a
-side channel while the agent or bash is busy. Only one side-channel command
-runs at a time. Commands that persist config changes (theme, model, thinking,
-voice, proxy) require idle, then write through the app server directly after
-the user confirms the picker.
+side channel while the agent or bash is busy, or while prompts are queued.
+Only one side-channel command runs at a time. Besides read-only commands
+(`/help`, `/status`, `/copy`, ...), this includes settings a running turn
+never reads (`/theme`, `/log-level`, `/voice`, `/proxy-setup`,
+`/remote-project`); their changes are saved at once. These settings still wait
+for a compaction, teleport, project request or agent install to finish.
 
-Commands not on the side-channel allowlist (e.g. `/clear`, `/compact`,
-`/rewind`, `/resume`, `/reload`, `/leanstall`, `/unleanstall`, `/teleport`,
-`/remote-project`, `/retry`, `/plugins`, `/reload-plugins`) are rejected while busy and can be retried when
-the session is idle.
+Commands that change what a turn reads (e.g. `/config`, `/model`,
+`/thinking`, `/clear`, `/compact`, `/rewind`, `/resume`, `/branch`,
+`/reload`, `/leanstall`, `/unleanstall`, `/teleport`, `/retry`, `/mcp`,
+`/connectors`, `/plugins`, `/reload-plugins`) are rejected while busy and can
+be retried when the session is idle.
 
 While the queue is non-empty and the agent is busy, pressing **Up**
 enters queue selection mode: the last queued item is highlighted and
@@ -1226,8 +1318,15 @@ using OpenAI's `agents/openai.yaml` convention can set
 `policy.allow_implicit_invocation: false` for the same provider-independent behavior.
 
 A `/` at the very start of the input opens the slash menu (commands and skills).
+A skill row's description starts with its scope in the theme's primary color,
+whether it is a local, plugin or registry skill: `project · …` (this project
+only), `user · …` (the user's, in every project), `vibe · …` (shipped with
+Vibe), or `skill · …` when an older server does not say; a plugin skill also
+shows its plugin in its `plugin:name`. Rows without one are built-in commands.
+A built-in command wins over a skill with the same name, so such a skill is
+left out of the slash menu; it can still be mentioned mid-prompt.
 A `/word` typed mid-prompt (not the first word) instead opens a completion popup
-of matching user-invocable skills.
+of matching user-invocable skills, with the same scope prefix.
 
 ## Environment Variables
 

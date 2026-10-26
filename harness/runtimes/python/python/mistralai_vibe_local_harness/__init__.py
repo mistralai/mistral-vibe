@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from mistralai_vibe_local_harness._native import HarnessSession, hook_tool_catalog
+from mistralai_vibe_local_harness._native import (
+    HarnessSession,
+    hook_tool_catalog,
+    process_tools_shell_guidance,
+    process_tools_timeout_advice,
+)
 from mistralai_vibe_local_harness.protocol import (
     RustAudioContentBlock,
     RustAutomaticCompactionPolicy,
@@ -85,4 +90,6 @@ __all__ = [
     "RustTurnSettings",
     "ToolExecutionResult",
     "hook_tool_catalog",
+    "process_tools_shell_guidance",
+    "process_tools_timeout_advice",
 ]

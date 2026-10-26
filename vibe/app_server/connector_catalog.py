@@ -77,6 +77,7 @@ from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.types import ConcurrencyConflictError
 from vibe.core.identity_cache import IdentityCache
 from vibe.core.paths import CONNECTOR_BOOTSTRAP_CACHE_FILE
+from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
 from vibe.core.tools.connectors.connector_registry import builtin_connectors
 from vibe.core.tools.mcp_settings import persist_mcp_toggle
 from vibe.core.utils.matching import name_matches
@@ -85,7 +86,9 @@ from vibe.setup.auth.whoami import WhoAmICache, load_cached_whoami
 from vibe.utils.http import (
     VibeAsyncHTTPClient,
     build_ssl_context,
+    disable_sdk_env_telemetry,
     get_server_url_from_api_base,
+    mistral_sdk_client,
 )
 
 type BootstrapFetcher = Callable[[str, str, tuple[str, ...]], Awaitable[object]]
@@ -115,7 +118,8 @@ _WHOAMI_RETRY_SECONDS = 5 * 60
 _WHOAMI_TIMEOUT_SECONDS = 2.0
 _BOOTSTRAP_CACHE_FORMAT = 2
 _BOOTSTRAP_CACHE_TTL_SECONDS = 10 * 60
-_BOOTSTRAP_TIMEOUT_SECONDS = 30.0
+# Also bounds how long a connector call waits for a catalog still loading.
+CONNECTOR_CATALOG_FETCH_TIMEOUT_S = 30.0
 # How long a failed bootstrap answers for the next callers before one retries.
 _BOOTSTRAP_FAILURE_RETRY_SECONDS = 60
 # Process-wide, like the whoami cooldown: every session in a shared process
@@ -220,6 +224,8 @@ class _ConnectorProvider:
 class _BootstrapFlight:
     task: asyncio.Task[ResolvedConnectorCatalog]
     waiters: int = 0
+    # Only a session's fetch: a failure no session waited for is not memoized.
+    remember_failure: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1347,7 +1353,12 @@ class ConnectorCatalogService:
         orchestrator: ConfigOrchestrator[VibeConfigSchema],
         *,
         force_refresh: bool = False,
+        remember_failure: bool = True,
     ) -> ResolvedConnectorCatalog | None:
+        """``remember_failure=False`` keeps a failed fetch out of the memo
+        that spares the next caller in the next minute a retry: for a fetch
+        made ahead of any session, whose failure a session must not inherit.
+        """
         provider = await asyncio.to_thread(_resolve_provider, orchestrator.config)
         if provider is None:
             return None
@@ -1369,7 +1380,9 @@ class ConnectorCatalogService:
                 return cached.catalog
             if failure := self._recent_failure(provider.fingerprint):
                 raise ConnectorCatalogUnavailableError(failure)
-            return await self._shared_refresh(provider)
+            return await self._shared_refresh(
+                provider, remember_failure=remember_failure
+            )
 
     def _recent_failure(self, fingerprint: str) -> str | None:
         failure = _BOOTSTRAP_FAILURES.get(fingerprint)
@@ -1381,7 +1394,7 @@ class ConnectorCatalogService:
         return message
 
     async def _shared_refresh(
-        self, provider: _ConnectorProvider
+        self, provider: _ConnectorProvider, *, remember_failure: bool = True
     ) -> ResolvedConnectorCatalog:
         """Fetch the bootstrap once per provider, whichever service asks.
 
@@ -1394,8 +1407,9 @@ class ConnectorCatalogService:
             flight = _BootstrapFlight(asyncio.create_task(self._refresh(provider)))
             _BOOTSTRAP_IN_FLIGHT[fingerprint] = flight
             flight.task.add_done_callback(
-                partial(_settle_bootstrap, fingerprint, clock=self._clock)
+                partial(_settle_bootstrap, fingerprint, flight, clock=self._clock)
             )
+        flight.remember_failure = flight.remember_failure or remember_failure
         # Shielded: one caller giving up must not cancel the fetch the others
         # are waiting on. The last one does, so a closed session's fetch does
         # not outlive it.
@@ -1411,14 +1425,29 @@ class ConnectorCatalogService:
                     del _BOOTSTRAP_IN_FLIGHT[fingerprint]
                 flight.task.cancel()
 
+    async def _fetch_bootstrap_or_none(self, provider: _ConnectorProvider) -> object:
+        """The bootstrap, or an empty one where the server has no connectors.
+
+        A server without the connector service (self-hosted, Private Cloud, or
+        a proxy in front of the API) answers 404: it has no connectors, rather
+        than failing to load them.
+        """
+        try:
+            return await self._fetch_bootstrap(
+                provider.base_url, provider.api_key, provider.builtins
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != httpx.codes.NOT_FOUND:
+                raise
+        logger.info("The server has no connector service: no connectors")
+        return {"connectors": []}
+
     async def _refresh(self, provider: _ConnectorProvider) -> ResolvedConnectorCatalog:
         started_at = time.perf_counter()
         with _tracer.start_as_current_span("connector_catalog.bootstrap") as span:
             span.set_attribute("mistral_ai.vibe.harness.backend", self._backend)
             try:
-                payload = await self._fetch_bootstrap(
-                    provider.base_url, provider.api_key, provider.builtins
-                )
+                payload = await self._fetch_bootstrap_or_none(provider)
                 catalog = await asyncio.to_thread(
                     _resolve_catalog, payload, provider.fingerprint
                 )
@@ -1527,7 +1556,7 @@ async def _fetch_bootstrap(
 
 def _build_bootstrap_http_client() -> VibeAsyncHTTPClient:
     return VibeAsyncHTTPClient(
-        timeout=_BOOTSTRAP_TIMEOUT_SECONDS, verify=build_ssl_context()
+        timeout=CONNECTOR_CATALOG_FETCH_TIMEOUT_S, verify=build_ssl_context()
     )
 
 
@@ -1541,8 +1570,9 @@ async def _connector_auth_url(
         sdk_client = Mistral(
             api_key=provider.api_key,
             server_url=provider.base_url,
-            async_client=http_client,
+            async_client=mistral_sdk_client(http_client),
         )
+        disable_sdk_env_telemetry(sdk_client)
         async with sdk_client as client:
             result = await client.beta.connectors.get_auth_url_async(
                 connector_id_or_name=raw_connector_id
@@ -1570,11 +1600,13 @@ async def _connect_without_credentials(
         sdk_client = Mistral(
             api_key=provider.api_key,
             server_url=provider.base_url,
-            async_client=http_client,
+            async_client=mistral_sdk_client(http_client),
         )
+        disable_sdk_env_telemetry(sdk_client)
         async with sdk_client as client:
-            await client.beta.connectors.create_or_update_user_credentials_async(
+            await client.beta.connectors.update_credentials_async(
                 connector_id_or_name=raw_connector_id,
+                consumer_scope="user",
                 name=_DEFAULT_CONNECTION_NAME,
                 is_default=True,
                 credentials={"headers": {}},
@@ -1767,7 +1799,8 @@ async def _manage_connectors_url(config: VibeConfigSchema) -> str | None:
     # Identity lives under the versioned API base (/v1/users/me), not the bare
     # server root that provider.base_url uses for the connectors bootstrap path.
     identity = await _IDENTITY_CACHE.resolve(
-        base_url=mistral_provider.api_base, api_key=provider.api_key
+        base_url=mistral_provider.api_base,
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key(provider.api_key),
     )
     if identity is None or identity.organization is None or identity.workspace is None:
         return None
@@ -2170,6 +2203,7 @@ def _connector_revision_payload(connector: ResolvedConnector) -> dict[str, objec
 
 def _settle_bootstrap(
     fingerprint: str,
+    settled: _BootstrapFlight,
     task: asyncio.Task[ResolvedConnectorCatalog],
     *,
     clock: Callable[[], int],
@@ -2181,7 +2215,8 @@ def _settle_bootstrap(
         return
     error = task.exception()
     if isinstance(error, ConnectorCatalogUnavailableError):
-        _BOOTSTRAP_FAILURES[fingerprint] = (clock(), str(error))
+        if settled.remember_failure:
+            _BOOTSTRAP_FAILURES[fingerprint] = (clock(), str(error))
     elif error is None:
         _BOOTSTRAP_FAILURES.pop(fingerprint, None)
 
@@ -2218,6 +2253,7 @@ def _redacted_bootstrap_error(exc: Exception) -> str:
 
 
 __all__ = [
+    "CONNECTOR_CATALOG_FETCH_TIMEOUT_S",
     "ConnectorCatalogCache",
     "ConnectorCatalogError",
     "ConnectorCatalogReadResult",

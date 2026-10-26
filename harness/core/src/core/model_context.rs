@@ -233,6 +233,12 @@ impl ModelContext {
         self.revision
     }
 
+    /// The revision, unless the messages or their projection changed since it
+    /// was committed.
+    pub(crate) fn committed_revision(&self) -> Option<u64> {
+        matches!(self.change, ContextChange::Clean).then_some(self.revision)
+    }
+
     pub(crate) fn cursor(&self) -> ModelContextCursor {
         ModelContextCursor {
             len: self.messages.len(),

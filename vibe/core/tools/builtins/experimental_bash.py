@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Mapping, Set as AbstractSet
 import functools
 import os
 from pathlib import Path
@@ -35,16 +35,15 @@ from vibe.core.tools.permissions import (
 from vibe.core.tools.utils import (
     ToolPath,
     is_path_within_workdir,
+    is_stream_device_path,
+    names_a_link,
     resolve_tool_path,
     shell_path_scope_root,
+    ungranted_paths,
 )
 from vibe.core.utils import is_windows
 from vibe.core.workspace import Workspace
-from vibe.permissions import (
-    PathGrantScope,
-    path_grant_pattern,
-    path_grant_pattern_matches,
-)
+from vibe.permissions import PathGrantScope, path_grant_pattern
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
@@ -55,7 +54,6 @@ LogAction = Literal["read", "write", "append"]
 SessionAction = Literal["list", "inspect", "kill", "reset"]
 
 DEFAULT_INLINE_BYTES = 30_000
-DEFAULT_MAX_TIMEOUT_SECONDS = 600.0
 DEFAULT_MAX_POLL_SECONDS = 300.0
 
 CONTROL_SEQUENCES: dict[str, bytes] = {
@@ -278,13 +276,14 @@ _MUTATING_PATH_COMMANDS = {"cd", "chmod", "chown", "cp", "mkdir", "mv", "rm", "t
 _PATH_COMMANDS = _MUTATING_PATH_COMMANDS | set(_READ_ONLY_COMMANDS_POSIX)
 
 
-def _looks_like_path(token: str) -> bool:
+def _looks_like_path(token: str, cwd: Path) -> bool:
     return (
         token.startswith(os.sep)
         or token.startswith("~")
         or token.startswith(".")
         or "/" in token
         or "\\" in token
+        or names_a_link(token, cwd)
     )
 
 
@@ -296,12 +295,14 @@ def _collect_outside_paths(
     scratchpad_dir: Path | None,
     path_commands: Collection[str] = _PATH_COMMANDS,
     case_sensitive_commands: bool = True,
-) -> set[str]:
-    paths: set[str] = set()
+    supplied_cwd: str | None = None,
+) -> dict[str, str]:
+    """Each outside path, resolved, mapped to the spelling the call supplied."""
+    paths: dict[str, str] = {}
     if not is_path_within_workdir(
         str(command_cwd), workspace=workspace
     ) and not is_scratchpad_path(str(command_cwd), scratchpad_dir=scratchpad_dir):
-        paths.add(str(command_cwd))
+        paths[str(command_cwd)] = supplied_cwd or str(command_cwd)
 
     for part in command_parts:
         tokens = _split_command_tokens(part)
@@ -312,7 +313,7 @@ def _collect_outside_paths(
         for token in path_candidates(
             tokens, inspect_positional_paths=command_name in path_commands
         ):
-            if not _looks_like_path(token):
+            if not _looks_like_path(token, command_cwd) or is_stream_device_path(token):
                 continue
 
             resolved = resolve_tool_path(token, command_cwd)
@@ -322,7 +323,7 @@ def _collect_outside_paths(
             if is_scratchpad_path(str(resolved), scratchpad_dir=scratchpad_dir):
                 continue
 
-            paths.add(str(resolved))
+            paths.setdefault(str(resolved), token)
     return paths
 
 
@@ -396,15 +397,6 @@ class ExperimentalBashToolConfig(BashToolConfig):
         default_factory=_get_default_denylist_standalone,
         description="Commands that are denied only when run without arguments",
     )
-    max_timeout_seconds: float | None = Field(
-        default=None,
-        description=(
-            "Longest foreground wait one tool call may ask for, in seconds. Unset,"
-            f" the native shell tools allow {DEFAULT_MAX_TIMEOUT_SECONDS:g}, or the"
-            " default timeout when that is longer, and the unified harness its own"
-            " maximum."
-        ),
-    )
     max_inline_bytes: int = Field(
         default=DEFAULT_INLINE_BYTES,
         validation_alias=AliasChoices("max_inline_bytes", "max_inline_chars"),
@@ -413,18 +405,6 @@ class ExperimentalBashToolConfig(BashToolConfig):
     shell: str | None = Field(
         default=None, description="Optional default shell executable override."
     )
-
-    def resolve_timeout(self, requested: float | None) -> float:
-        """The seconds a native shell tool waits for a call that asks for
-        ``requested``, or for none: the default timeout, at most the maximum.
-        """
-        default = self.native_default_timeout
-        maximum = (
-            max(DEFAULT_MAX_TIMEOUT_SECONDS, default)
-            if self.max_timeout_seconds is None
-            else self.max_timeout_seconds
-        )
-        return min(default if requested is None else requested, maximum)
 
 
 class BashOutputConfig(BaseToolConfig):
@@ -665,13 +645,16 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
         )
 
     @staticmethod
-    def _build_outside_directory_permission(path: str) -> RequiredPermission:
+    def _build_outside_directory_permission(
+        path: str, supplied: str
+    ) -> RequiredPermission:
         return RequiredPermission(
             scope=PermissionScope.OUTSIDE_DIRECTORY,
             invocation_pattern=path,
             session_pattern=path_grant_pattern(path, PathGrantScope.EXACT),
             label=f"outside workdir ({path})",
             path_scope_root=shell_path_scope_root(path),
+            supplied_pattern=supplied,
         )
 
     def _find_denylist_match(self, command: str) -> str | None:
@@ -766,10 +749,10 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
     def _is_unconditionally_allowed(
         self,
         command_parts: list[str],
-        outside_paths: set[str],
         required_context_permissions: list[RequiredPermission] | None = None,
+        *,
+        dynamic_paths: AbstractSet[str] = frozenset(),
     ) -> bool:
-        required_context_permissions = required_context_permissions or []
         if any(self._is_sensitive(part) for part in command_parts):
             return False
         if required_context_permissions:
@@ -777,13 +760,13 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
         if self.config.permission == ToolPermission.ALWAYS:
             return True
         return all(self._is_allowlisted(part) for part in command_parts) and (
-            not outside_paths
+            not dynamic_paths
         )
 
     def _build_required_permissions(
         self,
         command_parts: list[str],
-        outside_paths: set[str],
+        outside_paths: Mapping[str, str],
         *,
         include_allowlisted: bool = False,
     ) -> list[RequiredPermission]:
@@ -836,8 +819,8 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
                 )
             )
 
-        for path in sorted(outside_paths):
-            required.append(self._build_outside_directory_permission(path))
+        for path, supplied in sorted(outside_paths.items()):
+            required.append(self._build_outside_directory_permission(path, supplied))
 
         return required
 
@@ -868,27 +851,25 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
             command_cwd=command_cwd,
             workspace=self.workspace,
             scratchpad_dir=self.scratchpad_dir,
+            supplied_cwd=cwd,
         )
-        outside_paths = {
-            path
-            for path in outside_paths
-            if not any(
-                path_grant_pattern_matches(path, pattern)
-                for pattern in self.config.allowlist
-            )
-        }
+        outside_paths = ungranted_paths(
+            outside_paths, self.config.allowlist, self.workspace
+        )
         context_required = required_context_permissions or []
-        if (
-            self._is_unconditionally_allowed(
-                command_parts, outside_paths, context_required
-            )
+        commands_cleared = (
+            self._is_unconditionally_allowed(command_parts, context_required)
             and not guardrail_permission
             and not analysis.requires_approval
-        ):
+        )
+        if commands_cleared and not outside_paths:
             return PermissionContext(permission=ToolPermission.ALWAYS)
 
-        scoped_parts, include_allowlisted = scoped_command_parts(
-            analysis, command_parts
+        # Cleared commands leave only the outside paths to answer for.
+        scoped_parts, include_allowlisted = (
+            ([], False)
+            if commands_cleared
+            else scoped_command_parts(analysis, command_parts)
         )
         required = self._build_required_permissions(
             scoped_parts, outside_paths, include_allowlisted=include_allowlisted

@@ -28,16 +28,23 @@ fn canonical_config() -> HarnessConfig {
         "settings": {
             "turn": { "max_iterations": 42 },
             "context": {
-                "compaction": { "mode": "automatic", "token_threshold": 120000 },
+                "compaction": { "mode": "automatic" },
                 "notifications": { "pending_count": 1000, "pending_bytes": 1048576, "recent_ids": 1000 },
-                "input_modalities": ["text", "image"]
+                "model_facts": {
+                    "context_window": 262144,
+                    "compaction_threshold": 120000,
+                    "compaction_threshold_max": 238144,
+                    "input_modalities": ["text", "image"],
+                    "image_cost": { "kind": "fixed", "tokens": 8192 }
+                }
             },
             "tools": {
                 "programmatic": { "max_effects": 64, "max_operations": 512, "max_elapsed_ms": 60000, "max_sleep_ms": 30000 },
                 "large_output": { "mode": "disabled" },
                 "subagents": { "mode": "enabled" },
                 "background_processes": { "mode": "enabled" },
-                "command_environment": { "mode": "unix" }
+                "command_environment": { "mode": "unix" },
+                "bash_timeout": { "default_seconds": 120, "max_seconds": 300 }
             }
         },
         "capabilities": {

@@ -48,6 +48,7 @@ pub enum MouseTarget {
     ModelPicker,
     ThinkingPicker,
     LogLevelPicker,
+    ArtifactsModal,
     ResumePicker,
     RemoteProject,
     ProxySetup,
@@ -247,6 +248,7 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         MouseTarget::ModelPicker => model_picker::navigate(app, !up),
         MouseTarget::ThinkingPicker => thinking_picker::navigate(app, !up),
         MouseTarget::LogLevelPicker => log_level_picker::navigate(app, !up),
+        MouseTarget::ArtifactsModal => crate::artifacts_modal::navigate(app, !up),
         MouseTarget::ResumePicker => resume_picker::wheel(app, !up),
         MouseTarget::Mcp
         | MouseTarget::RemoteProject

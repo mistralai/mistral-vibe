@@ -15,7 +15,7 @@ pub(crate) use determinism::DeterminismContext;
 pub(crate) use observation::AcceptedToolResult;
 pub(crate) use observation::{
     ActionAbandonedCause, CandidateDiscardCause, Observation, Outcome, ToolDiscoveryKind,
-    ToolDiscoverySummary, Transition, TurnCompletion, TurnStopReason,
+    ToolDiscoverySummary, Transition, TurnCompletion, TurnStopReason, WarningCode,
 };
 
 use crate::core::capabilities::HarnessCapabilitySet;
@@ -34,6 +34,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 pub(crate) const STEP_PROTOCOL_VERSION: u8 = 1;
+
+/// The largest integer every JSON reader holds exactly (2**53 - 1). Core refuses
+/// a client's integer above it rather than let another reader round it.
+pub(crate) const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct HarnessInput {

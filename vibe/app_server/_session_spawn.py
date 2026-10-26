@@ -85,11 +85,13 @@ class SpawnModel:
 
 
 def spawn_models(config: VibeConfigSchema) -> tuple[SpawnModel, ...]:
+    from vibe.app_server._projection import offered_levels
+
     return tuple(
         SpawnModel(
             alias=model.alias,
             display_name=model.display_name,
-            levels=tuple(model.thinking_levels),
+            levels=tuple(offered_levels(config, model)),
         )
         for model in config.available_models().values()
     )
@@ -132,7 +134,8 @@ class SessionSettings:
     """What a session runs on, which a session it starts inherits."""
 
     model: str
-    reasoning_effort: ThinkingLevel
+    # None when the config leaves it unset: the model's lowest setting applies.
+    reasoning_effort: ThinkingLevel | None
     approval_policy: str
 
 
@@ -140,7 +143,7 @@ def session_settings(config: VibeConfigSchema, agents: AgentManager) -> SessionS
     model = config.get_active_model()
     return SessionSettings(
         model=model.alias,
-        reasoning_effort=model.thinking,
+        reasoning_effort=model.thinking if model.thinking_is_set else None,
         approval_policy=agents.active_profile.name,
     )
 

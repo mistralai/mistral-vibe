@@ -7,16 +7,18 @@ import os
 import signal
 import sys
 import threading
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from vibe.app_server import _termination, stdio
+from vibe.app_server._session_backend_port import SessionBackendHost
 from vibe.app_server._termination import (
     TERMINATED_EXIT_CODE,
     InputEndingTransport,
     ending_on_sigterm,
 )
+from vibe.app_server.server import AppServer
 from vibe.app_server.transport import JsonRpcTransport, memory_transport_pair
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
@@ -67,6 +69,49 @@ async def test_ending_the_input_ends_its_messages_as_the_end_of_the_stream_would
     async with asyncio.timeout(5):
         await serving
     assert received == [{"id": 1}]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_serving_mid_read_ends_its_messages_cancelled() -> None:
+    _, transport = memory_transport_pair()
+    ending = InputEndingTransport(transport)
+    reading = asyncio.Event()
+
+    async def serve() -> None:
+        messages = ending.messages()
+        reading.set()
+        async for _ in messages:
+            pass
+
+    serving = asyncio.create_task(serve())
+    await reading.wait()
+    await asyncio.sleep(0)
+    serving.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(5):
+            await serving
+
+
+@pytest.mark.asyncio
+async def test_a_server_closing_itself_mid_read_ends_its_serving_cleanly() -> None:
+    class Host:
+        async def shutdown(self) -> None:
+            pass
+
+    _, transport = memory_transport_pair()
+    server = AppServer(
+        InputEndingTransport(transport),
+        session_backend_host_factory=lambda _: cast(SessionBackendHost, Host()),
+    )
+    serving = asyncio.create_task(server.serve())
+    await asyncio.sleep(0)
+
+    # As session/stop does, from its request's task.
+    await server.close()
+
+    async with asyncio.timeout(5):
+        await serving
 
 
 @posix_only

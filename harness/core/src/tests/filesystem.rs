@@ -38,7 +38,7 @@ fn filesystem_cases() -> Vec<FileSystemCase> {
         },
         FileSystemCase {
             direct_name: "edit",
-            runtime_name: "file_system.search_replace",
+            runtime_name: "file_system.edit",
             model_arguments: json!({
                 "file_path": "source.txt",
                 "old_string": "before",
@@ -47,11 +47,9 @@ fn filesystem_cases() -> Vec<FileSystemCase> {
             }),
             runtime_arguments: json!({
                 "file_path": "source.txt",
-                "content": [{
-                    "old_str": "before",
-                    "new_str": "after",
-                    "replace_all": false,
-                }],
+                "old_string": "before",
+                "new_string": "after",
+                "replace_all": false,
             }),
             result: json!({
                 "file": "source.txt",
@@ -87,7 +85,7 @@ fn direct_tool_completion(action_id: &str, call_id: &str, name: &str, arguments:
                 "arguments_json": arguments.to_string(),
             }],
             "finish_reason": "tool_call",
-            "usage": null,
+            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
         },
     })
 }
@@ -95,7 +93,7 @@ fn direct_tool_completion(action_id: &str, call_id: &str, name: &str, arguments:
 ///
 /// *Prepare*: Each built-in filesystem tool starts from a fresh session and receives valid arguments and structured output.
 /// *Do*: Invoke every tool through its bare top-level name, then return its Runtime result.
-/// *Assert*: Every serialized action uses the stable qualified Runtime route and translated arguments, accepts its output schema, and resumes model execution.
+/// *Assert*: Every serialized action uses the stable qualified Runtime route and the model's arguments, accepts its output schema, and resumes model execution.
 ///
 #[test]
 fn direct_filesystem_route_matrix_is_step_visible() {
@@ -157,7 +155,7 @@ fn direct_filesystem_route_matrix_is_step_visible() {
 ///
 /// *Prepare*: One `run_typescript` call starts all four filesystem operations in parallel.
 /// *Do*: Serialize the dispatched actions, checkpoint the pending program, and restore it into a new session.
-/// *Assert*: Programmatic names map to the same four qualified Runtime routes with translated arguments, and restoration preserves every pending route.
+/// *Assert*: Programmatic names map to the same four qualified Runtime routes with the model's arguments, and restoration preserves every pending route.
 ///
 #[test]
 fn programmatic_filesystem_route_matrix_survives_restore() {

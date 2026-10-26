@@ -1,5 +1,6 @@
 //! Loading area: a spinner, gradient status label, and key hints.
 
+pub mod failure;
 mod hint;
 mod snake;
 
@@ -175,21 +176,7 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
         return;
     }
 
-    // A crashed app server lands in `Failed`; its transcript notice explains
-    // the failure, so the startup-error line stays out of the way.
-    if app.session.status == Status::Failed && !app.server_closed {
-        let message = app
-            .session
-            .startup_error
-            .as_deref()
-            .unwrap_or("unknown error");
-        f.render_widget(
-            Line::from(Span::styled(
-                format!(" Failed to initialize: {message}"),
-                Style::default().fg(theme::error()),
-            )),
-            content,
-        );
+    if failure::draw(app, f, area) {
         return;
     }
     let teleport_since = crate::teleport::loading_since(app);

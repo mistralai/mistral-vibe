@@ -6,7 +6,11 @@ import pytest
 
 from tests.constants import ANTHROPIC_BASE_URL, ANTHROPIC_MESSAGES_PATH
 from vibe.core.config import ProviderConfig
-from vibe.core.llm.backend.anthropic import AnthropicAdapter, AnthropicMapper
+from vibe.core.llm.backend.anthropic import (
+    AnthropicAdapter,
+    AnthropicMapper,
+    can_turn_thinking_off,
+)
 from vibe.core.types import (
     AvailableFunction,
     AvailableTool,
@@ -141,15 +145,6 @@ class TestMapperPrepareMessages:
         ]
         _, converted = mapper.prepare_messages(messages)
         assert converted[0]["content"] == [{"type": "text", "text": "Answer"}]
-
-    def test_has_thinking_content_ignores_unsigned(self, adapter):
-        messages = [
-            LLMMessage(
-                role=Role.assistant, content="Answer", reasoning_content="thinking..."
-            )
-        ]
-        _, converted = adapter._mapper.prepare_messages(messages)
-        assert adapter._has_thinking_content(converted) is False
 
     def test_assistant_with_tool_calls(self, mapper):
         messages = [
@@ -482,7 +477,29 @@ class TestAdapterPrepareRequest:
         assert "temperature" not in payload
         assert payload["max_tokens"] == 32_768
 
-    def test_history_forced_thinking(self, adapter, provider):
+    @staticmethod
+    def _off_payload(adapter, provider, model_name, messages=None):
+        req = adapter.prepare_request(
+            model_name=model_name,
+            messages=messages or [LLMMessage(role=Role.user, content="Hello")],
+            temperature=0.5,
+            tools=None,
+            max_tokens=None,
+            tool_choice=None,
+            enable_streaming=False,
+            provider=provider,
+            thinking="off",
+        )
+        return json.loads(req.body)
+
+    def test_off_disables_thinking(self, adapter, provider):
+        # Omitting the field leaves recent Claude models thinking adaptively.
+        payload = self._off_payload(adapter, provider, "claude-sonnet-5")
+        assert payload["thinking"] == {"type": "disabled"}
+        assert "output_config" not in payload
+        assert payload["max_tokens"] == AnthropicAdapter.DEFAULT_MAX_TOKENS
+
+    def test_off_stays_off_with_thinking_in_history(self, adapter, provider):
         messages = [
             LLMMessage(role=Role.user, content="Hello"),
             LLMMessage(
@@ -495,21 +512,50 @@ class TestAdapterPrepareRequest:
             ),
             LLMMessage(role=Role.user, content="Follow up"),
         ]
-        req = adapter.prepare_request(
-            model_name="claude-sonnet-4-20250514",
-            messages=messages,
-            temperature=0.5,
-            tools=None,
-            max_tokens=None,
-            tool_choice=None,
-            enable_streaming=False,
-            provider=provider,
-        )
-        payload = json.loads(req.body)
+        payload = self._off_payload(adapter, provider, "claude-sonnet-5", messages)
+        assert payload["thinking"] == {"type": "disabled"}
+        assert "output_config" not in payload
+        # The signed block is still replayed; the API accepts it with thinking off.
+        assert payload["messages"][1]["content"][0]["type"] == "thinking"
+
+    @pytest.mark.parametrize(
+        "model_name",
+        [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-fable-5-1",
+            "claude-opus-5-5-20260301",
+            "claude-opus-5-5@20260301",
+            "anthropic/claude-opus-5-5",
+        ],
+    )
+    def test_off_on_always_thinking_model_uses_lowest_level(
+        self, adapter, provider, model_name
+    ):
+        # These models reject {"type": "disabled"} with a 400.
+        payload = self._off_payload(adapter, provider, model_name)
         assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
-        assert payload["output_config"] == {"effort": "medium"}
-        assert "temperature" not in payload
-        assert payload["max_tokens"] == 32_768
+        assert payload["output_config"] == {"effort": "low"}
+        assert payload["max_tokens"] == AnthropicAdapter.DEFAULT_ADAPTIVE_MAX_TOKENS
+
+    @pytest.mark.parametrize(
+        ("model_name", "expected"),
+        [
+            ("claude-sonnet-5", True),
+            ("claude-opus-5", True),
+            ("claude-haiku-4-5", True),
+            ("claude-opus-4-8-20260101", True),
+            ("claude-opus-5-5", False),
+            ("CLAUDE-OPUS-5-5", False),
+            ("claude-fable-5", False),
+            ("claude-sonnet-5-5@20260301", False),
+            ("claude-fable-5-1-20260101", False),
+            ("anthropic/claude-opus-5-5", False),
+            ("not-a-known-model", True),
+        ],
+    )
+    def test_can_turn_thinking_off(self, model_name, expected):
+        assert can_turn_thinking_off(model_name) is expected
 
 
 class TestAdapterParseResponse:

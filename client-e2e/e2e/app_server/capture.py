@@ -242,6 +242,8 @@ def _environment(
     request_log: Path,
 ) -> dict[str, str]:
     environment = os.environ.copy()
+    # The pin is server-owned (clients learn it via setup/status); a host-set value would leak into goldens.
+    environment.pop("VIBE_CUSTOM_CONSOLE_URL", None)
     environment.update({
         "TERM": "xterm-256color",
         # Pin truecolor so the host's COLORTERM never decides the rendered colors.

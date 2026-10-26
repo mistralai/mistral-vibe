@@ -5,7 +5,7 @@ import ipaddress
 import os
 import re
 import ssl
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlparse
 from urllib.request import getproxies
 
@@ -14,6 +14,10 @@ import httpx
 import truststore
 
 from vibe import __version__
+
+if TYPE_CHECKING:
+    from mistralai.client import Mistral
+    from mistralai.client.httpclient import AsyncHttpClient
 
 _use_system_trust_store = False
 # Set by `pin_ssl_context`: the trust store no longer follows each config load.
@@ -261,11 +265,27 @@ def get_server_url_from_api_base(api_base: str) -> str | None:
     return match.group(1) if match else None
 
 
+def mistral_sdk_client(client: httpx.AsyncClient) -> AsyncHttpClient:
+    # TODO(httpx2 migration): mistralai 3 is typed against httpx2. Until Vibe
+    # moves to httpx2, the SDK runs on our httpx client, which it drives the
+    # same way, and raises httpx errors that our error handling expects.
+    return cast("AsyncHttpClient", client)
+
+
+def disable_sdk_env_telemetry(client: Mistral) -> None:
+    # TODO(httpx2 migration): the SDK's own tracing, on when MISTRAL_SDK_TELEMETRY
+    # is set, wraps our httpx response in an httpx2 one and breaks every stream.
+    # Vibe's own tracing (configure_telemetry) is unaffected by this setting.
+    client.sdk_configuration.telemetry = False  # pyright: ignore[reportAttributeAccessIssue]
+
+
 __all__ = [
     "VibeAsyncHTTPClient",
     "build_ssl_context",
     "configure_ssl_context",
+    "disable_sdk_env_telemetry",
     "get_server_url_from_api_base",
     "get_user_agent",
+    "mistral_sdk_client",
     "pin_ssl_context",
 ]

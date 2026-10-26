@@ -48,22 +48,35 @@ pub struct Grid {
 }
 
 impl Grid {
-    fn current() -> Option<Self> {
-        let size = crossterm::terminal::window_size().ok()?;
+    /// The cells' pixel area: VS Code's xterm.js reports just the cells, others add the leftover past the last one.
+    pub fn new(columns: u16, rows: u16, width: u16, height: u16, exact: bool) -> Option<Self> {
+        let cells = |pixels: u16, count: u16| {
+            if exact {
+                pixels
+            } else {
+                pixels / count.max(1) * count
+            }
+        };
         let grid = Self {
-            columns: size.columns,
-            rows: size.rows,
-            width: size.width,
-            height: size.height,
+            columns,
+            rows,
+            width: cells(width, columns),
+            height: cells(height, rows),
         };
         (grid.columns > 0 && grid.rows > 0 && grid.width > 0 && grid.height > 0).then_some(grid)
     }
 
-    /// Whole-pixel cells: the reported area also holds the leftover pixels past the last cell.
-    pub fn cell(self) -> (u16, u16) {
+    fn current() -> Option<Self> {
+        let size = crossterm::terminal::window_size().ok()?;
+        let exact = crate::terminal_detect::is_vscode_family(crate::terminal_detect::detect());
+        Self::new(size.columns, size.rows, size.width, size.height, exact)
+    }
+
+    /// Cell size in pixels, fractional on hosts that scale cells (VS Code's xterm.js).
+    pub fn cell(self) -> (f64, f64) {
         (
-            (self.width / self.columns).max(1),
-            (self.height / self.rows).max(1),
+            f64::from(self.width) / f64::from(self.columns),
+            f64::from(self.height) / f64::from(self.rows),
         )
     }
 
@@ -203,10 +216,14 @@ pub fn transition(was_on: bool, on: bool) -> Option<&'static str> {
     }
 }
 
-/// `grid` when its whole-pixel cells match the probed cell size (else another scale or a zoom).
+/// `grid` when its cells round to the probed cell size (else another scale or a zoom).
 pub fn validated(cell: Option<(u16, u16)>, grid: Option<Grid>) -> Option<Grid> {
     let cell = cell?;
-    grid.filter(|grid| grid.cell() == cell)
+    let probed = (f64::from(cell.0), f64::from(cell.1));
+    grid.filter(|grid| {
+        let (width, height) = grid.cell();
+        (width.round(), height.round()) == probed
+    })
 }
 
 /// Stop converting pixel reports; true when the caller must send `DISABLE`.
@@ -272,8 +289,8 @@ pub fn cells(grid: Option<Grid>, event: MouseEvent) -> (MouseEvent, f64) {
     // Undo crossterm's 1-based SGR adjustment: pixels are 0-based (pixel 0 wraps to `u16::MAX`).
     let pixel = |value: u16| f64::from(value.wrapping_add(1));
     let (cell_width, cell_height) = grid.cell();
-    let column = pixel(event.column) / f64::from(cell_width);
-    let row = pixel(event.row) / f64::from(cell_height);
+    let column = pixel(event.column) / cell_width;
+    let row = pixel(event.row) / cell_height;
     let cell = |value: f64, count: u16| (value as u16).min(count.saturating_sub(1));
     let cells = MouseEvent {
         column: cell(column, grid.columns),

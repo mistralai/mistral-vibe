@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 from vibe.app_server._config_paths import ACTIVE_MODEL_PATH, model_thinking_path
 from vibe.app_server._config_write import config_write_ops_to_patches
@@ -63,6 +63,7 @@ async def set_session_active_model_override(
     active_model: str,
     *,
     reason: str,
+    preflight: Callable[[VibeConfigSchema], Awaitable[None]] | None = None,
 ) -> list[BaseException]:
     if override_active_model(orchestrator) == active_model:
         return []
@@ -75,6 +76,7 @@ async def set_session_active_model_override(
             )
         ],
         reason=reason,
+        preflight=preflight,
     )
 
 

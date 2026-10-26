@@ -83,22 +83,24 @@ async def _serve(
                 sources=("user", "project"),
                 trust_store=trusted_folders_manager.for_session(),
             )
+            process = HarnessProcess(
+                harness_files,
+                additional_builtin_plugin_roots=additional_builtin_plugin_roots,
+            )
+            process.start_connector_warm_up()
             return await create_harness_server(
-                channel,
-                transport_kind="stdio",
-                process=HarnessProcess(
-                    harness_files,
-                    additional_builtin_plugin_roots=additional_builtin_plugin_roots,
-                ),
+                channel, transport_kind="stdio", process=process
             )
 
         await serve_multiplexed(transport, create_channel)
         return
     if agent_socket is None:
+        process = HarnessProcess(
+            additional_builtin_plugin_roots=additional_builtin_plugin_roots
+        )
+        process.start_connector_warm_up()
         harness = await create_harness_server(
-            transport,
-            transport_kind="stdio",
-            additional_builtin_plugin_roots=additional_builtin_plugin_roots,
+            transport, transport_kind="stdio", process=process
         )
     else:
         harness = await create_harness_server(

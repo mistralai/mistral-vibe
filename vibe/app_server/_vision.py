@@ -1,16 +1,16 @@
-"""Core can already show a blind model something other than the pixels: that
-is what ``image_delivery`` set to ``resource_link`` does for a file-backed
-attachment. But that projection is synchronous and infallible, and describing
-an image is neither -- it is a provider call that takes seconds and can fail.
-So the Host substitutes at the turn-input seam instead, where mentioned files
-are already inlined and an await with a failure path is available. What is
-substituted once is what Core stores, compacts and resumes.
+"""Core already shows a model without image input something in place of the
+pixels: ``[Image]``, plus the file's link for a file-backed image. Describing
+an image is Vibe's own feature on top of that, and unlike Core's projection it
+is a provider call that takes seconds and can fail. So the Host substitutes at
+the turn-input seam, where mentioned files are already inlined and an await
+with a failure path is available. What is substituted once is what Core
+stores, compacts and resumes.
 
-An image no describer can reach is left untouched, and Core's resource-link
-projection hands the model the local file in its place -- but only for a
-file-backed one, so ``images_supported`` promises nothing on the strength of
-that alone (see ``project_config_view``). Only the Unified backend does either;
-the legacy ``AgentLoop`` keeps rejecting attachments its model cannot read.
+An image no describer can reach is left as is, and Core hands the model
+``[Image]`` in its place, with the file's link for a file-backed one. That
+says nothing about the image, so ``images_supported`` promises nothing on its
+strength (see ``project_config_view``). Only the Unified backend describes images; the
+legacy ``AgentLoop`` keeps rejecting attachments its model cannot read.
 """
 
 from __future__ import annotations

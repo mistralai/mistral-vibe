@@ -98,7 +98,15 @@ expression: reviewable(snapshot)
           "- You MUST NOT call `main()` yourself - the sandbox calls it automatically",
           "- The result of the `main` function will be visible as a { type: \"success\", value } object.",
           "- The input must contain inline `code`.",
-          "- Tool calls may throw. Use `try/catch` or `.catch(...)` to recover or keep partial results; otherwise let errors propagate to the tool result.",
+          "- A failed tool call throws a `ToolError`, a subclass of `Error`: `name` is `\"ToolError\"`, `message` explains the failure, `code` is a stable error code, `tool` names the called function (`tools.<group>.<function>`), and `details` or `structuredContent` hold extra data when the tool gives it, such as a failed command's output. Codes include:",
+          "  - `invalid_arguments`: the arguments are invalid; the call did not run.",
+          "  - `permission_denied`, `tool_denied` or `policy_rejected`: a policy, the user or the file system refused the call.",
+          "  - `approval_failed`: nobody answered the approval request in time.",
+          "  - `tool_skipped`: a hook skipped the call.",
+          "  - `subagent_not_found`: no agent at that `agent_path` (for `interrupt`, no direct child there).",
+          "  - `ProgramBudgetExceeded`: the program's time budget ran out.",
+          "  - Any other code: the tool itself failed; `message` says why.",
+          "- Use `try/catch` or `.catch(...)` and branch on `error.code` to recover or keep partial results; otherwise let errors propagate to the tool result.",
           "- AVOID using console.log or console.error to read the output of functions. Rely on the main function's returned value instead. Only use console for debugging.",
           "- For independent calls, prefer `Promise.allSettled(...)`. Use `Promise.all(...)` only when all must succeed; avoid sequential awaits when calls can run concurrently.",
           "- You MUST NOT use `fetch()`, `setInterval()`, `atob()`, `btoa()`, `DOMParser`, `Buffer`, `require()`, `import()`, or `export` — they do not exist. Tool functions are already available under the `tools` namespace.",
@@ -1223,6 +1231,7 @@ expression: reviewable(snapshot)
         "properties": {
           "name": {
             "type": "string",
+            "description": "The child's name: one path segment, without `/`, other than `.` or `..`. The child's agent path is this agent's path followed by `/name`.",
             "minLength": 1,
             "pattern": "^(?!\\.{1,2}$)[^/]+$"
           },
@@ -1266,13 +1275,14 @@ expression: reviewable(snapshot)
         "namespace": "agents",
         "name": "send_message"
       },
-      "description": "Send a message to an agent path. Admission does not imply consumption or a reply.",
+      "description": "Send a message to another agent by agent_path: absolute, such as /root/researcher, or relative to this agent, such as researcher for a direct child. Admission does not imply consumption or a reply.",
       "input_schema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "agent_path": {
             "type": "string",
+            "description": "The recipient's agent path: absolute, such as `/root/researcher`, or relative to this agent, such as `researcher` for a direct child.",
             "minLength": 1
           },
           "message": {
@@ -1308,18 +1318,27 @@ expression: reviewable(snapshot)
         "namespace": "agents",
         "name": "interrupt"
       },
-      "description": "Interrupt a direct child's exact current Turn without closing its Session.",
+      "description": "Interrupt a direct child's exact current Turn without closing its Session. agent_path is the child's name or absolute path. reason, when given, is recorded on the interrupted Turn.",
       "input_schema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "name": {
+          "agent_path": {
             "type": "string",
+            "description": "A direct child's agent path: its name, such as `researcher`, or its absolute path, such as `/root/researcher`.",
+            "minLength": 1
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the Turn is interrupted. The child's Turn records it.",
             "minLength": 1
           }
         },
         "required": [
-          "name"
+          "agent_path"
         ]
       },
       "output_schema": {

@@ -198,35 +198,34 @@ mod tests {
         assert_ne!(status_key.as_str(), diff_key.as_str());
     }
 
+    /// *Prepare*: The same file change as a retired `file_system.search_replace` call and as a `file_system.edit` call.
+    /// *Do*: Derive both grant keys.
+    /// *Assert*: The keys differ, so a grant recorded for a retired call never approves a new edit.
     #[test]
-    fn changes_grant_key_when_search_replace_block_order_changes() {
+    fn retired_search_replace_grant_does_not_cover_the_edit_tool() {
         let policy = permission_policy("deny");
-        let first_key = derive_grant_key(
+        let retired_key = derive_grant_key(
             &policy,
-            RuntimeBuiltinToolName::FileSystemSearchReplace,
+            RuntimeBuiltinToolName::DeprecatedFileSystemSearchReplace,
             "edit",
             json!({
                 "file_path": "src/lib.rs",
-                "content": [
-                    {"old_str": "first", "new_str": "one", "replace_all": false},
-                    {"old_str": "second", "new_str": "two", "replace_all": false}
-                ]
+                "content": [{"old_str": "first", "new_str": "one", "replace_all": false}]
             }),
         );
-        let reordered_key = derive_grant_key(
+        let edit_key = derive_grant_key(
             &policy,
-            RuntimeBuiltinToolName::FileSystemSearchReplace,
+            RuntimeBuiltinToolName::FileSystemEdit,
             "edit",
             json!({
                 "file_path": "src/lib.rs",
-                "content": [
-                    {"old_str": "second", "new_str": "two", "replace_all": false},
-                    {"old_str": "first", "new_str": "one", "replace_all": false}
-                ]
+                "old_string": "first",
+                "new_string": "one",
+                "replace_all": false
             }),
         );
 
-        assert_ne!(first_key.as_str(), reordered_key.as_str());
+        assert_ne!(retired_key.as_str(), edit_key.as_str());
     }
 
     #[test]

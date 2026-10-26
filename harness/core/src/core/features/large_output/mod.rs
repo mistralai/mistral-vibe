@@ -1,7 +1,13 @@
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::core::config::ImageDeliveryMode;
 use crate::core::error::CoreError;
+use crate::core::model_input_projection::{
+    IMAGE_PLACEHOLDER, is_image_content, project_model_input_content,
+};
 use crate::core::wire::content::ContentBlock;
 use crate::core::wire::tool::{ProtocolError, StructuredContent, ToolResult};
 
@@ -186,6 +192,10 @@ impl PendingWrite {
     }
 }
 
+/// Measures the text of `result` against the limits. Images never count: they
+/// stay in the result whatever its size, and the context budget counts them at
+/// their image cost. The measured and saved serialization holds `[Image]` in
+/// place of each image, never its data.
 pub(crate) fn evaluate_result(
     policy: &Policy,
     tool_name: &str,
@@ -193,7 +203,7 @@ pub(crate) fn evaluate_result(
     result: ToolResult,
 ) -> Result<Option<EvaluatedResult>, CoreError> {
     let limits = policy.character_limits();
-    let value = parse_top_level_json_string(value_for_serialization(&result));
+    let value = parse_top_level_json_string(value_for_serialization(&without_image_data(&result)));
     let serialized = serde_json::to_string_pretty(&value).map_err(|error| {
         CoreError::invariant(format!("large-output serialization failed: {error}"))
     })?;
@@ -228,6 +238,29 @@ pub(crate) fn evaluate_result(
             }),
         })),
     }
+}
+
+/// `result` with each image replaced by the text a model without image input
+/// gets for it: `[Image]`, followed by the file link of an embedded image.
+fn without_image_data(result: &ToolResult) -> Cow<'_, ToolResult> {
+    if !result_content(result).iter().any(is_image_content) {
+        return Cow::Borrowed(result);
+    }
+    let mut measured = result.clone();
+    let (ToolResult::Success { content, .. } | ToolResult::Failure { content, .. }) = &mut measured;
+    for block in content.iter_mut() {
+        if let Cow::Owned(placeholder) =
+            project_model_input_content(block, ImageDeliveryMode::WithoutImageInput)
+        {
+            *block = placeholder;
+        }
+    }
+    Cow::Owned(measured)
+}
+
+fn result_content(result: &ToolResult) -> &[ContentBlock] {
+    let (ToolResult::Success { content, .. } | ToolResult::Failure { content, .. }) = result;
+    content
 }
 
 fn value_for_serialization(result: &ToolResult) -> Value {
@@ -280,8 +313,27 @@ fn parse_top_level_json_string(value: Value) -> Value {
     serde_json::from_str(&text).unwrap_or(Value::String(text))
 }
 
+/// Replaces the text of `original` with `message`. Its images follow the
+/// message unchanged, since they never count toward the limits.
 fn replace_result(original: ToolResult, message: String) -> ToolResult {
-    let content = vec![ContentBlock::text(message.clone())];
+    let images: Vec<ContentBlock> = result_content(&original)
+        .iter()
+        .filter(|block| is_image_content(block))
+        .cloned()
+        .collect();
+    let message = if images.is_empty() {
+        message
+    } else {
+        format!(
+            "{message}\n{}",
+            format_system_tag(&format!(
+                "The images of the tool output follow this notice. The text above shows {IMAGE_PLACEHOLDER} in their place."
+            ))
+        )
+    };
+    let content = std::iter::once(ContentBlock::text(message.clone()))
+        .chain(images)
+        .collect();
     match original {
         ToolResult::Success { .. } => ToolResult::Success {
             content,
@@ -302,6 +354,17 @@ fn replace_result(original: ToolResult, message: String) -> ToolResult {
     }
 }
 
+/// The words before the path in a saved output's closing reminder.
+const SAVED_TO: &str = "Remember: The full content was saved to ";
+
+/// The file a saved tool output was written to, read back from the result
+/// text Core wrote for it, or `None` for any other text.
+pub(crate) fn saved_output_path(text: &str) -> Option<&str> {
+    let start = text.rfind(SAVED_TO)? + SAVED_TO.len();
+    let length = text[start..].find(".\n")?;
+    Some(&text[start..start + length]).filter(|path| !path.is_empty())
+}
+
 fn build_saved_output_message(
     file_path: &str,
     serialized: &str,
@@ -318,7 +381,7 @@ fn build_saved_output_message(
         format_truncated_output(serialized, limits.model_visible_output),
         format!("<output-type>{type_definition}</output-type>"),
         format_system_tag(&format!(
-            "Remember: The full content was saved to {file_path}.\nRead the JSON's inferred type definition from the <output-type> tag first. To see an omitted part, extract the field you need with `jq` and search or slice it with `grep`, or page through the file with `read_file` using `offset` and `limit`."
+            "{SAVED_TO}{file_path}.\nRead the JSON's inferred type definition from the <output-type> tag first. To see an omitted part, extract the field you need with `jq` and search or slice it with `grep`, or page through the file with `read_file` using `offset` and `limit`."
         )),
     ]
     .join("\n")
@@ -548,6 +611,172 @@ fn tokens_to_characters(tokens: u32) -> usize {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    const SCREENSHOT_SIZES: [usize; 3] = [26_250, 71_604, 300_000];
+
+    fn default_policy() -> Policy {
+        serde_json::from_value(json!({"mode": "filesystem"})).unwrap()
+    }
+
+    /// The large-output limits of a host with a small threshold: 4,000 tokens,
+    /// below the 8,192-token cost of one image.
+    fn small_policy() -> Policy {
+        Policy::Filesystem {
+            max_output_tokens: 4_000,
+            model_visible_output_tokens: 2_000,
+        }
+    }
+
+    /// A tool result with `text` and `images` PNG images of `raw_bytes`, each saved
+    /// to a file (an embedded resource) when `file_backed`.
+    fn screenshot_result(
+        text: &str,
+        images: usize,
+        raw_bytes: usize,
+        file_backed: bool,
+    ) -> ToolResult {
+        let data = "A".repeat(raw_bytes.div_ceil(3) * 4);
+        let image = if file_backed {
+            json!({
+                "type": "resource",
+                "resource": {
+                    "uri": "file:///tmp/mistralai-vibe-session-s/attachments/a.png",
+                    "mimeType": "image/png",
+                    "blob": data,
+                },
+            })
+        } else {
+            json!({"type": "image", "data": data, "mimeType": "image/png"})
+        };
+        let mut content = vec![json!({"type": "text", "text": text})];
+        content.extend(std::iter::repeat_n(image, images));
+        serde_json::from_value(json!({"type": "success", "content": content})).unwrap()
+    }
+
+    fn disposition(policy: &Policy, result: ToolResult) -> ResultDisposition {
+        evaluate_result(policy, "screenshot", "call", result)
+            .unwrap()
+            .unwrap()
+            .disposition
+    }
+
+    ///
+    /// *Prepare*: Screenshots of 26 KB, 71 KB and 300 KB, saved to a file or not.
+    /// *Do*: Evaluate each result under the default policy.
+    /// *Assert*: Each stays inline: an image never counts toward the limits.
+    ///
+    #[test]
+    fn a_screenshot_stays_inline_whatever_its_size() {
+        for raw_bytes in SCREENSHOT_SIZES {
+            for file_backed in [false, true] {
+                // Prepare
+                let result = screenshot_result("a screenshot", 1, raw_bytes, file_backed);
+
+                // Do
+                let disposition = disposition(&default_policy(), result.clone());
+
+                // Assert
+                assert_eq!(
+                    disposition,
+                    ResultDisposition::Inline(result),
+                    "{raw_bytes} bytes, file {file_backed}"
+                );
+            }
+        }
+    }
+
+    ///
+    /// *Prepare*: A 4,000-token threshold, below the cost of one image, and a short
+    /// text with one screenshot, and with three.
+    /// *Do*: Evaluate both results.
+    /// *Assert*: Both stay inline, images included: an image never triggers a save.
+    ///
+    #[test]
+    fn an_image_never_triggers_a_save() {
+        for images in [1, 3] {
+            // Prepare
+            let result = screenshot_result("a screenshot", images, 26_250, false);
+
+            // Do
+            let disposition = disposition(&small_policy(), result.clone());
+
+            // Assert
+            assert_eq!(
+                disposition,
+                ResultDisposition::Inline(result),
+                "{images} images"
+            );
+        }
+    }
+
+    ///
+    /// *Prepare*: A 4,000-token threshold and a result whose text alone passes it,
+    /// next to a screenshot and a screenshot saved to a file.
+    /// *Do*: Evaluate the result and complete the write.
+    /// *Assert*: The text is saved and the file and excerpt hold `[Image]` in
+    /// place of each image, never its data; the images follow the notice, unchanged.
+    ///
+    #[test]
+    fn saved_text_keeps_its_images_inline() {
+        // Prepare
+        let mut result = screenshot_result(&"x".repeat(20_000), 1, 26_250, false);
+        let saved_screenshot = result_content(&screenshot_result("", 1, 26_250, true))[1].clone();
+        let ToolResult::Success { content, .. } = &mut result else {
+            unreachable!("screenshot results succeed");
+        };
+        content.push(saved_screenshot);
+        let images = result_content(&result)[1..].to_vec();
+        let image_data = "A".repeat(1_000);
+
+        // Do
+        let evaluated = evaluate_result(&small_policy(), "screenshot", "call", result)
+            .unwrap()
+            .unwrap();
+        let ResultDisposition::Write(pending) = evaluated.disposition else {
+            panic!("text past the threshold is saved");
+        };
+        let saved = pending.serialized().to_string();
+        let completed = pending.complete("/home/user/tool-results/screenshot-call.json");
+
+        // Assert
+        assert!(!saved.contains(&image_data));
+        assert!(saved.contains("\"[Image]\""));
+        assert!(saved.contains(
+            "\"[Image] [resource: file:///tmp/mistralai-vibe-session-s/attachments/a.png]\""
+        ));
+        assert_eq!(evaluated.serialized_char_count, utf16_len(&saved));
+        let content = result_content(&completed);
+        let ContentBlock::Text(notice) = &content[0] else {
+            panic!("the notice is text");
+        };
+        assert!(notice.text.contains("<truncated-output>"));
+        assert!(
+            notice
+                .text
+                .contains("The images of the tool output follow this notice.")
+        );
+        assert!(!notice.text.contains(&image_data));
+        assert_eq!(&content[1..], images.as_slice());
+    }
+
+    #[test]
+    fn a_saved_output_names_its_file_and_other_text_names_none() {
+        let message = build_saved_output_message(
+            ".vibe/tool-outputs/call-1.json",
+            &"x".repeat(200),
+            CharacterLimits {
+                max_output: 100,
+                model_visible_output: 50,
+            },
+            "string",
+        );
+
+        assert_eq!(
+            saved_output_path(&message),
+            Some(".vibe/tool-outputs/call-1.json")
+        );
+        assert_eq!(saved_output_path("plain tool output"), None);
+    }
 
     #[test]
     fn filesystem_policy_deserializes_core_defaults() {

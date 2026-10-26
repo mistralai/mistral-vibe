@@ -69,7 +69,9 @@ expression: reviewable_snapshot(request)
                   "",
                   "## Current time",
                   "",
-                  "For requests that depend on now, use `run_typescript` to read `new Date().toISOString()` before time-sensitive search, calendar, schedule, or service calls. Treat that timestamp as the source of truth for \"now\". Use a user timezone supplied in context for user-facing times; otherwise use UTC or ask for the timezone only when local time materially affects the result.",
+                  "\"Now\" is the current date or time the user states. If the user states none, call `run_typescript` to read `new Date().toISOString()` before answering or acting on anything that depends on the date; make the call right away instead of announcing it. Dates in documents, emails, logs, records, and tool results describe those items, not today, even when they are the only dates in view. Use a user timezone supplied in context for user-facing times; otherwise use UTC, or ask for the timezone only when local time materially affects the result.",
+                  "",
+                  "## Use-case instructions",
                   "",
                   "You are operating in the canonical Unified Harness snapshot environment.",
                   "",
@@ -249,7 +251,15 @@ expression: reviewable_snapshot(request)
               "- You MUST NOT call `main()` yourself - the sandbox calls it automatically",
               "- The result of the `main` function will be visible as a { type: \"success\", value } object.",
               "- The input must contain inline `code`.",
-              "- Tool calls may throw. Use `try/catch` or `.catch(...)` to recover or keep partial results; otherwise let errors propagate to the tool result.",
+              "- A failed tool call throws a `ToolError`, a subclass of `Error`: `name` is `\"ToolError\"`, `message` explains the failure, `code` is a stable error code, `tool` names the called function (`tools.<group>.<function>`), and `details` or `structuredContent` hold extra data when the tool gives it, such as a failed command's output. Codes include:",
+              "  - `invalid_arguments`: the arguments are invalid; the call did not run.",
+              "  - `permission_denied`, `tool_denied` or `policy_rejected`: a policy, the user or the file system refused the call.",
+              "  - `approval_failed`: nobody answered the approval request in time.",
+              "  - `tool_skipped`: a hook skipped the call.",
+              "  - `subagent_not_found`: no agent at that `agent_path` (for `interrupt`, no direct child there).",
+              "  - `ProgramBudgetExceeded`: the program's time budget ran out.",
+              "  - Any other code: the tool itself failed; `message` says why.",
+              "- Use `try/catch` or `.catch(...)` and branch on `error.code` to recover or keep partial results; otherwise let errors propagate to the tool result.",
               "- AVOID using console.log or console.error to read the output of functions. Rely on the main function's returned value instead. Only use console for debugging.",
               "- For independent calls, prefer `Promise.allSettled(...)`. Use `Promise.all(...)` only when all must succeed; avoid sequential awaits when calls can run concurrently.",
               "- You MUST NOT use `fetch()`, `setInterval()`, `atob()`, `btoa()`, `DOMParser`, `Buffer`, `require()`, `import()`, or `export` — they do not exist. Tool functions are already available under the `tools` namespace.",
@@ -389,7 +399,13 @@ expression: reviewable_snapshot(request)
         },
         {
           "name": "bash",
-          "description": "Run a shell command and capture stdout, stderr, and its return code.",
+          "description": {
+            "$multiline": [
+              "Run a shell command and capture stdout, stderr, and its return code.",
+              "",
+              "The call blocks until the command exits, and a command still running after `timeout_seconds` is stopped. Start long-running commands, such as servers and long builds, with `tools.process.start` and read their output with `tools.process.output`."
+            ]
+          },
           "parameters": {
             "type": "object",
             "additionalProperties": false,
@@ -400,7 +416,7 @@ expression: reviewable_snapshot(request)
               "timeout_seconds": {
                 "type": "integer",
                 "default": 120,
-                "description": "Seconds the command may run: 120 by default, at most 300. A command that runs longer is stopped, and the result keeps the output it wrote so far with `timed_out` set.",
+                "description": "Seconds the command may run: 120 by default, at most 300. A command that runs longer is stopped, and the result keeps the output it wrote so far with `timed_out` set. For longer work, use `tools.process.start` instead.",
                 "minimum": 1,
                 "maximum": 300
               }

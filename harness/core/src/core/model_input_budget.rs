@@ -1,27 +1,19 @@
 use serde::Serialize;
 
-use crate::core::config::{ImageDeliveryMode, ImageTokenCost};
+use crate::core::config::{ImageCostRule, ImageDeliveryMode};
 use crate::core::error::CoreError;
-use crate::core::model_input_projection::{
-    project_model_input_content, project_model_input_messages,
-};
+use crate::core::model_input_projection::project_model_input_messages;
 use crate::core::step_protocol::ToolDefinition;
 use crate::core::wire::content::{ContentBlock, strip_model_hidden_content_fields};
 use crate::core::wire::message::{AssistantPart, AssistantSemanticPart, Message, StoredMessage};
 
 pub(crate) const APPROX_BYTES_PER_TOKEN: usize = 4;
 
-/// Token cost one native image contributes to a model input estimate under the
-/// fixed image token cost policy. It is sized above what a typical screenshot
-/// costs on common vision models, so the estimate errs toward compacting early
-/// rather than overflowing the context.
-pub(crate) const FIXED_NATIVE_IMAGE_TOKENS: u64 = 8_192;
-
 pub(crate) fn estimate_model_input_tokens(
     messages: &[StoredMessage],
     tools: &[ToolDefinition],
     image_delivery: ImageDeliveryMode,
-    image_cost: ImageTokenCost,
+    image_cost: ImageCostRule,
 ) -> Result<u64, CoreError> {
     let mut messages = project_model_input_messages(messages, image_delivery);
     let mut image_tokens = 0u64;
@@ -32,34 +24,21 @@ pub(crate) fn estimate_model_input_tokens(
     Ok(estimate.saturating_add(image_tokens))
 }
 
-pub(crate) fn estimate_model_content_tokens(
-    block: &ContentBlock,
-    label: &str,
-    image_delivery: ImageDeliveryMode,
-    image_cost: ImageTokenCost,
-) -> Result<u64, CoreError> {
-    let mut block = project_model_input_content(block, image_delivery).into_owned();
-    if let Some(tokens) = budget_block(&mut block, image_cost) {
-        return Ok(tokens);
-    }
-    estimate_serialized_tokens(&block, label)
-}
-
-/// Prepares one content block for estimation. A native image under the fixed
-/// policy returns its constant token cost and must be dropped from the budget
-/// copy, so the image file size cannot influence the estimate. Any other block
-/// has its model-hidden fields stripped and returns `None`.
-fn budget_block(block: &mut ContentBlock, image_cost: ImageTokenCost) -> Option<u64> {
-    if image_cost.is_fixed() && matches!(block, ContentBlock::Image(_)) {
-        return Some(FIXED_NATIVE_IMAGE_TOKENS);
+/// Prepares one content block for estimation. A native image returns the token
+/// cost its image cost rule gives and must be dropped from the budget copy, so
+/// the image file size cannot influence the estimate. Any other block has its
+/// model-hidden fields stripped and returns `None`.
+fn budget_block(block: &mut ContentBlock, image_cost: ImageCostRule) -> Option<u64> {
+    if matches!(block, ContentBlock::Image(_)) {
+        return Some(image_cost.image_tokens());
     }
     strip_model_hidden_content_fields(block);
     None
 }
 
-/// Prepares a message budget copy and returns the fixed token cost of the
-/// native images it removed.
-fn budget_message(message: &mut Message, image_cost: ImageTokenCost) -> u64 {
+/// Prepares a message budget copy and returns the token cost of the native
+/// images it removed.
+fn budget_message(message: &mut Message, image_cost: ImageCostRule) -> u64 {
     let mut image_tokens = 0u64;
     match message {
         Message::System { content } | Message::User { content } => {
@@ -87,17 +66,17 @@ fn budget_message(message: &mut Message, image_cost: ImageTokenCost) -> u64 {
 
 fn budget_contents(
     content: &mut Vec<ContentBlock>,
-    image_cost: ImageTokenCost,
+    image_cost: ImageCostRule,
     image_tokens: &mut u64,
 ) {
     content.retain_mut(|block| keep_budgeted_block(block, image_cost, image_tokens));
 }
 
-/// Returns whether the block stays in the budget copy, adding the fixed cost of
-/// a removed image to `image_tokens`.
+/// Returns whether the block stays in the budget copy, adding the cost of a
+/// removed image to `image_tokens`.
 fn keep_budgeted_block(
     block: &mut ContentBlock,
-    image_cost: ImageTokenCost,
+    image_cost: ImageCostRule,
     image_tokens: &mut u64,
 ) -> bool {
     let Some(tokens) = budget_block(block, image_cost) else {
@@ -123,6 +102,8 @@ mod tests {
 
     use super::*;
 
+    const TEST_IMAGE_COST: ImageCostRule = ImageCostRule::Fixed { tokens: 8_192 };
+
     #[test]
     fn excludes_assistant_and_tool_message_metadata() {
         let metadata = "x".repeat(10_000);
@@ -136,14 +117,14 @@ mod tests {
                 &with_metadata,
                 &[],
                 ImageDeliveryMode::Native,
-                ImageTokenCost::SerializedBytes
+                TEST_IMAGE_COST
             )
             .expect("model input with metadata serializes"),
             estimate_model_input_tokens(
                 &without_metadata,
                 &[],
                 ImageDeliveryMode::Native,
-                ImageTokenCost::SerializedBytes
+                TEST_IMAGE_COST
             )
             .expect("model input without metadata serializes")
         );
@@ -154,22 +135,40 @@ mod tests {
         let small = user_message_with_image(&"a".repeat(1_000));
         let large = user_message_with_image(&"a".repeat(5_000_000));
 
-        let small_estimate = estimate_model_input_tokens(
-            &[small],
-            &[],
-            ImageDeliveryMode::Native,
-            ImageTokenCost::Fixed,
-        )
-        .expect("small image model input serializes");
-        let large_estimate = estimate_model_input_tokens(
-            &[large],
-            &[],
-            ImageDeliveryMode::Native,
-            ImageTokenCost::Fixed,
-        )
-        .expect("large image model input serializes");
+        let small_estimate =
+            estimate_model_input_tokens(&[small], &[], ImageDeliveryMode::Native, TEST_IMAGE_COST)
+                .expect("small image model input serializes");
+        let large_estimate =
+            estimate_model_input_tokens(&[large], &[], ImageDeliveryMode::Native, TEST_IMAGE_COST)
+                .expect("large image model input serializes");
 
         assert_eq!(small_estimate, large_estimate);
+    }
+
+    #[test]
+    fn an_embedded_image_costs_its_image_cost_not_its_base64_length() {
+        let embedded = |blob_len: usize| -> ContentBlock {
+            serde_json::from_value(json!({
+                "type": "resource",
+                "resource": {
+                    "uri": "file:///workspace/shot.png",
+                    "mimeType": "image/png",
+                    "blob": "a".repeat(blob_len),
+                },
+            }))
+            .expect("embedded image is valid")
+        };
+
+        let estimate = |blob_len: usize| {
+            let message = StoredMessage::visible(Message::user(vec![embedded(blob_len)]));
+            estimate_model_input_tokens(&[message], &[], ImageDeliveryMode::Native, TEST_IMAGE_COST)
+                .expect("embedded image is measured")
+        };
+
+        let small = estimate(1_000);
+        assert_eq!(small, estimate(5_000_000));
+        assert!(small >= TEST_IMAGE_COST.image_tokens());
+        assert!(small < TEST_IMAGE_COST.image_tokens() + 100, "{small}");
     }
 
     #[test]
@@ -182,69 +181,45 @@ mod tests {
             &[without_images],
             &[],
             ImageDeliveryMode::Native,
-            ImageTokenCost::Fixed,
+            TEST_IMAGE_COST,
         )
         .expect("image-free model input serializes");
         let one_estimate = estimate_model_input_tokens(
             &[one_image],
             &[],
             ImageDeliveryMode::Native,
-            ImageTokenCost::Fixed,
+            TEST_IMAGE_COST,
         )
         .expect("single-image model input serializes");
         let two_estimate = estimate_model_input_tokens(
             &[two_images],
             &[],
             ImageDeliveryMode::Native,
-            ImageTokenCost::Fixed,
+            TEST_IMAGE_COST,
         )
         .expect("two-image model input serializes");
 
-        assert_eq!(one_estimate - without_estimate, FIXED_NATIVE_IMAGE_TOKENS);
-        assert_eq!(two_estimate - one_estimate, FIXED_NATIVE_IMAGE_TOKENS);
-
-        let image_block = ContentBlock::Image(
-            serde_json::from_value(json!({
-                "type": "image",
-                "data": "a".repeat(1_000),
-                "mimeType": "image/png",
-            }))
-            .expect("image content is valid"),
-        );
         assert_eq!(
-            estimate_model_content_tokens(
-                &image_block,
-                "preserved user content",
-                ImageDeliveryMode::Native,
-                ImageTokenCost::Fixed
-            )
-            .expect("image content serializes"),
-            FIXED_NATIVE_IMAGE_TOKENS
+            one_estimate - without_estimate,
+            TEST_IMAGE_COST.image_tokens()
         );
+        assert_eq!(two_estimate - one_estimate, TEST_IMAGE_COST.image_tokens());
     }
 
     #[test]
-    fn text_only_input_estimates_identically_under_both_policies() {
-        let message = StoredMessage::visible(Message::user_text(
-            "summarize the repository and keep it short",
-        ));
+    fn each_native_image_costs_what_the_rule_says() {
+        let one_image = user_message_with_image_data(1);
+        let estimate = |tokens| {
+            estimate_model_input_tokens(
+                std::slice::from_ref(&one_image),
+                &[],
+                ImageDeliveryMode::Native,
+                ImageCostRule::Fixed { tokens },
+            )
+            .expect("single-image model input serializes")
+        };
 
-        let serialized = estimate_model_input_tokens(
-            std::slice::from_ref(&message),
-            &[],
-            ImageDeliveryMode::Native,
-            ImageTokenCost::SerializedBytes,
-        )
-        .expect("serialized-byte estimate measures model input");
-        let fixed = estimate_model_input_tokens(
-            std::slice::from_ref(&message),
-            &[],
-            ImageDeliveryMode::Native,
-            ImageTokenCost::Fixed,
-        )
-        .expect("fixed-cost estimate measures model input");
-
-        assert_eq!(serialized, fixed);
+        assert_eq!(estimate(9_000) - estimate(1_000), 8_000);
     }
 
     fn user_message_with_image(data: &str) -> StoredMessage {

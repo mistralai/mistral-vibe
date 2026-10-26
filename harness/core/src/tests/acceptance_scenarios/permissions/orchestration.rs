@@ -60,8 +60,8 @@ fn programmatic_orchestration_bypasses_ask_policy() {
             ),
         ),
         (
-            "tools.agents.interrupt({ name: 'alpha' })",
-            runtime_tool("agents.interrupt", json!({"name": "alpha"})),
+            "tools.agents.interrupt({ agent_path: 'alpha' })",
+            runtime_tool("agents.interrupt", json!({"agent_path": "alpha"})),
         ),
     ];
     for (call, expected) in cases {

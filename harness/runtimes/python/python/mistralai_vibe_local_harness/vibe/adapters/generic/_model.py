@@ -157,22 +157,6 @@ class LLMMessage(BaseModel):
         )
 
 
-class LLMUsage(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    # Prompt tokens served from the provider cache; a subset of prompt_tokens.
-    cached_tokens: int = 0
-
-    def __add__(self, other: LLMUsage) -> LLMUsage:
-        return LLMUsage(
-            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
-            completion_tokens=self.completion_tokens + other.completion_tokens,
-            cached_tokens=self.cached_tokens + other.cached_tokens,
-        )
-
-
 class StopInfo(BaseModel):
     model_config = ConfigDict(frozen=True, extra="ignore")
 
@@ -185,18 +169,11 @@ class LLMChunk(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     message: LLMMessage
-    usage: LLMUsage | None = None
     stop: StopInfo | None = None
 
     def __add__(self, other: LLMChunk) -> LLMChunk:
-        if self.usage is None and other.usage is None:
-            new_usage = None
-        else:
-            new_usage = (self.usage or LLMUsage()) + (other.usage or LLMUsage())
         return LLMChunk(
-            message=self.message + other.message,
-            usage=new_usage,
-            stop=other.stop or self.stop,
+            message=self.message + other.message, stop=other.stop or self.stop
         )
 
 
@@ -210,7 +187,6 @@ __all__ = [
     "InlineImageSource",
     "LLMChunk",
     "LLMMessage",
-    "LLMUsage",
     "Role",
     "StopInfo",
     "StrToolChoice",

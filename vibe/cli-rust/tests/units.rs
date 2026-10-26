@@ -16,8 +16,14 @@ mod app_server_crash;
 mod approval_keys;
 #[path = "units/argument_hint.rs"]
 mod argument_hint;
+#[path = "units/artifacts.rs"]
+mod artifacts;
 #[path = "units/banner.rs"]
 mod banner;
+#[path = "units/bottom_bar_model.rs"]
+mod bottom_bar_model;
+#[path = "units/bottom_bar_model_click.rs"]
+mod bottom_bar_model_click;
 #[path = "units/bottom_bar_overflow.rs"]
 mod bottom_bar_overflow;
 #[path = "units/bottom_bar_selection.rs"]
@@ -88,6 +94,8 @@ mod effect_entry;
 mod effect_output;
 #[path = "units/external_editor.rs"]
 mod external_editor;
+#[path = "units/fence_copy.rs"]
+mod fence_copy;
 #[path = "units/file_index_metrics.rs"]
 mod file_index_metrics;
 #[path = "units/file_index_rescan_ignore.rs"]
@@ -212,6 +220,8 @@ mod older_history;
 mod onboarding_boot_pending;
 #[path = "units/onboarding_loop_guard.rs"]
 mod onboarding_loop_guard;
+#[path = "units/onboarding_pinned_console.rs"]
+mod onboarding_pinned_console;
 #[path = "units/onboarding_screens.rs"]
 mod onboarding_screens;
 #[path = "units/onboarding_seed.rs"]
@@ -350,6 +360,8 @@ mod setup_welcome_gate;
 mod setup_wire;
 #[path = "units/shell_submission.rs"]
 mod shell_submission;
+#[path = "units/skill.rs"]
+mod skill;
 #[path = "units/skill_mention_completion.rs"]
 mod skill_mention_completion;
 #[path = "units/slash_completion.rs"]
@@ -358,6 +370,8 @@ mod slash_completion;
 mod startup_resume_intent;
 #[path = "units/stress_command.rs"]
 mod stress_command;
+#[path = "units/system_proxy.rs"]
+mod system_proxy;
 
 #[path = "units/subagent_click.rs"]
 mod subagent_click;

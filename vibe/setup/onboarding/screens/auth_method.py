@@ -84,6 +84,11 @@ class AuthMethodScreen(OnboardingScreen):
         self.app.switch_screen("api_key")
 
     def action_browser(self) -> None:
+        if self.onboarding_app.pinned_console_url is not None:
+            # Pinned console: skip the target selection; the custom-domain
+            # form shows the URL prefilled and locked.
+            self.app.switch_screen("custom_domain")
+            return
         self.app.switch_screen("sign_in_target")
 
     def action_move_up(self) -> None:

@@ -59,6 +59,57 @@ from vibe.app_server.protocol import (
     TurnStartParams,
 )
 from vibe.core.config.harness_files import HarnessFilesManager
+from vibe.core.utils import get_windows_bash_path
+
+type _ShellProfile = Literal["unix", "git_bash", "powershell"]
+
+_HOST_SHELL_PROFILES: tuple[_ShellProfile, ...] = (
+    ("git_bash", "powershell") if sys.platform == "win32" else ("unix",)
+)
+
+
+@pytest.fixture(params=_HOST_SHELL_PROFILES)
+def shell_profile(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> _ShellProfile:
+    profile: _ShellProfile = request.param
+    if profile == "git_bash" and get_windows_bash_path() is None:
+        pytest.skip("Git Bash is not installed")
+    monkeypatch.setattr(
+        "vibe.app_server._runtime._command_environment_mode", lambda: profile
+    )
+    return profile
+
+
+def _interactive_process_command(profile: _ShellProfile) -> str:
+    if profile == "powershell":
+        return (
+            "Write-Host -NoNewline ready; "
+            "$value = [Console]::ReadLine(); "
+            "Write-Host -NoNewline ('got:' + $value); "
+            "Start-Sleep -Seconds 30"
+        )
+    return "printf ready; IFS= read -r value; printf got:$value; sleep 30"
+
+
+def _interactive_process_writes(profile: _ShellProfile, process_id: str) -> str:
+    # PowerShell's [Console]::ReadLine() completes on the carriage return of
+    # the enter control, not on a bare newline in the written text; a single
+    # write carries either text or control, so the enter is a second write,
+    # as the harness's own native Windows test does.
+    pid = json.dumps(process_id)
+    if profile == "powershell":
+        return (
+            f'(await tools.process.write({{processId: {pid}, text: "hello"}}), '
+            f'await tools.process.write({{processId: {pid}, control: ["enter"]}}))'
+        )
+    return f'tools.process.write({{processId: {pid}, text: "hello\\n"}})'
+
+
+def _sleep_command(profile: _ShellProfile) -> str:
+    if profile == "powershell":
+        return "Start-Sleep -Seconds 30"
+    return "sleep 30"
 
 
 class _ScriptedCompletion:
@@ -145,10 +196,9 @@ async def test_vibe_enables_background_processes_for_every_host_shell_profile(
     )
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
 @pytest.mark.asyncio
 async def test_vibe_background_process_survives_adapter_replacement_and_is_session_scoped(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell_profile: _ShellProfile
 ) -> None:
     """*Prepare*: A process-enabled Vibe Harness and scripted turns for two Sessions.
     *Do*: Start a process, replace its adapter, isolate another Session, then use all tools.
@@ -168,12 +218,12 @@ async def test_vibe_background_process_survives_adapter_replacement_and_is_sessi
         first_backend,
         scripted,
         "start",
-        """
-async function main() {
-  return tools.process.start({
-    command: "printf ready; IFS= read -r value; printf got:$value; sleep 30"
-  });
-}
+        f"""
+async function main() {{
+  return tools.process.start({{
+    command: {json.dumps(_interactive_process_command(shell_profile))}
+  }});
+}}
 """,
     )
     first_store = UnifiedSessionStore(storage_root, first_backend.session_id)
@@ -197,7 +247,7 @@ async function main() {{
   const before = await tools.process.list({{}});
   const [output, written] = await Promise.all([
     tools.process.output({{processId: {json.dumps(process_id)}, waitMs: 3000}}),
-    tools.process.write({{processId: {json.dumps(process_id)}, text: "hello\\n"}})
+    {_interactive_process_writes(shell_profile, process_id)}
   ]);
   const after = await tools.process.output({{
     processId: {json.dumps(process_id)}, cursor: output.nextCursor, waitMs: 3000
@@ -268,10 +318,9 @@ async function main() {{
     await host.shutdown()
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
 @pytest.mark.asyncio
 async def test_vibe_background_process_approval_denial_never_starts_a_process(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell_profile: _ShellProfile
 ) -> None:
     """*Prepare*: A Vibe Harness whose shell policy requires approval.
     *Do*: Deny the callback raised by process.start.
@@ -288,7 +337,8 @@ async def test_vibe_background_process_approval_denial_never_starts_a_process(
         SessionReadParams(session_id=backend.session_id, history=PageRequest(limit=100))
     )
     scripted.next_program = (
-        "async function main() { return tools.process.start({command: 'sleep 30'}); }"
+        "async function main() { return tools.process.start("
+        "{command: " + json.dumps(_sleep_command(shell_profile)) + "}); }"
     )
 
     # Do
@@ -314,10 +364,9 @@ async def test_vibe_background_process_approval_denial_never_starts_a_process(
     await host.shutdown()
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
 @pytest.mark.asyncio
 async def test_vibe_host_shutdown_stops_a_running_background_process(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell_profile: _ShellProfile
 ) -> None:
     """*Prepare*: A Vibe Unified Session with a running background process.
     *Do*: Shut down the Vibe Session Host without explicitly stopping the process.
@@ -334,7 +383,8 @@ async def test_vibe_host_shutdown_stops_a_running_background_process(
         backend,
         scripted,
         "start",
-        "async function main() { return tools.process.start({command: 'sleep 30'}); }",
+        "async function main() { return tools.process.start("
+        "{command: " + json.dumps(_sleep_command(shell_profile)) + "}); }",
     )
     process_id = (
         UnifiedSessionStore(storage_root, backend.session_id)

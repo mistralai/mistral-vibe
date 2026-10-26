@@ -20,6 +20,9 @@ from vibe.app_server.protocol import (
     AgentInstallParams,
     AgentsListResponse,
     AgentSwitchParams,
+    ArtifactsListParams,
+    ArtifactsListResponse,
+    ArtifactsMarkViewedParams,
     CallbackResultError,
     CallbackResultParams,
     CallbackResultResponse,
@@ -91,6 +94,7 @@ from vibe.app_server.protocol import (
     TurnSteerParams,
     TurnSteerResponse,
 )
+from vibe.core.trusted_folders import TrustedFoldersManager
 
 type SessionBackendKind = Literal["legacy", "unified"]
 type MCPAuthorizationReason = Literal["missing", "expired", "rejected", "invalid"]
@@ -352,6 +356,17 @@ class SessionBackendError(Exception):
         self.on_response_abandoned = on_response_abandoned
         super().__init__(message)
 
+    @classmethod
+    def configuration(cls, problem: object) -> SessionBackendError:
+        """A config the user can fix, which clients show as a configuration
+        error rather than as a failed request. ``problem`` says what to fix.
+        """
+        return cls(
+            ProtocolErrorCode.INVALID_PARAMS,
+            f"Cannot load the Vibe config. {problem}",
+            {"kind": "configuration"},
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class SessionBackendEvent:
@@ -534,6 +549,14 @@ class SessionBackendQueuedTurnSteering(Protocol):
 
 
 @runtime_checkable
+class SessionBackendWorktreeTrust(Protocol):
+    """The selected live session policy for Git-only worktree cleanup."""
+
+    @property
+    def worktree_trust_store(self) -> TrustedFoldersManager: ...
+
+
+@runtime_checkable
 class SessionBackendExtension(Protocol):
     """Optional Vibe Host operations outside the shared session surface."""
 
@@ -648,6 +671,24 @@ class SessionBackendHostHistoryList(Protocol):
     async def list_history(
         self, params: SessionHistoryListParams
     ) -> SessionHistoryListResponse: ...
+
+
+@runtime_checkable
+class SessionBackendHostArtifacts(Protocol):
+    """Optional selected-backend ownership of a session's artifacts.
+
+    Lets a connection with no session attached (Desktop's catalogue channel)
+    answer ``artifacts/`` from the session's persisted state, the way stored
+    session reads do.
+    """
+
+    async def list_artifacts(
+        self, params: ArtifactsListParams
+    ) -> ArtifactsListResponse: ...
+
+    async def mark_artifacts_viewed(
+        self, params: ArtifactsMarkViewedParams
+    ) -> EmptyResponse: ...
 
 
 @runtime_checkable

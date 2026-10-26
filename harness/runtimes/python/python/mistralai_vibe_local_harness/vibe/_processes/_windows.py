@@ -9,7 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
-from typing import cast
+from typing import Protocol, cast
 
 from mistralai_vibe_local_harness.vibe._processes._backend import (
     ManagedTerminal,
@@ -27,14 +27,28 @@ _POWERSHELL_UTF8_PRELUDE = (
     "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
     "$OutputEncoding = [Console]::OutputEncoding; "
 )
+# ConPTY can deliver the last output shortly after every process has exited.
+_EXIT_OUTPUT_SETTLE_SECONDS = 0.1
+
+
+class ProcessJob(Protocol):
+    def adopt(self, process_id: int) -> None: ...
+
+    def active_processes(self) -> int: ...
+
+    def terminate(self) -> None: ...
+
+    def close(self) -> None: ...
 
 
 class WindowsTerminal:
-    def __init__(self, process: object, backend: PtyBackend) -> None:
+    def __init__(self, process: object, backend: PtyBackend, job: ProcessJob) -> None:
         self._process = process
         self._backend = backend
+        self.job = job
         self._read_buffer = bytearray()
         self._returncode: int | None = None
+        self._quiet_since: float | None = None
 
     @property
     def pid(self) -> int | None:
@@ -68,13 +82,14 @@ class WindowsTerminal:
             time.sleep(0.05)
 
     def group_is_alive(self) -> bool:
-        return self.poll() is None
+        return self.poll() is None or self.job.active_processes() > 0
 
     def wait_for_group_exit(self, timeout: float) -> bool:
-        try:
-            self.wait(timeout)
-        except subprocess.TimeoutExpired:
-            return False
+        deadline = time.monotonic() + timeout
+        while self.group_is_alive():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
         return True
 
     def wait_readable(self, timeout_seconds: float) -> bool:
@@ -91,15 +106,25 @@ class WindowsTerminal:
                     reached_eof = False
                 if not reached_eof and self.poll() is None:
                     raise
-                if self.poll() is not None:
-                    return False
                 output = ""
             if isinstance(output, str) and output:
                 self._read_buffer.extend(output.encode("utf-8"))
+                self._quiet_since = None
                 return True
-            if self.poll() is not None or time.monotonic() >= deadline:
+            # Once the whole job has exited and its output has settled, the
+            # terminal is at end-of-file: readable, with read() returning b"".
+            if self._output_settled():
+                return True
+            if time.monotonic() >= deadline:
                 return False
             time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+
+    def _output_settled(self) -> bool:
+        if self._quiet_since is None:
+            if self.group_is_alive():
+                return False
+            self._quiet_since = time.monotonic()
+        return time.monotonic() - self._quiet_since >= _EXIT_OUTPUT_SETTLE_SECONDS
 
     def read(self, size: int) -> bytes:
         if not self._read_buffer and not self.wait_readable(0):
@@ -118,6 +143,7 @@ class WindowsTerminal:
             self._process.cancel_io()  # type: ignore[attr-defined]
         except Exception:
             pass
+        self.job.close()
 
 
 class WindowsTerminalBackend:
@@ -177,26 +203,32 @@ class WindowsTerminalBackend:
         enums = importlib.import_module("winpty.enums")
         argv = self.command_argv(shell, command, interactive=True)
         environment = "\0".join(f"{key}={value}" for key, value in env.items()) + "\0"
-        for backend_name, backend_value in (
-            ("ConPTY", enums.Backend.ConPTY),
-            ("WinPTY", enums.Backend.WinPTY),
-        ):
-            try:
-                process = winpty.PTY(120, 40, backend=backend_value)
-            except Exception:
-                continue
-            command_line = " " + subprocess.list2cmdline(argv[1:])
-            try:
-                spawned = process.spawn(
-                    argv[0], cmdline=command_line, cwd=str(cwd), env=environment
-                )
-            except Exception as error:
+        job = _new_job()
+        try:
+            for backend_name, backend_value in (
+                ("ConPTY", enums.Backend.ConPTY),
+                ("WinPTY", enums.Backend.WinPTY),
+            ):
+                try:
+                    process = winpty.PTY(120, 40, backend=backend_value)
+                except Exception:
+                    continue
+                command_line = " " + subprocess.list2cmdline(argv[1:])
+                try:
+                    spawned = process.spawn(
+                        argv[0], cmdline=command_line, cwd=str(cwd), env=environment
+                    )
+                except Exception as error:
+                    process.cancel_io()
+                    raise TerminalBackendError("Windows PTY spawn failed") from error
+                if spawned:
+                    _adopt(job, process)
+                    return WindowsTerminal(process, cast(PtyBackend, backend_name), job)
                 process.cancel_io()
-                raise TerminalBackendError("Windows PTY spawn failed") from error
-            if spawned:
-                return WindowsTerminal(process, cast(PtyBackend, backend_name))
-            process.cancel_io()
-        raise TerminalBackendError("no Windows PTY backend could start the process")
+            raise TerminalBackendError("no Windows PTY backend could start the process")
+        except BaseException:
+            job.close()
+            raise
 
     def stop_terminals(
         self, terminals: Sequence[ManagedTerminal], grace_seconds: float
@@ -209,23 +241,34 @@ class WindowsTerminalBackend:
     def force_termination(self, terminal: ManagedTerminal) -> None:
         if not isinstance(terminal, WindowsTerminal):
             raise TerminalBackendError("Windows backend received a foreign terminal")
-        if terminal.poll() is not None:
-            return
-        if terminal.pid is None:
-            raise TerminalBackendError("Windows PTY has no process ID")
-        result = subprocess.run(
-            ["taskkill", "/PID", str(terminal.pid), "/T", "/F"],
-            check=False,
-            capture_output=True,
-            timeout=2,
-        )
-        if result.returncode != 0 and terminal.poll() is None:
+        try:
+            terminal.job.terminate()
+        except OSError as error:
             raise TerminalBackendError(
-                "taskkill did not terminate the Windows PTY root"
-            )
+                "the Windows Job Object could not be terminated"
+            ) from error
 
     def close(self) -> None:
         return
+
+
+def _adopt(job: ProcessJob, process: object) -> None:
+    pid = getattr(process, "pid", None)
+    try:
+        if not isinstance(pid, int):
+            raise OSError("Windows PTY has no process ID")
+        job.adopt(pid)
+    except OSError as error:
+        process.cancel_io()  # type: ignore[attr-defined]
+        raise TerminalBackendError(
+            "the Windows PTY process could not join a Job Object"
+        ) from error
+
+
+def _new_job() -> ProcessJob:
+    from mistralai_vibe_local_harness.vibe._processes._windows_job import WindowsJob
+
+    return WindowsJob()
 
 
 def _resolve_executable(candidate: str, env: dict[str, str]) -> str | None:

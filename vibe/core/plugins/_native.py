@@ -31,6 +31,7 @@ from vibe.core.config import (
     MCPStreamableHttp,
     VibeConfigSchema,
 )
+from vibe.core.config.builder import InvalidConfigError
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.mcp_servers import MCPServerAddError, normalize_mcp_server_url
 from vibe.core.hooks.config import load_hooks_file
@@ -1440,10 +1441,15 @@ class PluginResolver:
                     candidate = self._config_orchestrator.copy()
                     apply_profile_overrides(candidate, profile.overrides)
                 except (ValidationError, ValueError) as error:
+                    reason = (
+                        InvalidConfigError.from_validation_error(error)
+                        if isinstance(error, ValidationError)
+                        else error
+                    )
                     self._issues.append(
                         PluginConfigIssue(
                             file=source_file,
-                            message=f"Failed to apply plugin agent: {error}",
+                            message=f"Failed to apply plugin agent: {reason}",
                             code="plugin.agent.invalid",
                             source_format=plugin.source_format,
                             component="agent",

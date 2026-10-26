@@ -13,7 +13,7 @@ definition is not mistaken for a child admitted under another's.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import logging
@@ -34,7 +34,10 @@ if TYPE_CHECKING:
         RustRuntimeBuiltinToolName,
     )
     from mistralai_vibe_local_harness.vibe._permissions import PermissionResolver
-    from mistralai_vibe_local_harness.vibe.plugins import DeclaredAgentTypeProfile
+    from mistralai_vibe_local_harness.vibe.plugins import (
+        DeclaredAgentTypeProfile,
+        DeclaredCompletionRoute,
+    )
     from vibe.app_server.models import ConfigIssue
     from vibe.core.agents.manager import AgentManager
     from vibe.core.agents.models import AgentProfile
@@ -42,9 +45,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _session_route(_overrides: Mapping[str, Any]) -> DeclaredCompletionRoute | None:
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class AgentToolCatalogue:
-    """The tools a profile is measured against, and how its calls are decided.
+    """The tools a profile is measured against, how its calls are decided, and
+    the model its children run on.
 
     Handed in rather than derived here: the catalogue is a function of the
     session's live config, and this module resolves agents, not tools. One
@@ -54,11 +62,18 @@ class AgentToolCatalogue:
     ``permission_resolver`` turns a profile's overrides into the resolver its
     child's calls go through. The ceiling only says whether a tool may run; the
     resolver decides each call to it under the profile's ``[tools.*]`` rules.
+
+    ``completion_route`` turns a profile's overrides into the model its children
+    run on, ``None`` for the session's, and raises ``ValueError`` when the
+    profile selects a model the session cannot run.
     """
 
     available: frozenset[str]
     permission_of: Callable[[str], ToolPermission]
     permission_resolver: Callable[[Mapping[str, Any]], PermissionResolver] | None = None
+    completion_route: Callable[[Mapping[str, Any]], DeclaredCompletionRoute | None] = (
+        _session_route
+    )
 
 
 WORKSPACE_OWNER = "workspace"
@@ -77,6 +92,26 @@ class AgentTypeSource:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentTypeRejection:
+    """An agent file that cannot become an agent type, and why.
+
+    Handed to the Runtime by name so a spawn of the type reports the reason
+    instead of an unknown type.
+    """
+
+    name: str
+    file: str
+    reason: str
+
+    def issue(self) -> ConfigIssue:
+        from vibe.app_server.models import ConfigIssue
+
+        return ConfigIssue(
+            file=self.file, message=f"Agent '{self.name}': {self.reason}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedAgentTypes:
     """What the Core is told, what the Host binds, and what the user is told."""
 
@@ -84,6 +119,19 @@ class ResolvedAgentTypes:
     profiles: tuple[DeclaredAgentTypeProfile, ...]
     issues: tuple[ConfigIssue, ...]
     permission_resolvers: Mapping[str, PermissionResolver]
+    rejections: tuple[AgentTypeRejection, ...] = ()
+
+
+@dataclass(slots=True)
+class _Report:
+    issues: list[ConfigIssue] = field(default_factory=list)
+    rejections: list[AgentTypeRejection] = field(default_factory=list)
+
+    def reject(self, source: AgentTypeSource, message: str) -> None:
+        logger.warning("Agent type %r from %r: %s", source.name, source.owner, message)
+        rejection = _rejection(source, message)
+        self.issues.append(rejection.issue())
+        self.rejections.append(rejection)
 
 
 def workspace_agent_types(agents: AgentManager) -> tuple[AgentTypeSource, ...]:
@@ -122,6 +170,20 @@ def workspace_agent_types(agents: AgentManager) -> tuple[AgentTypeSource, ...]:
     return tuple(sources)
 
 
+def workspace_agent_rejections(agents: AgentManager) -> tuple[AgentTypeRejection, ...]:
+    """The agent files discovery could not load at all.
+
+    Their type is unknown, since the file never parsed, so every one is
+    reported: a subagent among them would otherwise only be missing.
+    """
+    return tuple(
+        AgentTypeRejection(
+            name=failure.name, file=str(failure.path), reason=failure.reason
+        )
+        for failure in agents.load_failures
+    )
+
+
 def resolve_agent_types(
     sources: Iterable[AgentTypeSource],
     tools: AgentToolCatalogue | None = None,
@@ -143,25 +205,23 @@ def resolve_agent_types(
     """
     definitions: list[RustAgentTypeDefinition] = []
     profiles: list[DeclaredAgentTypeProfile] = []
-    issues: list[ConfigIssue] = []
+    report = _Report()
     permission_resolvers: dict[str, PermissionResolver] = {}
 
     for source in sources:
         if source.name in reserved:
-            issues.append(
-                _issue(source, "an installed plugin already declares that name")
-            )
+            report.reject(source, "an installed plugin already declares that name")
             continue
-        accepted, instructions = _accepted_instructions(source, issues)
+        accepted, instructions = _accepted_instructions(source, report)
         if not accepted:
             continue
-        definition = _definition(source, issues)
+        definition = _definition(source, report)
         if definition is None:
             continue
         if tools is None:
             definitions.append(definition)
             continue
-        profile = _profile(source, instructions, tools, issues)
+        profile = _profile(source, instructions, tools, report)
         if profile is None:
             # Advertised without a binding, the Host strips the name anyway. Drop
             # both here so the two halves never disagree about what exists.
@@ -176,8 +236,9 @@ def resolve_agent_types(
     return ResolvedAgentTypes(
         definitions=tuple(definitions),
         profiles=tuple(profiles),
-        issues=tuple(issues),
+        issues=tuple(report.issues),
         permission_resolvers=permission_resolvers,
+        rejections=tuple(report.rejections),
     )
 
 
@@ -198,7 +259,7 @@ def agent_instructions(profile: AgentProfile) -> str | None:
 
 
 def _accepted_instructions(
-    source: AgentTypeSource, issues: list[ConfigIssue]
+    source: AgentTypeSource, report: _Report
 ) -> tuple[bool, str | None]:
     """Whether one agent file is usable, and the prompt it asks for.
 
@@ -210,27 +271,41 @@ def _accepted_instructions(
     description invalidates every other agent's capabilities rather than its
     own. Both checks therefore run before anything is built.
     """
+    from mistralai_vibe_local_harness.vibe.plugins import MAX_DECLARED_INSTRUCTION_CHARS
+
     if not source.name.strip() or not source.profile.description.strip():
-        issues.append(_issue(source, "a name and a description are required"))
+        report.reject(source, "a name and a description are required")
         return False, None
-    for key in ("active_model", "model"):
-        if key in source.profile.overrides:
-            logger.warning(
-                "Agent type %r from %r declares %r; it runs on the session's "
-                "model instead",
-                source.name,
-                source.owner,
-                key,
-            )
+    if source.profile.config_error is not None:
+        # Discovery already reports it, with the file, among the agent files
+        # that do not load; a second report here would show it twice.
+        return False, None
+    if "model" in source.profile.overrides:
+        logger.warning(
+            "Agent type %r from %r declares 'model', which is not read; it runs on "
+            "the session's model unless 'active_model' names an alias from "
+            "[[models]]",
+            source.name,
+            source.owner,
+        )
     try:
-        return True, agent_instructions(source.profile)
+        instructions = agent_instructions(source.profile)
     except (MissingPromptFileError, ValueError) as error:
-        issues.append(_issue(source, str(error)))
+        report.reject(source, str(error))
         return False, None
+    if instructions is not None and len(instructions) > MAX_DECLARED_INSTRUCTION_CHARS:
+        report.reject(
+            source,
+            f"its instructions are {len(instructions):,} characters long; a "
+            f"subagent's instructions are limited to "
+            f"{MAX_DECLARED_INSTRUCTION_CHARS:,} characters",
+        )
+        return False, None
+    return True, instructions
 
 
 def _definition(
-    source: AgentTypeSource, issues: list[ConfigIssue]
+    source: AgentTypeSource, report: _Report
 ) -> RustAgentTypeDefinition | None:
     from mistralai_vibe_local_harness.protocol import RustAgentTypeDefinition
 
@@ -241,7 +316,7 @@ def _definition(
             path=str(source.path),
         )
     except ValidationError as error:
-        issues.append(_issue(source, str(error)))
+        report.reject(source, _validation_reason(error))
         return None
 
 
@@ -249,18 +324,25 @@ def _profile(
     source: AgentTypeSource,
     instructions: str | None,
     tools: AgentToolCatalogue,
-    issues: list[ConfigIssue],
+    report: _Report,
 ) -> DeclaredAgentTypeProfile | None:
     # Everything the Runtime needs to spawn a child and nothing it would have to be
-    # Vibe to read. ``active_model`` and ``safety`` are deliberately not carried: the
-    # first is a widening, since the policy ceiling grants exactly one completion, and
-    # the second gates nothing today.
+    # Vibe to read. ``active_model`` travels as the route it resolves to, so the
+    # child runs on it; ``safety`` is not carried, since it gates nothing today.
     from mistralai_vibe_local_harness.vibe.plugins import DeclaredAgentTypeProfile
     from vibe.app_server._runtime import rust_agent_tool_ceiling
 
+    overrides = source.profile.overrides
     ceiling = rust_agent_tool_ceiling(
-        set(tools.available), tools.permission_of, source.profile.overrides
+        set(tools.available), tools.permission_of, overrides
     )
+    try:
+        completion = tools.completion_route(overrides)
+    except ValueError as error:
+        # Falling back to the session's model would hide the choice the profile
+        # made, so a model it cannot have takes the agent out instead.
+        report.reject(source, str(error))
+        return None
     path = str(source.path)
     try:
         return DeclaredAgentTypeProfile(
@@ -270,12 +352,15 @@ def _profile(
             instructions=instructions,
             tool_ceiling=ceiling,
             # Discovery already validated these against the config schema.
-            enabled_skills=source.profile.overrides.get("enabled_skills", []),
-            disabled_skills=source.profile.overrides.get("disabled_skills", []),
-            authority_digest=_authority_digest(source, path, ceiling, instructions),
+            enabled_skills=overrides.get("enabled_skills", []),
+            disabled_skills=overrides.get("disabled_skills", []),
+            completion=completion,
+            authority_digest=_authority_digest(
+                source, path, ceiling, instructions, completion
+            ),
         )
     except ValidationError as error:
-        issues.append(_issue(source, str(error)))
+        report.reject(source, _validation_reason(error))
         return None
 
 
@@ -284,40 +369,64 @@ def _authority_digest(
     path: str,
     ceiling: Mapping[RustRuntimeBuiltinToolName, str],
     instructions: str | None,
+    completion: DeclaredCompletionRoute | None,
 ) -> str:
     # Folded into the binding's template digest. A child spawned under an older
     # authority keeps the template it was admitted with, and only the digest tells
     # the two apart.
-    payload = json.dumps(
-        {
-            "owner": source.owner,
-            "source": source.source_name,
-            "path": path,
-            "description": source.profile.description,
-            "instructions": instructions,
-            "ceiling": dict(sorted(ceiling.items())),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    authority: dict[str, object] = {
+        "owner": source.owner,
+        "source": source.source_name,
+        "path": path,
+        "description": source.profile.description,
+        "instructions": instructions,
+        "ceiling": dict(sorted(ceiling.items())),
+    }
+    # Only when set, so a profile on the session's model keeps its digest.
+    if completion is not None:
+        authority["completion"] = _route_authority(completion)
+    payload = json.dumps(authority, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def _issue(source: AgentTypeSource, message: str) -> ConfigIssue:
-    from vibe.app_server.models import ConfigIssue
+def _route_authority(completion: DeclaredCompletionRoute) -> object:
+    provider = completion.provider
+    return {
+        "model": asdict(completion.model),
+        "model_facts": None
+        if completion.model_facts is None
+        else completion.model_facts.model_dump(mode="json"),
+        "provider": None
+        if provider is None
+        else {
+            "provider": provider.provider,
+            "api_style": provider.api_style,
+            "base_url": provider.base_url,
+        },
+    }
 
-    logger.warning("Agent type %r from %r: %s", source.name, source.owner, message)
-    return ConfigIssue(
-        file=str(source.path), message=f"Agent '{source.name}': {message}"
+
+def _rejection(source: AgentTypeSource, message: str) -> AgentTypeRejection:
+    return AgentTypeRejection(name=source.name, file=str(source.path), reason=message)
+
+
+def _validation_reason(error: ValidationError) -> str:
+    return "; ".join(
+        f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
+        if item["loc"]
+        else item["msg"]
+        for item in error.errors()
     )
 
 
 __all__ = [
     "WORKSPACE_OWNER",
     "AgentToolCatalogue",
+    "AgentTypeRejection",
     "AgentTypeSource",
     "ResolvedAgentTypes",
     "agent_instructions",
     "resolve_agent_types",
+    "workspace_agent_rejections",
     "workspace_agent_types",
 ]

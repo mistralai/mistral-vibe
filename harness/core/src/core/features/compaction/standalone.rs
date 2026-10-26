@@ -2,23 +2,20 @@
 //!
 //! The first compaction request reuses the agent's message prefix and tool
 //! catalog so a provider can serve it from its prompt cache. When that request
-//! fails or returns an unusable summary, Core sends this request instead. It
-//! renders the same fitted history as a plain-text transcript under a
-//! dedicated summarizer system prompt. The Runtime sends it without tool
+//! fails, returns an unusable summary or cannot fit, or when there is no agent
+//! reply to summarize up to, Core sends this request instead. It renders the
+//! history as a plain-text transcript, one line per item in the reduced
+//! view's full form, under a dedicated summarizer system prompt. The Runtime sends it without tool
 //! definitions and with reasoning disabled, so the provider sees a different
 //! and simpler request than the one that failed.
 
-use serde_json::Value;
-
-use crate::core::config::{ImageDeliveryMode, ImageTokenCost};
+use crate::core::config::{ImageCostRule, ImageDeliveryMode};
 use crate::core::error::CoreError;
 use crate::core::model_input_budget::{APPROX_BYTES_PER_TOKEN, estimate_model_input_tokens};
-use crate::core::wire::content::ContentBlock;
-use crate::core::wire::message::{
-    AssistantPart, Message, StoredMessage, ToolArguments, ToolOutcome,
-};
+use crate::core::wire::message::{Message, StoredMessage};
 
 use super::context::{prompt_extra_instructions, truncate_middle_to_tokens};
+use super::transcript::{Detail, message_items, render};
 
 const SYSTEM_PROMPT: &str = r#"You are a dedicated conversation summarizer. You read a transcript of a conversation between a user and an AI agent and write a faithful handoff summary for another LLM that will resume the task.
 
@@ -49,16 +46,19 @@ Respond with text only. Wrap the ENTIRE summary in <summary></summary> tags and 
 ...your handoff summary here...
 </summary>"#;
 
-/// Builds the self-contained request from a fitted in-context projection.
+/// Builds the self-contained request from what the summary covers.
 ///
 /// `projection` begins with the generated system message and ends with the
 /// compaction prompt. The generated system message is not part of the
-/// conversation, so the transcript omits it. With a token threshold, the
+/// conversation, so the transcript omits it. A cut-off retry adds
+/// `cut_off_instruction` as a last user message. With a token threshold, the
 /// transcript is middle-truncated until the whole request fits below it.
+/// Returns `None` when not even the request with an empty transcript fits.
 pub(super) fn standalone_messages(
     projection: &[StoredMessage],
     token_threshold: Option<u64>,
-) -> Result<Vec<StoredMessage>, CoreError> {
+    cut_off_instruction: Option<&str>,
+) -> Result<Option<Vec<StoredMessage>>, CoreError> {
     let extra_instructions = prompt_extra_instructions(projection)?;
     let history = projection
         .get(..projection.len().saturating_sub(1))
@@ -66,25 +66,29 @@ pub(super) fn standalone_messages(
         .iter()
         .filter(|stored| !stored.is_generated_system());
     let transcript = render_transcript(history);
-    let Some(token_threshold) = token_threshold else {
-        return Ok(request(&transcript, extra_instructions.as_deref()));
+    let request = |transcript: &str| {
+        request(
+            transcript,
+            extra_instructions.as_deref(),
+            cut_off_instruction,
+        )
     };
-    let full = request(&transcript, extra_instructions.as_deref());
-    if estimate_tokens(&full)? < token_threshold {
-        return Ok(full);
+    let Some(token_threshold) = token_threshold else {
+        return Ok(Some(request(&transcript)));
+    };
+    let full = request(&transcript);
+    if standalone_estimate(&full)? < token_threshold {
+        return Ok(Some(full));
     }
 
     let mut lower = 0;
     let mut upper = transcript.len().div_ceil(APPROX_BYTES_PER_TOKEN);
-    let mut fitted = request("", extra_instructions.as_deref());
+    let mut fitted = None;
     while lower <= upper {
         let max_tokens = lower + (upper - lower) / 2;
-        let candidate = request(
-            &truncate_middle_to_tokens(&transcript, max_tokens),
-            extra_instructions.as_deref(),
-        );
-        if estimate_tokens(&candidate)? < token_threshold {
-            fitted = candidate;
+        let candidate = request(&truncate_middle_to_tokens(&transcript, max_tokens));
+        if standalone_estimate(&candidate)? < token_threshold {
+            fitted = Some(candidate);
             lower = max_tokens + 1;
         } else if max_tokens == 0 {
             break;
@@ -95,129 +99,58 @@ pub(super) fn standalone_messages(
     Ok(fitted)
 }
 
-fn request(transcript: &str, extra_instructions: Option<&str>) -> Vec<StoredMessage> {
+fn request(
+    transcript: &str,
+    extra_instructions: Option<&str>,
+    cut_off_instruction: Option<&str>,
+) -> Vec<StoredMessage> {
     let mut user = format!("{TRANSCRIPT_OPEN}\n{transcript}\n{TRANSCRIPT_CLOSE}\n\n{REQUEST}");
     if let Some(extra_instructions) = extra_instructions {
         user.push_str(&format!(
             "\n\n{EXTRA_INSTRUCTIONS_OPEN}\n{extra_instructions}\n{EXTRA_INSTRUCTIONS_CLOSE}"
         ));
     }
-    vec![
+    let mut messages = vec![
         StoredMessage::injected(Message::system_text(SYSTEM_PROMPT)),
         StoredMessage::injected(Message::user_text(user)),
-    ]
+    ];
+    if let Some(instruction) = cut_off_instruction {
+        messages.push(StoredMessage::injected(Message::user_text(instruction)));
+    }
+    messages
 }
 
-/// The standalone request is text only (images render as `[image]`), so the
-/// image token cost policy does not change its estimate.
-fn estimate_tokens(messages: &[StoredMessage]) -> Result<u64, CoreError> {
+/// The standalone request is text only (images render as `[Image]`), so no
+/// image cost rule ever applies to its estimate.
+const TEXT_ONLY_IMAGE_COST: ImageCostRule = ImageCostRule::Fixed { tokens: 0 };
+
+pub(super) fn standalone_estimate(messages: &[StoredMessage]) -> Result<u64, CoreError> {
     estimate_model_input_tokens(
         messages,
         &[],
         ImageDeliveryMode::Native,
-        ImageTokenCost::default(),
+        TEXT_ONLY_IMAGE_COST,
     )
 }
 
+/// One line per item, in full: the renderer the reduced view uses.
 fn render_transcript<'a>(messages: impl Iterator<Item = &'a StoredMessage>) -> String {
     messages
-        .filter_map(|stored| render_message(&stored.message))
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-fn render_message(message: &Message) -> Option<String> {
-    let (heading, body) = match message {
-        Message::System { content } => ("### System".to_string(), render_blocks(content)),
-        Message::User { content } => ("### User".to_string(), render_blocks(content)),
-        Message::Assistant { content } => ("### Assistant".to_string(), render_assistant(content)),
-        Message::Tool {
-            tool_call_id,
-            name,
-            outcome,
-            content,
-            ..
-        } => {
-            let status = match outcome {
-                ToolOutcome::Success => "",
-                ToolOutcome::Failure => ", failed",
-            };
-            (
-                format!("### Tool result: {name} ({tool_call_id}{status})"),
-                render_blocks(content),
-            )
-        }
-    };
-    let body = body.trim();
-    (!body.is_empty()).then(|| format!("{heading}\n{body}"))
-}
-
-/// Renders assistant text and tool calls. Reasoning is private to the turn
-/// that produced it and is omitted.
-fn render_assistant(parts: &[AssistantPart]) -> String {
-    let mut lines = Vec::new();
-    for part in parts {
-        match part {
-            AssistantPart::Content(block) => lines.push(render_block(block)),
-            AssistantPart::Semantic(
-                crate::core::wire::message::AssistantSemanticPart::ToolCall {
-                    id,
-                    name,
-                    arguments,
-                    ..
-                },
-            ) => {
-                let arguments = match arguments {
-                    ToolArguments::Json { raw, .. } | ToolArguments::InvalidJson { raw, .. } => {
-                        raw.as_str()
-                    }
-                };
-                lines.push(format!("[tool call {id}] {name} {arguments}"));
-            }
-            AssistantPart::Semantic(
-                crate::core::wire::message::AssistantSemanticPart::Reasoning { .. },
-            ) => {}
-        }
-    }
-    lines.join("\n")
-}
-
-fn render_blocks(content: &[ContentBlock]) -> String {
-    content
-        .iter()
-        .map(render_block)
+        .flat_map(|stored| message_items(&stored.message))
+        .map(|item| render(&item, Detail::Full))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn render_block(block: &ContentBlock) -> String {
-    match block {
-        ContentBlock::Text(content) => content.text.clone(),
-        ContentBlock::Image(_) => "[image]".to_string(),
-        ContentBlock::Audio(_) => "[audio]".to_string(),
-        block => render_resource(block),
-    }
-}
-
-fn render_resource(block: &ContentBlock) -> String {
-    let value = serde_json::to_value(block).unwrap_or(Value::Null);
-    let resource = value.get("resource").unwrap_or(&value);
-    let uri = resource
-        .get("uri")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    match resource.get("text").and_then(Value::as_str) {
-        Some(text) => format!("[resource {uri}]\n{text}"),
-        None => format!("[resource {uri}]"),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::features::compaction::prompt_message;
-    use crate::core::wire::message::AssistantSemanticPart;
-    use crate::core::wire::message::ReasoningContent;
+    use crate::core::features::compaction::transcript::render_blocks;
+    use crate::core::wire::content::ContentBlock;
+    use crate::core::wire::message::{
+        AssistantPart, AssistantSemanticPart, ReasoningContent, ToolArguments, ToolOutcome,
+    };
 
     fn projection(history: Vec<StoredMessage>, extra: &str) -> Vec<StoredMessage> {
         let mut messages = vec![StoredMessage::generated_system(Message::system_text(
@@ -270,8 +203,10 @@ mod tests {
                 "Focus on the parser.",
             ),
             None,
+            None,
         )
-        .expect("standalone request");
+        .expect("standalone request")
+        .expect("an unbounded request fits");
 
         assert_eq!(messages.len(), 2);
         assert_eq!(text(&messages[0]), SYSTEM_PROMPT);
@@ -279,11 +214,27 @@ mod tests {
         assert_eq!(
             user,
             format!(
-                "{TRANSCRIPT_OPEN}\n### User\nFix the parser\n\n### Assistant\nReading the file.\n[tool call call-1] read_file {{\"path\":\"src/parser.rs\"}}\n\n### Tool result: read_file (call-1, failed)\nNo such file\n{TRANSCRIPT_CLOSE}\n\n{REQUEST}\n\n{EXTRA_INSTRUCTIONS_OPEN}\nFocus on the parser.\n{EXTRA_INSTRUCTIONS_CLOSE}"
+                "{TRANSCRIPT_OPEN}\nUserMessage: Fix the parser\nAssistantMessage: Reading the file.\nread_file(path=\"src/parser.rs\")\n<ERROR> No such file\n{TRANSCRIPT_CLOSE}\n\n{REQUEST}\n\n{EXTRA_INSTRUCTIONS_OPEN}\nFocus on the parser.\n{EXTRA_INSTRUCTIONS_CLOSE}"
             )
         );
         assert!(!user.contains("secret chain of thought"));
         assert!(!user.contains("agent system prompt"));
+    }
+
+    #[test]
+    fn a_cut_off_retry_adds_its_instruction_as_the_last_message() {
+        let history = vec![StoredMessage::visible(Message::user_text("Fix the parser"))];
+        let plain = standalone_messages(&projection(history.clone(), ""), None, None)
+            .expect("standalone request")
+            .expect("an unbounded request fits");
+        let retry = standalone_messages(&projection(history, ""), None, Some("Answer briefly."))
+            .expect("cut-off retry request")
+            .expect("an unbounded request fits");
+
+        assert_eq!(retry.len(), 3);
+        assert_eq!(retry[..2], plain[..]);
+        assert_eq!(text(&retry[2]), "Answer briefly.");
+        assert!(retry[2].is_injected());
     }
 
     #[test]
@@ -293,14 +244,26 @@ mod tests {
             StoredMessage::visible(Message::user_text(format!("{} end", "b".repeat(8_000)))),
         ];
         let threshold = 2_000;
-        let messages =
-            standalone_messages(&projection(history, ""), Some(threshold)).expect("request");
+        let messages = standalone_messages(&projection(history, ""), Some(threshold), None)
+            .expect("request")
+            .expect("the request fits with a truncated transcript");
 
-        assert!(estimate_tokens(&messages).expect("estimate") < threshold);
+        assert!(standalone_estimate(&messages).expect("estimate") < threshold);
         let user = text(&messages[1]);
-        assert!(user.contains("### User\nstart "));
+        assert!(user.contains("UserMessage: start "));
         assert!(user.contains(" end\n"));
         assert!(user.contains("tokens truncated"));
         assert!(user.ends_with(REQUEST));
+    }
+
+    #[test]
+    fn a_threshold_below_the_request_with_an_empty_transcript_fits_nothing() {
+        let history = vec![StoredMessage::visible(Message::user_text("Fix the parser"))];
+        let empty = standalone_estimate(&request("", None, None)).expect("estimate");
+
+        let messages =
+            standalone_messages(&projection(history, ""), Some(empty), None).expect("request");
+
+        assert_eq!(messages, None);
     }
 }

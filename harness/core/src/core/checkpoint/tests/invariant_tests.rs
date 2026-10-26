@@ -3,8 +3,8 @@ use serde_json::json;
 use super::cases::{checkpoint_with_turn, restorable_active_tool_checkpoint};
 use crate::core::checkpoint::{Checkpoint, decode_checkpoint};
 use crate::core::features::compaction::{
-    CompactionBudget, CompactionProjection, CompactionProjectionFit, CompactionTrigger,
-    NewestToolExchange, PendingCompaction,
+    CompactionBudgets, CompactionProjection, CompactionProjectionFit, CompactionTrigger,
+    PendingCompaction,
 };
 use crate::core::testing::config;
 use crate::core::{
@@ -81,12 +81,9 @@ fn compaction_projection(state: &crate::core::HarnessState) -> CompactionProject
         state.generated_system_message(),
         "",
         state.resolved_tools.top_level_tools(),
-        CompactionBudget {
-            token_threshold: state.config.settings.context.compaction.token_threshold(),
-            image_delivery: state.config.settings.context.image_delivery.compaction,
-            image_cost: state.config.settings.context.image_token_cost,
-        },
-        NewestToolExchange::Keep,
+        CompactionBudgets::from_settings(&state.config.settings.context, state.estimate_correction)
+            .request,
+        &state.config.settings.prompts.compaction,
     )
     .expect("test compaction projection can be estimated");
     let CompactionProjectionFit::Fitted(projection) = projection else {

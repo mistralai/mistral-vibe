@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from dataclasses import dataclass
 import json
 import logging
@@ -117,9 +117,7 @@ from mistralai_vibe_local_harness.vibe._errors import (
     HarnessTurnQueueIdempotencyConflictError,
     HarnessTurnQueuePendingError,
 )
-from mistralai_vibe_local_harness.vibe._file_image_fallback import (
-    build_file_image_content_block,
-)
+from mistralai_vibe_local_harness.vibe._file_images import file_image_content_block
 from mistralai_vibe_local_harness.vibe._local_actions import (
     ApprovalGrant,
     HookHandlers,
@@ -143,6 +141,7 @@ from mistralai_vibe_local_harness.vibe._projection import (
 from mistralai_vibe_local_harness.vibe._runtime import (
     ContextCompactionFailure,
     DurableSessionRuntime,
+    is_image_block,
 )
 from mistralai_vibe_local_harness.vibe._runtime_config import (
     CompletionDeltaSink,
@@ -473,6 +472,20 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             return None
         binding = self._pending_plugin_binding or empty_plugin_binding()
         return self._session_metadata, binding.lock
+
+    async def read_plugin_lock(self) -> PluginLockV1:
+        """The lock in force, live or pending, for a caller carrying it forward.
+
+        History/clear hands this to ``Host.start`` so the replacement session
+        restores the recorded environment instead of re-pinning. The pending
+        binding counts: an unpromoted ephemeral session has bound plugins but
+        no persisted runtime state yet.
+        """
+        async with self._lifecycle_lock:
+            if self._runtime is not None:
+                return self._runtime.runtime_state.plugin_lock
+            binding = self._pending_plugin_binding or empty_plugin_binding()
+            return binding.lock
 
     @property
     def active_turn_id(self) -> str | None:
@@ -1111,6 +1124,17 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             await asyncio.gather(*tasks)
 
     @asynccontextmanager
+    async def turn_start_boundary(self) -> AsyncIterator[None]:
+        """Wait out any promotion of this Session, and hold off the next.
+
+        A caller changing what a turn's Runtime is built from does it here, so
+        no promotion reads it meanwhile. Every promotion holds the lifecycle
+        lock; a turn start also holds the turn-start lock, taken first.
+        """
+        async with self._turn_start_lock, self._lifecycle_lock:
+            yield
+
+    @asynccontextmanager
     async def _fork_boundary(self) -> AsyncIterator[None]:
         """Block new Turns while a caller copies and forks this Session."""
         async with self._turn_start_lock:
@@ -1166,13 +1190,24 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             cached_only=cached_only,
         )
 
-    async def discover_pending_mcp(self) -> MCPRouteSnapshot:
+    async def discover_pending_mcp(self, *, refresh: bool = True) -> MCPRouteSnapshot:
         """Discover the MCP servers the session opened without.
 
-        Routes only: Core is left alone, so this may run during a turn. Publish
-        the result with ``push_mcp_capabilities`` once no turn is running.
+        Routes only: Core is left alone, so this may run during a turn. Each
+        server found reaches Core at the next turn boundary, before the slowest
+        is done; ``push_mcp_capabilities`` publishes the result at once. With
+        ``refresh`` false, servers routed from old descriptors are not
+        rediscovered yet.
         """
-        return await self._require_mcp_runtime().discover_pending(push_to_core=False)
+        return await self._require_mcp_runtime().discover_pending(
+            push_to_core=False, refresh=refresh
+        )
+
+    @property
+    def mcp_discovery_due(self) -> bool:
+        """Whether ``discover_pending_mcp`` has a server to discover or refresh."""
+        runtime = self._mcp_runtime
+        return runtime is not None and runtime.discovery_due
 
     async def push_mcp_capabilities(self) -> None:
         await self._require_mcp_runtime().push_snapshot_to_core()
@@ -1204,7 +1239,11 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         # Before promotion no Core holds the routes: a reserved turn's Runtime
         # is built from this snapshot, so changing it cannot split a turn.
         # During promotion the Runtime is being built from it, so it can.
-        if self._runtime is not None or self._promotion_conflict_id is not None:
+        # Routes alone, kept from Core, are like discover_pending_mcp: any
+        # turn can take them, and they reach Core with the next push.
+        if self._promotion_conflict_id is not None:
+            raise HarnessTurnConflictError(self._promotion_conflict_id)
+        if self._runtime is not None and push_to_core:
             self._reject_active_turn()
         return await self._require_connector_runtime().reconfigure(
             catalog, selection, push_to_core=push_to_core
@@ -1212,6 +1251,16 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
 
     async def push_connector_capabilities(self) -> None:
         await self._require_connector_runtime().push_snapshot_to_core()
+
+    def hold_connector_calls(
+        self, *, timeout_s: float
+    ) -> AbstractAsyncContextManager[None]:
+        """Hold connector calls while the caller loads a new catalog.
+
+        See ``ConnectorRuntime.hold_calls``. Any turn state is fine: the hold
+        touches no route and nothing in Core.
+        """
+        return self._require_connector_runtime().hold_calls(timeout_s=timeout_s)
 
     async def suspend_connectors(
         self, *, alias: str, tool_name: str | None
@@ -2678,6 +2727,32 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         settle = self._settle_configuration
         if settle is not None:
             await settle()
+        await self._publish_deferred_integration_snapshots()
+
+    async def _publish_deferred_integration_snapshots(self) -> None:
+        """Hand Core the provided-tool routes a running turn withdrew.
+
+        Skipped while a turn is in flight, since Core still rejects the
+        capability reconfigure; the next boundary publishes instead. A failure
+        is logged rather than raised: dispatch already applies the withdrawn
+        routes, so the advertised catalog lagging must not refuse a turn.
+        """
+        if self.active_turn_id is not None:
+            return
+        for runtime in (self._mcp_runtime, self._connector_runtime):
+            if runtime is None:
+                continue
+            try:
+                await runtime.publish_deferred_snapshot()
+            except Exception:
+                logger.warning(
+                    "Publishing deferred provided-tool routes failed",
+                    extra={
+                        "harness_backend": "unified",
+                        "session_id": self._session_id,
+                    },
+                    exc_info=True,
+                )
 
     async def _drain_turn_queue(self) -> None:
         async with self._locked_turn_start():
@@ -3420,16 +3495,43 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             callback_kind=callback_kind,
         )
 
-    def publish_notice(self, message: str, *, level: str = "warning") -> None:
+    async def holds_images(self) -> bool:
+        """Whether committed history or queued input holds an image a model would read as one.
+
+        A Session with no Runtime has no history yet.
+        """
+        if self._turn_queue.holds_block(is_image_block):
+            return True
+        runtime = self._runtime
+        return runtime is not None and await runtime.history_holds_images()
+
+    async def check_config_fits(self, config: SessionConfig) -> None:
+        """Refuse a configuration whose model this Session's context cannot fit.
+
+        Raises HarnessConfigurationRejectedError with Core's reason and
+        applies nothing, so a Host can refuse a model pick before persisting
+        it. A Session with no Runtime has no context yet, so anything fits.
+        """
+        runtime = self._runtime
+        if runtime is not None:
+            await runtime.check_settings_fit(config.core.settings)
+
+    def publish_notice(
+        self, message: str, *, level: str = "warning", code: str | None = None
+    ) -> None:
         """Emit an out-of-band remark that changes nothing about the session.
 
         A plugin reload that found a source still unreachable has something to
         say and nothing to report: the command succeeded, the session did not
         change, and there is no procedure result to carry the remark. It rides
         the same queue the MCP and connector runtimes already publish signals
-        on, so a subscriber sees it in order with everything else.
+        on, so a subscriber sees it in order with everything else. ``code``
+        names the remark for a client that handles it on its own.
         """
-        self._publish_event({"type": "notice", "level": level, "message": message})
+        event: JsonObject = {"type": "notice", "level": level, "message": message}
+        if code is not None:
+            event["code"] = code
+        self._publish_event(event)
 
     def _publish_session_state_update(self) -> None:
         state, _watermark = self._current_state_and_watermark()
@@ -3705,7 +3807,7 @@ def _rust_session_content_blocks(
 
 def _session_image_content_block(
     block: SessionImageContentBlock, *, image_source_roots: tuple[Path, ...]
-) -> RustImageContentBlock:
+) -> RustImageContentBlock | RustEmbeddedResourceContentBlock:
     if block.uri.startswith("data:"):
         header, separator, data = block.uri.partition(",")
         if not separator or not header.endswith(";base64"):
@@ -3732,13 +3834,7 @@ def _session_image_content_block(
         raise ValueError("Unified Harness queued image has no media type")
     encoded = _read_image_file_source(path, image_source_roots=image_source_roots)
     uri = block.uri if parsed.scheme == "file" else path.expanduser().resolve().as_uri()
-    return build_file_image_content_block(
-        data=encoded.data,
-        uri=uri,
-        name=block.alt_text or path.name or uri,
-        mime_type=media_type,
-        size=encoded.size,
-    )
+    return file_image_content_block(data=encoded.data, uri=uri, mime_type=media_type)
 
 
 def _with_content_meta(
@@ -3810,13 +3906,10 @@ def _rust_content_blocks(
                         encoded = _read_image_file_source(
                             path, image_source_roots=image_source_roots
                         )
-                        uri = path.expanduser().resolve().as_uri()
-                        image = build_file_image_content_block(
+                        image = file_image_content_block(
                             data=encoded.data,
-                            uri=uri,
-                            name=attachment.alias or path.name or uri,
+                            uri=path.expanduser().resolve().as_uri(),
                             mime_type=attachment.mime_type,
-                            size=encoded.size,
                         )
                     case _:
                         raise ValueError(

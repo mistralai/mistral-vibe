@@ -18,6 +18,7 @@ mod pending;
 pub mod process;
 pub mod proto_agents;
 pub mod proto_approval;
+pub mod proto_artifacts;
 pub mod proto_children;
 pub mod proto_fork;
 pub mod proto_mcp;
@@ -49,6 +50,7 @@ pub use process::{
 };
 pub use proto_agents::*;
 pub use proto_approval::*;
+pub use proto_artifacts::*;
 pub use proto_children::*;
 pub use proto_fork::*;
 pub use proto_mcp::*;

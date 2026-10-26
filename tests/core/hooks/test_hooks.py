@@ -207,7 +207,7 @@ class TestConfigLoading:
         assert result.hooks[0].match == "bash"
         assert result.hooks[1].match == "re:read_.*"
 
-    def test_match_field_rejected_on_post_agent(self, config_dir: Path) -> None:
+    def test_match_field_selects_agents_on_post_agent(self, config_dir: Path) -> None:
         _write_hooks_toml(
             config_dir / "hooks.toml",
             [
@@ -215,13 +215,30 @@ class TestConfigLoading:
                     "name": "h",
                     "type": "post_agent",
                     "command": "echo ok",
-                    "match": "bash",
+                    "match": "main",
+                }
+            ],
+        )
+        result = load_hooks_from_fs()
+        assert result.issues == []
+        assert result.hooks[0].match == "main"
+
+    def test_strict_still_rejected_on_post_agent(self, config_dir: Path) -> None:
+        _write_hooks_toml(
+            config_dir / "hooks.toml",
+            [
+                {
+                    "name": "h",
+                    "type": "post_agent",
+                    "command": "echo ok",
+                    "match": "main",
+                    "strict": True,
                 }
             ],
         )
         result = load_hooks_from_fs()
         assert result.hooks == []
-        assert any("match" in i.message for i in result.issues)
+        assert any("strict" in i.message for i in result.issues)
 
     def test_empty_match_rejected(self, config_dir: Path) -> None:
         _write_hooks_toml(

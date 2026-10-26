@@ -34,4 +34,7 @@ PNGf = "PNGf"
 [files]
 # SVG snapshot goldens embed rendered pixels as path data; excluded so
 # config-driven typos runs match pre-commit exactly.
-extend-exclude = ["__snapshots__/**/*.svg", "client-e2e/goldens/**/*.svg"]
+extend-exclude = [
+  "__snapshots__/**/*.svg",
+  "client-e2e/goldens/**/*.svg",
+]

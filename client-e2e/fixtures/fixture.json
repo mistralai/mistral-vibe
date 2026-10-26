@@ -1371,38 +1371,6 @@
           ]
         },
         {
-          "name": "displayed_workdir",
-          "kind": "str",
-          "description": "",
-          "value": "",
-          "path": "/displayed_workdir",
-          "popular": false,
-          "enumChoices": [],
-          "valueLabels": {},
-          "layerValues": [
-            {
-              "layer": "default",
-              "value": ""
-            }
-          ]
-        },
-        {
-          "name": "context_warnings",
-          "kind": "bool",
-          "description": "",
-          "value": false,
-          "path": "/context_warnings",
-          "popular": false,
-          "enumChoices": [],
-          "valueLabels": {},
-          "layerValues": [
-            {
-              "layer": "default",
-              "value": false
-            }
-          ]
-        },
-        {
           "name": "voice_mode_enabled",
           "kind": "bool",
           "description": "",
@@ -1465,22 +1433,6 @@
           "value": false,
           "path": "/bypass_tool_permissions",
           "popular": true,
-          "enumChoices": [],
-          "valueLabels": {},
-          "layerValues": [
-            {
-              "layer": "default",
-              "value": false
-            }
-          ]
-        },
-        {
-          "name": "raise_on_compaction_failure",
-          "kind": "bool",
-          "description": "",
-          "value": false,
-          "path": "/raise_on_compaction_failure",
-          "popular": false,
           "enumChoices": [],
           "valueLabels": {},
           "layerValues": [
@@ -1555,43 +1507,11 @@
           ]
         },
         {
-          "name": "include_model_info",
-          "kind": "bool",
-          "description": "",
-          "value": true,
-          "path": "/include_model_info",
-          "popular": false,
-          "enumChoices": [],
-          "valueLabels": {},
-          "layerValues": [
-            {
-              "layer": "default",
-              "value": true
-            }
-          ]
-        },
-        {
           "name": "include_project_context",
           "kind": "bool",
           "description": "",
           "value": true,
           "path": "/include_project_context",
-          "popular": false,
-          "enumChoices": [],
-          "valueLabels": {},
-          "layerValues": [
-            {
-              "layer": "default",
-              "value": true
-            }
-          ]
-        },
-        {
-          "name": "include_prompt_detail",
-          "kind": "bool",
-          "description": "",
-          "value": true,
-          "path": "/include_prompt_detail",
           "popular": false,
           "enumChoices": [],
           "valueLabels": {},

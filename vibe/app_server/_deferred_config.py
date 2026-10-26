@@ -19,7 +19,10 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 import contextlib
 
-from mistralai_vibe_local_harness.vibe import HarnessTurnConflictError
+from mistralai_vibe_local_harness.vibe import (
+    HarnessConfigurationRejectedError,
+    HarnessTurnConflictError,
+)
 
 
 class DeferredConfiguration[DerivationT]:
@@ -92,6 +95,12 @@ class DeferredConfiguration[DerivationT]:
         except HarnessTurnConflictError:
             self._parked = True
             return False
+        except HarnessConfigurationRejectedError:
+            # Dropped, not parked: Core refuses the same configuration until
+            # the context changes, so a parked one fails every boundary after
+            # this and no queued turn ever starts. Core keeps what it runs, and
+            # the caller hears why.
+            raise
         except BaseException:
             # Parked until it is actually running. One caller is the event pump,
             # whose task is cancelled when the session's stream ends, and a

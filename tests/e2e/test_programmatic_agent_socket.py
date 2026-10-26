@@ -654,7 +654,7 @@ def test_a_skill_left_out_of_the_sandbox_is_a_warning_in_the_export(
     *Do*: Run `vibe -p --agent-socket`, then the same prompt on the host.
     *Assert*: The socket run finishes, and its export warns that the skill was
     left out, naming the skill's file. The host run, which keeps the skill,
-    exports no warnings at all.
+    exports no other warning.
     """
     # Prepare
     skill_dir = Path(os.environ["VIBE_HOME"]) / "skills" / "huge"
@@ -693,13 +693,18 @@ def test_a_skill_left_out_of_the_sandbox_is_a_warning_in_the_export(
     export = read_export(socket_out)
     assert export.outcome == "finished"
     assert export.warnings is not None
-    [warning] = export.warnings
+    # The mock server answers the connector bootstrap with an error (501, not
+    # the 404 of a server without connectors), so both runs also warn that
+    # connectors could not load: only the skill warning is under test.
+    [warning] = [w for w in export.warnings if w.source != "integrations_unavailable"]
     assert warning.source == str(skill_file)
     assert warning.message.startswith("Skill left out of the sandbox: ")
     assert "data.bin exceeds the size limit" in warning.message
     assert host_run.returncode == 0, host_run.stderr
-    host_export = json.loads((host_out / "export.json").read_text(encoding="utf-8"))
-    assert "warnings" not in host_export
+    host_export = read_export(host_out)
+    assert [
+        w for w in host_export.warnings or [] if w.source != "integrations_unavailable"
+    ] == []
 
 
 def _read_then_answer(

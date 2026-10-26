@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import pytest
 
+from vibe.core.config import ProviderConfig, VibeConfigSchema
 from vibe.setup.onboarding.context import (
+    CUSTOM_CONSOLE_URL_ENV_VAR,
+    OnboardingContext,
     _normalize_origin,
     browser_auth_account_base,
     browser_auth_requires_origin_rewrite,
     is_likely_mistral_private_cloud_domain,
     is_valid_custom_domain,
+    pinned_console_api_base,
+    pinned_console_url_from_env,
     resolve_browser_auth_urls,
 )
 
@@ -204,3 +209,129 @@ def test_is_likely_mistral_private_cloud_domain_false_for_non_private(
     value: str,
 ) -> None:
     assert not is_likely_mistral_private_cloud_domain(value)
+
+
+@pytest.fixture
+def _no_pinned_console_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(CUSTOM_CONSOLE_URL_ENV_VAR, raising=False)
+
+
+def test_pinned_console_url_from_env_returns_none_when_unset(
+    _no_pinned_console_url: None,
+) -> None:
+    assert pinned_console_url_from_env() is None
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_pinned_console_url_from_env_returns_none_when_blank(
+    monkeypatch: pytest.MonkeyPatch, _no_pinned_console_url: None, value: str
+) -> None:
+    monkeypatch.setenv(CUSTOM_CONSOLE_URL_ENV_VAR, value)
+    assert pinned_console_url_from_env() is None
+
+
+def test_pinned_console_url_from_env_normalizes_bare_domain(
+    monkeypatch: pytest.MonkeyPatch, _no_pinned_console_url: None
+) -> None:
+    monkeypatch.setenv(CUSTOM_CONSOLE_URL_ENV_VAR, "console.acme.internal/")
+    assert pinned_console_url_from_env() == "https://console.acme.internal"
+
+
+def test_pinned_console_url_from_env_keeps_explicit_scheme(
+    monkeypatch: pytest.MonkeyPatch, _no_pinned_console_url: None
+) -> None:
+    monkeypatch.setenv(CUSTOM_CONSOLE_URL_ENV_VAR, "http://localhost:8080")
+    assert pinned_console_url_from_env() == "http://localhost:8080"
+
+
+@pytest.mark.parametrize("value", ["not a domain", "ftp://example.com", "http://a b"])
+def test_pinned_console_url_from_env_ignores_invalid_values(
+    monkeypatch: pytest.MonkeyPatch, _no_pinned_console_url: None, value: str
+) -> None:
+    monkeypatch.setenv(CUSTOM_CONSOLE_URL_ENV_VAR, value)
+    assert pinned_console_url_from_env() is None
+
+
+def test_onboarding_context_load_reads_pinned_console_url_from_env(
+    monkeypatch: pytest.MonkeyPatch, _no_pinned_console_url: None
+) -> None:
+    monkeypatch.setenv(CUSTOM_CONSOLE_URL_ENV_VAR, "https://console.acme.internal")
+    assert (
+        OnboardingContext.load().pinned_console_url == "https://console.acme.internal"
+    )
+
+
+def test_onboarding_context_load_prefers_explicit_pin_over_env(
+    monkeypatch: pytest.MonkeyPatch, _no_pinned_console_url: None
+) -> None:
+    monkeypatch.setenv(CUSTOM_CONSOLE_URL_ENV_VAR, "https://console.acme.internal")
+    context = OnboardingContext.load(
+        pinned_console_url="https://console.other.internal"
+    )
+    assert context.pinned_console_url == "https://console.other.internal"
+
+
+def test_onboarding_context_defaults_to_no_pin(_no_pinned_console_url: None) -> None:
+    assert OnboardingContext.load().pinned_console_url is None
+
+
+def test_onboarding_context_from_config_reads_pinned_console_url_from_env(
+    monkeypatch: pytest.MonkeyPatch, _no_pinned_console_url: None
+) -> None:
+    monkeypatch.setenv(CUSTOM_CONSOLE_URL_ENV_VAR, "https://console.acme.internal")
+    context = OnboardingContext.from_config(VibeConfigSchema.model_construct())
+    assert context.pinned_console_url == "https://console.acme.internal"
+
+
+def test_onboarding_context_load_explicit_none_pin_forces_no_pin(
+    monkeypatch: pytest.MonkeyPatch, _no_pinned_console_url: None
+) -> None:
+    monkeypatch.setenv(CUSTOM_CONSOLE_URL_ENV_VAR, "https://console.acme.internal")
+    context = OnboardingContext.load(pinned_console_url=None)
+    assert context.pinned_console_url is None
+
+
+def _split_provider(browser_base: str | None, api_base: str | None) -> ProviderConfig:
+    return ProviderConfig(
+        name="acme",
+        api_base="https://api.acme.internal/v1",
+        browser_auth_base_url=browser_base,
+        browser_auth_api_base_url=api_base,
+    )
+
+
+def test_pinned_console_api_base_preserves_split_base_matching_pin() -> None:
+    provider = _split_provider(
+        "https://console.acme.internal", "https://connector.acme.internal/api"
+    )
+    assert (
+        pinned_console_api_base(provider, "https://console.acme.internal")
+        == "https://connector.acme.internal/api"
+    )
+
+
+def test_pinned_console_api_base_matches_pin_despite_slash_and_scheme() -> None:
+    provider = _split_provider(
+        "console.acme.internal/", "https://connector.acme.internal/api"
+    )
+    assert (
+        pinned_console_api_base(provider, "https://console.acme.internal")
+        == "https://connector.acme.internal/api"
+    )
+
+
+@pytest.mark.parametrize(
+    ("browser_base", "api_base"),
+    [
+        # A split base of a different deployment must not be preserved.
+        ("https://console.other.internal", "https://connector.acme.internal/api"),
+        # No split base configured: the pin derives `{pin}/api`.
+        ("https://console.acme.internal", None),
+        (None, "https://connector.acme.internal/api"),
+    ],
+)
+def test_pinned_console_api_base_returns_none_otherwise(
+    browser_base: str | None, api_base: str | None
+) -> None:
+    provider = _split_provider(browser_base, api_base)
+    assert pinned_console_api_base(provider, "https://console.acme.internal") is None

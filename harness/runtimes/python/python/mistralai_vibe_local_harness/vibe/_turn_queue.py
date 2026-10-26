@@ -79,6 +79,15 @@ class SessionTurnQueue:
     def __bool__(self) -> bool:
         return bool(self._items)
 
+    def holds_block(self, predicate: Callable[[RustContentBlock], bool]) -> bool:
+        """Whether any block of queued input matches ``predicate``."""
+        return any(
+            predicate(block)
+            for record in self._items
+            for entry in record.prepared_entries
+            for block in entry.content
+        )
+
     @property
     def state(self) -> TurnQueue:
         return TurnQueue(

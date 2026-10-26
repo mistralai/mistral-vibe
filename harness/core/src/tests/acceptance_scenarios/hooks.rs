@@ -247,6 +247,88 @@ fn all_hook_points_execute_in_one_tool_using_turn() {
 }
 
 ///
+/// *Prepare*: One session binds a post-LLM hook and a post-agent hook.
+/// *Do*: Complete the model call with every provider token counter, then accept the candidate at each hook.
+/// *Assert*: Both hooks and the committed message receive every token counter unchanged.
+///
+#[test]
+fn completion_hooks_receive_every_token_counter() {
+    // Prepare
+    let turn_id = "turn-hook-usage";
+    let mut config = config();
+    config.capabilities.hook_bindings = serde_json::from_value(json!([
+        {"id": "usage-post-llm", "point": "post_llm_call", "order": 0, "selector": {"type": "always"}},
+        {"id": "usage-post-agent", "point": "post_agent_turn", "order": 1, "selector": {"type": "always"}}
+    ]))
+    .expect("completion hook bindings configure");
+    let mut runtime = SynchronousRuntime::new(config);
+    let completion = runtime.start_turn(turn_id, "count my tokens");
+    let usage = json!({
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "total_tokens": 150,
+        "cached_input_tokens": 80,
+        "cache_write_tokens": 25,
+        "reasoning_tokens": 12,
+    });
+    let mut candidate = text_candidate("counted");
+    candidate["usage"] = usage.clone();
+    let mut model_result = text_completion(&completion, "counted");
+    model_result["result"]["usage"] = usage;
+
+    // Do
+    let post_llm = runtime
+        .apply(
+            model_result,
+            running(turn_id).dispatch(hook_call(
+                "post_llm_call",
+                &["usage-post-llm"],
+                json!({"candidate": candidate}),
+            )),
+        )
+        .only_action();
+    let post_agent = runtime
+        .apply(
+            hook_completed(
+                &post_llm,
+                "post_llm_call",
+                json!({"type": "accept", "acceptance": {"type": "candidate"}}),
+            ),
+            running(turn_id).dispatch(hook_call(
+                "post_agent_turn",
+                &["usage-post-agent"],
+                json!({"candidate": candidate}),
+            )),
+        )
+        .only_action();
+    runtime.apply(
+        hook_completed(
+            &post_agent,
+            "post_agent_turn",
+            json!({"type": "accept", "acceptance": {"type": "candidate"}}),
+        ),
+        completed(turn_id, vec![json!({"type": "text", "text": "counted"})])
+            .observe(json!({
+                "type": "assistant_message_committed",
+                "turn_id": turn_id,
+                "action_id": action_id(&completion),
+                "candidate": candidate,
+            }))
+            .observe(turn_completed(turn_id, "counted")),
+    );
+
+    // Assert
+    assert_eq!(
+        post_llm["input"]["candidate"]["usage"]["cache_write_tokens"],
+        25
+    );
+    assert_eq!(
+        post_agent["input"]["candidate"]["usage"]["reasoning_tokens"],
+        12
+    );
+}
+
+///
 /// *Prepare*: An always binding and a filesystem-specific binding both observe the same direct read call.
 /// *Do*: Run both Runtime hook handlers in order, return their final transformed arguments, execute the tool, and finish the turn.
 /// *Assert*: The second handler receives the first handler's output and every Core transition has the expected observation and turn state.

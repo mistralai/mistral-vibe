@@ -72,7 +72,7 @@ pub enum Surface {
     /// A selectable rendered region, identified independently from its mouse target.
     Region(RegionId),
     Composer,
-    /// The bottom bar (working directory + PID), a single selectable row.
+    /// The bottom bar (working directory, model and token budget), a single selectable row.
     BottomBar,
 }
 
@@ -211,6 +211,9 @@ pub struct Session {
     pub prepared_worktree: Option<crate::worktree::WorktreeInfo>,
     /// Context budget `(current_tokens, max_tokens)`; `(_, 0)` renders as empty.
     pub tokens: (u64, u64),
+    /// The session's PR/MR artifacts, latest first; the footer shows the
+    /// latest as a link, or a modal listing them all when there are several.
+    pub artifacts: Vec<crate::server::PublicSessionArtifact>,
     pub stats: AgentStats,
     pub startup_config: StartupConfig,
     pub startup_error: Option<String>,
@@ -303,6 +306,8 @@ pub struct View {
     /// Text rectangle of each toast painted last frame, keyed by toast id and
     /// ordered newest last. Bounded by the stack the rack fits on screen.
     pub toast_text_areas: Vec<(u64, Rect)>,
+    /// The active model's name in the bottom bar painted last frame, which a click opens `/model` on.
+    pub footer_model_area: Rect,
     /// The toast text region a selection is anchored in, or the default region
     /// while no toast owns one.
     pub toast_selection_region: Region,
@@ -318,6 +323,8 @@ pub struct View {
     pub bottom_app_selection_folds: crate::selection::Folds,
     /// The bottom app drawn last frame and its box rect, which own the box selection.
     pub bottom_app: Option<(crate::ui::bottom_app::Kind, Rect)>,
+    /// The PR/MR link painted in the bottom bar last frame, for click routing.
+    pub bottom_bar_link: Option<ui::bottom_bar::BarLink>,
     /// Wrapped rows of each toast painted last frame, keyed by toast id.
     pub toast_folds: Vec<(u64, crate::selection::Folds)>,
     /// Inclusive `(y, x0, x1)` cells inside the region that belong to no widget,
@@ -385,12 +392,14 @@ impl Default for View {
             pointer_shape: crate::pointer::Shape::default(),
             selection_region: Region::default(),
             toast_text_areas: Vec::new(),
+            footer_model_area: Rect::default(),
             toast_selection_region: Region::default(),
             loading_selection_region: Region::default(),
             bottom_app_selection_region: Region::default(),
             bottom_app_selection_chrome: Vec::new(),
             bottom_app_selection_folds: crate::selection::Folds::default(),
             bottom_app: None,
+            bottom_bar_link: None,
             toast_folds: Vec::new(),
             selection_chrome: Vec::new(),
             selection_hangs: Vec::new(),
@@ -432,8 +441,8 @@ pub struct Overlays {
 /// Shared `/` and `@` completion popup state.
 #[derive(Default)]
 pub struct Completion {
-    /// User-invocable skills `(name, description)`, shown as `/name` popup rows.
-    pub skills: Vec<(String, String)>,
+    /// User-invocable skills, shown as `/name` popup rows.
+    pub skills: Vec<crate::skill::Skill>,
     /// Files below `cwd`, maintained by a background watcher.
     pub files: FileIndex,
     /// Entries currently displayed by the shared `/` and `@` popup.
@@ -519,6 +528,9 @@ pub struct Agents {
     /// Name the last Shift+Tab asked for, painted before the server answers
     /// and re-used as the base of a coalesced press.
     pub desired: Option<String>,
+    /// The last target the server refused; the next Shift+Tab cycles from it
+    /// so a broken profile does not trap the cycle.
+    pub refused: Option<String>,
     /// Whether a `session/agent/update` is in flight.
     pub switch_active: bool,
     /// Whether `/leanstall` or `/unleanstall` is in flight; input is rejected until it finishes.
@@ -563,6 +575,15 @@ pub struct ModelPicker {
     /// Sender carrying the `config/write` and `config/reload` answers, so the
     /// commit re-applies the server's config.
     pub tx: Option<Sender<crate::model_picker::Event>>,
+}
+
+/// The artifacts modal state (a bottom-app): the session's PR/MR links.
+#[derive(Default)]
+pub struct ArtifactsModal {
+    /// While set the modal replaces the input box: title, link rows, hint.
+    pub open: bool,
+    /// Highlighted artifact (latest first) and the viewport.
+    pub list: crate::option_list::OptionList<crate::option_list::SingleAction>,
 }
 
 /// `/log-level` picker state (a bottom-app).
@@ -804,6 +825,7 @@ pub struct App {
     pub model_picker: ModelPicker,
     pub log_level_picker: LogLevelPicker,
     pub thinking_picker: ThinkingPicker,
+    pub artifacts_modal: ArtifactsModal,
     pub resume_picker: ResumePicker,
     pub vibe_code_project: crate::vibe_code_project::State,
     /// The running `/teleport` operation, if any.
@@ -976,16 +998,20 @@ impl App {
         }
     }
 
-    /// Show the hint-free `Loading` spinner while a slash command fetches.
-    pub fn begin_command_loading(&mut self) {
-        if self.session.shell_operation_id.is_some() {
-            return;
+    /// Show the hint-free `Loading` spinner while a slash command fetches; false when another job owns it.
+    pub fn begin_command_loading(&mut self) -> bool {
+        // A running shell command or turn keeps its own loading line.
+        if self.session.shell_operation_id.is_some()
+            || matches!(self.session.status, Status::Generating { .. })
+        {
+            return false;
         }
         self.view.loading = LoadingAnim::default();
         self.view
             .loading
             .set_label(ui::loading::COMMAND_LOADING_STATUS);
         self.view.command_loading = true;
+        true
     }
 
     /// Render the whole UI; layout and per-region drawing live in `ui`.

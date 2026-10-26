@@ -55,7 +55,13 @@ def test_linux_wheel_build_environment_provides_zig(
 
 
 @pytest.mark.parametrize(
-    "arguments", ["--compatibility linux", "--compatibility=linux"]
+    "arguments",
+    [
+        "--compatibility linux",
+        "--compatibility=linux",
+        "--manylinux linux",
+        "--manylinux=linux",
+    ],
 )
 def test_native_linux_intermediate_wheel_uses_the_image_toolchain(
     monkeypatch: pytest.MonkeyPatch, arguments: str
@@ -216,6 +222,258 @@ def test_stage_rust_cli_finds_a_cross_target_build(
     assert bundled.read_bytes() == b"cross-rust-cli"
 
 
+def _stage_portable_rust_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    binary: bytes,
+    *,
+    host: str = "linux",
+    built_triple: str | None = "x86_64-unknown-linux-gnu",
+) -> tuple[ModuleType, list[tuple[list[str], dict[str, str]]], Path]:
+    """Stage vibe-rs as a manylinux wheel build on x86_64 Linux does."""
+    backend = _load_backend(monkeypatch)
+    monkeypatch.setattr(backend.sys, "platform", host)
+    project = tmp_path / "project"
+    target = project / ".native-build/vibe-rs-target"
+    bundled = project / "vibe/_bin" / backend._TUI_NAME
+    bundled.parent.mkdir(parents=True)
+    bundled.write_bytes(b"previous-rust-cli")
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def run(command: list[str], *, cwd: Path, env: dict[str, str], check: bool) -> None:
+        calls.append((command, env))
+        built = target / (built_triple or "") / "release" / backend._TUI_NAME
+        built.parent.mkdir(parents=True)
+        built.write_bytes(binary)
+
+    monkeypatch.setattr(backend, "_PROJECT_ROOT", project)
+    monkeypatch.setattr(backend, "_TUI_TARGET", target)
+    monkeypatch.setattr(backend, "_BUNDLED_TUI", bundled)
+    monkeypatch.setattr(backend, "_ZIG_WRAPPERS", project / ".native-build/zig")
+    monkeypatch.setattr(backend.subprocess, "run", run)
+    monkeypatch.setattr(backend.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(backend.shutil, "which", lambda _name: "/build env/maturin")
+    monkeypatch.setenv(
+        "MATURIN_PEP517_ARGS", "--locked --compatibility manylinux_2_28 --zig"
+    )
+    monkeypatch.setenv("CARGO_BUILD_FLAGS", "--no-default-features")
+    monkeypatch.delenv("CARGO_BUILD_TARGET", raising=False)
+    return backend, calls, bundled
+
+
+@pytest.mark.parametrize(
+    ("arguments", "glibc"),
+    [
+        ("--locked --compatibility manylinux_2_28 --zig", "2.28"),
+        ("--locked --compatibility manylinux2014 --zig", "2.17"),
+        ("--locked --compatibility=manylinux_2_31 --zig", "2.31"),
+        ("--locked --compatibility linux --zig", "2.28"),
+        ("--locked --zig", "2.17"),
+    ],
+)
+def test_portable_linux_rust_cli_is_linked_for_the_wheel_glibc(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arguments: str, glibc: str
+) -> None:
+    """*Prepare*: A zig wheel build on x86_64 Linux for a manylinux tag, a
+    `linux` tag or no tag, whose vibe-rs needs glibc 2.17 at most.
+    *Do*: Stage vibe-rs.
+    *Assert*: Cargo built it for the gnu target, linked and compiled with
+    Maturin's zig wrappers for the tag's glibc (2.17, Maturin's zig default,
+    without a tag; 2.28 for `linux`), and the binary was bundled.
+    """
+    # Prepare
+    binary = b"\x7fELF\0GLIBC_2.2.5\0GLIBC_2.17\0"
+    backend, calls, bundled = _stage_portable_rust_cli(monkeypatch, tmp_path, binary)
+    monkeypatch.setenv("MATURIN_PEP517_ARGS", arguments)
+
+    # Do
+    backend._stage_rust_cli()
+
+    # Assert
+    [(command, environment)] = calls
+    assert command[-3:] == [
+        "--no-default-features",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+    ]
+    linker = Path(environment["CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"])
+    assert environment["CC_x86_64_unknown_linux_gnu"] == str(linker)
+    assert linker.read_text() == (
+        "#!/bin/sh\nexec '/build env/maturin' zig cc -- "
+        f'-target x86_64-linux-gnu.{glibc} "$@"\n'
+    )
+    assert "zig c++ --" in Path(environment["CXX_x86_64_unknown_linux_gnu"]).read_text()
+    assert "zig ar --" in Path(environment["AR_x86_64_unknown_linux_gnu"]).read_text()
+    assert bundled.read_bytes() == binary
+
+
+@pytest.mark.parametrize(
+    ("arguments", "binary", "floor"),
+    [
+        (
+            "--locked --compatibility manylinux_2_28 --zig",
+            b"\x7fELF\0GLIBC_2.28\0GLIBC_2.34\0",
+            "2.34",
+        ),
+        ("--locked --zig", b"\x7fELF\0GLIBC_2.17\0GLIBC_2.28\0", "2.28"),
+    ],
+)
+def test_portable_linux_rust_cli_needing_a_newer_glibc_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    arguments: str,
+    binary: bytes,
+    floor: str,
+) -> None:
+    """*Prepare*: A manylinux_2_28 wheel build whose vibe-rs needs glibc 2.34,
+    or a bare `--zig` build (Maturin's manylinux2014) whose vibe-rs needs 2.28.
+    *Do*: Stage vibe-rs.
+    *Assert*: The build fails naming the floor and keeps the previous binary.
+    """
+    # Prepare
+    backend, _calls, bundled = _stage_portable_rust_cli(monkeypatch, tmp_path, binary)
+    monkeypatch.setenv("MATURIN_PEP517_ARGS", arguments)
+
+    # Do / Assert
+    with pytest.raises(backend.NativeBuildError, match=f"needs glibc {floor}"):
+        backend._stage_rust_cli()
+    assert bundled.read_bytes() == b"previous-rust-cli"
+
+
+@pytest.mark.parametrize(
+    ("flags", "build_target"),
+    [("--target x86_64-unknown-linux-gnu", None), ("", "x86_64-unknown-linux-gnu")],
+)
+def test_explicit_target_rust_cli_needing_a_newer_glibc_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    flags: str,
+    build_target: str | None,
+) -> None:
+    """*Prepare*: A manylinux_2_28 wheel build with an explicit Cargo target,
+    which links vibe-rs without zig, and a vibe-rs that needs glibc 2.34.
+    *Do*: Stage vibe-rs.
+    *Assert*: The wheel's glibc floor is still checked and the build fails.
+    """
+    # Prepare
+    binary = b"\x7fELF\0GLIBC_2.28\0GLIBC_2.34\0"
+    backend, calls, bundled = _stage_portable_rust_cli(monkeypatch, tmp_path, binary)
+    monkeypatch.setenv("CARGO_BUILD_FLAGS", flags)
+    if build_target is not None:
+        monkeypatch.setenv("CARGO_BUILD_TARGET", build_target)
+
+    # Do / Assert
+    with pytest.raises(backend.NativeBuildError, match=r"needs glibc 2\.34"):
+        backend._stage_rust_cli()
+    [(_command, environment)] = calls
+    assert "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER" not in environment
+    assert bundled.read_bytes() == b"previous-rust-cli"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "tag"),
+    [
+        ("--locked --compatibility manylinux_2_28 --zig", (2, 28)),
+        ("--compatibility=manylinux_2_31", (2, 31)),
+        ("--compatibility manylinux2014 --zig", (2, 17)),
+        ("--locked --zig", (2, 17)),
+        ("--manylinux manylinux_2_28 --zig", (2, 28)),
+        ("--manylinux=manylinux_2_31 --zig", (2, 31)),
+        ("--compatibility linux --zig", None),
+        ("--compatibility linux", None),
+        ("--compatibility pypi", None),
+        ("", None),
+    ],
+)
+def test_wheel_manylinux_glibc_reads_the_compatibility_tag(
+    monkeypatch: pytest.MonkeyPatch, arguments: str, tag: tuple[int, int] | None
+) -> None:
+    backend = _load_backend(monkeypatch)
+    monkeypatch.setattr(backend.sys, "platform", "linux")
+    monkeypatch.setattr(backend.platform, "machine", lambda: "x86_64")
+    monkeypatch.setenv("MATURIN_PEP517_ARGS", arguments)
+
+    assert backend._wheel_manylinux_glibc() == tag
+
+
+def test_bare_zig_default_tag_is_only_assumed_on_x86_64_and_aarch64(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """*Prepare*: A bare `--zig` build on riscv64, where Maturin's zig default
+    is manylinux_2_31, not manylinux2014.
+    *Do*: Read the wheel's glibc.
+    *Assert*: No floor is assumed.
+    """
+    backend = _load_backend(monkeypatch)
+    monkeypatch.setattr(backend.sys, "platform", "linux")
+    monkeypatch.setattr(backend.platform, "machine", lambda: "riscv64")
+    monkeypatch.setenv("MATURIN_PEP517_ARGS", "--locked --zig")
+
+    assert backend._wheel_manylinux_glibc() is None
+
+
+def test_native_linux_wheel_rust_cli_skips_the_manylinux_floor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """*Prepare*: A `--compatibility linux` wheel build, whose vibe-rs needs
+    the image's newer glibc.
+    *Do*: Stage vibe-rs.
+    *Assert*: No manylinux floor applies, so the binary is bundled.
+    """
+    # Prepare
+    binary = b"\x7fELF\0GLIBC_2.39\0"
+    backend, _calls, bundled = _stage_portable_rust_cli(
+        monkeypatch, tmp_path, binary, built_triple=None
+    )
+    monkeypatch.setenv("MATURIN_PEP517_ARGS", "--locked --compatibility linux")
+
+    # Do
+    backend._stage_rust_cli()
+
+    # Assert
+    assert bundled.read_bytes() == binary
+
+
+@pytest.mark.parametrize("host", ["darwin", "win32"])
+def test_zig_flag_off_linux_builds_the_host_rust_cli(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, host: str
+) -> None:
+    """*Prepare*: A macOS or Windows wheel build with a user-passed `--zig`.
+    *Do*: Stage vibe-rs.
+    *Assert*: Cargo builds it for the host, not as a Linux ELF via zig.
+    """
+    # Prepare
+    backend, calls, bundled = _stage_portable_rust_cli(
+        monkeypatch, tmp_path, b"host-rust-cli", host=host, built_triple=None
+    )
+    monkeypatch.setenv("MATURIN_PEP517_ARGS", "--locked --zig")
+
+    # Do
+    backend._stage_rust_cli()
+
+    # Assert
+    [(command, environment)] = calls
+    assert "--target" not in command
+    assert not any(name.endswith("_LINKER") for name in environment)
+    assert bundled.read_bytes() == b"host-rust-cli"
+
+
+@pytest.mark.parametrize(
+    ("binary", "floor"),
+    [
+        (b"GLIBC_2.2.5\0GLIBC_2.17\0GLIBC_PRIVATE\0", (2, 17)),
+        (b"GLIBC_2.9\0GLIBC_2.28\0", (2, 28)),
+        (b"no glibc symbols", None),
+    ],
+)
+def test_glibc_floor_is_the_newest_symbol_version(
+    monkeypatch: pytest.MonkeyPatch, binary: bytes, floor: tuple[int, int] | None
+) -> None:
+    backend = _load_backend(monkeypatch)
+
+    assert backend._glibc_floor(binary) == floor
+
+
 ALSA_PROBE = ["pkg-config", "--exists", "alsa"]
 PKGCONF_PROBE = ["pkgconf", "--exists", "alsa"]
 
@@ -229,6 +487,7 @@ def _stage_rust_cli_commands(
     probes: dict[str, int],
     build_target: str | None = None,
     pkg_config: str | None = None,
+    maturin_args: str | None = None,
 ) -> list[list[str]]:
     backend = _load_backend(monkeypatch)
     project = tmp_path / "project"
@@ -267,6 +526,13 @@ def _stage_rust_cli_commands(
         monkeypatch.delenv("PKG_CONFIG", raising=False)
     else:
         monkeypatch.setenv("PKG_CONFIG", pkg_config)
+    if maturin_args is None:
+        monkeypatch.delenv("MATURIN_PEP517_ARGS", raising=False)
+    else:
+        monkeypatch.setenv("MATURIN_PEP517_ARGS", maturin_args)
+        monkeypatch.setattr(backend, "_ZIG_WRAPPERS", project / ".native-build/zig")
+        monkeypatch.setattr(backend.platform, "machine", lambda: "x86_64")
+        monkeypatch.setattr(backend.shutil, "which", lambda _name: "/env/maturin")
 
     backend._stage_rust_cli()
 
@@ -274,7 +540,10 @@ def _stage_rust_cli_commands(
 
 
 def _assert_voice_disabled_warning(capsys: pytest.CaptureFixture[str]) -> None:
-    warning = capsys.readouterr().err
+    _assert_voice_disabled_warning_text(capsys.readouterr().err)
+
+
+def _assert_voice_disabled_warning_text(warning: str) -> None:
     assert "without voice mode" in warning
     assert "libasound2-dev" in warning
     assert "alsa-lib-devel" in warning
@@ -360,6 +629,45 @@ def test_linux_build_with_alsa_keeps_voice(
     assert cargo[-2:] == ["--jobs", "2"]
     assert "--no-default-features" not in cargo
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("probes", [{"pkg-config": 0}, {"pkg-config": 1}])
+def test_portable_linux_build_disables_voice_and_names_the_opt_ins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    probes: dict[str, int],
+) -> None:
+    """*Prepare*: A manylinux wheel build from a checkout (zig) on x86_64 Linux,
+    with no Cargo features chosen, with and without ALSA development files.
+    *Do*: Stage vibe-rs.
+    *Assert*: vibe-rs is built without voice for the zig target, because zig
+    cannot link the host's libasound for the wheel's older glibc, and the
+    warning names the opt-ins: a wheel for this machine only, or Cargo flags.
+    """
+    # Prepare / Do
+    commands = _stage_rust_cli_commands(
+        monkeypatch,
+        tmp_path,
+        platform="linux",
+        flags="",
+        probes=probes,
+        maturin_args="--locked --compatibility manylinux_2_28 --zig",
+    )
+
+    # Assert
+    [cargo] = commands
+    assert cargo[-3:] == [
+        "--no-default-features",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+    ]
+    warning = capsys.readouterr().err
+    assert warning.count("without voice mode") == 1
+    assert "glibc 2.28 and later" in warning
+    assert 'MATURIN_PEP517_ARGS="--compatibility linux"' in warning
+    assert "CARGO_BUILD_FLAGS" in warning
+    _assert_voice_disabled_warning_text(warning)
 
 
 @pytest.mark.parametrize(

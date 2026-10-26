@@ -14,10 +14,12 @@ class _Harness(App[None]):
         *,
         configured_custom_domain: str | None = None,
         configured_custom_api_base: str | None = None,
+        pinned_console_url: str | None = None,
     ) -> None:
         super().__init__()
         self._configured_custom_domain = configured_custom_domain
         self._configured_custom_api_base = configured_custom_api_base
+        self._pinned_console_url = pinned_console_url
 
     @property
     def configured_custom_domain(self) -> str | None:
@@ -26,6 +28,10 @@ class _Harness(App[None]):
     @property
     def configured_custom_api_base(self) -> str | None:
         return self._configured_custom_api_base
+
+    @property
+    def pinned_console_url(self) -> str | None:
+        return self._pinned_console_url
 
     def get_default_screen(self) -> CustomDomainScreen:
         return CustomDomainScreen()
@@ -180,6 +186,51 @@ async def test_reset_feedback_clears_all_state_classes_and_text() -> None:
             assert not feedback.has_class(state)
         for state in ("valid", "invalid", "warning"):
             assert not box.has_class(state)
+
+
+@pytest.mark.asyncio
+async def test_pinned_console_url_prefills_and_locks_domain_input() -> None:
+    async with _Harness(
+        pinned_console_url="https://console.acme.internal",
+        configured_custom_api_base="https://stale.connector.example/api",
+    ).run_test() as pilot:
+        domain = pilot.app.query_one("#domain", Input)
+        assert domain.value == "https://console.acme.internal"
+        assert domain.disabled
+
+        # The API base is locked to the console's derived default too: the
+        # input is disabled and never seeded from stale config.
+        api_base = pilot.app.query_one("#api-base", Input)
+        assert api_base.disabled
+        assert api_base.value == ""
+        assert not pilot.app.query_one("#api-base-box").display
+
+        title = pilot.app.query_one("#custom-domain-title", NoMarkupStatic)
+        subtitle = pilot.app.query_one("#custom-domain-subtitle", NoMarkupStatic)
+        assert str(title.content) == "Sign in to your console"
+        assert (
+            str(subtitle.content)
+            == "Your administrator has configured Vibe to sign in to this console."
+        )
+
+
+@pytest.mark.asyncio
+async def test_unpinned_domain_input_stays_editable() -> None:
+    async with _Harness(
+        configured_custom_api_base="https://connector.internal.example/api"
+    ).run_test() as pilot:
+        domain = pilot.app.query_one("#domain", Input)
+        assert not domain.disabled
+
+        api_base = pilot.app.query_one("#api-base", Input)
+        assert not api_base.disabled
+        assert api_base.value == "https://connector.internal.example/api"
+        assert pilot.app.query_one("#api-base-box").display
+
+        title = pilot.app.query_one("#custom-domain-title", NoMarkupStatic)
+        subtitle = pilot.app.query_one("#custom-domain-subtitle", NoMarkupStatic)
+        assert str(title.content) == "Use a custom domain"
+        assert str(subtitle.content) == "Point Vibe at a Mistral-compatible deployment."
 
 
 @pytest.mark.asyncio

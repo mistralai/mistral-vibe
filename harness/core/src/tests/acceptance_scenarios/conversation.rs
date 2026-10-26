@@ -2,28 +2,48 @@ use super::*;
 use crate::core::Message;
 
 /// *Prepare*: Hosts explicitly declare whether they can import parent conversation.
-/// *Do*: Call spawn through real program execution with valid and invalid selectors.
-/// *Assert*: Unsupported and malformed selections dispatch no child creation effect.
+/// *Do*: Call spawn through real program execution with valid and invalid contexts.
+/// *Assert*: Unsupported and malformed contexts dispatch no child creation effect.
 #[test]
-fn conversation_spawn_schema_matches_host_support_and_rejects_invalid_selectors() {
+fn conversation_spawn_schema_matches_host_support_and_rejects_invalid_contexts() {
+    let valid_contexts = [
+        json!("fresh"),
+        json!({"mode": "forked"}),
+        json!({"mode": "forked", "turns": "all"}),
+        json!({"mode": "forked", "turns": 1}),
+        json!({"mode": "forked", "turns": 4_294_967_295u32}),
+    ];
+    let invalid_contexts = [
+        json!("forked"),
+        json!("all"),
+        json!("none"),
+        json!(""),
+        json!(1),
+        json!(true),
+        json!(null),
+        json!({"mode": "fresh"}),
+        json!({"turns": 1}),
+        json!({"mode": "forked", "turns": 0}),
+        json!({"mode": "forked", "turns": -1}),
+        json!({"mode": "forked", "turns": 1.5}),
+        json!({"mode": "forked", "turns": "1"}),
+        json!({"mode": "forked", "turns": 4_294_967_296u64}),
+        json!({"mode": "forked", "turns": 1, "summary": true}),
+    ];
+    let contexts = std::iter::once((None, true))
+        .chain(
+            valid_contexts
+                .into_iter()
+                .map(|context| (Some(context), true)),
+        )
+        .chain(
+            invalid_contexts
+                .into_iter()
+                .map(|context| (Some(context), false)),
+        )
+        .collect::<Vec<_>>();
     for supported in [false, true] {
-        for selector in [
-            None,
-            Some(json!("all")),
-            Some(json!("none")),
-            Some(json!("1")),
-            Some(json!("01")),
-            Some(json!("999999999999999999999999")),
-            Some(json!("0")),
-            Some(json!("00")),
-            Some(json!("-1")),
-            Some(json!(1)),
-            Some(json!(true)),
-            Some(json!(null)),
-            Some(json!("")),
-            Some(json!("ALL")),
-            Some(json!(" 1")),
-        ] {
+        for (context, valid_context) in &contexts {
             // Prepare
             let mut settings = config();
             settings.settings.tools.subagents = serde_json::from_value(json!({
@@ -33,19 +53,10 @@ fn conversation_spawn_schema_matches_host_support_and_rejects_invalid_selectors(
             let mut runtime = SynchronousRuntime::new(settings);
             let first = runtime.start_turn("parent", "delegate");
             let mut args = json!({"name":"child", "message":"work"});
-            if let Some(value) = &selector {
-                args["fork_turns"] = value.clone();
+            if let Some(value) = context {
+                args["context"] = value.clone();
             }
-            let valid = selector.is_none()
-                || supported
-                    && selector.as_ref().is_some_and(|value| {
-                        value.as_str().is_some_and(|value| {
-                            matches!(
-                                value,
-                                "all" | "none" | "1" | "01" | "999999999999999999999999"
-                            )
-                        })
-                    });
+            let valid = context.is_none() || supported && *valid_context;
             let source = format!(
                 "try {{ return await tools.agents.spawn({args}); }} catch (error) {{ return 'rejected'; }}"
             );
@@ -76,6 +87,10 @@ fn conversation_spawn_schema_matches_host_support_and_rejects_invalid_selectors(
             }
         }
     }
+}
+
+fn forked(turns: Value) -> Value {
+    json!({"mode": "forked", "turns": turns})
 }
 
 /// *Prepare*: A parent Turn makes two tool calls at once, and only the first one finishes.
@@ -114,7 +129,7 @@ fn conversation_keeps_finished_results_of_a_running_tool_batch() {
     );
 
     // Do
-    let seed = messages(&parent.export_conversation("all"));
+    let seed = messages(&parent.export_conversation(forked(json!("all"))));
     let last = file_read_success(&actions[1], "hello from b");
     let next = parent
         .apply(
@@ -207,7 +222,7 @@ fn conversation_selects_whole_turns_and_closes_unfinished_tool_calls() {
         .only_action();
 
     // Do
-    let seed = parent.export_conversation("1");
+    let seed = parent.export_conversation(forked(json!(1)));
     parent.restart_from_checkpoint();
     let mut child_config = config();
     child_config.task_id = "child".into();
@@ -235,7 +250,7 @@ fn conversation_selects_whole_turns_and_closes_unfinished_tool_calls() {
             "STILL RUNNING IN THE SOURCE AGENT",
         ),
     ];
-    assert_eq!(seed, parent.export_conversation("01"));
+    assert_eq!(seed, parent.export_conversation(forked(json!(1))));
     assert_eq!(
         messages(&seed),
         [
@@ -247,12 +262,18 @@ fn conversation_selects_whole_turns_and_closes_unfinished_tool_calls() {
         .chain(running_call.clone())
         .collect::<Vec<_>>()
     );
-    assert_eq!(parent.export_conversation("none"), json!({"messages":[]}));
     assert_eq!(
-        parent.export_conversation("all"),
-        parent.export_conversation("999999999999999999999999999999")
+        parent.export_conversation(json!("fresh")),
+        json!({"messages":[]})
     );
-    assert_eq!(messages(&parent.export_conversation("all")).len(), 7);
+    assert_eq!(
+        parent.export_conversation(forked(json!("all"))),
+        parent.export_conversation(forked(json!(4_294_967_295u32)))
+    );
+    assert_eq!(
+        messages(&parent.export_conversation(forked(json!("all")))).len(),
+        7
+    );
     child.assert_last_model_message_update(
         &child_action,
         "replace",
@@ -274,7 +295,7 @@ fn conversation_selects_whole_turns_and_closes_unfinished_tool_calls() {
     child.finish_turn_with_text("child-turn", &child_action, "independent answer");
     assert!(
         !parent
-            .export_conversation("all")
+            .export_conversation(forked(json!("all")))
             .to_string()
             .contains("independent answer")
     );
@@ -292,7 +313,7 @@ fn compact(runtime: &mut SynchronousRuntime, summary: &str) {
         idle().observe(json!({
             "type":"context_compacted", "turn_id":null,
             "action_id":action["action_id"], "compaction_id":action["compaction_id"],
-            "attempt":1, "trigger":"manual", "summary":summary, "usage":null,
+            "attempt":1, "trigger":"manual", "summary":summary, "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
         })),
     );
 }
@@ -320,8 +341,8 @@ fn conversation_compaction_forms_one_turn_that_later_turns_follow() {
 
     // Do
     parent.restart_from_checkpoint();
-    let all = parent.export_conversation("all");
-    let latest = parent.export_conversation("1");
+    let all = parent.export_conversation(forked(json!("all")));
+    let latest = parent.export_conversation(forked(json!(1)));
     let mut child = SynchronousRuntime::new_with_conversation(config(), all.clone());
     compact(&mut child, "new child summary");
     let next = parent
@@ -339,20 +360,20 @@ fn conversation_compaction_forms_one_turn_that_later_turns_follow() {
     assert!(all.to_string().contains("shared aggregate summary"));
     assert!(all.to_string().contains("active token COPPER-92"));
     assert!(!all.to_string().contains("discarded assistant details"));
-    let child_seed = child.export_conversation("all");
+    let child_seed = child.export_conversation(forked(json!("all")));
     assert!(child_seed.to_string().contains("new child summary"));
     assert!(!child_seed.to_string().contains("shared aggregate summary"));
-    assert_eq!(child.export_conversation("1"), child_seed);
+    assert_eq!(child.export_conversation(forked(json!(1))), child_seed);
     assert_eq!(
-        messages(&parent.export_conversation("1")),
+        messages(&parent.export_conversation(forked(json!(1)))),
         vec![
             model_user_text("follow-up PEARL-5"),
             model_assistant_text("follow-up answer"),
         ]
     );
     assert_eq!(
-        messages(&parent.export_conversation("2")),
-        messages(&parent.export_conversation("all"))
+        messages(&parent.export_conversation(forked(json!(2)))),
+        messages(&parent.export_conversation(forked(json!("all"))))
     );
 }
 
@@ -377,8 +398,8 @@ fn conversation_counts_imported_history_as_turns() {
     let mut child = SynchronousRuntime::new_with_conversation(config(), seed);
 
     // Do
-    let imported_latest = child.export_conversation("1");
-    let imported_two = child.export_conversation("2");
+    let imported_latest = child.export_conversation(forked(json!(1)));
+    let imported_two = child.export_conversation(forked(json!(2)));
     let action = child
         .apply(
             user_message("child-turn", "child work", "queue"),
@@ -407,16 +428,19 @@ fn conversation_counts_imported_history_as_turns() {
         ]
     );
     assert_eq!(
-        messages(&child.export_conversation("1")),
+        messages(&child.export_conversation(forked(json!(1)))),
         vec![
             model_user_text("child work"),
             model_assistant_text("child answer"),
         ]
     );
-    assert_eq!(messages(&child.export_conversation("5")).len(), 10);
     assert_eq!(
-        child.export_conversation("5"),
-        child.export_conversation("all")
+        messages(&child.export_conversation(forked(json!(5)))).len(),
+        10
+    );
+    assert_eq!(
+        child.export_conversation(forked(json!(5))),
+        child.export_conversation(forked(json!("all")))
     );
 }
 
@@ -444,7 +468,7 @@ fn conversation_fork_excludes_parent_system_messages() {
     parent.finish_turn_with_text("parent-turn", &turn, "parent answer");
 
     // Do
-    let seed = parent.export_conversation("all");
+    let seed = parent.export_conversation(forked(json!("all")));
     let mut child_config = config();
     child_config.task_id = "child".into();
     child_config.system_instructions = "CHILD ONLY INSTRUCTIONS".into();
@@ -551,7 +575,7 @@ fn preserves_committed_steering_in_partial_fork_when_its_turn_was_interrupted() 
         ],
     );
     assert_eq!(
-        messages(&parent.export_conversation("all")),
+        messages(&parent.export_conversation(forked(json!("all")))),
         vec![
             model_user_text("unrelated request"),
             model_assistant_text("unrelated answer"),
@@ -561,7 +585,7 @@ fn preserves_committed_steering_in_partial_fork_when_its_turn_was_interrupted() 
         ],
     );
 
-    let seed = parent.export_conversation("2");
+    let seed = parent.export_conversation(forked(json!(2)));
     let mut child = SynchronousRuntime::new_with_conversation(config(), seed);
     let child_action = child
         .apply(
@@ -602,7 +626,7 @@ fn conversation_context_injected_before_a_turn_belongs_to_that_turn() {
     );
 
     // Do
-    let pending = runtime.export_conversation("1");
+    let pending = runtime.export_conversation(forked(json!(1)));
     runtime
         .apply(
             user_message("current", "delegate the database check", "queue"),
@@ -618,7 +642,7 @@ fn conversation_context_injected_before_a_turn_belongs_to_that_turn() {
         vec![model_user_text("database for this task: LOCAL-42")]
     );
     assert_eq!(
-        messages(&runtime.export_conversation("1")),
+        messages(&runtime.export_conversation(forked(json!(1)))),
         vec![
             model_user_text("database for this task: LOCAL-42"),
             model_user_text("delegate the database check"),
@@ -757,18 +781,18 @@ fn preserves_conversation_groups_and_sources_when_imported_and_restored() {
     ];
 
     // Do
-    let seed = parent.export_conversation("all");
+    let seed = parent.export_conversation(forked(json!("all")));
     let mut child = SynchronousRuntime::new_with_conversation(config(), seed.clone());
-    let before_restore = child.export_conversation("all");
+    let before_restore = child.export_conversation(forked(json!("all")));
     child.restart_from_checkpoint();
-    let after_restore = child.export_conversation("all");
+    let after_restore = child.export_conversation(forked(json!("all")));
 
     // Assert
     assert_eq!(conversation_groups(&seed), expected_groups);
     assert_eq!(conversation_groups(&before_restore), expected_groups);
     assert_eq!(conversation_groups(&after_restore), expected_groups);
     assert_eq!(
-        conversation_groups(&child.export_conversation("1")),
+        conversation_groups(&child.export_conversation(forked(json!(1)))),
         vec![expected_groups[1].clone()]
     );
 }

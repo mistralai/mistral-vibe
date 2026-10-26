@@ -4,6 +4,7 @@
     "consoleBaseUrl": "https://console.mistral.ai",
     "enableSystemTrustStore": false,
     "hasApiKey": false,
+    "pinnedConsoleUrl": null,
     "provider": {
       "apiBase": "https://api.mistral.ai/v1",
       "apiKeyEnvVar": "MISTRAL_API_KEY",

@@ -22,6 +22,7 @@ pub enum Kind {
     Model,
     LogLevel,
     Thinking,
+    Artifacts,
     Resume,
     Rewind,
     Mcp,
@@ -97,7 +98,7 @@ pub(crate) fn content(area: Rect) -> Rect {
 fn chunks(app: &App, area: Rect, box_height: u16) -> [Rect; 5] {
     let chunks = Layout::vertical([
         Constraint::Min(1),
-        Constraint::Length(super::loading_height(app)),
+        Constraint::Length(super::loading_height(app, area.width)),
         Constraint::Length(todo::row_height(app)),
         Constraint::Length(box_height),
         Constraint::Length(1),

@@ -44,11 +44,16 @@ from vibe.core.tools.builtins.managed_shell._windows import (
 )
 from vibe.core.tools.builtins.managed_shell.backend import ManagedShellBackendError
 from vibe.core.tools.permissions import PermissionContext, RequiredPermission
-from vibe.core.tools.utils import ToolPath, is_path_within_workdir, resolve_tool_path
+from vibe.core.tools.utils import (
+    ToolPath,
+    is_path_within_workdir,
+    names_a_link,
+    resolve_tool_path,
+    ungranted_paths,
+)
 from vibe.core.utils import is_windows
 from vibe.core.workspace import Workspace
 from vibe.observability.logging import logger
-from vibe.permissions import path_grant_pattern_matches
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
@@ -241,13 +246,14 @@ def _windows_looks_like_option(token: str) -> bool:
     return bool(body) and "/" not in body and "\\" not in body and ":" not in body
 
 
-def _windows_looks_like_path(token: str) -> bool:
+def _windows_looks_like_path(token: str, cwd: Path) -> bool:
     value = token.strip("\"'")
     return (
         value.startswith(("~", ".", "\\\\"))
         or (len(value) >= _WINDOWS_DRIVE_PREFIX_LENGTH and value[1] == ":")
         or "/" in value
         or "\\" in value
+        or names_a_link(value, cwd)
     )
 
 
@@ -413,7 +419,7 @@ def _windows_path(
             value = provider_path.group("path")
     if unresolved or unsupported_provider:
         return None, True
-    if not _windows_looks_like_path(value):
+    if not _windows_looks_like_path(value, command_cwd):
         return None, False
 
     windows_path = PureWindowsPath(value)
@@ -442,13 +448,15 @@ def _analyze_windows_paths(
     workspace: Workspace,
     scratchpad_dir: Path | None,
     environment: dict[str, str],
-) -> tuple[set[str], set[str]]:
-    paths: set[str] = set()
+    supplied_cwd: str | None = None,
+) -> tuple[dict[str, str], set[str]]:
+    """Resolved outside paths mapped to their supplied spelling, and dynamic tokens."""
+    paths: dict[str, str] = {}
     dynamic_paths: set[str] = set()
     if not is_path_within_workdir(
         str(command_cwd), workspace=workspace
     ) and not is_scratchpad_path(str(command_cwd), scratchpad_dir=scratchpad_dir):
-        paths.add(str(command_cwd))
+        paths[str(command_cwd)] = supplied_cwd or str(command_cwd)
 
     def collect(token: str) -> None:
         path, dynamic = _windows_path(
@@ -459,7 +467,7 @@ def _analyze_windows_paths(
             environment=environment,
         )
         if path is not None:
-            paths.add(path)
+            paths.setdefault(path, token)
         if dynamic:
             dynamic_paths.add(token)
 
@@ -489,7 +497,7 @@ def _analyze_windows_paths(
 
 
 class WindowsShellToolConfig(ExperimentalBashToolConfig):
-    pass
+    shell_tool_name: ClassVar[str] = "powershell"
 
 
 class WindowsShellArgs(BaseModel):
@@ -620,27 +628,27 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
             workspace=self.workspace,
             scratchpad_dir=self.scratchpad_dir,
             environment={**os.environ, **(env or {})},
+            supplied_cwd=cwd,
         )
-        outside_paths = {
-            path
-            for path in outside_paths
-            if not any(
-                path_grant_pattern_matches(path, pattern)
-                for pattern in self.config.allowlist
-            )
-        }
+        outside_paths = ungranted_paths(
+            outside_paths, self.config.allowlist, self.workspace
+        )
         context_required = self._build_windows_context_permissions(
             command_parts, shell, env
         )
-        if (
+        commands_cleared = (
             self._is_unconditionally_allowed(
-                command_parts, outside_paths | dynamic_paths, context_required
+                command_parts, context_required, dynamic_paths=dynamic_paths
             )
             and not guardrail_permission
-        ):
+        )
+        if commands_cleared and not outside_paths:
             return PermissionContext(permission=ToolPermission.ALWAYS)
 
-        required = self._build_required_permissions(command_parts, outside_paths)
+        # Cleared commands leave only the outside paths to answer for.
+        required = self._build_required_permissions(
+            [] if commands_cleared else command_parts, outside_paths
+        )
         required.extend(context_required)
         required.extend(
             self._build_command_required_permission(
@@ -699,6 +707,10 @@ class ExperimentalWindowsShell(
     @classmethod
     def get_name(cls) -> str:
         return "powershell"
+
+    @classmethod
+    def _get_tool_config_class(cls) -> type[WindowsShellToolConfig]:
+        return WindowsShellToolConfig
 
     @classmethod
     def is_available(cls, config: VibeConfigSchema | None = None) -> bool:

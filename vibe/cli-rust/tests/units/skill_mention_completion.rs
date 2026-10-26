@@ -3,13 +3,14 @@
 use vibe_rs::app::App;
 use vibe_rs::completion_manager;
 use vibe_rs::input_modes::InputMode;
+use vibe_rs::skill::Skill;
 
 fn app_with(input: &str) -> App {
     let mut app = App::default();
     app.completion.skills = vec![
-        ("code-review".into(), "Review the current change.".into()),
-        ("lint".into(), "Run the linters.".into()),
-        ("vibe:skill-creator".into(), "Create a skill.".into()),
+        Skill::new("code-review", "Review the current change."),
+        Skill::new("lint", "Run the linters."),
+        Skill::new("vibe:skill-creator", "Create a skill."),
     ];
     app.chat_input.input = input.into();
     app.chat_input.cursor = input.len();

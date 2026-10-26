@@ -117,6 +117,40 @@ orchestrator copies. Child-only values, such as child session logging, are
 written to the copied override layer rather than persisted into the parent's
 TOML.
 
+## Settings Vibe does not use
+
+`VibeConfigSchema.check_layer_keys` checks the keys of the user TOML, a
+supplied user config, the trusted project TOML and the active agent profile
+against the schema (`vibe.core.config._setting_keys`). It reports:
+
+- a key that is not a setting, with the closest setting name when there is one;
+- a retired setting, such as `include_model_info`; and
+- a setting with no effect under the unified harness, such as `[tools.grep]` or
+  `tools.read_file.max_read_bytes`.
+
+A tool setting is checked against the tool's own settings model. A custom tool
+reads its own settings, so `[tools.<name>]` is not checked when the tool
+manager selects a custom tool for that name, including one that replaces a
+builtin. When the selected variant is the builtin, for example because the
+custom tool is unavailable or has a lower `selection_priority`, the builtin's
+settings model applies.
+
+By default each finding is a warning. It is logged, shown at startup, written to
+stderr and the export by `vibe -p`, and returned in `validation_warnings` by
+`config/read`. With `strict_config = true` in a config file, or
+`VIBE_STRICT_CONFIG=1`, the config is refused with `UnusedConfigKeysError`
+instead. Clients receive `invalid_params` with data `{"kind": "configuration"}`
+for a session start, a session read, and a picker read without a session
+(`config/read`, `agents/list`, `skills/list`). `VIBE_STRICT_CONFIG` takes a boolean,
+such as `1`, `true`, `yes` or `on` to refuse and `0`, `false`, `no` or `off` to
+warn; any other non-empty value is refused, because the environment layer would
+otherwise drop it and leave strict mode off.
+
+`vibe config schema` prints the JSON schema of every setting, served by
+`config/schema`. It includes each builtin tool's settings under `tools`, marks
+retired settings as deprecated, and sets `additionalProperties: false` so an
+editor can flag unknown keys.
+
 ## App-server config boundary
 
 `ConfigView` is a redacted public projection, not a second writable config
@@ -186,3 +220,22 @@ Before attachment, launchers may read startup configuration for process setup.
 The session-less `setup/*` API persists onboarding choices and credentials;
 `config/write` serves attached sessions. The server owns keyring and
 `$VIBE_HOME/.env` credential custody.
+
+## Administrator environment variables
+
+`VIBE_CUSTOM_CONSOLE_URL` pins the console URL for VS Code and Vibe CLI
+sign-in. It supports centrally managed deployments: when set, sign-in is
+prefilled with that console and redirected into its normal login flow, and the
+domain can no longer be changed. The manual API-key sign-in path stays
+available.
+
+The value may be a full URL or a bare domain. Scheme-less values are upgraded
+to `https://`; an explicit `http://` is kept (useful for local auth gateways);
+trailing slashes are stripped. The variable name is matched case-insensitively.
+An unset, empty, or invalid value means no pin, and an invalid value logs a
+warning rather than blocking sign-in.
+
+The pin fixes the browser sign-in host only. In a split-horizon deployment
+whose configured browser auth base matches the pin, the configured
+`browser_auth_api_base_url` is preserved (the API base otherwise derives as
+`{pin}/api`), and account calls keep the CLI-reachable API base's origin.

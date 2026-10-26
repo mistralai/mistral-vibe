@@ -18,6 +18,7 @@ from vibe.cli.audio_recorder.audio_recorder_port import (
     RecordingMode,
 )
 from vibe.observability.logging import logger
+from vibe.utils.audio import miniaudio_unavailable_message
 
 # miniaudio raises OSError or ImportError on import when no audio driver is available.
 _MA_IMPORT_ERROR: OSError | ImportError | None = None
@@ -99,9 +100,10 @@ class AudioRecorder:
                 raise AlreadyRecordingError("Already recording")
 
             if not ma:
-                error_message = "miniaudio is not available, audio recording disabled"
-                if _MA_IMPORT_ERROR:
-                    error_message = f"{error_message}: {_MA_IMPORT_ERROR}"
+                error_message = miniaudio_unavailable_message(
+                    "miniaudio is not available, audio recording disabled",
+                    _MA_IMPORT_ERROR,
+                )
                 logger.error(error_message)
                 raise AudioBackendUnavailableError(error_message) from _MA_IMPORT_ERROR
 

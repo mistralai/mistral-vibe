@@ -365,13 +365,34 @@ class ToolManager:
                 if selected is None:
                     continue
                 _, discovery_index = selected
-                custom_variants = self._custom_tool_variants_by_name.get(name, [])
-                if (
-                    discovery_index < len(custom_variants)
-                    and custom_variants[discovery_index]
-                ):
+                if self._is_custom_variant(name, discovery_index):
                     custom_names.add(name)
         return custom_names
+
+    @property
+    def custom_config_tool_names(self) -> frozenset[str]:
+        """Names whose ``[tools.<name>]`` settings a custom tool reads.
+
+        ``get_tool_config`` reads a tool's settings with the variant it selects,
+        so a builtin name is listed only when that variant is a custom tool.
+        """
+        with self._lock:
+            return frozenset(
+                name
+                for name, fallback_tool_class in self._all_tools.items()
+                if self._is_custom_variant(
+                    name,
+                    self._select_registered_variant_with_index(
+                        name, fallback_tool_class
+                    )[1],
+                )
+            )
+
+    def _is_custom_variant(self, name: str, discovery_index: int) -> bool:
+        custom_variants = self._custom_tool_variants_by_name.get(name, [])
+        return (
+            discovery_index < len(custom_variants) and custom_variants[discovery_index]
+        )
 
     def _is_tool_available(self, cls: type[BaseTool]) -> bool:
         if (
@@ -450,10 +471,16 @@ class ToolManager:
     def _select_registered_variant(
         self, name: str, fallback: type[BaseTool]
     ) -> type[BaseTool]:
-        selected_tool_class = self._select_available_variant(name, fallback)
-        if selected_tool_class is not None:
-            return selected_tool_class
-        return fallback
+        return self._select_registered_variant_with_index(name, fallback)[0]
+
+    def _select_registered_variant_with_index(
+        self, name: str, fallback: type[BaseTool]
+    ) -> tuple[type[BaseTool], int]:
+        selected = self._select_available_variant_with_index(name, fallback)
+        if selected is not None:
+            return selected
+        # The fallback is the variant registered last.
+        return fallback, len(self._tool_variants_for_name(name, fallback)) - 1
 
     def _tool_class_for_config(self, tool_name: str) -> type[BaseTool] | None:
         fallback_tool_class = self._all_tools.get(tool_name)

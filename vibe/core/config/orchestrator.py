@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Collection, Iterable
 import copy
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from jsonpatch import JsonPatchException, apply_patch
 from jsonpointer import JsonPointer, JsonPointerException
 from pydantic import ValidationError
 
-from vibe.core.config.builder import ConfigBuilder
+from vibe.core.config.builder import ConfigBuilder, InvalidConfigError
 from vibe.core.config.event_bus import EventBus
 from vibe.core.config.layer import ConfigLayer, LayerNotLoadedError, RawConfig
 from vibe.core.config.layers.default import DefaultConfigLayer
@@ -34,15 +34,32 @@ from vibe.core.config.types import (
 from vibe.core.utils.concurrency import run_sync
 from vibe.observability.logging import logger
 
+if TYPE_CHECKING:
+    from vibe.core.config.harness_files import HarnessFilesManager
+
 
 class ConfigPatchValidationError(Exception):
-    """Raised when the merged-config preflight rejects a patch."""
+    """Raised when the merged-config preflight rejects a patch.
 
-    def __init__(self) -> None:
+    Its message is the schema's issues when the patched config breaks a rule,
+    so the caller can say what to change.
+    """
+
+    def __init__(self, problems: InvalidConfigError | None = None) -> None:
         super().__init__(
-            "Config patch failed preflight validation against the merged config; "
-            "fix the patch payload and retry"
+            str(problems)
+            if problems is not None
+            else "Config patch failed preflight validation against the merged"
+            " config; fix the patch payload and retry"
         )
+
+    @classmethod
+    def from_error(
+        cls, error: JsonPatchException | JsonPointerException | ValidationError
+    ) -> ConfigPatchValidationError:
+        if isinstance(error, ValidationError):
+            return cls(InvalidConfigError.from_validation_error(error))
+        return cls()
 
 
 class DefaultLayerResolutionError(Exception):
@@ -126,9 +143,13 @@ class ConfigOrchestrator[S: ConfigSchema]:
         layers: list[ConfigLayer[RawConfig]],
         default_layer_resolver: DefaultLayerResolver,
         bus: EventBus | None = None,
+        harness_files: HarnessFilesManager | None = None,
     ) -> ConfigOrchestrator[S]:
-        """Build an orchestrator from a schema and an ordered list of layers."""
-        builder = ConfigBuilder[S](schema)
+        """Build an orchestrator from a schema and an ordered list of layers.
+
+        ``harness_files`` are the files of the session the config is for.
+        """
+        builder = ConfigBuilder[S](schema, harness_files=harness_files)
         builder.add_layers(layers)
         config = await builder.build()
         instance = cls(builder, config, default_layer_resolver, bus)
@@ -207,7 +228,11 @@ class ConfigOrchestrator[S: ConfigSchema]:
     async def _reload_locked(
         self, *, preflight: Callable[[S], Awaitable[None]] | None = None
     ) -> None:
-        candidate = await self._builder.build(force_load=True)
+        try:
+            candidate = await self._builder.build(force_load=True)
+        except ValidationError as exc:
+            # A config file edited by hand can break a schema rule; say what to fix.
+            raise InvalidConfigError.from_validation_error(exc) from exc
         if preflight is not None:
             await preflight(candidate)
         self._config = candidate
@@ -393,9 +418,22 @@ class ConfigOrchestrator[S: ConfigSchema]:
                 )
             )
         except (JsonPatchException, JsonPointerException, ValidationError) as exc:
-            raise ConfigPatchValidationError() from exc
+            raise ConfigPatchValidationError.from_error(exc) from exc
 
-    async def _preview_patch(self, operations: list[PatchOp]) -> S:
+    async def preview_patch(
+        self, operations: list[PatchOp], *, without: Collection[str] = ()
+    ) -> S:
+        """The merged config ``operations`` would leave, read without the layers
+        named in ``without``.
+
+        Takes no lock: it reads the layers' loaded data, so a preflight that
+        ``apply_patch`` runs under its lock can call it.
+        """
+        return await self._preview_patch(operations, without=without)
+
+    async def _preview_patch(
+        self, operations: list[PatchOp], *, without: Collection[str] = ()
+    ) -> S:
         operations_by_layer: dict[str, list[PatchOp]] = defaultdict(list)
         default_layer_name: str | None = None
         for operation in operations:
@@ -419,9 +457,12 @@ class ConfigOrchestrator[S: ConfigSchema]:
                     in_place=False,
                 )
                 overrides[layer_name] = layer.validate_output(patched)
+            for layer in self.layers:
+                if layer.name in without:
+                    overrides[layer.name] = layer.validate_output({})
             return await self._builder.build(layer_overrides=overrides)
         except (JsonPatchException, JsonPointerException, ValidationError) as exc:
-            raise ConfigPatchValidationError() from exc
+            raise ConfigPatchValidationError.from_error(exc) from exc
 
     async def _apply_patch_to_layer(
         self,

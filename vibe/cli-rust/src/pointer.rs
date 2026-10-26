@@ -69,6 +69,13 @@ pub fn shape(app: &App) -> Shape {
     if target == crate::mouse::MouseTarget::Toast {
         return Shape::Text;
     }
+    if target == crate::mouse::MouseTarget::BottomBar {
+        return if crate::ui::bottom_bar::model_at(app, at) {
+            Shape::Pointer
+        } else {
+            Shape::Default
+        };
+    }
     if target == crate::mouse::MouseTarget::Trust {
         let at = crate::trust_folders::selection_position(app, at);
         return if app.view.selection_region.contains(at) {

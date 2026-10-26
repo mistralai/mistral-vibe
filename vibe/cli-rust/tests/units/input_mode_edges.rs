@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vibe_rs::app::App;
 use vibe_rs::input;
 use vibe_rs::input_modes::{classify_submitted, submitted_value, ClassifiedInput, InputMode};
+use vibe_rs::skill::Skill;
 use vibe_rs::voice::VoiceEvent;
 
 use crate::teleport_support::stub;
@@ -92,7 +93,7 @@ fn shift_backspace_on_an_empty_shell_input_returns_to_prompt_mode() {
 
 #[test]
 fn a_literal_leading_skill_keeps_its_skill_classification() {
-    let skills = vec![("review-pr".to_owned(), "Review the PR".to_owned())];
+    let skills = vec![Skill::new("review-pr", "Review the PR")];
 
     assert_eq!(
         classify_submitted(InputMode::Prompt, " /review-pr now", &skills),
@@ -121,7 +122,7 @@ fn leading_blank_lines_before_a_literal_prefix_collapse_to_one_space() {
 
 #[test]
 fn a_bare_slash_never_expands_a_skill() {
-    let skills = vec![("my-skill".to_owned(), "Do the thing.".to_owned())];
+    let skills = vec![Skill::new("my-skill", "Do the thing.")];
     let bare_slash = ClassifiedInput::Prompt {
         text: "/".to_owned(),
     };

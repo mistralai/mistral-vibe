@@ -126,9 +126,10 @@ pub fn status_error_type(status: u16) -> &'static str {
     }
 }
 
-/// ADR 0015: the speech client verifies against the effective trust policy.
+/// ADR 0015: the speech client verifies against the effective trust policy,
+/// with the same proxy handling as the shared builder (redirects stay on).
 pub fn build_http_client() -> Result<reqwest::Client, String> {
-    let builder = reqwest::Client::builder().timeout(TIMEOUT);
+    let builder = crate::utils::system_proxy::apply(reqwest::Client::builder().timeout(TIMEOUT));
     crate::utils::tls::apply_tls_trust(builder)
         .build()
         .map_err(|e| format!("TTS client failed to build: {e}"))

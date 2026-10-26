@@ -7,6 +7,7 @@ use vibe_rs::app::App;
 use vibe_rs::config;
 use vibe_rs::input::{handle_key, handle_paste};
 use vibe_rs::server::Client;
+use vibe_rs::skill::Skill;
 
 struct Harness {
     app: App,
@@ -19,8 +20,8 @@ impl Harness {
     fn new() -> Self {
         let mut app = App::default();
         app.completion.skills = vec![
-            ("lint".into(), "Run the linters.".into()),
-            ("code-review".into(), "Review the change.".into()),
+            Skill::new("lint", "Run the linters."),
+            Skill::new("code-review", "Review the change."),
         ];
         let (config_tx, _config_rx) = tokio::sync::mpsc::channel(1);
         Self {

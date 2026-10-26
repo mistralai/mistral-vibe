@@ -24,6 +24,8 @@ import hashlib
 import importlib
 import os
 from pathlib import Path
+import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -71,6 +73,23 @@ _UV_BUILD_REQUIREMENT = "uv_build>=0.9.7,<0.10.0"
 _UV_BUILD_SDIST_REQUIREMENT = "uv_build==0.9.30"
 _BUILD_LOCK_NAME = "build.lock"
 _TUI_WHEEL_ENTRY = f"vibe/_bin/{_TUI_NAME}"
+# The default wheel's manylinux glibc, and where vibe-rs is linked for it.
+_MANYLINUX_GLIBC = (2, 28)
+_ZIG_WRAPPERS = _BUILD_ROOT / "vibe-rs-zig"
+_ZIG_ARCHITECTURES = {
+    "x86_64": "x86_64",
+    "amd64": "x86_64",
+    "aarch64": "aarch64",
+    "arm64": "aarch64",
+}
+# Maturin's platform tag option and its alias.
+_COMPATIBILITY_FLAGS = frozenset({"--compatibility", "--manylinux"})
+# Maturin's legacy manylinux tags and the glibc each allows (PEP 600).
+_LEGACY_MANYLINUX_GLIBC = {
+    "manylinux1": (2, 5),
+    "manylinux2010": (2, 12),
+    "manylinux2014": (2, 17),
+}
 _RUNTIME_WHEEL_MARKERS = (
     "mistralai_vibe_local_harness/__init__.py",
     "mistralai_vibe_local_harness/protocol.py",
@@ -86,13 +105,23 @@ _CARGO_MISSING = (
     "See https://rust-lang.org/tools/install/ and CONTRIBUTING.md "
     '("Building distributions") for details.'
 )
-_ALSA_MISSING_WARNING = (
-    "warning: ALSA development files were not found through pkg-config, so the "
-    "Vibe terminal UI is built without voice mode.\n"
+_VOICE_OPT_IN = (
     "To enable voice mode, install pkg-config and the ALSA development package "
     "(Debian/Ubuntu: libasound2-dev, Fedora/RHEL: alsa-lib-devel, Arch: alsa-lib), "
-    "then rebuild: uv cache clean mistral-vibe, then reinstall.\n"
+    "and build a wheel for this machine only: set "
+    'MATURIN_PEP517_ARGS="--compatibility linux", run uv cache clean '
+    "mistral-vibe, then reinstall.\n"
     "Set CARGO_BUILD_FLAGS to choose the Cargo features explicitly."
+)
+_ALSA_MISSING_WARNING = (
+    "warning: ALSA development files were not found through pkg-config, so the "
+    f"Vibe terminal UI is built without voice mode.\n{_VOICE_OPT_IN}"
+)
+_MANYLINUX_NO_VOICE_WARNING = (
+    "warning: this Linux wheel is built for glibc {major}.{minor} and later "
+    "(manylinux), so the Vibe terminal UI is built without voice mode: voice "
+    "links the system ALSA library, which a portable wheel cannot carry.\n"
+    + _VOICE_OPT_IN
 )
 
 
@@ -517,6 +546,7 @@ def _stage_rust_cli() -> None:
     environment = os.environ.copy()
     environment["CARGO_TARGET_DIR"] = str(_TUI_TARGET)
     build_flags = _rust_cli_build_flags()
+    _link_rust_cli_with_zig(environment, build_flags)
     command = [
         "cargo",
         "build",
@@ -539,6 +569,14 @@ def _stage_rust_cli() -> None:
     built = release_dir / "release" / _TUI_NAME
     if not built.is_file():
         raise NativeBuildError(f"Rust CLI build did not produce {built}")
+    promised = _wheel_manylinux_glibc()
+    if promised is not None:
+        floor = _glibc_floor(built.read_bytes())
+        if floor is not None and floor > promised:
+            raise NativeBuildError(
+                f"{built} needs glibc {floor[0]}.{floor[1]}, newer than the "
+                f"wheel's manylinux_{promised[0]}_{promised[1]} tag allows"
+            )
     staged = _TUI_TARGET.parent / f"staged-{_TUI_NAME}"
     staged.unlink(missing_ok=True)
     _BUNDLED_TUI.parent.mkdir(parents=True, exist_ok=True)
@@ -549,13 +587,122 @@ def _stage_rust_cli() -> None:
         staged.unlink(missing_ok=True)
 
 
+def _link_rust_cli_with_zig(
+    environment: dict[str, str], build_flags: list[str]
+) -> None:
+    """Link vibe-rs for the manylinux glibc when Maturin links the Harness so.
+
+    Plain cargo links against the build machine's glibc, so a wheel built on a
+    newer Linux would carry a vibe-rs that the manylinux tag (manylinux_2_28 by
+    default) promises to older hosts but cannot run there. On a Linux host,
+    this builds it for the host's gnu target and the tag's glibc with Maturin's
+    zig wrappers, as `maturin --zig` does for the Harness.
+    """
+    arch = _zig_rust_cli_arch(build_flags)
+    if arch is None:
+        return
+    maturin_command = shutil.which("maturin")
+    if maturin_command is None:
+        raise NativeBuildError("Linking vibe-rs with zig needs `maturin` on PATH")
+    triple = f"{arch}-unknown-linux-gnu"
+    # Maturin's zig links for the wheel's manylinux tag, so vibe-rs does too.
+    glibc = _wheel_manylinux_glibc() or _MANYLINUX_GLIBC
+    zig_target = f"{arch}-linux-gnu.{glibc[0]}.{glibc[1]}"
+    _ZIG_WRAPPERS.mkdir(parents=True, exist_ok=True)
+    tools = {}
+    for tool, arguments in (
+        ("cc", f"cc -- -target {zig_target}"),
+        ("c++", f"c++ -- -target {zig_target}"),
+        ("ar", "ar --"),
+    ):
+        wrapper = _ZIG_WRAPPERS / tool
+        wrapper.write_text(
+            f'#!/bin/sh\nexec {shlex.quote(maturin_command)} zig {arguments} "$@"\n'
+        )
+        wrapper.chmod(0o755)
+        tools[tool] = str(wrapper)
+    target = triple.replace("-", "_")
+    environment[f"CARGO_TARGET_{target.upper()}_LINKER"] = tools["cc"]
+    environment[f"CC_{target}"] = tools["cc"]
+    environment[f"CXX_{target}"] = tools["c++"]
+    environment[f"AR_{target}"] = tools["ar"]
+    build_flags.extend(["--target", triple])
+
+
+def _zig_rust_cli_arch(build_flags: list[str]) -> str | None:
+    """The architecture to link vibe-rs for with zig, or None without zig.
+
+    Zig links it in a Linux build with Maturin's `--zig`, on x86_64 or
+    aarch64, for the host's gnu target: no cargo target is set.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    if "--zig" not in shlex.split(os.environ.get("MATURIN_PEP517_ARGS", "")):
+        return None
+    if _cargo_target_triple(build_flags) or os.environ.get("CARGO_BUILD_TARGET"):
+        return None
+    return _ZIG_ARCHITECTURES.get(platform.machine().lower())
+
+
+def _wheel_manylinux_glibc() -> tuple[int, int] | None:
+    """The glibc the wheel's manylinux tag lets a Linux build need, if tagged.
+
+    Read from the Maturin arguments, so it covers vibe-rs however it was
+    linked: with zig, or with plain cargo for a `--target` or unknown machine.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    arguments = shlex.split(os.environ.get("MATURIN_PEP517_ARGS", ""))
+    if (
+        "--zig" in arguments
+        and not _has_compatibility(arguments)
+        and platform.machine().lower() in _ZIG_ARCHITECTURES
+    ):
+        # Maturin's `--zig` then tags it manylinux2014, its x86_64/aarch64 minimum.
+        return _LEGACY_MANYLINUX_GLIBC["manylinux2014"]
+    tags = []
+    for argument in arguments:
+        tag = re.sub(r"^--(?:compatibility|manylinux)=", "", argument)
+        if match := re.fullmatch(r"manylinux_(\d+)_(\d+)", tag):
+            tags.append((int(match[1]), int(match[2])))
+        elif tag in _LEGACY_MANYLINUX_GLIBC:
+            tags.append(_LEGACY_MANYLINUX_GLIBC[tag])
+    return min(tags, default=None)
+
+
+def _has_compatibility(arguments: list[str]) -> bool:
+    return any(
+        argument in _COMPATIBILITY_FLAGS
+        or argument.startswith(tuple(f"{flag}=" for flag in _COMPATIBILITY_FLAGS))
+        for argument in arguments
+    )
+
+
+def _glibc_floor(binary: bytes) -> tuple[int, int] | None:
+    """The newest glibc symbol version an ELF binary needs, if any."""
+    versions = {
+        (int(major), int(minor))
+        for major, minor in re.findall(rb"GLIBC_(\d+)\.(\d+)", binary)
+    }
+    return max(versions, default=None)
+
+
 def _rust_cli_build_flags() -> list[str]:
     # The default `voice` feature links ALSA on Linux through pkg-config. Without
     # its development files, build like the published Linux wheels instead of
-    # failing, unless the caller already chose the features.
+    # failing, unless the caller already chose the features. A manylinux wheel
+    # linked with zig never gets voice: zig links for the tag's older glibc and
+    # cannot link the host's libasound, which needs the host's glibc.
     build_flags = shlex.split(os.environ.get("CARGO_BUILD_FLAGS", ""))
     if _selects_cargo_features(build_flags) or not _is_native_linux_build(build_flags):
         return build_flags
+    if _zig_rust_cli_arch(build_flags) is not None:
+        major, minor = _wheel_manylinux_glibc() or _MANYLINUX_GLIBC
+        print(
+            _MANYLINUX_NO_VOICE_WARNING.format(major=major, minor=minor),
+            file=sys.stderr,
+        )
+        return [*build_flags, "--no-default-features"]
     if _alsa_available():
         return build_flags
     print(_ALSA_MISSING_WARNING, file=sys.stderr)
@@ -616,18 +763,18 @@ def _maturin_environment(*, portable_linux_wheel: bool = False) -> Iterator[None
     arguments = shlex.split(original_arguments or "")
     if "--locked" not in arguments and "--frozen" not in arguments:
         arguments.append("--locked")
-    has_compatibility = any(
-        argument == "--compatibility" or argument.startswith("--compatibility=")
-        for argument in arguments
-    )
     if (
         portable_linux_wheel
         and sys.platform.startswith("linux")
-        and not has_compatibility
+        and not _has_compatibility(arguments)
     ):
         arguments.extend(["--compatibility", "manylinux_2_28"])
-    native_linux_wheel = "--compatibility=linux" in arguments or any(
-        argument == "--compatibility" and arguments[index + 1 : index + 2] == ["linux"]
+    native_linux_wheel = any(
+        argument in {"--compatibility=linux", "--manylinux=linux"}
+        or (
+            argument in _COMPATIBILITY_FLAGS
+            and arguments[index + 1 : index + 2] == ["linux"]
+        )
         for index, argument in enumerate(arguments)
     )
     if (

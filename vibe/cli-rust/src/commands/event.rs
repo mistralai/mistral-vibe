@@ -38,6 +38,8 @@ pub enum CommandEvent {
         reads: Option<AccountReads>,
         greeting: Option<String>,
     },
+    /// The post-ready `artifacts/list` answer, for the bottom-bar PR link.
+    ArtifactsRead(Vec<crate::server::PublicSessionArtifact>),
     /// A `/whoami` fetch that missed the cache.
     Whoami(Option<AccountReads>),
     /// A manual shell request settled; notifications already carried its output.

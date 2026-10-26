@@ -21,6 +21,7 @@ use super::browser_sign_in;
 use super::input;
 use super::options;
 use crate::app::App;
+use crate::setup::wizard::sign_in;
 use crate::setup::wizard::{
     BrowserSignInState, InputCard, OnboardingInput, OnboardingState, SignInVariant, ValidationState,
 };
@@ -101,7 +102,9 @@ impl Row {
             // One four-row card per option, with a blank row, the "or"
             // divider, and another blank between cards.
             Row::OptionCards { opts, .. } => opts.len() as u16 * 7 - 3,
-            Row::Steps { .. } => browser_sign_in::STEPS_HEIGHT,
+            Row::Steps { step_idx, state } => {
+                sign_in::steps_height(state, *step_idx, width, u16::MAX)
+            }
             Row::Warning(lines) | Row::UrlLines(lines) => lines.len() as u16,
         }
     }
@@ -158,12 +161,31 @@ pub(super) fn render(
         f.buffer_mut().set_string(x, y + 4, text, style);
     }
     let mut input_rows = Vec::new();
+    // The hint row carries the screen's keys, so the body fits above the
+    // frame's last line and the hint is pinned there instead of dropped when
+    // a tall body (a wrapped error, a revealed URL) overflows the frame.
+    let body_bottom = if rows.iter().any(|row| matches!(row, Row::Hint(_))) {
+        bottom.saturating_sub(1)
+    } else {
+        bottom
+    };
     let mut row_y = y + CHROME_ROWS;
-    for row in rows {
-        let height = row.height(width);
+    for (index, row) in rows.iter().enumerate() {
+        // The steps stack clamps itself to the rows it has left, so a long
+        // wrapped error shrinks instead of dropping every card.
+        let height = match row {
+            Row::Steps { step_idx, state } => {
+                sign_in::steps_height(state, *step_idx, width, body_bottom.saturating_sub(row_y))
+            }
+            _ => row.height(width),
+        };
         // Stop drawing once the content reaches the bottom of the
-        // screen: ratatui panics on a y outside the buffer.
-        if row_y.saturating_add(height) > bottom {
+        // screen: ratatui panics on a y outside the buffer. A hint not yet
+        // drawn is pinned on the body's last row instead of dropped.
+        if row_y.saturating_add(height) > body_bottom {
+            if let Some(hint) = pinned_hint(rows, index) {
+                draw_hint_row(f, x, width, body_bottom, hint);
+            }
             break;
         }
         let rect = Rect::new(x, row_y, width, height);
@@ -202,7 +224,8 @@ pub(super) fn render(
                 options::draw_option_cards(f, rect, panel_x, *selected, opts);
             }
             Row::Steps { step_idx, state } => {
-                browser_sign_in::draw_step_cards(f, rect, panel_x, *step_idx, state);
+                let budget = body_bottom.saturating_sub(rect.y);
+                browser_sign_in::draw_step_cards(f, rect, panel_x, *step_idx, budget, state);
             }
             Row::Warning(lines) => options::draw_warning(f, x, row_y, lines),
             Row::UrlHelp => browser_sign_in::draw_url_help(f, x, row_y),
@@ -212,10 +235,7 @@ pub(super) fn render(
                         .set_string(x, row_y + offset as u16, line, theme::muted_style());
                 }
             }
-            Row::Hint(hint) => match hint {
-                Hint::Keys(keys) => crate::ui::hint_line::draw(f, x, row_y, keys),
-                Hint::Browser(variant) => browser_sign_in::draw_hint(f, rect, *variant),
-            },
+            Row::Hint(hint) => draw_hint_row(f, x, width, row_y, hint),
         }
         row_y += height;
     }
@@ -223,6 +243,26 @@ pub(super) fn render(
     // others keep whatever the last input screen registered.
     if !input_rows.is_empty() {
         wizard.input_rows = input_rows;
+    }
+}
+
+/// The hint a body overflow would drop: the first not-yet-drawn one at or
+/// after `index`, pinned on the body's last row instead.
+fn pinned_hint(rows: &[Row], index: usize) -> Option<&Hint> {
+    rows[index..].iter().find_map(|row| match row {
+        Row::Hint(hint) => Some(hint),
+        _ => None,
+    })
+}
+
+/// One hint line: the wizard's key affordances, drawn by the walk and by its
+/// overflow pinning alike.
+fn draw_hint_row(f: &mut Frame, x: u16, width: u16, y: u16, hint: &Hint) {
+    match hint {
+        Hint::Keys(keys) => crate::ui::hint_line::draw(f, x, y, keys),
+        Hint::Browser(variant) => {
+            browser_sign_in::draw_hint(f, Rect::new(x, y, width, 1), *variant)
+        }
     }
 }
 

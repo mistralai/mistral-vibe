@@ -1,11 +1,16 @@
 //! Built-in slash commands, hardcoded in the client.
 
+use crate::completion_manager::CompletionEntry;
+use crate::skill::Skill;
+
 /// One `/`-prefixed alias group; `side_channel` marks the
 /// commands that still run while the session is busy. The first alias is canonical.
 pub struct Command {
     pub aliases: &'static [&'static str],
     pub description: &'static str,
     pub side_channel: bool,
+    /// A side-channel command that still waits for a compaction, teleport, project request or agent install.
+    pub waits_for_jobs: bool,
     /// Inline hint shown after `/command ` until an argument is typed; empty when none.
     pub arguments: &'static str,
 }
@@ -19,6 +24,7 @@ const fn cmd(
         aliases,
         description,
         side_channel,
+        waits_for_jobs: false,
         arguments: "",
     }
 }
@@ -26,6 +32,13 @@ const fn cmd(
 impl Command {
     const fn args(self, arguments: &'static str) -> Self {
         Self { arguments, ..self }
+    }
+
+    const fn after_jobs(self) -> Self {
+        Self {
+            waits_for_jobs: true,
+            ..self
+        }
     }
 }
 
@@ -38,7 +51,7 @@ const COMMANDS: &[Command] = &[
     cmd(&["/clear", "/new"], "Start a new conversation. Optionally pass a prompt to seed it.", false).args("[prompt]"),
     cmd(&["/copy"], "Copy the last agent message to the clipboard", true),
     cmd(&["/log"], "Show path to current interaction log file", true),
-    cmd(&["/log-level"], "Change the log level for this session or persist it to config.toml.", false),
+    cmd(&["/log-level"], "Change the log level for this session or persist it to config.toml.", true).after_jobs(),
     cmd(&["/debug"], "Toggle debug console", true),
     cmd(
         &["/stress"],
@@ -50,14 +63,14 @@ const COMMANDS: &[Command] = &[
     cmd(&["/exit", ":q", ":quit", "exit", "quit"], "Exit the application", true),
     cmd(&["/status"], "Display agent statistics and model and provider details", true),
     cmd(&["/whoami"], "Display the Mistral signed-in user, workspace, and plan", true),
-    cmd(&["/proxy-setup"], "Configure proxy and SSL certificate settings", false),
+    cmd(&["/proxy-setup"], "Configure proxy and SSL certificate settings", true).after_jobs(),
     cmd(&["/resume", "/continue"], "Browse, resume, or delete saved sessions", false),
     cmd(&["/rename"], "Rename the current session", true).args("<title>"),
     cmd(&["/mcp", "/connectors"], "Display available MCP servers and connectors. Pass a name to list tools; subcommands: add <url> [--transport http|streamable-http], status, login <alias>, logout <alias>", false)
         .args("[name] | add <url> | status | login <alias> | logout <alias>"),
     cmd(&["/plugins"], "Display the plugins this session is running", false),
     cmd(&["/reload-plugins"], "Re-pin this session's plugins and report what changed", false),
-    cmd(&["/voice"], "Configure voice settings", false),
+    cmd(&["/voice"], "Configure voice settings", true).after_jobs(),
     cmd(&["/leanstall"], "Install the Lean 4 agent (leanstral)", false),
     cmd(&["/unleanstall"], "Uninstall the Lean 4 agent", false),
     cmd(&["/rewind"], "Rewind to a previous message (or press Esc twice)", false),
@@ -65,13 +78,14 @@ const COMMANDS: &[Command] = &[
     cmd(&["/retry"], "Continue an interrupted model response; optionally pass additional instructions", false).args("[instructions]"),
     cmd(&["/loop"], "Schedule a recurring prompt: /loop [schedule] [prompt]", false).args("[schedule] [prompt]"),
     cmd(&["/data-retention"], "Show data retention information", true),
-    cmd(&["/theme"], "Select theme", false),
+    cmd(&["/theme"], "Select theme", true).after_jobs(),
     cmd(&["/teleport"], "Teleport session to Vibe Code Web", false),
     cmd(
         &["/remote-project"],
         "Select the Vibe Code Web project for this repository",
-        false,
-    ),
+        true,
+    )
+    .after_jobs(),
 ];
 
 const PASTE_IMAGE: Command = cmd(
@@ -109,6 +123,11 @@ pub fn argument_hint(prefix: Option<char>, body: &str) -> Option<&'static str> {
 /// Whether the command runs while a turn is generating.
 pub fn is_side_channel(label: &str) -> bool {
     available().any(|command| command.aliases.contains(&label) && command.side_channel)
+}
+
+/// Whether a side-channel command still waits for a compaction, teleport, project request or agent install.
+pub fn waits_for_jobs(label: &str) -> bool {
+    available().any(|command| command.aliases.contains(&label) && command.waits_for_jobs)
 }
 
 /// Resolve the slash-command word, returning the canonical alias.
@@ -149,23 +168,35 @@ pub fn builtin() -> Vec<(String, String)> {
 }
 
 /// The full popup entry list, expanding aliases into individual entries,
-/// merging with skills as `/name`, sorted by name then description.
-pub fn entries(skills: &[(String, String)]) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = available()
+/// merging with skills as `/name`, sorted by name then description. A skill
+/// named like a built-in is left out, since typing its name runs the built-in.
+pub fn entries(skills: &[Skill]) -> Vec<CompletionEntry> {
+    let mut out: Vec<CompletionEntry> = available()
         .flat_map(|command| {
             command
                 .aliases
                 .iter()
                 .filter(|a| a.starts_with('/'))
-                .map(|a| ((*a).to_owned(), command.description.to_owned()))
+                .map(|a| CompletionEntry {
+                    label: (*a).to_owned(),
+                    description: command.description.to_owned(),
+                    origin: None,
+                })
                 .collect::<Vec<_>>()
         })
         .collect();
-    out.extend(
-        skills
-            .iter()
-            .map(|(name, desc)| (format!("/{name}"), desc.clone())),
-    );
-    out.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    out.extend(skills.iter().filter_map(|skill| {
+        let label = format!("/{}", skill.name);
+        parse(&label).is_none().then(|| CompletionEntry {
+            label,
+            description: skill.description.clone(),
+            origin: Some(skill.origin),
+        })
+    }));
+    out.sort_by(|a, b| {
+        a.label
+            .cmp(&b.label)
+            .then_with(|| a.description.cmp(&b.description))
+    });
     out
 }

@@ -519,13 +519,14 @@ def test_stop_signal_stops_the_turn_and_its_tool_and_exits_three(
 
 @pytest.mark.parametrize("streaming_mock_server", [_text_reply], indirect=True)
 @pytest.mark.parametrize("backend", ["generic", "mistral"])
-def test_model_request_carries_the_configured_top_p_and_output_cap(
+def test_model_request_carries_the_configured_top_p_and_no_output_cap(
     streaming_mock_server: StreamingMockServer, e2e_workdir: Path, backend: str
 ) -> None:
     """*Prepare*: A model configured with `top_p` and `max_output_tokens`, behind
     either backend adapter.
     *Do*: Run `vibe -p`.
-    *Assert*: The model request carries both values.
+    *Assert*: The request carries `top_p` and no output cap: only Anthropic
+    requires one.
     """
     # Prepare
     write_e2e_config(
@@ -542,7 +543,7 @@ def test_model_request_carries_the_configured_top_p_and_output_cap(
     assert result.returncode == 0, result.stderr
     request: dict[str, Any] = dict(streaming_mock_server.requests[0])
     assert request["top_p"] == 0.9
-    assert request["max_tokens"] == 123
+    assert "max_tokens" not in request
 
 
 def _overloaded_once(

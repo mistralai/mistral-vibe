@@ -107,11 +107,12 @@ pub(super) async fn run_session(
         }
     }
 
-    // Wait for session ready.
+    // Wait for session ready, and for its connectors and MCP servers: a run
+    // sends one message, so tools found after it starts would never reach it.
     if let Err(error) = client
         .request(
             method::SESSION_READY_WAIT,
-            json!({ "sessionId": session_id }),
+            json!({ "sessionId": session_id, "integrations": true }),
         )
         .await
     {
@@ -133,6 +134,8 @@ pub(super) async fn run_session(
         Ok(None) => {}
         Err(failure) => return failure,
     }
+    let config_warnings = pre_turn::config_warnings(&client, &options, &session_id).await;
+    state.lock().unwrap().warnings.extend(config_warnings);
 
     // Read effective config for the export, as the session is ready and
     // before the turn spends anything.
@@ -151,6 +154,10 @@ pub(super) async fn run_session(
     if let Some(failure) = pre_turn::pending_abort(&mut notifications, &mut settled, &stop) {
         return failure;
     }
+    let unavailable = pre_turn::integrations_unavailable(&options.output, &settled);
+    state.lock().unwrap().warnings.extend(unavailable);
+    // Taken once: the turn loop replays `settled` and must not report them again.
+    settled.retain(|notification| !pre_turn::is_integrations_unavailable(notification));
 
     // Run the turn.
     let mut output = Output::new(options.output.clone());
@@ -167,6 +174,7 @@ pub(super) async fn run_session(
                 &stop,
                 &turn_id,
                 &usage_baseline,
+                &state,
             )
             .await;
             WorkEnd::Turn(end)

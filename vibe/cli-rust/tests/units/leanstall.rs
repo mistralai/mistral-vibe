@@ -261,3 +261,22 @@ fn a_failure_shows_the_bare_server_message_and_keeps_the_agents() {
     assert_eq!(app.agents.active, agent("default"));
     assert_eq!(rows(&app), row("command_error", "Session is busy"));
 }
+
+#[test]
+fn a_refused_switch_is_dropped_only_when_the_install_moves_the_running_agent() {
+    for (active, refused) in [("default", Some("lean")), ("lean", None)] {
+        let mut app = app_with(&["default", "lean"]);
+        app.agents.refused = Some("lean".to_owned());
+        leanstall::apply_event(
+            &mut app,
+            Event {
+                installed: true,
+                result: Ok(AgentsListResponse {
+                    active: agent(active),
+                    agents: vec![agent("default"), agent("lean")],
+                }),
+            },
+        );
+        assert_eq!(app.agents.refused.as_deref(), refused, "{active} runs");
+    }
+}

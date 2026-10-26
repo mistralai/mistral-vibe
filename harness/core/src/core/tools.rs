@@ -1,3 +1,4 @@
+pub(crate) mod arguments;
 pub(crate) mod command_environment;
 pub(crate) mod context;
 pub(crate) mod execution;

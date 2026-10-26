@@ -68,6 +68,8 @@ def _git_bash_managed_shell_enabled(config: VibeConfigSchema | None) -> bool:
 
 
 class GitBashToolConfig(ExperimentalBashToolConfig):
+    shell_tool_name: ClassVar[str] = "git_bash"
+
     allowlist: list[str] = Field(
         default_factory=posix_shell_default_allowlist,
         description="Command prefixes that are automatically allowed",

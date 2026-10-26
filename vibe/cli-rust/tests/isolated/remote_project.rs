@@ -217,12 +217,12 @@ fn protocol_requires_picker_id_but_tolerates_new_projection_fields() {
 }
 
 #[test]
-fn command_is_available_and_never_runs_as_a_side_channel() {
+fn command_is_available_and_runs_as_a_side_channel() {
     assert_eq!(
         vibe_rs::commands::parse("/REMOTE-PROJECT ignored"),
         Some("/remote-project")
     );
-    assert!(!vibe_rs::commands::is_side_channel("/remote-project"));
+    assert!(vibe_rs::commands::is_side_channel("/remote-project"));
 }
 
 #[test]

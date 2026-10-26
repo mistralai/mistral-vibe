@@ -97,9 +97,12 @@ This section is for developers who want to set up the repository for local devel
 package (`vibe-acp` and `vibe-app-server`), the Rust terminal UI, and the
 Unified Harness runtime. The build requires a working Rust toolchain and fails
 if either native component cannot be built.
-On Linux, voice mode needs pkg-config and the ALSA development files
-(`libasound2-dev` or `alsa-lib-devel`); without them, the build prints a warning
-and builds the terminal UI without voice mode, like the published Linux wheels.
+On Linux, a wheel built from a checkout is a portable `manylinux_2_28` wheel:
+the terminal UI is linked with zig for glibc 2.28 and built without voice mode,
+like the published Linux wheels, with a warning. Voice mode needs a wheel for
+this machine only (`MATURIN_PEP517_ARGS="--compatibility linux"`) and pkg-config
+with the ALSA development files (`libasound2-dev` or `alsa-lib-devel`). Without
+them, that build also prints a warning and leaves voice mode out.
 Setting `CARGO_BUILD_FLAGS` to select features (`--features`/`-F`,
 `--no-default-features`, `--all-features`) or a `--target` skips this detection.
 

@@ -104,6 +104,46 @@ def _model_field_write(
     return alias, model, field
 
 
+def _route(config: VibeConfigSchema, alias: str) -> tuple[Any, ...]:
+    """What a model's route compiles from: the model, which of its fields the
+    config sets (an unset thinking level is not an explicit one), and its
+    provider.
+    """
+    model = config.models[alias]
+    try:
+        provider = config.get_provider_for_model(model).model_dump()
+    except ValueError:
+        provider = None
+    return model.model_dump(), sorted(model.model_fields_set), provider
+
+
+def _active_alias(config: VibeConfigSchema) -> str | None:
+    try:
+        return config.get_active_model().alias
+    except ValueError:
+        return None
+
+
+def models_a_write_changes(
+    before: VibeConfigSchema, after: VibeConfigSchema
+) -> list[ModelConfig]:
+    """The models of ``after`` that read differently from ``before``, or that
+    the write made active.
+
+    A field, whole-model, provider or active-model write, or a removal that
+    uncovers a lower layer's value, all show up here, whatever path names them.
+    """
+    changed = {
+        alias: model
+        for alias, model in after.models.items()
+        if alias not in before.models or _route(before, alias) != _route(after, alias)
+    }
+    active = _active_alias(after)
+    if active in after.models and active != _active_alias(before):
+        changed.setdefault(active, after.models[active])
+    return list(changed.values())
+
+
 def config_write_ops_to_patches(
     config: VibeConfigSchema,
     ops: list[ConfigWriteOpWire],

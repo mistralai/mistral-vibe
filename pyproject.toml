@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "3.0.2"
+version = "3.0.3"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -34,8 +34,8 @@ dependencies = [
     "attrs==26.1.0",
     "beautifulsoup4==4.14.3",
     "cachetools==7.0.6",
-    "certifi==2026.7.22",
-    "cffi==2.0.0 ; platform_machine != 'aarch64' or platform_python_implementation != 'PyPy' or sys_platform != 'linux'",
+    "certifi==2026.10.19",
+    "cffi==2.0.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or platform_python_implementation != 'PyPy' or sys_platform == 'darwin' or sys_platform == 'win32'",
     "charset-normalizer==3.4.7",
     "click==8.3.3 ; sys_platform != 'emscripten'",
     "colorama==0.4.6 ; sys_platform == 'win32'",
@@ -43,17 +43,19 @@ dependencies = [
     "cryptography==50.0.0",
     "eval-type-backport==0.3.1",
     "gitdb==4.0.12",
-    "gitpython==3.1.62",
+    "gitpython==3.2.1",
     "giturlparse==0.15.0",
-    "google-auth==2.49.2",
+    "google-auth==2.62.0",
     "googleapis-common-protos==1.74.0",
     "h11==0.16.0",
     "httpcore==1.0.9",
+    "httpcore2==2.16.0 ; sys_platform != 'emscripten'",
     "httpx==0.28.1",
     "httpx-sse==0.4.3",
+    "httpx2==2.16.0",
+    "httpx2-jsfetch==1.0 ; sys_platform == 'emscripten'",
     "humanize==4.16.0",
     "idna==3.18",
-    "importlib-metadata==8.7.1",
     "jaraco-classes==3.4.0",
     "jaraco-context==6.1.2",
     "jaraco-functools==4.4.0",
@@ -67,26 +69,28 @@ dependencies = [
     "linkify-it-py==2.1.0",
     "markdown-it-py==4.0.0",
     "markdownify==1.2.3",
-    "mcp==1.28.1",
+    "mcp==1.30.0",
     "mdit-py-plugins==0.5.0",
     "mdurl==0.1.2",
-    "miniaudio==1.71 ; platform_machine != 'aarch64' or sys_platform != 'linux'",
-    "mistralai==2.6.0",
+    "miniaudio==1.71 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or sys_platform == 'win32'",
+    "mistralai==3.5.0",
     "more-itertools==11.0.2",
-    "opentelemetry-api==1.39.1",
-    "opentelemetry-exporter-otlp-proto-common==1.39.1",
-    "opentelemetry-exporter-otlp-proto-http==1.39.1",
-    "opentelemetry-proto==1.39.1",
-    "opentelemetry-sdk==1.39.1",
-    "opentelemetry-semantic-conventions==0.60b1",
-    "packaging==26.2",
+    "opentelemetry-api==1.45.1",
+    "opentelemetry-exporter-http-transport==0.66b1",
+    "opentelemetry-exporter-otlp-common==0.66b1",
+    "opentelemetry-exporter-otlp-proto-common==1.45.1",
+    "opentelemetry-exporter-otlp-proto-http==1.45.1",
+    "opentelemetry-proto==1.45.1",
+    "opentelemetry-sdk==1.45.1",
+    "opentelemetry-semantic-conventions==0.66b1",
+    "packaging==26.3",
     "pexpect==4.9.0",
     "platformdirs==4.9.6",
     "protobuf==6.33.6",
     "ptyprocess==0.7.0",
     "pyasn1==0.6.4",
     "pyasn1-modules==0.4.2",
-    "pycparser==3.0 ; (implementation_name != 'PyPy' and platform_machine != 'aarch64') or (implementation_name != 'PyPy' and platform_python_implementation != 'PyPy') or (implementation_name != 'PyPy' and sys_platform != 'linux')",
+    "pycparser==3.0 ; (implementation_name != 'PyPy' and platform_machine == 'x86_64' and sys_platform == 'linux') or (implementation_name != 'PyPy' and platform_python_implementation != 'PyPy') or (implementation_name != 'PyPy' and sys_platform == 'darwin') or (implementation_name != 'PyPy' and sys_platform == 'win32')",
     "pydantic==2.13.4",
     "pydantic-core==2.46.4",
     "pydantic-settings==2.14.2",
@@ -123,18 +127,24 @@ dependencies = [
     "typing-inspection==0.4.2",
     "uc-micro-py==2.0.0",
     "urllib3==2.8.0",
+    "uuid-utils==1.0.0",
     "uvicorn==0.46.0 ; sys_platform != 'emscripten'",
     "watchfiles==1.2.0",
     "websockets==16.0",
-    "zipp==3.23.1",
     "zstandard==0.25.0",
 ]
 
 [project.optional-dependencies]
-# Opt-in for aarch64 Linux, where upstream publishes no miniaudio wheel. The
-# default install needs no C++ toolchain; uv tool install "mistral-vibe[voice-aarch64]"
-# resolves the prebuilt manylinux wheel the release CI publishes to Artifact Registry
-# (see the miniaudio-aarch64 job in vibe-release-internal.yaml).
+# miniaudio is a default dependency only on macOS, Windows and x86_64 Linux,
+# where upstream publishes wheels (Windows on ARM64 has none but builds it
+# without trouble), so other platforms never build its sdist by default: it
+# links -ldl unconditionally and fails on OpenBSD. Editor voice features are
+# disabled at runtime when miniaudio is missing; the `voice` extra opts back in,
+# building it from source unless the index has a wheel (the release CI publishes
+# an aarch64 manylinux one to Artifact Registry, see the miniaudio-aarch64 job in
+# vibe-release-internal.yaml). `voice-aarch64` is the same extra, kept for
+# existing installs.
+voice = ["miniaudio>=1.59"]
 voice-aarch64 = ["miniaudio>=1.59"]
 
 [project.urls]
@@ -179,6 +189,7 @@ vibe-app-server = "vibe.app_server.stdio:main"
 
 [tool.uv]
 exclude-newer = "2 days"
+exclude-newer-package = { "mistralai" = false }
 cache-keys = [
     { file = "pyproject.toml" },
     { file = "build_backend/**/*.py" },
@@ -236,7 +247,7 @@ dev = [
 build = [
     "altgraph==0.17.5",
     "macholib==1.16.4 ; sys_platform == 'darwin'",
-    "packaging==26.2",
+    "packaging==26.3",
     "pefile==2024.8.26 ; sys_platform == 'win32'",
     "pyinstaller==6.20.0",
     "pyinstaller-hooks-contrib==2026.4",

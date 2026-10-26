@@ -17,13 +17,30 @@ from mistralai_vibe_local_harness.vibe.adapters.generic._model import (
     FunctionCall,
     LLMChunk,
     LLMMessage,
-    LLMUsage,
     Role,
     StopInfo,
     StrToolChoice,
     ToolCall,
 )
 from mistralai_vibe_local_harness.vibe.adapters.generic._provider import ProviderView
+from mistralai_vibe_local_harness.vibe.completion_profile import (
+    ReasoningSetting,
+    ReasoningSupport,
+)
+
+TOOL_RESULT_IMAGE_PLACEHOLDER = "[Image]"
+
+
+def _tool_result_text(msg: LLMMessage) -> str:
+    """A tool result's content as Chat Completions takes it: text only.
+
+    The format takes images on user messages only, so a tool result is sent as
+    to a model without image input: each image becomes `[Image]`, after the
+    result's text, and the turn goes on. Resources are text already.
+    """
+    parts = [msg.content] if msg.content else []
+    parts.extend(TOOL_RESULT_IMAGE_PLACEHOLDER for _ in msg.images or ())
+    return "\n\n".join(parts)
 
 
 class OpenAIAdapter(APIAdapter):
@@ -46,6 +63,9 @@ class OpenAIAdapter(APIAdapter):
     def _user_with_images_to_parts(
         self, msg_dict: dict[str, Any], source: LLMMessage
     ) -> dict[str, Any]:
+        if source.role == Role.tool and source.images:
+            msg_dict["content"] = _tool_result_text(source)
+            return msg_dict
         if source.role != Role.user or not source.images:
             return msg_dict
         parts: list[dict[str, Any]] = []
@@ -89,8 +109,9 @@ class OpenAIAdapter(APIAdapter):
         enable_streaming: bool,
         provider: ProviderView,
         api_key: str | None = None,
-        thinking: str = "off",
+        thinking: ReasoningSetting | None = None,
         top_p: float | None = None,
+        reasoning_support: ReasoningSupport | None = None,
     ) -> PreparedRequest:
         converted_messages = self._convert_messages(messages, provider)
 
@@ -148,20 +169,13 @@ class OpenAIAdapter(APIAdapter):
         if message is None:
             message = LLMMessage(role=Role.assistant, content="")
 
-        usage_data = data.get("usage") or {}
-        prompt_details = usage_data.get("prompt_tokens_details") or {}
-        usage = LLMUsage(
-            prompt_tokens=usage_data.get("prompt_tokens", 0),
-            completion_tokens=usage_data.get("completion_tokens", 0),
-            cached_tokens=prompt_details.get("cached_tokens", 0),
-        )
         choices = data.get("choices") or []
         finish_reason = choices[0].get("finish_reason") if choices else None
         stop = (
             StopInfo(reason=str(finish_reason)) if finish_reason is not None else None
         )
 
-        return LLMChunk(message=message, usage=usage, stop=stop)
+        return LLMChunk(message=message, stop=stop)
 
 
 class ReasoningAdapter(APIAdapter):
@@ -189,7 +203,7 @@ class ReasoningAdapter(APIAdapter):
             case Role.tool:
                 result: dict[str, Any] = {
                     "role": "tool",
-                    "content": msg.content or "",
+                    "content": _tool_result_text(msg),
                     "tool_call_id": msg.tool_call_id,
                 }
                 if msg.name:
@@ -240,8 +254,9 @@ class ReasoningAdapter(APIAdapter):
         enable_streaming: bool,
         provider: ProviderView,
         api_key: str | None = None,
-        thinking: str = "off",
+        thinking: ReasoningSetting | None = None,
         top_p: float | None = None,
+        reasoning_support: ReasoningSupport | None = None,
     ) -> PreparedRequest:
         converted_messages = [self._convert_message(msg) for msg in messages]
 
@@ -333,20 +348,13 @@ class ReasoningAdapter(APIAdapter):
         if message is None:
             message = LLMMessage(role=Role.assistant, content="")
 
-        usage_data = data.get("usage") or {}
-        prompt_details = usage_data.get("prompt_tokens_details") or {}
-        usage = LLMUsage(
-            prompt_tokens=usage_data.get("prompt_tokens", 0),
-            completion_tokens=usage_data.get("completion_tokens", 0),
-            cached_tokens=prompt_details.get("cached_tokens", 0),
-        )
         choices = data.get("choices") or []
         finish_reason = choices[0].get("finish_reason") if choices else None
         stop = (
             StopInfo(reason=str(finish_reason)) if finish_reason is not None else None
         )
 
-        return LLMChunk(message=message, usage=usage, stop=stop)
+        return LLMChunk(message=message, stop=stop)
 
 
 __all__ = ["OpenAIAdapter", "ReasoningAdapter"]

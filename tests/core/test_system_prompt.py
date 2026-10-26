@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -10,6 +12,7 @@ import pytest
 
 from vibe.core import system_prompt
 from vibe.core.config import ProjectContextConfig
+from vibe.core.prompts import PROMPTS_DIR, load_system_prompt
 from vibe.core.system_prompt import (
     ProjectContextProvider,
     default_branch,
@@ -17,6 +20,33 @@ from vibe.core.system_prompt import (
     get_agents_md_section,
 )
 from vibe.utils.platform import WindowsShell, WindowsShellKind
+
+
+@pytest.mark.parametrize(
+    "prompt_id", sorted(path.stem for path in PROMPTS_DIR.glob("*.md"))
+)
+def test_bundled_prompts_state_no_date(prompt_id: str) -> None:
+    # Agent profiles such as Lean load their prompt as written, so a date
+    # placeholder would reach the model unsubstituted.
+    prompt = load_system_prompt(prompt_id)
+
+    assert "$current_date" not in prompt
+    assert "Today's date" not in prompt
+
+
+@pytest.mark.parametrize(
+    "prompt_id", sorted(path.stem for path in PROMPTS_DIR.glob("*.md"))
+)
+def test_bundled_prompts_name_the_edit_tool_the_model_has(prompt_id: str) -> None:
+    # The model's file edit tool is `edit`; `search_replace` is only the
+    # Runtime's internal operation name. Edit errors quoted in a prompt must be
+    # ones the tool emits ("old_string not found").
+    prompt = load_system_prompt(prompt_id)
+
+    assert "search_replace" not in prompt
+    assert "diff_error" not in prompt
+    assert re.search(r"\bold_str\b", prompt) is None
+    assert set(re.findall(r'"([^"]*not found)"', prompt)) <= {"old_string not found"}
 
 
 def test_project_local_git_is_not_executed_automatically(
@@ -108,7 +138,13 @@ def test_fetch_git_context_does_not_inspect_worktree_status(
                 "refs/heads/master",
                 "refs/remotes/origin/master",
             ): "refs/remotes/origin/master\n",
-            ("log", "--oneline", "--no-decorate", "-5"): "abc123 message\n",
+            (
+                "log",
+                "--oneline",
+                "--no-decorate",
+                "--no-show-signature",
+                "-5",
+            ): "abc123 message\n",
         }[tuple(args)]
         return subprocess.CompletedProcess(args, 0, stdout=output)
 
@@ -387,3 +423,61 @@ def test_get_agents_md_section_renders_given_project_instructions_alone() -> Non
     assert "may or may not be relevant" not in section
     assert section.rstrip().endswith("# Given")
     assert get_agents_md_section("", [], project_instructions=" \n ") is None
+
+
+@pytest.mark.skipif(os.name != "posix", reason="owned verifier fixture is POSIX-only")
+def test_project_context_never_executes_repository_signature_verifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    git = system_prompt.resolve_git_executable(cwd=tmp_path)
+    if git is None:
+        pytest.skip("Git is unavailable")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+
+    def run_git(*args: str, input: str | None = None) -> str:
+        return subprocess.run(
+            [git, "-c", f"core.hooksPath={os.devnull}", *args],
+            cwd=tmp_path,
+            input=input,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    run_git("init", "-q")
+    marker = tmp_path / "verifier-executed"
+    verifier = tmp_path / "owned-verifier.sh"
+    verifier.write_text(
+        f"#!/bin/sh\nprintf inert > {shlex.quote(str(marker))}\nexit 1\n"
+    )
+    verifier.chmod(0o700)
+    run_git("config", "gpg.program", str(verifier))
+    run_git("config", "log.showSignature", "true")
+    tree = run_git("hash-object", "-t", "tree", "--stdin", input="")
+    commit = run_git(
+        "hash-object",
+        "-t",
+        "commit",
+        "-w",
+        "--stdin",
+        input=(
+            f"tree {tree}\n"
+            "author Fixture <fixture@example.test> 1700000000 +0000\n"
+            "committer Fixture <fixture@example.test> 1700000000 +0000\n"
+            "gpgsig -----BEGIN PGP SIGNATURE-----\n inert\n -----END PGP SIGNATURE-----\n"
+            "\nowned signed-commit fixture\n"
+        ),
+    )
+    run_git("update-ref", "HEAD", commit)
+    # Prove the repository configuration would execute the inert verifier.
+    run_git("log", "--oneline", "-1")
+    assert marker.exists()
+    marker.unlink()
+
+    context = ProjectContextProvider(
+        ProjectContextConfig(), root_path=tmp_path
+    ).get_git_status()
+
+    assert "owned signed-commit fixture" in context
+    assert not marker.exists()

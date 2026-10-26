@@ -288,6 +288,9 @@ class UnifiedVibeCodeSession:
     def require_idle(self) -> None:
         self._adapter._require_idle()
 
+    def require_no_session_rewrite(self) -> None:
+        self._adapter._require_no_session_rewrite()
+
     def begin_teleport(self, operation_id: str) -> None:
         self._adapter._begin_teleport(operation_id)
 

@@ -233,6 +233,14 @@ pub fn md_link() -> Color {
 pub fn md_table_border() -> Color {
     blend(background(), foreground(), 0.2)
 }
+/// Fenced code block box — $foreground 50% over background, the truecolor
+/// reading of ANSI bright black; ANSI themes dim it to bright black itself.
+pub fn md_fence_border() -> Color {
+    if is_ansi() {
+        return Color::DarkGray;
+    }
+    blend(background(), foreground(), 0.5)
+}
 /// Horizontal rule — a `$secondary` border.
 pub fn md_rule() -> Color {
     secondary()

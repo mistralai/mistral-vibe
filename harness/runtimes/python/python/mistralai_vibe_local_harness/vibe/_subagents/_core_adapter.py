@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, JsonValue, field_validator
+from pydantic import Field, JsonValue, field_validator, model_validator
 
 from mistralai_vibe_local_harness.protocol import (
     RustProtocolError,
@@ -58,7 +58,28 @@ class CoreMessageInput(SubagentModel):
 
 
 class CoreInterruptInput(SubagentModel):
-    name: str = Field(min_length=1)
+    agent_path: str = Field(min_length=1)
+    reason: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_saved_name(cls, value: object) -> object:
+        """A saved interrupt from before ``agent_path`` names the direct child."""
+        if isinstance(value, dict) and "agent_path" not in value and "name" in value:
+            saved = dict(value)
+            saved["agent_path"] = saved.pop("name")
+            return saved
+        return value
+
+
+def _direct_child_name(agent_path: str) -> str:
+    """The local Runtime runs as /root and addresses only its direct children."""
+    name = (
+        agent_path.removeprefix("/root/") if agent_path.startswith("/") else agent_path
+    )
+    if not name or "/" in name or name in {".", ".."}:
+        raise ValueError("the local Runtime can address only direct child paths")
+    return name
 
 
 def controller_action(
@@ -79,15 +100,15 @@ def controller_action(
             }
         case "agents.send_message":
             message = CoreMessageInput.model_validate(action.call.arguments)
-            name = message.agent_path.removeprefix("/root/")
-            if not name or "/" in name or name in {".", ".."}:
-                raise ValueError(
-                    "the local Runtime can message only direct child paths"
-                )
-            arguments = {"agentName": name, "message": message.message}
+            arguments = {
+                "agentName": _direct_child_name(message.agent_path),
+                "message": message.message,
+            }
         case "agents.interrupt":
             interrupt = CoreInterruptInput.model_validate(action.call.arguments)
-            arguments = {"agentName": interrupt.name}
+            arguments = {"agentName": _direct_child_name(interrupt.agent_path)}
+            if interrupt.reason is not None:
+                arguments["reason"] = interrupt.reason
         case _:
             raise ValueError(f"unsupported Core agent operation: {action.call.name}")
     return action.model_copy(

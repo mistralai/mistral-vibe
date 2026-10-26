@@ -23,6 +23,7 @@ from pydantic import (
 )
 
 from vibe.core.experiments.models import EvalResponse
+from vibe.core.session.artifacts import SessionArtifact
 from vibe.user_content import UserDisplayContent, UserResource
 from vibe.utils.tool_presentation import ToolCallPresentation, ToolResultPresentation
 
@@ -105,6 +106,9 @@ class SessionMetadata(BaseModel):
     config: dict[str, JsonValue] | None = None
     import_provenance: dict[str, JsonValue] | None = None
     created_worktree: WorktreeContext | None = None
+    # Durable external work products (PRs/MRs) observed during this session.
+    # Absent from sessions written before this field existed; defaults to [].
+    artifacts: list[SessionArtifact] = Field(default_factory=list)
 
 
 StrToolChoice = Literal["auto", "none", "any", "required"]

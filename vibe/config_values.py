@@ -8,8 +8,24 @@ DEFAULT_THEME = AUTO_THEME
 DEFAULT_LOG_LEVEL = "WARNING"
 
 type AudioClient = Literal["mistral"]
-type ThinkingLevel = Literal["off", "low", "medium", "high", "max"]
-THINKING_LEVELS: tuple[ThinkingLevel, ...] = ("off", "low", "medium", "high", "max")
+type ThinkingLevel = Literal["off", "low", "medium", "high", "xhigh", "max"]
+THINKING_LEVELS: tuple[ThinkingLevel, ...] = (
+    "off",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+)
+# The levels a model offers when its config does not narrow them. xhigh is
+# accepted everywhere but offered only by a model that lists it.
+DEFAULT_THINKING_LEVELS: tuple[ThinkingLevel, ...] = (
+    "off",
+    "low",
+    "medium",
+    "high",
+    "max",
+)
 
 type TranscriptionEncoding = Literal["pcm_s16le"]
 type SpeechOutputFormat = Literal["pcm", "wav", "mp3", "flac", "opus"]

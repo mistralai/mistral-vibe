@@ -9,20 +9,23 @@
 use serde_json::{Value, json};
 
 use crate::core::HarnessConfig;
-use crate::core::config::{ImageDeliveryMode, ImageTokenCost};
+use crate::core::config::{ImageCostRule, ImageDeliveryMode};
 use crate::core::features::background_processes::Mode as BackgroundProcessMode;
 use crate::core::features::compaction::{
-    CompactionBudget, CompactionProjection, CompactionProjectionFit, CompactionRequestKind,
-    NewestToolExchange, prompt_message,
+    CompactionBudget, CompactionPhase, CompactionProjection, CompactionProjectionFit,
 };
 use crate::core::features::model_wait::Mode as ModelWaitMode;
 use crate::core::features::skills::SkillDefinition;
 use crate::core::features::subagents::Mode as SubagentMode;
+use crate::core::prompt::PromptSettings;
 use crate::core::prompt::build_system_prompt;
-use crate::core::testing::{assistant_text, config};
+use crate::core::testing::config;
 use crate::core::tools::command_environment::CommandEnvironment;
 use crate::core::tools::resolved::ResolvedTools;
-use crate::core::wire::message::{Message, StoredMessage};
+use crate::core::wire::content::ContentBlock;
+use crate::core::wire::message::{
+    AssistantPart, AssistantSemanticPart, Message, StoredMessage, ToolArguments, ToolOutcome,
+};
 
 const ENVIRONMENTS: [(&str, CommandEnvironment); 5] = [
     ("disabled", CommandEnvironment::Disabled),
@@ -89,46 +92,84 @@ fn system_message_with_each_optional_section() {
 
 #[test]
 fn compaction_requests() {
+    // The reply ran a tool whose result came back: the in-context request
+    // ends with a placeholder for it.
     let history = vec![
         StoredMessage::visible(Message::user_text("Rename the config loader.")),
-        StoredMessage::visible(assistant_text("Renamed it in src/config.rs.")),
+        StoredMessage::visible(Message::assistant(vec![
+            AssistantPart::Content(ContentBlock::text("Renamed it in src/config.rs.")),
+            AssistantPart::Semantic(AssistantSemanticPart::ToolCall {
+                id: "call-1".to_string(),
+                name: "run_tests".to_string(),
+                arguments: ToolArguments::Json {
+                    raw: "{}".to_string(),
+                    value: json!({}),
+                },
+                meta: None,
+            }),
+        ])),
+        StoredMessage::visible(Message::tool(
+            "call-1".to_string(),
+            "run_tests".to_string(),
+            ToolOutcome::Success,
+            vec![ContentBlock::text("2 passed")],
+            None,
+        )),
     ];
     let generated = StoredMessage::generated_system(Message::system_text("agent system prompt"));
     let budget = CompactionBudget {
         token_threshold: None,
         image_delivery: ImageDeliveryMode::Native,
-        image_cost: ImageTokenCost::default(),
+        image_cost: ImageCostRule::Fixed { tokens: 8_192 },
     };
 
+    let prompts = PromptSettings::default();
     let mut requests = serde_json::Map::new();
     for (name, extra) in [
         ("without_extra_instructions", ""),
         ("with_extra_instructions", "Keep file paths verbatim."),
     ] {
-        let mut messages = vec![generated.clone()];
-        messages.extend(history.clone());
-        messages.push(prompt_message(extra));
-        let in_context = CompactionProjection::restore(
-            messages.clone(),
-            0,
-            CompactionRequestKind::InContext,
+        let mut canonical = vec![generated.clone()];
+        canonical.extend(history.clone());
+        let in_context = CompactionProjection::initial(
+            &canonical,
+            generated.clone(),
+            extra,
             &[],
             budget,
-            NewestToolExchange::MayRemove,
+            &prompts.compaction,
+        );
+        let Ok(CompactionProjectionFit::Fitted(projection)) = &in_context else {
+            panic!("snapshot compaction request fits without a threshold");
+        };
+        let messages = projection.messages().to_vec();
+        let cut_off_retry = CompactionProjection::restore(
+            messages.clone(),
+            1,
+            CompactionPhase::CutOffRetry {
+                attempt: 1,
+                partial: None,
+            },
+            None,
+            &[],
+            budget,
+            &prompts.compaction,
         );
         let standalone = CompactionProjection::restore(
             messages,
             1,
-            CompactionRequestKind::Standalone,
+            CompactionPhase::Standalone,
+            None,
             &[],
             budget,
-            NewestToolExchange::MayRemove,
+            &prompts.compaction,
         );
         requests.insert(
             name.to_string(),
             json!({
                 "in_context": model_messages(in_context),
                 "standalone": model_messages(standalone),
+                "cut_off_retry": model_messages(cut_off_retry),
             }),
         );
     }

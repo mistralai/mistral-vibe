@@ -18,15 +18,16 @@ pub(crate) use crate::core::action_id::{
 };
 pub(crate) use crate::core::capabilities::{HookBinding, HookSelector};
 pub(crate) use crate::core::config::{
-    ContextSettings, HarnessConfig, HarnessConfigUpdate, HarnessSettings, ImageDeliveryMode,
-    ImageDeliverySettings, ImageTokenCost, InputModality, ProvidedToolDefinition,
+    ContextSettings, HarnessConfig, HarnessConfigUpdate, HarnessSettings, ImageCostRule,
+    ImageDeliveryMode, ImageDeliverySettings, InputModality, ModelFacts, ProvidedToolDefinition,
     ProvidedToolExposure, ToolGroupDefinition, ToolGroupMetadata, ToolSettings, TurnSettings,
 };
 pub(crate) use crate::core::error::CoreError;
 pub(crate) use crate::core::features::background_processes::Mode as BackgroundProcessMode;
 pub(crate) use crate::core::features::compaction::{
-    CompactionBudget, CompactionFallback, CompactionPolicy, CompactionTrigger,
+    CompactionBudget, CompactionPolicy, CompactionTrigger,
 };
+pub(crate) use crate::core::features::file_system::BashTimeoutSettings;
 pub(crate) use crate::core::features::large_output::Policy as LargeOutputPolicy;
 pub(crate) use crate::core::features::notifications::{
     AsyncToolNotificationStatus, Notification, NotificationLevel, NotificationSource,
@@ -266,6 +267,30 @@ pub(crate) fn message_content(message: &Message) -> Vec<ContentBlock> {
     }
 }
 
+/// Facts of a 262,144-token model with image input, at the default threshold
+/// the hosts compile for that window.
+pub(crate) fn test_model_facts() -> ModelFacts {
+    ModelFacts {
+        context_window: 262_144,
+        compaction_threshold: 202_144,
+        compaction_threshold_max: 238_144,
+        input_modalities: vec![InputModality::Text, InputModality::Image],
+        image_cost: ImageCostRule::Fixed { tokens: 8_192 },
+    }
+}
+
+/// Usage of a small reply, far below any compaction threshold.
+pub(crate) fn test_usage() -> TokenUsage {
+    TokenUsage {
+        input_tokens: 100,
+        output_tokens: 20,
+        total_tokens: 120,
+        cached_input_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+    }
+}
+
 pub(crate) fn config() -> HarnessConfig {
     HarnessConfig {
         task_id: "task".to_string(),
@@ -277,15 +302,13 @@ pub(crate) fn config() -> HarnessConfig {
             },
             context: ContextSettings {
                 compaction: CompactionPolicy::Disabled,
-                compaction_fallback: CompactionFallback::Standalone,
-                image_delivery: ImageDeliverySettings::default(),
                 notifications: crate::core::features::notifications::Settings {
                     pending_count: 1000,
                     pending_bytes: 1024 * 1024,
                     recent_ids: 1000,
                 },
-                image_token_cost: ImageTokenCost::SerializedBytes,
-                input_modalities: vec![InputModality::Text, InputModality::Image],
+                model_facts: test_model_facts(),
+                compaction_model_input_modalities: None,
             },
             tools: ToolSettings {
                 max_wait_ms: 3_600_000,
@@ -304,6 +327,11 @@ pub(crate) fn config() -> HarnessConfig {
                 file_system: Default::default(),
                 skills: Default::default(),
                 command_environment: CommandEnvironment::Unix,
+                // A Host's timeouts, as the Vibe CLI and agents_sdk set them.
+                bash_timeout: Some(BashTimeoutSettings {
+                    default_seconds: 120,
+                    max_seconds: 300,
+                }),
                 permissions: None,
             },
             prompts: Default::default(),
@@ -469,7 +497,7 @@ pub(crate) fn advance_llm(state: HarnessState, message: Message) -> Step {
             result: CompletionResult {
                 parts,
                 finish_reason,
-                usage: None,
+                usage: test_usage(),
             },
         },
     )
@@ -492,7 +520,7 @@ pub(crate) fn advance_llm_retry(
                     "rejected draft".to_string(),
                 ))],
                 finish_reason: CompletionFinishReason::Stop,
-                usage: None,
+                usage: test_usage(),
             },
         },
     )?
@@ -546,6 +574,72 @@ pub(crate) fn advance_tool(
         },
     };
     advance(state, command).unwrap()
+}
+
+/// Core's uncorrected estimate of the agent request the checkpointed session
+/// makes next, tools included.
+pub(crate) fn agent_request_estimate(checkpoint: &Value, config: HarnessConfig) -> u64 {
+    let state = crate::core::checkpoint::decode_checkpoint(&checkpoint.to_string())
+        .and_then(|checkpoint| checkpoint.restore(config))
+        .expect("checkpoint restores");
+    crate::core::features::compaction::estimate_agent_request_tokens(&state)
+        .expect("request estimates")
+}
+
+pub(crate) fn summary_request_estimate(checkpoint: &Value, config: HarnessConfig) -> u64 {
+    let state = crate::core::checkpoint::decode_checkpoint(&checkpoint.to_string())
+        .and_then(|checkpoint| checkpoint.restore(config))
+        .expect("checkpoint restores");
+    crate::core::features::compaction::estimate_summary_request_tokens(&state)
+        .expect("request estimates")
+}
+
+/// The default config with automatic compaction at `token_threshold`.
+pub(crate) fn with_threshold(token_threshold: u64) -> HarnessConfig {
+    let mut config = config();
+    set_threshold(&mut config.settings, token_threshold);
+    config
+}
+
+/// Turns automatic compaction on at `token_threshold`, widening the
+/// window facts when the threshold is above them.
+pub(crate) fn set_threshold(settings: &mut HarnessSettings, token_threshold: u64) {
+    settings.context.compaction = CompactionPolicy::Automatic;
+    let facts = &mut settings.context.model_facts;
+    facts.compaction_threshold = token_threshold;
+    facts.compaction_threshold_max = facts.compaction_threshold_max.max(token_threshold);
+    facts.context_window = facts.context_window.max(token_threshold + 1);
+}
+
+/// Answers the awaited agent request with a reply reporting `input_tokens`.
+pub(crate) fn reply_with_input_tokens(state: HarnessState, input_tokens: u64) -> HarnessState {
+    let action_id = awaiting_action_id(&state);
+    let usage = TokenUsage {
+        input_tokens,
+        output_tokens: 7,
+        total_tokens: input_tokens + 7,
+        cached_input_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+    };
+    advance(
+        state,
+        HarnessCommand::CompletionSucceeded {
+            action_id,
+            result: CompletionResult {
+                parts: vec![CompletionResultPart::Content(ContentBlock::text("done"))],
+                finish_reason: CompletionFinishReason::Stop,
+                usage,
+            },
+        },
+    )
+    .unwrap()
+    .state
+}
+
+pub(crate) fn correction(factor: f64) -> crate::core::features::compaction::EstimateCorrection {
+    crate::core::features::compaction::EstimateCorrection::restore(factor)
+        .expect("valid correction")
 }
 
 pub(crate) fn started() -> HarnessState {

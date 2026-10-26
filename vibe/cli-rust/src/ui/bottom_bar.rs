@@ -1,8 +1,10 @@
-//! Bottom bar: working directory + PID on the left, token budget on the right.
+//! Bottom bar: working directory on the left, PR/MR link centered, active
+//! model and thinking level + token budget on the right.
+//! One artifact paints its link; several paint a count that opens the modal.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -14,6 +16,28 @@ use crate::utils::paths::collapse_home;
 use crate::utils::text::{ellipsize, format_compact_count};
 use unicode_width::UnicodeWidthStr;
 
+/// Between the active model and the token counter.
+const MODEL_SEP: &str = " · ";
+/// Fewest cells an elided cwd keeps before the model is hidden to make room.
+const CWD_FLOOR: usize = 16;
+/// Fewest cells an elided model name keeps before it is hidden.
+const MODEL_FLOOR: usize = 6;
+
+/// What a click on the painted bar link does.
+#[derive(Clone)]
+pub enum BarLinkAction {
+    /// Open this artifact's URL (the single-artifact case).
+    OpenUrl(String),
+    /// Open the artifacts modal (several artifacts).
+    ListArtifacts,
+}
+
+/// The PR/MR link painted in the bar this frame, for mouse click routing.
+pub struct BarLink {
+    pub area: Rect,
+    pub action: BarLinkAction,
+}
+
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     crate::mouse::register_region(app, area, crate::mouse::MouseTarget::BottomBar);
     // Working directory from `App`; `-` if unresolved.
@@ -24,14 +48,13 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
             .map(collapse_home)
             .unwrap_or_else(|| "-".into()),
     );
-    // While a quit is pending the path is replaced by the confirm hint.
-    let pid = crate::replay::footer_pid_label(format!(" [PID {}]", std::process::id()));
     let muted = theme::muted_style();
     // Token budget, empty until the first `session/statsUpdated` stats arrive.
-    let right = Line::from(Span::styled(format_context(app.session.tokens), muted));
-    // The cwd yields its tail to keep the PID, a one-cell spacer, and the counter.
-    let cwd_width = (area.width as usize).saturating_sub(right.width() + 1 + pid.width());
-    let left = if let Some(pending) = app.quit.active() {
+    let counter = format_context(app.session.tokens);
+    // The banner's `Name[thinking]` label, so the footer shows the thinking level too.
+    let model = app.session.startup_config.active_model.as_str();
+    // While a quit is pending the path is replaced by the confirm hint.
+    let quit = app.quit.active().map(|pending| {
         let extra = if pending.extra.is_empty() {
             String::new()
         } else {
@@ -41,12 +64,21 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
             Span::styled("Press ", muted),
             Span::styled(pending.key.label(), Style::default().fg(theme::primary())),
             Span::styled(format!(" again to quit{extra}"), muted),
-            Span::styled(pid, muted),
         ])
+    });
+    // The quit hint, a one-cell spacer and the counter stay; the cwd and model share the rest.
+    let fixed = quit.as_ref().map_or(0, Line::width);
+    let cwd_cells = if quit.is_some() { 0 } else { cwd.width() };
+    let room = (area.width as usize).saturating_sub(counter.width() + 1 + fixed);
+    let separator = if counter.is_empty() {
+        0
     } else {
-        let cwd = ellipsize(&cwd, cwd_width);
-        Line::from(Span::styled(format!("{cwd}{pid}"), muted))
+        MODEL_SEP.width()
     };
+    let (cwd_width, model_width) = split_room(room, cwd_cells, model.width(), separator);
+    let model = ellipsize(model, model_width);
+    let right = Line::from(Span::styled(right_text(&model, &counter), muted));
+    let left = quit.unwrap_or_else(|| Line::from(Span::styled(ellipsize(&cwd, cwd_width), muted)));
     // `#spacer` `width: 1fr`: the right context sits at the edge.
     let left_width = (left.width() as u16).min(area.width);
     // The `1fr` spacer never collapses below one cell.
@@ -70,7 +102,70 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
             ..area
         },
     );
+    // The model leads the right side; a click on it opens `/model`.
+    app.view.footer_model_area = Rect {
+        x: right_x,
+        width: (model.width() as u16).min(area.right() - right_x),
+        height: 1,
+        ..area
+    };
+    if app.view.mouse_position.is_some_and(|at| model_at(app, at)) {
+        f.buffer_mut()
+            .set_style(app.view.footer_model_area, theme::link_hover_style());
+    }
+    draw_link(app, f, area, spaced, right_x);
     paint_selection(app, f, area);
+}
+
+/// Whether `at` is on the footer's model name while a click there may open `/model`, which needs an idle session like the typed command.
+pub fn model_at(app: &App, at: (u16, u16)) -> bool {
+    app.focus() == crate::focus::Focus::Composer
+        && app.view.footer_model_area.contains(at.into())
+        && crate::commands::submission::accepts_idle_command(app)
+}
+
+/// Paint the session's PR/MR affordance centered between the two edge
+/// segments — the latest artifact's link when there is exactly one, else a
+/// count that opens the artifacts modal — and publish its hit rect.
+fn draw_link(app: &mut App, f: &mut Frame, area: Rect, lo: u16, hi: u16) {
+    let link = match app.session.artifacts.len() {
+        0 => None,
+        1 => {
+            let artifact = &app.session.artifacts[0];
+            Some((
+                // Phase 4: the link carries the synced status —
+                // `PR #123 (mergeable)`, `MR !7 (merged)`.
+                crate::artifacts::labeled(artifact),
+                BarLinkAction::OpenUrl(artifact.external_url.clone()),
+            ))
+        }
+        _ => Some((
+            crate::artifacts::count_label(&app.session.artifacts),
+            BarLinkAction::ListArtifacts,
+        )),
+    };
+    let mut painted = None;
+    if let Some((text, action)) = link {
+        let width = text.width() as u16;
+        if let Some(x) = center_x(area, width, lo, hi) {
+            let rect = Rect { x, width, ..area };
+            let style = theme::text(theme::md_link()).add_modifier(Modifier::UNDERLINED);
+            f.render_widget(Paragraph::new(Span::styled(text, style)), rect);
+            painted = Some(BarLink { area: rect, action });
+        }
+    }
+    app.view.bottom_bar_link = painted;
+}
+
+/// Center a `width`-cell segment in `area`, clamped to `[lo, hi - width]` so it
+/// never overlaps the edge segments; `None` when it does not fit.
+pub fn center_x(area: Rect, width: u16, lo: u16, hi: u16) -> Option<u16> {
+    let max_x = hi.checked_sub(width)?;
+    if width == 0 || max_x < lo {
+        return None;
+    }
+    let centered = area.x + (area.width - width) / 2;
+    Some(centered.clamp(lo, max_x))
 }
 
 /// Highlight the bottom-bar selection and, on a pending release, copy its text.
@@ -156,6 +251,26 @@ fn read_row(buf: &Buffer, y: u16, x0: u16, x1: u16) -> String {
         .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol()))
         .collect();
     row.trim_end().to_string()
+}
+
+/// `(cwd, model)` cells in `room`, with `separator` cells before a shown model: the model elides to its floor, the cwd to its, then the model hides and the cwd takes the rest.
+pub fn split_room(room: usize, cwd: usize, model: usize, separator: usize) -> (usize, usize) {
+    let shown = room.saturating_sub(separator);
+    let model_floor = model.min(MODEL_FLOOR);
+    if model == 0 || shown < cwd.min(CWD_FLOOR) + model_floor {
+        return (cwd.min(room), 0);
+    }
+    let cwd = cwd.min(shown - model_floor);
+    (cwd, model.min(shown - cwd))
+}
+
+/// The right side: the (elided) model, then the counter, either one possibly empty.
+fn right_text(model: &str, counter: &str) -> String {
+    match (model.is_empty(), counter.is_empty()) {
+        (true, _) => counter.to_owned(),
+        (false, true) => model.to_owned(),
+        (false, false) => format!("{model}{MODEL_SEP}{counter}"),
+    }
 }
 
 /// Render the context budget `(current, max)`; empty while `max == 0`.

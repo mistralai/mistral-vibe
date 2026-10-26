@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from vibe.app_server._cached_layers import apply_cached_layers
+from vibe.app_server._config_errors import USER_CONFIG_ERRORS, user_config_error
 from vibe.app_server._connection_protocol import ClientInfo
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
 from vibe.app_server._history_projection import project_message_history
@@ -96,6 +97,7 @@ from vibe.app_server.protocol import (
 )
 from vibe.core.agents.manager import AgentManager
 from vibe.core.config import VibeConfigSchema, build_default_orchestrator
+from vibe.core.config._setting_keys import config_json_schema
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.layers.admin import enforced_keys
 from vibe.core.config.orchestrator import ConfigOrchestrator
@@ -112,6 +114,7 @@ from vibe.core.git.worktree import (
     WorktreeRepository,
 )
 from vibe.core.hooks.config import load_hooks_from_fs
+from vibe.core.session.artifacts import sanitize_artifacts_in_raw_metadata
 from vibe.core.session.saved_sessions import (
     delete_saved_session,
     relocate_saved_session,
@@ -120,6 +123,7 @@ from vibe.core.session.saved_sessions import (
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.skills.manager import SkillManager
 from vibe.core.skills.models import SkillSource
+from vibe.core.trusted_folders import TrustedFoldersManager
 from vibe.core.types import LLMMessage, SessionMetadata
 from vibe.observability.logging import logger
 
@@ -183,12 +187,24 @@ class HostRequestHandler:
         raw_params: dict[str, Any],
         *,
         session_id: str | None = None,
+        worktree_trust_store: TrustedFoldersManager | None = None,
         client_info: ClientInfo | None = None,
     ) -> DispatchResult:
         try:
             response = await self._dispatch(
-                method, raw_params, session_id=session_id, client_info=client_info
+                method,
+                raw_params,
+                session_id=session_id,
+                client_info=client_info,
+                worktree_trust_store=worktree_trust_store,
             )
+        except USER_CONFIG_ERRORS as exc:
+            # The picker reads load the same config a session start does, so they
+            # report a config the user can fix the same way.
+            error = user_config_error(exc)
+            if error is None:
+                raise
+            raise RequestFailure(error.code, error.message, error.data) from exc
         except WorkspaceTrustError as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
         except GitError as exc:
@@ -211,6 +227,7 @@ class HostRequestHandler:
         raw_params: dict[str, Any],
         *,
         session_id: str | None = None,
+        worktree_trust_store: TrustedFoldersManager | None = None,
         client_info: ClientInfo | None = None,
     ) -> ProtocolModel:
         match method:
@@ -246,7 +263,10 @@ class HostRequestHandler:
                 response = await self._dispatch_session(method, raw_params)
             case _ if method.startswith("workspace/"):
                 response = await self._dispatch_workspace(
-                    method, raw_params, session_id=session_id
+                    method,
+                    raw_params,
+                    session_id=session_id,
+                    worktree_trust_store=worktree_trust_store,
                 )
             case _ if method.startswith("projectLinks/"):
                 response = await self._dispatch_project_links(method, raw_params)
@@ -492,7 +512,12 @@ class HostRequestHandler:
         return response
 
     async def _dispatch_workspace(
-        self, method: str, raw_params: dict[str, Any], *, session_id: str | None = None
+        self,
+        method: str,
+        raw_params: dict[str, Any],
+        *,
+        session_id: str | None = None,
+        worktree_trust_store: TrustedFoldersManager | None = None,
     ) -> ProtocolModel:
         match method:
             case "workspace/trust/status":
@@ -543,12 +568,13 @@ class HostRequestHandler:
                 )
             case "workspace/git/worktrees/prune":
                 validate_wire(WorkspaceWorktreePruneParams, raw_params)
-                worktree_cleanup().sweep()
+                worktree_cleanup().sweep(trust_store=self._harness_files.trust_store)
                 orchestrator = await self._load_orchestrator(self._session_files(None))
                 removed = await asyncio.to_thread(
                     ManagedWorktree.prune,
                     orchestrator.config.worktree_limit,
                     session_finished,
+                    trust_store=self._harness_files.trust_store.for_session(),
                 )
                 response = WorkspaceWorktreePruneResponse(removed=removed)
             case "workspace/git/checkouts":
@@ -567,6 +593,7 @@ class HostRequestHandler:
                     delete_branch=params.delete_branch,
                     session_id=session_id,
                     inspect=params.inspect,
+                    trust_store=worktree_trust_store or self._harness_files.trust_store,
                 )
             case _:
                 raise method_not_found(method)
@@ -676,7 +703,9 @@ class HostRequestHandler:
         if session_path is None:
             raise FileNotFoundError(f"Session not found: {session_id}")
         messages, raw_metadata = SessionLoader.load_session(session_path)
-        return messages, SessionMetadata.model_validate(raw_metadata)
+        return messages, SessionMetadata.model_validate(
+            sanitize_artifacts_in_raw_metadata(raw_metadata, session_dir=session_path)
+        )
 
     async def _load_config(self, cwd: str | None) -> VibeConfigSchema:
         return (await self._load_orchestrator(self._session_files(cwd))).config
@@ -718,7 +747,7 @@ class HostRequestHandler:
 
 @lru_cache(maxsize=1)
 def config_schema_response() -> ConfigSchemaReadResponse:
-    schema = VibeConfigSchema.model_json_schema(mode="serialization", by_alias=True)
+    schema = config_json_schema(VibeConfigSchema)
     encoded = json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()
     version = hashlib.sha256(encoded, usedforsecurity=False).hexdigest()
     return ConfigSchemaReadResponse.model_validate({
@@ -853,6 +882,8 @@ def worktree_remove_response(
     delete_branch: bool | None = None,
     session_id: str | None = None,
     inspect: bool = False,
+    *,
+    trust_store: TrustedFoldersManager | None = None,
 ) -> WorkspaceWorktreeRemoveResponse:
     managed = ManagedWorktree.at(cwd)
     if managed is None:
@@ -878,14 +909,16 @@ def worktree_remove_response(
         if inspect:
             # The exit prompt's progress line: what a removal would do, asked
             # before anything commits. The probe never mutates the claim.
-            release = managed.probe_release(session_id)
+            release = managed.probe_release(session_id, trust_store=trust_store)
         elif force:
-            release = managed.force_release(session_id, delete_branch)
+            release = managed.force_release(
+                session_id, delete_branch, trust_store=trust_store
+            )
         else:
             # The plain call keeps its historical contract: snapshot-then-remove,
             # no holder discount. Desktop removes a deleted session's worktree
             # this way, and the caller's own session was never passed before.
-            release = managed.release()
+            release = managed.release(trust_store=trust_store)
     except (GitError, OSError) as e:
         logger.warning(
             "Failed to %s worktree cwd=%s: %s", "probe" if inspect else "remove", cwd, e

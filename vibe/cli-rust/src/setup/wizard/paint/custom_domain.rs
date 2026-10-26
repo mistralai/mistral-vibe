@@ -16,6 +16,38 @@ pub(super) fn draw(
     area: Rect,
     chat_frame: &str,
 ) {
+    // An administrator-pinned console renders as one locked card: no API
+    // base, no caret, the submit hint under it.
+    if wizard.context.pinned_console_url.is_some() {
+        let rows = vec![
+            Row::Blank(2),
+            Row::InputCard {
+                input: wizard.custom_domain.clone(),
+                focused: false,
+                title: "Console URL",
+                placeholder: "console.mistral.ai",
+                secure: false,
+                card: InputCard::Domain,
+            },
+            Row::Blank(1),
+            Row::Feedback(ValidationState::Valid),
+            Row::Blank(2),
+            Row::Hint(Hint::Keys(&[crate::hints::BACK])),
+        ];
+        render(
+            app,
+            wizard,
+            f,
+            area,
+            chat_frame,
+            "Sign in to your console",
+            Subtitle::Text(
+                "Your administrator has configured Vibe to sign in to this console.".into(),
+            ),
+            &rows,
+        );
+        return;
+    }
     let domain = wizard.custom_domain.clone();
     let api = wizard.custom_domain_api.clone();
     let focus = wizard.custom_domain_focus;

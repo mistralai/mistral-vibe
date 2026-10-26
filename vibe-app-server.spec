@@ -31,6 +31,16 @@ for item in core_builtins_hidden_imports + harness_hidden_imports:
 
 binaries = core_builtins_binaries + harness_binaries
 
+# gh and glab release binaries staged by scripts/ci/download-cli-binaries.sh.
+# They land in _internal/vibe/bin/, where the session artifact detector looks
+# them up (approach C). Absent in dev builds: detection falls back to PATH.
+_cli_bin_dir = os.path.join(SPECPATH, ".native-build", "cli-binaries")
+for _cli_name in ("gh", "glab"):
+    _cli_exe = f"{_cli_name}.exe" if sys.platform == "win32" else _cli_name
+    _cli_src = os.path.join(_cli_bin_dir, _cli_exe)
+    if os.path.isfile(_cli_src):
+        binaries.append((_cli_src, "vibe/bin"))
+
 datas = collect_data_files(
     "vibe",
     includes=[

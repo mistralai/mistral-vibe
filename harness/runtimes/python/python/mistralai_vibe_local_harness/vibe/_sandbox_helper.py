@@ -25,7 +25,6 @@ import base64
 import codecs
 from collections.abc import Callable, Iterator, Mapping, Sequence
 import contextlib
-import difflib
 import hashlib
 import hmac
 import json
@@ -86,9 +85,13 @@ _EDIT_HINT_MAX_LINES = 8
 _EDIT_HINT_MAX_CHARS = 400
 _EDIT_HINT_MAX_MATCH_LINES = 5
 _EDIT_HINT_MIN_SIMILARITY = 0.6
-# Bounds the closest-match search to roughly this many compared characters, so
-# a miss in a large file still fails fast.
-_EDIT_HINT_MAX_COMPARED_CHARS = 2_000_000
+# The closest-match search reads the file twice in one pass; above this many
+# characters it is skipped, so a miss in a huge file still fails fast.
+_EDIT_HINT_MAX_SCANNED_CHARS = 2_000_000
+_REREAD_HINT = "read the file again and copy old_string exactly"
+_EDIT_HINT_RERANKED_WINDOWS = 5
+_EDIT_HINT_PIECE_CHARS = 3
+_EDIT_HINT_SHIFTED_LINE_WEIGHT = 0.9
 SESSION_DIRECTORY_PREFIX = "mistralai-vibe-session-"
 TOOL_RESULTS_DIRECTORY = "tool-results"
 _POSIX_SHELL_NAMES = ("zsh", "bash", "sh")
@@ -102,13 +105,13 @@ _POSIX_SHELL_PATHS = (
 )
 
 
-FileToolName = Literal["read_file", "write_file", "search_replace"]
+FileToolName = Literal["read_file", "write_file", "edit"]
 """The file tools the helper runs."""
 
 FILE_TOOL_PATH_KEYS: dict[FileToolName, str] = {
     "read_file": "path",
     "write_file": "path",
-    "search_replace": "file_path",
+    "edit": "file_path",
 }
 """The argument naming each file tool's target path."""
 
@@ -302,18 +305,16 @@ def write_file(path: Path, content: str) -> tuple[dict[str, Any], str | None]:
     return result, previous_content
 
 
-def search_replace(
-    path: Path, blocks: Sequence[Mapping[str, Any]]
+def edit(
+    path: Path, old_string: str, new_string: str, *, replace_all: bool = False
 ) -> tuple[dict[str, Any], list[dict[str, Any]], str | None]:
-    """Apply search/replace blocks in order; return the result, line previews
-    and the text the edit replaced.
+    """Replace ``old_string`` with ``new_string``; return the result, line
+    previews and the text the edit replaced.
 
-    Each block maps ``old_str``, ``new_str`` and ``replace_all``.
-
-    Blocks and the file match with their line endings normalized to ``\\n``, so
-    a block written with either ``\\n`` or ``\\r\\n`` edits a CRLF file. An
-    edited file is written back with its dominant line ending, which also
-    unifies a file that mixed several.
+    The strings and the file match with their line endings normalized to
+    ``\\n``, so an edit written with either ``\\n`` or ``\\r\\n`` edits a CRLF
+    file. An edited file is written back with its dominant line ending, which
+    also unifies a file that mixed several.
     """
     handle, status = _open_file(path)
     with handle:
@@ -325,17 +326,15 @@ def search_replace(
     decoded, encoding = _decode_editable_text(raw, path)
     newline = _dominant_newline(decoded) or os.linesep
     original = _to_lf(decoded)
-    updated = original
     previews: list[dict[str, Any]] = []
-    lines_changed = 0
     warnings: list[str] = []
 
-    for index, block in enumerate(blocks):
-        updated, changed = _apply_block(updated, index, block, path, previews)
-        lines_changed += changed
+    updated, lines_changed = _replace(
+        original, old_string, new_string, replace_all, path, previews
+    )
 
     if updated == original:
-        warnings.append("search/replace blocks leave the file unchanged")
+        warnings.append("the edit leaves the file unchanged")
     else:
         _atomic_write_text(path, _from_lf(updated, newline), encoding)
     # Previews carry the lines as written, so a reader that splices them back
@@ -361,24 +360,24 @@ def search_replace(
     return result, previews, previous_content
 
 
-def _apply_block(
+def _replace(
     text: str,
-    index: int,
-    block: Mapping[str, Any],
+    old_string: str,
+    new_string: str,
+    replace_all: bool,
     path: Path,
     previews: list[dict[str, Any]],
 ) -> tuple[str, int]:
-    if not block["old_str"].removesuffix("\r"):
-        raise ValueError(f"block {index}: old_str cannot be empty")
-    old_str, new_str = _edit_strings_to_lf(block["old_str"], block["new_str"])
-    replace_all = bool(block.get("replace_all", False))
+    if not old_string.removesuffix("\r"):
+        raise ValueError("old_string cannot be empty")
+    old_str, new_str = _edit_strings_to_lf(old_string, new_string)
     if old_str == new_str:
-        raise ValueError(f"block {index}: old_str and new_str must differ")
+        raise ValueError("old_string and new_string must differ")
     matches = text.count(old_str)
     if matches == 0:
-        raise ValueError(_not_found_message(text, index, old_str, path))
+        raise ValueError(_not_found_message(text, old_str, path))
     if matches > 1 and not replace_all:
-        raise ValueError(_not_unique_message(text, index, old_str, path, matches))
+        raise ValueError(_not_unique_message(text, old_str, path, matches))
 
     replacement_count = matches if replace_all else 1
     old_lines = old_str.splitlines(keepends=True)
@@ -397,86 +396,223 @@ def _apply_block(
     return text.replace(old_str, new_str, replacement_count), lines_changed
 
 
-def _not_found_message(text: str, index: int, old_str: str, path: Path) -> str:
-    message = f"block {index}: old_str not found in {path}"
-    lines = text.splitlines(keepends=True)
-    line_count = len(old_str.splitlines()) or 1
-    start = _whitespace_insensitive_match(text, old_str)
-    if start is not None:
-        snippet = _edit_hint_snippet(lines[start - 1 : start - 1 + line_count])
-        return (
-            f"{message}; the text at line {start} differs from it only in "
-            "whitespace or indentation. Copy it exactly, including indentation:\n"
-            f"{snippet}"
-        )
-    closest = _closest_match(lines, old_str, line_count)
-    if closest is None:
-        return f"{message}; read the file again and copy old_str exactly"
-    start, similarity = closest
-    snippet = _edit_hint_snippet(lines[start - 1 : start - 1 + line_count])
-    return (
-        f"{message}; the closest match ({similarity:.0%} similar) starts at "
-        f"line {start}:\n{snippet}"
-    )
+def _not_found_message(text: str, old_str: str, path: Path) -> str:
+    # Texts over the scanned-size limit get the reread hint before they are
+    # split into lines or normalized, so a failed edit on a huge file makes no
+    # copies of it.
+    if len(text) + len(old_str) > _EDIT_HINT_MAX_SCANNED_CHARS:
+        return f"old_string not found in {path}; {_REREAD_HINT}"
+    # Lines end at "\n" only, as in the edit previews and match line numbers.
+    hint, _ = _missing_old_str_hint(_lf_lines(text), _lf_lines(old_str) or [""])
+    return f"old_string not found in {path}; {hint}"
 
 
-def _not_unique_message(
-    text: str, index: int, old_str: str, path: Path, matches: int
-) -> str:
+def _lf_lines(text: str) -> list[str]:
+    lines = [f"{line}\n" for line in text.split("\n")]
+    lines[-1] = lines[-1][:-1]
+    return lines if lines[-1] else lines[:-1]
+
+
+def _not_unique_message(text: str, old_str: str, path: Path, matches: int) -> str:
     starts = _find_matches(text, old_str, limit=_EDIT_HINT_MAX_MATCH_LINES)
     lines = ", ".join(str(text.count("\n", 0, start) + 1) for start in starts)
     if matches > len(starts):
         lines += f" and {matches - len(starts)} more"
     return (
-        f"block {index}: old_str is not unique; found {matches} matches in {path} "
-        f"at lines {lines}. Add surrounding lines to old_str to pick one, or set "
+        f"old_string is not unique; found {matches} matches in {path} "
+        f"at lines {lines}. Add surrounding lines to old_string to pick one, or set "
         "replace_all to replace every match"
     )
 
 
-def _whitespace_insensitive_match(text: str, old_str: str) -> int | None:
-    """Return the line where ``old_str`` matches once whitespace runs are
-    collapsed and every line is stripped, or ``None``.
+def _missing_old_str_hint(
+    lines: list[str], wanted: list[str]
+) -> tuple[str, int | None]:
+    """Say where the text ``wanted`` was probably meant to match is in ``lines``.
+
+    Both take whole lines with their line breaks. Returns the hint and the
+    1-based line it points at, if any: lines equal to ``wanted`` but for
+    whitespace, else the most similar region, if it is at least
+    60% similar. The Vibe CLI and agents_sdk sandbox helpers carry this same
+    code, so the model sees the same hint on both hosts.
     """
+    match = _whitespace_insensitive_match(lines, wanted)
+    if match is not None:
+        start, count = match
+        snippet = _edit_hint_snippet(lines[start - 1 : start - 1 + count])
+        return (
+            f"the text at line {start} differs from it only in whitespace or "
+            f"indentation. Copy it exactly, including indentation:\n{snippet}",
+            start,
+        )
+    closest = _closest_match(lines, wanted)
+    if closest is None:
+        return _REREAD_HINT, None
+    start, count, similarity = closest
+    snippet = _edit_hint_snippet(lines[start - 1 : start - 1 + count])
+    # Capped at 99%, so a region that differs never reads as 100% similar.
+    percent = min(round(similarity * 100), 99)
+    return (
+        f"the closest match ({percent}% similar) starts at line {start}:\n{snippet}",
+        start,
+    )
 
-    def normalize(value: str) -> str:
-        return "\n".join(" ".join(line.split()) for line in value.split("\n"))
 
-    needle = normalize(old_str).strip("\n")
-    if not needle.strip():
+def _whitespace_insensitive_match(
+    lines: list[str], wanted: list[str]
+) -> tuple[int, int] | None:
+    """Return the line where ``wanted`` matches whole lines once whitespace
+    runs are collapsed and every line is stripped, and how many lines it spans.
+    """
+    needle = [" ".join(line.split()) for line in wanted]
+    while needle and not needle[0]:
+        needle.pop(0)
+    while needle and not needle[-1]:
+        needle.pop()
+    if not needle:
         return None
-    haystack = normalize(text)
-    found = haystack.find(needle)
+    # Both ends are newlines, so the match covers whole lines only.
+    haystack = "\n" + "\n".join(" ".join(line.split()) for line in lines) + "\n"
+    found = haystack.find("\n" + "\n".join(needle) + "\n")
     if found < 0:
         return None
-    return haystack.count("\n", 0, found) + 1
+    return haystack.count("\n", 0, found) + 1, len(needle)
 
 
 def _closest_match(
-    lines: Sequence[str], old_str: str, line_count: int
-) -> tuple[int, float] | None:
-    """Return the start line and similarity of the window of ``line_count``
-    lines most like ``old_str``, if any reaches the similarity floor.
+    lines: list[str], wanted: list[str]
+) -> tuple[int, int, float] | None:
+    """Return the start line, line count and similarity of the region most
+    like ``wanted``, if any reaches the similarity floor.
+
+    Similarity counts shared three-character pieces of the stripped lines, so
+    indentation does not matter. One pass slides the window over the file,
+    adding the line that enters and removing the line that leaves, so the cost
+    grows with the file's length only. The few best windows are then ranked
+    again with each line compared to its counterpart (or, at a discount, the
+    line next to it), which settles windows that differ by one line. The region
+    also takes in the lines that the first and last lines of ``wanted`` matched,
+    so a line old_str drops at either end is quoted too. Both texts count toward
+    the scanned-size limit, so a huge old_str is not split into pieces either.
     """
-    windows = max(len(lines) - line_count + 1, 0)
-    if windows * 2 * len(old_str) > _EDIT_HINT_MAX_COMPARED_CHARS:
+    line_count = len(wanted)
+    scanned = sum(map(len, lines)) + sum(map(len, wanted))
+    if len(lines) < line_count or scanned > _EDIT_HINT_MAX_SCANNED_CHARS:
         return None
-    matcher = difflib.SequenceMatcher(None, autojunk=False)
-    matcher.set_seq2(old_str)
-    best: tuple[int, float] | None = None
-    floor = _EDIT_HINT_MIN_SIMILARITY
-    for start in range(windows):
-        matcher.set_seq1("".join(lines[start : start + line_count]))
-        if matcher.real_quick_ratio() < floor or matcher.quick_ratio() < floor:
-            continue
-        similarity = matcher.ratio()
-        if similarity >= floor and (best is None or similarity > best[1]):
-            best = (start + 1, similarity)
-            floor = similarity
+    # Each distinct piece is stored once, so a piece costs a list slot only.
+    canonical: dict[str, str] = {}
+    wanted_pieces = [_line_pieces(line, canonical) for line in wanted]
+    scores = _window_scores(lines, wanted_pieces, canonical)
+    best: tuple[int, int, float] | None = None
+    candidates = sorted(range(len(scores)), key=lambda start: (-scores[start], start))
+    line_pieces: dict[int, list[str]] = {}
+    for start in candidates[:_EDIT_HINT_RERANKED_WINDOWS]:
+        matches = [
+            _aligned_similarity(lines, start + offset, pieces, line_pieces, canonical)
+            for offset, pieces in enumerate(wanted_pieces)
+        ]
+        similarity = (
+            scores[start] + sum(score for score, _ in matches) / line_count
+        ) / 2
+        if similarity >= _EDIT_HINT_MIN_SIMILARITY and (
+            best is None or similarity > best[2]
+        ):
+            first = min(start, matches[0][1])
+            last = max(start + line_count - 1, matches[-1][1])
+            best = (first + 1, last - first + 1, similarity)
     return best
 
 
-def _edit_hint_snippet(lines: Sequence[str]) -> str:
+def _window_scores(
+    lines: list[str], wanted_pieces: list[list[str]], canonical: dict[str, str]
+) -> list[float]:
+    """Return how many pieces each run of ``len(wanted_pieces)`` lines shares
+    with ``wanted_pieces``, as a Dice score, in one pass over ``lines``.
+    """
+    line_count = len(wanted_pieces)
+    limits: dict[str, int] = {}
+    for pieces in wanted_pieces:
+        for piece in pieces:
+            limits[piece] = limits.get(piece, 0) + 1
+    wanted_total = sum(map(len, wanted_pieces))
+    held: dict[str, int] = {}
+    shared = 0
+    total = 0
+    scores: list[float] = []
+    for index, line in enumerate(lines):
+        for piece in _line_pieces(line, canonical):
+            total += 1
+            limit = limits.get(piece, 0)
+            if limit:
+                count = held.get(piece, 0)
+                if count < limit:
+                    shared += 1
+                held[piece] = count + 1
+        if index >= line_count:
+            for piece in _line_pieces(lines[index - line_count], canonical):
+                total -= 1
+                limit = limits.get(piece, 0)
+                if limit:
+                    count = held[piece] - 1
+                    held[piece] = count
+                    if count < limit:
+                        shared -= 1
+        if index >= line_count - 1:
+            scores.append(2 * shared / (total + wanted_total))
+    return scores
+
+
+def _aligned_similarity(
+    lines: list[str],
+    index: int,
+    wanted: list[str],
+    line_pieces: dict[int, list[str]],
+    canonical: dict[str, str],
+) -> tuple[float, int]:
+    """Return how like ``wanted`` the line at ``index`` is, or the line above
+    or below it at a discount, and which line that is, so a line that old_str
+    drops or adds does not misalign every line after it, and a window in place
+    still wins a tie.
+    """
+    best = (0.0, index)
+    for at in range(max(index - 1, 0), min(index + 2, len(lines))):
+        weight = 1.0 if at == index else _EDIT_HINT_SHIFTED_LINE_WEIGHT
+        pieces = line_pieces.get(at)
+        if pieces is None:
+            pieces = line_pieces[at] = _line_pieces(lines[at], canonical)
+        score = weight * _piece_similarity(pieces, wanted)
+        if score > best[0]:
+            best = (score, at)
+    return best
+
+
+def _line_pieces(line: str, canonical: dict[str, str]) -> list[str]:
+    content = line.strip()
+    if len(content) < _EDIT_HINT_PIECE_CHARS:
+        return [canonical.setdefault(content, content)]
+    return [
+        canonical.setdefault(piece, piece)
+        for piece in (
+            content[index : index + _EDIT_HINT_PIECE_CHARS]
+            for index in range(len(content) - _EDIT_HINT_PIECE_CHARS + 1)
+        )
+    ]
+
+
+def _piece_similarity(left: list[str], right: list[str]) -> float:
+    counts: dict[str, int] = {}
+    for piece in left:
+        counts[piece] = counts.get(piece, 0) + 1
+    shared = 0
+    for piece in right:
+        count = counts.get(piece, 0)
+        if count:
+            counts[piece] = count - 1
+            shared += 1
+    return 2 * shared / (len(left) + len(right))
+
+
+def _edit_hint_snippet(lines: list[str]) -> str:
     snippet = "".join(lines[:_EDIT_HINT_MAX_LINES]).rstrip("\n")
     truncated = len(lines) > _EDIT_HINT_MAX_LINES
     if len(snippet) > _EDIT_HINT_MAX_CHARS:
@@ -488,10 +624,10 @@ def _edit_hint_snippet(lines: Sequence[str]) -> str:
 def run_file_tool(request: Mapping[str, Any]) -> dict[str, Any]:
     """Resolve the target path, then run one file tool.
 
-    ``request`` carries ``tool`` (``read_file``, ``write_file`` or
-    ``search_replace``), its validated ``arguments`` and the path ``policy``.
-    Returns ``{"result": ..., "annotations": ...}``, plus ``previous_content``
-    with the pre-edit text when the tool is a search/replace edit.
+    ``request`` carries ``tool`` (``read_file``, ``write_file`` or ``edit``),
+    its validated ``arguments`` and the path ``policy``. Returns
+    ``{"result": ..., "annotations": ...}``, plus ``previous_content`` with the
+    pre-edit text when the tool is ``edit``.
     """
     tool = request["tool"]
     arguments = request["arguments"]
@@ -523,7 +659,12 @@ def run_file_tool(request: Mapping[str, Any]) -> dict[str, Any]:
     if tool == "write_file":
         result, previous_content = write_file(path, arguments["content"])
         return {"result": result, "annotations": previous_content}
-    result, previews, previous_content = search_replace(path, arguments["content"])
+    result, previews, previous_content = edit(
+        path,
+        arguments["old_string"],
+        arguments["new_string"],
+        replace_all=bool(arguments.get("replace_all", False)),
+    )
     return {
         "result": result,
         "annotations": previews,
@@ -1711,6 +1852,7 @@ async def collect_bash(
     command: str,
     timeout_seconds: int,
     output_encoding: str = "utf-8",
+    timeout_advice: str = "",
 ) -> dict[str, Any]:
     """Wait for a spawned command and return its decoded output.
 
@@ -1721,8 +1863,9 @@ async def collect_bash(
 
     A non-zero exit is a result, not an error: the caller reports the code. So
     is a timeout: the command is stopped, and the result carries what it
-    printed until then, with ``timed_out`` set. The process group is always
-    killed, on success, timeout or cancellation.
+    printed until then, with ``timed_out`` set, and its note ends with
+    ``timeout_advice``, if any. The process group is always killed, on
+    success, timeout or cancellation.
     """
     stdout = _OutputCapture("stdout")
     stderr = _OutputCapture("stderr")
@@ -1743,9 +1886,10 @@ async def collect_bash(
         await asyncio.wait({readers}, timeout=_OUTPUT_DRAIN_SECONDS)
         stderr_text = stderr.render(output_encoding)
         if timed_out:
+            advice = f" {timeout_advice}" if timeout_advice else ""
             stderr_text += (
                 f"\n[The command timed out after {timeout_seconds}s and was"
-                " stopped. The output above is what it printed until then.]"
+                f" stopped. The output above is what it printed until then.{advice}]"
             )
         return {
             "command": command,
@@ -1771,6 +1915,7 @@ async def run_bash(
     shell: str | None,
     session_id: str | None,
     login_env: bool = True,
+    timeout_advice: str = "",
 ) -> dict[str, Any]:
     """Run ``command`` with this process's environment, after the shell's
     login profile.
@@ -1814,7 +1959,10 @@ async def run_bash(
         start_new_session=True,
     )
     result = await collect_bash(
-        process, command=command, timeout_seconds=timeout_seconds
+        process,
+        command=command,
+        timeout_seconds=timeout_seconds,
+        timeout_advice=timeout_advice,
     )
     if warnings:
         # The profile changed since the Host read it, and failed this time.
@@ -1859,11 +2007,16 @@ def decode_output(raw: bytes, encoding: str) -> str:
 
 
 async def kill(process: asyncio.subprocess.Process) -> None:
-    """Kill the process and its group, tolerating one that already exited."""
+    """Kill the process and its group, tolerating one that already exited.
+
+    On POSIX the process is only terminated directly when its group could not
+    be killed: a second signal after a delivered SIGKILL can still win on
+    macOS for a multi-threaded process, which then reports -15 instead of -9.
+    """
     if process.returncode is not None:
         return
-    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-        if sys.platform == "win32":
+    if sys.platform == "win32":
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             killer = await asyncio.create_subprocess_exec(
                 "taskkill",
                 "/F",
@@ -1874,10 +2027,14 @@ async def kill(process: asyncio.subprocess.Process) -> None:
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await killer.wait()
-        else:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            process.terminate()
+    else:
+        try:
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-        process.terminate()
+        except (ProcessLookupError, PermissionError, OSError):
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                process.terminate()
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         await process.wait()
 
@@ -3159,6 +3316,7 @@ def _run_bash_request(request: Mapping[str, Any]) -> dict[str, Any]:
             shell=request.get("shell"),
             session_id=request.get("session_id"),
             login_env=request.get("login_env", True),
+            timeout_advice=request.get("timeout_advice", ""),
         )
     )
 

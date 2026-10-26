@@ -18,13 +18,15 @@ use crate::startup::StartupEvent;
 use crate::transcript::local;
 use crate::utils::startup_cache;
 use crate::{
-    agents, approval, completion_manager, config, config_issues, feedback, mcp, message_queue,
-    model_picker, observability, post_ready, question_app, resume_picker, session_exit, startup,
-    subagents, todo_tracker, turn_summary, ui,
+    agents, approval, artifacts, completion_manager, config, config_issues, feedback, mcp,
+    message_queue, model_picker, observability, post_ready, question_app, resume_picker,
+    session_exit, startup, subagents, todo_tracker, turn_summary, ui,
 };
 
 /// Seconds a server warning/error toast stays up.
 pub(crate) const SERVER_TOAST_SECS: u64 = 5;
+/// The `warning` code of a connector or MCP server that failed to load.
+const INTEGRATIONS_UNAVAILABLE: &str = "integrations_unavailable";
 
 /// Returns true if a deferred `/exit` was replayed during the Ready event.
 pub fn apply_startup_event(
@@ -267,6 +269,7 @@ fn apply_ready(
     crate::update_notifier::gateway::configure_tls_trust(config.enable_system_trust_store);
     spawn_background_update_check(config.enable_update_checks);
     post_ready::fetch(app, client, config.show_greeting);
+    artifacts::fetch(app, client);
     resume_picker::subscribe(app, client);
     completion_manager::refresh(app);
     app.set_status(Status::Ready);
@@ -587,6 +590,8 @@ fn is_foreign_session_notification(app: &App, event: &Notification) -> bool {
             | notification::SESSION_STATS_UPDATED
             | notification::SESSION_SNAPSHOT
             | notification::CHILD_SESSION_UPDATED
+            | notification::ARTIFACTS_CREATED
+            | notification::ARTIFACTS_UPDATED
     ) {
         return false;
     }
@@ -868,6 +873,15 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             }
             apply_stats(app, event.params.get("stats").unwrap_or(&Value::Null));
         }
+        notification::ARTIFACTS_CREATED | notification::ARTIFACTS_UPDATED => {
+            if let Some(artifact) = event.params.get("artifact") {
+                if let Ok(artifact) =
+                    serde_json::from_value::<crate::server::PublicSessionArtifact>(artifact.clone())
+                {
+                    artifacts::upsert(app, artifact);
+                }
+            }
+        }
         notification::SESSION_COMPACTED => {
             // The handoff installs the replacement session.
             match compact::compacted_handoff(&event.params) {
@@ -918,11 +932,15 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                 .pointer("/warning/message")
                 .and_then(Value::as_str)
             {
-                app.show_toast(
-                    message.to_owned(),
-                    ToastSeverity::Warning,
-                    SERVER_TOAST_SECS,
-                );
+                let seconds = match event
+                    .params
+                    .pointer("/warning/code")
+                    .and_then(Value::as_str)
+                {
+                    Some(INTEGRATIONS_UNAVAILABLE) => mcp::INTEGRATIONS_UNAVAILABLE_TOAST_SECS,
+                    _ => SERVER_TOAST_SECS,
+                };
+                app.show_toast(message.to_owned(), ToastSeverity::Warning, seconds);
             }
         }
         notification::ERROR => {

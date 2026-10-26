@@ -4,7 +4,7 @@ mod tools;
 use crate::core::tools::command_environment::CommandEnvironmentProfile;
 
 pub(crate) use settings::Mode;
-pub(crate) use tools::{is_sandbox_name, tools};
+pub(crate) use tools::{explain_write_schema_error, is_sandbox_name, tools};
 
 pub(crate) const NAMESPACE: &str = "process";
 pub(crate) const SEARCH_DESCRIPTION: &str =

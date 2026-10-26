@@ -31,7 +31,7 @@ from vibe.core.tools.builtins.windows_shell import (
 from vibe.core.tools.permissions import PermissionContext
 from vibe.core.utils import is_windows
 from vibe.core.workspace import Workspace
-from vibe.permissions import PathGrantScope, path_grant_pattern
+from vibe.permissions import PathGrantScope, PermissionScope, path_grant_pattern
 from vibe.utils import paths
 
 
@@ -337,11 +337,28 @@ def test_windows_shell_alias_expansion_does_not_apply_to_explicit_executable():
     )
 
     permission = tool.resolve_permission(
-        WindowsShellArgs(command=r"C:\tools\rm.exe victim.txt")
+        WindowsShellArgs(command=r".\tools\rm.exe victim.txt")
     )
 
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ALWAYS
+
+
+def test_windows_shell_always_still_asks_for_an_executable_outside_the_workdir():
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(permission=ToolPermission.ALWAYS),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(
+        WindowsShellArgs(command=r"C:\tools\rm.exe victim.txt")
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert [required.scope for required in permission.required_permissions] == [
+        PermissionScope.OUTSIDE_DIRECTORY
+    ]
 
 
 @pytest.mark.parametrize(
@@ -468,6 +485,33 @@ def test_windows_shell_file_command_requires_approval_for_outside_path(
     permission = tool.resolve_permission(
         WindowsShellArgs(command=f'type "{outside_file}"')
     )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.invocation_pattern == str(outside_file.resolve())
+        for required in permission.required_permissions
+    )
+
+
+def test_windows_shell_bare_name_linking_outside_requires_approval(
+    tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    outside_file = tmp_path / "secret.txt"
+    workdir.mkdir()
+    outside_file.write_text("secret", encoding="utf-8")
+    try:
+        (workdir / "lnk").symlink_to(outside_file)
+    except OSError:
+        pytest.skip("this host cannot create symlinks")
+    monkeypatch.chdir(workdir)
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(allowlist=["Get-Content"]),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(WindowsShellArgs(command="Get-Content lnk"))
 
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ASK
@@ -1222,3 +1266,20 @@ def test_windows_redirect_writes_place_only_plainly_spelled_targets(command, exp
     writes = windows_shell_module.windows_redirect_writes(command)
 
     assert tuple((write.spelling, write.path) for write in writes) == expected
+
+
+@pytest.mark.parametrize(
+    "command", ["copy secret.txt /dev/null", "git log 2>/dev/null"]
+)
+def test_windows_shell_reads_dev_null_as_a_real_path(command: str):
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(permission=ToolPermission.ALWAYS),
+        state=BaseToolState(),
+    )
+
+    permission = tool.resolve_permission(WindowsShellArgs(command=command))
+
+    assert isinstance(permission, PermissionContext)
+    assert PermissionScope.OUTSIDE_DIRECTORY in [
+        required.scope for required in permission.required_permissions
+    ]

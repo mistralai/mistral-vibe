@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::core::error::CoreError;
-use crate::core::features::{programmatic_tool_calling, subagents};
+use crate::core::features::{compaction, programmatic_tool_calling, subagents};
 use crate::core::helpers::AgentMessageSettings;
 
 static DEFAULT_DOCUMENT: LazyLock<Value> = LazyLock::new(|| {
@@ -34,6 +34,7 @@ pub(crate) struct PromptSettings {
     pub agent_messages: AgentMessageSettings,
     pub agent_tools: subagents::Prompts,
     pub programs: programmatic_tool_calling::Prompts,
+    pub compaction: compaction::Prompts,
     pub wait_description: String,
     pub discovery_description: String,
 }
@@ -69,6 +70,7 @@ impl PromptSettings {
         self.agent_messages.validate()?;
         self.agent_tools.validate()?;
         self.programs.validate()?;
+        self.compaction.validate()?;
         for (text, path) in [
             (&self.wait_description, "settings.prompts.wait_description"),
             (

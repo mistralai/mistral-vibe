@@ -112,6 +112,19 @@ pub fn slash_command_used(app: &App, command: &str, command_type: &str) {
     );
 }
 
+/// A builtin command opened by a click instead of typed; `entry_point` names the control.
+pub fn slash_command_clicked(app: &App, command: &str, entry_point: &str) {
+    record(
+        app,
+        event::SLASH_COMMAND_USED,
+        bmap(json!({
+            "command": command.trim_start_matches('/'),
+            "command_type": "builtin",
+            "entry_point": entry_point,
+        })),
+    );
+}
+
 pub fn user_copied_text(app: &App, text: &str) {
     record(
         app,

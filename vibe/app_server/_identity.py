@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Protocol
 
 from vibe.app_server.models import IdentityEntityView, IdentityView
@@ -13,8 +14,10 @@ from vibe.core.identity import (
     IdentityResult,
 )
 from vibe.core.identity_cache import IdentityCache
-from vibe.observability.logging import logger
-from vibe.utils.api_keys import resolve_api_key
+from vibe.core.platform_auth import (
+    ApiKeyPlatformCredentialProvider,
+    PlatformCredentialProvider,
+)
 
 __all__ = [
     "HttpIdentityGateway",
@@ -40,12 +43,19 @@ class IdentityHost(Protocol):
     def identity_cache(self) -> IdentityCache: ...
 
 
+type PlatformCredentialProviderFactory = Callable[[str], PlatformCredentialProvider]
+
+
 class IdentityController:
     def __init__(
-        self, agent_loop: IdentityHost, gateway: IdentityGateway | None = None
+        self,
+        agent_loop: IdentityHost,
+        gateway: IdentityGateway | None = None,
+        credentials: PlatformCredentialProviderFactory | None = None,
     ) -> None:
         self._agent_loop = agent_loop
         self._gateway = gateway or HttpIdentityGateway()
+        self._credentials = credentials
         self._lock = asyncio.Lock()
 
     async def read(self) -> IdentityView | None:
@@ -58,33 +68,15 @@ class IdentityController:
         if provider is None:
             return None
 
-        api_key = await asyncio.to_thread(resolve_api_key, provider.api_key_env_var)
-        if not api_key:
-            return None
+        if self._credentials is not None:
+            credentials = self._credentials(provider.api_key_env_var)
+        else:
+            credentials = ApiKeyPlatformCredentialProvider(provider.api_key_env_var)
 
-        cached = self._agent_loop.identity_cache.peek(
-            base_url=provider.api_base, api_key=api_key
+        result = await self._agent_loop.identity_cache.resolve(
+            base_url=provider.api_base, credentials=credentials, gateway=self._gateway
         )
-        if cached is not None:
-            return _to_view(cached)
-
-        result = await self._fetch(base_url=provider.api_base, api_key=api_key)
         return _to_view(result) if result is not None else None
-
-    async def _fetch(self, *, base_url: str, api_key: str) -> IdentityResult | None:
-        try:
-            return await self._gateway.read(base_url=base_url, api_key=api_key)
-        except IdentityGatewayUnauthorized:
-            logger.info(
-                "Identity endpoint rejected the API key (401/403); "
-                "the key may be invalid or expired."
-            )
-            return None
-        except IdentityGatewayUnavailable as exc:
-            logger.warning(
-                "Failed to fetch identity (%s)", type(exc).__name__, exc_info=exc
-            )
-            return None
 
 
 def _to_view(result: IdentityResult) -> IdentityView:

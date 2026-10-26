@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use super::submission::new_message_id;
 use super::CommandEvent;
+use crate::agents;
 use crate::app::App;
 use crate::input::deliver;
 use crate::server::request_error::describe;
@@ -94,7 +95,7 @@ pub fn apply_event(app: &mut App, event: Event) {
         }
     };
     app.agents.all = response.agents;
-    app.agents.active = response.active;
+    agents::set_active(app, response.active);
     let notice = if event.installed {
         "Lean agent installed."
     } else {

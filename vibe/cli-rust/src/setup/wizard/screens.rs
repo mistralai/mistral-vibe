@@ -97,6 +97,13 @@ fn handle_auth_method(state: &mut OnboardingState, key: KeyEvent) -> Option<Acti
         }
         KeyCode::Enter => {
             if state.auth_method_selected == 0 {
+                if state.context.pinned_console_url.is_some() {
+                    // Administrator-pinned console: skip the target selection
+                    // and show the pinned URL prefilled and locked.
+                    reset_custom_domain_inputs(state);
+                    state.screen = Screen::CustomDomain;
+                    return None;
+                }
                 state.screen = Screen::SignInTarget;
                 None
             } else {
@@ -188,9 +195,14 @@ fn handle_browser_sign_in(state: &mut OnboardingState, key: KeyEvent) -> Option<
             // Backing out abandons the attempted domain: the context returns
             // to the launch snapshot, so a later API-key submission cannot
             // whoami the abandoned host (the 'm' manual path below keeps the
-            // domain).
+            // domain). A pinned console backs out to its locked form instead
+            // of the target picker.
             state.context = state.config.clone();
-            state.screen = Screen::SignInTarget;
+            state.screen = if state.context.pinned_console_url.is_some() {
+                Screen::CustomDomain
+            } else {
+                Screen::SignInTarget
+            };
             Some(Action::AbortSignIn)
         }
         _ => None,
@@ -247,6 +259,10 @@ pub fn paste(state: &mut OnboardingState, text: &str) {
     }
     match state.screen {
         Screen::CustomDomain => {
+            // A pinned console's inputs are locked: paste edits nothing.
+            if state.context.pinned_console_url.is_some() {
+                return;
+            }
             let input = state.focused_custom_domain_input();
             input_edit::insert(&mut input.value, &mut input.cursor, &text);
             validate_custom_domain_input(state);

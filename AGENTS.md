@@ -2,7 +2,7 @@
 
 Conventions for AI agents and humans contributing to **Mistral Vibe** — a CLI coding assistant: a Rust terminal UI over a Python 3.12+ app server managed with `uv`.
 
-Layout: Unified Harness Core and Runtime are external dependencies that execute and persist sessions; `vibe/app_server` hosts sessions and exposes product features and RPCs; `vibe/core` retains shared config, tool, permission and other utilities; `vibe/cli-rust` is the terminal UI (Rust, Ratatui), a thin client over `vibe-app-server`; `vibe/cli` holds the `vibe` launcher that execs it and the audio helpers `vibe/acp` uses; `vibe/acp` bridges to the Agent Client Protocol; `vibe/setup` holds auth and the Textual onboarding wizard behind `vibe-acp --setup`. Tests live in `tests/` with autouse fixtures in `conftest.py` and test doubles in `tests/stubs/`.
+Layout: Unified Harness Core and Runtime are external dependencies that execute and persist sessions; `vibe/app_server` hosts sessions and exposes product features and RPCs to every client, including Vibe Desktop; `vibe/core` retains shared config, tool, permission and other utilities; `vibe/cli-rust` is the terminal UI (Rust, Ratatui), a thin client over `vibe-app-server`; `vibe/cli` holds the `vibe` launcher that execs it and the audio helpers `vibe/acp` uses; `vibe/acp` bridges to the Agent Client Protocol; `vibe/setup` holds auth and the Textual onboarding wizard behind `vibe-acp --setup`. Tests live in `tests/` with autouse fixtures in `conftest.py` and test doubles in `tests/stubs/`.
 
 ## Architecture Decisions
 
@@ -29,11 +29,15 @@ Before architecture-affecting changes, read [0002 Ownership Boundaries](docs/adr
 
 Superseded records: [0003](docs/adr/0003-event-driven-agent-loop.md) → 0009; [0011](docs/adr/0011-unified-harness-backend.md) → 0002. Their paths remain for existing links.
 
+## Cross-Surface Features
+
+Vibe CLI and Vibe Desktop share the app server. When a CLI feature may also belong on Desktop, follow `.agents/skills/vibe-workflow/cross-surface.md` at the root of the dashboard monorepo. Skip this outside the dashboard monorepo.
+
 ## Terminal UI changes
 
 The terminal UI is `vibe/cli-rust`. Follow `vibe/cli-rust/AGENTS.md` and the `vibe-rust-tui` skill, and cover every user-visible change with a `client-e2e` scenario and golden (see `client-e2e/AGENTS.md`).
 
-- Put server-owned behavior (session, config and persistence, tools, network; see the ownership table in ADR 0002) behind an app-server method or notification so the TUI and `vibe-acp` only render it. Keep presentation state (widgets, layout, focus, selection, editing) in the client.
+- Put server-owned behavior (session, config and persistence, tools, network; see the ownership table in ADR 0002) behind an app-server method or notification so the TUI, Vibe Desktop, and `vibe-acp` only render it. Keep presentation state (widgets, layout, focus, selection, editing) in the client.
 - The Textual onboarding wizard in `vibe/setup/onboarding` only serves `vibe-acp --setup`; do not add terminal UI features there.
 
 ## Commands

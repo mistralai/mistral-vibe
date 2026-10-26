@@ -2,8 +2,8 @@ use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
 use crate::core::features::compaction::{
-    CompactionBudget, CompactionProjection, CompactionProjectionFit, CompactionRequestKind,
-    CompactionTrigger, NewestToolExchange, PendingCompaction,
+    CompactionBudget, CompactionPhase, CompactionProjection, CompactionProjectionFit,
+    CompactionTrigger, PendingCompaction, Prompts as CompactionPrompts,
 };
 use crate::core::hooks::{HookPoint, hook_action_id};
 use crate::core::model_context::ModelContext;
@@ -17,6 +17,14 @@ use super::context::CheckpointStoredMessage;
 use super::schema::{CheckpointCompletionCandidate, CheckpointProtocolError};
 use super::tool::CheckpointToolBatch;
 use super::validate_derived_hook_action_id;
+
+/// What restoring a pending compaction needs from the restored session.
+pub(super) struct CompactionRestore<'a> {
+    pub generated_system: StoredMessage,
+    pub tools: &'a [ToolDefinition],
+    pub budget: CompactionBudget,
+    pub prompts: &'a CompactionPrompts,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(transparent)]
@@ -91,9 +99,7 @@ impl CheckpointTurnState {
     pub(super) fn restore(
         self,
         context: &ModelContext,
-        generated_system: StoredMessage,
-        tools: &[ToolDefinition],
-        budget: CompactionBudget,
+        compaction: CompactionRestore<'_>,
     ) -> Result<TurnState, String> {
         match self.0 {
             CheckpointTurnStateRepr::Idle => Ok(TurnState::Idle),
@@ -107,12 +113,7 @@ impl CheckpointTurnState {
                     pending: PendingCompaction::between_turns(
                         compaction_id,
                         trigger.restore(),
-                        projection.restore(
-                            generated_system.clone(),
-                            tools,
-                            budget,
-                            NewestToolExchange::MayRemove,
-                        )?,
+                        projection.restore(compaction)?,
                     ),
                 })
             }
@@ -128,14 +129,7 @@ impl CheckpointTurnState {
                 if turn_id.trim().is_empty() {
                     return Err("active checkpoint turn ID must not be empty".to_string());
                 }
-                let phase = phase.restore(
-                    &turn_id,
-                    iterations,
-                    context,
-                    generated_system,
-                    tools,
-                    budget,
-                )?;
+                let phase = phase.restore(&turn_id, iterations, context, compaction)?;
                 Ok(TurnState::Active(ActiveTurn {
                     turn_id,
                     iterations,
@@ -161,41 +155,92 @@ impl CheckpointTurnState {
 #[serde(deny_unknown_fields)]
 struct CheckpointCompactionProjection {
     attempt: u32,
-    /// Absent in checkpoints captured before the standalone fallback existed.
+    /// Absent for the in-context phase. Checkpoints captured before the
+    /// phases existed name it `request`.
     #[serde(
         default,
-        skip_serializing_if = "CheckpointCompactionRequest::is_in_context"
+        alias = "request",
+        skip_serializing_if = "CheckpointCompactionPhase::is_in_context"
     )]
-    request: CheckpointCompactionRequest,
+    phase: CheckpointCompactionPhase,
+    /// Present only in the cut-off retry phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cut_off_retry: Option<CheckpointCutOffRetry>,
+    /// After a refusal as too long in this compaction, the estimate every
+    /// later summary request stays under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refit_limit: Option<u64>,
+    /// What the summary covers, without the generated system message. A
+    /// checkpoint written before the summary scope ended at the last reply
+    /// holds the fitted request instead, which restores the same way.
     messages: Vec<CheckpointStoredMessage>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
-enum CheckpointCompactionRequest {
+enum CheckpointCompactionPhase {
     #[default]
     #[serde(rename = "in_context")]
     InContext,
     #[serde(rename = "standalone")]
     Standalone,
+    #[serde(rename = "cut_off_retry")]
+    CutOffRetry,
 }
 
-impl CheckpointCompactionRequest {
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct CheckpointCutOffRetry {
+    attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    partial: Option<String>,
+}
+
+impl CheckpointCompactionPhase {
     fn is_in_context(&self) -> bool {
         *self == Self::InContext
     }
+}
 
-    fn capture(request: CompactionRequestKind) -> Self {
-        match request {
-            CompactionRequestKind::InContext => Self::InContext,
-            CompactionRequestKind::Standalone => Self::Standalone,
-        }
+fn capture_phase(
+    phase: &CompactionPhase,
+) -> (CheckpointCompactionPhase, Option<CheckpointCutOffRetry>) {
+    match phase {
+        CompactionPhase::InContext => (CheckpointCompactionPhase::InContext, None),
+        CompactionPhase::Standalone => (CheckpointCompactionPhase::Standalone, None),
+        CompactionPhase::CutOffRetry { attempt, partial } => (
+            CheckpointCompactionPhase::CutOffRetry,
+            Some(CheckpointCutOffRetry {
+                attempt: *attempt,
+                partial: partial.clone(),
+            }),
+        ),
     }
+}
 
-    fn restore(self) -> CompactionRequestKind {
-        match self {
-            Self::InContext => CompactionRequestKind::InContext,
-            Self::Standalone => CompactionRequestKind::Standalone,
+fn restore_phase(
+    phase: CheckpointCompactionPhase,
+    cut_off_retry: Option<CheckpointCutOffRetry>,
+) -> Result<CompactionPhase, String> {
+    match (phase, cut_off_retry) {
+        (CheckpointCompactionPhase::InContext, None) => Ok(CompactionPhase::InContext),
+        (CheckpointCompactionPhase::Standalone, None) => Ok(CompactionPhase::Standalone),
+        (CheckpointCompactionPhase::CutOffRetry, Some(retry)) => {
+            if retry
+                .partial
+                .as_ref()
+                .is_some_and(|partial| partial.trim().is_empty())
+            {
+                return Err("cut-off retry partial summary must not be empty".to_string());
+            }
+            Ok(CompactionPhase::CutOffRetry {
+                attempt: retry.attempt,
+                partial: retry.partial,
+            })
         }
+        (CheckpointCompactionPhase::CutOffRetry, None) => {
+            Err("cut-off retry phase is missing its attempt".to_string())
+        }
+        (_, Some(_)) => Err("only the cut-off retry phase records a cut-off retry".to_string()),
     }
 }
 
@@ -207,21 +252,19 @@ impl CheckpointCompactionProjection {
             .filter(|message| !message.is_generated_system())
             .map(CheckpointStoredMessage::capture)
             .collect::<Result<Vec<_>, _>>()?;
+        let (phase, cut_off_retry) = capture_phase(projection.phase());
         Ok(Self {
             attempt: projection.attempt(),
-            request: CheckpointCompactionRequest::capture(projection.request_kind()),
+            phase,
+            cut_off_retry,
+            refit_limit: projection.refit_limit(),
             messages,
         })
     }
 
-    fn restore(
-        self,
-        generated_system: StoredMessage,
-        tools: &[ToolDefinition],
-        budget: CompactionBudget,
-        newest_tool_exchange: NewestToolExchange,
-    ) -> Result<CompactionProjection, String> {
-        let mut messages = vec![generated_system];
+    fn restore(self, compaction: CompactionRestore<'_>) -> Result<CompactionProjection, String> {
+        let phase = restore_phase(self.phase, self.cut_off_retry)?;
+        let mut messages = vec![compaction.generated_system];
         messages.extend(
             self.messages
                 .into_iter()
@@ -231,20 +274,18 @@ impl CheckpointCompactionProjection {
         match CompactionProjection::restore(
             messages,
             self.attempt,
-            self.request.restore(),
-            tools,
-            budget,
-            newest_tool_exchange,
+            phase,
+            self.refit_limit,
+            compaction.tools,
+            compaction.budget,
+            compaction.prompts,
         )
         .map_err(|error| error.detail().to_string())?
         {
             CompactionProjectionFit::Fitted(projection) => Ok(projection),
-            CompactionProjectionFit::TooLarge => Err(
-                "token threshold cannot fit the generated system prompt, latest user message, tool catalog, and compaction prompt".to_string(),
-            ),
-            CompactionProjectionFit::ToolResultTooLarge { .. } => Err(
-                "token threshold cannot fit the newest tool calls and their results".to_string(),
-            ),
+            CompactionProjectionFit::TooLarge => {
+                Err("token threshold cannot fit the smallest compaction request".to_string())
+            }
         }
     }
 }
@@ -329,9 +370,7 @@ impl CheckpointActivePhase {
         turn_id: &str,
         iterations: u32,
         context: &ModelContext,
-        generated_system: StoredMessage,
-        tools: &[ToolDefinition],
-        budget: CompactionBudget,
+        compaction: CompactionRestore<'_>,
     ) -> Result<ActivePhase, String> {
         match self {
             Self::AwaitingCompletion { action_id } => {
@@ -345,12 +384,7 @@ impl CheckpointActivePhase {
                     compaction_id,
                     turn_id.to_string(),
                     iterations,
-                    projection.restore(
-                        generated_system,
-                        tools,
-                        budget,
-                        NewestToolExchange::Keep,
-                    )?,
+                    projection.restore(compaction)?,
                 ),
             }),
             Self::AwaitingToolBatch { batch } => Ok(ActivePhase::AwaitingToolBatch {

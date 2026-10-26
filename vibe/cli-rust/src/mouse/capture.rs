@@ -28,6 +28,7 @@ pub(crate) fn cancel_capture(app: &mut App, keep_selection: bool) {
                 | MouseTarget::ModelPicker
                 | MouseTarget::ThinkingPicker
                 | MouseTarget::LogLevelPicker
+                | MouseTarget::ArtifactsModal
                 | MouseTarget::ResumePicker
                 | MouseTarget::Mcp
                 | MouseTarget::Plugins

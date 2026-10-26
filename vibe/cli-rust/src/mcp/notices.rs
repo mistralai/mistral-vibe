@@ -2,22 +2,16 @@
 
 use serde_json::Value;
 
-use crate::app::{App, ToastSeverity};
+use crate::app::App;
 use crate::mcp::{add_result, state_at};
 
-/// Seconds a discovery-failure toast stays up.
-const DISCOVERY_TOAST_SECS: u64 = 10;
+/// Seconds a failed connector or MCP load stays up.
+pub(crate) const INTEGRATIONS_UNAVAILABLE_TOAST_SECS: u64 = 10;
 
-/// Toast every failed discovery, then mount the OAuth-required notice.
+/// Mount the OAuth-required notice. Failed loads arrive as `warning`
+/// notifications instead, whenever the background loads end.
 pub fn show_post_init_notices(app: &mut App, runtime: &Value) {
     let state = state_at(runtime, "/runtime/mcp").unwrap_or_default();
-    for (name, error) in &state.discovery_errors {
-        app.show_toast(
-            format!("MCP server '{name}' failed to connect: {error}"),
-            ToastSeverity::Warning,
-            DISCOVERY_TOAST_SECS,
-        );
-    }
     let aliases = state.needs_auth();
     let Some(first) = aliases.first() else {
         return;

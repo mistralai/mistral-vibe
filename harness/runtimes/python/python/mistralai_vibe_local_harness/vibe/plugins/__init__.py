@@ -9,8 +9,10 @@ in the host application.
 from __future__ import annotations
 
 from mistralai_vibe_local_harness.vibe.plugins._session import (
+    MAX_DECLARED_INSTRUCTION_CHARS,
     RELEASE_TIMEOUT_SECONDS,
     DeclaredAgentTypeProfile,
+    DeclaredCompletionRoute,
     PinnedPackage,
     PinnedPlugins,
     PluginContextDefinition,
@@ -18,6 +20,7 @@ from mistralai_vibe_local_harness.vibe.plugins._session import (
     PluginRestoreDiagnostic,
     PluginRestoreDiagnosticCode,
     PluginRestoreError,
+    RejectedAgentType,
     RestoredPlugins,
     SessionPluginBinder,
     SessionPluginBinding,
@@ -41,10 +44,12 @@ from mistralai_vibe_local_harness.vibe.plugins._store import (
 )
 
 __all__ = [
+    "MAX_DECLARED_INSTRUCTION_CHARS",
     "MAX_PACKAGE_BYTES",
     "MAX_PACKAGE_ENTRIES",
     "RELEASE_TIMEOUT_SECONDS",
     "DeclaredAgentTypeProfile",
+    "DeclaredCompletionRoute",
     "IgnoredNames",
     "PinnedPackage",
     "PinnedPlugins",
@@ -61,6 +66,7 @@ __all__ = [
     "PluginRestoreDiagnostic",
     "PluginRestoreDiagnosticCode",
     "PluginRestoreError",
+    "RejectedAgentType",
     "RestoredPlugins",
     "SessionPluginBinder",
     "SessionPluginBinding",

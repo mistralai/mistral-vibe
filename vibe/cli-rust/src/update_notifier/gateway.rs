@@ -111,10 +111,12 @@ pub fn build_http_client_for(
     trust: TlsTrustStore,
     timeout: Duration,
 ) -> Result<reqwest::Client, reqwest::Error> {
-    let builder = reqwest::Client::builder()
-        .timeout(timeout)
-        // Redirects are not followed.
-        .redirect(reqwest::redirect::Policy::none());
+    let builder = crate::utils::system_proxy::apply(
+        reqwest::Client::builder()
+            .timeout(timeout)
+            // Redirects are not followed.
+            .redirect(reqwest::redirect::Policy::none()),
+    );
     apply_tls_trust_for(builder, trust).build()
 }
 

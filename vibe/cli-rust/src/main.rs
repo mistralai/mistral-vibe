@@ -114,6 +114,9 @@ async fn run() -> Result<std::process::ExitCode> {
     if let Some(vibe_rs::cli::CliCommand::Mcp { command }) = &cli.command {
         return Ok(vibe_rs::mcp_command::run(command, launch).await);
     }
+    if let Some(vibe_rs::cli::CliCommand::Config { command }) = &cli.command {
+        return Ok(vibe_rs::config_command::run(command, launch).await);
+    }
     if let Some(vibe_rs::cli::CliCommand::RunServer {
         max_runs,
         runs_per_app_server,

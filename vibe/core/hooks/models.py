@@ -74,10 +74,6 @@ class HookConfig(BaseModel):
 
     @model_validator(mode="after")
     def _apply_defaults_and_constraints(self) -> Self:
-        if self.match is not None and self.type == HookType.POST_AGENT:
-            raise ValueError(
-                "match is only valid for tool hooks (pre_tool / post_tool)"
-            )
         if self.strict and self.type == HookType.POST_AGENT:
             raise ValueError(
                 "strict is only valid for tool hooks (pre_tool / post_tool)"

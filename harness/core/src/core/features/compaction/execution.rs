@@ -2,14 +2,14 @@ use crate::core::action_id;
 use crate::core::error::CoreError;
 
 use super::{
-    CompactionBudget, CompactionBudgets, CompactionFallback, CompactionProjection,
-    CompactionProjectionFit, CompactionTrigger, NewestToolExchange, SummaryAcceptance,
-    SummaryRejection, accept_summary, minimum_replacement_fits,
+    CompactionInputs, CompactionProjection, CompactionProjectionFit, CompactionTrigger, Rebuilt,
+    Reduction, SummaryAcceptance, SummaryCut, SummaryCutCause, SummaryRejection,
+    accept_cut_off_summary, accept_summary, minimum_replacement_fits,
 };
 
 use crate::core::model_context::ModelContext;
-use crate::core::step_protocol::{Observation, Outcome, ToolDefinition};
-use crate::core::wire::completion::CompletionCandidate;
+use crate::core::step_protocol::{Observation, Outcome, WarningCode};
+use crate::core::wire::completion::{CompletionCandidate, TokenUsage};
 use crate::core::wire::message::StoredMessage;
 use crate::core::wire::tool::ProtocolError;
 
@@ -153,6 +153,8 @@ pub(crate) enum CompactionResolution {
 
 pub(crate) enum CompactionAttemptResolution {
     Retry(PendingCompaction),
+    /// The summary replaced the history.
+    Compacted(Box<CompactionResolution>),
     Resolve(Box<CompactionResolution>),
 }
 
@@ -163,60 +165,69 @@ pub(crate) enum CompactionStartResolution {
 
 pub(crate) fn finish_compaction(
     context: &mut ModelContext,
-    last_reported_context_tokens: &mut Option<u64>,
     pending: PendingCompaction,
     candidate: CompletionCandidate,
-    tools: &[ToolDefinition],
-    replacement_budget: CompactionBudget,
-    fallback: CompactionFallback,
+    inputs: CompactionInputs<'_>,
 ) -> Result<CompactionAttemptResolution, CoreError> {
-    let mut outcome = Outcome::quiet();
     let acceptance = accept_summary(
         context.messages(),
         pending.projection().messages(),
         &candidate,
-        tools,
-        replacement_budget,
-        fallback,
+        inputs.tools,
+        inputs.budgets.replacement,
+        inputs.prompts,
     )?;
-    let (messages, summary) = match acceptance {
-        SummaryAcceptance::Accepted { messages, summary } => (messages, summary),
+    match acceptance {
+        SummaryAcceptance::Accepted(rebuilt) => {
+            Ok(compacted(context, pending, *rebuilt, candidate.usage))
+        }
         SummaryAcceptance::Rejected(rejection) => {
-            return fail_compaction_or_fall_back(
-                context,
-                pending,
-                fallback,
-                replacement_budget.token_threshold,
-                invalid_summary_error(rejection),
-            );
+            fail_compaction_or_fall_back(context, pending, inputs, invalid_summary_error(rejection))
         }
-        SummaryAcceptance::ReplacementTooLarge => {
-            return Ok(CompactionAttemptResolution::Resolve(Box::new(
-                fail_compaction(pending, replacement_too_large_error()),
-            )));
+        SummaryAcceptance::CutOff { partial } => {
+            retry_cut_off_compaction(context, pending, partial, candidate.usage, inputs)
         }
-    };
-    context.replace_with_compacted(messages);
-    // The previous provider-reported size describes the now-replaced context.
-    // Clear it only once the live history actually changes, so a failed or
-    // interrupted attempt keeps the over-budget signal for the next turn.
-    *last_reported_context_tokens = None;
+        SummaryAcceptance::ReplacementTooLarge => Ok(CompactionAttemptResolution::Resolve(
+            Box::new(fail_compaction(pending, replacement_too_large_error())),
+        )),
+    }
+}
+
+/// Replaces the history with the rebuilt one, and reports what the rebuild
+/// cut or reduced to fit.
+fn compacted(
+    context: &mut ModelContext,
+    pending: PendingCompaction,
+    rebuilt: Rebuilt,
+    usage: Option<TokenUsage>,
+) -> CompactionAttemptResolution {
+    let mut outcome = Outcome::quiet();
+    context.replace_with_compacted(rebuilt.messages);
     outcome.observe(Observation::ContextCompacted {
         turn_id: pending.observed_turn_id(),
         action_id: pending.action_id().to_string(),
         compaction_id: pending.compaction_id().to_string(),
         attempt: pending.attempt(),
         trigger: pending.trigger(),
-        summary,
-        usage: candidate.usage,
+        summary: rebuilt.summary,
+        usage,
     });
-    Ok(CompactionAttemptResolution::Resolve(Box::new(
+    if let Some(cut) = rebuilt.summary_cut {
+        outcome.observe(summary_cut_off_warning(pending.observed_turn_id(), &cut));
+    }
+    if let Some(reduction) = rebuilt.reduction {
+        outcome.observe(inputs_reduced_warning(
+            pending.observed_turn_id(),
+            &reduction,
+        ));
+    }
+    CompactionAttemptResolution::Compacted(Box::new(
         pending.into_continuation().into_resolution(outcome),
-    )))
+    ))
 }
 
-/// Fails an attempt over to the next request `fallback` allows, or fails the
-/// compaction when the failed attempt was the last one.
+/// Moves a failed attempt on to the next phase, or ends the compaction when
+/// none follows: with the cut-off text a cut-off retry saved, or failed.
 ///
 /// The standalone request differs from the in-context one in its messages,
 /// tools and reasoning, so a provider that cached or deterministically
@@ -224,19 +235,152 @@ pub(crate) fn finish_compaction(
 pub(crate) fn fail_compaction_or_fall_back(
     context: &mut ModelContext,
     pending: PendingCompaction,
-    fallback: CompactionFallback,
-    token_threshold: Option<u64>,
+    inputs: CompactionInputs<'_>,
     error: ProtocolError,
 ) -> Result<CompactionAttemptResolution, CoreError> {
-    if let Some(projection) = pending.projection.fall_back(fallback, token_threshold)? {
+    let next =
+        pending
+            .projection
+            .after_failure(inputs.tools, inputs.budgets.request, inputs.prompts)?;
+    continue_or_end(context, pending, next, None, None, inputs, error)
+}
+
+/// Refits a summary request the provider refused as too long within the same
+/// phase, under `refit_limit`. The caller has already grown the estimate
+/// correction, so `inputs` carries the smaller budget. When even the minimal
+/// request was refused, ends the compaction with the cut-off text a cut-off
+/// retry saved, or fails it.
+pub(crate) fn refit_refused_compaction(
+    context: &mut ModelContext,
+    pending: PendingCompaction,
+    refit_limit: u64,
+    inputs: CompactionInputs<'_>,
+    error: ProtocolError,
+) -> Result<CompactionAttemptResolution, CoreError> {
+    let next = pending.projection.after_refusal(
+        refit_limit,
+        inputs.tools,
+        inputs.budgets.request,
+        inputs.prompts,
+    )?;
+    continue_or_end(
+        context,
+        pending,
+        next,
+        None,
+        None,
+        inputs,
+        minimal_request_refused_error(error),
+    )
+}
+
+/// Asks again after a cut-off summary while a retry is left, then keeps the
+/// longest cut-off text (Truncate).
+fn retry_cut_off_compaction(
+    context: &mut ModelContext,
+    pending: PendingCompaction,
+    partial: Option<String>,
+    usage: Option<TokenUsage>,
+    inputs: CompactionInputs<'_>,
+) -> Result<CompactionAttemptResolution, CoreError> {
+    let next = pending.projection.after_cut_off(
+        partial.clone(),
+        inputs.tools,
+        inputs.budgets.request,
+        inputs.prompts,
+    )?;
+    continue_or_end(
+        context,
+        pending,
+        next,
+        partial,
+        usage,
+        inputs,
+        cut_off_summary_error(),
+    )
+}
+
+/// Sends `next` when there is one. Otherwise keeps the longest cut-off text,
+/// the saved one or this attempt's `partial`, in place of a summary
+/// (Truncate). Fails the compaction with `error` when there is none, or when
+/// the rebuild with it does not fit.
+fn continue_or_end(
+    context: &mut ModelContext,
+    pending: PendingCompaction,
+    next: Option<CompactionProjection>,
+    partial: Option<String>,
+    usage: Option<TokenUsage>,
+    inputs: CompactionInputs<'_>,
+    error: ProtocolError,
+) -> Result<CompactionAttemptResolution, CoreError> {
+    if let Some(projection) = next {
         context.mark_projection_replacement();
         return Ok(CompactionAttemptResolution::Retry(
             PendingCompaction::from_parts(pending.compaction_id, pending.continuation, projection),
         ));
     }
-    Ok(CompactionAttemptResolution::Resolve(Box::new(
-        fail_compaction(pending, error),
-    )))
+    let Some(partial) = pending.projection.kept_partial(partial) else {
+        return Ok(CompactionAttemptResolution::Resolve(Box::new(
+            fail_compaction(pending, error),
+        )));
+    };
+    let acceptance = accept_cut_off_summary(
+        context.messages(),
+        pending.projection().messages(),
+        &partial,
+        inputs.tools,
+        inputs.budgets.replacement,
+        inputs.prompts,
+    )?;
+    // When not even the fixed parts fit, the error that ended the summary
+    // requests says more than the rebuild's: a refusal at the smallest size
+    // has grown the estimate correction until nothing fits.
+    let SummaryAcceptance::Accepted(rebuilt) = acceptance else {
+        return Ok(CompactionAttemptResolution::Resolve(Box::new(
+            fail_compaction(pending, error),
+        )));
+    };
+    Ok(compacted(context, pending, *rebuilt, usage))
+}
+
+/// The summary was cut to fit, with the note after it: cut off at the
+/// output limit after its retries, or too long for the rebuilt history.
+fn summary_cut_off_warning(turn_id: Option<String>, cut: &SummaryCut) -> Observation {
+    let message = match cut.cause {
+        SummaryCutCause::CutOff => {
+            "The compaction summary was cut off at the output limit; the part written is kept, \
+             with a note that it was cut."
+        }
+        SummaryCutCause::TooLong => {
+            "The compaction summary was too long for the rebuilt history and was cut, with a \
+             note that it was cut."
+        }
+    };
+    Observation::Warning {
+        turn_id,
+        code: WarningCode::CompactionSummaryCutOff,
+        message: message.to_string(),
+        details: serde_json::json!({
+            "cause": cut.cause.as_str(),
+            "summary_bytes": cut.summary_bytes,
+            "kept_bytes": cut.kept_bytes,
+        }),
+    }
+}
+
+/// Items after the summary did not fit whole and come back reduced.
+fn inputs_reduced_warning(turn_id: Option<String>, reduction: &Reduction) -> Observation {
+    Observation::Warning {
+        turn_id,
+        code: WarningCode::CompactionInputsReduced,
+        message: "The history rebuilt after compaction did not fit the context and was \
+                  reduced."
+            .to_string(),
+        details: serde_json::json!({
+            "reduced_messages": reduction.reduced_messages,
+            "view": reduction.view,
+        }),
+    }
 }
 
 fn invalid_summary_error(rejection: SummaryRejection) -> ProtocolError {
@@ -246,13 +390,20 @@ fn invalid_summary_error(rejection: SummaryRejection) -> ProtocolError {
             "compaction response contained malformed <summary> delimiters"
         }
         SummaryRejection::ToolCalls => "compaction response emitted tool calls",
-        SummaryRejection::Truncated => {
-            "compaction response reached the output token limit before a complete summary"
-        }
     };
     ProtocolError {
         code: "invalid_compaction_summary".to_string(),
         message: message.to_string(),
+        retryable: false,
+        details: serde_json::Value::Null,
+    }
+}
+
+fn cut_off_summary_error() -> ProtocolError {
+    ProtocolError {
+        code: "invalid_compaction_summary".to_string(),
+        message: "compaction response reached the output token limit before a complete summary"
+            .to_string(),
         retryable: false,
         details: serde_json::Value::Null,
     }
@@ -277,15 +428,21 @@ fn request_too_large_error() -> ProtocolError {
     }
 }
 
-fn tool_result_too_large_error(tool_names: &[String]) -> ProtocolError {
+/// The provider refused even the smallest summary request as too long. The
+/// error keeps the provider's code and is retryable: the next request is
+/// counted at the grown correction.
+fn minimal_request_refused_error(error: ProtocolError) -> ProtocolError {
     ProtocolError {
-        code: "compaction_tool_result_too_large".to_string(),
-        message: format!(
-            "the newest result of tool {} cannot fit the configured compaction token threshold; raise the threshold or make the tool return less",
-            tool_names.join(", ")
-        ),
-        retryable: false,
-        details: serde_json::json!({ "tool_names": tool_names }),
+        code: error.code,
+        message: "The provider refused the compaction request as too long even at its smallest \
+                  size. Check the model's context window."
+            .to_string(),
+        retryable: true,
+        details: serde_json::json!({
+            "reason": "minimal_summary_request",
+            "provider_message": error.message,
+            "provider_details": error.details,
+        }),
     }
 }
 
@@ -358,10 +515,9 @@ pub(crate) fn start_compaction(
     generated_system: StoredMessage,
     task_id: &str,
     request: CompactionRequest<'_>,
-    tools: &[ToolDefinition],
-    budgets: CompactionBudgets,
+    inputs: CompactionInputs<'_>,
 ) -> Result<CompactionStartResolution, CoreError> {
-    let (continuation, extra_instructions, newest_tool_exchange) = match request {
+    let (continuation, extra_instructions) = match request {
         CompactionRequest::Automatic {
             turn_id,
             iterations,
@@ -371,71 +527,88 @@ pub(crate) fn start_compaction(
                 iterations,
             },
             "",
-            NewestToolExchange::Keep,
         ),
         CompactionRequest::Manual { extra_instructions } => (
             CompactionContinuation::BetweenTurns {
                 trigger: CompactionTrigger::Manual,
             },
             extra_instructions,
-            NewestToolExchange::MayRemove,
         ),
     };
     let compaction_id = next_action_id(compaction_count, task_id)?;
-    let replacement_system = generated_system.clone();
-    let projection = CompactionProjection::initial(
+    let projection = match plan_compaction(
         context.messages(),
         generated_system,
         extra_instructions,
-        tools,
-        budgets.request,
-        newest_tool_exchange,
-    )?;
-    let projection = match projection {
-        CompactionProjectionFit::Fitted(projection) => projection,
-        CompactionProjectionFit::TooLarge => {
+        inputs,
+    )? {
+        Ok(projection) => projection,
+        Err(unfit) => {
             return Ok(CompactionStartResolution::Failed(Box::new(
                 fail_compaction_attempt(
                     compaction_id.clone(),
                     compaction_id,
                     1,
                     continuation,
-                    request_too_large_error(),
-                ),
-            )));
-        }
-        CompactionProjectionFit::ToolResultTooLarge { tool_names } => {
-            return Ok(CompactionStartResolution::Failed(Box::new(
-                fail_compaction_attempt(
-                    compaction_id.clone(),
-                    compaction_id,
-                    1,
-                    continuation,
-                    tool_result_too_large_error(&tool_names),
+                    unfit.error(),
                 ),
             )));
         }
     };
-    if !minimum_replacement_fits(
-        context.messages(),
-        replacement_system,
-        tools,
-        budgets.replacement,
-    )? {
-        return Ok(CompactionStartResolution::Failed(Box::new(
-            fail_compaction_attempt(
-                compaction_id.clone(),
-                compaction_id,
-                1,
-                continuation,
-                replacement_too_large_error(),
-            ),
-        )));
-    }
     context.mark_projection_replacement();
     Ok(CompactionStartResolution::Pending(
         PendingCompaction::from_parts(compaction_id, continuation, projection),
     ))
+}
+
+/// Why a compaction cannot start under its budgets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CompactionTooLarge {
+    /// The compaction request cannot fit, even with the oldest history removed.
+    Request,
+    /// The summary and the context a continuation needs cannot fit.
+    Replacement,
+}
+
+impl CompactionTooLarge {
+    pub(crate) fn error(&self) -> ProtocolError {
+        match self {
+            Self::Request => request_too_large_error(),
+            Self::Replacement => replacement_too_large_error(),
+        }
+    }
+}
+
+/// Fits a compaction request over `messages` and checks that its replacement
+/// fits too. Starting a compaction and checking a new model's facts share it.
+pub(crate) fn plan_compaction(
+    messages: &[StoredMessage],
+    generated_system: StoredMessage,
+    extra_instructions: &str,
+    inputs: CompactionInputs<'_>,
+) -> Result<Result<CompactionProjection, CompactionTooLarge>, CoreError> {
+    let replacement_system = generated_system.clone();
+    let projection = match CompactionProjection::initial(
+        messages,
+        generated_system,
+        extra_instructions,
+        inputs.tools,
+        inputs.budgets.request,
+        inputs.prompts,
+    )? {
+        CompactionProjectionFit::Fitted(projection) => projection,
+        CompactionProjectionFit::TooLarge => return Ok(Err(CompactionTooLarge::Request)),
+    };
+    if !minimum_replacement_fits(
+        messages,
+        replacement_system,
+        inputs.tools,
+        inputs.budgets.replacement,
+        inputs.prompts,
+    )? {
+        return Ok(Err(CompactionTooLarge::Replacement));
+    }
+    Ok(Ok(projection))
 }
 
 fn next_action_id(compaction_count: &mut u64, task_id: &str) -> Result<String, CoreError> {

@@ -6,6 +6,6 @@ from e2e.app_server.scenario import Timeline, resize
 
 handshake = {"runtime/read": {"runtime": {"stats": {"contextTokens": 23_000}}}}
 
-timeline: Timeline = [resize(20, 36)]
+timeline: Timeline = [resize(20, 28)]
 
-screen_contains = ("/test/… [PID 0] 23k/600k tokens (4%)",)
+screen_contains = ("/test/… 23k/600k tokens (4%)",)

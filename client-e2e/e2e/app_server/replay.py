@@ -155,6 +155,7 @@ def _derive_runtime_responses(
     runtime = responses["runtime/read"]["runtime"]
     derived: dict[str, Any] = {
         "config/reload": {"runtime": deepcopy(runtime), "strippedHistoryImages": 0},
+        "config/effective/read": {"config": deepcopy(runtime["config"])},
         # A saved model pick answers with the runtime it produced, applied at once.
         "config/model/write": {"runtime": deepcopy(runtime), "status": "applied"},
         "session/compact": {

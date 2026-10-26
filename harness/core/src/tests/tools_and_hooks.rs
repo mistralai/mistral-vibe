@@ -33,7 +33,7 @@ fn tool_call_completion(action_id: &str, call_id: &str) -> Value {
                 "arguments_json": "{\"path\":\"original.txt\"}",
             }],
             "finish_reason": "tool_call",
-            "usage": null,
+            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
         },
     })
 }
@@ -194,7 +194,7 @@ fn tool_inspection_identifies_the_route_without_exposing_arguments() {
                     "arguments_json": "{\"path\":\"secret.txt\"}",
                 }],
                 "finish_reason": "tool_call",
-                "usage": null,
+                "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
             },
         }),
     )));
@@ -412,7 +412,7 @@ fn invalid_provided_tool_hook_arguments_use_the_resolved_catalog() {
                     "arguments_json": "{\"query\":\"planning\"}",
                 }],
                 "finish_reason": "tool_call",
-                "usage": null,
+                "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
             },
         }),
     )));

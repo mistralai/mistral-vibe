@@ -7,21 +7,11 @@ import json
 from typing import Any
 
 import httpx
+import httpx2
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from vibe.core.types import AvailableTool, LLMMessage, StrToolChoice
 from vibe.utils.api_keys import ApiKeyOrigin
-
-_CONTEXT_TOO_LONG_SUBSTRINGS = (
-    "context too long",
-    "maximum context length",
-    "input too large",
-    "couldn't fit with truncation",
-    "prompt is too long",
-    # orchestral_runtime returns these as 422
-    "model_context_exceeded",
-    "prompt_too_long",
-)
 
 _RESPONSE_TOO_LONG_SUBSTRINGS = ("max_tokens_exceeded", "finish_reason=length")
 
@@ -97,13 +87,6 @@ class BackendError(RuntimeError):
         self.payload_summary = payload_summary
         self.api_key_origin = api_key_origin
         super().__init__(self._fmt())
-
-    @property
-    def is_context_too_long(self) -> bool:
-        if self.status not in {HTTPStatus.BAD_REQUEST, HTTPStatus.UNPROCESSABLE_ENTITY}:
-            return False
-        body = (self.body_text or "").lower()
-        return any(s in body for s in _CONTEXT_TOO_LONG_SUBSTRINGS)
 
     @property
     def is_response_too_long(self) -> bool:
@@ -210,7 +193,11 @@ class BackendErrorBuilder:
 
     @classmethod
     def build_http_error(
-        cls, call: ModelCall, *, error: Exception, response: httpx.Response
+        cls,
+        call: ModelCall,
+        *,
+        error: Exception,
+        response: httpx.Response | httpx2.Response,
     ) -> BackendError:
         """Build a BackendError from an HTTP error.
 
@@ -265,7 +252,9 @@ class BackendErrorBuilder:
         )
 
     @staticmethod
-    def _read_response_body(response: httpx.Response, error: Exception) -> str | None:
+    def _read_response_body(
+        response: httpx.Response | httpx2.Response, error: Exception
+    ) -> str | None:
         try:
             response.read()
             return response.text

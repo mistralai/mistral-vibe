@@ -21,6 +21,7 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from vibe.config_values import (
+    DEFAULT_THINKING_LEVELS,
     THINKING_LEVELS as THINKING_LEVELS,
     SpeechOutputFormat,
     ThinkingLevel,
@@ -29,7 +30,6 @@ from vibe.config_values import (
 from vibe.core.config._defaults import (
     DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
     DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
-    UNSET_AUTO_COMPACT_THRESHOLD,
 )
 from vibe.core.paths import SESSION_LOG_DIR
 from vibe.core.types import Backend
@@ -497,6 +497,22 @@ def _default_alias_to_name(data: Any) -> Any:
     return data
 
 
+def refuse_zero_auto_compact_threshold(value: Any) -> Any:
+    """Refuse ``auto_compact_threshold = 0`` with an error that says why.
+
+    Older versions read 0 as "compaction off". Compaction is now always on, so
+    0 is a config error rather than a silent switch to the default threshold.
+    Other values go on to the field's own checks.
+    """
+    if value == 0 and not isinstance(value, bool):
+        raise ValueError(
+            'auto_compact_threshold: 0 is not allowed. There is no "off" value: '
+            "set a positive threshold, or remove the setting to use the model's "
+            "default."
+        )
+    return value
+
+
 class ModelConfig(BaseModel):
     name: str
     provider: str
@@ -507,7 +523,8 @@ class ModelConfig(BaseModel):
     # agent loop does not send them.
     # Nucleus sampling; None leaves it to the provider's default.
     top_p: float | None = Field(default=None, gt=0, le=1)
-    # Cap on output tokens per model request; None leaves it to the provider.
+    # The model's max output, sent as Anthropic's required max_tokens; other
+    # providers get no cap. None takes the known max output, else 32,768.
     # A session's own ``max_tokens`` limit, when set, takes precedence.
     max_output_tokens: int | None = Field(default=None, ge=1)
     input_price: float = 0.0  # Price per million input tokens
@@ -517,16 +534,25 @@ class ModelConfig(BaseModel):
     )
     thinking: ThinkingLevel = "off"
     # The levels this model offers, in display order. Defaults to the CLI's
-    # five; a narrowed set resets a stored level that falls outside it.
+    # five, which say nothing about the model; a narrowed set is the model's
+    # levels. A `thinking` outside it is still sent, and offered beside them.
     thinking_levels: list[ThinkingLevel] = Field(
-        default_factory=lambda: list(THINKING_LEVELS)
+        default_factory=lambda: list(DEFAULT_THINKING_LEVELS)
     )
-    supports_images: bool = False
-    # None when the window is unknown; 0 or a negative would silently disable
-    # compaction by deriving an unreachable threshold, so it must be rejected.
+    # None when unset: Vibe offers the model no images, while its completion
+    # facts take their input modalities from the catalogue or the known-model
+    # table. True states text and image input, false text only.
+    supports_images: bool | None = None
+    # None when the window is unknown: the session then uses the window it
+    # knows for the model, or a default one with a warning.
     max_context_length: int | None = Field(default=None, ge=1)
-    auto_compact_threshold: int = UNSET_AUTO_COMPACT_THRESHOLD
+    # Token count before automatic compaction. None takes the global setting,
+    # or else the default for the model's window.
+    auto_compact_threshold: int | None = Field(default=None, gt=0)
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
+    _refuse_zero_threshold = field_validator("auto_compact_threshold", mode="before")(
+        refuse_zero_auto_compact_threshold
+    )
 
     @field_validator("thinking_levels", mode="after")
     @classmethod
@@ -539,7 +565,7 @@ class ModelConfig(BaseModel):
 
     @property
     def default_thinking(self) -> ThinkingLevel:
-        """The level a model lands on when its stored one is not offered.
+        """The level a catalog model starts on: its set's default.
 
         ``high`` when the set offers it, else the set's last entry: rank comes
         from list order, the same order the pickers render, so a level the CLI
@@ -550,6 +576,15 @@ class ModelConfig(BaseModel):
         return self.thinking_levels[-1]
 
     @property
+    def thinking_is_set(self) -> bool:
+        """Whether the config chose a thinking level.
+
+        An unset level is not a request for off: the session thinks at the
+        model's lowest setting, which is off only where the model can stop.
+        """
+        return "thinking" in self.model_fields_set
+
+    @property
     def thinking_levels_curated(self) -> bool:
         """Whether the offered set was narrowed from the CLI's default five.
 
@@ -557,22 +592,7 @@ class ModelConfig(BaseModel):
         (e.g. the Mistral backend's reasoning-effort mapping) treat it
         differently from a set someone deliberately wrote.
         """
-        return set(self.thinking_levels) != set(THINKING_LEVELS)
-
-    @model_validator(mode="after")
-    def _reset_thinking_outside_levels(self) -> ModelConfig:
-        # Curation can narrow a set under a level the user already stored.
-        # Re-derived on every load, like the active-model fallback: the stored
-        # value stays in the user's file and applies again if the set widens.
-        if self.thinking not in self.thinking_levels:
-            # "low" was the historical no-reasoning pick; a curated set that
-            # dropped it carries that intent in "off" instead of re-enabling
-            # reasoning through default_thinking.
-            if self.thinking == "low" and "off" in self.thinking_levels:
-                self.thinking = "off"
-            else:
-                self.thinking = self.default_thinking
-        return self
+        return set(self.thinking_levels) != set(DEFAULT_THINKING_LEVELS)
 
 
 def normalize_model_configs(value: Any) -> Any:
@@ -606,15 +626,10 @@ def serialize_model_configs(value: Any) -> Any:
 
 def _serialize_model_entry(model: Any) -> Any:
     if isinstance(model, ModelConfig):
-        entry = model.model_dump(exclude_none=True)
-    elif isinstance(model, Mapping):
-        entry = {key: value for key, value in model.items() if value is not None}
-    else:
-        return model
-    # The unset sentinel is merge-internal; it must never reach a TOML file.
-    if entry.get("auto_compact_threshold") == UNSET_AUTO_COMPACT_THRESHOLD:
-        del entry["auto_compact_threshold"]
-    return entry
+        return model.model_dump(exclude_none=True)
+    if isinstance(model, Mapping):
+        return {key: value for key, value in model.items() if value is not None}
+    return model
 
 
 def _model_alias_from_payload(payload: Any) -> str:

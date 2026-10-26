@@ -70,8 +70,7 @@ pub(super) fn start(app: &mut App, client: &Arc<Client>, operation: Operation) {
         Operation::LoadMore => Some("Loading more projects"),
         Operation::Unlink | Operation::Cancel => None,
     };
-    if let Some(label) = label {
-        app.begin_command_loading();
+    if let Some(label) = label.filter(|_| app.begin_command_loading()) {
         app.view.loading.set_label(label);
     }
     if opening {

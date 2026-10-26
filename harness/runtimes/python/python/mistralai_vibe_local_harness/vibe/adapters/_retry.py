@@ -32,6 +32,7 @@ from mistralai_vibe_local_harness.vibe.adapters._provider_failure import (
     ProviderFailure,
     read_provider_failure,
 )
+from mistralai_vibe_local_harness.vibe.completion_profile import should_retry_stall
 
 logger = logging.getLogger(__name__)
 
@@ -50,12 +51,11 @@ async def call_with_retries[T](
     an attempt the provider said would fail is not worth making early. A budget
     of zero disables retries.
 
-    A stall is retried at most ``_MAX_STALL_RETRIES`` times, and a nonzero
-    budget does not bound that retry: a stall is noticed only after the stream
-    idle limit or the transport read timeout, either of which can be longer than
-    the whole budget. The cap is low because when the silence was a long
-    generation the provider does not stream, every attempt repeats it, and each
-    one is paid for. A response whose tool calls all lack a name is retried at
+    A stall gets one retry of its own (``should_retry_stall``), and a nonzero
+    budget does not bound it: a stall is noticed only after a limit of the stream
+    guard, which can be longer than the whole budget. It is one because when the
+    silence was a long generation the provider does not stream, every attempt
+    repeats it, and each one is paid for. A response whose tool calls all lack a name is retried at
     most ``_MAX_UNUSABLE_TOOL_CALL_RETRIES`` times for the same reason.
     """
     started = time.monotonic()
@@ -67,7 +67,7 @@ async def call_with_retries[T](
             return await attempt()
         except Exception as error:
             failure = read_provider_failure(error)
-            stalls_spent = failure.stalled and stall_retries >= _MAX_STALL_RETRIES
+            stalls_spent = failure.stalled and not should_retry_stall(stall_retries)
             unusable_spent = (
                 failure.unusable_tool_calls
                 and unusable_tool_call_retries >= _MAX_UNUSABLE_TOOL_CALL_RETRIES
@@ -136,7 +136,6 @@ _INITIAL_RETRY_DELAY_S = 0.5
 _RETRY_BACKOFF = 1.5
 _MAX_RETRY_DELAY_S = 30.0
 _MAX_RETRY_JITTER_S = 1.0
-_MAX_STALL_RETRIES = 1
 _MAX_UNUSABLE_TOOL_CALL_RETRIES = 1
 # The backoff reaches its maximum long before this exponent; the cap keeps a
 # large retry budget from overflowing the power.

@@ -313,7 +313,7 @@ fn reasoning_only_completion_ends_the_turn_with_empty_visible_output() {
             }],
         },
         "finish_reason": "stop",
-        "usage": null,
+        "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
     });
 
     // Do
@@ -327,7 +327,7 @@ fn reasoning_only_completion_ends_the_turn_with_empty_visible_output() {
                     "content": [{"type": "text", "text": reasoning}],
                 }],
                 "finish_reason": "stop",
-                "usage": null,
+                "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
             },
         }),
         completed(turn_id, vec![])
@@ -881,6 +881,50 @@ fn invalid_unicode_in_programmatic_arguments_finishes_without_a_runtime_tool_act
 }
 
 ///
+/// *Prepare*: A TypeScript program throws a plain object that has a `code`, not a `ToolError`.
+/// *Do*: Submit the program through the serialized Core interface.
+/// *Assert*: `run_typescript` fails with `ExecutionError`: only a `ToolError` sets the failure code.
+///
+#[test]
+fn a_thrown_object_with_a_code_fails_the_program_as_an_execution_error() {
+    // Prepare
+    let turn_id = "turn-thrown-code";
+    let call_id = "program-thrown-code";
+    let source = "async function main() { throw { code: 'permission_denied', message: 'not a tool failure' }; }";
+    let mut runtime = SynchronousRuntime::new(config());
+    let first_completion = runtime.start_turn(turn_id, "run the program");
+    let error = json!({"code": "permission_denied", "message": "not a tool failure"});
+    let failure_result = json!({
+        "type": "failure",
+        "content": [{
+            "type": "text",
+            "text": format!(
+                "run_typescript failed: {}",
+                serde_json::to_string(&error).expect("thrown object serializes")
+            ),
+        }],
+        "error": {
+            "code": "ExecutionError",
+            "message": "not a tool failure",
+            "retryable": false,
+            "details": null,
+        },
+    });
+
+    // Do / Assert
+    let next_completion = runtime
+        .apply(
+            run_typescript_completion(action_id(&first_completion), call_id, source),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(tool_execution_started(turn_id, call_id))
+                .observe(tool_execution_finished(turn_id, call_id, failure_result)),
+        )
+        .only_action();
+    assert_eq!(next_completion["type"], "llm_call");
+}
+
+///
 /// *Prepare*: A TypeScript program selects results from two consecutive pairs of filesystem calls
 /// with `Promise.race()` and `Promise.any()`.
 /// *Do*: Complete each pair one result at a time, then complete the follow-up model call.
@@ -1177,7 +1221,7 @@ fn multiple_completion_and_tool_rounds_complete_one_turn() {
     assert_eq!(final_completion["iteration"], 2);
 }
 
-const OUTPUT_LIMIT_FEEDBACK: &str = "Your previous response was discarded because it reached the output token limit before it finished. Continue the task with a shorter response: keep reasoning brief, and split long file contents or edits into several smaller tool calls.";
+const OUTPUT_LIMIT_FEEDBACK: &str = "Your previous response was discarded because it reached the output token limit after 20 tokens. Give a shorter answer; put long content in a file with a tool call if needed.";
 
 fn output_limit_recovery_config(max_iterations: u32, max_retries: u32) -> HarnessConfig {
     let mut config = config();
@@ -1196,7 +1240,7 @@ fn cut_off_completion(action: &Value, text: &str) -> Value {
         "result": {
             "parts": [{"type": "text", "text": text}],
             "finish_reason": "length",
-            "usage": null,
+            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
         },
     })
 }
@@ -1362,7 +1406,52 @@ fn output_limit_recovery_retries_a_completion_cut_off_inside_a_tool_call() {
         &retry,
         "append",
         &[model_user_text(
-            "Your previous response was discarded because it reached the output token limit after 8192 tokens before it finished. It was cut off while writing the arguments of a `write_file` call, so none of its tool calls ran. Continue the task with a shorter response: keep reasoning brief, and split long file contents or edits into several smaller tool calls.",
+            "Your previous response was discarded because it reached the output token limit after 8192 tokens. It stopped inside the arguments of a `write_file` call, so no tool ran. Split long content or edits into several smaller tool calls.",
+        )],
+    );
+}
+
+///
+/// *Prepare*: Output limit recovery is enabled.
+/// *Do*: Answer with a completion cut off at the output limit while it is still reasoning, before any visible text or tool call.
+/// *Assert*: Core discards the completion and retries with feedback that asks for one concrete next step instead of a shorter answer.
+///
+#[test]
+fn output_limit_recovery_retries_a_completion_cut_off_while_reasoning() {
+    // Prepare
+    let turn_id = "turn-output-limit-reasoning";
+    let mut runtime = SynchronousRuntime::new(output_limit_recovery_config(8, 6));
+    let first = runtime.start_turn(turn_id, "fix the failing test");
+
+    // Do
+    let retry = runtime
+        .apply(
+            json!({
+                "type": "completion_succeeded",
+                "action_id": action_id(&first),
+                "result": {
+                    "parts": [{
+                        "type": "reasoning",
+                        "content": [{"type": "text", "text": "First, consider every module that"}],
+                    }],
+                    "finish_reason": "length",
+                    "usage": {"input_tokens": 1200, "output_tokens": 32000, "total_tokens": 33200},
+                },
+            }),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(agent_completion_candidate_discarded(
+                    turn_id, &first, "retry",
+                )),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(
+        &retry,
+        "append",
+        &[model_user_text(
+            "Your previous response was discarded because it reached the output token limit after 32000 tokens. Use what you already have. Choose one concrete next step, a tool call or your answer, and do not restart the analysis.",
         )],
     );
 }
@@ -1391,7 +1480,7 @@ fn cut_off_answers_and_cut_off_tool_calls_share_one_recovery_budget() {
     // Do
     let third = runtime
         .apply(
-            cut_off_tool_call_completion(&second, Value::Null),
+            cut_off_tool_call_completion(&second, json!({"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0})),
             running(turn_id)
                 .dispatch(llm_call(2))
                 .observe(cut_off_tool_call_committed(turn_id, &second))
@@ -1423,7 +1512,7 @@ fn cut_off_tool_call_runs_as_a_tool_call_without_output_limit_recovery() {
     // Do
     let next = runtime
         .apply(
-            cut_off_tool_call_completion(&completion, Value::Null),
+            cut_off_tool_call_completion(&completion, json!({"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0})),
             running(turn_id)
                 .dispatch(llm_call(1))
                 .observe(cut_off_tool_call_committed(turn_id, &completion))
@@ -1475,7 +1564,7 @@ fn cut_off_tool_call_committed(turn_id: &str, action: &Value) -> Value {
                 ],
             },
             "finish_reason": "tool_call",
-            "usage": null,
+            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
         },
     })
 }

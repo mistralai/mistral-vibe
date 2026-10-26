@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::core::model_context::assign_turn_indexes;
@@ -21,6 +23,79 @@ pub(crate) struct ConversationMessage {
     pub message: Message,
     pub turn_index: Option<u64>,
     pub source: ConversationSource,
+}
+
+/// What a spawned child starts from: `"fresh"`, or the parent's latest whole
+/// Turns with `{"mode": "forked", "turns": N}` or `{"mode": "forked", "turns": "all"}`.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(untagged)]
+#[schemars(extend("x-harness-one-of" = true))]
+pub(crate) enum SpawnContext {
+    /// A new conversation with only the child's task.
+    Fresh(FreshMode),
+    /// A copy of the parent's conversation before the child's task.
+    Forked(ForkedContext),
+}
+
+impl Default for SpawnContext {
+    fn default() -> Self {
+        Self::Fresh(FreshMode::Fresh)
+    }
+}
+
+impl SpawnContext {
+    /// The accepted values, in words for error messages.
+    pub(crate) const ACCEPTED: &str =
+        r#""fresh" or {"mode": "forked", "turns": <positive integer> or "all"}"#;
+
+    /// Reads a context sent across a language binding.
+    pub(crate) fn from_json(value: &str) -> Result<Self, String> {
+        serde_json::from_str(value)
+            .map_err(|_| format!("context must be {}, not {value}", Self::ACCEPTED))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum FreshMode {
+    #[default]
+    Fresh,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ForkedContext {
+    pub mode: ForkedMode,
+    /// How many of the parent's latest whole Turns to copy, the current one included: a positive integer, or `"all"` (the default), which also lets the child reuse the parent's cached prompt prefix.
+    #[serde(default)]
+    pub turns: ForkedTurns,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ForkedMode {
+    Forked,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(untagged)]
+#[schemars(extend("x-harness-one-of" = true))]
+pub(crate) enum ForkedTurns {
+    Latest(#[schemars(range(max = 4_294_967_295u32))] NonZeroU32),
+    All(AllTurns),
+}
+
+impl Default for ForkedTurns {
+    fn default() -> Self {
+        Self::All(AllTurns::All)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum AllTurns {
+    #[default]
+    All,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -59,7 +134,7 @@ impl ConversationSeed {
         if complete_prefix_len(&messages.iter().collect::<Vec<_>>()) != messages.len() {
             return Err("conversation seed contains an incomplete tool exchange".into());
         }
-        // Imported history counts as Turns, so later fork_turns selections can count it.
+        // Imported history counts as Turns, so a later forked spawn can count it.
         assign_turn_indexes(&mut messages);
         Ok(messages)
     }
@@ -72,21 +147,20 @@ impl ConversationSeed {
 /// up to and including that message.
 pub(super) fn export(
     messages: &[StoredMessage],
-    fork_turns: &str,
+    context: SpawnContext,
     finished_results: &[&Message],
     pending_call_result: &str,
 ) -> Result<ConversationSeed, String> {
-    let limit = match fork_turns {
-        "none" => return Ok(ConversationSeed::default()),
-        "all" => None,
-        value
-            if !value.is_empty()
-                && value.bytes().all(|byte| byte.is_ascii_digit())
-                && value.bytes().any(|byte| byte != b'0') =>
-        {
-            Some(value.parse::<usize>().unwrap_or(usize::MAX))
-        }
-        _ => return Err("fork_turns must be all, none, or a positive integer string".into()),
+    let limit = match context {
+        SpawnContext::Fresh(_) => return Ok(ConversationSeed::default()),
+        SpawnContext::Forked(ForkedContext {
+            turns: ForkedTurns::All(_),
+            ..
+        }) => usize::MAX,
+        SpawnContext::Forked(ForkedContext {
+            turns: ForkedTurns::Latest(turns),
+            ..
+        }) => usize::try_from(turns.get()).unwrap_or(usize::MAX),
     };
     let history = messages
         .iter()
@@ -109,7 +183,7 @@ pub(super) fn export(
     let selected = groups
         .iter()
         .rev()
-        .take(limit.unwrap_or(usize::MAX))
+        .take(limit)
         .copied()
         .collect::<BTreeSet<_>>();
     Ok(ConversationSeed {
@@ -322,6 +396,13 @@ mod tests {
         );
     }
 
+    fn all_turns() -> SpawnContext {
+        SpawnContext::Forked(ForkedContext {
+            mode: ForkedMode::Forked,
+            turns: ForkedTurns::All(AllTurns::All),
+        })
+    }
+
     fn stored(messages: Vec<Message>) -> Vec<StoredMessage> {
         messages
             .into_iter()
@@ -352,7 +433,7 @@ mod tests {
             Message::tool_success_text("call-b".into(), "read_file".into(), "b contents");
 
         // Do
-        let seed = export(&messages, "all", &[&finished], "STILL RUNNING").unwrap();
+        let seed = export(&messages, all_turns(), &[&finished], "STILL RUNNING").unwrap();
 
         // Assert
         let exported = seed
@@ -394,7 +475,7 @@ mod tests {
         ]);
 
         // Do
-        let seed = export(&messages, "all", &[], "STILL RUNNING").unwrap();
+        let seed = export(&messages, all_turns(), &[], "STILL RUNNING").unwrap();
 
         // Assert
         assert_eq!(seed.messages.len(), 1);

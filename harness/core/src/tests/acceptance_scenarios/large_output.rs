@@ -1,6 +1,7 @@
 use super::*;
 use crate::core::{
-    LargeOutputPolicy, ProvidedToolDefinition, ProvidedToolExposure, ToolGroupDefinition,
+    InputModality, LargeOutputPolicy, ProvidedToolDefinition, ProvidedToolExposure,
+    ToolGroupDefinition,
 };
 
 fn large_output_config(exposure: ProvidedToolExposure) -> HarnessConfig {
@@ -1239,4 +1240,119 @@ fn assert_page_is_not_offloaded(
             model_tool_text(call_id, model_name, &serde_json::to_string(&page).unwrap()),
         ],
     );
+}
+
+fn screenshot_config(image_input: bool) -> HarnessConfig {
+    let mut harness_config = large_output_config(ProvidedToolExposure::Direct);
+    harness_config.settings.tools.large_output = LargeOutputPolicy::Filesystem {
+        max_output_tokens: 10_000,
+        model_visible_output_tokens: 10_000,
+    };
+    if !image_input {
+        harness_config.settings.context.model_facts.input_modalities = vec![InputModality::Text];
+    }
+    harness_config
+}
+
+/// The tool message of a 300 KB screenshot saved to a file, as the model
+/// receives it.
+fn completion_after_large_screenshot(image_input: bool) -> Value {
+    let turn_id = "turn-large-screenshot";
+    let call_id = "screenshot";
+    let image = json!({
+        "type": "resource",
+        "resource": {
+            "uri": "file:///tmp/mistralai-vibe-session-s/attachments/a.png",
+            "mimeType": "image/png",
+            "blob": "A".repeat(400_000),
+        },
+    });
+    let content = json!([{"type": "text", "text": "a screenshot"}, image]);
+    let mut runtime = SynchronousRuntime::new(screenshot_config(image_input));
+    let first_completion = runtime.start_turn(turn_id, "take a screenshot");
+    let calls = vec![tool_call(call_id, "large_lookup", json!({}))];
+    let direct_action = runtime
+        .complete_with_tool_calls(
+            turn_id,
+            &first_completion,
+            &calls,
+            [provided_action(json!({}))],
+        )
+        .only_action();
+    let direct_result = json!({
+        "type": "tool_succeeded",
+        "action_id": direct_action["action_id"],
+        "call_id": direct_action["call_id"],
+        "result": {"type": "success", "content": content},
+    });
+    // The serialization holds the image's placeholder, never its data.
+    let serialized = serde_json::to_string_pretty(&json!({"content": [
+        {"type": "text", "text": "a screenshot"},
+        {
+            "type": "text",
+            "text": "[Image] [resource: file:///tmp/mistralai-vibe-session-s/attachments/a.png]",
+        },
+    ]}))
+    .unwrap();
+    let next_completion = runtime
+        .apply(
+            direct_result.clone(),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(serialized_observation(
+                    turn_id,
+                    call_id,
+                    "large_lookup",
+                    serialized.encode_utf16().count(),
+                ))
+                .observe_completed_tool_result(&direct_action, &direct_result),
+        )
+        .only_action();
+    next_completion["model_input"]["messages"]["messages"]
+        .as_array()
+        .expect("completion action has model messages")
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .expect("the completion carries the tool message")
+        .clone()
+}
+
+///
+/// *Prepare*: A text-only model, and a tool that returns a 300 KB screenshot saved to a file.
+/// *Do*: Complete the tool call.
+/// *Assert*: Core writes no large-output file, and the model gets the text and the placeholder
+/// with the file link.
+///
+#[test]
+fn text_only_model_gets_the_link_of_a_large_saved_screenshot() {
+    // Do
+    let tool_message = completion_after_large_screenshot(false);
+
+    // Assert
+    assert_eq!(
+        tool_message["content"],
+        json!([
+            {"type": "text", "text": "a screenshot"},
+            {
+                "type": "text",
+                "text": "[Image] [resource: file:///tmp/mistralai-vibe-session-s/attachments/a.png]",
+            },
+        ])
+    );
+}
+
+///
+/// *Prepare*: A vision model, and a tool that returns a 300 KB screenshot.
+/// *Do*: Complete the tool call.
+/// *Assert*: Core writes no large-output file, and the model gets the image itself.
+///
+#[test]
+fn vision_model_gets_a_large_screenshot_itself() {
+    // Do
+    let tool_message = completion_after_large_screenshot(true);
+
+    // Assert
+    let content = tool_message["content"].as_array().unwrap();
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["data"].as_str().unwrap().len(), 400_000);
 }

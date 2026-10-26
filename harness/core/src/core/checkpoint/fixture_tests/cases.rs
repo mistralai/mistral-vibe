@@ -2,8 +2,8 @@ use serde_json::{Value, json};
 
 use super::{CONFIG_SECRET, FixtureCase};
 use crate::core::features::compaction::{
-    CompactionBudget, CompactionFallback, CompactionProjection, CompactionProjectionFit,
-    CompactionTrigger, NewestToolExchange, PendingCompaction,
+    CompactionBudgets, CompactionProjection, CompactionProjectionFit, CompactionTrigger,
+    PendingCompaction,
 };
 use crate::core::features::notifications::NotificationState;
 use crate::core::features::programmatic_tool_calling::{
@@ -40,6 +40,14 @@ pub(super) fn fixture_cases() -> Vec<FixtureCase> {
         FixtureCase {
             file_name: "active-awaiting-compaction-completion.json",
             state: awaiting_completion_state(CompletionPurpose::Compaction),
+        },
+        FixtureCase {
+            file_name: "active-awaiting-compaction-in-context.json",
+            state: awaiting_compaction_state(CompactionFixturePhase::InContext),
+        },
+        FixtureCase {
+            file_name: "active-awaiting-compaction-cut-off-retry.json",
+            state: awaiting_compaction_state(CompactionFixturePhase::CutOffRetry),
         },
         FixtureCase {
             file_name: "between-turn-manual-compaction.json",
@@ -158,11 +166,32 @@ fn idle_history_notifications_state() -> HarnessState {
     state
 }
 
+/// The summary request a compaction fixture has out.
+#[derive(Clone, Copy)]
+enum CompactionFixturePhase {
+    InContext,
+    Standalone,
+    CutOffRetry,
+}
+
 fn awaiting_completion_state(purpose: CompletionPurpose) -> HarnessState {
+    match purpose {
+        CompletionPurpose::Agent => awaiting_state(None),
+        CompletionPurpose::Compaction => {
+            awaiting_compaction_state(CompactionFixturePhase::Standalone)
+        }
+    }
+}
+
+fn awaiting_compaction_state(phase: CompactionFixturePhase) -> HarnessState {
+    awaiting_state(Some(phase))
+}
+
+fn awaiting_state(compaction: Option<CompactionFixturePhase>) -> HarnessState {
     let mut state = historical_state();
     let turn_id = "turn-active".to_string();
     let iterations = 3;
-    let compaction_projection = if purpose == CompletionPurpose::Compaction {
+    let compaction_projection = compaction.map(|phase| {
         state
             .context
             .push_in_current_turn(StoredMessage::visible(Message::assistant(vec![
@@ -173,28 +202,38 @@ fn awaiting_completion_state(purpose: CompletionPurpose) -> HarnessState {
             .push_in_current_turn(StoredMessage::visible(Message::user_text(
                 "current raw request",
             )));
-        Some(
-            fixture_projection(&state, "", NewestToolExchange::Keep)
-                .fall_back(
-                    CompactionFallback::Standalone,
-                    state.config.settings.context.compaction.token_threshold(),
+        let in_context = fixture_projection(&state, "");
+        let tools = state.resolved_tools.top_level_tools();
+        let budget = fixture_budgets(&state).request;
+        let prompts = &state.config.settings.prompts.compaction;
+        match phase {
+            CompactionFixturePhase::InContext => in_context,
+            CompactionFixturePhase::Standalone => in_context
+                .after_failure(tools, budget, prompts)
+                .expect("fixture standalone request is valid")
+                .expect("an in-context request falls back to standalone"),
+            // The in-context summary was cut off after its first words.
+            CompactionFixturePhase::CutOffRetry => in_context
+                .after_cut_off(
+                    Some("The user asked to rename the config".to_string()),
+                    tools,
+                    budget,
+                    prompts,
                 )
-                .expect("fixture standalone fallback is valid")
-                .expect("fixture in-context projection has a standalone fallback"),
-        )
-    } else {
-        None
-    };
-    let phase = match purpose {
-        CompletionPurpose::Agent => ActivePhase::AwaitingCompletion {
+                .expect("fixture cut-off retry is valid")
+                .expect("a first cut-off summary is asked for again"),
+        }
+    });
+    let phase = match compaction_projection {
+        None => ActivePhase::AwaitingCompletion {
             action_id: crate::core::action_id::completion("checkpoint-fixture-task", 2, 3),
         },
-        CompletionPurpose::Compaction => ActivePhase::AwaitingCompaction {
+        Some(projection) => ActivePhase::AwaitingCompaction {
             pending: PendingCompaction::in_turn(
                 crate::core::action_id::compaction("checkpoint-fixture-task", 3),
                 turn_id.clone(),
                 iterations,
-                compaction_projection.expect("compaction fixture has a projection"),
+                projection,
             ),
         },
     };
@@ -207,16 +246,17 @@ fn awaiting_completion_state(purpose: CompletionPurpose) -> HarnessState {
         output_limit_retries: 0,
         queued: QueuedTurn::Empty,
     });
+    // An earlier reply measured the estimate as short by a quarter.
+    state.estimate_correction =
+        crate::core::features::compaction::EstimateCorrection::restore(1.25)
+            .expect("fixture estimate correction is valid");
+    state.last_reported_context_tokens = Some(41_000);
     state
 }
 
 fn between_turn_manual_compaction_state() -> HarnessState {
     let mut state = historical_state();
-    let projection = fixture_projection(
-        &state,
-        "preserve fixture details",
-        NewestToolExchange::MayRemove,
-    );
+    let projection = fixture_projection(&state, "preserve fixture details");
     state.turn = TurnState::Compacting {
         pending: PendingCompaction::between_turns(
             crate::core::action_id::compaction("checkpoint-fixture-task", 3),
@@ -298,6 +338,8 @@ fn completion_candidate() -> CompletionCandidate {
             output_tokens: 4,
             total_tokens: 14,
             cached_input_tokens: 3,
+            cache_write_tokens: 2,
+            reasoning_tokens: 1,
         }),
     }
 }
@@ -373,22 +415,18 @@ fn skill_read_state() -> HarnessState {
     state
 }
 
-fn fixture_projection(
-    state: &HarnessState,
-    extra_instructions: &str,
-    newest_tool_exchange: NewestToolExchange,
-) -> CompactionProjection {
+fn fixture_budgets(state: &HarnessState) -> CompactionBudgets {
+    CompactionBudgets::from_settings(&state.config.settings.context, state.estimate_correction)
+}
+
+fn fixture_projection(state: &HarnessState, extra_instructions: &str) -> CompactionProjection {
     let projection = CompactionProjection::initial(
         state.context.messages(),
         state.generated_system_message(),
         extra_instructions,
         state.resolved_tools.top_level_tools(),
-        CompactionBudget {
-            token_threshold: state.config.settings.context.compaction.token_threshold(),
-            image_delivery: state.config.settings.context.image_delivery.compaction,
-            image_cost: state.config.settings.context.image_token_cost,
-        },
-        newest_tool_exchange,
+        fixture_budgets(state).request,
+        &state.config.settings.prompts.compaction,
     )
     .expect("fixture compaction projection can be estimated");
     let CompactionProjectionFit::Fitted(projection) = projection else {

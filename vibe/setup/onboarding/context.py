@@ -116,6 +116,50 @@ def is_likely_mistral_private_cloud_domain(domain: str) -> bool:
     )
 
 
+CUSTOM_CONSOLE_URL_ENV_VAR = "VIBE_CUSTOM_CONSOLE_URL"
+
+
+def pinned_console_url_from_env() -> str | None:
+    """Administrator-pinned console URL for sign-in (`VIBE_CUSTOM_CONSOLE_URL`).
+
+    Accepts a full URL or a bare domain (scheme-less upgrades to `https://`,
+    trailing slashes stripped). Unset, empty, or invalid values mean no pin —
+    an invalid value warns rather than blocking sign-in.
+    """
+    value = _find_env_value(CUSTOM_CONSOLE_URL_ENV_VAR)
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if not is_valid_custom_domain(stripped):
+        logger.warning(
+            "Ignoring invalid %s environment value: %r",
+            CUSTOM_CONSOLE_URL_ENV_VAR,
+            value,
+        )
+        return None
+    return _normalize_origin(stripped)
+
+
+def pinned_console_api_base(provider: ProviderConfig, pin: str) -> str | None:
+    """Configured split-horizon API base belonging to the pinned console.
+
+    The pin fixes the browser sign-in host; it must not clobber an API base
+    configured for the same deployment. Only returned when the configured
+    browser base normalizes to the pin.
+    """
+    browser_base = provider.browser_auth_base_url
+    api_base = provider.browser_auth_api_base_url
+    if (
+        browser_base is not None
+        and api_base is not None
+        and _normalize_origin(browser_base) == pin
+    ):
+        return api_base
+    return None
+
+
 def _default_provider_payloads() -> list[dict[str, Any]]:
     return [provider.model_dump(mode="json") for provider in DEFAULT_PROVIDERS]
 
@@ -306,12 +350,16 @@ def _resolve_provider(
     return DEFAULT_PROVIDERS[0]
 
 
+_PINNED_CONSOLE_URL_UNSET: Any = object()
+
+
 @dataclass(frozen=True)
 class OnboardingContext:
     provider: ProviderConfig
     vibe_base_url: str = DEFAULT_VIBE_BASE_URL
     console_base_url: str = DEFAULT_CONSOLE_BASE_URL
     theme: str = DEFAULT_THEME
+    pinned_console_url: str | None = None
 
     @property
     def supports_browser_sign_in(self) -> bool:
@@ -333,10 +381,18 @@ class OnboardingContext:
             vibe_base_url=config.vibe_base_url,
             console_base_url=config.console_base_url,
             theme=config.theme,
+            pinned_console_url=pinned_console_url_from_env(),
         )
 
     @classmethod
     def load(cls, **overrides: Any) -> OnboardingContext:
+        # Sentinel: an explicit pinned_console_url=None forces "no pin" even
+        # when VIBE_CUSTOM_CONSOLE_URL is set.
+        pinned_console_url = overrides.pop(
+            "pinned_console_url", _PINNED_CONSOLE_URL_UNSET
+        )
+        if pinned_console_url is _PINNED_CONSOLE_URL_UNSET:
+            pinned_console_url = pinned_console_url_from_env()
         try:
             snapshot = _OnboardingSnapshot.model_validate(
                 _build_onboarding_snapshot_payload(**overrides)
@@ -348,6 +404,7 @@ class OnboardingContext:
                 vibe_base_url=snapshot.vibe_base_url,
                 console_base_url=snapshot.console_base_url,
                 theme=snapshot.theme,
+                pinned_console_url=pinned_console_url,
             )
         except (RuntimeError, ValidationError, ValueError):
             logger.warning(

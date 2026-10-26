@@ -42,6 +42,41 @@ fn warning_notification_shows_a_warning_toast() {
 }
 
 #[test]
+fn a_failed_integration_load_stays_up_longer_than_other_warnings() {
+    let mut app = App::default();
+    app.set_status(Status::Ready);
+    let client = Arc::new(Client::stub());
+
+    for (code, message) in [
+        ("warning", "config is deprecated"),
+        (
+            "integrations_unavailable",
+            "Couldn't load connectors GitHub: timed out.",
+        ),
+    ] {
+        let event = notif(
+            notification::WARNING,
+            json!({"warning": {"code": code, "message": message}}),
+        );
+        event_handler::apply_notification(&mut app, &client, &event);
+    }
+
+    let durations: Vec<(&str, u64)> = app
+        .overlays
+        .toasts
+        .iter()
+        .map(|toast| (toast.text.as_str(), toast.duration.as_secs()))
+        .collect();
+    assert_eq!(
+        durations,
+        vec![
+            ("config is deprecated", 5),
+            ("Couldn't load connectors GitHub: timed out.", 10),
+        ]
+    );
+}
+
+#[test]
 fn error_notification_shows_an_error_toast() {
     let mut app = App::default();
     app.set_status(Status::Ready);

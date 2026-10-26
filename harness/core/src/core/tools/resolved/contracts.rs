@@ -1,9 +1,9 @@
-use jsonschema::error::ValidationErrorKind;
 use serde_json::Value;
 
 use crate::core::config::HarnessConfig;
 use crate::core::error::CoreError;
 use crate::core::features::file_system;
+use crate::core::tools::arguments::{ArgumentsRejection, validate_arguments, validate_json_schema};
 use crate::core::tools::external::{
     ExternalTool, ExternalToolCall, RuntimeBuiltinToolName, ToolTarget,
 };
@@ -13,6 +13,7 @@ use crate::core::tools::resolved::assembly;
 pub(super) struct ToolContracts {
     runtime: Vec<RuntimeContract>,
     provided: Vec<ProvidedInputContract>,
+    bash_timeout: file_system::BashTimeout,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -31,7 +32,8 @@ struct ProvidedInputContract {
 
 impl ToolContracts {
     pub(super) fn compile(config: &HarnessConfig) -> Self {
-        let mut runtime = file_system::runtime_contracts()
+        let bash_timeout = assembly::bash_timeout(config);
+        let mut runtime = file_system::runtime_contracts(bash_timeout)
             .into_iter()
             .map(|contract| RuntimeContract {
                 name: contract.name,
@@ -49,6 +51,11 @@ impl ToolContracts {
         runtime.extend(
             assembly::non_filesystem_runtime_builtin_tools(
                 config.settings.tools.programmatic.max_sleep_ms,
+                config
+                    .settings
+                    .tools
+                    .subagents
+                    .supports_conversation_forking(),
             )
             .into_iter()
             .map(|tool| {
@@ -81,7 +88,27 @@ impl ToolContracts {
                 })
             })
             .collect();
-        Self { runtime, provided }
+        Self {
+            runtime,
+            provided,
+            bash_timeout,
+        }
+    }
+
+    /// The call to `target`, with its arguments as the runtime takes them.
+    pub(super) fn external_tool(
+        &self,
+        target: ToolTarget,
+        invocation_name: &str,
+        arguments: Value,
+    ) -> ExternalTool {
+        let arguments = match &target {
+            ToolTarget::RuntimeBuiltin {
+                name: RuntimeBuiltinToolName::FileSystemBash,
+            } => file_system::bash_runtime_arguments(arguments, self.bash_timeout),
+            ToolTarget::RuntimeBuiltin { .. } | ToolTarget::Provided { .. } => arguments,
+        };
+        ExternalTool::from_target(target, invocation_name, arguments)
     }
 
     pub(super) fn resolve_effective_call(
@@ -89,9 +116,15 @@ impl ToolContracts {
         original: &ExternalToolCall,
         arguments: Value,
     ) -> Result<ExternalToolCall, CoreError> {
-        validate_json_schema(self.input_schema(&original.call)?, &arguments).map_err(|error| {
+        let tool = match &original.call {
+            ExternalTool::RuntimeBuiltin { name, .. } => Some(*name),
+            ExternalTool::Provided { .. } => None,
+        };
+        let schema = self.input_schema(&original.call)?;
+        validate_arguments(tool, schema, &arguments).map_err(|rejection| {
             CoreError::invalid_command(format!(
-                "pre-tool hook arguments do not satisfy the original tool schema: {error}"
+                "pre-tool hook arguments do not satisfy the original tool schema: {}",
+                rejection.detail(schema)
             ))
         })?;
         let arguments = match &original.call {
@@ -103,6 +136,10 @@ impl ToolContracts {
                 original_arguments,
                 arguments,
             )?,
+            ExternalTool::RuntimeBuiltin {
+                name: RuntimeBuiltinToolName::FileSystemBash,
+                ..
+            } => file_system::bash_runtime_arguments(arguments, self.bash_timeout),
             _ => arguments,
         };
         Ok(ExternalToolCall {
@@ -116,9 +153,19 @@ impl ToolContracts {
     pub(super) fn validate_input(
         &self,
         target: &ToolTarget,
+        tool_name: &str,
         value: &Value,
     ) -> Result<(), CoreError> {
-        validate_model_input(self.input_schema_for_target(target)?, value)
+        let tool = match target {
+            ToolTarget::RuntimeBuiltin { name } => Some(*name),
+            ToolTarget::Provided { .. } => None,
+        };
+        validate_model_input(
+            tool,
+            tool_name,
+            self.input_schema_for_target(target)?,
+            value,
+        )
     }
 
     pub(super) fn validate_runtime_builtin_output(
@@ -131,7 +178,7 @@ impl ToolContracts {
             .output_schema
             .as_ref()
             .expect("Runtime built-ins must declare an output schema");
-        validate_json_schema(schema, value)
+        validate_json_schema(schema, value).map_err(|rejection| rejection.detail(schema))
     }
 
     fn input_schema(&self, tool: &ExternalTool) -> Result<&Value, CoreError> {
@@ -181,223 +228,181 @@ impl ToolContracts {
     }
 }
 
-pub(super) fn validate_model_input(schema: &Value, value: &Value) -> Result<(), CoreError> {
-    validate_json_schema(schema, value).map_err(|error| {
-        CoreError::invalid_command(format!(
-            "tool arguments do not satisfy the declared input schema: {error}"
-        ))
+/// A model's direct call. A schema failure keeps the schema wording, even when
+/// the tool words the error itself, so it still reads as a schema failure; a
+/// rule the schema cannot state speaks for the tool, as in a program.
+pub(super) fn validate_model_input(
+    tool: Option<RuntimeBuiltinToolName>,
+    tool_name: &str,
+    schema: &Value,
+    value: &Value,
+) -> Result<(), CoreError> {
+    validate_arguments(tool, schema, value).map_err(|rejection| {
+        CoreError::invalid_command(match rejection {
+            ArgumentsRejection::Domain(message) => {
+                format!("Invalid arguments for {tool_name}: {message}")
+            }
+            rejection => format!(
+                "tool arguments do not satisfy the declared input schema: {}",
+                rejection.detail(schema)
+            ),
+        })
     })
-}
-
-fn validate_json_schema(schema: &Value, value: &Value) -> Result<(), String> {
-    let validator = jsonschema::draft7::options()
-        .should_validate_formats(true)
-        .build(schema)
-        .map_err(|error| format!("invalid Core-owned JSON Schema: {error}"))?;
-    validator
-        .validate(value)
-        .map_err(|error| schema_error_detail(schema, &error))
-}
-
-/// Most allowed field names listed back to the model for an unknown field.
-const LISTED_FIELDS: usize = 24;
-
-/// The validator's message, made actionable for the model: where in the
-/// arguments the problem is and, for an unknown field, which fields the tool
-/// accepts and which one the model most likely meant.
-fn schema_error_detail(schema: &Value, error: &jsonschema::ValidationError<'_>) -> String {
-    let mut detail = error.to_string();
-    let location = error.instance_path().as_str();
-    if !location.is_empty() {
-        detail = format!("at {location}: {detail}");
-    }
-    let ValidationErrorKind::AdditionalProperties { unexpected } = error.kind() else {
-        return detail;
-    };
-    let allowed = allowed_fields(schema, error.schema_path().as_str());
-    if allowed.is_empty() {
-        return detail;
-    }
-    detail.push_str(". Allowed fields: ");
-    detail.push_str(
-        &allowed
-            .iter()
-            .take(LISTED_FIELDS)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    if allowed.len() > LISTED_FIELDS {
-        detail.push_str(", ...");
-    }
-    detail.push('.');
-    for name in unexpected {
-        if let Some(field) = closest_field(name, &allowed) {
-            detail.push_str(&format!(" Use {field:?} instead of {name:?}."));
-        }
-    }
-    detail
-}
-
-/// The properties declared by the schema object whose `additionalProperties`
-/// rejected a field.
-fn allowed_fields(schema: &Value, keyword_location: &str) -> Vec<String> {
-    let Some(object_location) = keyword_location.strip_suffix("/additionalProperties") else {
-        return Vec::new();
-    };
-    schema
-        .pointer(object_location)
-        .and_then(|object| object.get("properties"))
-        .and_then(Value::as_object)
-        .map(|properties| properties.keys().cloned().collect())
-        .unwrap_or_default()
-}
-
-/// The declared field an unknown field most likely stands for: the same name
-/// in another case or separator style, a longer or shorter form of it
-/// (`timeout` for `timeout_seconds`, `file_path` for `path`), or a near
-/// spelling. `None` when no field is a clear match.
-fn closest_field<'a>(unexpected: &str, allowed: &'a [String]) -> Option<&'a str> {
-    let normalized = normalize_field(unexpected);
-    if normalized.is_empty() {
-        return None;
-    }
-    let same_name = allowed
-        .iter()
-        .find(|field| normalize_field(field) == normalized);
-    let longer_form = || {
-        allowed
-            .iter()
-            .filter(|field| {
-                let field = normalize_field(field);
-                normalized.len() >= 3
-                    && (field.starts_with(&normalized) || field.ends_with(&normalized))
-            })
-            .min_by_key(|field| field.len())
-    };
-    let shorter_form = || {
-        allowed
-            .iter()
-            .filter(|field| {
-                let field = normalize_field(field);
-                field.len() >= 3 && (normalized.starts_with(&field) || normalized.ends_with(&field))
-            })
-            .max_by_key(|field| field.len())
-    };
-    let near_spelling = || {
-        allowed
-            .iter()
-            .map(|field| (field, edit_distance(&normalize_field(field), &normalized)))
-            .filter(|(_, distance)| *distance <= (normalized.chars().count() / 4).max(1))
-            .min_by_key(|(_, distance)| *distance)
-            .map(|(field, _)| field)
-    };
-    same_name
-        .or_else(longer_form)
-        .or_else(shorter_form)
-        .or_else(near_spelling)
-        .map(String::as_str)
-}
-
-fn normalize_field(name: &str) -> String {
-    name.chars()
-        .filter(|character| character.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn edit_distance(left: &str, right: &str) -> usize {
-    let right: Vec<char> = right.chars().collect();
-    let mut previous: Vec<usize> = (0..=right.len()).collect();
-    for (row, left_char) in left.chars().enumerate() {
-        let mut current = vec![row + 1];
-        for (column, right_char) in right.iter().enumerate() {
-            let substitution = previous[column] + usize::from(left_char != *right_char);
-            current.push(
-                substitution
-                    .min(previous[column + 1] + 1)
-                    .min(current[column] + 1),
-            );
-        }
-        previous = current;
-    }
-    previous[right.len()]
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
 
-    fn bash_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "command": {"type": "string"},
-                "timeout_seconds": {"type": "integer", "minimum": 1},
-            },
-            "required": ["command"],
-            "additionalProperties": false,
-        })
+    use super::*;
+
+    fn spawn_schema() -> Value {
+        crate::core::features::subagents::tools(
+            true,
+            &crate::core::prompt::PromptSettings::default().agent_tools,
+        )
+        .into_iter()
+        .find(|spec| spec.name.runtime_tool() == RuntimeBuiltinToolName::SubagentSpawn)
+        .unwrap()
+        .input_schema
     }
 
     #[test]
-    fn unknown_fields_list_the_allowed_fields_and_the_likely_one() {
-        let error = validate_json_schema(
-            &bash_schema(),
-            &json!({"command": "sleep 5", "timeout": 30}),
+    fn a_direct_call_rejected_by_a_worded_schema_error_keeps_the_schema_prefix() {
+        let error = validate_model_input(
+            Some(RuntimeBuiltinToolName::SubagentSpawn),
+            "agents_spawn",
+            &spawn_schema(),
+            &json!({"name": "a/b", "message": "hi"}),
         )
         .unwrap_err();
+
         assert_eq!(
-            error,
-            "Additional properties are not allowed ('timeout' was unexpected). Allowed fields: command, timeout_seconds. Use \"timeout_seconds\" instead of \"timeout\"."
+            error.detail(),
+            "tool arguments do not satisfy the declared input schema: at /name: \"a/b\" is not \
+             a valid name: use one path segment, without `/`, other than `.` or `..`"
         );
     }
 
     #[test]
-    fn unknown_fields_without_a_clear_match_only_list_the_allowed_fields() {
-        let error =
-            validate_json_schema(&bash_schema(), &json!({"command": "ls", "verbose": true}))
-                .unwrap_err();
-        assert!(error.ends_with("Allowed fields: command, timeout_seconds."));
+    fn a_direct_call_rejected_by_the_domain_check_reads_as_in_a_program() {
+        let error = validate_model_input(
+            Some(RuntimeBuiltinToolName::SubagentSpawn),
+            "agents_spawn",
+            &spawn_schema(),
+            &json!({"name": "a", "message": "hi", "context": {"mode": "forked", "turns": 3.0}}),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .detail()
+                .starts_with("Invalid arguments for agents_spawn: at /context: "),
+            "{}",
+            error.detail()
+        );
     }
 
     #[test]
-    fn nested_errors_name_the_field() {
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "edits": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {"old_string": {"type": "string"}},
-                        "additionalProperties": false,
-                    },
-                },
+    fn a_direct_call_rejected_by_the_schema_keeps_the_schema_wording() {
+        let error = validate_model_input(
+            Some(RuntimeBuiltinToolName::SubagentSpawn),
+            "agents_spawn",
+            &spawn_schema(),
+            &json!({"name": "a", "message": 7}),
+        )
+        .unwrap_err();
+
+        assert!(
+            error.detail().starts_with(
+                "tool arguments do not satisfy the declared input schema: at /message"
+            ),
+            "{}",
+            error.detail()
+        );
+    }
+
+    ///
+    /// *Prepare*: A Host's bash timeouts with a maximum of 300 seconds, and a
+    /// bash call asking for 301.
+    /// *Do*: Check it as a model's fresh call, and hold it as a restored one.
+    /// *Assert*: Both refuse it with the same reason, so a restored call reads
+    /// to the model as a fresh one would.
+    ///
+    #[test]
+    fn a_restored_bash_call_above_the_maximum_is_refused_as_a_fresh_one() {
+        // Prepare
+        let timeout =
+            file_system::BashTimeout::from_settings(Some(&file_system::BashTimeoutSettings {
+                default_seconds: 120,
+                max_seconds: 300,
+            }));
+        let bash = file_system::runtime_contracts(timeout)
+            .into_iter()
+            .find(|contract| contract.name == RuntimeBuiltinToolName::FileSystemBash)
+            .unwrap();
+        let arguments = json!({"command": "make", "timeout_seconds": 301});
+
+        // Do
+        let fresh = validate_model_input(
+            Some(RuntimeBuiltinToolName::FileSystemBash),
+            "bash",
+            &bash.input_schema,
+            &arguments,
+        )
+        .unwrap_err();
+        let restored = file_system::restored_bash_call(arguments, timeout).unwrap_err();
+
+        // Assert
+        assert_eq!(
+            *restored,
+            crate::core::tools::result::invalid_tool_call_result(fresh.detail().to_string())
+        );
+    }
+
+    fn hook_spawn_call(arguments: Value) -> ExternalToolCall {
+        ExternalToolCall {
+            action_id: "action".to_string(),
+            call_id: "call".to_string(),
+            origin: crate::core::tools::external::ToolOrigin::Programmatic,
+            call: ExternalTool::RuntimeBuiltin {
+                name: RuntimeBuiltinToolName::SubagentSpawn,
+                invocation_name: "agents.spawn".to_string(),
+                arguments,
             },
-        });
-        let error =
-            validate_json_schema(&schema, &json!({"edits": [{"old_str": "a"}]})).unwrap_err();
-        assert!(error.starts_with("at /edits/0: Additional properties are not allowed"));
-        assert!(error.ends_with("Use \"old_string\" instead of \"old_str\"."));
-        let error = validate_json_schema(&bash_schema(), &json!({"command": 7})).unwrap_err();
-        assert_eq!(error, "at /command: 7 is not of type \"string\"");
+        }
     }
 
     #[test]
-    fn closest_field_matches_style_length_and_spelling() {
-        let allowed = ["file_path", "old_string", "new_string", "replace_all"]
-            .map(String::from)
-            .to_vec();
-        assert_eq!(closest_field("filePath", &allowed), Some("file_path"));
-        assert_eq!(closest_field("path", &allowed), Some("file_path"));
-        assert_eq!(closest_field("old_str", &allowed), Some("old_string"));
-        assert_eq!(closest_field("replace_al", &allowed), Some("replace_all"));
-        let read_file = ["path", "offset", "limit"].map(String::from).to_vec();
-        assert_eq!(closest_field("file_path", &read_file), Some("path"));
-        assert_eq!(closest_field("start_offset", &read_file), Some("offset"));
-        assert_eq!(closest_field("content", &allowed), None);
-        assert_eq!(closest_field("_", &allowed), None);
+    fn a_hook_result_for_a_forked_spawn_is_checked_against_the_offered_schema() {
+        let mut config = crate::core::testing::config();
+        config.settings.tools.subagents =
+            crate::core::features::subagents::Mode::enabled().with_conversation_forking(true);
+        let contracts = ToolContracts::compile(&config);
+        let arguments = json!({"name": "a", "message": "hi", "context": "fresh"});
+
+        let resolved = contracts
+            .resolve_effective_call(&hook_spawn_call(arguments.clone()), arguments.clone())
+            .unwrap();
+
+        assert_eq!(resolved.call.arguments(), &arguments);
+    }
+
+    #[test]
+    fn a_hook_result_with_a_context_is_rejected_when_forking_is_off() {
+        let contracts = ToolContracts::compile(&crate::core::testing::config());
+        let arguments = json!({"name": "a", "message": "hi", "context": "fresh"});
+
+        let error = contracts
+            .resolve_effective_call(&hook_spawn_call(arguments.clone()), arguments)
+            .unwrap_err();
+
+        assert!(
+            error
+                .detail()
+                .starts_with("pre-tool hook arguments do not satisfy the original tool schema: "),
+            "{}",
+            error.detail()
+        );
     }
 }

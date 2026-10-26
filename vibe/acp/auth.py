@@ -40,6 +40,7 @@ from vibe.setup.onboarding.context import (
     browser_auth_account_base,
     browser_auth_requires_origin_rewrite,
     is_valid_custom_domain,
+    pinned_console_api_base,
     resolve_browser_auth_urls,
 )
 
@@ -78,6 +79,15 @@ type TenantDomainResolver = Callable[
 class PendingBrowserSignIn:
     attempt: BrowserSignInAttempt
     provider: ProviderConfig
+
+
+@dataclass(frozen=True, slots=True)
+class AuthStatusReport:
+    """Everything the auth/status endpoint reports, from one context load."""
+
+    state: AuthState
+    custom_domain: str | None
+    custom_domain_locked: bool
 
 
 def _custom_domain_of(provider: ProviderConfig) -> str | None:
@@ -182,7 +192,33 @@ class AcpAuthController:
         )
 
     def custom_domain(self) -> str | None:
+        pinned = self._pinned_console_url()
+        if pinned is not None:
+            return pinned
         return _custom_domain_of(self._load_context().provider)
+
+    def custom_domain_locked(self) -> bool:
+        """True when the console URL is admin-pinned (`VIBE_CUSTOM_CONSOLE_URL`)."""
+        return self._pinned_console_url() is not None
+
+    def status_report(self) -> AuthStatusReport:
+        load_dotenv_values(env_path=GLOBAL_ENV_FILE.path)
+        context = self._load_context()
+        provider = context.provider
+        pinned = context.pinned_console_url
+        return AuthStatusReport(
+            state=assess_auth_state(
+                provider,
+                process_env_had_value_before_dotenv_load=bool(
+                    provider.api_key_env_var
+                    and self._initial_environment.get(provider.api_key_env_var)
+                ),
+            ),
+            custom_domain=(
+                pinned if pinned is not None else _custom_domain_of(provider)
+            ),
+            custom_domain_locked=pinned is not None,
+        )
 
     def sign_out(self) -> None:
         provider = self._load_context().provider
@@ -344,8 +380,19 @@ class AcpAuthController:
             )
         return meta
 
+    def _pinned_console_url(self) -> str | None:
+        return self._load_context().pinned_console_url
+
     def _resolve_sign_in_provider(self, arguments: dict[str, Any]) -> ProviderConfig:
         provider = self._enabled_provider()
+        pinned = self._pinned_console_url()
+        if pinned is not None:
+            # An administrator-pinned console URL wins over any requested target
+            # so users cannot point Vibe at a different deployment. A split-
+            # horizon API base configured for the pinned console is preserved.
+            return self._provider_for_console_url(
+                provider, pinned, pinned_console_api_base(provider, pinned)
+            )
         target = arguments.get("signInTarget")
         if target is None:
             return provider
@@ -378,13 +425,19 @@ class AcpAuthController:
             raise InvalidRequestError(
                 f"Invalid custom sign-in API base URL: {api_base_arg!r}"
             )
-        base_url, api_base_url = resolve_browser_auth_urls(domain, api_base_arg or None)
+        return self._provider_for_console_url(provider, domain, api_base_arg or None)
+
+    @staticmethod
+    def _provider_for_console_url(
+        provider: ProviderConfig, domain: str, api_base_url: str | None = None
+    ) -> ProviderConfig:
+        base_url, api_base = resolve_browser_auth_urls(domain, api_base_url)
         return provider.model_copy(
             update={
                 "browser_auth_base_url": base_url,
-                "browser_auth_api_base_url": api_base_url,
-                "browser_auth_allow_origin_rewrite": (
-                    browser_auth_requires_origin_rewrite(base_url, api_base_url)
+                "browser_auth_api_base_url": api_base,
+                "browser_auth_allow_origin_rewrite": browser_auth_requires_origin_rewrite(
+                    base_url, api_base
                 ),
             }
         )

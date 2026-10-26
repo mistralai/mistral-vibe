@@ -26,17 +26,21 @@ from mistralai_vibe_local_harness.vibe.adapters.generic._model import (
     FunctionCall,
     LLMChunk,
     LLMMessage,
-    LLMUsage,
     Role,
     StopInfo,
     StrToolChoice,
     ToolCall,
 )
 from mistralai_vibe_local_harness.vibe.adapters.generic._provider import ProviderView
+from mistralai_vibe_local_harness.vibe.completion_profile import (
+    ReasoningSetting,
+    ReasoningSupport,
+    WireFormat,
+    reasoning_wire_value,
+)
 
 logger = logging.getLogger(__name__)
 
-_EMPTY_USAGE = LLMUsage(prompt_tokens=0, completion_tokens=0)
 
 _ERROR_HTTP_STATUS = {
     "authentication_error": HTTPStatus.UNAUTHORIZED,
@@ -47,6 +51,18 @@ _ERROR_HTTP_STATUS = {
     "rate_limit_exceeded": HTTPStatus.TOO_MANY_REQUESTS,
     "server_error": HTTPStatus.INTERNAL_SERVER_ERROR,
 }
+
+
+def _terminal_reason(event_type: str, response: _ResponsesObject) -> str | None:
+    """The finish reason of a terminal event, for the format's finish table.
+
+    A finished response is ``completed``; an incomplete one gives its reason,
+    such as ``max_output_tokens`` or ``content_filter``.
+    """
+    if event_type != "response.incomplete":
+        return event_type.removeprefix("response.")
+    details = response.get("incomplete_details") or {}
+    return details.get("reason")
 
 
 class OpenAIResponsesStreamError(ProviderStreamError):
@@ -115,10 +131,15 @@ class _ResponsesErrorData(TypedDict, total=False):
     message: str | None
 
 
+class _ResponsesIncompleteDetails(TypedDict, total=False):
+    reason: str | None
+
+
 class _ResponsesObject(TypedDict, total=False):
     usage: _ResponsesUsageData | None
     output: list[dict[str, Any]]
     error: _ResponsesErrorData | None
+    incomplete_details: _ResponsesIncompleteDetails | None
 
 
 type _RawResponsesStreamEvent = dict[str, Any]
@@ -205,16 +226,6 @@ class _OpenAIResponsesStreamParser:
         return item.get("type") == "message" and item.get("phase") == "commentary"
 
     @staticmethod
-    def _usage_from_response(usage_data: _ResponsesUsageData | None) -> LLMUsage:
-        usage = usage_data or {}
-        input_details = usage.get("input_tokens_details") or {}
-        return LLMUsage(
-            prompt_tokens=usage.get("input_tokens", 0),
-            completion_tokens=usage.get("output_tokens", 0),
-            cached_tokens=input_details.get("cached_tokens", 0),
-        )
-
-    @staticmethod
     def _reasoning_payloads_from_output(
         output: list[dict[str, Any]],
     ) -> list[dict[str, Any]] | None:
@@ -242,15 +253,11 @@ class _OpenAIResponsesStreamParser:
 
     @staticmethod
     def _empty_chunk() -> LLMChunk:
-        return LLMChunk(
-            message=LLMMessage(role=Role.assistant, content=""), usage=_EMPTY_USAGE
-        )
+        return LLMChunk(message=LLMMessage(role=Role.assistant, content=""))
 
     @staticmethod
     def _assistant_text_chunk(text: str) -> LLMChunk:
-        return LLMChunk(
-            message=LLMMessage(role=Role.assistant, content=text), usage=_EMPTY_USAGE
-        )
+        return LLMChunk(message=LLMMessage(role=Role.assistant, content=text))
 
     @staticmethod
     def _tool_call_chunk(
@@ -269,8 +276,7 @@ class _OpenAIResponsesStreamParser:
                         function=FunctionCall(name=name, arguments=arguments),
                     )
                 ],
-            ),
-            usage=_EMPTY_USAGE,
+            )
         )
 
     @staticmethod
@@ -278,8 +284,7 @@ class _OpenAIResponsesStreamParser:
         return LLMChunk(
             message=LLMMessage(
                 role=Role.assistant, content="", reasoning_content=reasoning_content
-            ),
-            usage=_EMPTY_USAGE,
+            )
         )
 
     def _remember_tool_call_state(
@@ -470,8 +475,7 @@ class _OpenAIResponsesStreamParser:
                 content="",
                 reasoning_payloads=self._reasoning_payloads_from_output(output),
             ),
-            usage=self._usage_from_response(response_obj.get("usage")),
-            stop=StopInfo(reason=event["type"].removeprefix("response.")),
+            stop=StopInfo(reason=_terminal_reason(event["type"], response_obj)),
         )
 
     def _on_error(self, data: _RawResponsesStreamEvent) -> LLMChunk:
@@ -529,14 +533,6 @@ class OpenAIResponsesAdapter(APIAdapter):
         supported_prefixes = ("gpt-4", "gpt-3.5")
         return model_name.startswith(supported_prefixes)
 
-    @staticmethod
-    def _map_reasoning_effort(thinking: str) -> str:
-        if thinking == "off":
-            return "none"
-        if thinking == "max":
-            return "xhigh"
-        return thinking
-
     def _convert_messages(self, messages: Sequence[LLMMessage]) -> list[dict[str, Any]]:
         input_items: list[dict[str, Any]] = []
 
@@ -583,10 +579,23 @@ class OpenAIResponsesAdapter(APIAdapter):
                         })
 
                 case Role.tool:
+                    output: str | list[dict[str, Any]] = msg.content or ""
+                    if msg.images:
+                        output = [
+                            *(
+                                [{"type": "input_text", "text": msg.content}]
+                                if msg.content
+                                else []
+                            ),
+                            *(
+                                {"type": "input_image", "image_url": to_data_uri(att)}
+                                for att in msg.images
+                            ),
+                        ]
                     input_items.append({
                         "type": "function_call_output",
                         "call_id": msg.tool_call_id or "",
-                        "output": msg.content or "",
+                        "output": output,
                     })
 
                 case _:
@@ -611,7 +620,7 @@ class OpenAIResponsesAdapter(APIAdapter):
         tools: list[AvailableTool] | None,
         max_tokens: int | None,
         tool_choice: StrToolChoice | AvailableTool | None,
-        thinking: str,
+        thinking: ReasoningSetting | None,
         enable_streaming: bool,
         top_p: float | None = None,
     ) -> dict[str, Any]:
@@ -626,7 +635,10 @@ class OpenAIResponsesAdapter(APIAdapter):
             if top_p is not None:
                 payload["top_p"] = top_p
 
-        payload["reasoning"] = {"effort": self._map_reasoning_effort(thinking)}
+        if thinking is not None:
+            payload["reasoning"] = {
+                "effort": reasoning_wire_value(WireFormat.OPENAI_RESPONSES, thinking)
+            }
 
         if tools:
             payload["tools"] = [
@@ -668,8 +680,9 @@ class OpenAIResponsesAdapter(APIAdapter):
         enable_streaming: bool,
         provider: ProviderView,
         api_key: str | None = None,
-        thinking: str = "off",
+        thinking: ReasoningSetting | None = None,
         top_p: float | None = None,
+        reasoning_support: ReasoningSupport | None = None,
     ) -> PreparedRequest:
         input_items = self._convert_messages(messages)
 
@@ -761,12 +774,7 @@ class OpenAIResponsesAdapter(APIAdapter):
             output = response_data.get("output")
             if output is None:
                 raise ValueError("OpenAI Responses response missing output")
-            return LLMChunk(
-                message=self._parse_output_items(output),
-                usage=self._stream_parser._usage_from_response(
-                    response_data.get("usage")
-                ),
-            )
+            return LLMChunk(message=self._parse_output_items(output))
 
         return self._stream_parser.parse(data)
 

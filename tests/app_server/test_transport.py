@@ -14,7 +14,7 @@ import pytest
 
 from vibe.app_server import stdio
 from vibe.app_server._agent_socket import AgentSocketMount
-from vibe.app_server._runtime import HarnessServer
+from vibe.app_server._runtime import HarnessProcess, HarnessServer
 from vibe.app_server.transport import (
     InvalidJsonRpcMessage,
     MemoryJsonRpcTransport,
@@ -169,6 +169,10 @@ async def test_stdio_server_creates_the_harness_behind_its_transport(
     harness = AsyncMock(spec=HarnessServer)
     factory = AsyncMock(return_value=harness)
     monkeypatch.setattr(stdio, "create_harness_server", factory)
+    warmed: list[HarnessProcess] = []
+    monkeypatch.setattr(
+        HarnessProcess, "start_connector_warm_up", lambda self: warmed.append(self)
+    )
 
     await stdio.serve_stdio(reader=BytesIO(), writer=BytesIO())
 
@@ -177,7 +181,7 @@ async def test_stdio_server_creates_the_harness_behind_its_transport(
     assert call is not None
     args, kwargs = call
     assert isinstance(args[0], StdioJsonRpcTransport)
-    assert kwargs == {"transport_kind": "stdio", "additional_builtin_plugin_roots": ()}
+    assert kwargs == {"transport_kind": "stdio", "process": warmed[0]}
     harness.serve.assert_awaited_once_with()
 
 

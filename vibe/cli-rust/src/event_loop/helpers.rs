@@ -75,6 +75,7 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
             cache_reads(app, reads);
             app.view.banner.set_account(plan, greeting);
         }
+        CommandEvent::ArtifactsRead(artifacts) => crate::artifacts::apply_list(app, artifacts),
         CommandEvent::UntrustedConfig(warning) => {
             if let Some(text) = warning {
                 local::add_warning(&mut app.view.transcript, &id, &text);

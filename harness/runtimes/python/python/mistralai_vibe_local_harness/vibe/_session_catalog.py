@@ -8,6 +8,7 @@ stores remain authoritative and are loaded only for new or changed entries.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from pathlib import Path
 import stat
@@ -30,6 +31,8 @@ from mistralai_vibe_local_harness.vibe._storage import (
 from mistralai_vibe_local_harness.vibe._subagents._models import SessionIdentity
 
 _CATALOG_FILENAME = ".session-index.json"
+
+logger = logging.getLogger(__name__)
 
 
 class _CatalogModel(BaseModel):
@@ -109,6 +112,9 @@ class UnifiedSessionCatalog:
                     continue
                 entry = self._load_entry(session_id, key)
             except Exception:
+                logger.warning(
+                    "Skipping unloadable session %s", session_id, exc_info=True
+                )
                 continue
             reconciled.append(entry)
 

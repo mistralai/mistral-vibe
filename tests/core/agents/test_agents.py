@@ -16,6 +16,7 @@ from vibe.core.agents.models import (
     BuiltinAgentName,
 )
 from vibe.core.config import VibeConfigSchema
+from vibe.core.config.builder import InvalidConfigError
 from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.layers.overrides import OverridesLayer
@@ -46,6 +47,16 @@ class TestAgentProfile:
         path.write_text('description = "Reviews"\n', encoding="utf-8")
 
         assert AgentProfile.from_toml(path).source_path == path
+
+    @pytest.mark.parametrize("stem", ["main", "Main"])
+    def test_main_is_reserved_for_hook_matching(
+        self, tmp_path: Path, stem: str
+    ) -> None:
+        path = tmp_path / f"{stem}.toml"
+        path.write_text('description = "Mine"\n', encoding="utf-8")
+
+        with pytest.raises(ValueError, match="reserved for hook matching"):
+            AgentProfile.from_toml(path)
 
     def test_a_builtin_profile_has_no_source_file(self) -> None:
         assert EXPLORE.source_path is None
@@ -366,6 +377,86 @@ class TestAgentManager:
         manager = AgentManager(load_orchestrator(config))
         assert "reckless" not in manager.available_agents
 
+    @pytest.mark.parametrize(
+        ("bash", "message"),
+        [
+            (
+                "default_timeout = 600",
+                "default_timeout is set without max_timeout_seconds.",
+            ),
+            (
+                "max_timeout_seconds = 600",
+                "max_timeout_seconds is set without default_timeout.",
+            ),
+        ],
+    )
+    def test_a_custom_agent_with_one_bash_timeout_gives_the_config_error(
+        self,
+        tmp_path: Path,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+        bash: str,
+        message: str,
+    ) -> None:
+        """*Prepare*: A custom agent file sets one of the two bash timeouts.
+        *Do*: Start in it, then switch to it from another agent.
+        *Assert*: Both give the main config's error naming the file, not "not
+        found", and a refused switch leaves the running agent as it was.
+        """
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        path = agents_dir / "slow.toml"
+        path.write_text(f"[tools.bash]\n{bash}\n", encoding="utf-8")
+        expected = (
+            f"Agent 'slow' in {path}: tools: tools.bash: {message}"
+            " Set both, or neither."
+        )
+        config = build_config(agent_paths=[agents_dir])
+
+        with pytest.raises(InvalidConfigError) as started:
+            AgentManager(load_orchestrator(config), initial_agent="slow")
+        assert str(started.value) == expected
+
+        manager = AgentManager(load_orchestrator(config), initial_agent="ask")
+        assert "slow" in manager.available_agents
+        with pytest.raises(InvalidConfigError) as switched:
+            manager.switch_profile("slow")
+        assert str(switched.value) == expected
+        assert manager.active_profile.name == "ask"
+        assert "default_timeout" not in manager.config.tools.get("bash", {})
+
+    def test_a_broken_override_of_a_builtin_agent_keeps_the_builtin(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        """*Prepare*: agents/accept-edits.toml sets only one of the two bash
+        timeouts.
+        *Do*: Start in accept-edits, the default mode.
+        *Assert*: The session starts on the builtin, and the ignored file is
+        logged with its config error.
+        """
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        path = agents_dir / "accept-edits.toml"
+        path.write_text("[tools.bash]\ndefault_timeout = 30\n", encoding="utf-8")
+        config = build_config(agent_paths=[agents_dir])
+
+        with caplog.at_level("WARNING"):
+            manager = AgentManager(
+                load_orchestrator(config), initial_agent=BuiltinAgentName.ACCEPT_EDITS
+            )
+
+        assert manager.active_profile is BUILTIN_AGENTS[BuiltinAgentName.ACCEPT_EDITS]
+        assert any(
+            str(path) in record.getMessage()
+            and "default_timeout is set without max_timeout_seconds"
+            in record.getMessage()
+            for record in caplog.records
+        )
+
     def test_removed_plan_default_agent_starts_on_ask(
         self,
         caplog: pytest.LogCaptureFixture,
@@ -411,6 +502,27 @@ class TestAgentManager:
 
         assert manager.active_profile.name == "plan"
         assert manager.active_profile.display_name == "My Plan"
+
+    def test_an_agent_file_named_main_is_skipped(
+        self,
+        tmp_path: Path,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "main.toml").write_text(
+            'description = "Mine"\n', encoding="utf-8"
+        )
+        (agents_dir / "reviewer.toml").write_text(
+            'description = "Reviews"\n', encoding="utf-8"
+        )
+        config = build_config(agent_paths=[agents_dir])
+
+        with pytest.raises(ValueError, match="Agent 'main' not found"):
+            AgentManager(load_orchestrator(config), initial_agent="main")
+        manager = AgentManager(load_orchestrator(config), initial_agent="reviewer")
+        assert manager.active_profile.name == "reviewer"
 
     def test_custom_agent_listing_exit_plan_mode_still_loads(
         self,

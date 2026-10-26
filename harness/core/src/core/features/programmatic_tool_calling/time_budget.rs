@@ -10,7 +10,8 @@
 //! When the budget is used up, the program stops before its next tool call or
 //! step with a `ProgramBudgetExceeded` failure. A running tool call is never cut
 //! short, but Core fits each wait to the remaining budget before it starts: a
-//! shortened sleep rejects with a catchable `ProgramBudgetExceeded` error, and
+//! shortened sleep rejects with a catchable `ToolError` with code
+//! `ProgramBudgetExceeded`, and
 //! a process output read only waits for the remaining time.
 
 use serde_json::{Value, json};

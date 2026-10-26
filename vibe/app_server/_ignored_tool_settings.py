@@ -12,11 +12,6 @@ from vibe.core.paths import DEFAULT_TOOL_DIR
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
 
-GREP_SETTINGS_IGNORED = (
-    "[tools.grep] has no effect: there is no grep tool, and the agent searches "
-    "through the shell. Commands such as `rg` and `grep` follow your shell tool's "
-    "settings, such as [tools.bash]."
-)
 SPAWN_DESCRIPTION_OVERRIDE_IGNORED = (
     "This file overrides the description of the former `task` tool and has no "
     "effect: subagents are started with the built-in `agents.spawn` tool, whose "
@@ -28,9 +23,9 @@ SPAWN_DESCRIPTION_OVERRIDE_IGNORED = (
 def ignored_tool_settings(
     config: VibeConfigSchema, tool_search_paths: Iterable[Path]
 ) -> list[ConfigIssue]:
+    # Tool settings without effect, such as [tools.grep], are config warnings
+    # (vibe.core.config._setting_keys), which strict_config refuses.
     issues: list[ConfigIssue] = []
-    if "grep" in config.tools:
-        issues.append(ConfigIssue(file="", message=GREP_SETTINGS_IGNORED))
     builtin_dir = DEFAULT_TOOL_DIR.path.resolve()
     for base in tool_search_paths:
         if base.resolve() == builtin_dir:
@@ -45,8 +40,4 @@ def ignored_tool_settings(
     return issues
 
 
-__all__ = [
-    "GREP_SETTINGS_IGNORED",
-    "SPAWN_DESCRIPTION_OVERRIDE_IGNORED",
-    "ignored_tool_settings",
-]
+__all__ = ["SPAWN_DESCRIPTION_OVERRIDE_IGNORED", "ignored_tool_settings"]

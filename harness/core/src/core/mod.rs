@@ -33,7 +33,9 @@ pub(crate) use checkpoint::Checkpoint;
 #[allow(unused_imports)]
 pub(crate) use checkpoint::decode_checkpoint;
 pub(crate) use config::HarnessConfig;
-pub(crate) use conversation::ConversationSeed;
+pub(crate) use conversation::{ConversationSeed, SpawnContext};
+#[cfg(feature = "python-binding")]
+pub(crate) use features::file_system::{BashTimeout, BashTimeoutSettings, restored_bash_call};
 #[cfg(test)]
 pub(crate) use features::large_output::Policy as LargeOutputPolicy;
 pub(crate) use session::HarnessSession;
@@ -57,22 +59,25 @@ pub(crate) use testing::{
     CompletionResult, CompletionResultPart, CompletionResultSemanticPart, ContextSettings,
     ExternalCallStage, ExternalTool, ExternalToolCall, HarnessConfigurationChange, HarnessSettings,
     HookBinding, HookCall, HookPoint, HookResult, HookSelector, HookToolCall, HookToolKey,
-    HookToolTarget, ImageDeliveryMode, ImageDeliverySettings, ImageTokenCost, InputModality,
-    ModelInputUpdate, ModelMessageUpdate, ModelToolCatalogUpdate, Notification, NotificationLevel,
-    NotificationSource, PendingActionInspection, PendingCompletionPurpose, PendingLifecycleHook,
-    PreAgentTurnOutput, PreToolCallOutput, ProcessTerminalStatus, ProgramExecution,
-    ProgrammaticToolSettings, ProtocolError, ProvidedToolCall, ProvidedToolDefinition,
-    ProvidedToolExposure, QueuedTurn, ReasoningContent, RuntimeBuiltinToolCall,
-    RuntimeBuiltinToolName, SessionStatus, SkillDefinition, StateInspection, StoredMessageSource,
-    StructuredContent, SubagentMode, TokenUsage, ToolArguments, ToolBatch, ToolCall, ToolContext,
-    ToolDefinition, ToolExecution, ToolExecutionState, ToolGroupDefinition, ToolGroupMetadata,
-    ToolOrigin, ToolOutcome, ToolResult, ToolSettings, ToolTarget, Turn, TurnOutcome, TurnSettings,
-    UserMessageMode,
+    HookToolTarget, ImageCostRule, ImageDeliveryMode, ImageDeliverySettings, InputModality,
+    ModelFacts, ModelInputUpdate, ModelMessageUpdate, ModelToolCatalogUpdate, Notification,
+    NotificationLevel, NotificationSource, PendingActionInspection, PendingCompletionPurpose,
+    PendingLifecycleHook, PreAgentTurnOutput, PreToolCallOutput, ProcessTerminalStatus,
+    ProgramExecution, ProgrammaticToolSettings, ProtocolError, ProvidedToolCall,
+    ProvidedToolDefinition, ProvidedToolExposure, QueuedTurn, ReasoningContent,
+    RuntimeBuiltinToolCall, RuntimeBuiltinToolName, SessionStatus, SkillDefinition,
+    StateInspection, StoredMessageSource, StructuredContent, SubagentMode, TokenUsage,
+    ToolArguments, ToolBatch, ToolCall, ToolContext, ToolDefinition, ToolExecution,
+    ToolExecutionState, ToolGroupDefinition, ToolGroupMetadata, ToolOrigin, ToolOutcome,
+    ToolResult, ToolSettings, ToolTarget, Turn, TurnOutcome, TurnSettings, UserMessageMode,
 };
 
 use crate::core::config::HarnessConfigUpdate;
 use crate::core::error::CoreError;
-use crate::core::features::compaction::prompt_message;
+use crate::core::features::compaction::{
+    CompactionLimits, EstimateCorrection, RequestMeasurements, corrected_request_tokens,
+    next_turn_compaction_unfit, prompt_message,
+};
 use crate::core::features::notifications::NotificationState;
 use crate::core::features::skills;
 use crate::core::features::subagents;
@@ -138,6 +143,9 @@ pub(crate) fn initial_state_with_history(
         context: ModelContext::new(messages),
         compaction_count: 0,
         last_reported_context_tokens: None,
+        estimate_correction: EstimateCorrection::NONE,
+        exact_request_tokens: None,
+        rebuilt_since_reply: false,
         turn: TurnState::Idle,
         last_finished_turn_id: None,
         notifications: NotificationState::default(),
@@ -171,6 +179,31 @@ pub(crate) fn reconfigure_in_place(
     // Build and validate the whole next configuration before touching state so
     // this operation remains locally atomic as well as session-atomic.
     let (next_config, next_resolved_tools) = planned_config(&state.config, update)?;
+    let patched_messages = if rebuild_system_prompt && !state.context.is_empty() {
+        // Rewriting the system prompt in place invalidates the provider KV cache for
+        // the whole history. A skill catalog change takes this path because the
+        // catalog lives in the system prompt. It stops once catalog changes are
+        // delivered as appended context with a KV-cache-friendly context upsert.
+        let system_prompt = build_system_prompt(
+            &next_config,
+            next_resolved_tools.tool_group_inventory_prompt_section(),
+        );
+        Some(patched_system_prompt(
+            state.context.messages(),
+            system_prompt,
+        )?)
+    } else {
+        None
+    };
+    let measurements = carried_measurements(
+        &state.config.settings.context,
+        &next_config,
+        &next_resolved_tools,
+        patched_messages
+            .as_deref()
+            .unwrap_or_else(|| state.context.messages()),
+        RequestMeasurements::of(state),
+    )?;
     // Settings can add or remove direct tools such as `wait`, so compare the
     // compiled model tool list as well as the prompt and capability sources.
     let tool_catalog_changed = tool_catalog_source_changed(&state.config, &next_config)
@@ -178,6 +211,7 @@ pub(crate) fn reconfigure_in_place(
     let current_image_delivery = state.config.settings.context.effective_image_delivery();
     let next_image_delivery = next_config.settings.context.effective_image_delivery();
     let agent_image_delivery_changed = current_image_delivery.agent != next_image_delivery.agent;
+    store_measurements(state, measurements);
     state.config = next_config;
     state
         .notifications
@@ -187,21 +221,120 @@ pub(crate) fn reconfigure_in_place(
     if tool_catalog_changed {
         state.mark_tool_catalog_changed();
     }
-    if rebuild_system_prompt && !state.context.is_empty() {
-        // Rewriting the system prompt in place invalidates the provider KV cache for
-        // the whole history. A skill catalog change takes this path because the
-        // catalog lives in the system prompt. It stops once catalog changes are
-        // delivered as appended context with a KV-cache-friendly context upsert.
-        let system_prompt = build_system_prompt(
-            &state.config,
-            state.resolved_tools.tool_group_inventory_prompt_section(),
-        );
-        let messages = patched_system_prompt(state.context.messages(), system_prompt)?;
+    if let Some(messages) = patched_messages {
         state.context.replace_messages(messages);
     } else if agent_image_delivery_changed && !state.context.is_empty() {
         state.context.mark_projection_replacement();
     }
     Ok(())
+}
+
+/// Applies to a Session restored under new settings the rule a reconfiguration
+/// applies, from `previous`, the context settings its checkpoint was taken
+/// under.
+pub(crate) fn move_from_settings(
+    state: &mut HarnessState,
+    previous: &config::ContextSettings,
+) -> Result<(), CoreError> {
+    let measurements = carried_measurements(
+        previous,
+        &state.config,
+        &state.resolved_tools,
+        state.context.messages(),
+        RequestMeasurements::of(state),
+    )?;
+    store_measurements(state, measurements);
+    Ok(())
+}
+
+/// What a Session keeps of its request measurements when its context settings
+/// move from `current` to those of `next`, once the move is checked.
+///
+/// The correction, the provider's last reported size and an exact count all
+/// measured requests under the old model facts and image delivery, so new ones
+/// start over with none of them. So does the guard against compacting twice:
+/// a compaction under the old facts says nothing about whether one under the
+/// new facts fits, so the new model's first refusal compacts. New model facts are refused when the next
+/// turn could not carry `messages` under them, counted as that turn's check
+/// will count them.
+fn carried_measurements(
+    current: &config::ContextSettings,
+    next: &HarnessConfig,
+    next_tools: &ResolvedTools,
+    messages: &[StoredMessage],
+    measured: RequestMeasurements,
+) -> Result<RequestMeasurements, CoreError> {
+    let measurements = if CompactionLimits::model_facts_changed(current, &next.settings.context) {
+        RequestMeasurements {
+            last_reported: None,
+            correction: EstimateCorrection::NONE,
+            exact: None,
+            rebuilt_since_reply: false,
+        }
+    } else {
+        measured
+    };
+    if next.settings.context.model_facts != current.model_facts {
+        validate_model_switch(next, next_tools, messages, measurements)?;
+    }
+    Ok(measurements)
+}
+
+fn store_measurements(state: &mut HarnessState, measurements: RequestMeasurements) {
+    state.last_reported_context_tokens = measurements.last_reported;
+    state.estimate_correction = measurements.correction;
+    state.exact_request_tokens = measurements.exact;
+    state.rebuilt_since_reply = measurements.rebuilt_since_reply;
+}
+
+/// Refuses new model facts only when the Session's context could not be carried
+/// under them: the context is at or above the new compaction threshold and the
+/// automatic compaction the next Turn would start cannot fit the new budgets.
+/// Context the next Turn can compact is accepted. Without compaction nothing
+/// shrinks the context, so it must fit the new context window as it is.
+pub(crate) fn validate_model_switch(
+    config: &HarnessConfig,
+    resolved_tools: &ResolvedTools,
+    messages: &[StoredMessage],
+    measurements: RequestMeasurements,
+) -> Result<(), CoreError> {
+    let facts = &config.settings.context.model_facts;
+    if config.settings.context.compaction_threshold().is_none() {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let tokens = corrected_request_tokens(
+            &config.settings,
+            resolved_tools.top_level_tools(),
+            messages,
+            measurements,
+        )?;
+        if tokens < facts.context_window {
+            return Ok(());
+        }
+        return Err(CoreError::invalid_configuration(
+            "settings.context.model_facts",
+            format!(
+                "the Session's context cannot move to a model with a {}-token context window \
+                 and compaction disabled: the context needs about {tokens} tokens",
+                facts.context_window
+            ),
+        ));
+    }
+    let Some(unfit) = next_turn_compaction_unfit(config, resolved_tools, messages, measurements)?
+    else {
+        return Ok(());
+    };
+    Err(CoreError::invalid_configuration(
+        "settings.context.model_facts",
+        format!(
+            "the Session's context cannot move to a model with a {}-token context window \
+             and a compaction threshold of {}: {}",
+            facts.context_window,
+            facts.compaction_threshold,
+            unfit.error().message
+        ),
+    ))
 }
 
 fn patched_system_prompt(
@@ -339,7 +472,7 @@ fn validate_compaction_budget(
     config: &HarnessConfig,
     resolved_tools: &ResolvedTools,
 ) -> Result<(), CoreError> {
-    let Some(token_threshold) = config.settings.context.compaction.token_threshold() else {
+    let Some(token_threshold) = config.settings.context.compaction_threshold() else {
         return Ok(());
     };
     let messages = vec![
@@ -352,12 +485,16 @@ fn validate_compaction_budget(
     if estimate_model_input_tokens(
         &messages,
         resolved_tools.top_level_tools(),
-        config.settings.context.image_delivery.compaction,
-        config.settings.context.image_token_cost,
+        config
+            .settings
+            .context
+            .effective_image_delivery()
+            .compaction,
+        config.settings.context.model_facts.image_cost,
     )? >= token_threshold
     {
         return Err(CoreError::invalid_configuration(
-            "settings.context.compaction.token_threshold",
+            "settings.context.model_facts.compaction_threshold",
             "token threshold cannot fit the generated system prompt, tool catalog, and compaction prompt",
         ));
     }
@@ -525,9 +662,8 @@ mod tests {
     fn reconfigure_updates_runtime_limits_and_existing_system_message() {
         let mut settings = config().settings;
         settings.turn.max_iterations = Some(2);
-        settings.context.compaction = CompactionPolicy::Automatic {
-            token_threshold: 40_000,
-        };
+        settings.context.compaction = CompactionPolicy::Automatic;
+        settings.context.model_facts.compaction_threshold = 40_000;
         settings.tools.programmatic.max_effects = 64;
         settings.tools.programmatic.max_operations = 512;
         let state = reconfigure(
@@ -545,10 +681,8 @@ mod tests {
         assert_eq!(state.config.system_instructions, "updated system");
         assert_eq!(state.config.settings.turn.max_iterations, Some(2));
         assert_eq!(
-            state.config.settings.context.compaction,
-            CompactionPolicy::Automatic {
-                token_threshold: 40_000
-            }
+            state.config.settings.context.compaction_threshold(),
+            Some(40_000)
         );
         assert_eq!(state.config.settings.tools.programmatic.max_effects, 64);
         assert_eq!(state.config.settings.tools.programmatic.max_operations, 512);

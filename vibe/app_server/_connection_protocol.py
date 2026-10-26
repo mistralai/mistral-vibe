@@ -33,6 +33,11 @@ class ClientToolMethod(StrEnum):
     TERMINAL_RELEASE = "clientTool/terminal/release"
 
 
+class PlatformCredentialsCapability(ProtocolModel):
+    version: Literal[1]
+    kind: Literal["oauth_access_token"]
+
+
 class ClientCapabilities(ProtocolModel):
     # Unknown capabilities are ignored, so a client can declare one ahead of
     # the servers that use it.
@@ -42,6 +47,7 @@ class ClientCapabilities(ProtocolModel):
     client_tools: list[ClientToolCapability] = Field(default_factory=list)
     session_spawn: bool = False
     disabled_notifications: list[str] = Field(default_factory=list)
+    platform_credentials: PlatformCredentialsCapability | None = None
 
 
 class InitializeParams(ProtocolModel):
@@ -103,3 +109,32 @@ class ClientToolTerminalOutputResponse(ProtocolModel):
 class InitializeResponse(ProtocolModel):
     server_info: ServerInfo
     process_id: int | None = None
+
+
+class PlatformCredentialsResolveParams(ProtocolModel):
+    audience: Annotated[str, Field(min_length=1)]
+    minimum_validity_ms: Annotated[StrictInt, Field(ge=0, le=300_000)]
+    rejected_revision: Annotated[str, Field(min_length=1)] | None = None
+
+
+class PlatformCredentialsSnapshot(ProtocolModel):
+    status: Literal["ready"]
+    kind: Literal["oauth_access_token"]
+    token: Annotated[str, Field(min_length=1, repr=False)]
+    audience: Annotated[str, Field(min_length=1)]
+    expires_at: Annotated[StrictInt, Field(gt=0, le=253_402_300_799_999)]
+    revision: Annotated[str, Field(min_length=1)]
+
+
+class PlatformCredentialsUnavailable(ProtocolModel):
+    status: Literal["unavailable"]
+    reason: Literal["missing", "reauthentication_required", "transient", "invalid"]
+
+
+type PlatformCredentialsResolveResponse = (
+    PlatformCredentialsSnapshot | PlatformCredentialsUnavailable
+)
+
+
+class PlatformCredentialsInvalidatedParams(ProtocolModel):
+    reason: Literal["logout", "account_changed", "workspace_changed"]

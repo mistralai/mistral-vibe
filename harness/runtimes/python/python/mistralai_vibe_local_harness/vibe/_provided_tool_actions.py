@@ -43,7 +43,8 @@ async def execute_provided_tool_action(
         result = await call(
             action.call.group_name, action.call.tool_name, action.call.arguments
         )
-        content = _CONTENT_BLOCKS.validate_python(list(result.content))
+        # Servers may speak a newer MCP; fields we do not know are not an error.
+        content = _CONTENT_BLOCKS.validate_python(list(result.content), extra="ignore")
     except failure_type as exc:
         return _failed(
             action,

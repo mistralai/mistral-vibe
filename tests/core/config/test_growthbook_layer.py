@@ -891,7 +891,7 @@ async def test_copied_orchestrator_keeps_growthbook_variant_after_reload() -> No
     copied = orchestrator.copy()
 
     failures = await copied.set_field(
-        "/include_model_info",
+        "/include_commit_signature",
         False,
         reason="exercise copied orchestrator reload",
         target_layer=OverridesLayer.NAME,

@@ -201,8 +201,6 @@ result-*
 .vibe/*
 !.vibe/skills/
 .vibe/skills/*
-!.vibe/skills/create-vibe-feature/
-!.vibe/skills/create-vibe-feature/**
 !.vibe/skills/instrument-feature-analytics/
 !.vibe/skills/instrument-feature-analytics/**
 !.vibe/skills/write-vibe-adr/

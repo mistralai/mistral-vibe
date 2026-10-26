@@ -55,6 +55,7 @@ from mistralai_vibe_local_harness.session_protocol import (
     TitleSource,
     TokenUsage,
 )
+from mistralai_vibe_local_harness.vibe._file_images import is_file_image
 from mistralai_vibe_local_harness.vibe._observability import (
     add_uncorrelated_tool_result,
 )
@@ -75,6 +76,8 @@ APPROVAL_NOTE_META_KEY = "approval_note"
 # approval_source) that the local actions gate records on the tool result;
 # lifted into the effect state for telemetry.
 APPROVAL_META_KEY = "approval"
+
+SMART_APPROVE_META_KEY = "smart_approve"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1293,15 +1296,21 @@ def _text_preview(parts: Sequence[str]) -> str:
 
 def _public_content_block(part: Any) -> JsonValue:
     serialized = part.model_dump(mode="json", by_alias=True, exclude_none=True)
-    if isinstance(part, RustImageContentBlock):
+    # An image kept with its file shows as the image it was sent as.
+    if isinstance(part, RustImageContentBlock) or is_file_image(part):
+        data, mime_type = (
+            (part.data, part.mime_type)
+            if isinstance(part, RustImageContentBlock)
+            else (part.resource.blob, part.resource.mime_type)
+        )
         return cast(
             JsonValue,
             {
                 "type": "image",
                 "attachment": {
-                    "source": {"kind": "inline", "data": part.data},
+                    "source": {"kind": "inline", "data": data},
                     "alias": "image",
-                    "mimeType": part.mime_type,
+                    "mimeType": mime_type,
                 },
             },
         )

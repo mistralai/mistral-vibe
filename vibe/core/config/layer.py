@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -138,6 +139,14 @@ class ConfigLayer[S: BaseModel](ABC):
         self._lock = asyncio.Lock()
 
     # --- Overridable ---
+
+    def check_lower_layers(self, lower: Sequence[tuple[str, dict[str, Any]]]) -> None:
+        """Raise when this layer cannot apply over ``lower``, the loaded layers
+        below it as ``(name, data)``, lowest first. Every build calls it.
+
+        Accepts any by default.
+        """
+        del lower
 
     async def _check_trust(self) -> bool:
         """Resolve whether this layer should be trusted.

@@ -15,6 +15,10 @@ point's policy. The fail action per point:
 * ``post_agent`` — always *accepts* the turn (no blocking mode), so a broken
   review hook can never wedge completion; ``strict`` is accepted for a uniform
   builder API but does not change this.
+
+A ``post_agent`` hook may declare a ``match`` over the agent that finished its turn: the
+agent configuration name, plus the ``main`` alias for a root or fork session. A hook
+that does not match is filtered out by the executor before it runs.
 """
 
 from __future__ import annotations
@@ -51,10 +55,12 @@ from mistralai_vibe_local_harness.session_protocol import JsonObject
 from mistralai_vibe_local_harness.vibe._hook_matcher import (
     match_predicate,
     qualified_tool_name,
+    selects_agent,
     selects_tool,
 )
 from mistralai_vibe_local_harness.vibe._local_actions import (
     AcceptOrRetryPostAgentHandler,
+    HookAgentIdentity,
     HookContext,
     HookNoticeData,
     ToolScopedHook,
@@ -155,24 +161,6 @@ def _renamed(arguments: JsonObject, source: str, target: str) -> JsonObject:
     }
 
 
-def _search_replace_author_arguments(arguments: JsonObject) -> JsonObject:
-    # The legacy edit shape carries a single search/replace pair at the top level. A
-    # multi-block runtime payload cannot be represented in it, so it is passed through
-    # untouched rather than silently dropping the extra blocks.
-    content = arguments.get("content")
-    if not (
-        isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict)
-    ):
-        return arguments
-    block = content[0]
-    return {
-        **{key: value for key, value in arguments.items() if key != "content"},
-        "old_string": block.get("old_str", ""),
-        "new_string": block.get("new_str", ""),
-        "replace_all": block.get("replace_all", False),
-    }
-
-
 # Runtime argument names to the ones the CLI's tools — and therefore hooks written
 # against the legacy runtime — use. Each translator renames keys on a copy of the full
 # argument set; it must not rebuild a subset, or hooks silently lose fields the Core
@@ -182,7 +170,6 @@ _AUTHOR_ARGUMENTS: Mapping[str, Callable[[JsonObject], JsonObject]] = {
     "file_system.write_file": lambda arguments: _renamed(
         arguments, "path", "file_path"
     ),
-    "file_system.search_replace": _search_replace_author_arguments,
     "file_system.bash": lambda arguments: _renamed(
         arguments, "timeout_seconds", "timeout"
     ),
@@ -207,32 +194,12 @@ def _bash_runtime_arguments(arguments: JsonObject) -> JsonObject | None:
     return _renamed(arguments, "timeout", "timeout_seconds")
 
 
-def _search_replace_runtime_arguments(arguments: JsonObject) -> JsonObject | None:
-    if "old_string" not in arguments and "new_string" not in arguments:
-        return None
-    return {
-        **{
-            key: value
-            for key, value in arguments.items()
-            if key not in {"old_string", "new_string", "replace_all", "content"}
-        },
-        "content": [
-            {
-                "old_str": arguments.get("old_string", ""),
-                "new_str": arguments.get("new_string", ""),
-                "replace_all": arguments.get("replace_all", False),
-            }
-        ],
-    }
-
-
 # The reverse direction, for a pre_tool rewrite: a hook speaks the author-facing names
 # and the Core executes runtime names. ``None`` means the rewrite already looks
 # runtime-shaped and passes through untouched.
 _RUNTIME_ARGUMENTS: Mapping[str, Callable[[JsonObject], JsonObject | None]] = {
     "file_system.read_file": _read_file_runtime_arguments,
     "file_system.write_file": _write_file_runtime_arguments,
-    "file_system.search_replace": _search_replace_runtime_arguments,
     "file_system.bash": _bash_runtime_arguments,
 }
 
@@ -723,7 +690,16 @@ def _retry(feedback: str) -> RustPostAgentTurnHookResult:
 
 
 def _post_agent_payload(context: HookContext) -> dict[str, Any]:
-    return {**_base_payload(context), "hook_event_name": _POST_AGENT_EVENT_NAME}
+    return {
+        **_base_payload(context),
+        "hook_event_name": _POST_AGENT_EVENT_NAME,
+        # The agent configuration that finished its turn; never the ``main`` alias.
+        "agent_name": context.agent.name if context.agent is not None else None,
+    }
+
+
+def _agent_selector(match: str | None) -> Callable[[HookAgentIdentity], bool]:
+    return lambda agent: selects_agent(match, agent.name, main=agent.main)
 
 
 def _interpret_post_agent_stdout(
@@ -766,6 +742,7 @@ def build_post_agent_turn_handler(
     *,
     name: str,
     command: str,
+    match: str | None = None,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
     strict: bool = False,
 ) -> AcceptOrRetryPostAgentHandler:
@@ -794,4 +771,4 @@ def build_post_agent_turn_handler(
         return result
 
     # A foreign hook's stdout can only accept or ask for a retry, never replace.
-    return AcceptOrRetryPostAgentHandler(handler)
+    return AcceptOrRetryPostAgentHandler(handler, selects=_agent_selector(match))

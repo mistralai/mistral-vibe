@@ -134,6 +134,7 @@ from vibe.app_server.config import ConfigView
 from vibe.app_server.events import (
     AppServerEvent,
     CallbackRequested,
+    ServerWarning,
     SessionUpdated,
     StatsUpdated,
     TurnCompleted,
@@ -166,6 +167,7 @@ from vibe.app_server.models import (
     turn_stop,
 )
 from vibe.app_server.protocol import (
+    INTEGRATIONS_UNAVAILABLE_WARNING,
     AppServerResponseError,
     CallbackKind,
     CallbackResultError,
@@ -201,6 +203,8 @@ def _session_agent_changed(event: SessionUpdated) -> bool:
 
 
 INITIAL_AVAILABLE_COMMANDS_DELAY_SECONDS = 0.1
+# On SIGTERM the agent gets this long to close before the closing is cancelled.
+_SIGTERM_CLOSE_TIMEOUT_SECONDS = 1.0
 type SessionStarter = Callable[[LocalHarnessOptions], Awaitable[AppServerSession]]
 
 
@@ -692,18 +696,11 @@ class VibeAcpAgent(AcpAgent):
         )
 
     async def _warm_up(self, session: AcpSession) -> None:
+        # MCP and connector load failures arrive as warnings, whenever the
+        # background loads end: see ``_forward_event``.
         with suppress(Exception):
             await session.app_server.resources.runtime.wait_until_ready()
-            await self._notify_mcp_discovery_failures(session)
             await self._notify_mcp_auth(session)
-
-    async def _notify_mcp_discovery_failures(self, session: AcpSession) -> None:
-        errors = session.app_server.resources.runtime.mcp.discovery_errors
-        if not errors:
-            return
-        lines = ["The following MCP servers failed to connect:"]
-        lines.extend(f"- {name}: {error}" for name, error in sorted(errors.items()))
-        await self._command_controller.message(session, "\n".join(lines))
 
     async def _notify_mcp_auth(self, session: AcpSession) -> None:
         aliases = session.app_server.resources.runtime.mcp.needs_auth
@@ -733,6 +730,14 @@ class VibeAcpAgent(AcpAgent):
             return
         if isinstance(event, TurnRetrying):
             await self._send_retrying(session, event)
+            return
+        if (
+            isinstance(event, ServerWarning)
+            and event.params.warning.code == INTEGRATIONS_UNAVAILABLE_WARNING
+        ):
+            await self._command_controller.message(
+                session, event.params.warning.message
+            )
             return
         # A profile switch the client did not request (e.g. `/unleanstall` moving
         # off the active Lean agent) patches the session's `agent`. The mode is
@@ -1071,6 +1076,7 @@ class VibeAcpAgent(AcpAgent):
                     "low",
                     "medium",
                     "high",
+                    "xhigh",
                     "max",
                 }:
                     await session.app_server.resources.config.set_thinking(
@@ -1157,12 +1163,13 @@ class VibeAcpAgent(AcpAgent):
     async def ext_method(self, method: str, params: dict) -> dict:  # noqa: PLR0912
         match method:
             case "auth/status":
-                state = self._auth.status()
+                report = self._auth.status_report()
                 result = {
-                    "authenticated": state.can_use_active_provider,
-                    "authState": state.kind.value,
-                    "signOutAvailable": state.sign_out_available,
-                    "customDomain": self._auth.custom_domain(),
+                    "authenticated": report.state.can_use_active_provider,
+                    "authState": report.state.kind.value,
+                    "signOutAvailable": report.state.sign_out_available,
+                    "customDomain": report.custom_domain,
+                    "customDomainLocked": report.custom_domain_locked,
                 }
             case "auth/signOut":
                 self._auth.sign_out()
@@ -1862,18 +1869,48 @@ async def _serve_acp_agent(agent: VibeAcpAgent) -> None:
         await agent.close()
 
 
+def _terminate_server(server: asyncio.Task[None]) -> None:
+    server.cancel()
+    # A second cancellation stops an agent close that outlives its budget.
+    server.get_loop().call_later(_SIGTERM_CLOSE_TIMEOUT_SECONDS, server.cancel)
+
+
 def run_acp_server(
     *, environ_before_dotenv_load: Mapping[str, str] | None = None
 ) -> None:
     agent = VibeAcpAgent(environ_before_dotenv_load=environ_before_dotenv_load)
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+    server: asyncio.Task[None] | None = None
+    terminating = False
+
+    async def serve() -> None:
+        nonlocal server
+        server = asyncio.current_task()
+        await _serve_acp_agent(agent)
 
     def handle_sigterm(_signum: int, _frame: Any) -> None:
-        raise KeyboardInterrupt
+        nonlocal terminating
+        if (
+            terminating
+            or server is None
+            or server.done()
+            or server.get_loop().is_closed()
+        ):
+            raise KeyboardInterrupt
+        terminating = True
+        # Cancel the server from the loop rather than raise here: raised while
+        # another task runs, the interrupt is stored on that task and re-raised
+        # when the shutdown awaits it. The loop then closes with the server task
+        # pending, and the worker threads that stop when it ends block the
+        # process exit forever.
+        server.get_loop().call_soon_threadsafe(_terminate_server, server)
 
     signal.signal(signal.SIGTERM, handle_sigterm)
     try:
-        asyncio.run(_serve_acp_agent(agent))
+        asyncio.run(serve())
+    except asyncio.CancelledError:
+        if not terminating:
+            raise
     except KeyboardInterrupt:
         with suppress(Exception):
             asyncio.run(asyncio.wait_for(agent.close(), timeout=1.0))

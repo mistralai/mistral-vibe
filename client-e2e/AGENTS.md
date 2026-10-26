@@ -43,7 +43,8 @@ It is hard to do tests like this for uis, here's why:
 
 Add a declarative `scenarios/<name>.py` with a `timeline`; it is auto-discovered
 by `test_golden.py`. Mark a known gap `skip = "<reason>"`. Generate its golden
-with `make store_golden` and review the diff before committing.
+with `make store_golden` and review the diff before committing; `test_golden.py`
+fails for a scenario without a committed golden and never generates one.
 
 ## Golden snapshots
 

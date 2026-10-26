@@ -11,7 +11,10 @@ from typing import Any, cast
 import pytest
 import tomli_w
 
-from tests.app_server.backend_contract.conftest import BackendContractConnection
+from tests.app_server.backend_contract.conftest import (
+    BackendContractConnection,
+    wait_for_background_integrations,
+)
 from vibe.app_server._mcp_auth import MCPAuthenticationService
 from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server._session_backend_port import (
@@ -115,6 +118,7 @@ async def test_mcp_catalog_read_refresh_toggle_remove_and_compatibility_aliases(
     backend_contract_session: AppServerSession,
 ) -> None:
     await backend_contract_session.resources.runtime.wait_until_ready()
+    await wait_for_background_integrations()
     session_id = backend_contract_session.session_id
     canonical_read = MCPReadResponse.model_validate(
         await backend_contract_connection.client.request(

@@ -29,6 +29,7 @@ use rows::Row;
 pub use browser::{back, close, mouse, navigate, select};
 pub use help::help_text;
 pub use notices::show_post_init_notices;
+pub(crate) use notices::INTEGRATIONS_UNAVAILABLE_TOAST_SECS;
 use refresh::rediscover;
 pub use refresh::{background_refresh, refresh, refresh_deadline};
 pub use toggle::{set_disabled, Toggle};

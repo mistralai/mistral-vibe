@@ -113,6 +113,7 @@ GROWTHBOOK_CONFIG_MAPPINGS: Final[
     ExperimentName.SMART_APPROVE: (("smart_approve_available", _map_on),),
     ExperimentName.SMART_APPROVE_DEFAULT: (("smart_approve_default", _map_on),),
     ExperimentName.REGISTRY_SKILLS: (("experimental_enable_registry_skills", _map_on),),
+    ExperimentName.PR_MONITORING: (("experimental_enable_pr_monitoring", _map_on),),
 }
 
 

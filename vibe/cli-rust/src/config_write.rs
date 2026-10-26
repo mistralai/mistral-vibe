@@ -89,7 +89,10 @@ pub fn mutation_error(value: &Value) -> Option<String> {
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return Some("Invalid configuration edit".to_owned());
+        return Some(match value.get("reason").and_then(Value::as_str) {
+            Some(reason) if !reason.is_empty() => format!("Invalid configuration edit: {reason}"),
+            _ => "Invalid configuration edit".to_owned(),
+        });
     }
     let failures: Vec<&str> = value
         .get("failures")

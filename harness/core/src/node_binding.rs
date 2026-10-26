@@ -118,12 +118,12 @@ impl NodeHarnessSession {
     #[napi_derive::napi]
     pub fn export_conversation(
         &self,
-        fork_turns: String,
+        context: String,
     ) -> napi::Result<AsyncTask<SessionOperationTask>> {
         Ok(AsyncTask::new(SessionOperationTask {
             engine: Arc::clone(&self.engine),
             handle: self.required_handle()?,
-            operation: SessionOperation::ExportConversation(fork_turns),
+            operation: SessionOperation::ExportConversation(context),
         }))
     }
 
@@ -212,7 +212,7 @@ impl Task for CreateSessionTask {
                 let resume_input_id = u64::try_from(resume_input_id.unwrap_or(0))
                     .map_err(|_| node_error("resumed input ID must not be negative".to_string()))?;
                 self.engine
-                    .restore(config, checkpoint, resume_input_id)
+                    .restore(config, checkpoint, resume_input_id, None)
                     .map_err(node_error)
             }
         }
@@ -259,10 +259,10 @@ impl Task for SessionOperationTask {
                 let checkpoint = self.engine.checkpoint(self.handle).map_err(node_error)?;
                 serde_json::to_string(&checkpoint).map_err(|error| node_error(error.to_string()))
             }
-            SessionOperation::ExportConversation(fork_turns) => {
+            SessionOperation::ExportConversation(context) => {
                 let conversation = self
                     .engine
-                    .export_conversation(self.handle, fork_turns)
+                    .export_conversation(self.handle, context)
                     .map_err(node_error)?;
                 serde_json::to_string(&conversation).map_err(|error| node_error(error.to_string()))
             }

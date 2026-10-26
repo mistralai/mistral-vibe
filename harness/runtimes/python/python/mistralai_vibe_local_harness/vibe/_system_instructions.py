@@ -1,14 +1,27 @@
 from __future__ import annotations
 
-from datetime import date
+import logging
 from typing import Final
 
+from mistralai_vibe_local_harness._native import process_tools_shell_guidance
+
+logger = logging.getLogger(__name__)
+
 DEFAULT_VIBE_CODE_SYSTEM_INSTRUCTIONS_VARIANT: Final = "cli"
+
+SHELL_GUIDANCE_HEADING: Final = "**Shell**"
+"""Heads the shell guidance in a Vibe Code prompt that carries it."""
+
+FOREGROUND_SHELL_GUIDANCE: Final = (
+    "Always add timeouts. Never launch servers, watchers, or long-running"
+    " processes inside the loop — give the user the command instead."
+)
+"""Opens the **Shell** guidance; replaced by the Harness Core's
+``process_tools_shell_guidance`` where background processes are enabled."""
 
 
 _CLI_SYSTEM_INSTRUCTIONS_TEMPLATE: Final = """\
 You are Mistral Vibe, a CLI coding agent built by Mistral AI.
-Today's date is $current_date.
 
 ## Instruction hierarchy
 
@@ -102,7 +115,7 @@ You are **not** done when the edit landed, when there are no syntax errors, or w
 If you see any of these, the current approach is not working:
 
 - An edit that leaves the file unchanged
-- `diff_error`, "string not found", repeated `edit` failures
+- "old_string not found", repeated `edit` failures
 - The same error twice in a row
 - Three edits to the same file without the problem resolving
 - Whitespace/CRLF mismatch
@@ -147,7 +160,6 @@ Always add timeouts. Never launch servers, watchers, or long-running processes i
 
 _CLI_2026_07_V2_SYSTEM_INSTRUCTIONS_TEMPLATE: Final = """\
 You are Mistral Vibe, a CLI coding agent built by Mistral AI. You work on a local codebase using tools.
-Today's date is $current_date.
 
 ## Instruction hierarchy
 
@@ -224,7 +236,7 @@ When editing:
 
 - Match existing style (indentation, naming, error handling density).
 - Minimal diff. Remove completely when removing — no `_unused` renames, no `// removed` comments, no wrapper shims. Update all call sites.
-- Whitespace and line endings matter for search_replace. Copy exactly from the read.
+- Whitespace and line endings matter for `edit`. Copy exactly from the read.
 - Comments: default to none. Add a comment only to explain *why* for
 non-obvious logic or a deliberate non-obvious choice — never to restate
 *what* the code does. Match the file's existing comment density; if the
@@ -252,7 +264,7 @@ change is verified.
 If you see any of these, the current approach is not working:
 
 - An edit that leaves the file unchanged
-- `diff_error`, "string not found", repeated search_replace failures
+- "old_string not found", repeated `edit` failures
 - The same error twice in a row
 - Three edits to the same file without the problem resolving
 - Whitespace/CRLF mismatch
@@ -323,7 +335,6 @@ When the conversation grows long, some or all of the current context is summariz
 
 _CLI_ML4_2026_10_V2_SYSTEM_INSTRUCTIONS_TEMPLATE: Final = """\
 You are Mistral Vibe, a CLI coding agent built by Mistral AI.
-Today's date is $current_date.
 
 IMPORTANT: keep your reasoning short. NEVER draft your answer in your reasoning; write it directly in your reply.
 
@@ -430,15 +441,43 @@ _SYSTEM_INSTRUCTIONS_TEMPLATES: Final[dict[str, str]] = {
 }
 
 
-def build_vibe_code_system_instructions(
-    *, variant: str, current_date: date | None = None
+def with_shell_guidance(
+    instructions: str, *, background_processes: bool, command_environment: str
 ) -> str:
+    """Fit the **Shell** guidance in ``instructions`` to whether long work can
+    run as a background process.
+
+    ``instructions`` is a Vibe Code prompt, built here or read from a prompt
+    file that carries the same guidance. Where the Harness Core's
+    ``process_tools_shell_guidance`` has guidance for the session, it replaces
+    ``FOREGROUND_SHELL_GUIDANCE``; elsewhere ``instructions`` is returned as it
+    is.
+
+    A prompt with a ``SHELL_GUIDANCE_HEADING`` section that lacks
+    ``FOREGROUND_SHELL_GUIDANCE`` keeps its own guidance, with a warning: an
+    agent's prompt may word it differently, so this does not fail the Session,
+    and the tests check that every bundled prompt with the section carries it.
+    """
+    guidance = process_tools_shell_guidance(
+        background_processes=background_processes,
+        command_environment=command_environment,
+    )
+    if guidance is None:
+        return instructions
+    if FOREGROUND_SHELL_GUIDANCE not in instructions:
+        if SHELL_GUIDANCE_HEADING in instructions:
+            logger.warning(
+                "The system prompt's %s guidance does not open with Vibe's"
+                " foreground guidance, so it does not mention the process tools",
+                SHELL_GUIDANCE_HEADING,
+            )
+        return instructions
+    return instructions.replace(FOREGROUND_SHELL_GUIDANCE, guidance)
+
+
+def build_vibe_code_system_instructions(*, variant: str) -> str:
     """Build the complete Vibe Code prompt for the requested instruction variant."""
-    rendered_date = current_date or date.today()
-    template = _SYSTEM_INSTRUCTIONS_TEMPLATES.get(
+    return _SYSTEM_INSTRUCTIONS_TEMPLATES.get(
         variant,
         _SYSTEM_INSTRUCTIONS_TEMPLATES[DEFAULT_VIBE_CODE_SYSTEM_INSTRUCTIONS_VARIANT],
-    )
-    return template.replace(
-        "$current_date", f"{rendered_date.isoformat()} ({rendered_date.strftime('%A')})"
     )

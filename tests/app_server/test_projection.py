@@ -13,12 +13,13 @@ from vibe.app_server._effect_output_cap import (
     TRUNCATION_MARKER,
 )
 from vibe.app_server._history_projection import project_message_history
-from vibe.app_server._projection import project_config_view
+from vibe.app_server._projection import project_config_view, project_skill_summaries
 from vibe.app_server.models import (
     AgentStatsSnapshot,
     CompletedEffectState,
     PublicEffectEntry,
 )
+from vibe.core.skills.models import SkillInfo, SkillScope, SkillSource
 from vibe.core.types import FunctionCall, LLMMessage, Role, ToolCall
 
 
@@ -87,6 +88,30 @@ def test_config_view_projects_the_tls_trust_policy() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("source", "scope"),
+    [
+        (SkillSource.LOCAL, SkillScope.GLOBAL),
+        (SkillSource.LOCAL, SkillScope.PROJECT),
+        (SkillSource.PLUGIN, SkillScope.GLOBAL),
+        (SkillSource.REGISTRY, SkillScope.PROJECT),
+        (SkillSource.BUILTIN, SkillScope.BUILTIN),
+    ],
+)
+def test_skill_summaries_carry_the_origin_the_slash_menu_tags(
+    source: SkillSource, scope: SkillScope
+) -> None:
+    skill = SkillInfo(
+        name="deploy", description="Ship it.", prompt="", source=source, scope=scope
+    )
+
+    [summary] = project_skill_summaries([skill])
+
+    payload = summary.model_dump(mode="json", by_alias=True)
+    assert (payload["source"], payload["scope"]) == (source.value, scope.value)
+    assert payload["userInvocable"] is True
+
+
 def test_snapshot_session_cost_discounts_cached_tokens() -> None:
     snapshot = AgentStatsSnapshot(
         session_prompt_tokens=1_000_000,
@@ -123,7 +148,7 @@ def test_snapshot_session_cost_never_negative_when_cached_exceeds_prompt() -> No
 def test_model_config_view_defaults_thinking_levels_for_older_clients() -> None:
     # A payload from an older server lacks thinkingLevels; the view's default
     # keeps such clients rendering the five (ADR 0014).
-    from vibe.app_server.config import THINKING_LEVELS, ModelConfigView
+    from vibe.app_server.config import DEFAULT_THINKING_LEVELS, ModelConfigView
 
     view = ModelConfigView.model_validate({
         "name": "model-a",
@@ -133,7 +158,7 @@ def test_model_config_view_defaults_thinking_levels_for_older_clients() -> None:
         "displayName": "alpha",
     })
 
-    assert list(view.thinking_levels) == list(THINKING_LEVELS)
+    assert list(view.thinking_levels) == list(DEFAULT_THINKING_LEVELS)
     assert view.auto_compact_threshold is None
     assert view.source is None
 
@@ -266,18 +291,76 @@ def test_config_view_carries_each_model_compaction_threshold() -> None:
             provider="mistral",
             alias="beta",
             max_context_length=100_000,
-            auto_compact_threshold=50_000,
+            auto_compact_threshold=60_000,
         ),
     ]
     config = project_config_view(
         build_test_vibe_config(models=models, active_model="alpha")
     )
 
-    assert config.active_model.auto_compact_threshold == 80_000
+    # An unset threshold reports the default for the model's window, the one its
+    # sessions compact at, so a client can show usage against it.
+    assert config.active_model.auto_compact_threshold == 50_000
     assert {model.alias: model.auto_compact_threshold for model in config.models} == {
-        "alpha": 80_000,
-        "beta": 50_000,
+        "alpha": 50_000,
+        "beta": 60_000,
     }
+
+
+def test_config_view_offers_the_thinking_levels_the_model_accepts() -> None:
+    """*Prepare*: GLM 5.3, which always reasons, and a model with no known facts.
+    *Do*: Project the config view.
+    *Assert*: GLM offers only its levels, no off; the other keeps the config's.
+    The picker used to offer off for GLM, and Core refused it.
+    """
+    from vibe.core.config import ModelConfig
+
+    models = [
+        ModelConfig(name="zai-glm-5-3", provider="mistral", alias="glm"),
+        ModelConfig(name="model-a", provider="mistral", alias="alpha"),
+    ]
+
+    config = project_config_view(
+        build_test_vibe_config(models=models, active_model="glm")
+    )
+
+    assert config.active_model.thinking_levels == ["low", "high", "max"]
+    assert {model.alias: model.thinking_levels for model in config.models} == {
+        "glm": ["low", "high", "max"],
+        "alpha": ["off", "low", "medium", "high", "max"],
+    }
+
+
+@pytest.mark.parametrize(("written", "runs"), [(None, "low"), ("high", "high")])
+def test_config_view_reports_the_thinking_level_the_session_runs(
+    written: str | None, runs: str
+) -> None:
+    """*Prepare*: GLM 5.3, which always reasons at low, high or max, with no level
+    written or one of its own.
+    *Do*: Project the config view.
+    *Assert*: The view reports the level the session runs, one of those offered.
+    It used to report the raw config value, off, outside the options, so the
+    picker highlighted another level than the current one.
+    """
+    from vibe.acp.utils import make_thinking_response
+    from vibe.core.config import ModelConfig
+
+    fields: dict[str, str] = {"name": "zai-glm-5-3", "provider": "mistral"}
+    if written is not None:
+        fields["thinking"] = written
+    models = [ModelConfig.model_validate({**fields, "alias": "glm"})]
+
+    config = project_config_view(
+        build_test_vibe_config(models=models, active_model="glm")
+    )
+
+    assert config.active_model.thinking == runs
+    assert config.active_model.thinking in config.active_model.thinking_levels
+    assert config.models[0].thinking == runs
+    # ACP's thinking option reads the same view.
+    option = make_thinking_response(config)
+    assert option.current_value == runs
+    assert runs in {choice.value for choice in option.options}
 
 
 def test_config_view_default_alias_never_follows_the_active_model() -> None:
@@ -366,9 +449,8 @@ def test_config_view_image_support_widens_for_a_backend_that_can_fall_back() -> 
 
     The unified backend describes an image for a blind model, so it accepts an
     attachment ``active_model.supports_images`` would reject -- but only when a
-    describer is actually reachable. Core's resource-link projection alone is
-    not enough: it only exists for a file-backed image, so promising on its
-    strength would let a pasted one through to a model that cannot read it.
+    describer is actually reachable. Without one the model would get ``[Image]``
+    in place of the pixels, so the send is refused instead.
     """
     from vibe.core.config import ModelConfig
 

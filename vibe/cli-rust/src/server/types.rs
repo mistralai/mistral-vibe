@@ -33,6 +33,8 @@ pub mod method {
     pub const SESSION_SUBAGENTS_READ: &str = "session/subagents/read";
     pub const RUNTIME_READ: &str = "runtime/read";
     pub const CONFIG_READ: &str = "config/read";
+    /// The JSON schema of the user config, each builtin tool's settings included.
+    pub const CONFIG_SCHEMA: &str = "config/schema";
     pub const WORKSPACE_PROMPT_PREPARE: &str = "workspace/prompt/prepare";
     /// Whether the cwd is trusted, plus what the gate must show when it is not.
     pub const WORKSPACE_TRUST_STATUS: &str = "workspace/trust/status";
@@ -133,6 +135,8 @@ pub mod method {
     pub const NARRATION_SUMMARIZE: &str = "narration/summarize";
     /// Remove a managed worktree (app-server `WorkspaceWorktreeRemoveParams`).
     pub const WORKSPACE_WORKTREE_REMOVE: &str = "workspace/git/worktrees/remove";
+    /// The session's PR/MR artifacts (app-server `artifacts/list`).
+    pub const ARTIFACTS_LIST: &str = "artifacts/list";
 }
 
 /// Callback kinds the client advertises at `initialize` and knows how to answer.
@@ -187,6 +191,10 @@ pub mod notification {
     pub const SESSION_LEASE_UPDATED: &str = "session/lease/updated";
     /// The server's lease watch died; held locks can no longer be trusted.
     pub const SESSION_LEASE_ENDED: &str = "session/lease/ended";
+    /// A session artifact (PR/MR) was detected or discovered.
+    pub const ARTIFACTS_CREATED: &str = "artifacts/created";
+    /// A session artifact changed (markViewed, provider sync).
+    pub const ARTIFACTS_UPDATED: &str = "artifacts/updated";
 }
 
 // JSON-RPC envelopes.

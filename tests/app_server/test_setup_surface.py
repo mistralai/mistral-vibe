@@ -8,6 +8,7 @@ from typing import Any, Never
 
 import keyring
 import pytest
+import tomli_w
 
 from tests.app_server._helpers import setup_client
 from tests.conftest import get_base_config
@@ -105,6 +106,68 @@ async def test_setup_status_has_api_key_true_from_keyring_only(
         await server_transport.close()
 
     assert response.has_api_key is True
+
+
+@pytest.mark.asyncio
+async def test_setup_status_carries_the_pinned_console_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The admin pin is normalized to an origin (the trailing slash drops).
+    monkeypatch.setenv("VIBE_CUSTOM_CONSOLE_URL", "https://console.acme.internal/")
+    client, client_transport, server_transport = await setup_client()
+    try:
+        response = await _status(client)
+    finally:
+        await client_transport.close()
+        await server_transport.close()
+
+    assert response.pinned_console_url == "https://console.acme.internal"
+
+
+@pytest.mark.asyncio
+async def test_setup_status_normalizes_a_scheme_less_pinned_console_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A bare domain is upgraded to https:// before it rides the wire.
+    monkeypatch.setenv("VIBE_CUSTOM_CONSOLE_URL", "console.acme.internal")
+    client, client_transport, server_transport = await setup_client()
+    try:
+        response = await _status(client)
+    finally:
+        await client_transport.close()
+        await server_transport.close()
+
+    assert response.pinned_console_url == "https://console.acme.internal"
+
+
+@pytest.mark.asyncio
+async def test_setup_status_pinned_console_url_defaults_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VIBE_CUSTOM_CONSOLE_URL", raising=False)
+    client, client_transport, server_transport = await setup_client()
+    try:
+        response = await _status(client)
+    finally:
+        await client_transport.close()
+        await server_transport.close()
+
+    assert response.pinned_console_url is None
+
+
+@pytest.mark.asyncio
+async def test_setup_status_ignores_an_invalid_pinned_console_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIBE_CUSTOM_CONSOLE_URL", "not a url")
+    client, client_transport, server_transport = await setup_client()
+    try:
+        response = await _status(client)
+    finally:
+        await client_transport.close()
+        await server_transport.close()
+
+    assert response.pinned_console_url is None
 
 
 @pytest.mark.asyncio
@@ -242,6 +305,157 @@ async def test_setup_submit_choices_reports_each_failed_field(
 
     assert response.outcome == "provider_config_error"
     assert response.failures == ["console_base_url", "vibe_base_url"]
+
+
+@pytest.mark.asyncio
+async def test_setup_submit_choices_pin_wins_over_a_drifted_console_url(
+    monkeypatch: pytest.MonkeyPatch, config_dir: Path
+) -> None:
+    # A drifted client cannot persist another deployment: the pin is forced
+    # over the submitted console URL (and derived onto the provider).
+    monkeypatch.setenv("VIBE_CUSTOM_CONSOLE_URL", "https://console.acme.internal")
+    client, client_transport, server_transport = await setup_client()
+    try:
+        status = await _status(client)
+        response = validate_wire(
+            SetupSubmitChoicesResponse,
+            await client.request(
+                "setup/submit-choices",
+                SetupSubmitChoicesParams(
+                    provider=status.provider, console_base_url="https://evil.example"
+                ),
+            ),
+        )
+    finally:
+        await client_transport.close()
+        await server_transport.close()
+
+    assert response.outcome == "completed"
+    persisted = tomllib.loads((config_dir / "config.toml").read_text())
+    assert persisted["console_base_url"] == "https://console.acme.internal"
+    assert persisted["providers"][0]["browser_auth_base_url"] == (
+        "https://console.acme.internal"
+    )
+    assert persisted["providers"][0]["browser_auth_api_base_url"] == (
+        "https://console.acme.internal/api"
+    )
+    # The pin never touches the LLM API base.
+    assert persisted["providers"][0]["api_base"] == "https://api.mistral.ai/v1"
+
+
+@pytest.mark.asyncio
+async def test_setup_submit_choices_pin_wins_over_drifted_provider_urls(
+    monkeypatch: pytest.MonkeyPatch, config_dir: Path
+) -> None:
+    # The provider view's browser-auth URLs are pinned too: they choose where
+    # the browser sign-in lands. A scheme-less pin upgrades to https://.
+    monkeypatch.setenv("VIBE_CUSTOM_CONSOLE_URL", "console.acme.internal")
+    client, client_transport, server_transport = await setup_client()
+    try:
+        status = await _status(client)
+        response = validate_wire(
+            SetupSubmitChoicesResponse,
+            await client.request(
+                "setup/submit-choices",
+                SetupSubmitChoicesParams(
+                    provider=status.provider.model_copy(
+                        update={
+                            "browser_auth_base_url": "https://evil.example",
+                            "browser_auth_api_base_url": "https://evil.example/api",
+                            "browser_auth_allow_origin_rewrite": True,
+                        }
+                    ),
+                    console_base_url="https://evil.example",
+                ),
+            ),
+        )
+    finally:
+        await client_transport.close()
+        await server_transport.close()
+
+    assert response.outcome == "completed"
+    persisted = tomllib.loads((config_dir / "config.toml").read_text())
+    assert persisted["console_base_url"] == "https://console.acme.internal"
+    assert persisted["providers"][0]["browser_auth_base_url"] == (
+        "https://console.acme.internal"
+    )
+    assert persisted["providers"][0]["browser_auth_api_base_url"] == (
+        "https://console.acme.internal/api"
+    )
+    # Same-origin pin: no rewrite, so the default is simply not written.
+    assert (
+        persisted["providers"][0].get("browser_auth_allow_origin_rewrite") is not True
+    )
+
+
+@pytest.mark.asyncio
+async def test_setup_submit_choices_pin_forces_the_console_url_when_absent(
+    monkeypatch: pytest.MonkeyPatch, config_dir: Path
+) -> None:
+    # Even a client that submits no console URL lands on the pin: the admin
+    # pin is the deployment, not a prefill suggestion.
+    monkeypatch.setenv("VIBE_CUSTOM_CONSOLE_URL", "https://console.acme.internal")
+    client, client_transport, server_transport = await setup_client()
+    try:
+        response = validate_wire(
+            SetupSubmitChoicesResponse,
+            await client.request("setup/submit-choices", SetupSubmitChoicesParams()),
+        )
+    finally:
+        await client_transport.close()
+        await server_transport.close()
+
+    assert response.outcome == "completed"
+    persisted = tomllib.loads((config_dir / "config.toml").read_text())
+    assert persisted["console_base_url"] == "https://console.acme.internal"
+    # No provider view: the merged seed provider still gets the pin's
+    # browser-auth URLs, so the persisted config points at the pin end to end.
+    assert persisted["providers"][0]["browser_auth_base_url"] == (
+        "https://console.acme.internal"
+    )
+
+
+@pytest.mark.asyncio
+async def test_setup_submit_choices_pin_preserves_a_split_horizon_api_base(
+    monkeypatch: pytest.MonkeyPatch, config_dir: Path
+) -> None:
+    # A split-horizon deployment behind the pin keeps its CLI-reachable
+    # connector: the pin fixes the browser sign-in host, not the API base.
+    config = get_base_config()
+    config["providers"][0].update({
+        "browser_auth_base_url": "https://console.acme.internal",
+        "browser_auth_api_base_url": "https://connector.acme.internal/api",
+        "browser_auth_allow_origin_rewrite": True,
+    })
+    (config_dir / "config.toml").write_text(tomli_w.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("VIBE_CUSTOM_CONSOLE_URL", "https://console.acme.internal")
+    client, client_transport, server_transport = await setup_client()
+    try:
+        status = await _status(client)
+        response = validate_wire(
+            SetupSubmitChoicesResponse,
+            await client.request(
+                "setup/submit-choices",
+                SetupSubmitChoicesParams(provider=status.provider),
+            ),
+        )
+    finally:
+        await client_transport.close()
+        await server_transport.close()
+
+    assert response.outcome == "completed"
+    persisted = tomllib.loads((config_dir / "config.toml").read_text())
+    provider = persisted["providers"][0]
+    assert provider["browser_auth_base_url"] == "https://console.acme.internal"
+    assert (
+        provider["browser_auth_api_base_url"] == "https://connector.acme.internal/api"
+    )
+    assert provider["browser_auth_allow_origin_rewrite"] is True
+    # Account calls keep the CLI-reachable connector origin, not the
+    # browser-only console host.
+    assert persisted["console_base_url"] == "https://connector.acme.internal"
+    # The pin never touches the LLM API base.
+    assert provider["api_base"] == "https://api.mistral.ai/v1"
 
 
 @pytest.mark.asyncio

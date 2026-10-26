@@ -104,7 +104,7 @@ async def test_admin_global_compaction_threshold_cannot_be_bypassed_by_model() -
     alias = orchestrator.config.get_active_model().alias
 
     failures = await orchestrator.set_field(
-        f"/models/{alias}/auto_compact_threshold", 0
+        f"/models/{alias}/auto_compact_threshold", 120_000
     )
 
     assert failures == []
@@ -113,7 +113,7 @@ async def test_admin_global_compaction_threshold_cannot_be_bypassed_by_model() -
 
 @pytest.mark.asyncio
 async def test_admin_global_compaction_threshold_overrides_a_declared_window() -> None:
-    # Accepted as-is for now: an admin-set global wins over the 80% the
+    # Accepted as-is for now: an admin-set global wins over the default the
     # model's own window would derive.
     defaults = DefaultConfigLayer(schema=VibeConfigSchema)
     overrides = OverridesLayer(

@@ -42,8 +42,8 @@ __all__ = ["CompiledHooks", "ForeignHookDefinition", "compile_foreign_hooks"]
 @dataclass(frozen=True, slots=True)
 class ForeignHookDefinition:
     # ``point`` is an authorable name, a key of ``_AUTHORABLE_POINTS``. ``source`` labels
-    # the declaring file: a project-root path, or ``user`` for ``~/.vibe``. ``match`` is
-    # a tool selector and must be ``None`` for ``post_agent``.
+    # the declaring file: a project-root path, or ``user`` for ``~/.vibe``. ``match``
+    # selects tools for ``pre_tool``/``post_tool`` and agents for ``post_agent``.
     name: str
     point: str
     command: str
@@ -68,8 +68,9 @@ def compile_foreign_hooks(
     """Compile ``definitions`` into shared Core bindings and Runtime handlers.
 
     Every declaration produces a binding, so no hook can compile to something that never
-    fires: a tool-scoped ``match`` binds ``always`` and is applied at call time inside
-    the handler (see :mod:`._hook_matcher`).
+    fires: a ``match`` binds ``always`` and is applied at call time by the executor,
+    against the called tool or, for ``post_agent``, the agent that finished its turn
+    (see :mod:`._hook_matcher`).
 
     ``tool_catalog`` is accepted and never called. The Vibe app-server still passes the
     catalogue provider this used to need, because ``vibe/uv.lock`` can resolve a
@@ -122,6 +123,7 @@ def compile_foreign_hooks(
             post_agent[bid] = build_post_agent_turn_handler(
                 name=definition.name,
                 command=definition.command,
+                match=definition.match,
                 timeout_s=definition.timeout_s,
                 strict=definition.strict,
             )

@@ -20,6 +20,7 @@ from vibe.core.tools.models import (
     ToolPermissionError as ToolPermissionError,
 )
 from vibe.core.workspace import Workspace
+from vibe.permissions import OutsideWorkdirPolicy
 from vibe.utils.io import read_safe
 
 if TYPE_CHECKING:
@@ -48,6 +49,7 @@ class BaseToolConfig(BaseModel):
         allowlist: Patterns that automatically allow tool execution.
         denylist: Patterns that automatically deny tool execution.
         sensitive_patterns: Patterns that trigger ASK even when permission is ALWAYS.
+        outside_workdir: Per-tool override of the global ``outside_workdir`` policy.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -56,6 +58,13 @@ class BaseToolConfig(BaseModel):
     allowlist: list[str] = Field(default_factory=list)
     denylist: list[str] = Field(default_factory=list)
     sensitive_patterns: list[str] = Field(default_factory=list)
+    outside_workdir: OutsideWorkdirPolicy | None = Field(
+        default=None,
+        description=(
+            "Overrides the global 'outside_workdir' policy for this tool. "
+            "Unset follows the global policy."
+        ),
+    )
 
 
 class BaseToolState(BaseModel):

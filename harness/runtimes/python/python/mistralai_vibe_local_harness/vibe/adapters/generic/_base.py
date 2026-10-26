@@ -19,13 +19,24 @@ from mistralai_vibe_local_harness.vibe.adapters.generic._model import (
     StrToolChoice,
 )
 from mistralai_vibe_local_harness.vibe.adapters.generic._provider import ProviderView
+from mistralai_vibe_local_harness.vibe.completion_profile import (
+    ReasoningSetting,
+    ReasoningSupport,
+    WireFormat,
+    reasoning_wire_value,
+)
 
 MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS = 60.0
 
 
-def apply_reasoning_effort(payload: dict[str, Any], thinking: str) -> None:
-    if thinking != "off":
-        payload["reasoning_effort"] = thinking
+def apply_reasoning_effort(
+    payload: dict[str, Any], thinking: ReasoningSetting | None
+) -> None:
+    """Send the request's reasoning setting; `None` leaves the field out."""
+    if thinking is not None:
+        payload["reasoning_effort"] = reasoning_wire_value(
+            WireFormat.OPENAI_CHAT, thinking
+        )
 
 
 def build_chat_payload(
@@ -36,7 +47,7 @@ def build_chat_payload(
     tools: list[AvailableTool] | None,
     max_tokens: int | None,
     tool_choice: StrToolChoice | AvailableTool | None,
-    thinking: str,
+    thinking: ReasoningSetting | None,
     top_p: float | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -109,8 +120,9 @@ class APIAdapter(ABC):
         enable_streaming: bool,
         provider: ProviderView,
         api_key: str | None = None,
-        thinking: str = "off",
+        thinking: ReasoningSetting | None = None,
         top_p: float | None = None,
+        reasoning_support: ReasoningSupport | None = None,
     ) -> PreparedRequest: ...
 
     @abstractmethod

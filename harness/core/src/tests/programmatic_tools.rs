@@ -15,7 +15,7 @@ fn run_typescript_completion(action_id: &str, calls: &[(&str, &str)]) -> Value {
                 }))
                 .collect::<Vec<_>>(),
             "finish_reason": "tool_call",
-            "usage": null,
+            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
         },
     })
 }
@@ -421,7 +421,7 @@ fn parallel_programmatic_tools_survive_checkpoint_restore() {
                     "arguments_json": json!({"code": source}).to_string(),
                 }],
                 "finish_reason": "tool_call",
-                "usage": null,
+                "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
             }
         }),
     )));

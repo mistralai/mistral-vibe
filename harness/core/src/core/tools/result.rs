@@ -223,4 +223,39 @@ mod tests {
         )));
         assert_eq!(text, "partial output and the timeout");
     }
+
+    ///
+    /// *Prepare*: A tool image with an older Vibe's file link and another field in its
+    /// metadata, and annotations.
+    /// *Do*: Make it model-visible.
+    /// *Assert*: No metadata or annotations survive: a file link is no image metadata.
+    ///
+    #[test]
+    fn a_tool_image_keeps_no_metadata_when_made_model_visible() {
+        // Prepare
+        let block: ContentBlock = serde_json::from_value(json!({
+            "type": "image",
+            "data": "aGVsbG8=",
+            "mimeType": "image/png",
+            "annotations": {"priority": 0.5},
+            "_meta": {
+                "mistralai.vibe.harness/file-image-resource-link": {
+                    "type": "resource_link",
+                    "uri": "file:///workspace/screenshot.png",
+                    "name": "screenshot.png",
+                },
+                "client": "hidden",
+            },
+        }))
+        .expect("image block is valid");
+
+        // Do
+        let visible = model_visible_content_block(block).expect("image stays visible");
+
+        // Assert
+        assert_eq!(
+            serde_json::to_value(visible).expect("block serializes"),
+            json!({"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"})
+        );
+    }
 }

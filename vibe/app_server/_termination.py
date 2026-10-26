@@ -58,6 +58,7 @@ class InputEndingTransport:
     async def messages(self) -> AsyncIterator[dict[str, Any]]:
         incoming = aiter(self._transport.messages())
         ended = asyncio.ensure_future(self._input_ended.wait())
+        received: asyncio.Future[dict[str, Any]] | None = None
         try:
             while True:
                 received = asyncio.ensure_future(anext(incoming))
@@ -75,6 +76,10 @@ class InputEndingTransport:
                 yield message
         finally:
             ended.cancel()
+            # A cancelled serving leaves its read running, which aclose() rejects.
+            if received is not None and not received.done():
+                received.cancel()
+                await asyncio.wait((received,))
             aclose = getattr(incoming, "aclose", None)
             if aclose is not None:
                 await aclose()

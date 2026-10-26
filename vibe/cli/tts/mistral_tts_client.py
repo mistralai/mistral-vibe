@@ -9,7 +9,13 @@ from vibe.app_server.config import AudioProviderView, TTSModelConfigView
 from vibe.cli.audio_request_metadata import RequestMetadataGetter
 from vibe.cli.tts.tts_client_port import TTSResult
 from vibe.utils.api_keys import resolve_api_key
-from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context, get_user_agent
+from vibe.utils.http import (
+    VibeAsyncHTTPClient,
+    build_ssl_context,
+    disable_sdk_env_telemetry,
+    get_user_agent,
+    mistral_sdk_client,
+)
 
 
 class MistralTTSClient:
@@ -36,8 +42,9 @@ class MistralTTSClient:
             self._client = Mistral(
                 api_key=self._api_key,
                 server_url=self._server_url,
-                async_client=self._http_client,
+                async_client=mistral_sdk_client(self._http_client),
             )
+            disable_sdk_env_telemetry(self._client)
         return self._client
 
     async def speak(self, text: str) -> TTSResult:

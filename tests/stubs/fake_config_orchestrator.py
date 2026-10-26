@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 import copy
 from typing import Any
 
@@ -168,6 +168,22 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
             target_layer=target_layer,
             preflight=preflight,
         )
+
+    async def preview_patch(
+        self, operations: list[PatchOp], *, without: Collection[str] = ()
+    ) -> C:
+        """The config ``operations`` would leave, read without the ``without``
+        layers' operations: the fake keeps no layers of its own.
+        """
+        kept = [op for op in operations if op.target_layer_name not in without]
+        data = ensure_parent_paths(self._base_config.model_dump(), kept)
+        data = json_apply_patch(
+            data, [op.to_json_patch() for op in kept], in_place=False
+        )
+        candidate = self.copy()
+        candidate._base_config = type(self._base_config).model_validate(data)
+        candidate.rebuild()
+        return candidate.config
 
     async def apply_patch(
         self,

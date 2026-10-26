@@ -5,6 +5,7 @@ use tokio::sync::watch;
 use crate::app::App;
 use crate::commands;
 use crate::input_modes::InputMode;
+use crate::skill::SkillOrigin;
 use crate::utils::fuzzy;
 
 const FILE_MATCH_LIMIT: usize = 100;
@@ -13,6 +14,8 @@ const FILE_MATCH_LIMIT: usize = 100;
 pub struct CompletionEntry {
     pub label: String,
     pub description: String,
+    /// Where a skill row comes from; `None` for built-in commands and files.
+    pub origin: Option<SkillOrigin>,
 }
 
 enum ActiveCompletion {
@@ -225,9 +228,10 @@ fn slash_entries(app: &App) -> Vec<CompletionEntry> {
     let query = input[..end].to_lowercase();
     let mut scored: Vec<(i64, CompletionEntry)> = commands::entries(&app.completion.skills)
         .into_iter()
-        .filter_map(|(label, description)| {
-            let score = fuzzy::score(&query, &label[1..].to_lowercase())? + boost(&label);
-            Some((score, CompletionEntry { label, description }))
+        .filter_map(|entry| {
+            let score =
+                fuzzy::score(&query, &entry.label[1..].to_lowercase())? + boost(&entry.label);
+            Some((score, entry))
         })
         .collect();
     scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
@@ -243,6 +247,7 @@ fn file_entries(app: &App, start: usize, end: usize) -> Vec<CompletionEntry> {
         .map(|label| CompletionEntry {
             label,
             description: String::new(),
+            origin: None,
         })
         .collect()
 }
@@ -255,13 +260,14 @@ fn skill_entries(app: &App, start: usize, end: usize) -> Vec<CompletionEntry> {
         .completion
         .skills
         .iter()
-        .filter_map(|(name, description)| {
-            let score = fuzzy::score(&query, &name.to_lowercase())?;
+        .filter_map(|skill| {
+            let score = fuzzy::score(&query, &skill.name.to_lowercase())?;
             Some((
                 score,
                 CompletionEntry {
-                    label: format!("/{name}"),
-                    description: description.clone(),
+                    label: format!("/{}", skill.name),
+                    description: skill.description.clone(),
+                    origin: Some(skill.origin),
                 },
             ))
         })

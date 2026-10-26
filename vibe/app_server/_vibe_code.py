@@ -91,6 +91,7 @@ class VibeCodeSession(Protocol):
     def session_message_count(self) -> int: ...
     def has_conversation_history(self) -> bool: ...
     def require_idle(self) -> None: ...
+    def require_no_session_rewrite(self) -> None: ...
     def begin_teleport(self, operation_id: str) -> None: ...
     def finish_teleport(self, operation_id: str) -> None: ...
     def teleport_events(
@@ -143,7 +144,7 @@ class VibeCodeController:
     async def open(
         self, *, purpose: VibeCodePickerPurpose, prompt: str | None = None
     ) -> tuple[str, VibeCodePickerView, str | None]:
-        self._session.require_idle()
+        self._require_quiet_session(purpose)
         if purpose == "teleport":
             await self._require_teleport_available(prompt)
         async with self._picker_lock:
@@ -184,7 +185,7 @@ class VibeCodeController:
             return picker_id, self.view(), resolved_project_id
 
     async def load_more(self, picker_id: str) -> tuple[VibeCodePickerView, str | None]:
-        self._session.require_idle()
+        self._require_quiet_session()
         async with self._picker_lock:
             service, data, _ = self._require_picker(picker_id)
             if not data.state.has_more:
@@ -201,7 +202,7 @@ class VibeCodeController:
     async def create(
         self, *, picker_id: str, name: str, default_branch: str
     ) -> tuple[VibeCodePickerView, VibeCodeProject]:
-        self._session.require_idle()
+        self._require_quiet_session()
         async with self._picker_lock:
             service, data, git = self._require_picker(picker_id)
             try:
@@ -222,7 +223,7 @@ class VibeCodeController:
     async def select(
         self, *, picker_id: str, project_id: str
     ) -> tuple[VibeCodePickerView, VibeCodeProject]:
-        self._session.require_idle()
+        self._require_quiet_session()
         async with self._picker_lock:
             service, data, _ = self._require_picker(picker_id)
             project = next(
@@ -275,7 +276,7 @@ class VibeCodeController:
             return self.view(), _project(project)
 
     async def unlink(self, picker_id: str) -> VibeCodePickerView:
-        self._session.require_idle()
+        self._require_quiet_session()
         async with self._picker_lock:
             service, data, _ = self._require_picker(picker_id)
             await asyncio.to_thread(service.clear_project_link, data.context)
@@ -301,7 +302,7 @@ class VibeCodeController:
             return self.view()
 
     async def cancel_picker(self, picker_id: str) -> None:
-        self._session.require_idle()
+        self._require_quiet_session()
         async with self._picker_lock:
             self._require_picker(picker_id)
             payload = self._picker_telemetry(source="cancelled", shown=True)
@@ -316,7 +317,7 @@ class VibeCodeController:
     async def recover_stale_link(
         self, picker_id: str
     ) -> tuple[VibeCodePickerView, bool]:
-        self._session.require_idle()
+        self._require_quiet_session()
         async with self._picker_lock:
             service, data, git = self._require_picker(picker_id)
             await asyncio.to_thread(service.clear_project_link, data.context)
@@ -598,6 +599,16 @@ class VibeCodeController:
         if picker_id is not None and picker_id != self._picker_id:
             raise VibeCodeConflictError("Vibe Code project picker is stale")
         return self._service, self._data, self._git
+
+    def _require_quiet_session(
+        self, purpose: VibeCodePickerPurpose | None = None
+    ) -> None:
+        # Only a teleport moves the session; a configure picker just links the
+        # repo, which a running turn never reads but a teleport copies.
+        if (purpose or self._picker_purpose) == "teleport":
+            self._session.require_idle()
+        else:
+            self._session.require_no_session_rewrite()
 
     def _reset_picker_state(self) -> None:
         self._service = None

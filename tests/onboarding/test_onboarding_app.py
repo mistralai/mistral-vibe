@@ -116,6 +116,34 @@ def test_mistral_default_domain_resets_custom_auth_urls() -> None:
     assert gateway._api_base_url == "https://console.mistral.ai/api"
 
 
+def test_pinned_console_url_applies_provider_and_console_urls() -> None:
+    app = OnboardingApp(
+        OnboardingContext(
+            provider=DEFAULT_PROVIDERS[0],
+            pinned_console_url="https://console.acme.internal",
+        )
+    )
+    assert app.pinned_console_url == "https://console.acme.internal"
+
+    app.apply_pinned_console_url()
+
+    assert app._provider.browser_auth_base_url == "https://console.acme.internal"
+    assert (
+        app._provider.browser_auth_api_base_url == "https://console.acme.internal/api"
+    )
+    assert app._provider.browser_auth_allow_origin_rewrite is False
+    assert app._console_base_url == "https://console.acme.internal"
+    assert app._browser_sign_in_service_factory is not None
+    gateway = app._browser_sign_in_service_factory()._gateway
+    assert isinstance(gateway, HttpBrowserSignInGateway)
+    assert gateway._browser_base_url == "https://console.acme.internal"
+    assert gateway._api_base_url == "https://console.acme.internal/api"
+
+
+def test_pinned_console_url_defaults_to_none() -> None:
+    assert OnboardingApp(_mistral_context()).pinned_console_url is None
+
+
 def _split_horizon_context() -> OnboardingContext:
     provider = ProviderConfig(
         name="mistral",

@@ -5,9 +5,11 @@ from pathlib import Path
 import pexpect
 import pytest
 
+from tests.e2e.agent_loop_characterization.support import assert_tool_result_contains
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
     send_ctrl_c_until_quit_confirmation,
+    wait_for_dialog_to_accept_keys,
     wait_for_main_screen,
     wait_for_rendered_text,
     wait_for_request_count_while_draining_child_output,
@@ -86,15 +88,24 @@ def test_spawn_cli_asks_bash_permission_and_shows_tool_output_after_approval(
         )
         # The unified runtime names builtins by their canonical route
         # (``file_system.bash`` stands for Vibe's ``bash``).
-        wait_for_rendered_text(
-            child,
-            captured,
-            needle="Permission for the file_system.bash tool",
-            timeout=10,
+        wait_for_dialog_to_accept_keys(
+            child, captured, needle="Permission for the file_system.bash tool"
         )
         child.send("y")
         child.send("\r")
-        wait_for_rendered_text(child, captured, needle=PREDICTABLE_OUTPUT, timeout=10)
+        # The command on screen already shows PREDICTABLE_OUTPUT: wait for the
+        # model's reply to the tool result instead.
+        wait_for_rendered_text(
+            child, captured, needle="has been printed successfully", timeout=10
+        )
 
         send_ctrl_c_until_quit_confirmation(child, captured, timeout=5)
         child.expect(pexpect.EOF, timeout=10)
+
+    # The scripted reply follows a denial too: only the tool result shows the
+    # approved command ran.
+    assert_tool_result_contains(
+        streaming_mock_server.requests[1],
+        call_id="call_bash_1",
+        expected=PREDICTABLE_OUTPUT,
+    )

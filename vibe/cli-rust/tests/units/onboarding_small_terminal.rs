@@ -61,3 +61,86 @@ fn arm_worst_case_state(wizard: &mut vibe_rs::setup::wizard::OnboardingState) {
     wizard.browser_sign_in.show_url_help = true;
     wizard.custom_domain_feedback = 1;
 }
+
+#[test]
+fn a_long_sign_in_error_keeps_the_hint_keys_on_screen() {
+    let mut app = App::default();
+    let mut wizard = vibe_rs::setup::wizard::OnboardingState {
+        open: true,
+        screen: Screen::BrowserSignIn,
+        ..vibe_rs::setup::wizard::OnboardingState::default()
+    };
+    wizard.browser_sign_in.variant = vibe_rs::setup::wizard::SignInVariant::Error;
+    wizard.browser_sign_in.message = "Failed to start browser sign-in: error sending request \
+         for url (https://console.example.com/vibe/sign-in): client error (Connect): tcp connect \
+         error: connection refused (via proxy http://10.0.0.1:8080)"
+        .into();
+    let (width, height) = (80u16, 24u16);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    terminal
+        .draw(|frame| paint::draw(&mut app, &mut wizard, frame, Rect::new(0, 0, width, height)))
+        .expect("draw");
+    let screen: Vec<String> = (0..height)
+        .map(|row| {
+            (0..width)
+                .map(|col| {
+                    terminal
+                        .backend()
+                        .buffer()
+                        .cell((col, row))
+                        .map(|cell| cell.symbol().to_string())
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .collect();
+    let joined = screen.join("\n");
+    assert!(
+        joined.contains("retry") && joined.contains("enter API key manually"),
+        "hints must stay visible:\n{joined}"
+    );
+}
+
+#[test]
+fn a_long_error_on_a_short_terminal_keeps_the_step_cards() {
+    let mut app = App::default();
+    let mut wizard = vibe_rs::setup::wizard::OnboardingState {
+        open: true,
+        screen: Screen::BrowserSignIn,
+        ..vibe_rs::setup::wizard::OnboardingState::default()
+    };
+    wizard.browser_sign_in.variant = vibe_rs::setup::wizard::SignInVariant::Error;
+    wizard.browser_sign_in.message = "Failed to start browser sign-in: error sending request \\
+         for url (https://console.example.com/vibe/sign-in): client error (Connect): tcp connect \\
+         error: connection refused (via proxy http://10.0.0.1:8080)"
+        .into();
+    let (width, height) = (80u16, 20u16);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    terminal
+        .draw(|frame| paint::draw(&mut app, &mut wizard, frame, Rect::new(0, 0, width, height)))
+        .expect("draw");
+    let joined: String = (0..height)
+        .map(|row| {
+            (0..width)
+                .map(|col| {
+                    terminal
+                        .backend()
+                        .buffer()
+                        .cell((col, row))
+                        .map(|cell| cell.symbol().to_string())
+                        .unwrap_or_default()
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("Open browser"),
+        "cards must stay visible:\n{joined}"
+    );
+    assert!(
+        joined.contains("…"),
+        "the clamped message ends with an ellipsis:\n{joined}"
+    );
+    assert!(joined.contains("retry"), "hints stay visible:\n{joined}");
+}

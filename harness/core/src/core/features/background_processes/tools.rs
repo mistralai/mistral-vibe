@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde_json::Value;
 
+use crate::core::tools::arguments::validate_json_schema;
 use crate::core::tools::external::RuntimeBuiltinToolName;
 use crate::core::tools::schema::{RequiredNullable, ToolSchema};
 
@@ -279,6 +280,37 @@ pub(crate) fn tools() -> Vec<ToolSpec> {
     ToolName::ALL.into_iter().map(ToolName::spec).collect()
 }
 
+const WRITE_PAYLOADS: [&str; 3] = ["text", "control", "bytesBase64"];
+
+/// A `process.write` call is one of 3 alternatives, and the schema reports a
+/// bad call only as "not valid under any of the schemas listed in the 'oneOf'
+/// keyword". This says what to fix: the payload count, or the error of the
+/// one alternative the call picked.
+pub(crate) fn explain_write_schema_error(
+    error: &jsonschema::ValidationError<'_>,
+) -> Option<String> {
+    if !error.instance_path().as_str().is_empty() || error.kind().keyword() != "oneOf" {
+        return None;
+    }
+    let arguments = error.instance().as_object()?;
+    let mut payloads = WRITE_PAYLOADS.into_iter().filter(|payload| {
+        arguments
+            .get(*payload)
+            .is_some_and(|value| !value.is_null())
+    });
+    let (Some(payload), None) = (payloads.next(), payloads.next()) else {
+        return Some("write requires exactly one of text, control, or bytesBase64".to_string());
+    };
+    let schema = ProcessWriteInput::tool_schema();
+    let alternative = schema["oneOf"]
+        .as_array()?
+        .iter()
+        .find(|alternative| alternative["properties"].get(payload).is_some())?;
+    validate_json_schema(alternative, error.instance())
+        .err()
+        .map(|rejection| rejection.detail(alternative))
+}
+
 pub(crate) fn is_sandbox_name(name: &str) -> bool {
     ToolName::ALL
         .into_iter()
@@ -290,6 +322,57 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_bad_write_reads_in_words() {
+        let write = tools()
+            .into_iter()
+            .find(|tool| tool.name == ToolName::Write)
+            .unwrap();
+        let validator = jsonschema::draft7::new(&write.input_schema).unwrap();
+        let explain = |arguments: Value| {
+            validator
+                .validate(&arguments)
+                .err()
+                .map(|error| explain_write_schema_error(&error).unwrap())
+        };
+
+        assert_eq!(explain(json!({"processId": "p", "text": "ls\n"})), None);
+        for arguments in [
+            json!({"processId": "p"}),
+            json!({"processId": "p", "text": null}),
+            json!({"processId": "p", "text": "y", "control": ["enter"]}),
+        ] {
+            assert_eq!(
+                explain(arguments).as_deref(),
+                Some("write requires exactly one of text, control, or bytesBase64")
+            );
+        }
+        assert_eq!(
+            explain(json!({"text": "y"})).as_deref(),
+            Some("\"processId\" is a required property")
+        );
+        assert_eq!(
+            explain(json!({"processId": "", "text": "y"})).as_deref(),
+            Some("at /processId: \"\" is shorter than 1 character")
+        );
+        assert_eq!(
+            explain(json!({"processId": "p", "control": ["F1"]})).as_deref(),
+            Some(
+                "at /control/0: \"F1\" is not one of \"ctrl_c\", \"ctrl_d\" or 9 other candidates"
+            )
+        );
+        assert!(
+            explain(json!({"processId": "p", "text": null, "control": ["enter"]}))
+                .unwrap()
+                .starts_with("Additional properties are not allowed ('text' was unexpected)")
+        );
+        assert!(
+            explain(json!({"processId": "p", "text": "y", "proc": 1}))
+                .unwrap()
+                .starts_with("Additional properties are not allowed ('proc' was unexpected)")
+        );
+    }
 
     #[test]
     fn output_schema_preserves_bounded_inspection_controls() {

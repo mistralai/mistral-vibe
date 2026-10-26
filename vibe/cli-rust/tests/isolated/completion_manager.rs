@@ -18,6 +18,7 @@ fn offer(app: &mut App, label: &str) {
     app.completion.entries = vec![CompletionEntry {
         label: label.into(),
         description: String::new(),
+        origin: None,
     }];
 }
 

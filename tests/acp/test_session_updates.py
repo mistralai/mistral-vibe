@@ -710,7 +710,7 @@ def test_batched_file_edit_emits_ordered_call_and_result_diffs() -> None:
         **_entry_fields("batch-edit", PublicEntryGenerationStatus.IN_PROGRESS),
         title="Edit",
         detail=FileEditEffectDetail(
-            tool_name="file_system.search_replace",
+            tool_name="file_system.edit",
             input=FileEditEffectBatchInput(
                 file_path="app.py",
                 changes=[

@@ -25,16 +25,26 @@ fn pixel_reports_map_to_their_cell_and_fractional_row() {
 
 #[test]
 fn leftover_pixels_past_the_last_cell_do_not_stretch_cells() {
-    let grid = Grid {
-        width: 1009,
-        height: 819,
-        ..GRID
-    };
+    let grid = Grid::new(100, 40, 1009, 819, false).unwrap();
 
     let (cell, row) = cells(Some(grid), pixels(MouseEventKind::Moved, 995, 795));
 
     assert_eq!((cell.column, cell.row), (99, 39));
     assert_eq!(row, 39.75);
+}
+
+#[test]
+fn fractional_cells_of_vscode_hosts_map_to_the_pointed_cell() {
+    // VS Code's xterm.js reports exactly 100 columns of 7.83 pixels and 100 rows of 17.35.
+    let grid = Grid::new(100, 100, 783, 1735, true).unwrap();
+    let cell = |x, y| {
+        let (cell, _) = cells(Some(grid), pixels(MouseEventKind::Moved, x, y));
+        (cell.column, cell.row)
+    };
+
+    assert_eq!(cell(5, 872), (0, 50));
+    assert_eq!(cell(5, 1566), (0, 90));
+    assert_eq!(cell(700, 5), (89, 0));
 }
 
 #[test]
@@ -81,11 +91,8 @@ fn the_cell_size_reply_reads_as_width_and_height() {
 
 #[test]
 fn pixel_reports_need_window_cells_matching_the_probed_cell_size() {
-    let leftover = Grid {
-        width: 1009,
-        height: 819,
-        ..GRID
-    };
+    let leftover = Grid::new(100, 40, 1009, 819, false).unwrap();
+    let fractional = Grid::new(100, 100, 1000, 1750, true).unwrap();
     let scaled = Grid {
         width: 2000,
         height: 1600,
@@ -94,6 +101,10 @@ fn pixel_reports_need_window_cells_matching_the_probed_cell_size() {
 
     assert_eq!(validated(Some((10, 20)), Some(GRID)), Some(GRID));
     assert_eq!(validated(Some((10, 20)), Some(leftover)), Some(leftover));
+    assert_eq!(
+        validated(Some((10, 18)), Some(fractional)),
+        Some(fractional)
+    );
     assert_eq!(validated(Some((10, 20)), Some(scaled)), None);
     assert_eq!(validated(None, Some(GRID)), None);
     assert_eq!(validated(Some((10, 20)), None), None);

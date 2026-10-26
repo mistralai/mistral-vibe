@@ -459,6 +459,20 @@ class TestGuardAudioInput:
                 recorder.start(RecordingMode.BUFFER)
             assert "cannot load miniaudio C extension" in str(exc_info.value)
             assert exc_info.value.__cause__ is import_error
+            assert "mistral-vibe[voice]" not in str(exc_info.value)
+
+    def test_start_tells_how_to_install_a_missing_miniaudio(self) -> None:
+        import_error = ModuleNotFoundError("No module named 'miniaudio'")
+        with (
+            patch("vibe.cli.audio_recorder.audio_recorder.ma", None),
+            patch(
+                "vibe.cli.audio_recorder.audio_recorder._MA_IMPORT_ERROR", import_error
+            ),
+        ):
+            recorder = AudioRecorder()
+            with pytest.raises(AudioBackendUnavailableError) as exc_info:
+                recorder.start(RecordingMode.BUFFER)
+            assert 'uv tool install "mistral-vibe[voice]"' in str(exc_info.value)
 
     @patch("vibe.cli.audio_recorder.audio_recorder.ma.CaptureDevice")
     def test_start_raises_when_no_device(self, mock_device_cls: MagicMock) -> None:

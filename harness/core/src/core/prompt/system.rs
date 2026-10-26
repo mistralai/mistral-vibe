@@ -45,8 +45,9 @@ pub(crate) fn build_system_prompt(
     tool_group_inventory_prompt_section: &str,
 ) -> String {
     let mut sections = vec![build_generic_system_prompt(config)];
-    if !config.system_instructions.trim().is_empty() {
-        sections.push(config.system_instructions.trim().to_string());
+    let system_instructions = config.system_instructions.trim();
+    if !system_instructions.is_empty() {
+        sections.push(format!("## Use-case instructions\n\n{system_instructions}"));
     }
     if !tool_group_inventory_prompt_section.is_empty() {
         sections.push(tool_group_inventory_prompt_section.to_string());
@@ -62,7 +63,8 @@ fn build_generic_system_prompt(config: &HarnessConfig) -> String {
     let prompts = &config.settings.prompts;
     let programmatic = config.settings.tools.programmatic.is_enabled();
     let skill_mode = config.settings.tools.skills;
-    let skills_on = !skill_mode.is_disabled();
+    // Name the `skill` tool only when the Session exposes it.
+    let skills_on = skill_mode.exposes(config.skills());
     // The default guidance names the skill and programmatic tools, so it is rebuilt for the
     // features this Session has. An override is prompt research and is used as written.
     let (intro, autonomy) = if prompts.guidance == PromptSettings::default().guidance {
@@ -232,7 +234,11 @@ mod tests {
         assert!(skill_catalog < knowledge_folders);
         assert!(system_prompt.contains("<available-knowledge-folders>"));
         assert!(system_prompt.contains("</available-knowledge-folders>"));
-        assert!(!system_prompt.contains("## Use-case instructions"));
+        assert!(
+            system_prompt.contains(
+                "## Use-case instructions\n\nProduct instructions before dynamic catalogs."
+            )
+        );
         let Some(Action::Completion {
             model_input:
                 ModelInputUpdate {
@@ -281,7 +287,7 @@ mod tests {
         assert!(prompt.contains("let the runtime's approval mechanism handle it"));
         assert!(!prompt.contains("## Process"));
         assert!(!prompt.contains("Complete the task using tools as needed."));
-        assert!(prompt.contains("use `run_typescript` to read `new Date().toISOString()`"));
+        assert!(prompt.contains("call `run_typescript` to read `new Date().toISOString()`"));
         assert!(!prompt.contains("step()"));
         assert!(!prompt.contains("await step"));
         assert!(prompt.contains("proactively call the `skill` tool"));
@@ -295,6 +301,30 @@ mod tests {
         assert!(!prompt.contains("mode: \"best_match\""));
         assert!(!prompt.contains("all_connector_capabilities"));
         assert!(!prompt.contains("moreCandidatesAvailable"));
+    }
+
+    #[test]
+    fn system_prompt_without_skills_names_no_skill_tool() {
+        for mode in [skills::Mode::WhenConfigured, skills::Mode::Enabled] {
+            let mut config = config();
+            config.settings.tools.skills = mode;
+
+            let resolved_tools = ResolvedTools::compile(&config).expect("tools resolve");
+            let prompt = build_system_prompt(
+                &config,
+                resolved_tools.tool_group_inventory_prompt_section(),
+            );
+
+            assert!(
+                resolved_tools
+                    .top_level_tools()
+                    .iter()
+                    .all(|tool| tool.name != "skill"),
+                "{mode:?}"
+            );
+            assert!(!prompt.contains("`skill`"), "{mode:?}");
+            assert!(!prompt.contains("## Available Skills"), "{mode:?}");
+        }
     }
 
     #[test]

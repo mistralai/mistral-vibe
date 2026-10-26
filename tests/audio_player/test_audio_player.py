@@ -224,6 +224,30 @@ class TestGuardAudioOutput:
             with pytest.raises(AudioBackendUnavailableError):
                 player.play(_make_wav_bytes(), AudioFormat.WAV)
 
+    def test_tells_how_to_install_a_missing_miniaudio(self) -> None:
+        import_error = ModuleNotFoundError("No module named 'miniaudio'")
+        with (
+            patch("vibe.cli.audio_player.audio_player.ma", None),
+            patch("vibe.cli.audio_player.audio_player._MA_IMPORT_ERROR", import_error),
+        ):
+            player = AudioPlayer()
+            with pytest.raises(AudioBackendUnavailableError) as exc_info:
+                player.play(_make_wav_bytes(), AudioFormat.WAV)
+            assert 'uv tool install "mistral-vibe[voice]"' in str(exc_info.value)
+            assert exc_info.value.__cause__ is import_error
+
+    def test_does_not_suggest_reinstalling_for_a_driver_failure(self) -> None:
+        import_error = OSError("cannot load the audio driver")
+        with (
+            patch("vibe.cli.audio_player.audio_player.ma", None),
+            patch("vibe.cli.audio_player.audio_player._MA_IMPORT_ERROR", import_error),
+        ):
+            player = AudioPlayer()
+            with pytest.raises(AudioBackendUnavailableError) as exc_info:
+                player.play(_make_wav_bytes(), AudioFormat.WAV)
+            assert "cannot load the audio driver" in str(exc_info.value)
+            assert "mistral-vibe[voice]" not in str(exc_info.value)
+
     @patch("vibe.cli.audio_player.audio_player.ma.PlaybackDevice")
     def test_raises_when_no_output_device(self, mock_device_cls: MagicMock) -> None:
         with patch("vibe.cli.audio_player.audio_player.ma.Devices") as mock_devices_cls:

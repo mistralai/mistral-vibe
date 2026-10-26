@@ -194,14 +194,15 @@ async def test_the_agents_md_hook_reads_subdirectory_docs_through_the_adapter(
             {"path": "pkg/mod/AGENTS.md", "content": "# Module rules"},
         ),
         (
-            "file_system.search_replace",
+            "file_system.edit",
             {
                 "file_path": "pkg/mod/AGENTS.md",
-                "content": [{"old_str": "", "new_str": "# Module rules"}],
+                "old_string": "",
+                "new_string": "# Module rules",
             },
         ),
     ],
-    ids=["write_file", "search_replace"],
+    ids=["write_file", "edit"],
 )
 @pytest.mark.asyncio
 async def test_the_agents_md_hook_looks_in_each_sandbox_directory_once(

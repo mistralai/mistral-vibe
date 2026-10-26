@@ -775,6 +775,10 @@ class _CompletionResultAssembler:
     def finish(
         self, *, finish_reason: RustCompletionFinishReason, usage: RustTokenUsage | None
     ) -> RustCompletionResult:
+        # Core sizes the next request from each reply's usage; the stream fails
+        # as a provider failure without it.
+        if usage is None:
+            raise RuntimeError("The provider reply has no token usage.")
         return RustCompletionResult(
             parts=self._parts, finish_reason=finish_reason, usage=usage
         )

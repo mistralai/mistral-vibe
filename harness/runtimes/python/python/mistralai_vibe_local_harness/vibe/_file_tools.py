@@ -76,31 +76,27 @@ class WriteFileAnnotations(BaseModel):
     previous_content: str
 
 
-class SearchReplaceBlock(BaseModel):
-    old_str: str = Field(min_length=1)
-    new_str: str
+class EditArgs(BaseModel):
+    file_path: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    old_string: str = Field(min_length=1)
+    new_string: str
     replace_all: bool = False
 
 
-class SearchReplaceArgs(BaseModel):
-    file_path: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-    content: list[SearchReplaceBlock] = Field(min_length=1)
-
-
-class SearchReplaceResult(BaseModel):
+class EditResult(BaseModel):
     file: str
     lines_changed: int
     warnings: list[str] = Field(default_factory=list)
 
 
-class SearchReplacePreviewBlock(BaseModel):
+class EditPreviewBlock(BaseModel):
     old_start_line: int
     new_start_line: int
     old_lines: list[str]
     new_lines: list[str]
 
 
-class SearchReplaceAnnotations(BaseModel):
+class EditAnnotations(BaseModel):
     """Applied replacement previews and the text the edit replaced.
 
     ``previous_content`` is the file's whole pre-edit text, carried so readers
@@ -109,7 +105,7 @@ class SearchReplaceAnnotations(BaseModel):
     UTF-8 or was larger than the write annotation cap.
     """
 
-    blocks: list[SearchReplacePreviewBlock]
+    blocks: list[EditPreviewBlock]
     previous_content: str | None = None
 
 
@@ -132,13 +128,13 @@ class WriteFileResponse(BaseModel):
         return {WRITE_FILE_ANNOTATION_KEY: previous.model_dump(mode="json")}
 
 
-class SearchReplaceResponse(BaseModel):
-    result: SearchReplaceResult
-    annotations: list[SearchReplacePreviewBlock]
+class EditResponse(BaseModel):
+    result: EditResult
+    annotations: list[EditPreviewBlock]
     previous_content: str | None = None
 
     def meta(self) -> dict[str, JsonValue] | None:
-        previews = SearchReplaceAnnotations(
+        previews = EditAnnotations(
             blocks=self.annotations, previous_content=self.previous_content
         )
         return {SEARCH_REPLACE_ANNOTATION_KEY: previews.model_dump(mode="json")}
@@ -149,18 +145,14 @@ class FileTool:
     """How one file tool's arguments and helper response are read."""
 
     name: FileToolName
-    arguments: type[ReadFileArgs] | type[WriteFileArgs] | type[SearchReplaceArgs]
-    response: (
-        type[ReadFileResponse] | type[WriteFileResponse] | type[SearchReplaceResponse]
-    )
+    arguments: type[ReadFileArgs] | type[WriteFileArgs] | type[EditArgs]
+    response: type[ReadFileResponse] | type[WriteFileResponse] | type[EditResponse]
 
 
 FILE_TOOLS: Mapping[str, FileTool] = {
     "file_system.read_file": FileTool("read_file", ReadFileArgs, ReadFileResponse),
     "file_system.write_file": FileTool("write_file", WriteFileArgs, WriteFileResponse),
-    "file_system.search_replace": FileTool(
-        "search_replace", SearchReplaceArgs, SearchReplaceResponse
-    ),
+    "file_system.edit": FileTool("edit", EditArgs, EditResponse),
 }
 
 

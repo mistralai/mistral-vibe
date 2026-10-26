@@ -12,13 +12,13 @@ handshake = {
 }
 
 # The bottom bar is the last terminal row (40); "workdir" sits at columns 7-13
-# of "/test/workdir [PID 0]", so a click at column 9 lands inside the word.
+# of "/test/workdir", so a click at column 9 lands inside the word.
 _ROW = 40
 _CLICK = f"\x1b[<0;9;{_ROW}M\x1b[<0;9;{_ROW}m"
 _DOUBLE_CLICK = _CLICK * 2
 _COMMAND_C = "\x1b[99;9u"
 
 clipboard_contains = ("workdir",)
-clipboard_excludes = ("/test", "PID")
+clipboard_excludes = ("/test",)
 
 timeline: Timeline = [_DOUBLE_CLICK, _COMMAND_C]

@@ -29,6 +29,9 @@ def _is_valid_optional_custom_domain(value: str) -> bool:
 class CustomDomainScreen(OnboardingScreen):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape", "back", "Back", show=False),
+        # With a pinned console both inputs are disabled, so Enter reaches the
+        # screen instead of an input; otherwise the focused input consumes it.
+        Binding("enter", "submit", "Continue", show=False),
         Binding("ctrl+c", "cancel", "Cancel", show=False),
     ]
 
@@ -102,8 +105,12 @@ class CustomDomainScreen(OnboardingScreen):
         self._reset_input()
 
     def _reset_input(self) -> None:
-        domain_seed = self.onboarding_app.configured_custom_domain or ""
-        api_seed = self.onboarding_app.configured_custom_api_base or ""
+        app = self.onboarding_app
+        # A pinned console URL is prefilled and locked.
+        pinned = app.pinned_console_url
+        domain_seed = pinned or app.configured_custom_domain or ""
+        # Pinned: the API base derives from the console, never from config.
+        api_seed = "" if pinned is not None else (app.configured_custom_api_base or "")
         self._suppress_domain_feedback = bool(domain_seed) or bool(
             self.domain_input.value
         )
@@ -112,12 +119,38 @@ class CustomDomainScreen(OnboardingScreen):
         )
         self.domain_input.value = domain_seed
         self.domain_input.cursor_position = len(domain_seed)
+        self.domain_input.disabled = pinned is not None
         self.api_base_input.value = api_seed
         self.api_base_input.cursor_position = len(api_seed)
+        self.api_base_input.disabled = pinned is not None
         self.domain_input.focus()
         feedback = self.query_one("#feedback", NoMarkupStatic)
         self._reset_feedback(feedback, self.query_one("#domain-box"))
         self._reset_feedback(feedback, self.query_one("#api-base-box"))
+        self._apply_pinned_copy(pinned)
+
+    def _apply_pinned_copy(self, pinned: str | None) -> None:
+        title = self.query_one("#custom-domain-title", NoMarkupStatic)
+        subtitle = self.query_one("#custom-domain-subtitle", NoMarkupStatic)
+        domain_box = self.query_one("#domain-box")
+        api_base_box = self.query_one("#api-base-box")
+        if pinned is None:
+            title.update("Use a custom domain")
+            subtitle.update("Point Vibe at a Mistral-compatible deployment.")
+            domain_box.border_title = "Custom domain"
+            api_base_box.display = True
+            return
+        title.update("Sign in to your console")
+        subtitle.update(
+            "Your administrator has configured Vibe to sign in to this console."
+        )
+        domain_box.border_title = "Console URL"
+        # Nothing left to configure: the API base derives from the pinned console.
+        api_base_box.display = False
+        feedback = self.query_one("#feedback", NoMarkupStatic)
+        feedback.update(shortcut_hint(f"Press {shortcut('Enter')} to continue ↵"))
+        feedback.add_class("success")
+        domain_box.add_class("valid")
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "api-base":
@@ -177,9 +210,24 @@ class CustomDomainScreen(OnboardingScreen):
         box.add_class("valid")
 
     def on_input_submitted(self, _event: Input.Submitted) -> None:
-        domain = self.domain_input.value.strip()
+        self._submit()
+
+    def action_submit(self) -> None:
+        # Pinned only: both inputs are disabled, so Enter reaches the screen
+        # instead of an input's Input.Submitted.
+        if self.onboarding_app.pinned_console_url is None:
+            return
+        self._submit()
+
+    def _submit(self) -> None:
+        app = self.onboarding_app
+        domain = (app.pinned_console_url or self.domain_input.value).strip()
         if not is_valid_custom_domain(domain):
             self._render_domain_feedback(domain, self.domain_input.validate(domain))
+            return
+        if app.pinned_console_url is not None:
+            app.apply_pinned_console_url()
+            app.switch_screen("browser_sign_in")
             return
         api_base = self.api_base_input.value.strip()
         if api_base and not is_valid_custom_domain(api_base):
@@ -187,11 +235,13 @@ class CustomDomainScreen(OnboardingScreen):
                 api_base, self.api_base_input.validate(api_base)
             )
             return
-        app = self.onboarding_app
         app.apply_custom_domain(domain, api_base or None)
         app.switch_screen("browser_sign_in")
 
     def action_back(self) -> None:
+        if self.onboarding_app.pinned_console_url is not None:
+            self.app.switch_screen("auth_method")
+            return
         self.app.switch_screen("sign_in_target")
 
     def _reset_feedback(self, feedback: NoMarkupStatic, box: Widget) -> None:

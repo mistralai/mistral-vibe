@@ -227,6 +227,44 @@ async function main() {
         await host.shutdown()
 
 
+@pytest.mark.parametrize("path", ["--help", "--pre=removed-grep-sentinel", "-n"])
+@pytest.mark.asyncio
+async def test_removed_grep_rejects_option_shaped_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """Obsolete Grep calls never reach a backend, even with Auto Approve."""
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    scripted = _ScriptedCompletion()
+    scripted.next_call = RustCompletionResultToolCallPart(
+        id="removed-grep-option",
+        name="grep",
+        arguments_json=json.dumps({"pattern": ".", "path": path}),
+    )
+    monkeypatch.setattr(
+        "mistralai_vibe_local_harness.vibe._local_actions.execute_completion", scripted
+    )
+    host = await _todo_host(tmp_path)
+    try:
+        session = await host.start(_start_params(tmp_path))
+        await _run_turn(session.backend, scripted, "search the requested path")
+        response = next(
+            message
+            for message in scripted.final_inputs[-1]
+            if message.get("tool_call_id") == "removed-grep-option"
+        )
+        assert response["outcome"] == "failure"
+        result = json.loads(response["content"][0]["text"])["result"]
+        assert result == {
+            "type": "error",
+            "error": {
+                "name": "InvalidToolCall",
+                "message": 'unsupported top-level tool "grep"',
+            },
+        }
+    finally:
+        await host.shutdown()
+
+
 def _settled_todo_contents(state: PublicSessionState) -> list[str]:
     for entry in reversed(state.history or []):
         raw = entry.model_dump(mode="json", by_alias=True)

@@ -657,6 +657,18 @@ pub fn handle_thinking_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     }
 }
 
+/// The artifacts modal owns keys: arrows/jk navigate, Enter opens the
+/// highlighted link, Esc closes.
+pub fn handle_artifacts_modal_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => crate::artifacts_modal::close(app),
+        KeyCode::Up | KeyCode::Char('k') => crate::artifacts_modal::navigate(app, false),
+        KeyCode::Down | KeyCode::Char('j') => crate::artifacts_modal::navigate(app, true),
+        KeyCode::Enter => crate::artifacts_modal::select(app),
+        _ => {}
+    }
+}
+
 /// Hand a commit's answer to the main thread, which releases the commit once it
 /// has applied it. With no receiver the commit is released here instead.
 pub(crate) async fn deliver<T>(tx: Option<mpsc::Sender<T>>, event: T, pending: &Arc<AtomicU32>) {
@@ -886,15 +898,7 @@ fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
     if app.quit.is_confirmed(QuitConfirmKey::CtrlC) {
         return true;
     }
-    if app.vibe_code_project.open || app.vibe_code_project.pending {
-        crate::vibe_code_project::input::handle_key(
-            app,
-            client,
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        );
-        return false;
-    }
-    // Reject the approval or cancel the question.
+    // Reject the approval or cancel the question, which a turn shows over any picker.
     let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
     if app.approval.open {
         crate::approval::handle_key(app, client, esc);
@@ -904,8 +908,17 @@ fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
         question_input::handle_key(app, client, esc);
         return false;
     }
+    if app.vibe_code_project.open || app.vibe_code_project.pending {
+        crate::vibe_code_project::input::handle_key(app, client, esc);
+        return false;
+    }
     // An active narrator stops first, before the queue step.
     if turn_summary::cancel(app) {
+        return false;
+    }
+    // A picker hides the queue and the turn behind it, so never drop or interrupt them.
+    if app.picker_focused() {
+        request_quit_confirmation(app, QuitConfirmKey::CtrlC);
         return false;
     }
     // Ladder step before arming quit: drop the newest queued prompt (LIFO).

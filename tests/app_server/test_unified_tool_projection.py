@@ -26,8 +26,8 @@ from vibe.app_server.models import (
     CompletedEffectState,
     EffectResultDisplay,
     FailedEffectState,
-    FileEditEffectBatchInput,
     FileEditEffectDetail,
+    FileEditEffectInput,
     FileEditEffectOutput,
     FileReadEffectDetail,
     FileReadEffectOutput,
@@ -229,20 +229,19 @@ def test_leaves_a_write_generic_when_the_runtime_omits_file_existed() -> None:
     assert isinstance(projected.detail, GenericEffectDetail)
 
 
-def test_projects_unified_batched_search_replace_and_occurrences() -> None:
+def test_projects_unified_edit_and_occurrences() -> None:
     entry = _effect(
-        "file_system.search_replace",
+        "file_system.edit",
         {
             "file_path": "notes.txt",
-            "content": [
-                {"old_str": "alpha", "new_str": "beta"},
-                {"old_str": "one", "new_str": "two", "replace_all": True},
-            ],
+            "old_string": "one\n",
+            "new_string": "two\n",
+            "replace_all": True,
         },
         result={
             "structured_content": {
                 "file": "/workspace/notes.txt",
-                "lines_changed": 3,
+                "lines_changed": 2,
                 "warnings": ["review generated content"],
             },
             "_meta": {
@@ -251,8 +250,8 @@ def test_projects_unified_batched_search_replace_and_occurrences() -> None:
                         {
                             "old_start_line": 2,
                             "new_start_line": 2,
-                            "old_lines": ["alpha"],
-                            "new_lines": ["beta"],
+                            "old_lines": ["one\n"],
+                            "new_lines": ["two\n"],
                         },
                         {
                             "old_start_line": 5,
@@ -270,29 +269,23 @@ def test_projects_unified_batched_search_replace_and_occurrences() -> None:
 
     assert isinstance(projected, PublicEffectEntry)
     assert isinstance(projected.detail, FileEditEffectDetail)
-    assert isinstance(projected.detail.input, FileEditEffectBatchInput)
-    assert [change.old_string for change in projected.detail.input.changes] == [
-        "alpha",
-        "one",
-    ]
-    assert projected.detail.input.changes[1].replace_all
+    assert projected.detail.input == FileEditEffectInput(
+        file_path="notes.txt", old_string="one\n", new_string="two\n", replace_all=True
+    )
     assert isinstance(projected.state, CompletedEffectState)
     output = FileEditEffectOutput.model_validate(projected.state.output)
     assert output.old_string is None
     assert output.new_string is None
     assert [
         (item.start_line, item.old_text, item.new_text) for item in output.occurrences
-    ] == [(2, "alpha", "beta"), (5, "one\n", "two\n")]
+    ] == [(2, "one\n", "two\n"), (5, "one\n", "two\n")]
     assert projected.state.display.warnings == ["review generated content"]
 
 
-def test_projects_search_replace_carried_preedit_text_and_anchors() -> None:
+def test_projects_edit_carried_preedit_text_and_anchors() -> None:
     entry = _effect(
-        "file_system.search_replace",
-        {
-            "file_path": "notes.txt",
-            "content": [{"old_str": "one\n", "new_str": "two\n"}],
-        },
+        "file_system.edit",
+        {"file_path": "notes.txt", "old_string": "one\n", "new_string": "two\n"},
         result={
             "structured_content": {
                 "file": "/workspace/notes.txt",
@@ -327,15 +320,12 @@ def test_projects_search_replace_carried_preedit_text_and_anchors() -> None:
     ] == [(2, 2, "one\n", "two\n")]
 
 
-def test_projects_search_replace_without_carried_text_stays_positional() -> None:
+def test_projects_edit_without_carried_text_stays_positional() -> None:
     # A runtime predating the carried pre-edit text annotates blocks only;
     # the reversal falls back to the hunks alone.
     entry = _effect(
-        "file_system.search_replace",
-        {
-            "file_path": "notes.txt",
-            "content": [{"old_str": "alpha", "new_str": "beta"}],
-        },
+        "file_system.edit",
+        {"file_path": "notes.txt", "old_string": "alpha", "new_string": "beta"},
         result={
             "structured_content": {
                 "file": "/workspace/notes.txt",
@@ -933,8 +923,8 @@ def test_edit_write_and_grep_paths_display_relative(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     target = str(root / "notes.txt")
     edit = _effect(
-        "file_system.search_replace",
-        {"file_path": target, "content": [{"old_str": "a", "new_str": "b"}]},
+        "file_system.edit",
+        {"file_path": target, "old_string": "a", "new_string": "b"},
         error="failed",
     )
     write = _effect(

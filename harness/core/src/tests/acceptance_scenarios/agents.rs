@@ -213,7 +213,7 @@ fn operator_task_framing_identifies_inherited_source_and_recipient() {
     });
     let mut child = SynchronousRuntime::new_with_conversation(
         serde_json::from_value(settings).unwrap(),
-        parent.export_conversation("all"),
+        parent.export_conversation(json!({"mode": "forked", "turns": "all"})),
     );
     let content = json!([
         {"type":"text", "text":"Agent task from /root/research:\n"},
@@ -288,7 +288,7 @@ fn delegated_tasks_frame_inherited_context_without_resuming_parent_work() {
                 "Resume the audit and spawn helpers.",
             )),
     );
-    let seed = parent.export_conversation("all");
+    let seed = parent.export_conversation(json!({"mode": "forked", "turns": "all"}));
     let mut child_config = config();
     child_config.task_id = "child".into();
     child_config.system_instructions = "CHILD AUDIT INSTRUCTIONS".into();
@@ -330,7 +330,10 @@ fn delegated_tasks_frame_inherited_context_without_resuming_parent_work() {
         expected_messages.push(model_assistant_text(answer));
         child.restart_from_checkpoint();
     }
-    assert_eq!(parent.export_conversation("all"), seed);
+    assert_eq!(
+        parent.export_conversation(json!({"mode": "forked", "turns": "all"})),
+        seed
+    );
 }
 
 /// *Prepare*: A parent's program call that spawns a forked helper is still running.
@@ -370,8 +373,10 @@ fn forked_child_sees_the_running_spawn_call_closed_before_its_task() {
     // Do
     let mut child_config = config();
     child_config.task_id = "child".into();
-    let mut child =
-        SynchronousRuntime::new_with_conversation(child_config, parent.export_conversation("all"));
+    let mut child = SynchronousRuntime::new_with_conversation(
+        child_config,
+        parent.export_conversation(json!({"mode": "forked", "turns": "all"})),
+    );
     let child_action = child
         .apply(
             json!({
@@ -962,7 +967,7 @@ fn canonical_agent_operations_survive_restore() {
         ),
         (
             "interrupt",
-            json!({"name": "child"}),
+            json!({"agent_path": "child", "reason": "plan changed"}),
             json!({"type": "success"}),
         ),
     ];

@@ -70,7 +70,7 @@ fn completion(action_id: &str, parts: Value) -> Value {
         "result": {
             "parts": parts,
             "finish_reason": "stop",
-            "usage": null,
+            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
         },
     })
 }
@@ -235,7 +235,7 @@ fn restore_preserves_a_pending_tool_continuation_and_restarts_step_delivery() {
                     "arguments_json": "{\"path\":\"notes.txt\"}"
                 }],
                 "finish_reason": "tool_call",
-                "usage": null
+                "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0}
             }
         }),
     )));

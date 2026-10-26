@@ -15,15 +15,14 @@ _BRAILLE = re.compile(r"[\u2800-\u28ff]")
 # The pulse spinner alternates filled/hollow squares on an unsynced 100 ms clock,
 # so canonicalize the hollow frame to the filled one before comparing.
 _PULSE_HOLLOW, _PULSE_FILLED = "\u25a1", "\u25a0"
-_PID = re.compile(r"(?<=PID )\d+")
-# The loading hint's turn-elapsed counter (`Generating… (0s …`) is wall-clock,
-# so a slower host renders `12s` or `1m5s` where a fast one renders `0s`.
-# Collapse it to a fixed-width `#s` so the golden is host-independent.
-_ELAPSED = re.compile(r"(?<=… \()(?:\d+h)?(?:\d+m)?\d+s(?= )")
-# Mask the update dialog's `<client version> → <latest>` digits (like PID) so
-# goldens survive a version bump; the `semver → semver` lookahead keeps fixture
-# versions, IPs, and the pinned latest intact. Same-width limitation as PID
-# masking: a digit-count change or a row wrap still needs one regen.
+# The loading hint's turn-elapsed counter (`Generating… (0s …` or `(0s)` alone)
+# is wall-clock, so a slower host renders `12s` or `1m5s` where a fast one
+# renders `0s`. Collapse it to a fixed-width `#s` so the golden is host-independent.
+_ELAPSED = re.compile(r"(?<=… \()(?:\d+h)?(?:\d+m)?\d+s(?=[ )])")
+# Mask the update dialog's `<client version> → <latest>` digits so goldens
+# survive a version bump; the `semver → semver` lookahead keeps fixture
+# versions, IPs, and the pinned latest intact. The mask keeps the width, so a
+# digit-count change or a row wrap still needs one regen.
 _UPDATE_CURRENT = re.compile(r"\d+\.\d+\.\d+(?= → \d+\.\d+\.\d+)")
 _SCROLLBAR_THUMB = re.compile(r"[\u2581-\u2587]")
 _VIBE_DIR = str(VIBE_DIR)
@@ -158,7 +157,7 @@ def _normalized_cells(snapshot: Snapshot) -> list[list[Cell]]:
     normalized: list[list[Cell]] = []
     for cell_row in normalized_rows:
         grid_row = "".join(cell.character for cell in cell_row)
-        pid_columns = _pid_columns(grid_row) | _version_columns(grid_row)
+        version_columns = _version_columns(grid_row)
         row: list[Cell] = []
         # Mask whole scrollbar columns so blank thumb cells cannot vary by host.
         for x, cell in enumerate(cell_row):
@@ -190,7 +189,7 @@ def _normalized_cells(snapshot: Snapshot) -> list[list[Cell]]:
                         cell.hyperlink,
                     )
                 )
-            elif x in pid_columns:
+            elif x in version_columns:
                 row.append(
                     Cell(
                         "#",
@@ -204,14 +203,6 @@ def _normalized_cells(snapshot: Snapshot) -> list[list[Cell]]:
                 row.append(cell)
         normalized.append(row)
     return normalized
-
-
-def _pid_columns(row: str) -> set[int]:
-    return {
-        column
-        for match in _PID.finditer(row)
-        for column in range(match.start(), match.end())
-    }
 
 
 def _version_columns(row: str) -> set[int]:

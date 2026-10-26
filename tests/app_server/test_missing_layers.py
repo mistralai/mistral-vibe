@@ -55,6 +55,7 @@ from vibe.core.model_catalog import ModelCatalogResponse, parse_model_catalog_re
 from vibe.core.model_catalog.cache import store_cached_model_catalog
 from vibe.core.model_catalog.wait import mark_model_catalog_failed, model_catalog_failed
 from vibe.core.telemetry.types import LaunchContext
+from vibe.core.trusted_folders import TrustedFoldersManager
 
 _CLIENT = ClientInfo(name="vibe-desktop", version="9.9.9")
 _ORG_TOML = 'default_agent = "ask"\n'
@@ -426,6 +427,7 @@ class _RecordingHost(HostRequestHandler):
         raw_params: dict[str, Any],
         *,
         session_id: str | None = None,
+        worktree_trust_store: TrustedFoldersManager | None = None,
         client_info: ClientInfo | None = None,
     ) -> DispatchResult:
         self.dispatched.append((method, session_id, client_info))

@@ -91,7 +91,7 @@ impl CandidateMessage {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ToolOutcome {
     Success,

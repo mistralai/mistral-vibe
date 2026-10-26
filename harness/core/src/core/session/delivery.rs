@@ -11,11 +11,10 @@ use crate::core::step_protocol::{
 };
 use crate::core::step_protocol::{
     HarnessActionDirective, HarnessCommand, HarnessCommandRejection, HarnessInput,
-    HarnessNextAction, STEP_PROTOCOL_VERSION, SessionTransition, Turn, invalid_command,
+    HarnessNextAction, MAX_SAFE_JSON_INTEGER, STEP_PROTOCOL_VERSION, SessionTransition, Turn,
+    invalid_command,
 };
 use crate::core::wire::message::StoredMessage;
-
-const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone)]
 struct InputReceipt {

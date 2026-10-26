@@ -77,8 +77,15 @@ fn push_wrapped(
 /// A fence body. A standalone widget keeps the `MarkdownFence > Label`
 /// padding (one blank row above and below, two indent columns on truecolor)
 /// and washes the label box in the fence background; the chat tcss zeroes it.
+/// A chat fence sits inside a keyline box, like a table: one rule row above
+/// and below, one rail column either side.
 fn render_code(lines: &[Vec<Span<'static>>], width: u16, frame: Frame, out: &mut Out) {
     let content = (width as usize).saturating_sub(2 * frame.pad);
+    // Below five content columns the box cannot fit its rails and text: bare fence.
+    if frame.profile == Profile::Assistant && content >= 5 {
+        boxed_code(lines, content, frame, out);
+        return;
+    }
     let (wrap, indent, bg) = match frame.profile {
         Profile::Assistant => (content, 0, None),
         Profile::Widget => {
@@ -137,6 +144,46 @@ fn bg_style(bg: Option<ratatui::style::Color>) -> Style {
         Some(bg) => Style::default().bg(bg),
         None => Style::default(),
     }
+}
+
+/// A chat fence's keyline box: `rule, content rows, rule`.
+fn boxed_code(lines: &[Vec<Span<'static>>], content: usize, frame: Frame, out: &mut Out) {
+    let border = Style::default().fg(theme::md_fence_border());
+    let rule = |left: char, right: char| {
+        Line::from(vec![
+            pad(frame.pad),
+            Span::styled(left.to_string(), border),
+            Span::styled("─".repeat(content.saturating_sub(2)), border),
+            Span::styled(right.to_string(), border),
+        ])
+    };
+    let inner = content.saturating_sub(4);
+    let hang = (frame.pad + 2) as u16;
+    out.lines.push(rule('┌', '┐'));
+    for line in lines {
+        if line.iter().all(|span| span.content.trim().is_empty()) {
+            out.lines.push(Line::from(vec![
+                pad(frame.pad),
+                Span::styled("│", border),
+                Span::raw(" ".repeat(inner + 2)),
+                Span::styled("│", border),
+            ]));
+            continue;
+        }
+        for (row, gap) in styled_text::wrap_hard_folded(line, inner) {
+            let mut spans = vec![pad(frame.pad), Span::styled("│ ", border)];
+            let mut used = 0;
+            for span in row {
+                used += span.content.width();
+                spans.push(span);
+            }
+            spans.push(pad(inner.saturating_sub(used)));
+            spans.push(Span::styled(" │", border));
+            out.lines
+                .push_folded(Line::from(spans), Fold::hung(gap, hang));
+        }
+    }
+    out.lines.push(rule('└', '┘'));
 }
 
 /// Render a list at nesting `depth`, its markers offset by `indent` cells.

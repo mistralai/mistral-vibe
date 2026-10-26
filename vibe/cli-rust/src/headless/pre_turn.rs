@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use super::drive::WorkEnd;
@@ -12,7 +12,10 @@ use crate::cli::{HeadlessOptions, HeadlessSession, OutputFormat};
 use crate::headless_run::StopRequests;
 use crate::headless_trust::untrusted_warning;
 use crate::run_export::{RunOutcome, RunWarning};
-use crate::server::{method, Client, ConfigEffectiveReadParams, Notification};
+use crate::server::{method, notification, Client, ConfigEffectiveReadParams, Notification};
+
+/// The `warning` code of a connector or MCP server that failed to load.
+const INTEGRATIONS_UNAVAILABLE: &str = "integrations_unavailable";
 
 /// A reopened session's earlier runs neither spend this run's budgets nor count in its export.
 pub(super) async fn usage_baseline(
@@ -56,12 +59,112 @@ pub(super) async fn host_trust_warning(
     }))
 }
 
+/// Report the config warnings and issues the session started with, and return
+/// the warnings for the export, which gets the issues from the final runtime read.
+pub(super) async fn config_warnings(
+    client: &Arc<Client>,
+    options: &HeadlessOptions,
+    session_id: &str,
+) -> Vec<RunWarning> {
+    let runtime = match client
+        .request(method::RUNTIME_READ, json!({ "sessionId": session_id }))
+        .await
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::warn!("runtime/read for config warnings failed: {error:#}");
+            return Vec::new();
+        }
+    };
+    let (warnings, issues) = startup_config_notices(&runtime);
+    for issue in &issues {
+        report_warning(&options.output, issue);
+    }
+    warnings
+        .into_iter()
+        .map(|message| {
+            report_warning(&options.output, &message);
+            RunWarning {
+                message,
+                source: None,
+            }
+        })
+        .collect()
+}
+
+/// The runtime snapshot's config validation warnings, and its config issues as
+/// `file: message` lines.
+fn startup_config_notices(runtime: &Value) -> (Vec<String>, Vec<String>) {
+    let warnings = runtime
+        .pointer("/runtime/config/validationWarnings")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let issues = runtime
+        .pointer("/runtime/issues")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|issue| {
+                    let message = issue.get("message")?.as_str()?;
+                    Some(match issue.get("file").and_then(Value::as_str) {
+                        Some(file) if !file.is_empty() => format!("{file}: {message}"),
+                        _ => message.to_owned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (warnings, issues)
+}
+
 /// A warning the run goes on despite: in the log, and on stderr unless the run is silent.
 pub(super) fn report_warning(format: &OutputFormat, warning: &str) {
     tracing::warn!("{warning}");
     if *format != OutputFormat::Silent {
         eprintln!("{warning}");
     }
+}
+
+/// Whether `notification` names a connector or MCP server the session could not load.
+pub(super) fn is_integrations_unavailable(notification: &Notification) -> bool {
+    notification.method == notification::WARNING
+        && notification
+            .params
+            .pointer("/warning/code")
+            .and_then(Value::as_str)
+            == Some(INTEGRATIONS_UNAVAILABLE)
+}
+
+/// The connectors and MCP servers the session could not load, reported as run warnings.
+pub(super) fn integrations_unavailable(
+    format: &OutputFormat,
+    settled: &[Notification],
+) -> Vec<RunWarning> {
+    settled
+        .iter()
+        .filter(|notification| is_integrations_unavailable(notification))
+        .filter_map(|notification| {
+            notification
+                .params
+                .pointer("/warning/message")
+                .and_then(Value::as_str)
+        })
+        .map(|message| {
+            report_warning(format, message);
+            RunWarning {
+                message: message.to_owned(),
+                source: Some(INTEGRATIONS_UNAVAILABLE.to_owned()),
+            }
+        })
+        .collect()
 }
 
 /// An abort the server sent before the turn ends the run before the model is called.
@@ -94,3 +197,6 @@ pub(super) async fn read_effective_config(client: &Arc<Client>, session_id: &str
         .context("config/effective/read response missing config")?;
     Ok(config)
 }
+
+#[cfg(test)]
+mod tests;

@@ -294,9 +294,8 @@ async def test_apply_patch_rejects_invalid_schema_result_before_routing() -> Non
             reason="test invalid patch",
         )
 
-    assert exc_info.value.args == (
-        "Config patch failed preflight validation against the merged config; fix the patch payload and retry",
-    )
+    # The schema's issue, so the caller can say what to change.
+    assert exc_info.value.args == ("value: Input should be a valid string",)
     assert isinstance(exc_info.value.__cause__, ValidationError)
 
 

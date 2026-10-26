@@ -153,6 +153,36 @@ class TestPrepareRequest:
         assert payload["max_tokens"] == 1024
         assert "temperature" not in payload
 
+    def test_off_disables_thinking(self, adapter, provider):
+        req = adapter.prepare_request(
+            model_name="claude-sonnet-5",
+            messages=[LLMMessage(role=Role.user, content="Hello")],
+            temperature=0.5,
+            tools=None,
+            max_tokens=None,
+            tool_choice=None,
+            enable_streaming=False,
+            provider=provider,
+            thinking="off",
+        )
+        assert json.loads(req.body)["thinking"] == {"type": "disabled"}
+
+    def test_off_on_always_thinking_model_uses_lowest_level(self, adapter, provider):
+        req = adapter.prepare_request(
+            model_name="claude-opus-5-5@20260301",
+            messages=[LLMMessage(role=Role.user, content="Hello")],
+            temperature=0.5,
+            tools=None,
+            max_tokens=None,
+            tool_choice=None,
+            enable_streaming=False,
+            provider=provider,
+            thinking="off",
+        )
+        payload = json.loads(req.body)
+        assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert payload["output_config"] == {"effort": "low"}
+
     def test_with_tools(self, adapter, provider):
         messages = [LLMMessage(role=Role.user, content="Hello")]
         tools = [
@@ -533,35 +563,6 @@ class TestStreamingEvents:
 
 
 class TestHelperMethods:
-    def test_has_thinking_content_true(self, adapter):
-        messages = [
-            {"role": "user", "content": "Hello"},
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "thinking", "thinking": "Let me think..."},
-                    {"type": "text", "text": "Answer"},
-                ],
-            },
-        ]
-        assert adapter._has_thinking_content(messages) is True
-
-    def test_has_thinking_content_false(self, adapter):
-        messages = [
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Just text"},
-        ]
-        assert adapter._has_thinking_content(messages) is False
-
-    def test_has_thinking_content_empty(self, adapter):
-        assert adapter._has_thinking_content([]) is False
-
-    def test_has_thinking_content_non_list_content(self, adapter):
-        messages = [
-            {"role": "assistant", "content": [{"type": "text", "text": "no thinking"}]}
-        ]
-        assert adapter._has_thinking_content(messages) is False
-
     def test_add_cache_control_to_last_user_message(self, adapter):
         messages = [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}]
         adapter._add_cache_control_to_last_user_message(messages)

@@ -6,6 +6,7 @@ use ratatui::layout::Rect;
 use crate::selection::cells::{is_blank, skip_blanks_right, word_end, word_start};
 use crate::selection::region::RowSpan;
 use crate::selection::Granularity;
+use crate::ui::theme;
 
 /// Leading chrome glyphs, each followed by its own padding column (body text may open with one too).
 const CHROME_GLYPHS: [&str; 6] = ["⎢", "⎣", "⏵", "⏷", "■", "▌"];
@@ -15,8 +16,10 @@ const CHROME_WIDTH: u16 = 2;
 /// Assistant markdown is inset by two display-only cells. Selection starts
 /// after that inset but keeps any additional, content-owned indentation.
 const BODY_PADDING: u16 = 2;
-/// Horizontal rules are decoration, never selectable text.
-const RULE: &str = "─";
+/// Horizontal rules and fence box edges are decoration, never selectable text.
+const EDGE: [&str; 5] = ["─", "┌", "┐", "└", "┘"];
+/// The fence box rail closing a fenced code row after a blank column.
+const RAIL: &str = "│";
 
 /// A row under the selection: its selectable body `[lo, hi]` and clipped `[x0, x1]`.
 struct Row {
@@ -127,24 +130,36 @@ fn body(
         })
         .collect();
     let Some((&(first_x, first_symbol), &(last_x, _))) = visible.first().zip(visible.last()) else {
-        if !copy_blank_rows {
-            return None;
-        }
-        x0 = x0.max(content_start);
-        return (x0 <= x1).then_some(Row {
-            y,
-            lo: content_start,
-            hi: content_start,
-            x0,
-            x1: x0,
-        });
+        return blank_row(y, content_start, x0, x1, copy_blank_rows);
     };
-    if chrome && visible.iter().all(|(_, symbol)| *symbol == RULE) {
+    // A fence's blank content rows paint only their two rails: layout, not
+    // text. The rails bracket the row, so content — even rails-colored —
+    // makes the row wider and keeps it.
+    if chrome
+        && visible.len() == 2
+        && visible
+            .iter()
+            .all(|&(x, symbol)| symbol == RAIL && fence_glyph(buf, x, y))
+    {
+        return blank_row(y, content_start + CHROME_WIDTH, x0, x1, copy_blank_rows);
+    }
+    // Rule rows and fence box edges are decoration, never selectable text:
+    // dashes, like any rule paints them, plus the box's cornered edges. A
+    // code row quoting either keeps its rails and stays content.
+    if chrome
+        && visible.iter().all(|&(x, symbol)| {
+            symbol == EDGE[0] || (EDGE[1..].contains(&symbol) && fence_glyph(buf, x, y))
+        })
+    {
         return None;
     }
     let mut lo = first_x.min(content_start);
     let is_chrome = |x: u16, symbol: &str| {
-        (CHROME_GLYPHS.contains(&symbol) || (x == chat.x && MARKER_GLYPHS.contains(&symbol)))
+        (CHROME_GLYPHS.contains(&symbol)
+            // A fence's leading rail opens the row: content quoting a rail,
+            // in whatever color, never does.
+            || (x == first_x && fence_glyph(buf, x, y))
+            || (x == chat.x && MARKER_GLYPHS.contains(&symbol)))
             && is_blank(buf, x.saturating_add(1), y)
     };
     if chrome && is_chrome(first_x, first_symbol) {
@@ -169,13 +184,68 @@ fn body(
         }
         x1 -= 1;
     }
+    // The fence's closing rail ends the row: content quoting a rail, in
+    // whatever color, never does.
+    if x1 == last_x && x1 > x0 && closing_rail(buf, x1, y) {
+        x1 -= 1;
+        while x1 > x0 && is_blank(buf, x1, y) {
+            x1 -= 1;
+        }
+        if is_blank(buf, x1, y) {
+            return None;
+        }
+    }
     (x0 <= x1).then_some(Row {
         y,
         lo: lo.min(last_x),
-        hi: last_x,
+        hi: content_end(buf, first_x, last_x, y),
         x0,
         x1,
     })
+}
+
+/// A blank or rail-only row under the selection: an empty content row.
+fn blank_row(y: u16, content_start: u16, x0: u16, x1: u16, copy_blank_rows: bool) -> Option<Row> {
+    if !copy_blank_rows {
+        return None;
+    }
+    let x0 = x0.max(content_start);
+    (x0 <= x1).then_some(Row {
+        y,
+        lo: content_start,
+        hi: content_start,
+        x0,
+        x1: x0,
+    })
+}
+
+/// A fence box glyph: the fence border paints it, code quoting the glyph does not.
+fn fence_glyph(buf: &Buffer, x: u16, y: u16) -> bool {
+    buf.cell((x, y)).is_some_and(|cell| {
+        (EDGE.contains(&cell.symbol()) || cell.symbol() == RAIL)
+            && cell.style().fg == Some(theme::md_fence_border())
+    })
+}
+
+/// The rail glyph at `x` closes its row: preceded by a blank column.
+fn closing_rail(buf: &Buffer, x: u16, y: u16) -> bool {
+    buf.cell((x, y)).is_some_and(|cell| {
+        cell.symbol() == RAIL
+            && cell.style().fg == Some(theme::md_fence_border())
+            && is_blank(buf, x.saturating_sub(1), y)
+    })
+}
+
+/// The row's last content column: past the blank and rail that close it.
+fn content_end(buf: &Buffer, first_x: u16, last_x: u16, y: u16) -> u16 {
+    let mut end = last_x;
+    if closing_rail(buf, end, y) {
+        end -= 1;
+        while end > first_x && is_blank(buf, end, y) {
+            end -= 1;
+        }
+    }
+    end
 }
 
 /// Widen the outer ends to whole words or whole rows.

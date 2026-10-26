@@ -12,12 +12,32 @@ use crate::utils::text::wrap_hard;
 
 /// Popup viewport height in content rows (a 12-row popup minus borders).
 const MAX_VISIBLE: usize = 10;
+/// Between a skill's origin and its description.
+const ORIGIN_SEP: &str = " · ";
 
-/// One rendered terminal row: label fragment, selected flag, description fragment.
+/// One rendered terminal row: label fragment, entry flags, description fragment.
 struct VisualLine {
     label: Option<String>,
     selected: bool,
     desc: String,
+    /// Leading characters of `desc` that spell the skill origin (first row only).
+    origin_chars: usize,
+}
+
+/// Column widths: command and description (origin included).
+struct Columns {
+    cmd: usize,
+    desc: usize,
+}
+
+impl Columns {
+    fn new(width: u16, entries: &[CompletionEntry]) -> Self {
+        let cmd = command_width(width, entries);
+        Self {
+            cmd,
+            desc: (width as usize).saturating_sub(7 + cmd),
+        }
+    }
 }
 
 /// Reconcile the viewport offset: reveal the selection on a keyboard move, then clamp.
@@ -61,7 +81,10 @@ pub fn popup_height(app: &App, width: u16) -> u16 {
 
 /// Width of the command column: the widest label, capped at 30% of the width.
 fn command_width(width: u16, entries: &[CompletionEntry]) -> usize {
-    let cap = if entries.iter().any(|entry| !entry.description.is_empty()) {
+    let cap = if entries
+        .iter()
+        .any(|entry| !entry.description.is_empty() || entry.origin.is_some())
+    {
         (width as usize)
             .saturating_mul(30)
             .saturating_div(100)
@@ -83,22 +106,30 @@ fn entry_heights(app: &App, width: u16) -> Vec<usize> {
     if entries.is_empty() {
         return Vec::new();
     }
-    let cmd_w = command_width(width, entries);
-    let desc_w = (width as usize).saturating_sub(7 + cmd_w);
+    let cols = Columns::new(width, entries);
     entries
         .iter()
         .map(|entry| {
-            let (label_lines, desc_lines) = wrapped(entry, cmd_w, desc_w);
+            let (label_lines, desc_lines) = wrapped(entry, &cols);
             label_lines.len().max(desc_lines.len())
         })
         .collect()
 }
 
+/// A skill's description led by its origin (`project · Deploy the app`); others as is.
+fn description(entry: &CompletionEntry) -> String {
+    match (entry.origin, entry.description.is_empty()) {
+        (None, _) => entry.description.clone(),
+        (Some(origin), true) => origin.label().to_owned(),
+        (Some(origin), false) => format!("{}{ORIGIN_SEP}{}", origin.label(), entry.description),
+    }
+}
+
 /// Wrapped label and description rows of one entry, shared by scroll math and drawing.
-fn wrapped(entry: &CompletionEntry, cmd_w: usize, desc_w: usize) -> (Vec<String>, Vec<String>) {
+fn wrapped(entry: &CompletionEntry, cols: &Columns) -> (Vec<String>, Vec<String>) {
     (
-        wrap_hard(display_label(&entry.label), cmd_w),
-        wrap_hard(&entry.description, desc_w),
+        wrap_hard(display_label(&entry.label), cols.cmd),
+        wrap_hard(&description(entry), cols.desc),
     )
 }
 
@@ -108,16 +139,21 @@ fn build_lines(app: &App, width: u16) -> Vec<VisualLine> {
     if entries.is_empty() {
         return Vec::new();
     }
-    let cmd_w = command_width(width, entries);
-    let desc_w = (width as usize).saturating_sub(7 + cmd_w);
+    let cols = Columns::new(width, entries);
     let mut out: Vec<VisualLine> = Vec::new();
     for (idx, entry) in entries.iter().enumerate() {
-        let (label_lines, desc_lines) = wrapped(entry, cmd_w, desc_w);
+        let (label_lines, desc_lines) = wrapped(entry, &cols);
         for line_idx in 0..label_lines.len().max(desc_lines.len()) {
+            let desc = desc_lines.get(line_idx).cloned().unwrap_or_default();
+            let origin_chars = match entry.origin {
+                Some(origin) if line_idx == 0 => origin.label().chars().count(),
+                _ => 0,
+            };
             out.push(VisualLine {
                 label: label_lines.get(line_idx).cloned(),
                 selected: idx == app.completion.selected,
-                desc: desc_lines.get(line_idx).cloned().unwrap_or_default(),
+                origin_chars: origin_chars.min(desc.chars().count()),
+                desc,
             });
         }
     }
@@ -128,13 +164,30 @@ fn display_label(label: &str) -> &str {
     label.strip_prefix('@').unwrap_or(label)
 }
 
+/// `(label, origin, description)` styles of a row.
+fn row_styles(selected: bool) -> (Style, Style, Style) {
+    let bg = Style::default().bg(theme::background());
+    let label = bg.fg(theme::foreground()).add_modifier(Modifier::BOLD);
+    let origin = bg.fg(theme::primary());
+    if !selected {
+        return (label, origin, theme::muted_style().bg(theme::background()));
+    }
+    // The selected command is `bold reverse`, its whole description italic;
+    // a manual color swap would be a no-op under terminal-default ansi colors.
+    (
+        label.add_modifier(Modifier::REVERSED),
+        origin.add_modifier(Modifier::ITALIC),
+        bg.fg(theme::foreground()).add_modifier(Modifier::ITALIC),
+    )
+}
+
 /// Draw the popup into `area` (its full bordered box).
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     if area.width < 8 || area.height < 3 {
         return;
     }
-    let entries = &app.completion.entries;
-    let cmd_w = command_width(area.width, entries);
+    let cols = Columns::new(area.width, &app.completion.entries);
+    let cmd_w = cols.cmd;
     let lines = build_lines(app, area.width);
     let total = lines.len();
 
@@ -148,8 +201,8 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
 
     let text_x = inner.x + 1; // left padding (0, 1)
     let desc_x = text_x + cmd_w as u16 + 2; // command column + margin-right 2
-    let desc_w = inner.width.saturating_sub(1 + cmd_w as u16 + 2 + 1 + 1) as usize;
-    let buf = f.buffer_mut();
+    let desc_w = cols.desc;
+    let scrollbar_x = desc_x + desc_w as u16;
 
     let offset = app
         .completion
@@ -162,33 +215,26 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         .enumerate()
     {
         let y = inner.y + row as u16;
+        let (label_style, origin_style, desc_style) = row_styles(line.selected);
+        let buf = f.buffer_mut();
         if let Some(label) = &line.label {
-            // The selected command is `bold reverse`;
-            // a manual color swap would be a no-op under terminal-default ansi colors.
-            let mut style = Style::default()
-                .fg(theme::foreground())
-                .bg(theme::background())
-                .add_modifier(Modifier::BOLD);
-            if line.selected {
-                style = style.add_modifier(Modifier::REVERSED);
-            }
-            buf.set_stringn(text_x, y, label, cmd_w, style);
+            buf.set_stringn(text_x, y, label, cmd_w, label_style);
         }
-        let desc_style = if line.selected {
-            Style::default()
-                .fg(theme::foreground())
-                .bg(theme::background())
-                .add_modifier(Modifier::ITALIC)
-        } else {
-            theme::muted_style().bg(theme::background())
-        };
-        buf.set_stringn(desc_x, y, &line.desc, desc_w, desc_style);
+        let split = line
+            .desc
+            .char_indices()
+            .nth(line.origin_chars)
+            .map_or(line.desc.len(), |(at, _)| at);
+        let (origin, rest) = line.desc.split_at(split);
+        let (x, _) = buf.set_stringn(desc_x, y, origin, desc_w, origin_style);
+        let used = (x - desc_x) as usize;
+        buf.set_stringn(x, y, rest, desc_w.saturating_sub(used), desc_style);
     }
 
     // Scrollbar in the last content column when the list overflows the viewport.
     if total > inner.height as usize {
         let bar = Rect {
-            x: desc_x + desc_w as u16,
+            x: scrollbar_x,
             y: inner.y,
             width: 1,
             height: inner.height,

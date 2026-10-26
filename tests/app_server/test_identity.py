@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
+
 import httpx
 import pytest
 
@@ -10,6 +13,11 @@ from vibe.app_server._identity import (
     IdentityResult,
 )
 from vibe.app_server.models import IdentityView
+from vibe.core.platform_auth import (
+    ApiKeyPlatformCredentialProvider,
+    PlatformCredentialProvider,
+    PlatformCredentialSnapshot,
+)
 
 
 @pytest.mark.parametrize(
@@ -51,13 +59,42 @@ async def test_http_identity_gateway_parses_response(respx_mock) -> None:
     )
 
     result = await HttpIdentityGateway().read(
-        base_url="https://api.mistral.ai/v1", api_key="server-secret"
+        base_url="https://api.mistral.ai/v1",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("server-secret"),
     )
 
     assert result.id == "user-1"
     assert result.workspace is not None
     assert result.workspace.name == "Analytical Engine"
     assert route.calls.last.request.headers["Authorization"] == "Bearer server-secret"
+
+
+@pytest.mark.asyncio
+async def test_http_identity_gateway_accepts_an_expiring_oauth_snapshot(
+    respx_mock,
+) -> None:
+    route = respx_mock.get("https://api.mistral.ai/v1/users/me").mock(
+        return_value=httpx.Response(200, json={"id": "user-1"})
+    )
+    credentials = AsyncMock(spec=PlatformCredentialProvider)
+    credentials.resolve.return_value = PlatformCredentialSnapshot(
+        kind="oauth_access_token",
+        headers={"Authorization": "Bearer oauth-access-token"},
+        cache_namespace="oauth:desktop-connection",
+        revision="oauth:revision-1",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        source="desktop",
+    )
+
+    result = await HttpIdentityGateway().read(
+        base_url="https://api.mistral.ai/v1", credentials=credentials
+    )
+
+    assert result.id == "user-1"
+    assert route.calls.last.request.headers["Authorization"] == (
+        "Bearer oauth-access-token"
+    )
+    credentials.resolve.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -74,7 +111,8 @@ async def test_http_identity_gateway_ignores_extra_response_fields(respx_mock) -
     )
 
     result = await HttpIdentityGateway().read(
-        base_url="https://api.mistral.ai/v1", api_key="server-secret"
+        base_url="https://api.mistral.ai/v1",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("server-secret"),
     )
 
     assert result == IdentityResult(id="user-1", email="ada@example.com")
@@ -92,7 +130,8 @@ async def test_http_identity_gateway_maps_unauthorized_status(
 
     with pytest.raises(IdentityGatewayUnauthorized):
         await HttpIdentityGateway().read(
-            base_url="https://api.mistral.ai/v1", api_key="server-secret"
+            base_url="https://api.mistral.ai/v1",
+            credentials=ApiKeyPlatformCredentialProvider.from_api_key("server-secret"),
         )
 
 
@@ -106,5 +145,39 @@ async def test_http_identity_gateway_maps_server_error_to_unavailable(
 
     with pytest.raises(IdentityGatewayUnavailable):
         await HttpIdentityGateway().read(
-            base_url="https://api.mistral.ai/v1", api_key="server-secret"
+            base_url="https://api.mistral.ai/v1",
+            credentials=ApiKeyPlatformCredentialProvider.from_api_key("server-secret"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_http_identity_gateway_maps_malformed_response_to_unavailable(
+    respx_mock,
+) -> None:
+    # Producer contract: dashboard/users/public/schemas.py::UserIdentity requires
+    # a string id. Exercise the client-side guard with a response that violates it.
+    respx_mock.get("https://api.mistral.ai/v1/users/me").mock(
+        return_value=httpx.Response(200, json={"id": 123})
+    )
+
+    with pytest.raises(IdentityGatewayUnavailable, match="Invalid identity response"):
+        await HttpIdentityGateway().read(
+            base_url="https://api.mistral.ai/v1",
+            credentials=ApiKeyPlatformCredentialProvider.from_api_key("server-secret"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_http_identity_gateway_maps_transport_failure_to_unavailable(
+    respx_mock,
+) -> None:
+    request = httpx.Request("GET", "https://api.mistral.ai/v1/users/me")
+    respx_mock.get(request.url).mock(
+        side_effect=httpx.ConnectError("identity unavailable", request=request)
+    )
+
+    with pytest.raises(IdentityGatewayUnavailable):
+        await HttpIdentityGateway().read(
+            base_url="https://api.mistral.ai/v1",
+            credentials=ApiKeyPlatformCredentialProvider.from_api_key("server-secret"),
         )

@@ -33,6 +33,7 @@ from vibe.setup.onboarding.context import (
     OnboardingContext,
     browser_auth_account_base,
     browser_auth_requires_origin_rewrite,
+    pinned_console_api_base,
     resolve_browser_auth_urls,
 )
 from vibe.setup.onboarding.screens import (
@@ -84,6 +85,7 @@ class OnboardingApp(App[str | None]):
         self._provider = config.provider
         self._vibe_base_url = config.vibe_base_url
         self._console_base_url = config.console_base_url
+        self._pinned_console_url = config.pinned_console_url
         self._launch_context = launch_context
         self._browser_sign_in_success_delay = browser_sign_in_success_delay
         self._browser_sign_in_url_help_delay = browser_sign_in_url_help_delay
@@ -138,6 +140,15 @@ class OnboardingApp(App[str | None]):
         return self._theme_selection_screen.selected_theme
 
     @property
+    def pinned_console_url(self) -> str | None:
+        """Administrator-pinned console URL (`VIBE_CUSTOM_CONSOLE_URL`), if set.
+
+        When set, sign-in is redirected straight into the pinned console's
+        browser login flow and the domain cannot be modified.
+        """
+        return self._pinned_console_url
+
+    @property
     def configured_custom_domain(self) -> str | None:
         base_url = self._config.provider.browser_auth_base_url
         if not base_url or base_url == DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL:
@@ -178,6 +189,15 @@ class OnboardingApp(App[str | None]):
         # the connector API base origin instead; single-host setups are unchanged.
         self._console_base_url = browser_auth_account_base(
             browser_base_url, browser_api_base_url
+        )
+
+    def apply_pinned_console_url(self) -> None:
+        if self._pinned_console_url is None:
+            msg = "No pinned console URL is configured."
+            raise AssertionError(msg)
+        self.apply_custom_domain(
+            self._pinned_console_url,
+            pinned_console_api_base(self._config.provider, self._pinned_console_url),
         )
 
     def apply_mistral_default_domain(self) -> None:

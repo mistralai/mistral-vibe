@@ -10,6 +10,7 @@ import types
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 import httpx
+import httpx2
 from mistralai.client import Mistral
 from mistralai.client._hooks.types import AfterErrorHook
 from mistralai.client.errors import SDKError
@@ -65,7 +66,9 @@ from vibe.utils.api_keys import resolve_api_key_with_origin
 from vibe.utils.http import (
     VibeAsyncHTTPClient,
     build_ssl_context,
+    disable_sdk_env_telemetry,
     get_server_url_from_api_base,
+    mistral_sdk_client,
 )
 
 if TYPE_CHECKING:
@@ -89,8 +92,8 @@ class _RetryNoticeHook(AfterErrorHook):
         self._report = report
 
     def after_error(
-        self, hook_ctx: Any, response: httpx.Response | None, error: Exception | None
-    ) -> tuple[httpx.Response | None, Exception | None]:
+        self, hook_ctx: Any, response: httpx2.Response | None, error: Exception | None
+    ) -> tuple[httpx2.Response | None, Exception | None]:
         if error is not None:
             self._report(error)
         return response, error
@@ -258,6 +261,7 @@ _THINKING_TO_REASONING_EFFORT: dict[str, ReasoningEffortValue] = {
     "low": "none",
     "medium": "high",
     "high": "high",
+    "xhigh": "high",
     "max": "high",
 }
 
@@ -449,8 +453,9 @@ class MistralBackend:
             server_url=self._server_url,
             timeout_ms=int(self._timeout * 1000),
             retry_config=self._retry_config,
-            async_client=self._http_client,
+            async_client=mistral_sdk_client(self._http_client),
         )
+        disable_sdk_env_telemetry(client)
         _register_retry_hook(client, _RetryNoticeHook(self._report_error))
         if self._enable_otel:
             configure_telemetry(client, provider="global")

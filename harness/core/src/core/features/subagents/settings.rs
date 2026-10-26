@@ -43,6 +43,16 @@ impl Mode {
             idle_message_starts: IdleMessageStarts::DirectChildren,
         }
     }
+    pub(crate) fn with_conversation_forking(mut self, enabled: bool) -> Self {
+        if let Self::Enabled {
+            conversation_forking,
+            ..
+        } = &mut self
+        {
+            *conversation_forking = enabled;
+        }
+        self
+    }
     pub(crate) fn is_enabled(&self) -> bool {
         matches!(self, Self::Enabled { .. })
     }

@@ -58,10 +58,11 @@ from vibe.app_server.provider_auth import ProviderAuthView
 def _raise_for_write(response: ConfigWriteResponse) -> None:
     """Turn a write the app-server declined into an error the caller sees."""
     if response.rejected:
+        reason = f": {response.reason}" if response.reason else ""
         raise AppServerResponseError(
             ProtocolError(
                 code=ProtocolErrorCode.INVALID_PARAMS,
-                message="Invalid configuration edit",
+                message=f"Invalid configuration edit{reason}",
             )
         )
     if response.failures:
@@ -445,7 +446,9 @@ class RuntimeResource:
         if notification.method != "runtime/updated":
             return False
         params = validate_wire(RuntimeUpdatedParams, notification.params)
-        if params.session_id != self._state.session_id:
-            return False
-        self._state.apply_runtime(params.runtime)
+        # Consumed either way: one for another session is a stale announcement
+        # (a background load ending as /clear or a fork replaced the session),
+        # not an event the session stream can place.
+        if params.session_id == self._state.session_id:
+            self._state.apply_runtime(params.runtime)
         return True

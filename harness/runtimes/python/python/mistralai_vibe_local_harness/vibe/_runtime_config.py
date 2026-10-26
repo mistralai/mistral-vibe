@@ -20,8 +20,20 @@ from mistralai_vibe_local_harness.vibe._sandbox import (
     SandboxAdapter,
     sandbox_path,
 )
+from mistralai_vibe_local_harness.vibe.completion_profile import (
+    FIRST_OUTPUT_WAIT_SECONDS,
+    REQUIRED_MAX_TOKENS_FALLBACK,
+    STREAM_IDLE_SECONDS,
+    ReasoningSetting,
+    ReasoningSupport,
+    RequestReasoning,
+    StreamGuard,
+    WireFormat,
+    request_reasoning,
+)
 
-type ThinkingLevel = Literal["off", "low", "medium", "high", "max"]
+# The standard reasoning settings.
+type ThinkingLevel = Literal["off", "low", "medium", "high", "xhigh", "max"]
 
 # "classify" defers to the smart-approve risk classifier at dispatch time; the
 # other three are frozen decisions.
@@ -49,12 +61,14 @@ type ProviderRetryObserver = Callable[[ProviderRetry | None], Awaitable[None]]
 class ProviderStreamDelta:
     """One streamed chunk's visible fragments, straight off the provider stream.
 
-    A chunk carries text, reasoning, or both; empty fragments mean the chunk
-    had neither and the observer is not called for it.
+    A chunk carries text, reasoning, part of a tool call, or several of them;
+    the observer is not called for a chunk with none. ``tool_call`` only says
+    that the chunk carries part of one: the call itself arrives in the result.
     """
 
     text: str = ""
     reasoning: str = ""
+    tool_call: bool = False
 
 
 # Per-chunk observer for a provider stream in progress. Emission is
@@ -169,16 +183,22 @@ class LocalModelRoute:
     model: str = "mistral-vibe-cli-latest"
     temperature: float = 1.0
     thinking: ThinkingLevel = "off"
-    supports_images: bool = True
     # Nucleus sampling; None leaves it to the provider's default.
     top_p: float | None = None
-    # This model's cap on output tokens per request, used when the adapter
-    # config sets no ``max_tokens`` of its own.
+    # The model's max output, sent as ``max_tokens`` where the format requires one
+    # and the adapter config sets none of its own.
     max_output_tokens: int | None = None
-    # The model's context window in tokens. When known, each request's output
-    # cap is clipped to the room the input leaves, so input plus output never
-    # asks for more than the window holds.
-    context_window: int | None = None
+    # The model's reasoning levels; None when nobody knows them.
+    reasoning: ReasoningSupport | None = None
+    # One request's own setting, such as the lowest for a summary; None keeps
+    # ``thinking``.
+    request_thinking: RequestReasoning | None = None
+
+    def reasoning_setting(self, wire: WireFormat) -> ReasoningSetting | None:
+        """The setting one request on this route sends; None leaves the field out."""
+        return request_reasoning(
+            wire, self.thinking, self.reasoning, self.request_thinking
+        )
 
 
 _DEFAULT_LOCAL_MODEL_ROUTE = LocalModelRoute()
@@ -298,7 +318,8 @@ class LocalRuntimeAdapterConfig:
     # Reasoning effort passed to reasoning-capable providers: "off" or a level.
     thinking: ThinkingLevel = "off"
     active_model: LocalModelRoute = field(default_factory=LocalModelRoute)
-    # Only used to record profile changes in the transcript; None disables it.
+    # The agent configuration this session runs: recorded in the transcript when it
+    # changes, and matched by post_agent hooks. None disables the transcript record.
     active_agent: str | None = None
     compaction_model: LocalModelRoute = field(default_factory=LocalModelRoute)
     title_model: LocalModelRoute | None = None
@@ -321,23 +342,12 @@ class LocalRuntimeAdapterConfig:
     max_tokens: int | None = None
     # How the Runtime shapes compaction requests. The names match the Vibe
     # settings. The first, in-context request reuses the conversation's prompt
-    # prefix and tool catalog; the standalone fallback always runs without
-    # tools and without reasoning.
-    # Output cap for every compaction request, applied below the general cap.
-    # A summary is far shorter than this; the cap bounds how long a request
-    # that reasons instead of summarizing can run. ``None`` applies no extra cap.
-    compaction_max_output_tokens: int | None = 80_000
-    # Reasoning of the in-context request; ``None`` keeps the compaction
-    # route's own.
-    compaction_thinking: ThinkingLevel | None = None
+    # prefix, tool catalog and reasoning; the standalone fallback always runs
+    # without tools and without reasoning.
     # Reasoning, in estimated tokens, after which the in-context request is
     # abandoned so Core falls back to the standalone request. ``None`` lets it
     # reason up to the output cap.
     compaction_reasoning_limit_tokens: int | None = 32_000
-    # Tokens kept free of the context window when an output cap is clipped to
-    # the room the input leaves (see ``LocalModelRoute.context_window``). The
-    # input size is an estimate, so the reserve absorbs its error.
-    output_token_reserve: int = 4096
     # OpenAI-compatible providers expose reasoning under different keys.
     reasoning_field_name: str = "reasoning_content"
     # Some OpenAI-compatible endpoints never emit a finish reason.
@@ -351,14 +361,14 @@ class LocalRuntimeAdapterConfig:
     # Vertex AI routing.
     project_id: str = ""
     region: str = ""
-    timeout_s: float = 60.0
-    # Silence allowed between output items once a response has started
-    # streaming. ``timeout_s`` must also cover the wait for the first token, so
-    # it is too long to notice a provider that stalls mid-response. ``None``
-    # applies no limit: some providers, Mistral included, send a tool call in one
-    # piece once it is fully generated, so a long tool call is a long silence
-    # that no fixed limit can tell apart from a stall.
-    stream_idle_timeout_s: float | None = None
+    # How long a response stream may wait for the model's first output. The
+    # transport read timeout sits above it and above the idle limit.
+    timeout_s: float = FIRST_OUTPUT_WAIT_SECONDS
+    # Silence allowed once the model has produced output. ``None`` gives that
+    # silence the first-output wait instead: some providers, Mistral included,
+    # send a tool call in one piece once it is fully generated, so a long tool
+    # call is a long silence that a short limit cannot tell apart from a stall.
+    stream_idle_timeout_s: float | None = STREAM_IDLE_SECONDS
     retry_max_elapsed_time_s: float = 300.0
     # Verify provider certificates with the operating system's trust store (the
     # macOS Keychain, for example) instead of OpenSSL's default roots plus
@@ -410,11 +420,6 @@ class LocalRuntimeAdapterConfig:
     )
 
     def __post_init__(self) -> None:
-        if (
-            self.compaction_max_output_tokens is not None
-            and self.compaction_max_output_tokens < 1
-        ):
-            raise ValueError("compaction_max_output_tokens must be positive")
         if (
             self.compaction_reasoning_limit_tokens is not None
             and self.compaction_reasoning_limit_tokens < 1
@@ -503,36 +508,26 @@ class LocalRuntimeAdapterConfig:
             headers["x-affinity"] = affinity_id
         return headers
 
-    def output_token_cap(self, route: LocalModelRoute) -> int | None:
-        """The output-token cap for one request on ``route``.
+    def stream_guard(self) -> StreamGuard:
+        """A guard for one response stream, with this config's limits."""
+        idle_s = self.stream_idle_timeout_s
+        return StreamGuard(self.timeout_s, self.timeout_s if idle_s is None else idle_s)
+
+    def output_token_cap(
+        self, route: LocalModelRoute, *, required: bool = False
+    ) -> int | None:
+        """The ``max_tokens`` one request on ``route`` sends, or None for none.
 
         ``max_tokens`` wins when set, so a caller that pins a short completion
-        (a title, say) keeps its cap whatever the model allows.
+        (a title, say) keeps its cap whatever the model allows. Otherwise only a
+        format that requires the field sends it: the model's max output, else a
+        fixed fallback.
         """
         if self.max_tokens is not None:
             return self.max_tokens
-        return route.max_output_tokens
-
-    def request_output_token_cap(
-        self, route: LocalModelRoute, *, estimated_input_tokens: int, compaction: bool
-    ) -> int | None:
-        """The output-token cap for one Core model request.
-
-        Starts from :meth:`output_token_cap`, lowers it to the compaction cap
-        for a compaction request, then clips it to the room the estimated input
-        leaves in the route's context window, keeping ``output_token_reserve``
-        free. The result is at least 1 so the request stays well formed; a
-        prompt that already fills the window fails at the provider either way.
-        """
-        cap = self.output_token_cap(route)
-        compaction_cap = self.compaction_max_output_tokens
-        if compaction and compaction_cap is not None:
-            cap = compaction_cap if cap is None else min(cap, compaction_cap)
-        if route.context_window is None:
-            return cap
-        room = route.context_window - estimated_input_tokens - self.output_token_reserve
-        room = max(room, 1)
-        return room if cap is None else min(cap, room)
+        if not required:
+            return None
+        return route.max_output_tokens or REQUIRED_MAX_TOKENS_FALLBACK
 
     def with_workspace(self, workspace: SessionWorkspace) -> LocalRuntimeAdapterConfig:
         """Return this config projected onto the Session's canonical workspace."""
@@ -593,10 +588,7 @@ _LOCAL_RUNTIME_ADAPTER_BEHAVIOR_FIELDS = frozenset({
     "title_prompt",
     "classifier_model",
     "max_tokens",
-    "compaction_max_output_tokens",
-    "compaction_thinking",
     "compaction_reasoning_limit_tokens",
-    "output_token_reserve",
     "reasoning_field_name",
     "emits_finish_reason",
     "extra_headers",

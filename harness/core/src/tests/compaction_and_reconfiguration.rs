@@ -1,6 +1,17 @@
 use super::*;
-use crate::core::{BackgroundProcessMode, CompactionPolicy};
+use crate::core::testing::assistant_text;
+use crate::core::{BackgroundProcessMode, CompactionPolicy, Message};
 use uuid::Uuid;
+
+/// A session with one exchange, so compaction starts with the in-context
+/// request.
+fn session_with_a_reply() -> HarnessSession {
+    HarnessSession::create_with_history(
+        config(),
+        vec![Message::user_text("hello"), assistant_text("hi")],
+    )
+    .expect("session creates")
+}
 
 fn compact(extra_instructions: &str) -> Value {
     json!({
@@ -45,7 +56,8 @@ fn reconfigure(changes: Value) -> Value {
 fn automatic_compaction_rejects_a_budget_below_fixed_model_input() {
     // Prepare
     let mut config = config();
-    config.settings.context.compaction = CompactionPolicy::Automatic { token_threshold: 1 };
+    config.settings.context.compaction = CompactionPolicy::Automatic;
+    config.settings.context.model_facts.compaction_threshold = 1;
 
     // Do
     let error = HarnessSession::create(config)
@@ -87,8 +99,8 @@ fn message_text(message: &Value) -> &str {
 #[test]
 fn compaction_action_ids_are_deterministic_opaque_uuids() {
     // Prepare
-    let mut first = HarnessSession::create(config()).expect("first session creates");
-    let mut second = HarnessSession::create(config()).expect("second session creates");
+    let mut first = session_with_a_reply();
+    let mut second = session_with_a_reply();
 
     // Do
     let first_requested = accepted_value(first.apply(input(1, compact("first attempt"))));
@@ -140,7 +152,7 @@ fn compaction_action_ids_are_deterministic_opaque_uuids() {
 #[test]
 fn earlier_in_context_retry_checkpoint_restores_and_then_falls_back() {
     // Prepare
-    let mut session = HarnessSession::create(config()).expect("session creates");
+    let mut session = session_with_a_reply();
     let requested = accepted_value(session.apply(input(1, compact("keep file paths"))));
     let first_action = dispatched_action(&requested).clone();
     let mut checkpoint = checkpoint_value(&session);
