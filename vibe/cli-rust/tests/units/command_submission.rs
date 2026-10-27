@@ -9,7 +9,7 @@ use vibe_rs::app::{App, Status};
 use vibe_rs::commands::{is_side_channel, submission, CommandEvent};
 use vibe_rs::config;
 use vibe_rs::post_ready::AccountReads;
-use vibe_rs::server::Client;
+use vibe_rs::server::{Client, HistoryEntry, MessageContent};
 
 struct Harness {
     app: App,
@@ -97,6 +97,32 @@ async fn branch_during_a_turn_is_refused_kept_and_never_forks() {
         .sent_methods()
         .await
         .contains(&"session/fork".to_owned()));
+}
+
+#[tokio::test]
+async fn the_fork_alias_branches_the_session_like_branch() {
+    let mut harness = Harness::ready();
+
+    assert!(!harness.submit("/fork"));
+
+    let sent = harness.sent_methods().await;
+    assert!(sent.contains(&"session/fork".to_owned()), "{sent:?}");
+    let echoed = harness
+        .app
+        .view
+        .transcript
+        .lines()
+        .any(|line| match line.entry {
+            HistoryEntry::Message(message) => {
+                message.role == "command"
+                    && message.content.iter().any(|block| match block {
+                        MessageContent::Text { text } => text.contains("/fork"),
+                        _ => false,
+                    })
+            }
+            _ => false,
+        });
+    assert!(echoed, "the typed alias is echoed");
 }
 
 #[tokio::test]

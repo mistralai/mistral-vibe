@@ -112,9 +112,10 @@ install: `uv tool install mistral-vibe`.
   falls back to latest in cwd).
 - `vibe --resume [SESSION_ID]`: specific session; without an id, opens a picker.
 - In-session: `/resume` (alias `/continue`).
-- `/branch` - Fork the current conversation into a new resumable session,
-  leaving this session unchanged. Resume the copy in another terminal with
-  `vibe --resume <id>` (the id is printed when the branch is created).
+- `/branch` (alias `/fork`) - Fork the current conversation into a new
+  resumable session, leaving this session unchanged. Resume the copy in another
+  terminal with `vibe --resume <id>` (the id is printed when the branch is
+  created).
 
 #### Session titles
 

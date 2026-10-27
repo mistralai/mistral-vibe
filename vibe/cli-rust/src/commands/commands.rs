@@ -74,7 +74,7 @@ const COMMANDS: &[Command] = &[
     cmd(&["/leanstall"], "Install the Lean 4 agent (leanstral)", false),
     cmd(&["/unleanstall"], "Uninstall the Lean 4 agent", false),
     cmd(&["/rewind"], "Rewind to a previous message (or press Esc twice)", false),
-    cmd(&["/branch"], "Fork the current conversation into a new resumable session, leaving this session unchanged. Resume the copy with `vibe --resume <id>`.", false),
+    cmd(&["/branch", "/fork"], "Fork the current conversation into a new resumable session, leaving this session unchanged. Resume the copy with `vibe --resume <id>`.", false),
     cmd(&["/retry"], "Continue an interrupted model response; optionally pass additional instructions", false).args("[instructions]"),
     cmd(&["/loop"], "Schedule a recurring prompt: /loop [schedule] [prompt]", false).args("[schedule] [prompt]"),
     cmd(&["/data-retention"], "Show data retention information", true),

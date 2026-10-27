@@ -1019,8 +1019,9 @@ session's model.
   clears it instead. In the rewind panel: `↑/↓` pick option, `Shift+↑/↓`
   scroll, `←`/`Esc` edit previous message, `→` edit next message, `Enter`
   accept, `q` quit.
-- `/branch` - Fork the current conversation into a new resumable session,
-  leaving this session unchanged. Resume the copy with `vibe --resume <id>`.
+- `/branch` (alias `/fork`) - Fork the current conversation into a new resumable
+  session, leaving this session unchanged. Resume the copy with
+  `vibe --resume <id>`.
 - `/loop [schedule] [prompt]` - With the Unified Harness, ask the model to
   schedule a recurring prompt, e.g. `/loop every two minutes check the build`
   or `/loop weekdays at 9am review CI`.

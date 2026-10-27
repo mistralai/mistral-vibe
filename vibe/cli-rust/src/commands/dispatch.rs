@@ -49,7 +49,7 @@ pub(super) fn run_command(
         "/debug" => crate::debug_console::toggle(app, client),
         "/resume" | "/continue" => resume_picker::open(app, client),
         "/rewind" => rewind::start(app, client),
-        "/branch" => super::branch::branch_session(app, client),
+        "/branch" | "/fork" => super::branch::branch_session(app, client),
         "/mcp" | "/connectors" => mcp::show(app, client, value),
         "/plugins" => crate::plugins::show(app, client),
         "/reload-plugins" => crate::plugins::reload(app, client),
