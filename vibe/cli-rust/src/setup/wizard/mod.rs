@@ -222,9 +222,10 @@ pub fn open(state: &mut OnboardingState) {
 /// One 40ms step of the welcome typing animation. Replay settles instantly
 /// so captures stay stable.
 pub fn advance_welcome_typing(state: &mut OnboardingState, replaying: bool) {
+    let len = state.context.welcome_text.len();
     if replaying {
         settle_welcome_typing(state);
-    } else if state.welcome_char_index < WELCOME_TEXT.len() {
+    } else if state.welcome_char_index < len {
         state.welcome_char_index += 1;
     } else {
         state.welcome_done = true;
@@ -234,7 +235,7 @@ pub fn advance_welcome_typing(state: &mut OnboardingState, replaying: bool) {
 /// Replay's settle: the full text, done — shared by the open and the
 /// animation step so the two cannot drift.
 fn settle_welcome_typing(state: &mut OnboardingState) {
-    state.welcome_char_index = WELCOME_TEXT.len();
+    state.welcome_char_index = state.context.welcome_text.len();
     state.welcome_done = true;
 }
 

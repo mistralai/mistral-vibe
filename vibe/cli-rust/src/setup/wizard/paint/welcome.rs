@@ -16,9 +16,10 @@ const HIGHLIGHT_END: usize = 23;
 
 /// Round border, padding 1 3, centered text, `Enter continue` hint.
 pub(super) fn draw(wizard: &mut OnboardingState, f: &mut Frame, area: Rect) {
-    let text = &WELCOME_TEXT[..wizard.welcome_char_index.min(WELCOME_TEXT.len())];
+    let full_text = &wizard.context.welcome_text;
+    let text = &full_text[..wizard.welcome_char_index.min(full_text.len())];
     // The box is text plus border and padding; narrow terminals clip it.
-    let box_w = (WELCOME_TEXT.len() as u16 + 8).min(area.width);
+    let box_w = (full_text.len() as u16 + 8).min(area.width);
     let box_x = area.x + (area.width.saturating_sub(box_w)) / 2;
     // Align center middle, margin-bottom 2 on the box, hint below.
     // Total = 5 (box) + 2 (gap) + 1 (hint) = 8 rows, centered in area height.
@@ -46,8 +47,12 @@ pub(super) fn draw(wizard: &mut OnboardingState, f: &mut Frame, area: Rect) {
             1,
         );
         f.render_widget(
-            Paragraph::new(render_welcome_text(text, wizard.welcome_char_index))
-                .alignment(Alignment::Center),
+            Paragraph::new(render_welcome_text(
+                text,
+                wizard.welcome_char_index,
+                full_text != WELCOME_TEXT,
+            ))
+            .alignment(Alignment::Center),
             inner,
         );
     }
@@ -66,9 +71,11 @@ pub(super) fn draw(wizard: &mut OnboardingState, f: &mut Frame, area: Rect) {
     hint_line::draw_clipped(f, hx, box_y + 7, box_x + box_w - hx, &keys);
 }
 
-fn render_welcome_text<'a>(text: &'a str, char_index: usize) -> Text<'a> {
+fn render_welcome_text<'a>(text: &'a str, char_index: usize, custom: bool) -> Text<'a> {
     use ratatui::text::{Line, Span};
-    if char_index <= HIGHLIGHT_START {
+    // A plugin's setup text replaces the whole line verbatim: there is no
+    // highlight split, so it renders as one span.
+    if custom || char_index <= HIGHLIGHT_START {
         return Text::from(Line::from(Span::styled(
             text,
             Style::default().fg(theme::foreground()),

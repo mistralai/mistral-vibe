@@ -57,6 +57,11 @@ pub struct SetupStatus {
     /// the server resolved one: the wizard locks its sign-in domain to it.
     #[serde(default)]
     pub pinned_console_url: Option<String>,
+    /// A plugin's `setupText.locales` map (the `ai.mistral.vibe` extension),
+    /// when a resolved plugin customizes the welcome text; the wizard picks
+    /// the user's locale from it. Absent means the default welcome text.
+    #[serde(default)]
+    pub setup_text_locales: Option<std::collections::HashMap<String, String>>,
 }
 
 /// `setup/store-credential`'s outcome, the server's key-persist contract

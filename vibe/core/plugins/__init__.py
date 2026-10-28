@@ -67,6 +67,7 @@ from vibe.core.plugins._native import (
     ResolvedPluginSet,
     plugin_skill_runtime_path,
     plugin_skill_translation,
+    resolve_setup_text,
 )
 from vibe.core.plugins._paths import (
     PluginPathOutsideRootError,
@@ -219,6 +220,7 @@ __all__ = [
     "redact_url",
     "redact_values",
     "resolve_plugin_path",
+    "resolve_setup_text",
     "resolve_tool_group_names",
     "retain_pinned_tools",
     "route_key",

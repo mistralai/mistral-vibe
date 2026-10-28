@@ -13,6 +13,10 @@
       "browserAuthBaseUrl": "https://console.mistral.ai",
       "name": "mistral"
     },
+    "setupTextLocales": {
+      "en": "Welcome to Acme!",
+      "fr": "Bienvenue chez Acme !"
+    },
     "supportsBrowserSignIn": true,
     "theme": "auto",
     "vibeBaseUrl": "https://chat.mistral.ai"

@@ -115,6 +115,9 @@ _MAX_PLUGIN_COMPONENT_PATH_LENGTH = 1024
 _MAX_NODE_LIBRARY_ALIAS_LENGTH = 214
 _MAX_PYTHON_LIBRARY_ALIAS_LENGTH = 128
 _MAX_CONNECTOR_TOOL_NAME_LENGTH = 256
+_MAX_SETUP_TEXT_LOCALES = 32
+_MAX_SETUP_TEXT_LENGTH = 300
+_SETUP_TEXT_LOCALE_PATTERN = re.compile(r"^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 _PLUGIN_COMPONENT_NAME_PATTERN = r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
 _NODE_LIBRARY_ALIAS_PATTERN = re.compile(
     r"^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$"
@@ -163,6 +166,39 @@ class _ToolOverride(BaseModel):
     exposure: Literal["programmatic", "direct", "direct_and_programmatic"] | None = None
 
 
+class _SetupText(BaseModel):
+    """One locale's replacement for the onboarding welcome text.
+
+    ``en`` is mandatory (the fallback every other locale misses); any other
+    BCP 47-style tag is optional. The text replaces the whole welcome line
+    verbatim — there is no highlight split, so a localized line is styled as
+    one span.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
+
+    locales: dict[str, str] = Field(alias="locales")
+
+    @field_validator("locales")
+    @classmethod
+    def validate_locales(cls, value: dict[str, str]) -> dict[str, str]:
+        if "en" not in value:
+            raise ValueError("setupText.locales must include 'en'")
+        if len(value) > _MAX_SETUP_TEXT_LOCALES:
+            raise ValueError(
+                f"setupText.locales exceeds the {_MAX_SETUP_TEXT_LOCALES}-locale limit"
+            )
+        for locale, text in value.items():
+            if _SETUP_TEXT_LOCALE_PATTERN.fullmatch(locale) is None:
+                raise ValueError(f"invalid setupText locale tag: {locale!r}")
+            if not 1 <= len(text) <= _MAX_SETUP_TEXT_LENGTH:
+                raise ValueError(
+                    f"setupText locale {locale!r} must be 1-{_MAX_SETUP_TEXT_LENGTH} "
+                    "characters"
+                )
+        return value
+
+
 class _VibePluginExtension(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
 
@@ -176,6 +212,7 @@ class _VibePluginExtension(BaseModel):
     tool_overrides: dict[str, _ToolOverride] = Field(
         default_factory=dict, alias="toolOverrides"
     )
+    setup_text: _SetupText | None = Field(default=None, alias="setupText")
 
 
 class _KnowledgeMetadata(BaseModel):
@@ -393,6 +430,9 @@ class PluginDescriptor:
     author: str | None = None
     # Presentation only (ai.mistral.vibe extension); `name` stays the identity.
     display_name: str | None = None
+    # The onboarding welcome text this plugin overrides, per locale; `None`
+    # when the plugin does not customize it. `en` is always present when set.
+    setup_text: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,7 +496,11 @@ class ResolvedPluginSet:
     agents: tuple[PluginAgentDefinition, ...]
     libraries: tuple[PluginLibraryDefinition, ...]
     connectors: tuple[PluginConnectorDefinition, ...]
-    issues: tuple[PluginConfigIssue, ...]
+    # The winning plugin's `setupText` locales (project beats user beats
+    # builtin, matching plugin precedence); `None` when no plugin customizes
+    # the onboarding welcome text.
+    setup_text: Mapping[str, str] | None = None
+    issues: tuple[PluginConfigIssue, ...] = ()
     unsupported_components: tuple[PluginUnsupportedComponent, ...] = ()
 
     @classmethod
@@ -657,6 +701,7 @@ class PluginResolver:
             agents=agents,
             libraries=libraries,
             connectors=connectors,
+            setup_text=resolve_setup_text(plugins),
             issues=tuple(self._issues),
             unsupported_components=tuple(self._unsupported_components),
         )
@@ -874,6 +919,11 @@ class PluginResolver:
                 manifest.author.name if manifest.author is not None else None
             ),
             display_name=extension.display_name if extension is not None else None,
+            setup_text=(
+                MappingProxyType(dict(extension.setup_text.locales))
+                if extension is not None and extension.setup_text is not None
+                else None
+            ),
         )
         skills = self._load_skills(descriptor)
         mcp_servers = self._load_mcp_servers(descriptor)
@@ -1993,6 +2043,20 @@ def plugin_skill_runtime_path(skill: SkillInfo) -> Path | None:
 def plugin_skill_translation(skill: SkillInfo) -> Literal["synthetic_skill"] | None:
     value = skill.metadata.get(_SKILL_TRANSLATION_METADATA)
     return "synthetic_skill" if value == "synthetic_skill" else None
+
+
+def resolve_setup_text(plugins: Sequence[PluginDescriptor]) -> Mapping[str, str] | None:
+    """The winning plugin's `setupText` locales, in scope precedence.
+
+    `plugins` arrive sorted by name from `resolve()`; scope decides the
+    winner — project beats user beats builtin, the same precedence plugin
+    selection applies — so the first descriptor carrying `setupText` wins.
+    """
+    for scope in (SkillScope.PROJECT, SkillScope.GLOBAL, SkillScope.BUILTIN):
+        for plugin in plugins:
+            if plugin.scope is scope and plugin.setup_text is not None:
+                return plugin.setup_text
+    return None
 
 
 def _plugin_log_label(plugin: PluginDescriptor) -> str:

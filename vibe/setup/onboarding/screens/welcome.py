@@ -34,9 +34,13 @@ class WelcomeScreen(OnboardingScreen):
 
     NEXT_SCREEN = "theme_selection"
 
-    def __init__(self, next_screen: str = "theme_selection") -> None:
+    def __init__(
+        self, next_screen: str = "theme_selection", setup_text: str | None = None
+    ) -> None:
         super().__init__()
         self.NEXT_SCREEN = next_screen
+        self._text = setup_text if setup_text is not None else WELCOME_TEXT
+        self._custom_text = setup_text is not None
         self._char_index = 0
         self._gradient_offset = 0
         self._typing_done = False
@@ -61,9 +65,9 @@ class WelcomeScreen(OnboardingScreen):
         self.focus()
 
     def _render_text(self, length: int) -> str:
-        text = WELCOME_TEXT[:length]
+        text = self._text[:length]
 
-        if length <= HIGHLIGHT_START:
+        if self._custom_text or length <= HIGHLIGHT_START:
             return text
 
         prefix = text[:HIGHLIGHT_START]
@@ -78,13 +82,17 @@ class WelcomeScreen(OnboardingScreen):
         return prefix + highlight
 
     def _type_next_char(self) -> None:
-        if self._char_index >= len(WELCOME_TEXT):
+        if self._char_index >= len(self._text):
             if not self._typing_done:
                 self._typing_done = True
                 self.set_timer(0.5, self._show_button)
             return
 
-        if self._char_index == HIGHLIGHT_END and not self._paused:
+        if (
+            not self._custom_text
+            and self._char_index == HIGHLIGHT_END
+            and not self._paused
+        ):
             self._paused = True
             if self._typing_timer:
                 self._typing_timer.stop()

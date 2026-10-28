@@ -23,5 +23,6 @@ pub(crate) fn default_status() -> SetupStatus {
         has_api_key: false,
         enable_system_trust_store: false,
         pinned_console_url: None,
+        setup_text_locales: None,
     }
 }

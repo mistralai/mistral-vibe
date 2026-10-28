@@ -8,6 +8,7 @@ semantics stay identical to the in-process wizard.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from vibe import __version__
@@ -100,6 +101,7 @@ class SetupRequestHandler:
             has_api_key=not env_var or resolve_api_key(env_var) is not None,
             enable_system_trust_store=config.enable_system_trust_store,
             pinned_console_url=_pinned_console_url(),
+            setup_text_locales=await _resolve_setup_text_locales(self._harness_files),
         )
 
     async def _store_credential(
@@ -219,6 +221,27 @@ def _pinned_console_url() -> str | None:
     from vibe.setup.onboarding.context import pinned_console_url_from_env
 
     return pinned_console_url_from_env()
+
+
+async def _resolve_setup_text_locales(
+    harness_files: HarnessFilesManager,
+) -> dict[str, str] | None:
+    """The winning plugin's `setupText.locales`, when one customizes the
+    welcome text. Resolution is filesystem discovery plus manifest reads, so
+    it runs off the event loop; a failure degrades to the default text.
+    """
+    # Lazy import: the plugins package would push
+    # `import vibe.app_server.stdio` over its startup import budget.
+    from vibe.core.plugins import PluginResolver
+
+    try:
+        resolution = await asyncio.to_thread(
+            PluginResolver.from_harness_files(harness_files).resolve
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        logger.warning("Plugin resolution failed during setup/status: %s", error)
+        return None
+    return dict(resolution.setup_text) if resolution.setup_text is not None else None
 
 
 def _pin_provider_to_console_url(provider: ProviderConfig, pin: str) -> ProviderConfig:

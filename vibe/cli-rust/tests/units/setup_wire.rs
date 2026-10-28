@@ -39,6 +39,13 @@ fn the_status_response_round_trips_the_server_payload() {
         .as_object_mut()
         .expect("status object")
         .remove("activeModel");
+    // `setupTextLocales` round-trips when a plugin customizes the text.
+    let with_locales: SetupStatus =
+        serde_json::from_value(expected.clone()).expect("deserializes with setupTextLocales");
+    assert_eq!(
+        with_locales.setup_text_locales.as_ref().expect("locales")["fr"],
+        "Bienvenue chez Acme !"
+    );
     assert_eq!(
         serde_json::to_value(&status).expect("serializes"),
         expected,

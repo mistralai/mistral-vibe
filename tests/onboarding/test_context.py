@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from vibe.core.config import ProviderConfig, VibeConfigSchema
 from vibe.setup.onboarding.context import (
     CUSTOM_CONSOLE_URL_ENV_VAR,
+    SETUP_LOCALE_ENV_VAR,
     OnboardingContext,
     _normalize_origin,
     browser_auth_account_base,
@@ -335,3 +338,63 @@ def test_pinned_console_api_base_returns_none_otherwise(
 ) -> None:
     provider = _split_provider(browser_base, api_base)
     assert pinned_console_api_base(provider, "https://console.acme.internal") is None
+
+
+_PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+
+
+def _plant_setup_text_plugin(root: Path, locales: dict[str, str]) -> None:
+    import json
+
+    plugin_dir = root / ".vibe" / "plugins" / "acme"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps({
+            "$schema": _PLUGIN_SCHEMA,
+            "name": "acme",
+            "extensions": {
+                "ai.mistral.vibe": {
+                    "schemaVersion": 1,
+                    "setupText": {"locales": locales},
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_onboarding_context_resolves_the_plugin_setup_text_for_the_locale(
+    monkeypatch: pytest.MonkeyPatch, tmp_working_directory: Path
+) -> None:
+    from vibe.core.config.harness_files import (
+        HarnessFilesManager,
+        init_harness_files_manager,
+        reset_harness_files_manager,
+    )
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    _plant_setup_text_plugin(
+        tmp_working_directory, {"en": "Welcome to Acme!", "fr": "Bienvenue !"}
+    )
+    trust_store = trusted_folders_manager.for_session()
+    trust_store.trust_for_session(tmp_working_directory)
+    reset_harness_files_manager()
+    init_harness_files_manager("user", "project")
+    monkeypatch.setattr(
+        "vibe.core.config.harness_files._harness_manager._manager",
+        HarnessFilesManager(
+            sources=("user", "project"),
+            cwd=tmp_working_directory,
+            trust_store=trust_store,
+        ),
+    )
+    monkeypatch.setenv(SETUP_LOCALE_ENV_VAR, "fr")
+    assert OnboardingContext.load().setup_text == "Bienvenue !"
+
+
+def test_onboarding_context_setup_text_defaults_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (SETUP_LOCALE_ENV_VAR, "LC_ALL", "LC_MESSAGES", "LANG"):
+        monkeypatch.delenv(name, raising=False)
+    assert OnboardingContext.load().setup_text is None

@@ -1192,6 +1192,12 @@ schema (`https://agent-plugins.org/schemas/1.0.0/plugin.schema.json`):
       "toolNamespace": "myNs",
       "toolOverrides": {
         "tool-name": { "name": "renamedTool", "exposure": "programmatic" }
+      },
+      "setupText": {
+        "locales": {
+          "en": "Welcome to Acme Vibe - Let's get you started!",
+          "fr": "Bienvenue dans Acme Vibe - C'est parti !"
+        }
       }
     }
   }
@@ -1204,6 +1210,16 @@ TypeScript-identifier-safe string used to prefix all component names
 (e.g. `myNs:my-skill`). If omitted, it is derived from the plugin name.
 `displayName` is an optional title of 1 to 100 characters; the plugin `name`
 stays its identity.
+
+`setupText` customizes the onboarding welcome text (`vibe --setup` and the
+first-run wizard). `locales` maps BCP 47-style locale tags to the replacement
+line: `en` is mandatory (the fallback for every other locale), other locales
+are optional, each text is 1-300 characters, at most 32 locales. The text
+replaces the whole welcome line verbatim (no brand highlight) and is resolved
+for the user's locale — `VIBE_LOCALE`, then `LC_ALL`/`LC_MESSAGES`/`LANG`; an
+exact tag (`fr-CA`) beats the language-only entry (`fr`), and a miss falls
+back to `en`. When several plugins set `setupText`, project beats user beats
+builtin.
 
 Reserved namespaces (rejected): `file_system`, `self`, `process`, `skill`,
 `subagent`, `vibe`.

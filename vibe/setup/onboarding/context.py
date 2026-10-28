@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import os
 import tomllib
@@ -117,6 +118,46 @@ def is_likely_mistral_private_cloud_domain(domain: str) -> bool:
 
 
 CUSTOM_CONSOLE_URL_ENV_VAR = "VIBE_CUSTOM_CONSOLE_URL"
+SETUP_LOCALE_ENV_VAR = "VIBE_LOCALE"
+
+
+def _locale_candidates() -> list[str]:
+    """The user's locale tags, most specific first: VIBE_LOCALE, then the
+    LC_ALL/LC_MESSAGES/LANG environment chain, then the C library's own
+    preference. Tags normalize to lowercase with `_` as `-` (BCP 47 style).
+    """
+    candidates: list[str] = []
+    for name in (SETUP_LOCALE_ENV_VAR, "LC_ALL", "LC_MESSAGES", "LANG"):
+        value = _find_env_value(name)
+        if value:
+            normalized = value.strip().replace("_", "-").split(".", 1)[0]
+            if normalized and normalized.lower() not in {"c", "posix"}:
+                candidates.append(normalized.lower())
+    return candidates
+
+
+def resolve_setup_locale() -> str:
+    """The locale the onboarding welcome text resolves in.
+
+    The first tag the plugin's `setupText.locales` carries wins; an exact
+    match (`fr-CA`) beats a language-only one (`fr`). With no match the
+    mandatory `en` entry applies.
+    """
+    return _locale_candidates()[0] if _locale_candidates() else "en"
+
+
+def resolve_setup_text(locales: Mapping[str, str]) -> str:
+    """Pick the welcome text for the user's locale out of a plugin's
+    `setupText.locales` map: exact tag, then language-only, then `en` (which
+    the extension contract makes mandatory).
+    """
+    for candidate in _locale_candidates():
+        if candidate in locales:
+            return locales[candidate]
+        language = candidate.split("-", 1)[0]
+        if language in locales:
+            return locales[language]
+    return locales["en"]
 
 
 def pinned_console_url_from_env() -> str | None:
@@ -353,6 +394,30 @@ def _resolve_provider(
 _PINNED_CONSOLE_URL_UNSET: Any = object()
 
 
+def _resolve_setup_text() -> str | None:
+    """The plugin-customized welcome text for the user's locale, if any.
+
+    Resolution runs on the event loop's caller thread: it walks the project
+    and user plugin directories, so it never runs inside a session's event
+    loop. A broken plugin degrades to the default text, exactly as a broken
+    plugin degrades every other plugin feature.
+    """
+    from vibe.core.plugins import PluginResolver
+
+    try:
+        harness_files = get_harness_files_manager()
+    except RuntimeError:
+        return None
+    try:
+        resolution = PluginResolver.from_harness_files(harness_files).resolve()
+    except (OSError, ValueError) as error:
+        logger.warning("Plugin resolution failed during onboarding: %s", error)
+        return None
+    if resolution.setup_text is None:
+        return None
+    return resolve_setup_text(resolution.setup_text)
+
+
 @dataclass(frozen=True)
 class OnboardingContext:
     provider: ProviderConfig
@@ -360,6 +425,10 @@ class OnboardingContext:
     console_base_url: str = DEFAULT_CONSOLE_BASE_URL
     theme: str = DEFAULT_THEME
     pinned_console_url: str | None = None
+    # The plugin-customized welcome text resolved for the user's locale
+    # (the `ai.mistral.vibe` extension's `setupText`); `None` keeps the
+    # default text.
+    setup_text: str | None = None
 
     @property
     def supports_browser_sign_in(self) -> bool:
@@ -382,6 +451,7 @@ class OnboardingContext:
             console_base_url=config.console_base_url,
             theme=config.theme,
             pinned_console_url=pinned_console_url_from_env(),
+            setup_text=_resolve_setup_text(),
         )
 
     @classmethod
@@ -405,6 +475,7 @@ class OnboardingContext:
                 console_base_url=snapshot.console_base_url,
                 theme=snapshot.theme,
                 pinned_console_url=pinned_console_url,
+                setup_text=_resolve_setup_text(),
             )
         except (RuntimeError, ValidationError, ValueError):
             logger.warning(

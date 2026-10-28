@@ -110,6 +110,24 @@ stays its identity.
 tool name from MCP servers or connectors. `exposure` is one of
 `programmatic`, `direct`, or `direct_and_programmatic`.
 
+`setupText` customizes the onboarding welcome text. `locales` maps BCP 47-style
+locale tags to the replacement line; `en` is mandatory (it is the fallback for
+every other locale), other locales are optional, each text is 1-300 characters,
+and at most 32 locales are allowed. The winning plugin's text replaces the
+whole welcome line verbatim (there is no brand highlight), resolved for the
+user's locale (`VIBE_LOCALE`, then `LC_ALL`/`LC_MESSAGES`/`LANG`; an exact tag
+like `fr-CA` beats the language-only `fr`, and a miss falls back to `en`).
+When several plugins set it, project beats user beats builtin.
+
+```json
+"setupText": {
+  "locales": {
+    "en": "Welcome to Acme Vibe - Let's get you started!",
+    "fr": "Bienvenue dans Acme Vibe - C'est parti !"
+  }
+}
+```
+
 ## Step 3 — Skills (optional)
 
 Place skills under `skills/` — one subdirectory per skill, each containing a

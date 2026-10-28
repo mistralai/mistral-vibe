@@ -2167,6 +2167,10 @@ class SetupStatusResponse(ProtocolModel):
     # The administrator-pinned console URL (`VIBE_CUSTOM_CONSOLE_URL`), when
     # set: the wizard locks its sign-in domain to it.
     pinned_console_url: str | None = None
+    # A plugin's `setupText.locales` map (the `ai.mistral.vibe` extension),
+    # when a resolved plugin customizes the welcome text; the wizard picks the
+    # user's locale from it. Absent means the default welcome text.
+    setup_text_locales: dict[str, str] | None = None
 
 
 class SetupStoreCredentialParams(ProtocolModel):

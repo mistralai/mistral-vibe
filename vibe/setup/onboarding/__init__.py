@@ -98,7 +98,9 @@ class OnboardingApp(App[str | None]):
         self.theme = self._resolved_theme
 
         theme_next = "auth_method" if self.supports_browser_sign_in else "api_key"
-        welcome_screen = WelcomeScreen(next_screen="theme_selection")
+        welcome_screen = WelcomeScreen(
+            next_screen="theme_selection", setup_text=self._config.setup_text
+        )
         self.install_screen(welcome_screen, "welcome")
         self._theme_selection_screen = ThemeSelectionScreen(
             initial_theme=self._initial_theme, next_screen=theme_next

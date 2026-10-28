@@ -41,6 +41,12 @@ pub struct OnboardingContext {
     /// the server resolved one: sign-in locks to it and the domain cannot be
     /// modified.
     pub pinned_console_url: Option<String>,
+    /// A plugin's `setupText.locales` map, when a resolved plugin customizes
+    /// the welcome text; `welcome_text` resolves it for the user's locale.
+    pub setup_text_locales: Option<std::collections::HashMap<String, String>>,
+    /// The resolved welcome text: the plugin's locale entry, or the built-in
+    /// default when no plugin customizes it.
+    pub welcome_text: String,
 }
 
 impl Default for OnboardingContext {
@@ -53,6 +59,8 @@ impl Default for OnboardingContext {
             supports_browser_sign_in: true,
             enable_system_trust_store: false,
             pinned_console_url: None,
+            setup_text_locales: None,
+            welcome_text: crate::setup::wizard::WELCOME_TEXT.to_owned(),
         }
     }
 }
@@ -67,6 +75,11 @@ impl OnboardingContext {
             .ok()
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| status.theme.clone());
+        let setup_text_locales = status.setup_text_locales.clone();
+        let welcome_text = setup_text_locales
+            .as_ref()
+            .and_then(resolve_setup_text)
+            .unwrap_or_else(|| crate::setup::wizard::WELCOME_TEXT.to_owned());
         Self {
             provider: status.provider.clone(),
             vibe_base_url: status.vibe_base_url.clone(),
@@ -75,8 +88,40 @@ impl OnboardingContext {
             supports_browser_sign_in: status.supports_browser_sign_in,
             enable_system_trust_store: status.enable_system_trust_store,
             pinned_console_url: status.pinned_console_url.clone(),
+            setup_text_locales,
+            welcome_text,
         }
     }
+}
+
+/// Pick the welcome text for the user's locale out of a plugin's
+/// `setupText.locales` map: `VIBE_LOCALE` then the `LC_ALL`/`LC_MESSAGES`/
+/// `LANG` chain (normalized to BCP 47 style), exact tag then language-only,
+/// then the mandatory `en` entry.
+fn resolve_setup_text(locales: &std::collections::HashMap<String, String>) -> Option<String> {
+    for name in ["VIBE_LOCALE", "LC_ALL", "LC_MESSAGES", "LANG"] {
+        let Ok(raw) = std::env::var(name) else {
+            continue;
+        };
+        let tag = raw
+            .trim()
+            .replace('_', "-")
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if tag.is_empty() || tag == "c" || tag == "posix" {
+            continue;
+        }
+        if let Some(text) = locales.get(&tag) {
+            return Some(text.clone());
+        }
+        let language = tag.split('-').next().unwrap_or("");
+        if let Some(text) = locales.get(language) {
+            return Some(text.clone());
+        }
+    }
+    locales.get("en").cloned()
 }
 
 /// Whether the wizard still holds the launch snapshot: provider, console,

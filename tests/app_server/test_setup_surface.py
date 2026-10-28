@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tomllib
 from typing import Any, Never
@@ -29,6 +30,7 @@ from vibe.core.config import (
     DEFAULT_THEME,
     DEFAULT_VIBE_BASE_URL,
 )
+from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.setup.auth.api_key_persistence import ProviderCredentialsPersistResult
 from vibe.utils.keyring import clear_api_key_keyring_cache
 
@@ -526,3 +528,86 @@ async def test_server_without_setup_methods_answers_method_not_found(
 
     assert exc_info.value.error.code is ProtocolErrorCode.METHOD_NOT_FOUND
     assert tomllib.loads((config_dir / "config.toml").read_text()) == get_base_config()
+
+
+_PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+
+
+def _plant_setup_text_plugin(root: Path, name: str, locales: dict[str, str]) -> None:
+    plugin_dir = root / ".vibe" / "plugins" / name
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps({
+            "$schema": _PLUGIN_SCHEMA,
+            "name": name,
+            "extensions": {
+                "ai.mistral.vibe": {
+                    "schemaVersion": 1,
+                    "setupText": {"locales": locales},
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+
+
+async def _setup_client_with_harness_files(
+    harness_files: HarnessFilesManager,
+) -> tuple[AppServerClient, Any, Any]:
+    from vibe.app_server._runtime import HarnessProcess, create_harness_server
+    from vibe.app_server.protocol import ClientInfo
+    from vibe.app_server.transport import memory_transport_pair
+
+    client_transport, server_transport = memory_transport_pair()
+    server = await create_harness_server(
+        server_transport,
+        transport_kind="in_process",
+        process=HarnessProcess(harness_files),
+    )
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    await client.initialize(ClientInfo(name="setup-test", version="1"))  # type: ignore[arg-type]
+    await client.notify("initialized")
+    return client, client_transport, server_transport
+
+
+@pytest.mark.asyncio
+async def test_setup_status_carries_the_plugin_setup_text_locales(
+    tmp_working_directory: Path,
+) -> None:
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    _plant_setup_text_plugin(
+        tmp_working_directory,
+        "acme",
+        {"en": "Welcome to Acme!", "fr": "Bienvenue chez Acme !"},
+    )
+    trust_store = trusted_folders_manager.for_session()
+    trust_store.trust_for_session(tmp_working_directory)
+    harness_files = HarnessFilesManager(
+        sources=("user", "project"), cwd=tmp_working_directory, trust_store=trust_store
+    )
+    client, client_transport, server_transport = await _setup_client_with_harness_files(
+        harness_files
+    )
+    try:
+        response = await _status(client)
+    finally:
+        await client_transport.close()
+        await server_transport.close()
+
+    assert response.setup_text_locales == {
+        "en": "Welcome to Acme!",
+        "fr": "Bienvenue chez Acme !",
+    }
+
+
+@pytest.mark.asyncio
+async def test_setup_status_setup_text_locales_default_to_none() -> None:
+    client, client_transport, server_transport = await setup_client()
+    try:
+        response = await _status(client)
+    finally:
+        await client_transport.close()
+        await server_transport.close()
+
+    assert response.setup_text_locales is None
