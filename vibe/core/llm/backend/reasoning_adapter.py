@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from typing import Any, ClassVar
 
 from vibe.core.config import ProviderConfig
+from vibe.core.llm.backend._content_blocks import split_content_blocks
 from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
 from vibe.core.llm.backend.base import (
     APIAdapter,
@@ -121,29 +122,6 @@ class ReasoningAdapter(APIAdapter):
         )
 
     @staticmethod
-    def _parse_content_blocks(
-        content: str | list[dict[str, Any]],
-    ) -> tuple[str | None, str | None]:
-        if isinstance(content, str):
-            return content or None, None
-
-        text_parts: list[str] = []
-        thinking_parts: list[str] = []
-
-        for block in content:
-            block_type = block.get("type")
-            if block_type == "text":
-                text_parts.append(block.get("text", ""))
-            elif block_type == "thinking":
-                for inner in block.get("thinking", []):
-                    if isinstance(inner, dict) and inner.get("type") == "text":
-                        thinking_parts.append(inner.get("text", ""))
-                    elif isinstance(inner, str):
-                        thinking_parts.append(inner)
-
-        return ("".join(text_parts) or None, "".join(thinking_parts) or None)
-
-    @staticmethod
     def _parse_tool_calls(
         tool_calls: list[dict[str, Any]] | None,
     ) -> list[ToolCall] | None:
@@ -167,7 +145,7 @@ class ReasoningAdapter(APIAdapter):
         reasoning_content: str | None = None
 
         if content is not None:
-            text_content, reasoning_content = self._parse_content_blocks(content)
+            text_content, reasoning_content = split_content_blocks(content)
 
         return LLMMessage(
             role=Role.assistant,
