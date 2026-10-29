@@ -2185,6 +2185,11 @@ class TestResolvePermissionShellAware:
         "python3 - << 'EOF'\nprint(42)\nEOF",
         "python3 <<'PYEOF'\nimport sys\nprint('hello')\nPYEOF",
         "python3 < input.txt",
+        "cd . && python3 <<'EOF'\nprint(42)\nEOF",
+        "cd . && python3 - <<'EOF'\nprint(42)\nEOF",
+        "false || python3 - <<'EOF'\nprint(42)\nEOF",
+        "printf ignored | python3 - <<'EOF'\nprint(42)\nEOF",
+        "cd . && printf ignored | python3 - <<'EOF'\nprint(42)\nEOF",
     ],
 )
 def test_experimental_bash_standalone_denylisted_with_redirect_not_denied(command):
@@ -2196,6 +2201,15 @@ def test_experimental_bash_standalone_denylisted_with_redirect_not_denied(comman
     assert result.permission is not ToolPermission.NEVER, (
         f"Command with redirect should not be denied: {command!r}"
     )
+
+
+@pytest.mark.parametrize("operator", ["&&", "||", "|"])
+def test_redirect_on_later_command_does_not_allow_bare_python(bash, operator):
+    result = bash.resolve_permission(
+        BashArgs(command=f"python3 {operator} cat <<'EOF'\nhello\nEOF")
+    )
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.NEVER
 
 
 _AGENT = "/Users/me/Library/LaunchAgents/x.plist"
