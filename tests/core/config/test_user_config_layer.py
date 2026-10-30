@@ -12,7 +12,6 @@ from vibe.core.config._migration import migrate_config_layers
 from vibe.core.config.fingerprint import create_file_fingerprint
 from vibe.core.config.layer import (
     ConfigStorageError,
-    LayerImplementationError,
     LayerNotLoadedError,
 )
 from vibe.core.config.layers import _base
@@ -380,12 +379,34 @@ provider = "p"
 
 
 @pytest.mark.asyncio
-async def test_invalid_toml_raises(tmp_working_directory: Path) -> None:
+async def test_invalid_toml_fails_open(
+    tmp_working_directory: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     path = tmp_working_directory / random_config_file_name()
     path.write_text("this is not valid = = = toml [[[")
     layer = UserConfigLayer(path=path)
-    with pytest.raises(LayerImplementationError, match="_build_config_snapshot"):
-        await layer.load()
+    with caplog.at_level("WARNING"):
+        data = await layer.load()
+    assert data.model_extra == {}
+    assert any("Ignoring unparseable TOML" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_invalid_allowlist_toml_fails_open(
+    tmp_working_directory: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Regression for #1270: broken escaping in tools.bash.allowlist must not crash."""
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text(
+        '[tools.bash]\nallowlist = [\n'
+        '    "find /"$HOME/" -maxdepth 4 -type d -name /".git/" 2>/dev/null | head -20",\n'
+        "]\n"
+    )
+    layer = UserConfigLayer(path=path)
+    with caplog.at_level("WARNING"):
+        data = await layer.load()
+    assert data.model_extra == {}
+    assert any("Ignoring unparseable TOML" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
