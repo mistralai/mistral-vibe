@@ -449,8 +449,14 @@ def _read_command(node: Node) -> _CommandRead:
     if first_unreadable is not None and not _identity_survives(parts, first_unreadable):
         invalidates_scope = True
 
-    # A redirect is a sibling of the command under redirected_statement. Keep the
-    # marker so standalone-command denylist behavior stays intact.
+    # A redirect may wrap a list or pipeline, but belongs only to its last command.
+    # Keep the marker so standalone-command denylist behavior stays intact.
+    while (
+        (parent := node.parent)
+        and parent.type in {"list", "pipeline"}
+        and node.next_named_sibling is None
+    ):
+        node = parent
     if parts and node.parent and node.parent.type == "redirected_statement":
         parts.append("<redirect>")
     return _CommandRead(
