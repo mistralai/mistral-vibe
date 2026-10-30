@@ -284,7 +284,7 @@ class GenericBackend:
 
         async def paced_on_retry(reason: RetryReason) -> None:
             if reason.category is RetryCategory.RATE_LIMITED:
-                self._pacer.on_rate_limited()
+                self._pacer.on_rate_limited(reason.retry_after_seconds)
             if self._user_on_retry is not None:
                 await self._user_on_retry(reason)
 
