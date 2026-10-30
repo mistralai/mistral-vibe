@@ -4,7 +4,8 @@ version = "3.0.4"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "Mistral AI" }]
 keywords = [
     "ai",
