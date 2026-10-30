@@ -59,7 +59,6 @@ fn app_with_broken_profile() -> App {
 fn settle(app: &mut App, client: &Arc<Client>, target: &str, runtime: Result<Value, String>) {
     app.agents.desired = Some(target.into());
     app.agents.switch_active = true;
-    app.commit_started();
     let event = Event {
         target: target.into(),
         runtime,

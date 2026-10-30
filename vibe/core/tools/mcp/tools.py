@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 import contextlib
-from datetime import timedelta
 import hashlib
 import os
 from pathlib import Path
 import threading
 from typing import TYPE_CHECKING, Any, ClassVar, TextIO
 
-import httpx
+import httpx2
 
 from vibe import __version__
 from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
@@ -26,6 +25,7 @@ from vibe.utils.io import decode_console_safe
 if TYPE_CHECKING:
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters
+    from mcp.types import Tool
 
 
 # Mirrors MCP's default Streamable HTTP timeout values while avoiding an import from
@@ -64,7 +64,7 @@ async def _mcp_stderr_capture() -> AsyncGenerator[TextIO]:
 
 
 def create_vibe_mcp_http_client(
-    headers: dict[str, str] | None, *, auth: httpx.Auth | None = None
+    headers: dict[str, str] | None, *, auth: httpx2.Auth | None = None
 ) -> VibeAsyncHTTPClient:
     effective_headers = dict(headers or {})
     if not any(k.lower() == "user-agent" for k in effective_headers):
@@ -72,35 +72,74 @@ def create_vibe_mcp_http_client(
     return VibeAsyncHTTPClient(
         follow_redirects=True,
         headers=effective_headers,
-        auth=auth,
-        timeout=httpx.Timeout(_MCP_DEFAULT_TIMEOUT, read=_MCP_DEFAULT_SSE_READ_TIMEOUT),
+        auth=_RaiseForStatus(auth),
+        timeout=httpx2.Timeout(
+            _MCP_DEFAULT_TIMEOUT, read=_MCP_DEFAULT_SSE_READ_TIMEOUT
+        ),
         verify=build_ssl_context(),
     )
+
+
+class _RaiseForStatus(httpx2.Auth):
+    """Raise an HTTP error on a POST once ``inner`` is done with the response.
+
+    mcp 2 answers an HTTP error on a POST with a generic JSON-RPC error;
+    raising keeps the status, so a 401 still reads as an authorization
+    rejection. Raising after ``inner`` lets an OAuth provider answer the 401
+    first; the provider's flow is always closed, which releases its lock.
+    """
+
+    def __init__(self, inner: httpx2.Auth | None) -> None:
+        self._inner = inner
+
+    async def async_auth_flow(
+        self, request: httpx2.Request
+    ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
+        if self._inner is None:
+            response = yield request
+        else:
+            flow = self._inner.async_auth_flow(request)
+            try:
+                next_request = await anext(flow)
+                while True:
+                    response = yield next_request
+                    try:
+                        next_request = await flow.asend(response)
+                    except StopAsyncIteration:
+                        break
+            finally:
+                await flow.aclose()
+        if response.request.method == "POST" and response.is_error:
+            await response.aread()
+            response.raise_for_status()
 
 
 async def list_tools_http(
     url: str,
     *,
     headers: dict[str, str] | None = None,
-    auth: httpx.Auth | None = None,
+    auth: httpx2.Auth | None = None,
     startup_timeout_sec: float | None = None,
 ) -> list[RemoteTool]:
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
 
-    timeout = timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
+    timeout = startup_timeout_sec or None
     async with create_vibe_mcp_http_client(headers, auth=auth) as http_client:
         async with streamable_http_client(url, http_client=http_client) as (
             read,
             write,
-            _,
         ):
             async with ClientSession(
                 read, write, read_timeout_seconds=timeout
             ) as session:
                 await session.initialize()
                 tools_resp = await session.list_tools()
-                return [RemoteTool.model_validate(t) for t in tools_resp.tools]
+                return _remote_tools(tools_resp.tools)
+
+
+def _remote_tools(tools: list[Tool]) -> list[RemoteTool]:
+    return [RemoteTool.model_validate(tool.model_dump(by_alias=True)) for tool in tools]
 
 
 def create_mcp_http_proxy_tool_class(
@@ -160,8 +199,8 @@ def authorization_required_result(
 def is_authorization_rejection(exc: BaseException) -> bool:
     if isinstance(exc, BaseExceptionGroup):
         return any(is_authorization_rejection(child) for child in exc.exceptions)
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code == httpx.codes.UNAUTHORIZED
+    if isinstance(exc, httpx2.HTTPStatusError):
+        return exc.response.status_code == httpx2.codes.UNAUTHORIZED
     from mcp.client.auth import OAuthFlowError
 
     return isinstance(exc, OAuthFlowError)
@@ -179,7 +218,7 @@ async def enter_stdio_session(
     stack: contextlib.AsyncExitStack,
     params: StdioServerParameters,
     *,
-    init_timeout: timedelta | None,
+    init_timeout: float | None,
 ) -> ClientSession:
     """Enter the stderr-capture, stdio_client, and ClientSession contexts on *stack*.
 
@@ -206,11 +245,11 @@ async def list_tools_stdio(
     startup_timeout_sec: float | None = None,
 ) -> list[RemoteTool]:
     params = build_stdio_params(command, env=env, cwd=cwd)
-    timeout = timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
+    timeout = startup_timeout_sec or None
     async with contextlib.AsyncExitStack() as stack:
         session = await enter_stdio_session(stack, params, init_timeout=timeout)
         tools_resp = await session.list_tools()
-        return [RemoteTool.model_validate(t) for t in tools_resp.tools]
+        return _remote_tools(tools_resp.tools)
 
 
 def create_mcp_stdio_proxy_tool_class(

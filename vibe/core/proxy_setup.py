@@ -13,7 +13,7 @@ SUPPORTED_PROXY_VARS: dict[str, str] = {
     "SSL_CERT_DIR": "Path to directory containing SSL certificates",
 }
 
-# Proxy URL vars need an http(s):// scheme, else httpx crashes on startup (VIBE-4084).
+# Proxy URL vars need an http(s):// scheme, else httpx2 crashes on startup (VIBE-4084).
 PROXY_URL_VARS: frozenset[str] = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"})
 
 

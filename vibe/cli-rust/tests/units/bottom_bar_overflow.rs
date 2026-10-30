@@ -1,22 +1,10 @@
 //! Regression: a long cwd clipped the bottom bar's token counter.
 
-use ratatui::backend::TestBackend;
-use ratatui::layout::Rect;
-use ratatui::Terminal;
-
 use vibe_rs::app::App;
-use vibe_rs::ui::bottom_bar;
+
+use crate::support::bottom_bar_row;
 
 const WIDTH: u16 = 120;
-
-fn render_row(app: &mut App) -> String {
-    let mut terminal = Terminal::new(TestBackend::new(WIDTH, 1)).expect("terminal");
-    terminal
-        .draw(|frame| bottom_bar::draw(app, frame, Rect::new(0, 0, WIDTH, 1)))
-        .expect("draw");
-    let buffer = terminal.backend().buffer();
-    (0..WIDTH).map(|x| buffer[(x, 0)].symbol()).collect()
-}
 
 #[test]
 fn a_long_cwd_is_ellipsized_and_keeps_the_token_counter() {
@@ -25,7 +13,7 @@ fn a_long_cwd_is_ellipsized_and_keeps_the_token_counter() {
     app.session.cwd = Some(cwd);
     app.session.tokens = (0, 600_000);
 
-    let row = render_row(&mut app);
+    let row = bottom_bar_row(&mut app, WIDTH);
 
     let counter = "0/600k tokens (0%)";
     let path_width = WIDTH as usize - 1 - counter.len();
@@ -39,7 +27,7 @@ fn a_short_cwd_is_left_untouched() {
     app.session.cwd = Some("/tmp/project".into());
     app.session.tokens = (0, 600_000);
 
-    let row = render_row(&mut app);
+    let row = bottom_bar_row(&mut app, WIDTH);
 
     assert!(row.starts_with("/tmp/project "));
     assert!(row.ends_with("0/600k tokens (0%)"));

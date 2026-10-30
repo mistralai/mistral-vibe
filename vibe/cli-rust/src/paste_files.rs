@@ -38,12 +38,7 @@ pub(crate) fn spawn_job(
     job: impl FnOnce() -> Event + Send + 'static,
     fallback: Event,
 ) -> bool {
-    let Some(tx) = app
-        .paste_image
-        .tx
-        .clone()
-        .filter(|_| app.paste_image.has_slot())
-    else {
+    let Some(tx) = app.events.clone().filter(|_| app.paste_image.has_slot()) else {
         return false;
     };
     app.paste_image.in_flight += 1;

@@ -13,6 +13,7 @@ import pytest
 
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
+    drain_child_output,
     poll_until,
     send_ctrl_c_until_quit_confirmation,
     strip_ansi,
@@ -115,10 +116,7 @@ def _finish_turn(
     last_size = len(captured.getvalue())
 
     while time.monotonic() - start < 5:
-        try:
-            child.expect(r"\S", timeout=0.05)
-        except pexpect.TIMEOUT:
-            pass
+        drain_child_output(child, timeout=0.05)
 
         current_size = len(captured.getvalue())
         if current_size != last_size:

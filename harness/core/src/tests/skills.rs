@@ -137,7 +137,7 @@ fn direct_skill_route_preserves_prompt_catalog_and_restore() {
     assert!(messages.contains("without calling `skill` again"));
     assert!(messages.contains("Connector names and unlisted names"));
     assert!(messages.contains("Review &lt;code&gt; safely."));
-    assert!(messages.contains("/skills/zeta&lt;&amp;/SKILL.md"));
+    assert!(!messages.contains("/skills/zeta"));
     let zeta_index = messages
         .find("zeta-review")
         .expect("root skill is rendered");

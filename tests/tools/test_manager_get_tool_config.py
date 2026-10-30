@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
 from tests.conftest import build_test_vibe_config
+from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.tools import manager as tool_manager_module
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.tools.manager import NoSuchToolError, ToolManager
+from vibe.core.trusted_folders import trusted_folders_manager
 
 
 def _manager(
@@ -557,184 +558,32 @@ class TestToolManagerFiltering:
         assert "grep" in tools
         assert "read_file" in tools
 
-    def test_tool_paths_with_file_and_directory(self, tmp_path: Path):
-        """Should handle a mix of file and directory paths in tool_paths."""
-        import sys
-
-        # Create a directory with a tool
-        tool_dir = tmp_path / "tools"
-        tool_dir.mkdir()
-        (tool_dir / "dir_tool.py").write_text("""
-from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
-from pydantic import BaseModel
-from collections.abc import AsyncGenerator
-
-class DirToolArgs(BaseModel):
-    pass
-
-class DirToolResult(BaseModel):
-    pass
-
-class DirTool(BaseTool[DirToolArgs, DirToolResult, BaseToolConfig, BaseToolState]):
-    description = "Tool from directory"
-
-    async def run(self, args, ctx=None):
-        yield DirToolResult()
-""")
-
-        # Create a standalone tool file
-        file_tool = tmp_path / "file_tool.py"
-        file_tool.write_text("""
-from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
-from pydantic import BaseModel
-from collections.abc import AsyncGenerator
-
-class FileToolArgs(BaseModel):
-    pass
-
-class FileToolResult(BaseModel):
-    pass
-
-class FileTool(BaseTool[FileToolArgs, FileToolResult, BaseToolConfig, BaseToolState]):
-    description = "Tool from file path"
-
-    async def run(self, args, ctx=None):
-        yield FileToolResult()
-""")
-
-        # Clean up any previously loaded modules
-        to_remove = [k for k in sys.modules if "dir_tool" in k or "file_tool" in k]
-        for k in to_remove:
-            del sys.modules[k]
-
-        vibe_config = build_test_vibe_config(tool_paths=[tool_dir, file_tool])
-        manager = ToolManager(lambda: vibe_config)
-
-        tools = manager.available_tools
-        assert "dir_tool" in tools
-        assert "file_tool" in tools
-
-    def test_custom_tool_names_include_only_available_custom_tools(
-        self, tmp_path: Path
+    def test_custom_tool_files_are_never_imported(
+        self, tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        tool_dir = tmp_path / "tools"
-        tool_dir.mkdir()
-        (tool_dir / "weather.py").write_text("""
-from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
-from pydantic import BaseModel
+        marker = tmp_path / "imported.txt"
+        module = f"from pathlib import Path\nPath({str(marker)!r}).write_text('x')\n"
+        project_tools = tmp_path / ".vibe" / "tools"
+        user_tools = config_dir / "tools"
+        for tools_dir in (project_tools, user_tools):
+            tools_dir.mkdir(parents=True)
+            (tools_dir / "marker.py").write_text(module)
+        trusted_folders_manager.add_trusted(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        vibe_config = build_test_vibe_config()
 
-class WeatherArgs(BaseModel):
-    pass
-
-class WeatherResult(BaseModel):
-    pass
-
-class WeatherTool(BaseTool[WeatherArgs, WeatherResult, BaseToolConfig, BaseToolState]):
-    async def run(self, args, ctx=None):
-        yield WeatherResult()
-""")
-
-        vibe_config = build_test_vibe_config(tool_paths=[tool_dir])
-        holder = {"config": vibe_config}
-        manager = ToolManager(lambda: holder["config"])
-
-        assert manager.custom_tool_names == {"weather_tool"}
-
-        holder["config"] = vibe_config.model_copy(
-            update={"disabled_tools": ["weather_tool"]}
-        )
-        assert manager.custom_tool_names == set()
-
-    def test_reexported_builtin_counts_as_a_custom_tool_override(self, tmp_path: Path):
-        tools_dir = tmp_path / "tools"
-        tools_dir.mkdir()
-        (tools_dir / "reexport.py").write_text(
-            "from vibe.core.tools.builtins.todo import Todo\n"
+        manager = ToolManager(
+            lambda: vibe_config,
+            harness_files=HarnessFilesManager(sources=("user", "project")),
         )
 
-        vibe_config = build_test_vibe_config(tool_paths=[tools_dir])
-        manager = ToolManager(lambda: vibe_config)
-
-        assert "todo" in manager.custom_tool_names
-
-    def test_fixed_custom_tool_loads_on_next_scan(self, tmp_path: Path):
-        tool_dir = tmp_path / "tools"
-        tool_dir.mkdir()
-        tool_file = tool_dir / "broken_then_fixed.py"
-        tool_file.write_text("raise RuntimeError('boom')\n")
-        vibe_config = build_test_vibe_config(tool_paths=[tool_dir])
-
-        broken = ToolManager(lambda: vibe_config)
-        assert [f.path for f in broken.failed_custom_tool_files] == [tool_file]
-
-        tool_file.write_text("""
-from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
-from pydantic import BaseModel
-
-class FixedArgs(BaseModel):
-    pass
-
-class FixedResult(BaseModel):
-    pass
-
-class FixedTool(BaseTool[FixedArgs, FixedResult, BaseToolConfig, BaseToolState]):
-    pass
-""")
-        fixed = ToolManager(lambda: vibe_config)
-
-        assert fixed.failed_custom_tool_files == []
-        assert "fixed_tool" in fixed.custom_tool_names
+        assert "marker" not in manager.available_tools
+        assert "bash" in manager.available_tools
+        assert not marker.exists()
 
 
 class TestToolRuntimeAvailability:
     """Tests for is_available() filtering in ToolManager."""
-
-    def test_unavailable_tool_excluded_from_available_tools(
-        self, tmp_path: Path, monkeypatch
-    ):
-        """Tools where is_available() returns False should be excluded."""
-        import sys
-
-        tool_dir = tmp_path / "tools"
-        tool_dir.mkdir()
-        (tool_dir / "conditional_tool.py").write_text("""
-import os
-from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
-from pydantic import BaseModel
-
-class ConditionalToolArgs(BaseModel):
-    pass
-
-class ConditionalToolResult(BaseModel):
-    pass
-
-class ConditionalTool(BaseTool[ConditionalToolArgs, ConditionalToolResult, BaseToolConfig, BaseToolState]):
-    description = "Tool that requires TEST_VAR"
-
-    @classmethod
-    def is_available(cls) -> bool:
-        return bool(os.getenv("TEST_VAR"))
-
-    async def run(self, args, ctx=None):
-        yield ConditionalToolResult()
-""")
-
-        to_remove = [k for k in sys.modules if "conditional_tool" in k]
-        for k in to_remove:
-            del sys.modules[k]
-
-        monkeypatch.delenv("TEST_VAR", raising=False)
-        vibe_config = build_test_vibe_config(tool_paths=[tool_dir])
-        manager = ToolManager(lambda: vibe_config)
-        assert "conditional_tool" not in manager.available_tools
-
-        to_remove = [k for k in sys.modules if "conditional_tool" in k]
-        for k in to_remove:
-            del sys.modules[k]
-
-        monkeypatch.setenv("TEST_VAR", "1")
-        manager2 = ToolManager(lambda: vibe_config)
-        assert "conditional_tool" in manager2.available_tools
 
     def test_default_is_available_returns_true(self):
         """Tools without is_available() override should be available."""
@@ -846,113 +695,49 @@ class TestToolManagerModuleReuse:
         assert tool1 is not tool2
         assert tool1.state is not tool2.state
 
-    def test_different_files_same_stem_get_different_modules(self, tmp_path: Path):
-        """Tools with same stem but different paths should be separate modules.
 
-        This ensures user tools can override builtins - a custom todo.py in
-        ~/.config/vibe/tools/ should override the builtin todo.py.
-        """
-        import sys
+def test_builtin_discovery_lists_every_tool_file() -> None:
+    """A builtin module that stops loading fails here, not as a missing tool."""
+    from vibe.core.paths import DEFAULT_TOOL_DIR
+    from vibe.core.tools.manager import builtin_tool_classes
 
-        # Create two tool files with the same stem but different content
-        dir1 = tmp_path / "tools1"
-        dir2 = tmp_path / "tools2"
-        dir1.mkdir()
-        dir2.mkdir()
-
-        tool_code_v1 = """
-from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
-from pydantic import BaseModel
-from collections.abc import AsyncGenerator
-
-class DummyArgs(BaseModel):
-    value: str
-
-class DummyResult(BaseModel):
-    version: str = "v1"
-
-class DummyTool(BaseTool[DummyArgs, DummyResult, BaseToolConfig, BaseToolState]):
-    description = "Dummy tool v1"
-
-    async def run(self, args: DummyArgs, ctx=None) -> AsyncGenerator[DummyResult, None]:
-        yield DummyResult(version="v1")
-"""
-
-        tool_code_v2 = """
-from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
-from pydantic import BaseModel
-from collections.abc import AsyncGenerator
-
-class DummyArgs(BaseModel):
-    value: str
-
-class DummyResult(BaseModel):
-    version: str = "v2"
-
-class DummyTool(BaseTool[DummyArgs, DummyResult, BaseToolConfig, BaseToolState]):
-    description = "Dummy tool v2"
-
-    async def run(self, args: DummyArgs, ctx=None) -> AsyncGenerator[DummyResult, None]:
-        yield DummyResult(version="v2")
-"""
-
-        (dir1 / "dummy.py").write_text(tool_code_v1)
-        (dir2 / "dummy.py").write_text(tool_code_v2)
-
-        # Clean up any previously loaded dummy modules
-        to_remove = [k for k in sys.modules if "dummy" in k]
-        for k in to_remove:
-            del sys.modules[k]
-
-        # Load tools from both directories (dir2 comes after, should override)
-        classes = list(ToolManager._iter_tool_classes([dir1, dir2]))
-        dummy_classes = [c for c in classes if "dummy" in c.get_name().lower()]
-
-        # Should have 2 separate classes (from different modules)
-        assert len(dummy_classes) == 2
-
-        # They should be different class objects
-        assert dummy_classes[0] is not dummy_classes[1]
-
-        # When put in a dict (like _available), the second one wins
-        available = {c.get_name(): c for c in classes}
-        final_class = available.get("dummy_tool")
-        assert final_class is not None
-        assert final_class.description == "Dummy tool v2"
-
-    def test_reexported_custom_tool_is_discovered(self, tmp_path: Path):
-        # A custom tool file may import/re-export a tool class defined in another
-        # module; its __module__ points at the origin, not the file. The builtin
-        # base-class dedup filter must not drop such tools from user/project dirs.
-        tools_dir = tmp_path / "tools"
-        tools_dir.mkdir()
-        (tools_dir / "reexport.py").write_text(
-            "from vibe.core.tools.builtins.todo import Todo\n"
-        )
-
-        classes = list(ToolManager._iter_tool_classes([tools_dir]))
-
-        assert any(c.get_name() == "todo" for c in classes)
-
-    def test_tool_added_to_a_discovered_directory_is_picked_up(self, tmp_path: Path):
-        tools_dir = tmp_path / "tools"
-        tools_dir.mkdir()
-        (tools_dir / "reexport_todo.py").write_text(
-            "from vibe.core.tools.builtins.todo import Todo\n"
-        )
-        listed = tools_dir.stat()
-        assert {c.get_name() for c in ToolManager._iter_tool_classes([tools_dir])} == {
-            "todo"
-        }
-
-        (tools_dir / "reexport_bash.py").write_text(
-            "from vibe.core.tools.builtins.bash import Bash\n"
-        )
-        # A coarse-grained clock (Linux) can leave the directory mtime where the
-        # previous scan saw it after an add.
-        os.utime(tools_dir, ns=(listed.st_atime_ns, listed.st_mtime_ns))
-
-        assert {c.get_name() for c in ToolManager._iter_tool_classes([tools_dir])} == {
-            "todo",
-            "bash",
-        }
+    discovered = {tool_class.get_name() for tool_class in builtin_tool_classes()}
+    # One line per builtin module: the shell families publish several names.
+    expected = {
+        "ask_user_question",
+        "bash",
+        "bash_log_file",
+        "bash_output",
+        "bash_sessions",
+        "bash_stdin",
+        "edit",
+        "git_bash",
+        "git_bash_log_file",
+        "git_bash_output",
+        "git_bash_sessions",
+        "git_bash_stdin",
+        "grep",
+        "powershell",
+        "powershell_log_file",
+        "powershell_output",
+        "powershell_sessions",
+        "powershell_stdin",
+        "read_file",
+        "skill",
+        "task",
+        "todo",
+        "web_fetch",
+        "web_search",
+        "write_file",
+    }
+    assert discovered == expected
+    # Every non-underscore file in the builtin directory contributed.
+    modules = {
+        tool_class.__module__.rsplit(".", 1)[-1]
+        for tool_class in builtin_tool_classes()
+    }
+    assert modules == {
+        path.stem
+        for path in DEFAULT_TOOL_DIR.path.glob("*.py")
+        if not path.name.startswith("_")
+    }

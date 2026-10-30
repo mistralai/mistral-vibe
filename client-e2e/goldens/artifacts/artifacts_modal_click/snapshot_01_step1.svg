@@ -38,7 +38,7 @@
 .vibe-r4 { fill: #cdcd00 }
 .vibe-r5 { fill: #000000 }
 .vibe-r6 { fill: #868887 }
-.vibe-r7 { fill: #0000ee;text-decoration: underline; }
+.vibe-r7 { fill: #5c5cff;text-decoration: underline; }
     </style>
 
     <defs>

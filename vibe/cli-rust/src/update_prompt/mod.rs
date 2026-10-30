@@ -2,6 +2,7 @@
 //! main terminal owns the screen.
 
 mod ansi;
+mod manual;
 mod view;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +21,7 @@ use crate::update_notifier::update;
 use crate::utils::is_replaying;
 
 pub use ansi::color_span;
+pub use manual::{manual_update_command, manual_update_lines};
 pub use view::draw;
 pub use view::option_span;
 
@@ -45,6 +47,8 @@ pub enum UpdatePromptResult {
     Continue,
     Updated(Vec<update::UpdateCommandOutcome>),
     UpdateFailed(Vec<update::UpdateCommandOutcome>),
+    /// The user must close Vibe and run the upgrade from a shell.
+    ManualUpdate,
     Quit,
 }
 
@@ -86,6 +90,8 @@ pub struct UpdatePromptState {
     pub source: UpdateSource,
     pub selected: UpdateChoice,
     pub updating: bool,
+    /// Windows cannot replace files a running Vibe holds, so the upgrade is left to the user.
+    pub manual_update: bool,
 }
 
 impl UpdatePromptState {
@@ -103,6 +109,7 @@ impl UpdatePromptState {
             // Start on "Update now".
             selected: UpdateChoice::Update,
             updating: false,
+            manual_update: cfg!(windows),
         }
     }
 
@@ -161,6 +168,7 @@ pub async fn show_update_prompt(
             None
         }
         UpdatePromptResult::Quit => Some(0),
+        UpdatePromptResult::ManualUpdate => manual::print_manual_update(state),
         UpdatePromptResult::Updated(outcomes) => {
             // The manager's own answer can differ from the advertised latest
             // (a lagging brew formula, a re-resolved uv constraint); its
@@ -246,6 +254,7 @@ pub fn apply_key(
         }
         KeyCode::Enter if !state.updating => match state.selected {
             UpdateChoice::Continue => Some(UpdatePromptResult::Continue),
+            UpdateChoice::Update if state.manual_update => Some(UpdatePromptResult::ManualUpdate),
             UpdateChoice::Update => {
                 state.updating = true;
                 None

@@ -65,27 +65,6 @@ class TestLLMMessageId:
         assert msg.message_id is None
 
 
-class TestLLMMessageAccumulation:
-    def test_message_id_preserved_on_add(self) -> None:
-        msg1 = LLMMessage(role=Role.assistant, content="Hello")
-        msg2 = LLMMessage(role=Role.assistant, content=" world")
-
-        result = msg1 + msg2
-
-        assert result.message_id == msg1.message_id
-        assert result.content == "Hello world"
-
-    def test_message_id_preserved_after_multiple_adds(self) -> None:
-        msg1 = LLMMessage(role=Role.assistant, content="A")
-        msg2 = LLMMessage(role=Role.assistant, content="B")
-        msg3 = LLMMessage(role=Role.assistant, content="C")
-
-        result = msg1 + msg2 + msg3
-
-        assert result.message_id == msg1.message_id
-        assert result.content == "ABC"
-
-
 class TestEventMessageId:
     def test_user_message_event_has_message_id(self) -> None:
         event = UserMessageEvent(content="Hello", message_id="user-msg-id")

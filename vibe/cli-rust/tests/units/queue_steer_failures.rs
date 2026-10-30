@@ -10,6 +10,8 @@ use vibe_rs::commands::submission;
 use vibe_rs::message_queue::{self as mq, QueueEvent, QueueItem};
 use vibe_rs::server::{Client, PublicSessionState};
 
+use crate::support::{queued, queued_texts, stub};
+
 /// Two busy-time prompts merged into one accepted server queue item `q-1`.
 fn busy_app_with_merged_queue() -> App {
     let mut app = App::default();
@@ -32,15 +34,8 @@ fn busy_app_with_merged_queue() -> App {
         }));
         app.queue.items.push(QueueItem {
             queue_item_id: Some("q-1".into()),
-            message_id: id.into(),
             server_message_id: "first".into(),
-            text: text.into(),
-            images: Vec::new(),
-            mentions: None,
-            sent: true,
-            ever_sent: true,
-            revision: 0,
-            replacing: false,
+            ..queued(id, text)
         });
     }
     app
@@ -50,14 +45,6 @@ fn press_empty_enter(app: &mut App, client: &Arc<Client>) -> bool {
     let (config_tx, _config_rx) = mpsc::channel(1);
     app.chat_input.clear();
     submission::submit(app, client, &config_tx)
-}
-
-fn queued_texts(app: &App) -> Vec<&str> {
-    app.queue
-        .items
-        .iter()
-        .map(|item| item.text.as_str())
-        .collect()
 }
 
 fn assert_still_queued_and_removable(app: &App) {
@@ -70,7 +57,7 @@ fn assert_still_queued_and_removable(app: &App) {
 
 #[tokio::test]
 async fn a_steer_rejected_because_the_turn_ended_keeps_the_queue_for_the_next_turn() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = busy_app_with_merged_queue();
     let entries = app.view.transcript.lines().count();
 
@@ -93,7 +80,7 @@ async fn a_steer_rejected_because_the_turn_ended_keeps_the_queue_for_the_next_tu
 
 #[tokio::test]
 async fn a_steer_lost_to_a_disconnect_is_reconciled_from_the_snapshot() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = busy_app_with_merged_queue();
 
     assert!(!press_empty_enter(&mut app, &client));

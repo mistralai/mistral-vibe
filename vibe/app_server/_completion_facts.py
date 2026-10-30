@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 import json
 from typing import Any
 
-import httpx
+import httpx2
 
 from mistralai_vibe_local_harness.vibe import (
     LocalRuntimeAdapterConfig,
@@ -28,7 +28,6 @@ from mistralai_vibe_local_harness.vibe import (
 )
 from mistralai_vibe_local_harness.vibe.completion_profile import (
     PROCESS_CATALOGUE_CACHE,
-    REASONING_LEVELS,
     AnthropicCatalogueFetcher,
     CatalogueEntry,
     CatalogueFetcher,
@@ -42,7 +41,6 @@ from mistralai_vibe_local_harness.vibe.completion_profile import (
     NoCatalogueFetcher,
     ProfileError,
     ReasoningControl,
-    ReasoningLevel,
     ReasoningSupport,
     catalogue_endpoint,
     compile_profile,
@@ -55,21 +53,27 @@ from vibe.app_server.protocol import ProtocolErrorCode
 from vibe.app_server.run_export import RunOutcome
 from vibe.config_values import THINKING_LEVELS, ThinkingLevel
 from vibe.core.config import ModelConfig, ProviderConfig
+from vibe.core.llm.reasoning import (
+    lowest_first,
+    profile_thinking,
+    written_reasoning_levels,
+)
 from vibe.core.types import Backend
+from vibe.observability.logging import logger
 from vibe.utils.api_keys import resolve_api_key
-from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context, with_user_agent
 
 type CatalogueFetcherFactory = Callable[
-    [ProviderConfig, httpx.AsyncClient], CatalogueFetcher
+    [ProviderConfig, httpx2.AsyncClient], CatalogueFetcher
 ]
 
 
 def provider_catalogue_fetcher(
-    provider: ProviderConfig, client: httpx.AsyncClient
+    provider: ProviderConfig, client: httpx2.AsyncClient
 ) -> CatalogueFetcher:
     """The catalogue fetcher for ``provider``, with the key its completions use."""
     key = resolve_api_key(provider.api_key_env_var)
-    headers = dict(provider.extra_headers)
+    headers = with_user_agent(provider.extra_headers, provider.backend)
     if provider.backend == Backend.MISTRAL:
         return MistralCatalogueFetcher(
             client, provider.api_base, api_key=key, headers=headers
@@ -182,12 +186,12 @@ def _reasoning(value: Any) -> ReasoningSupport | None:
     if value is None:
         return None
     levels = value["levels"]
-    if not isinstance(levels, list) or any(
-        level not in REASONING_LEVELS for level in levels
+    if not isinstance(levels, list) or not all(
+        isinstance(level, str) for level in levels
     ):
-        raise ValueError("unknown reasoning level")
+        raise ValueError("not a list of reasoning levels")
     return ReasoningSupport(
-        tuple(levels),
+        lowest_first(levels),
         can_turn_off=_flag(value["can_turn_off"]) is True,
         control=ReasoningControl(value["control"]),
     )
@@ -229,6 +233,7 @@ def compile_session_model_facts(
     compaction: ModelConfig,
     *,
     saved: CatalogueSnapshot | None = None,
+    agent_max_tokens: int | None = None,
 ) -> SessionModelFacts:
     """Compile both routes on ``provider``, which serves them both.
 
@@ -253,6 +258,7 @@ def compile_session_model_facts(
         agent,
         threshold=agent.auto_compact_threshold,
         catalogue=agent_catalogue,
+        max_tokens=agent_max_tokens,
     )
     compaction_profile = _compile(
         provider, compaction, threshold=None, catalogue=catalogue.get(compaction.name)
@@ -268,8 +274,8 @@ def compile_session_model_facts(
         ),
         agent_reasoning=agent_reasoning,
         compaction_reasoning=compaction_reasoning,
-        agent_thinking=_thinking(agent, agent_reasoning),
-        compaction_thinking=_thinking(compaction, compaction_reasoning),
+        agent_thinking=profile_thinking(agent_profile),
+        compaction_thinking=profile_thinking(compaction_profile),
         catalogue=None
         if agent_catalogue is None or agent_catalogue.entry is None
         else CatalogueSnapshot(
@@ -316,14 +322,9 @@ def compile_agent_route_facts(
         threshold=agent.auto_compact_threshold,
         catalogue=catalogue.get(agent.name),
     )
-    written = compiled.profile.format.reasoning_setting
     return AgentRouteFacts(
         compiled.profile.facts.compaction_threshold,
-        # The level Core runs: the written one as written, else the model's
-        # lowest, as the session compiles it.
-        written
-        if written is not None
-        else _thinking(agent, compiled.profile.format.reasoning),
+        profile_thinking(compiled),
         offered_thinking_levels(agent, compiled.profile.format.reasoning),
     )
 
@@ -351,12 +352,30 @@ def offered_thinking_levels(
     else:
         offered = support.levels
     if model.thinking_is_set and model.thinking not in offered:
-        offered = tuple(
-            level
-            for level in THINKING_LEVELS
-            if level in offered or level == model.thinking
-        )
+        offered = _with_level(offered, model.thinking)
     return offered
+
+
+def _with_level(
+    levels: tuple[ThinkingLevel, ...], level: ThinkingLevel
+) -> tuple[ThinkingLevel, ...]:
+    """``levels`` with ``level`` in its standard place, or last when it has none.
+
+    Every level keeps its place: one outside the standard set has no rank to
+    sort by.
+    """
+    if level not in THINKING_LEVELS:
+        return (*levels, level)
+    rank = THINKING_LEVELS.index(level)
+    at = next(
+        (
+            index
+            for index, offered in enumerate(levels)
+            if offered in THINKING_LEVELS and THINKING_LEVELS.index(offered) > rank
+        ),
+        len(levels),
+    )
+    return (*levels[:at], level, *levels[at:])
 
 
 def _lists_thinking_levels(model: ModelConfig) -> bool:
@@ -393,7 +412,16 @@ def _catalogue_lookups(
 async def _fetch(
     provider: ProviderConfig, factory: CatalogueFetcherFactory, models: tuple[str, ...]
 ) -> dict[str, CatalogueLookup]:
-    async with VibeAsyncHTTPClient(verify=build_ssl_context()) as client:
+    try:
+        client = VibeAsyncHTTPClient(verify=build_ssl_context())
+    except Exception as error:
+        # The client builds its proxy transports from the environment's
+        # settings, so it can fail before any request: a proxy it cannot
+        # transport costs the catalogue, never the session — the compile
+        # degrades as for a fetch that never answered.
+        logger.warning("Model catalogue client could not be built: %s", error)
+        return {}
+    async with client:
         fetcher = factory(provider, client)
         # One bounded lookup per model, all at once: a slow catalogue costs the
         # session one timeout, not one per model.
@@ -434,6 +462,7 @@ def _compile(
     *,
     threshold: int | None,
     catalogue: CatalogueLookup | None,
+    max_tokens: int | None = None,
 ) -> CompiledProfile:
     adapter = LocalRuntimeAdapterConfig(
         backend=str(provider.backend),
@@ -454,7 +483,10 @@ def _compile(
                 compaction_threshold=threshold,
                 # Unset fits nothing: the route then takes the model's lowest.
                 reasoning=model.thinking if model.thinking_is_set else None,
-                reasoning_levels=_written_reasoning_levels(model),
+                reasoning_levels=written_reasoning_levels(model),
+                # Read only to warn when the cap leaves no room for reasoning;
+                # the Runtime sets each request's max_tokens itself.
+                max_tokens=max_tokens,
             ),
             catalogue.entry if catalogue is not None else None,
         )
@@ -463,37 +495,6 @@ def _compile(
             f"Model '{model.alias}' cannot be used with provider "
             f"'{provider.name}': {error}."
         ) from error
-
-
-def _written_reasoning_levels(model: ModelConfig) -> ReasoningSupport | None:
-    """The levels the config lists, as `ExplicitFacts.reasoning_levels` takes them.
-
-    A set with no level, only off, says the user wants no reasoning, not that the
-    model has none: the catalogue or the known row still says whether off has to
-    be sent for the model to stop.
-    """
-    if not _lists_thinking_levels(model):
-        return None
-    written = set(model.thinking_levels)
-    levels: tuple[ReasoningLevel, ...] = tuple(
-        level for level in REASONING_LEVELS if level in written
-    )
-    if not levels:
-        return None
-    return ReasoningSupport(levels, can_turn_off="off" in written)
-
-
-def _thinking(model: ModelConfig, support: ReasoningSupport | None) -> ThinkingLevel:
-    """The config's level, else the model's lowest setting.
-
-    The lowest is off where the model can stop or its levels are unknown, else its
-    lowest level: an unset level must not ask a model that always reasons for off.
-    """
-    if model.thinking_is_set:
-        return model.thinking
-    if support is None or support.can_turn_off:
-        return "off"
-    return support.levels[0]
 
 
 def _supports_images_modalities(

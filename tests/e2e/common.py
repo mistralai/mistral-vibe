@@ -144,6 +144,10 @@ def write_e2e_config(
             'active_model = "mock-model"',
             "enable_update_checks = false",
             "disable_welcome_banner_animation = true",
+            # Keep runs offline: no experiments, connectors or managed config fetch.
+            "enable_telemetry = false",
+            "enable_connectors = false",
+            f'vibe_base_url = "{api_base.removesuffix("/v1")}"',
             *settings,
             "",
             "[[providers]]",
@@ -175,11 +179,6 @@ def poll_until(predicate: Callable[[], bool], timeout: float, message: str) -> N
     raise AssertionError(message)
 
 
-# Waiting on the backend must always drain the child, never just sleep on the
-# predicate. Textual's writer thread has a 30-slot queue and blocks on a full one, so
-# a pty nobody reads eventually stalls the app's event loop: it stops handling input,
-# never dispatches the turn, and the request the caller is waiting for never arrives.
-# The startup burst alone is ~26KB against a 64KB Linux pty buffer.
 def still_running(pids: Sequence[int], timeout: float = 15.0) -> list[int]:
     """Those of `pids` still running after up to `timeout` seconds; a zombie,
     which only waits for its parent to reap it, has ended.
@@ -202,6 +201,22 @@ def _running(pid: int) -> bool:
     return bool(state) and not state.startswith("Z")
 
 
+def drain_child_output(child: pexpect.spawn, timeout: float) -> None:
+    """Consume pexpect's buffered output or, when it is empty, read one chunk
+    (up to `child.maxread`) from the pty, waiting up to `timeout` for it.
+
+    A wait loop must call this on each check, never just sleep: the child
+    blocks when nobody reads a full pty, and stops handling input. pexpect
+    reads the pty again only when its buffer holds no match, so a pattern that
+    consumes one character per call lets the reader fall seconds behind a TUI
+    that redraws its spinner continuously.
+    """
+    try:
+        child.expect(r"[\s\S]+", timeout=timeout)
+    except pexpect.TIMEOUT:
+        pass
+
+
 def wait_for_request_count_while_draining_child_output(
     child: pexpect.spawn,
     captured: io.StringIO,
@@ -214,10 +229,7 @@ def wait_for_request_count_while_draining_child_output(
     while time.monotonic() - start < timeout:
         if request_count_getter() >= expected_count:
             return
-        try:
-            child.expect(r"\S", timeout=0.05)
-        except pexpect.TIMEOUT:
-            pass
+        drain_child_output(child, timeout=0.05)
     rendered_tail = strip_ansi(captured.getvalue())[-1200:]
     raise AssertionError(
         f"Timed out waiting for {expected_count} backend request(s).\n\n"
@@ -238,20 +250,35 @@ def _rendered_within(
     without ever crossing the output stream whole: match the screen, not the
     stream.
     """
+    return _screen_within(
+        child,
+        captured,
+        lambda screen: needle in screen,
+        timeout,
+        waiting_for=f"rendered text: {needle!r}",
+    )
+
+
+def _screen_within(
+    child: pexpect.spawn,
+    captured: io.StringIO,
+    matches: Callable[[str], bool],
+    timeout: float,
+    *,
+    waiting_for: str,
+) -> bool:
     start = time.monotonic()
     while time.monotonic() - start < timeout:
-        if needle in rendered_screen(captured):
+        if matches(rendered_screen(captured)):
             return True
         try:
-            child.expect(r"\S", timeout=0.1)
-        except pexpect.TIMEOUT:
-            pass
+            drain_child_output(child, timeout=0.1)
         except pexpect.EOF as exc:
             rendered_tail = strip_ansi(captured.getvalue())[-1200:]
             raise AssertionError(
-                f"Child exited while waiting for rendered text: {needle!r}\n\nRendered tail:\n{rendered_tail}"
+                f"Child exited while waiting for {waiting_for}\n\nRendered tail:\n{rendered_tail}"
             ) from exc
-    return needle in rendered_screen(captured)
+    return matches(rendered_screen(captured))
 
 
 def wait_for_rendered_text(
@@ -285,10 +312,11 @@ def wait_for_dialog_to_accept_keys(
     grace_ms = int(os.environ.get(_INPUT_GRACE_PERIOD_ENV, _INPUT_GRACE_PERIOD_MS))
     deadline = time.monotonic() + grace_ms / 1000
     while (remaining := deadline - time.monotonic()) > 0:
-        try:
-            child.expect(r"\S", timeout=min(remaining, 0.05))
-        except pexpect.TIMEOUT:
-            pass
+        drain_child_output(child, timeout=min(remaining, 0.05))
+
+
+# The loading line's key hint while a turn runs (vibe/cli-rust/src/ui/loading/hint.rs).
+_TURN_RUNNING_HINT = "to interrupt"
 
 
 def send_ctrl_c_until_quit_confirmation(
@@ -297,6 +325,14 @@ def send_ctrl_c_until_quit_confirmation(
     """Send Ctrl+C and wait for quit confirmation prompt. Retries if first Ctrl+C interrupts."""
     start = time.monotonic()
     while time.monotonic() - start < timeout:
+        # Ctrl+C interrupts a running turn instead of asking to quit.
+        _screen_within(
+            child,
+            captured,
+            lambda screen: _TURN_RUNNING_HINT not in screen,
+            2,
+            waiting_for="the turn to end",
+        )
         child.sendcontrol("c")
         if _rendered_within(child, captured, "Press Ctrl+C again to quit", 2):
             # Confirmation prompt appeared, send second Ctrl+C

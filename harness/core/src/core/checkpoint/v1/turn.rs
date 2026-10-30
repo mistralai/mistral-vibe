@@ -7,7 +7,7 @@ use crate::core::features::compaction::{
 };
 use crate::core::hooks::{HookPoint, hook_action_id};
 use crate::core::model_context::ModelContext;
-use crate::core::state::{ActivePhase, ActiveTurn, QueuedTurn, TurnState};
+use crate::core::state::{ActivePhase, ActiveTurn, TurnState};
 use crate::core::step_protocol::ToolDefinition;
 use crate::core::turn::{PendingLifecycleHook, TurnOutcome};
 use crate::core::wire::content::{ContentBlock, validate_non_empty_content};
@@ -43,6 +43,7 @@ enum CheckpointTurnStateRepr {
         turn_id: String,
         iterations: u32,
         phase: CheckpointActivePhase,
+        /// Retained for V1 compatibility; new checkpoints always write Empty.
         queued: CheckpointQueuedTurn,
         pending_steer: Vec<CheckpointStoredMessage>,
         model_input_ready: bool,
@@ -80,7 +81,7 @@ impl CheckpointTurnState {
                         &active.turn_id,
                         active.iterations,
                     )?,
-                    queued: CheckpointQueuedTurn::capture(&active.queued)?,
+                    queued: CheckpointQueuedTurn::Empty,
                     pending_steer: capture_pending_steer(&active.pending_steer)?,
                     model_input_ready: active.model_input_ready,
                     output_limit_retries: active.output_limit_retries,
@@ -126,6 +127,10 @@ impl CheckpointTurnState {
                 model_input_ready,
                 output_limit_retries,
             } => {
+                if !matches!(queued, CheckpointQueuedTurn::Empty) {
+                    return Err("checkpoint contains pending queued requests; resume with the previous build before upgrading".to_string());
+                }
+
                 if turn_id.trim().is_empty() {
                     return Err("active checkpoint turn ID must not be empty".to_string());
                 }
@@ -137,7 +142,6 @@ impl CheckpointTurnState {
                     pending_steer: restore_pending_steer(pending_steer)?,
                     model_input_ready,
                     output_limit_retries,
-                    queued: queued.restore()?,
                 }))
             }
             CheckpointTurnStateRepr::Terminal { turn_id, outcome } => {
@@ -419,52 +423,11 @@ fn restore_pending_steer(
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum CheckpointQueuedTurn {
     Empty,
+    /// Decoded so restore can explain how to recover these requests.
     Pending {
         turn_id: String,
         messages: Vec<CheckpointStoredMessage>,
     },
-}
-
-impl CheckpointQueuedTurn {
-    fn capture(queued: &QueuedTurn) -> Result<Self, String> {
-        match queued {
-            QueuedTurn::Empty => Ok(Self::Empty),
-            QueuedTurn::Pending { turn_id, messages } => {
-                validate_identity(turn_id, "queued checkpoint turn ID")?;
-                if messages.is_empty() {
-                    return Err("queued turn must contain at least one message".to_string());
-                }
-                Ok(Self::Pending {
-                    turn_id: turn_id.clone(),
-                    messages: messages
-                        .iter()
-                        .map(|message| {
-                            CheckpointStoredMessage::capture_visible_user(message, "queued turn")
-                        })
-                        .collect::<Result<_, _>>()?,
-                })
-            }
-        }
-    }
-
-    fn restore(self) -> Result<QueuedTurn, String> {
-        match self {
-            Self::Empty => Ok(QueuedTurn::Empty),
-            Self::Pending { turn_id, messages } => {
-                validate_identity(&turn_id, "queued checkpoint turn ID")?;
-                if messages.is_empty() {
-                    return Err("queued turn must contain at least one message".to_string());
-                }
-                Ok(QueuedTurn::Pending {
-                    turn_id,
-                    messages: messages
-                        .into_iter()
-                        .map(|message| message.restore_visible_user("queued turn"))
-                        .collect::<Result<_, _>>()?,
-                })
-            }
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

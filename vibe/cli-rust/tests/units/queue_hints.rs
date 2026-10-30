@@ -1,12 +1,12 @@
 //! Queue key hints stay in step with what the queue keys actually do.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vibe_rs::app::{App, Status};
-use vibe_rs::message_queue::{self as mq, QueueItem};
-use vibe_rs::server::Client;
+use vibe_rs::message_queue::{self as mq};
+
+use crate::support::{press, queued, stub};
 
 fn busy_app(ids: &[&str]) -> App {
     let mut app = App::default();
@@ -15,27 +15,12 @@ fn busy_app(ids: &[&str]) -> App {
     app.session.status = Status::Generating {
         since: Instant::now(),
     };
-    app.queue.items = ids
-        .iter()
-        .map(|id| QueueItem {
-            queue_item_id: Some(format!("q-{id}")),
-            message_id: (*id).into(),
-            server_message_id: (*id).into(),
-            text: (*id).into(),
-            images: Vec::new(),
-            mentions: None,
-            sent: true,
-            ever_sent: true,
-            revision: 0,
-            replacing: false,
-        })
-        .collect();
+    app.queue.items = ids.iter().map(|id| queued(id, id)).collect();
     app
 }
 
-fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
-    let client = Arc::new(Client::stub());
-    mq::handle_selection_key(app, &client, KeyEvent::new(code, modifiers));
+fn select_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    mq::handle_selection_key(app, &stub(), KeyEvent::new(code, modifiers));
 }
 
 fn keys(app: &App) -> Vec<&'static str> {
@@ -60,7 +45,7 @@ fn selection_hints_last_exactly_as_long_as_the_selection() {
     mq::end_edit(&mut app);
     assert_eq!(keys(&app), ["↑↓/jk", "Enter", "Backspace/Ctrl+C", "Esc"]);
 
-    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    select_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     assert!(mq::mode_hints(&app).is_none());
 }
 
@@ -69,7 +54,7 @@ async fn a_consumed_edit_hints_submit_as_new() {
     let mut app = busy_app(&["a", "b"]);
     assert!(mq::enter(&mut app));
     mq::edit_selected(&mut app);
-    mq::remove_selected(&mut app, &Arc::new(Client::stub()));
+    mq::remove_selected(&mut app, &stub());
     let hints = mq::mode_hints(&app).expect("still editing");
     assert_eq!(
         hints[0],
@@ -88,10 +73,10 @@ async fn ctrl_c_and_backspace_remove_the_highlighted_prompt_but_delete_does_not(
     assert!(mq::enter(&mut app));
     mq::select_older(&mut app);
 
-    press(&mut app, KeyCode::Delete, KeyModifiers::NONE);
+    select_key(&mut app, KeyCode::Delete, KeyModifiers::NONE);
     assert_eq!(app.queue.len(), 3, "Delete is not a removal key");
 
-    press(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    select_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
     let left: Vec<_> = app
         .queue
         .items
@@ -104,27 +89,24 @@ async fn ctrl_c_and_backspace_remove_the_highlighted_prompt_but_delete_does_not(
         "the highlighted prompt goes, not the newest"
     );
 
-    press(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+    select_key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
     assert_eq!(app.queue.len(), 1);
 }
 
 #[tokio::test]
-async fn esc_on_a_focused_list_interrupts_instead_of_discarding_the_edit() {
+async fn esc_on_a_focused_list_returns_to_the_input_and_keeps_the_edit() {
     let mut app = busy_app(&["a", "b"]);
     assert!(mq::enter(&mut app));
     mq::edit_selected(&mut app);
-    // A focused list owns the keys, so the loading line shows "Esc to interrupt".
     app.subagents.list.focused = true;
 
-    let client = Arc::new(Client::stub());
-    let (config_tx, _config_rx) = tokio::sync::mpsc::channel(1);
-    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-    vibe_rs::input::handle_key(&mut app, &client, &config_tx, esc);
+    press(&mut app, KeyCode::Esc);
 
     assert!(app.queue.editing, "the edit is kept");
+    assert!(!app.subagents.list.focused, "Esc goes back one level");
     assert!(
-        app.session.status == Status::Ready,
-        "Esc interrupted the turn"
+        matches!(app.session.status, Status::Generating { .. }),
+        "the first Esc does not interrupt the turn"
     );
 }
 
@@ -135,10 +117,7 @@ fn esc_in_a_subagent_view_returns_to_main_and_keeps_the_edit() {
     mq::edit_selected(&mut app);
     app.subagents.viewed_subagent_id = Some("child".into());
 
-    let client = Arc::new(Client::stub());
-    let (config_tx, _config_rx) = tokio::sync::mpsc::channel(1);
-    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-    vibe_rs::input::handle_key(&mut app, &client, &config_tx, esc);
+    press(&mut app, KeyCode::Esc);
 
     assert!(app.queue.editing, "the edit is kept");
     assert_eq!(app.subagents.viewed_subagent_id, None);

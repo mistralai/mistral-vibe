@@ -6,6 +6,8 @@ from typing import cast
 import pytest
 
 from vibe.app_server._dispatch import RequestFailure
+from vibe.app_server._host import HostRequestHandler
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._session_backend_port import (
     SessionBackend,
     SessionBackendError,
@@ -20,6 +22,7 @@ from vibe.app_server.protocol import (
 )
 from vibe.app_server.server import _SESSION_BACKEND_METHODS, AppServer
 from vibe.app_server.transport import memory_transport_pair
+from vibe.core.config.harness_files import HarnessFilesManager
 
 
 def test_session_backend_contract_covers_the_complete_session_lifecycle() -> None:
@@ -111,7 +114,9 @@ def test_session_backend_errors_keep_semantic_code_and_data() -> None:
     assert ProtocolErrorCode.CALLBACK_CLOSED.value == "callback_closed"
 
 
-def test_app_server_passes_services_to_session_backend_host_factory() -> None:
+def test_app_server_passes_services_to_session_backend_host_factory(
+    process_services: ProcessServices,
+) -> None:
     captured_services: object | None = None
     expected_host = cast(SessionBackendHost, object())
 
@@ -121,28 +126,50 @@ def test_app_server_passes_services_to_session_backend_host_factory() -> None:
         return expected_host
 
     _, server_transport = memory_transport_pair()
-    server = AppServer(server_transport, session_backend_host_factory=factory)
+    server = AppServer(
+        server_transport,
+        session_backend_host_factory=factory,
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+        ),
+    )
 
     assert captured_services is server
     assert server._session_backend_host is expected_host
 
 
-def test_app_server_rejects_empty_session_backend_host_factory_result() -> None:
+def test_app_server_rejects_empty_session_backend_host_factory_result(
+    process_services: ProcessServices,
+) -> None:
     def empty_factory(_: object) -> SessionBackendHost:
         return cast(SessionBackendHost, None)
 
     _, server_transport = memory_transport_pair()
 
     with pytest.raises(TypeError, match="must return a SessionBackendHost"):
-        AppServer(server_transport, session_backend_host_factory=empty_factory)
+        AppServer(
+            server_transport,
+            session_backend_host_factory=empty_factory,
+            host_handler=HostRequestHandler(
+                HarnessFilesManager(sources=("user", "project")),
+                org_config=process_services.org_config,
+            ),
+        )
 
 
 @pytest.mark.asyncio
-async def test_pin_requires_the_optional_host_capability() -> None:
+async def test_pin_requires_the_optional_host_capability(
+    process_services: ProcessServices,
+) -> None:
     _, server_transport = memory_transport_pair()
     server = AppServer(
         server_transport,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+        ),
     )
 
     with pytest.raises(RequestFailure) as exc_info:
@@ -154,11 +181,17 @@ async def test_pin_requires_the_optional_host_capability() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mark_as_seen_requires_the_optional_host_capability() -> None:
+async def test_mark_as_seen_requires_the_optional_host_capability(
+    process_services: ProcessServices,
+) -> None:
     _, server_transport = memory_transport_pair()
     server = AppServer(
         server_transport,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+        ),
     )
 
     with pytest.raises(RequestFailure) as exc_info:
@@ -170,7 +203,9 @@ async def test_mark_as_seen_requires_the_optional_host_capability() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mark_as_seen_routes_to_the_selected_backend_host() -> None:
+async def test_mark_as_seen_routes_to_the_selected_backend_host(
+    process_services: ProcessServices,
+) -> None:
     received: SessionMarkAsSeenParams | None = None
 
     class SeenStateHost:
@@ -185,6 +220,10 @@ async def test_mark_as_seen_routes_to_the_selected_backend_host() -> None:
         session_backend_host_factory=lambda _: cast(
             SessionBackendHost, SeenStateHost()
         ),
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+        ),
     )
 
     result = await server._dispatch_backend_host_operation(
@@ -197,7 +236,9 @@ async def test_mark_as_seen_routes_to_the_selected_backend_host() -> None:
 
 
 @pytest.mark.asyncio
-async def test_app_server_shutdown_waits_for_host_cleanup() -> None:
+async def test_app_server_shutdown_waits_for_host_cleanup(
+    process_services: ProcessServices,
+) -> None:
     """*Prepare*: A Session Host whose shutdown remains active.
     *Do*: Close the App Server before allowing Host cleanup to finish.
     *Assert*: App Server shutdown waits until Host cleanup is complete.
@@ -218,6 +259,10 @@ async def test_app_server_shutdown_waits_for_host_cleanup() -> None:
     server = AppServer(
         server_transport,
         session_backend_host_factory=lambda _services: cast(SessionBackendHost, host),
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+        ),
     )
 
     # Do

@@ -5,6 +5,11 @@ use vibe_rs::run_export::{
     turn_stop_from_turn, RunError, RunExport, RunLimits, RunOutcome, RunResult, RunUsage,
     RunWarning, TurnStop,
 };
+use vibe_rs::server::PublicTurn;
+
+fn stop(turn: Value) -> Option<TurnStop> {
+    turn_stop_from_turn(&PublicTurn::read(&json!({"turn": turn})))
+}
 
 #[test]
 fn outcome_exit_codes() {
@@ -40,32 +45,32 @@ fn outcome_display() {
 #[test]
 fn turn_stop_from_turn_interrupted() {
     let turn = json!({"status": "interrupted", "stopReason": null});
-    assert_eq!(turn_stop_from_turn(&turn), Some(TurnStop::Interrupted));
+    assert_eq!(stop(turn), Some(TurnStop::Interrupted));
 }
 
 #[test]
 fn turn_stop_from_turn_limit() {
     let turn = json!({"status": "completed", "stopReason": "limit"});
-    assert_eq!(turn_stop_from_turn(&turn), Some(TurnStop::Limit));
+    assert_eq!(stop(turn), Some(TurnStop::Limit));
 }
 
 #[test]
 fn turn_stop_from_turn_length() {
     let turn = json!({"status": "completed", "stopReason": "length"});
-    assert_eq!(turn_stop_from_turn(&turn), Some(TurnStop::Length));
+    assert_eq!(stop(turn), Some(TurnStop::Length));
 }
 
 #[test]
 fn turn_stop_from_turn_none() {
     let turn = json!({"status": "completed", "stopReason": null});
-    assert_eq!(turn_stop_from_turn(&turn), None);
+    assert_eq!(stop(turn), None);
 }
 
 #[test]
 fn turn_stop_from_turn_interrupted_wins_over_reason() {
     // Interrupted status wins even if stopReason is set.
     let turn = json!({"status": "interrupted", "stopReason": "limit"});
-    assert_eq!(turn_stop_from_turn(&turn), Some(TurnStop::Interrupted));
+    assert_eq!(stop(turn), Some(TurnStop::Interrupted));
 }
 
 #[test]

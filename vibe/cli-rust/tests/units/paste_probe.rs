@@ -6,6 +6,7 @@ use vibe_rs::app::App;
 use vibe_rs::input;
 use vibe_rs::paste_image::{apply_event, Event};
 use vibe_rs::paste_path::rewrite_bare_image_paths_in_text;
+use vibe_rs::ui_event::UiEvent;
 
 #[test]
 fn probed_pastes_upgrade_the_raw_text_in_place() {
@@ -101,8 +102,10 @@ async fn probed_mixed_lists_survive_keystrokes_and_glued_words() {
         path.display().to_string()
     });
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    let mut app = App::default();
-    app.paste_image.tx = Some(tx);
+    let mut app = App {
+        events: Some(tx),
+        ..Default::default()
+    };
     app.chat_input.input = "see:".to_owned();
     app.chat_input.cursor = app.chat_input.input.len();
 
@@ -110,7 +113,9 @@ async fn probed_mixed_lists_survive_keystrokes_and_glued_words() {
     assert_eq!(app.chat_input.input, format!("see:{a} {notes} @{b}"));
     let typed = format!("{} ok", app.chat_input.input);
     app.chat_input.input = rewrite_bare_image_paths_in_text(&typed);
-    let event = rx.recv().await.expect("probe result");
+    let Some(UiEvent::PasteImage(event)) = rx.recv().await else {
+        panic!("probe result");
+    };
     apply_event(&mut app, event);
 
     assert_eq!(
@@ -130,12 +135,16 @@ async fn tall_mixed_lists_skip_collapsing_and_become_mentions() {
         })
         .collect();
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    let mut app = App::default();
-    app.paste_image.tx = Some(tx);
+    let mut app = App {
+        events: Some(tx),
+        ..Default::default()
+    };
 
     input::handle_paste(&mut app, paths.join("\n"));
     assert!(!app.chat_input.input.contains("[Pasted"));
-    let event = rx.recv().await.expect("probe result");
+    let Some(UiEvent::PasteImage(event)) = rx.recv().await else {
+        panic!("probe result");
+    };
     apply_event(&mut app, event);
 
     let mentions: Vec<String> = paths.iter().map(|path| format!("@{path}")).collect();

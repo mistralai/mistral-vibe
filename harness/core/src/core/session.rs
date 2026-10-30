@@ -160,7 +160,7 @@ impl HarnessSession {
         let result = match command {
             HarnessCommand::CompletionModelInputResyncRequested { action_id } => {
                 let action = self.current_completion_action(&action_id)?;
-                let turn = self.state.turn_view(None).map_err(|error| {
+                let turn = self.state.turn_view().map_err(|error| {
                     core_rejection(error, "completion_model_input_resync_requested")
                 })?;
                 let settings = &self.state.config.settings;
@@ -184,7 +184,7 @@ impl HarnessSession {
             Ok(transition) => {
                 let turn = self
                     .state
-                    .turn_view(transition.completed.clone())
+                    .turn_view()
                     .map_err(|error| invalid_command(error.detail()))?;
                 let pending_action_ids = self
                     .state

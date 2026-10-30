@@ -210,7 +210,12 @@ class StreamingMockServer:
             self._server.socket = ssl_context.wrap_socket(
                 self._server.socket, server_side=True
             )
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        # The default 0.5s poll makes every `stop()` wait up to that long.
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            kwargs={"poll_interval": 0.05},
+            daemon=True,
+        )
 
     def _build_handler(self) -> type[BaseHTTPRequestHandler]:
         parent = self

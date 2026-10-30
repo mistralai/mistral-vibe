@@ -25,17 +25,33 @@ pub enum PipedPrompt {
 /// caller can fall back to stdin.
 /// Returns an error message suitable for stderr on I/O or size-cap failures.
 pub fn read_prompt_file(path: &Path) -> Result<String, String> {
+    read_text_file(path, "prompt file")
+}
+
+/// An empty file is an error here: it would silently keep the product prompt.
+pub fn read_system_prompt_file(path: &Path) -> Result<String, String> {
+    let content = read_text_file(path, "system prompt file")?;
+    if content.is_empty() {
+        return Err(format!(
+            "The system prompt file {} is empty",
+            path.display()
+        ));
+    }
+    Ok(content)
+}
+
+fn read_text_file(path: &Path, what: &str) -> Result<String, String> {
     let metadata = std::fs::metadata(path)
-        .map_err(|e| format!("Cannot read the prompt file {}: {e}", path.display()))?;
+        .map_err(|e| format!("Cannot read the {what} {}: {e}", path.display()))?;
     if metadata.len() > MAX_PROMPT_FILE_BYTES {
         return Err(format!(
-            "Cannot read the prompt file {}: file exceeds {} bytes",
+            "Cannot read the {what} {}: file exceeds {} bytes",
             path.display(),
             MAX_PROMPT_FILE_BYTES
         ));
     }
     let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Cannot read the prompt file {}: {e}", path.display()))?;
+        .map_err(|e| format!("Cannot read the {what} {}: {e}", path.display()))?;
     Ok(content.trim().to_owned())
 }
 

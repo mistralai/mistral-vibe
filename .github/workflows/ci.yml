@@ -105,10 +105,10 @@ jobs:
       - name: Run tests
         shell: bash
         run: |
-          uv run pytest --ignore tests/snapshots && exit 0
+          uv run pytest && exit 0
           for attempt in 2 3; do
             echo "::warning::pytest failed; retrying last-failed tests (attempt ${attempt}/3)"
-            uv run pytest --ignore tests/snapshots --lf && exit 0
+            uv run pytest --lf && exit 0
           done
           exit 1
 
@@ -228,53 +228,3 @@ jobs:
             python=".smoke/bin/python"
           fi
           "$python" scripts/ci/validate-combined-wheel.py
-
-  snapshot-tests:
-    name: Snapshot Tests
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Install uv with caching
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-        with:
-          version: "latest"
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: stable
-
-      - name: Sync dependencies
-        run: uv sync --all-extras
-
-      - name: Run snapshot tests
-        id: snapshot-tests
-        run: uv run pytest tests/snapshots
-        continue-on-error: true
-
-      - name: Upload snapshot report
-        if: steps.snapshot-tests.outcome == 'failure'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: snapshot-report
-          path: snapshot_report.html
-          if-no-files-found: warn
-          retention-days: 3
-
-      - name: Fail job if snapshot tests failed
-        if: steps.snapshot-tests.outcome == 'failure'
-        run: |
-          echo "Snapshot tests failed, failing job."
-          exit 1

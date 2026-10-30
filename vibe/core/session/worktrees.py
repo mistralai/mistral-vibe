@@ -104,6 +104,7 @@ class SessionWorktrees:
         base: RefreshedBase | None = None,
         *,
         trust_store: TrustedFoldersManager | None = None,
+        copy_on_write: bool = False,
     ) -> ResolvedWorktree:
         """Turn a request into the directory the session will run in."""
         base_cwd = base_cwd.expanduser().resolve()
@@ -134,14 +135,14 @@ class SessionWorktrees:
                 return ResolvedWorktree(cwd=requested, pending_hold=pending_hold)
             case CreateNamedWorktree(name=name, branch=branch):
                 with WorktreeRepository.open(
-                    base_cwd, trust_store=trust_store
+                    base_cwd, trust_store=trust_store, copy_on_write=copy_on_write
                 ) as repository:
                     created = repository.prepare(
                         name, branch=branch, on_progress=on_progress, base=base
                     )
             case CreateWorktreeForPrompt(prompt=prompt):
                 with WorktreeRepository.open(
-                    base_cwd, trust_store=trust_store
+                    base_cwd, trust_store=trust_store, copy_on_write=copy_on_write
                 ) as repository:
                     created = repository.prepare_auto(
                         prompt=prompt,
@@ -160,6 +161,7 @@ class SessionWorktrees:
         on_progress: WorktreeProgressCallback | None = None,
         *,
         trust_store: TrustedFoldersManager | None = None,
+        copy_on_write: bool = False,
     ) -> ResolvedWorktree:
         """Resolve off the event loop, cleaning up if the start is cancelled.
 
@@ -189,6 +191,7 @@ class SessionWorktrees:
                 on_progress,
                 base,
                 trust_store=trust_store,
+                copy_on_write=copy_on_write,
             )
         )
         try:
@@ -210,7 +213,11 @@ class SessionWorktrees:
         return resolved
 
     async def resolve_fork(
-        self, base_cwd: Path, *, trust_store: TrustedFoldersManager | None = None
+        self,
+        base_cwd: Path,
+        *,
+        trust_store: TrustedFoldersManager | None = None,
+        copy_on_write: bool = False,
     ) -> ResolvedWorktree:
         """Create an independent checkout when the source is Vibe-managed.
 
@@ -245,6 +252,7 @@ class SessionWorktrees:
                 base_cwd,
                 suggested_name=f"{managed.name}-fork",
                 trust_store=trust_store,
+                copy_on_write=copy_on_write,
             )
         )
         try:
@@ -263,8 +271,11 @@ class SessionWorktrees:
         *,
         suggested_name: str,
         trust_store: TrustedFoldersManager | None = None,
+        copy_on_write: bool = False,
     ) -> ResolvedWorktree:
-        with WorktreeRepository.open(base_cwd, trust_store=trust_store) as repository:
+        with WorktreeRepository.open(
+            base_cwd, trust_store=trust_store, copy_on_write=copy_on_write
+        ) as repository:
             created = repository.prepare_fork(suggested_name=suggested_name)
         return ResolvedWorktree(
             cwd=created.path, prepared=created, pending_hold=created.pending_hold

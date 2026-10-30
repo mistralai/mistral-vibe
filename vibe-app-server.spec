@@ -7,7 +7,7 @@
 import os
 import sys
 
-from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 # The Unified Runtime and its native extension are required contents of this
 # executable; the build fails when they cannot be collected.
@@ -19,12 +19,14 @@ _core_builtins_datas, core_builtins_binaries, core_builtins_hidden_imports = (
 )
 _harness_datas, harness_binaries, harness_hidden_imports = collect_unified_runtime()
 
-# rich lazily loads Unicode width tables via importlib.import_module() at runtime,
-# which PyInstaller's static analysis cannot discover.
+# httpx2 imports socksio lazily inside its SOCKS transport: a bundle without
+# it fails session/start behind a SOCKS proxy (VIBE-5416), so the build fails
+# when it cannot be collected, and the smoke test exercises the proxy path.
 hidden_imports = [
     "truststore",
+    "socksio",
     "vibe.app_server._unified_harness_backend_adapter",
-] + collect_submodules("rich._unicode_data")
+]
 for item in core_builtins_hidden_imports + harness_hidden_imports:
     if isinstance(item, str):
         hidden_imports.append(item)
@@ -49,11 +51,8 @@ datas = collect_data_files(
     ],
 )
 datas += [("vibe/core/tools/builtins/*.py", "vibe/core/tools/builtins")]
-# Built-in skills are read from source files at runtime, so collect_data_files
-# must be allowed to include .py files here. By default it filters .py/.pyc out.
-datas += collect_data_files(
-    "vibe.core.skills.builtins", includes=["*.py"], include_py_files=True
-)
+# Built-in plugins are discovered on disk next to vibe.plugins.builtins.
+datas += collect_data_files("vibe.plugins.builtins")
 datas += _harness_datas
 
 a = Analysis(

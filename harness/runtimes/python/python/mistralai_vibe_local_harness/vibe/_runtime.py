@@ -332,6 +332,10 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         self._core = core
         self._identity = identity
         self._projector = SessionProjector(projection)
+        # What readers see. The projector advances before its update is durable
+        # and announced, so a read of the projector could hold state whose event
+        # is still to come, labelled with the previous event's watermark.
+        self._published = self._projector.projection
         self._replayed_transition = (
             replayed_transitions[-1] if replayed_transitions else None
         )
@@ -454,11 +458,22 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
 
     @property
     def projection(self) -> PublicSessionState:
-        return self._projector.projection.snapshot
+        """The latest state announced to the event sink."""
+        return self._published.snapshot
 
     @property
     def watermark(self) -> int:
-        return self._projector.projection.watermark
+        """The watermark of ``projection``."""
+        return self._published.watermark
+
+    def turn_has_ended(self, turn_id: str) -> bool:
+        """Whether the latest projected state ends ``turn_id``, announced or not."""
+        latest_turn = self._projector.projection.snapshot.latest_turn
+        return (
+            latest_turn is not None
+            and latest_turn.id == turn_id
+            and latest_turn.status != "in_progress"
+        )
 
     @property
     def session_id(self) -> str:
@@ -1348,6 +1363,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 update={"snapshot_sequence": record.sequence}
             )
             self._projector = SessionProjector(projection)
+            self._published = projection
             if self._event_sink is not None:
                 try:
                     emitted = self._event_sink(update.event)
@@ -1658,6 +1674,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             self._core = replacement
             previous.close()
             self._projector = SessionProjector(refreshed.projection_state)
+            self._published = self._projector.projection
             self._replayed_transition = None
             self._replayed_core_inputs = ()
             self._model_input_resync_required = False
@@ -4108,6 +4125,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         if delta is None:
             # In-memory advance: no journal write, and no store read to decide
             # on one. Both are per-fragment costs on the live provider stream.
+            self._published = update.projection
             if self._event_sink is not None:
                 emitted = self._event_sink(update.event)
                 if isinstance(emitted, Awaitable):
@@ -4121,10 +4139,12 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             ):
                 raise RuntimeError("conflicting public projection persistence retry")
             self._projector = self._projector.rebased(effective)
+            self._published = self._projector.projection
             return
         await self._advance_projection(
             update.projection.watermark, delta, update.journaled_snapshot
         )
+        self._published = update.projection
         if self._event_sink is not None:
             emitted = self._event_sink(update.event)
             if isinstance(emitted, Awaitable):
@@ -4220,6 +4240,9 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 await self._advance_projection(
                     update.projection.watermark, update.delta, update.journaled_snapshot
                 )
+        # Replayed inputs were announced before the restart, if at all; they
+        # have no events of their own to wait for.
+        self._published = self._projector.projection
         self._replayed_core_inputs = ()
 
     async def _maybe_compact_journal(self) -> None:

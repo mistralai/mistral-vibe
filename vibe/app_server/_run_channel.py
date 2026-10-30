@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from vibe.app_server._agent_socket import AgentSocketMount
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._process_settings import pin_process_settings
 from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server.multiplex import ChannelOpen
@@ -25,9 +26,11 @@ class RunChannelServer:
         channel: JsonRpcTransport,
         options: ChannelOpen,
         *,
+        services: ProcessServices,
         additional_builtin_plugin_roots: Sequence[Path] = (),
     ) -> None:
         self._channel = channel
+        self._services = services
         self._options = options
         self._additional_builtin_plugin_roots = additional_builtin_plugin_roots
         self.mount: AgentSocketMount | None = None
@@ -46,6 +49,7 @@ class RunChannelServer:
                 HarnessFilesManager(
                     sources=("user",), user_config=self._options.config
                 ),
+                services=self._services,
                 additional_builtin_plugin_roots=self._additional_builtin_plugin_roots,
                 agent_socket=mount,
                 credentials=self._options.credentials,

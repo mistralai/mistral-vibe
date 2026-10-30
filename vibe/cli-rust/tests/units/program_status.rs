@@ -2,29 +2,19 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::json;
-use std::sync::Arc;
 use std::time::Instant;
 use vibe_rs::app::{App, Status};
 use vibe_rs::program_status::{encode_report, BlockedKind, ProgramState};
-use vibe_rs::server::{notification, Client, Notification};
+use vibe_rs::server::notification;
 use vibe_rs::terminal_notifier::{NotificationContext, TerminalNotifier};
+
+use crate::support::notify;
 
 fn notifier() -> TerminalNotifier {
     let mut notifier = TerminalNotifier::default();
     notifier.configure(true, true);
     notifier.enable_program_reports(true);
     notifier
-}
-
-fn notify(app: &mut App, method: &str, params: serde_json::Value) {
-    assert!(vibe_rs::event_handler::apply_notification(
-        app,
-        &Arc::new(Client::stub()),
-        &Notification {
-            method: method.into(),
-            params
-        }
-    ));
 }
 
 #[test]
@@ -161,7 +151,10 @@ fn approval_takes_precedence_and_dismissal_restores_the_question() {
         &json!({"callback":{"callbackId":"q","detail":{"kind":"user_input","request":{"questions":[{"question":"Pick?","options":[]}]}}}}),
     );
     let mut approval = vibe_rs::server::ApprovalCallback {
-        callback_id: "a".into(),
+        address: vibe_rs::server::CallbackAddress {
+            callback_id: "a".into(),
+            ..Default::default()
+        },
         ..Default::default()
     };
     approval.detail.effect.display.status_text = "Approve?".into();
@@ -193,7 +186,10 @@ fn approval_takes_precedence_and_dismissal_restores_the_question() {
     );
     vibe_rs::question_app::dismiss(
         &mut app,
-        &vibe_rs::question_app::QuestionSource::Callback("q".into()),
+        &vibe_rs::question_app::QuestionSource::Callback(vibe_rs::server::CallbackAddress {
+            callback_id: "q".into(),
+            ..Default::default()
+        }),
     );
     assert_eq!(
         vibe_rs::terminal_notifier::take_program_report(&mut app),

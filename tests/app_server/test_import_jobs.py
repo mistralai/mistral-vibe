@@ -15,6 +15,7 @@ from mistralai_vibe_local_harness.vibe._storage import (
     UnifiedSessionStore,
 )
 from vibe.app_server._claude_import import ClaudeImportService
+from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._import_jobs import (
     ImportJobConflictError,
     ImportJobService,
@@ -22,6 +23,7 @@ from vibe.app_server._import_jobs import (
 )
 from vibe.app_server._imports import ImportsService
 from vibe.app_server._model import validate_wire
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server._session_backend_port import SessionBackendHost
 from vibe.app_server._unified_import_writer import UnifiedSessionImportWriter
@@ -42,6 +44,7 @@ from vibe.app_server.server import AppServer
 from vibe.app_server.session import AppServerSession
 from vibe.app_server.transport import memory_transport_pair
 from vibe.core.config import SessionLoggingConfig
+from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.imports._harness_port import ImportDiscoverySummary, ImportProject
 from vibe.core.imports._session import VibeSessionPayload
 from vibe.core.imports.adapters.claude_project import ClaudeProjectSource
@@ -208,7 +211,9 @@ async def test_import_job_is_single_flight_and_reports_status_revisions() -> Non
 
 
 @pytest.mark.asyncio
-async def test_sessionless_import_job_sends_status_updates() -> None:
+async def test_sessionless_import_job_sends_status_updates(
+    process_services: ProcessServices,
+) -> None:
     """*Prepare*: A process-owned import service on a sessionless connection.
     *Do*: Start an import job and consume its status notifications.
     *Assert*: The connection receives running and completed updates.
@@ -216,7 +221,7 @@ async def test_sessionless_import_job_sends_status_updates() -> None:
     # Prepare
     runner = BlockingImportRunner()
     imports = ImportsService({ImportHarness.CLAUDE: BlockingImportHarness(runner)})
-    process = HarnessProcess()
+    process = HarnessProcess(services=process_services)
     process.imports = imports
     client_transport, server_transport = memory_transport_pair()
     harness = await create_harness_server(
@@ -257,7 +262,7 @@ async def test_sessionless_import_job_sends_status_updates() -> None:
 
 @pytest.mark.asyncio
 async def test_session_stop_does_not_cancel_process_import(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     """*Prepare*: A process-owned import job running beside an attached session.
     *Do*: Stop the session, then allow the import to finish.
@@ -277,7 +282,7 @@ async def test_session_stop_does_not_cancel_process_import(
         ):
             completed.set()
 
-    process = HarnessProcess()
+    process = HarnessProcess(services=process_services)
     process.imports = imports
     try:
         client_transport, server_transport = memory_transport_pair()
@@ -586,7 +591,7 @@ async def test_claude_runner_skips_an_invalid_transcript_and_continues(
 
 @pytest.mark.asyncio
 async def test_app_server_discovers_claude_projects_and_their_sessions(
-    tmp_path: Path,
+    tmp_path: Path, process_services: ProcessServices
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -621,6 +626,10 @@ async def test_app_server_discovers_claude_projects_and_their_sessions(
                 build_writer,
             )
         }),
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+        ),
     )
 
     dispatched = await server._dispatch_request("imports/discover", {})

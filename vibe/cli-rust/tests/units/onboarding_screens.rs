@@ -4,9 +4,7 @@
 #[path = "../onboarding_common/keys.rs"]
 pub(crate) mod keys;
 
-use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{Event, KeyCode, MouseButton, MouseEventKind};
 use keys::{enter, esc};
 use ratatui::layout::Rect;
 
@@ -17,6 +15,8 @@ use vibe_rs::setup::wizard::context::OnboardingContext;
 use vibe_rs::setup::wizard::mouse;
 use vibe_rs::setup::wizard::screens;
 use vibe_rs::setup::wizard::{Action, InputCard, OnboardingState, Screen};
+
+use crate::support::{ctrl, down, key, mouse};
 
 fn theme_state(base_url: &str, api_base_url: &str) -> OnboardingState {
     let context = OnboardingContext::default();
@@ -73,22 +73,14 @@ fn clicking_mid_multibyte_input_keeps_the_caret_on_a_char_boundary() {
     mouse::handle_mouse(
         &mut app,
         &mut wizard,
-        MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 4,
-            row: 1,
-            modifiers: KeyModifiers::NONE,
-        },
+        down(4, 1),
         MouseTarget::OnboardingInputs,
     );
     // The click lands after the two-byte é: the caret is the byte offset (2),
     // not the char index (1), so the next insert cannot slice mid-character.
     assert_eq!(wizard.api_key_input.cursor, 2);
 
-    screens::handle_key(
-        &mut wizard,
-        KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
-    );
+    screens::handle_key(&mut wizard, key(KeyCode::Char('X')));
     assert_eq!(wizard.api_key_input.value, "éXabc");
 }
 
@@ -102,10 +94,7 @@ fn backspace_after_a_multibyte_paste_deletes_the_whole_character() {
     screens::paste(&mut state, "validé");
     assert_eq!(state.api_key_input.cursor, "validé".len());
 
-    screens::handle_key(
-        &mut state,
-        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
-    );
+    screens::handle_key(&mut state, key(KeyCode::Backspace));
 
     assert_eq!(state.api_key_input.value, "valid");
     assert_eq!(state.api_key_input.cursor, 5);
@@ -145,10 +134,7 @@ fn the_manual_key_path_keeps_the_attempted_domain() {
     state.browser_sign_in.variant = vibe_rs::setup::wizard::SignInVariant::Pending;
     state.context.provider.browser_auth_base_url = Some("https://console.example".into());
 
-    let action = screens::handle_key(
-        &mut state,
-        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
-    );
+    let action = screens::handle_key(&mut state, key(KeyCode::Char('m')));
     assert!(matches!(action, Some(Action::AbortSignIn)));
     assert_eq!(state.screen, Screen::ApiKey);
     assert_eq!(
@@ -218,6 +204,7 @@ fn ctrl_c_cancels_from_every_screen() {
     for screen in [
         Screen::Welcome,
         Screen::ThemeSelection,
+        Screen::ProviderChoice,
         Screen::AuthMethod,
         Screen::SignInTarget,
         Screen::CustomDomain,
@@ -228,25 +215,17 @@ fn ctrl_c_cancels_from_every_screen() {
             screen,
             ..OnboardingState::default()
         };
-        let action = screens::handle_key(
-            &mut state,
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-        );
+        let action = screens::handle_key(&mut state, ctrl('c'));
         assert!(matches!(action, Some(Action::Cancel)), "{screen:?}");
     }
 }
 
 #[test]
 fn a_dropped_release_ends_the_wizard_gesture_on_motion_a_key_or_a_focus_loss() {
-    let event = |kind| MouseEvent {
-        kind,
-        column: 5,
-        row: 5,
-        modifiers: KeyModifiers::NONE,
-    };
+    let event = |kind| mouse(kind, 5, 5);
     for ending in [
         Event::Mouse(event(MouseEventKind::Moved)),
-        Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+        Event::Key(key(KeyCode::Char('a'))),
         Event::FocusLost,
     ] {
         let mut app = App::default();

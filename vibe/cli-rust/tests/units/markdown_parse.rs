@@ -74,9 +74,10 @@ fn ordered_lists_carry_their_start_number() {
 #[test]
 fn code_fences_capture_language_and_body() {
     let blocks = parse("```rust\nfn main() {}\n```");
-    let Block::Code(lines) = &blocks[0] else {
+    let Block::Code(lang, lines) = &blocks[0] else {
         panic!("expected a code block");
     };
+    assert_eq!(lang, "rust");
     assert_eq!(lines.len(), 1);
     let joined: String = lines[0].iter().map(|s| s.content.clone()).collect();
     assert!(joined.contains("fn main()"));
@@ -85,9 +86,10 @@ fn code_fences_capture_language_and_body() {
 #[test]
 fn bare_fences_have_no_language() {
     let blocks = parse("```\nplain\n```");
-    let Block::Code(lines) = &blocks[0] else {
+    let Block::Code(lang, lines) = &blocks[0] else {
         panic!("expected a code block");
     };
+    assert!(lang.is_empty());
     assert!(lines[0].iter().any(|span| span.content.contains("plain")));
 }
 
@@ -124,6 +126,49 @@ fn blockquotes_collect_their_text() {
         panic!("expected a quote");
     };
     assert_eq!(text(inline), "quoted words");
+}
+
+fn fg(inline: &[Sc]) -> Option<ratatui::style::Color> {
+    inline[0].1.fg
+}
+
+#[test]
+fn quote_text_is_muted_and_text_after_it_is_not() {
+    let blocks = parse("> q\n\nafter");
+    let (Block::Quote(quote), Block::Paragraph(after)) = (&blocks[0], &blocks[1]) else {
+        panic!("expected a quote then a paragraph");
+    };
+    assert_eq!(fg(quote), Some(theme::muted()));
+    assert_eq!(fg(after), Some(theme::foreground()));
+}
+
+#[test]
+fn text_after_a_nested_quote_stays_in_the_outer_quote() {
+    let blocks = parse("> a\n>\n> > b\n>\n> c\n\nafter");
+    let texts: Vec<(String, bool)> = blocks
+        .iter()
+        .map(|block| match block {
+            Block::Quote(inline) => (text(inline), true),
+            Block::Paragraph(inline) => (text(inline), false),
+            _ => panic!("unexpected block"),
+        })
+        .collect();
+    let expected = [("a", true), ("b", true), ("c", true), ("after", false)];
+    assert_eq!(texts, expected.map(|(t, q)| (t.to_string(), q)));
+    let Block::Paragraph(after) = &blocks[3] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(fg(after), Some(theme::foreground()));
+}
+
+#[test]
+fn headings_inside_quotes_keep_the_heading_style() {
+    let blocks = parse("> ### h\n\nafter");
+    let (Block::Heading(3, heading), Block::Paragraph(after)) = (&blocks[0], &blocks[1]) else {
+        panic!("expected a heading then a paragraph");
+    };
+    assert_eq!(heading[0].1, theme::md_heading(3));
+    assert_eq!(fg(after), Some(theme::foreground()));
 }
 
 #[test]
@@ -222,7 +267,7 @@ fn rules_render_as_a_blank_padded_thematic_row() {
             "  b".to_string(),
         ]
     );
-    assert_eq!(lines[3].spans[1].style.fg, Some(theme::md_rule()));
+    assert_eq!(lines[3].spans[1].style, theme::md_keyline());
 }
 
 #[test]

@@ -1,41 +1,41 @@
 # -*- mode: python ; coding: utf-8 -*-
 # Onedir build for vibe-acp — no per-launch extraction overhead.
-# Build: uv run --group build pyinstaller vibe-acp.spec
+# Build: bash scripts/ci/build-pyinstaller-binaries.sh vibe-acp.spec
 # Output: dist/vibe-acp-dir/vibe-acp  (+  dist/vibe-acp-dir/_internal/)
 # UPX stays off: it rewrites the Mach-O header and invalidates the macOS code signature.
 
 import os
 import sys
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 # The Unified Runtime and its native extension are required contents of this
 # executable; the build fails when they cannot be collected.
 sys.path.insert(0, os.path.join(SPECPATH, "pyinstaller"))
 from unified_runtime import collect_unified_runtime
+from rust_tui import collect_rust_tui
 
 # Collect all dependencies (including hidden imports and binaries) from builtins modules
 core_builtins_deps = collect_all('vibe.core.tools.builtins')
 harness_deps = collect_unified_runtime()
 
 # Extract hidden imports and binaries, filtering to ensure only strings are in hiddenimports
-# rich lazily loads Unicode width tables via importlib.import_module() at runtime,
-# which PyInstaller's static analysis cannot discover.
-hidden_imports = ["truststore"] + collect_submodules("rich._unicode_data")
+hidden_imports = ["truststore"]
 for item in core_builtins_deps[2] + harness_deps[2]:
     if isinstance(item, str):
         hidden_imports.append(item)
 
-binaries = core_builtins_deps[1] + harness_deps[1]
+# `--setup` execs the bundled vibe-rs, which spawns `vibe-acp --setup-app-server`.
+binaries = core_builtins_deps[1] + harness_deps[1] + collect_rust_tui()
 datas = [
     # By default, pyinstaller doesn't include the .md files
     ('vibe/core/prompts/*.md', 'vibe/core/prompts'),
     ('vibe/core/tools/builtins/prompts/*.md', 'vibe/core/tools/builtins/prompts'),
-    # We also need to add all setup files
-    ('vibe/setup/*', 'vibe/setup'),
     # This is necessary because tools are dynamically called in vibe, meaning there is no static reference to those files
     ('vibe/core/tools/builtins/*.py', 'vibe/core/tools/builtins'),
 ] + harness_deps[0]
+# Built-in plugins are discovered on disk next to vibe.plugins.builtins.
+datas += collect_data_files('vibe.plugins.builtins')
 
 a = Analysis(
     ['vibe/acp/entrypoint.py'],

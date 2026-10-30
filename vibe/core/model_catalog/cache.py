@@ -37,15 +37,21 @@ def load_cached_model_catalog(config: VibeConfigSchema) -> ModelCatalogResponse 
 
 
 def store_cached_model_catalog(
-    config: VibeConfigSchema, response: ModelCatalogResponse
+    config: VibeConfigSchema,
+    response: ModelCatalogResponse,
+    *,
+    fetched_for: str | None = None,
 ) -> None:
     """Overwrite the cached catalog for this user's credential.
 
     Called on every successful fetch, including an empty catalog: a successful
-    response is authoritative.
+    response is authoritative. Only for the user it was fetched for (see
+    ``may_cache_under``).
     """
+    from vibe.core.telemetry.send import may_cache_under
+
     key = _cache_key(config)
-    if key is None:
+    if key is None or not may_cache_under(key, fetched_for=fetched_for):
         return
     store_keyed_entry(
         MODEL_CATALOG_CACHE_FILE.path, key, response.model_dump(mode="json")

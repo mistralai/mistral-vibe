@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-import httpx
+import httpx2
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from vibe.core.platform_auth import (
@@ -71,10 +71,10 @@ class HttpIdentityGateway:
         try:
             async with client:
                 response = await client.get(_IDENTITY_PATH.lstrip("/"))
-        except httpx.RequestError as exc:
+        except httpx2.RequestError as exc:
             raise IdentityGatewayUnavailable() from exc
 
-        if response.status_code in {httpx.codes.UNAUTHORIZED, httpx.codes.FORBIDDEN}:
+        if response.status_code in {httpx2.codes.UNAUTHORIZED, httpx2.codes.FORBIDDEN}:
             raise IdentityGatewayUnauthorized()
         if not response.is_success:
             raise IdentityGatewayUnavailable(

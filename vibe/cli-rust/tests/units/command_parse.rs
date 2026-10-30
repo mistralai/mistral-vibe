@@ -11,6 +11,7 @@ fn aliases_resolve_to_their_canonical_command() {
         ("/clean", "/clear"),
         ("/continue", "/resume"),
         ("/connectors", "/mcp"),
+        ("/fork", "/branch"),
         (":q", "/exit"),
         (":quit", "/exit"),
     ] {
@@ -23,6 +24,7 @@ fn command_words_are_case_insensitive_and_trimmed() {
     assert_eq!(parse("/HELP"), Some("/help"));
     assert_eq!(parse("  /Model  "), Some("/model"));
     assert_eq!(parse("/Connectors"), Some("/mcp"));
+    assert_eq!(parse("/FORK"), Some("/branch"));
 }
 
 #[test]
@@ -101,6 +103,8 @@ fn commands_a_turn_never_reads_run_while_busy_and_the_others_wait_for_idle() {
         "/connectors",
         "/plugins",
         "/reload-plugins",
+        "/branch",
+        "/fork",
     ] {
         assert!(!is_side_channel(command), "{command} waits for idle");
     }

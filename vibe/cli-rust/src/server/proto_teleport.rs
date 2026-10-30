@@ -41,6 +41,6 @@ pub struct TeleportError {
 pub fn parse_event(params: &Value) -> Option<(String, TeleportEvent)> {
     let event = params.get("event")?;
     let operation_id = event.get("operationId")?.as_str()?.to_owned();
-    let event = serde_json::from_value(event.clone()).ok()?;
+    let event = serde::Deserialize::deserialize(event).ok()?;
     Some((operation_id, event))
 }

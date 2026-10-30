@@ -51,7 +51,9 @@ from vibe.app_server._session_backend_port import (
 )
 from vibe.app_server._session_backend_services import SessionBackendServices
 from vibe.app_server._session_lease_subscription import SessionLeaseSubscription
+from vibe.app_server._session_peers import SessionPeerError
 from vibe.app_server._session_spawn import SessionSpawnError
+from vibe.app_server._setup_oidc import SetupOidcHandler
 from vibe.app_server.connector_catalog import ConnectorCatalogService
 from vibe.app_server.events import (
     CallbackRequested,
@@ -61,6 +63,10 @@ from vibe.app_server.events import (
 from vibe.app_server.models import OpenCallbackState, PublicCallbackEntry
 from vibe.app_server.protocol import (
     SERVER_METHODS,
+    SESSION_PEER_ARCHIVE_METHOD,
+    SESSION_PEER_LIST_METHOD,
+    SESSION_PEER_READ_METHOD,
+    SESSION_PEER_SEND_METHOD,
     SESSION_SPAWN_METHOD,
     AgentInstallParams,
     AgentSwitchParams,
@@ -113,6 +119,14 @@ from vibe.app_server.protocol import (
     SessionHistoryListParams,
     SessionListParams,
     SessionMarkAsSeenParams,
+    SessionPeerArchiveParams,
+    SessionPeerArchiveResponse,
+    SessionPeerListParams,
+    SessionPeerListResponse,
+    SessionPeerReadParams,
+    SessionPeerReadResponse,
+    SessionPeerSendParams,
+    SessionPeerSendResponse,
     SessionPinParams,
     SessionReadParams,
     SessionReadResponse,
@@ -147,8 +161,6 @@ from vibe.app_server.protocol import (
     validate_json_rpc_envelope,
 )
 from vibe.app_server.transport import JsonRpcTransport
-from vibe.core.config.builder import InvalidConfigError
-from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.platform_auth import (
     ApiKeyPlatformCredentialProvider,
     PlatformCredentialProvider,
@@ -248,19 +260,18 @@ class AppServer:
         transport: JsonRpcTransport,
         *,
         session_backend_host_factory: SessionBackendHostFactory,
+        host_handler: HostRequestHandler,
         transport_kind: TransportKind = "in_process",
         account_gateway: AccountGateway | None = None,
         identity_gateway: IdentityGateway | None = None,
-        host_handler: HostRequestHandler | None = None,
         mcp_catalog_service: MCPCatalogService | None = None,
         connector_catalog_service: ConnectorCatalogService | None = None,
         plugin_catalog_service: PluginCatalogService | None = None,
         imports_service: ImportsService | None = None,
     ) -> None:
         self._root: SessionBackend | None = None
-        self._host_handler = host_handler or HostRequestHandler(
-            HarnessFilesManager(sources=("user", "project"))
-        )
+        self._host_handler = host_handler
+        self._setup_oidc = SetupOidcHandler(self._host_handler.setup_telemetry)
         self._transport: JsonRpcTransport | None = transport
         self._initialization = InitializationState.UNINITIALIZED
         self._client_info: ClientInfo | None = None
@@ -268,13 +279,13 @@ class AppServer:
         self._next_request_id = 1
         self._event_watermarks: dict[str, int] = {}
         self._callback_requests: dict[int, CallbackDelivery] = {}
-        self._spawn_requests: dict[int, asyncio.Future[SessionSpawnResponse]] = {}
         self._platform_credential_requests: dict[
             int, asyncio.Future[PlatformCredentialsResolveResponse]
         ] = {}
         self._abandoned_platform_credential_requests: set[int] = set()
-        # Timed out on our side; the client may still answer.
-        self._unanswered_spawns: set[int] = set()
+        self._client_requests: dict[int, _ClientRequest] = {}
+        # Given up on our side; the client may still answer.
+        self._unanswered_client_requests: dict[int, str] = {}
         self._request_tasks: set[asyncio.Task[None]] = set()
         self._leases = SessionLeaseSubscription(self._send_notification)
         self._backend_event_task: asyncio.Task[None] | None = None
@@ -528,11 +539,15 @@ class AppServer:
                 serve_task.cancel()
             errors = await self._stop_background_tasks(current)
             try:
+                await self._setup_oidc.close()
+            except BaseException as exc:
+                errors.append(exc)
+            try:
                 await self._close_root()
             except BaseException as exc:
                 errors.append(exc)
             self._callback_requests.clear()
-            self._abandon_spawn_requests("The app server closed")
+            self._abandon_client_requests("The app server closed")
             self._abandon_platform_credential_requests("The app server closed")
             self._pending_notifications.clear()
             self._connection_attached = False
@@ -565,13 +580,17 @@ class AppServer:
         if self._closed:
             return
         errors = await self._stop_request_tasks(asyncio.current_task())
+        try:
+            await self._setup_oidc.close()
+        except BaseException as exc:
+            errors.append(exc)
         if isinstance(self._root, SessionBackendQueuedTurnEditing):
             try:
                 await self._root.abandon_active_queued_turn_edit()
             except BaseException as exc:
                 errors.append(exc)
         self._callback_requests.clear()
-        self._abandon_spawn_requests("The client disconnected")
+        self._abandon_client_requests("The client disconnected")
         self._abandon_platform_credential_requests("The client disconnected")
         self._pending_notifications.clear()
         self._connection_attached = False
@@ -769,11 +788,17 @@ class AppServer:
         if request.method == "session/stop":
             await self.close()
 
-    async def _dispatch_request(  # noqa: PLR0911 - explicit route ownership
+    async def _dispatch_request(  # noqa: PLR0911, PLR0912 - explicit route ownership
         self, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult:
         if method not in SERVER_METHODS:
             raise method_not_found(method)
+        if method.startswith("setup/oidc-"):
+            return DispatchResult(
+                await self._setup_oidc.dispatch(
+                    method, raw_params, client_info=self._initialized_client_info()
+                )
+            )
         if method == "events/read":
             return self._events_read(raw_params)
         if method == "imports/discover":
@@ -811,10 +836,19 @@ class AppServer:
             )
         if method in {
             "config/schema",
+            "projects/create",
+            "projects/list",
+            "projects/remove",
+            "projects/rename",
             "session/history/get",
             "setup/status",
             "setup/store-credential",
             "setup/submit-choices",
+            "skills/local/delete",
+            "skills/local/list",
+            "skills/local/read",
+            "skills/local/setEnabled",
+            "skills/local/write",
             "workspace/git/checkouts",
             "workspace/git/worktrees/limit/update",
             "workspace/git/worktrees/list",
@@ -1471,36 +1505,9 @@ class AppServer:
             )
             runtime_updated = result.response.applied
         elif method == "config/reload":
-            try:
-                plan = (
-                    await self._mcp_catalog_service.prepare_config_reload(root)
-                    if self._mcp_catalog_service is not None
-                    else None
-                )
-            except InvalidConfigError as exc:
-                # Its reload builds the config first: one the session refuses
-                # is the user's to fix, and the session keeps the one it has.
-                raise SessionBackendError.configuration(exc) from exc
-            try:
-                result = await root.reload_config(
-                    validate_wire(ConfigReloadParams, raw_params)
-                )
-                mcp_runtime = (
-                    await self._mcp_catalog_service.finish_config_reload(root, plan)
-                    if self._mcp_catalog_service is not None
-                    else None
-                )
-            except Exception:
-                if self._mcp_catalog_service is not None:
-                    await self._mcp_catalog_service.fail_config_reload(root, plan)
-                raise
-            if mcp_runtime is not None:
-                result = SessionBackendResult(
-                    response=result.response.model_copy(
-                        update={"runtime": mcp_runtime}
-                    ),
-                    after_response=result.after_response,
-                )
+            result = await root.reload_config(
+                validate_wire(ConfigReloadParams, raw_params)
+            )
             runtime_updated = True
         else:
             return None
@@ -1609,16 +1616,18 @@ class AppServer:
         if request_id in self._abandoned_platform_credential_requests:
             self._abandoned_platform_credential_requests.discard(request_id)
             return
-        spawn = self._spawn_requests.pop(request_id, None)
-        if spawn is not None:
-            _settle_spawn(spawn, response)
+        pending = self._client_requests.pop(request_id, None)
+        if pending is not None:
+            if not pending.answer.done():
+                pending.answer.set_result(response)
             return
-        if request_id in self._unanswered_spawns:
-            self._unanswered_spawns.discard(request_id)
+        method = self._unanswered_client_requests.pop(request_id, None)
+        if method is not None:
             logger.info(
-                "session/spawn %s answered after the tool gave up on it: %s",
+                "%s %s answered after the tool gave up on it: %s",
+                method,
                 request_id,
-                "refused" if isinstance(response, JsonRpcErrorResponse) else "started",
+                "refused" if isinstance(response, JsonRpcErrorResponse) else "answered",
             )
             return
         callback_route = self._callback_requests.pop(request_id, None)
@@ -1776,33 +1785,121 @@ class AppServer:
     async def spawn_session(self, params: SessionSpawnParams) -> SessionSpawnResponse:
         if not self._client_capabilities.session_spawn:
             raise SessionSpawnError("The attached client cannot start sessions")
+        try:
+            return await self._request_client(
+                SESSION_SPAWN_METHOD, params, SessionSpawnResponse
+            )
+        except _ClientUnreachable as exc:
+            raise SessionSpawnError(
+                f"Could not reach the client to start the session: {exc}"
+            ) from exc
+        except _ClientRequestLost as exc:
+            raise SessionSpawnError(
+                f"{exc} before confirming the session, so it may or may not have "
+                "started. Do not start it again before the user has checked their "
+                "sessions."
+            ) from exc
+        except _ClientRequestFailed as exc:
+            raise SessionSpawnError(str(exc)) from exc
+
+    async def list_peer_sessions(
+        self, params: SessionPeerListParams
+    ) -> SessionPeerListResponse:
+        return await self._request_peers(
+            SESSION_PEER_LIST_METHOD, params, SessionPeerListResponse
+        )
+
+    async def read_peer_session(
+        self, params: SessionPeerReadParams
+    ) -> SessionPeerReadResponse:
+        return await self._request_peers(
+            SESSION_PEER_READ_METHOD, params, SessionPeerReadResponse
+        )
+
+    async def send_to_peer_session(
+        self, params: SessionPeerSendParams
+    ) -> SessionPeerSendResponse:
+        return await self._request_peers(
+            SESSION_PEER_SEND_METHOD,
+            params,
+            SessionPeerSendResponse,
+            lost=(
+                "before confirming the message, so it may or may not have been "
+                "sent. Read the session before sending it again."
+            ),
+        )
+
+    async def archive_peer_sessions(
+        self, params: SessionPeerArchiveParams
+    ) -> SessionPeerArchiveResponse:
+        return await self._request_peers(
+            SESSION_PEER_ARCHIVE_METHOD,
+            params,
+            SessionPeerArchiveResponse,
+            lost=(
+                "before confirming, so some sessions may have been archived. "
+                "List them before archiving again."
+            ),
+        )
+
+    async def _request_peers[ResponseT: ProtocolModel](
+        self,
+        method: str,
+        params: ProtocolModel,
+        response_type: type[ResponseT],
+        *,
+        lost: str = "before answering. Try again.",
+    ) -> ResponseT:
+        if not self._client_capabilities.session_peers:
+            raise SessionPeerError("The attached client cannot reach other sessions")
+        try:
+            return await self._request_client(method, params, response_type)
+        except _ClientRequestLost as exc:
+            raise SessionPeerError(f"{exc} {lost}") from exc
+        except _ClientRequestFailed as exc:
+            raise SessionPeerError(str(exc)) from exc
+
+    async def _request_client[ResponseT: ProtocolModel](
+        self, method: str, params: ProtocolModel, response_type: type[ResponseT]
+    ) -> ResponseT:
+        """A refusal or a malformed answer fails this request, not the
+        connection.
+        """
         transport = self._transport
         if transport is None or not self._connection_attached:
-            raise SessionSpawnError("No client is attached to start the session")
+            raise _ClientRequestFailed("No client is attached")
         request_id = self._next_request_id
         self._next_request_id += 1
-        spawned = asyncio.get_running_loop().create_future()
-        self._spawn_requests[request_id] = spawned
+        pending = _ClientRequest(
+            method=method, answer=asyncio.get_running_loop().create_future()
+        )
+        self._client_requests[request_id] = pending
         try:
             try:
                 await transport.send({
                     "jsonrpc": "2.0",
                     "id": request_id,
-                    "method": SESSION_SPAWN_METHOD,
+                    "method": method,
                     # An option left out is absent rather than null.
                     "params": params.model_dump(
                         mode="json", by_alias=True, exclude_none=True
                     ),
                 })
             except Exception as exc:
-                raise SessionSpawnError(
-                    f"Could not reach the client to start the session: {exc}"
-                ) from exc
-            return await spawned
+                raise _ClientUnreachable(str(exc)) from exc
+            response = await pending.answer
         finally:
-            self._spawn_requests.pop(request_id, None)
-            if spawned.cancelled() or not spawned.done():
-                self._unanswered_spawns.add(request_id)
+            self._client_requests.pop(request_id, None)
+            if pending.answer.cancelled() or not pending.answer.done():
+                self._unanswered_client_requests[request_id] = method
+        if isinstance(response, JsonRpcErrorResponse):
+            raise _ClientRequestFailed(response.error.message)
+        try:
+            return validate_wire(response_type, response.result)
+        except ValidationError as exc:
+            raise _ClientRequestFailed(
+                f"The client answered {method} invalidly: {exc}"
+            ) from exc
 
     async def _resolve_platform_credentials(
         self, params: PlatformCredentialsResolveParams
@@ -1838,18 +1935,12 @@ class AppServer:
         self._platform_credential_requests.clear()
         self._abandoned_platform_credential_requests.clear()
 
-    def _abandon_spawn_requests(self, reason: str) -> None:
-        for spawned in self._spawn_requests.values():
-            if not spawned.done():
-                spawned.set_exception(
-                    SessionSpawnError(
-                        f"{reason} before confirming the session, so it may or may "
-                        "not have started. Do not start it again before the user "
-                        "has checked their sessions."
-                    )
-                )
-        self._spawn_requests.clear()
-        self._unanswered_spawns.clear()
+    def _abandon_client_requests(self, reason: str) -> None:
+        for pending in self._client_requests.values():
+            if not pending.answer.done():
+                pending.answer.set_exception(_ClientRequestLost(reason))
+        self._client_requests.clear()
+        self._unanswered_client_requests.clear()
 
     def _sequence_notification(self, params: ProtocolModel) -> ProtocolModel:
         if not isinstance(params, EventNotificationParams):
@@ -1906,24 +1997,22 @@ def _in_order(*callbacks: Callable[[], None] | None) -> Callable[[], None] | Non
     return run
 
 
-def _settle_spawn(
-    spawned: asyncio.Future[SessionSpawnResponse],
-    response: JsonRpcErrorResponse | JsonRpcSuccessResponse,
-) -> None:
-    """Resolve a pending ``session/spawn`` with the client's answer. A refusal
-    or a malformed answer is the spawn's failure, not the connection's.
-    """
-    if spawned.done():
-        return
-    if isinstance(response, JsonRpcErrorResponse):
-        spawned.set_exception(SessionSpawnError(response.error.message))
-        return
-    try:
-        spawned.set_result(validate_wire(SessionSpawnResponse, response.result))
-    except ValidationError as exc:
-        spawned.set_exception(
-            SessionSpawnError(f"The client answered session/spawn invalidly: {exc}")
-        )
+@dataclass(frozen=True, slots=True)
+class _ClientRequest:
+    method: str
+    answer: asyncio.Future[JsonRpcErrorResponse | JsonRpcSuccessResponse]
+
+
+class _ClientRequestFailed(Exception):
+    pass
+
+
+class _ClientUnreachable(_ClientRequestFailed):
+    pass
+
+
+class _ClientRequestLost(_ClientRequestFailed):
+    """The client went away after the request was sent, so it may have acted."""
 
 
 def _settle_platform_credentials(

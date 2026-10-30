@@ -1,11 +1,12 @@
 //! Turn, queue, and dialog transitions preserve ordinary titles and bells.
 
 use serde_json::{json, Value};
-use std::sync::Arc;
 use std::time::Instant;
 use vibe_rs::app::{App, Status};
-use vibe_rs::server::{notification, Client, Notification};
+use vibe_rs::server::notification;
 use vibe_rs::{approval, message_queue, question_app};
+
+use crate::support::{notify, stub};
 
 fn app() -> App {
     let mut app = App::default();
@@ -15,17 +16,6 @@ fn app() -> App {
         since: Instant::now(),
     });
     app
-}
-
-fn notify(app: &mut App, method: &str, params: Value) {
-    assert!(vibe_rs::event_handler::apply_notification(
-        app,
-        &Arc::new(Client::stub()),
-        &Notification {
-            method: method.into(),
-            params,
-        },
-    ));
 }
 
 fn completed(app: &mut App, status: &str) {
@@ -51,7 +41,10 @@ fn assert_title_without_bell(app: &mut App, title: &str) {
 fn approval(app: &mut App) {
     app.approval
         .enqueue(vibe_rs::server::ApprovalCallback {
-            callback_id: "approval1".into(),
+            address: vibe_rs::server::CallbackAddress {
+                callback_id: "approval1".into(),
+                ..Default::default()
+            },
             ..Default::default()
         })
         .unwrap();
@@ -145,7 +138,7 @@ fn resuming_a_paused_queue_restores_the_running_title_without_a_bell() {
     app.set_status(Status::Ready);
     message_queue::sync(&mut app, &queue(true));
     assert_title_without_bell(&mut app, "Vibe");
-    message_queue::resume(&mut app, &Arc::new(Client::stub()));
+    message_queue::resume(&mut app, &stub());
     assert!(!app.queue.paused);
     assert_title_without_bell(&mut app, ">> Vibe");
 }
@@ -156,7 +149,7 @@ fn removing_the_last_queued_turn_restores_idle_without_a_bell() {
     app.set_status(Status::Ready);
     message_queue::sync(&mut app, &queue(false));
     app.queue.selected = Some("next-message".into());
-    message_queue::remove_selected(&mut app, &Arc::new(Client::stub()));
+    message_queue::remove_selected(&mut app, &stub());
     assert!(app.queue.is_empty());
     assert_title_without_bell(&mut app, "Vibe");
 }
@@ -190,7 +183,10 @@ fn dismissing_a_question_preserves_the_remaining_approval_without_a_bell() {
     app.terminal_notifier.set_focus(false);
     question_app::dismiss(
         &mut app,
-        &question_app::QuestionSource::Callback("question1".into()),
+        &question_app::QuestionSource::Callback(vibe_rs::server::CallbackAddress {
+            callback_id: "question1".into(),
+            ..Default::default()
+        }),
     );
     assert!(app.approval.open && !app.question_app.open);
     assert_title_without_bell(&mut app, "? Vibe");
@@ -212,10 +208,10 @@ fn queue_transitions_preserve_open_dialog_titles_without_a_bell() {
             json!({"queue": queue(true)}),
         );
         assert_title_without_bell(&mut app, "? Vibe");
-        message_queue::resume(&mut app, &Arc::new(Client::stub()));
+        message_queue::resume(&mut app, &stub());
         assert_title_without_bell(&mut app, "? Vibe");
         app.queue.selected = Some("next-message".into());
-        message_queue::remove_selected(&mut app, &Arc::new(Client::stub()));
+        message_queue::remove_selected(&mut app, &stub());
         assert_title_without_bell(&mut app, "? Vibe");
     }
 }

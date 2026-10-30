@@ -433,3 +433,170 @@ fn empty_tool_arguments_run_the_tool_with_an_empty_object() {
         ],
     );
 }
+
+///
+/// *Prepare*: A session has programmatic tool calling and one discoverable tool.
+/// *Do*: The model calls `search_tool_functions` four times with a mode name as an argument name: the query as the value, nested arguments, the function list as the value next to a valid `mode`, and two mode names in one call.
+/// *Assert*: Every call fails with the schema error for the first rejected field, followed by the call shape for that mode; no call runs a search.
+///
+#[test]
+fn search_tool_functions_rejects_a_mode_name_used_as_an_argument_name() {
+    // Prepare
+    let turn_id = "turn-search-mode-as-argument";
+    let mut harness_config = config();
+    harness_config.capabilities.tool_groups = serde_json::from_value(json!([{
+        "name": "github",
+        "description": "GitHub tools",
+        "tools": [{
+            "name": "search_issues",
+            "description": "Search GitHub issues",
+            "input_schema": {"type": "object"},
+            "exposure": "programmatic",
+        }],
+    }]))
+    .expect("tool discovery configuration is valid");
+    let mut runtime = SynchronousRuntime::new(harness_config);
+    let first_completion = runtime.start_turn(turn_id, "find GitHub issues");
+    let calls = vec![
+        tool_call(
+            "query-as-value",
+            "search_tool_functions",
+            json!({"best_match": "search issues"}),
+        ),
+        tool_call(
+            "nested-arguments",
+            "search_tool_functions",
+            json!({"best_match": {"query": "search issues"}}),
+        ),
+        tool_call(
+            "functions-as-value",
+            "search_tool_functions",
+            json!({"details": ["github.search_issues"], "mode": "details"}),
+        ),
+        tool_call(
+            "two-mode-names",
+            "search_tool_functions",
+            json!({"all_connector_capabilities": null, "best_match": "issues"}),
+        ),
+    ];
+    let unexpected = |field: &str| {
+        schema_error(&format!(
+            "Additional properties are not allowed ('{field}' was unexpected). Allowed fields: mode, query, functions, functionNames, connectors."
+        ))
+    };
+    let modes = "\"best_match\", \"details\" and \"all_connector_capabilities\" are values of \"mode\", not argument names.";
+    let best_match_error = format!(
+        "{} {modes} Call search_tool_functions with {{\"mode\": \"best_match\", \"query\": \"<keywords>\"}}.",
+        unexpected("best_match")
+    );
+    let details_error = format!(
+        "{} {modes} Call search_tool_functions with {{\"mode\": \"details\", \"functions\": [\"<connector>.<function>\"]}}.",
+        unexpected("details")
+    );
+    let two_modes_error = format!(
+        "{} {modes} Call search_tool_functions with {{\"mode\": \"all_connector_capabilities\", \"connectors\": [\"<connector>\"]}}.",
+        unexpected("all_connector_capabilities")
+    );
+
+    // Do
+    let retry = runtime
+        .apply(
+            tool_call_completion(action_id(&first_completion), calls.clone()),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(assistant_tool_calls_committed(
+                    turn_id,
+                    &first_completion,
+                    &calls,
+                ))
+                .observe(tool_execution_started(turn_id, "query-as-value"))
+                .observe(tool_execution_started(turn_id, "nested-arguments"))
+                .observe(tool_execution_started(turn_id, "functions-as-value"))
+                .observe(tool_execution_started(turn_id, "two-mode-names"))
+                .observe_tool_execution_finished(
+                    "query-as-value",
+                    invalid_tool_call_result(&best_match_error),
+                )
+                .observe_tool_execution_finished(
+                    "nested-arguments",
+                    invalid_tool_call_result(&best_match_error),
+                )
+                .observe_tool_execution_finished(
+                    "functions-as-value",
+                    invalid_tool_call_result(&details_error),
+                )
+                .observe_tool_execution_finished(
+                    "two-mode-names",
+                    invalid_tool_call_result(&two_modes_error),
+                ),
+        )
+        .only_action();
+
+    // Assert
+    let expected_messages = [
+        model_assistant_tool_calls(&calls),
+        model_invalid_tool_call("query-as-value", "search_tool_functions", &best_match_error),
+        model_invalid_tool_call(
+            "nested-arguments",
+            "search_tool_functions",
+            &best_match_error,
+        ),
+        model_invalid_tool_call(
+            "functions-as-value",
+            "search_tool_functions",
+            &details_error,
+        ),
+        model_invalid_tool_call("two-mode-names", "search_tool_functions", &two_modes_error),
+    ];
+    runtime.assert_last_model_message_update(&retry, "append", &expected_messages);
+    assert_exact_appended_model_input(&retry, &expected_messages);
+}
+
+///
+/// *Prepare*: A session has programmatic tool calling enabled.
+/// *Do*: The model calls `search_tool_functions` with a valid query and an unknown field that is not a mode name.
+/// *Assert*: The call fails with the schema error alone, without a mode hint, and runs no search.
+///
+#[test]
+fn search_tool_functions_rejects_an_unknown_argument() {
+    // Prepare
+    let turn_id = "turn-search-unknown-argument";
+    let mut runtime = SynchronousRuntime::new(config());
+    let first_completion = runtime.start_turn(turn_id, "find GitHub issues");
+    let calls = vec![tool_call(
+        "unknown-search-argument",
+        "search_tool_functions",
+        json!({"query": "search issues", "limit": 5}),
+    )];
+    let error = schema_error(
+        "Additional properties are not allowed ('limit' was unexpected). Allowed fields: mode, query, functions, functionNames, connectors.",
+    );
+
+    // Do
+    let retry = runtime
+        .apply(
+            tool_call_completion(action_id(&first_completion), calls.clone()),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(assistant_tool_calls_committed(
+                    turn_id,
+                    &first_completion,
+                    &calls,
+                ))
+                .observe(tool_execution_started(turn_id, "unknown-search-argument"))
+                .observe(tool_execution_finished(
+                    turn_id,
+                    "unknown-search-argument",
+                    invalid_tool_call_result(&error),
+                )),
+        )
+        .only_action();
+
+    // Assert
+    let expected_messages = [
+        model_assistant_tool_calls(&calls),
+        model_invalid_tool_call("unknown-search-argument", "search_tool_functions", &error),
+    ];
+    runtime.assert_last_model_message_update(&retry, "append", &expected_messages);
+    assert_exact_appended_model_input(&retry, &expected_messages);
+}

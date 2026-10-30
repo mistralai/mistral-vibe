@@ -771,13 +771,19 @@ def with_session_preview(state: PublicSessionState) -> PublicSessionState:
 def settle_stalled_projection(
     state: PublicSessionState, *, observed_at: int
 ) -> PublicSessionState:
-    """Present a mid-turn projection with no live owner as settled.
+    """Present a projection with no live owner as settled.
 
     Projects a ``running``/``blocked`` turn as ``interrupted``, settles its open
     effects, and marks the session idle, so clients never render a phantom
-    "working" state. A pure presentation transform: the caller decides the
-    session is actually unowned (e.g. via the lease), not this function.
+    "working" state. Its queue is emptied too: a queue lives only in the
+    process that holds the session, so a saved one never runs. A pure
+    presentation transform: the caller decides the session is actually unowned
+    (e.g. via the lease), not this function.
     """
+    if state.turn_queue.items:
+        state = state.model_copy(
+            update={"turn_queue": state.turn_queue.model_copy(update={"items": []})}
+        )
     status = state.session.status
     if not isinstance(status, (RunningSessionStatus, BlockedSessionStatus)):
         return state

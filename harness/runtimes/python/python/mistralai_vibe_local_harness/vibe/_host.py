@@ -155,6 +155,7 @@ from mistralai_vibe_local_harness.vibe._runtime_config import (
 )
 from mistralai_vibe_local_harness.vibe._session import UnifiedHarnessSessionBackend
 from mistralai_vibe_local_harness.vibe._session_catalog import (
+    SessionCatalogCache,
     SessionCatalogEntryV1,
     UnifiedSessionCatalog,
 )
@@ -295,6 +296,7 @@ class HarnessSessionListItem:
     session: PublicSession
     cwd: str | None
     origin_cwd: str | None = None
+    started_by_session_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -438,6 +440,7 @@ def _fork_live_session_config(
 class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-server host surface
     def __init__(self, storage_root: Path | None = None) -> None:
         self._storage_root = storage_root or _default_storage_root()
+        self._catalog_cache = SessionCatalogCache()
         self._sessions: dict[str, _LoadedSessionEntry] = {}
         self._read_stores: OrderedDict[str, UnifiedSessionStore] = OrderedDict()
         self._read_store_retirements = 0
@@ -506,6 +509,8 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         root = Path(storage_root).expanduser().resolve()
         if self._live_session_ids() and root != self._storage_root:
             raise RuntimeError("cannot change storage root while sessions are bound")
+        if root != self._storage_root:
+            self._catalog_cache = SessionCatalogCache()
         self._storage_root = root
 
     def configure_legacy_source_loader(self, loader: LegacySourceLoader) -> None:
@@ -713,6 +718,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         hook_bindings: Sequence[RustHarnessHookBinding] = (),
         hook_handlers: HookHandlers | None = None,
         plugin_lock: PluginLockV1 | None = None,
+        started_by_session_id: str | None = None,
     ) -> UnifiedHarnessSessionBackend:
         started_at = time.perf_counter()
         self._guard_open()
@@ -733,6 +739,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         metadata = SessionMetadataV1(
             cwd=str(workspace.cwd),
             root_session_id=session_id,
+            started_by_session_id=started_by_session_id,
             hook_bindings=list(hook_bindings),
         )
         try:
@@ -1410,11 +1417,14 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 for definition in requested
             ])
         previous_lock = await session._guard_plugin_rewrite()
+        hook_bindings = session._hook_bindings()
         plugins = await binder.create(requested, session_id=session_id)
         try:
             await session._rewrite_plugins(
                 plugins=plugins,
-                config=self._runtime_config(session_id, plugins=plugins),
+                # The rebuilt Core keeps the session's hooks: a re-pin swaps
+                # plugins, not the hooks the session was started with.
+                config=self._runtime_config(session_id, hook_bindings, plugins=plugins),
                 subagents=self._reloaded_subagents(session, plugins),
             )
         except BaseException:
@@ -1433,7 +1443,11 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         cwd: str | None = None,
         root_session_id: str | None = None,
         parent_session_id: str | None = None,
+        session_ids: Sequence[str] | None = None,
     ) -> HarnessSessionListResult:
+        """With `session_ids`, only those sessions are read, so the cost
+        follows the ids asked for rather than every stored session.
+        """
         self._guard_open()
         return await asyncio.to_thread(
             self._list,
@@ -1444,6 +1458,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             parent_session_id,
             self._ephemeral_session_ids(),
             self._live_listed_sessions(),
+            session_ids,
         )
 
     async def read(self, params: SessionReadParams) -> HarnessSessionReadResult:
@@ -1455,22 +1470,32 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             self._retire_read_stores((params.session_id,))
             raise HarnessSessionNotFoundError(params.session_id)
         retirements = self._read_store_retirements
-        stored = await asyncio.to_thread(store.load)
+        tail = await asyncio.to_thread(store.read_projection_tail, params.history_limit)
+        # A session without a stored preview derives it from its first message,
+        # which only the whole history holds.
+        if tail is not None and (
+            tail.projection_state.snapshot.session.preview or tail.before is None
+        ):
+            projection = tail.projection_state
+            cwd = tail.session_metadata.cwd
+        else:
+            stored = await asyncio.to_thread(store.load)
+            projection = stored.projection_state
+            cwd = stored.runtime_state.session_metadata.cwd
         if self._read_store_retirements == retirements:
             self._admit_read_store(store)
         # No live runtime here, and if no process holds the lease the session is
         # not executing anywhere: settle its stalled projection.
-        snapshot = stored.projection_state.snapshot
+        snapshot = projection.snapshot
         if not await asyncio.to_thread(
             session_is_live, self._storage_root, params.session_id
         ):
             snapshot = settle_stalled_projection(
                 snapshot, observed_at=_now_milliseconds()
             )
-        projection = stored.projection_state.model_copy(update={"snapshot": snapshot})
+        projection = projection.model_copy(update={"snapshot": snapshot})
         return HarnessSessionReadResult(
-            snapshot=_snapshot(projection, params.history_limit),
-            cwd=stored.runtime_state.session_metadata.cwd,
+            snapshot=_snapshot(projection, params.history_limit), cwd=cwd
         )
 
     async def relocate(
@@ -3768,9 +3793,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
     async def _report_orphan_children(
         self, parent_session_id: str, referenced_child_session_ids: frozenset[str]
     ) -> int:
-        entries = await asyncio.to_thread(
-            UnifiedSessionCatalog(self._storage_root).entries
-        )
+        entries = await asyncio.to_thread(self._session_catalog().entries)
         orphan_count = 0
         for entry in entries:
             if entry.session_id in referenced_child_session_ids:
@@ -3965,14 +3988,20 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         parent_session_id: str | None,
         ephemeral_session_ids: frozenset[str],
         live_sessions: Mapping[str, PublicSession],
+        session_ids: Sequence[str] | None = None,
     ) -> HarnessSessionListResult:
         if limit < 1:
             raise ValueError("session list limit must be positive")
         unified_root = self._storage_root / "unified"
         if not unified_root.exists():
             return HarnessSessionListResult(items=(), continue_session_id=None)
+        catalog = self._session_catalog()
         stored_sessions: list[tuple[int, str, PublicSession, SessionMetadataV1]] = []
-        for entry in UnifiedSessionCatalog(self._storage_root).entries():
+        for entry in (
+            catalog.entries()
+            if session_ids is None
+            else catalog.entries_for(session_ids)
+        ):
             session_id = entry.session_id
             if session_id in ephemeral_session_ids:
                 continue
@@ -4028,7 +4057,10 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         return HarnessSessionListResult(
             items=tuple(
                 HarnessSessionListItem(
-                    session=item[2], cwd=item[3].cwd, origin_cwd=item[3].origin_cwd
+                    session=item[2],
+                    cwd=item[3].cwd,
+                    origin_cwd=item[3].origin_cwd,
+                    started_by_session_id=item[3].started_by_session_id,
                 )
                 for item in page
             ),
@@ -4057,7 +4089,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
 
     def _resolve_legacy_import_id(self, source_session_id: str) -> str | None:
         matches: list[tuple[str, str]] = []
-        for entry in UnifiedSessionCatalog(self._storage_root).entries():
+        for entry in self._session_catalog().entries():
             provenance = entry.import_provenance
             if (
                 provenance is not None
@@ -4071,7 +4103,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         self, harness: str, source_session_id: str
     ) -> str | None:
         matches: list[tuple[int, str]] = []
-        for entry in UnifiedSessionCatalog(self._storage_root).entries():
+        for entry in self._session_catalog().entries():
             external_import = entry.metadata.external_import
             if (
                 external_import is not None
@@ -4081,11 +4113,14 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 matches.append((entry.session.created_at, entry.session_id))
         return min(matches)[1] if matches else None
 
+    def _session_catalog(self) -> UnifiedSessionCatalog:
+        return UnifiedSessionCatalog(self._storage_root, self._catalog_cache)
+
     async def _catalog_entry(self, session_id: str) -> SessionCatalogEntryV1 | None:
         store = self._read_store(session_id)
         retirements = self._read_store_retirements
         entry = await asyncio.to_thread(
-            UnifiedSessionCatalog(self._storage_root).entry, session_id, store
+            self._session_catalog().entry, session_id, store
         )
         if store.last_load_bytes and self._read_store_retirements == retirements:
             self._admit_read_store(store)
@@ -4319,7 +4354,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 or entry.maintenance_pins
             ):
                 return
-            if entry.session._has_active_work and not entry.close_requested:
+            if entry.session.has_active_work and not entry.close_requested:
                 return
             entry.state = "evicting"
         error: BaseException | None = None

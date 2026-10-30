@@ -19,6 +19,7 @@ from pydantic import (
     TypeAdapter,
     ValidationError,
     field_validator,
+    model_validator,
 )
 
 from vibe.agents import AgentSafety, AgentType
@@ -116,6 +117,7 @@ _MAX_NODE_LIBRARY_ALIAS_LENGTH = 214
 _MAX_PYTHON_LIBRARY_ALIAS_LENGTH = 128
 _MAX_CONNECTOR_TOOL_NAME_LENGTH = 256
 _PLUGIN_COMPONENT_NAME_PATTERN = r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
+_LOCALE_PATTERN = r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$"
 _NODE_LIBRARY_ALIAS_PATTERN = re.compile(
     r"^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$"
 )
@@ -163,6 +165,37 @@ class _ToolOverride(BaseModel):
     exposure: Literal["programmatic", "direct", "direct_and_programmatic"] | None = None
 
 
+class _StarterPrompt(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    prompt: (
+        dict[
+            Annotated[str, Field(pattern=_LOCALE_PATTERN)],
+            Annotated[str, Field(min_length=1, max_length=500)],
+        ]
+        | None
+    ) = None
+    submit: bool | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _rejects_null(cls, data: object) -> object:
+        # `None` above means absent: the schema refuses an explicit null.
+        if isinstance(data, dict) and any(
+            key in data and data[key] is None for key in ("prompt", "submit")
+        ):
+            raise ValueError("starterPrompt prompt and submit cannot be null")
+        return data
+
+    @model_validator(mode="after")
+    def _has_a_prompt_or_is_submitted(self) -> _StarterPrompt:
+        if self.prompt is not None and "en" not in self.prompt:
+            raise ValueError("starterPrompt.prompt must include en")
+        if self.prompt is None and self.submit is not True:
+            raise ValueError("starterPrompt needs a prompt, or submit true")
+        return self
+
+
 class _VibePluginExtension(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
 
@@ -170,12 +203,23 @@ class _VibePluginExtension(BaseModel):
     display_name: str | None = Field(
         default=None, alias="displayName", min_length=1, max_length=100
     )
+    # Shown only by hosts with a composer, such as Vibe Work: accepted here so
+    # that the extension stays valid.
+    starter_prompt: _StarterPrompt | None = Field(default=None, alias="starterPrompt")
     tool_namespace: str | None = Field(
         default=None, alias="toolNamespace", pattern=_TYPESCRIPT_IDENTIFIER_PATTERN
     )
     tool_overrides: dict[str, _ToolOverride] = Field(
         default_factory=dict, alias="toolOverrides"
     )
+
+    @field_validator("starter_prompt", mode="before")
+    @classmethod
+    def _starter_prompt_is_not_null(cls, value: object) -> object:
+        # `None` above means absent: the schema refuses an explicit null.
+        if value is None:
+            raise ValueError("starterPrompt cannot be null")
+        return value
 
 
 class _KnowledgeMetadata(BaseModel):

@@ -16,7 +16,8 @@ from tests.app_server.backend_contract.conftest import (
     BackendContractConnection,
     connect_backend_contract_host,
 )
-from vibe.app_server._runtime import create_harness_server
+from vibe.app_server._process_services import ProcessServices
+from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.events import HistoryEntryAdded, HistoryEntryUpdated
 from vibe.app_server.host import AppServerHost
@@ -210,11 +211,13 @@ def _shell_history(session: AppServerSession) -> list[PublicEffectEntry]:
 
 
 async def _resume_on_a_new_host(
-    session_id: str,
+    session_id: str, *, process_services: ProcessServices
 ) -> tuple[AppServerSession, BackendContractConnection]:
     """Resume a stored session through a brand-new Host, as a restart would."""
     connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     session = await connection.host.resume_session(session_id)
     return session, connection
@@ -224,6 +227,7 @@ async def _resume_on_a_new_host(
 @pytest.mark.asyncio
 async def test_manual_shell_command_survives_a_new_host(
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A persistent session that ran one manual shell command.
     *Do*: Close it, resume it through a brand-new Host, and read the history.
@@ -239,7 +243,9 @@ async def test_manual_shell_command_survives_a_new_host(
     session_id = session.session_id
     await session.close()
 
-    resumed, resumed_connection = await _resume_on_a_new_host(session_id)
+    resumed, resumed_connection = await _resume_on_a_new_host(
+        session_id, process_services=process_services
+    )
     try:
         restored = _shell_history(resumed)
         assert len(restored) == 1, (
@@ -260,6 +266,7 @@ async def test_manual_shell_command_survives_a_new_host(
 @pytest.mark.asyncio
 async def test_manual_shell_command_timeout_state_survives_a_new_host(
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A persistent session whose manual shell command timed out.
     *Do*: Close it and resume it through a brand-new Host.
@@ -278,7 +285,9 @@ async def test_manual_shell_command_timeout_state_survives_a_new_host(
     session_id = session.session_id
     await session.close()
 
-    resumed, resumed_connection = await _resume_on_a_new_host(session_id)
+    resumed, resumed_connection = await _resume_on_a_new_host(
+        session_id, process_services=process_services
+    )
     try:
         restored = _shell_history(resumed)
         assert len(restored) == 1
@@ -295,6 +304,7 @@ async def test_manual_shell_command_timeout_state_survives_a_new_host(
 @pytest.mark.asyncio
 async def test_manual_shell_command_interrupt_state_survives_a_new_host(
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A persistent session whose manual shell command was
     interrupted by the user mid-run.
@@ -331,7 +341,9 @@ async def test_manual_shell_command_interrupt_state_survives_a_new_host(
     session_id = session.session_id
     await session.close()
 
-    resumed, resumed_connection = await _resume_on_a_new_host(session_id)
+    resumed, resumed_connection = await _resume_on_a_new_host(
+        session_id, process_services=process_services
+    )
     try:
         restored = _shell_history(resumed)
         assert len(restored) == 1
@@ -348,6 +360,7 @@ async def test_manual_shell_command_interrupt_state_survives_a_new_host(
 @pytest.mark.asyncio
 async def test_manual_shell_command_output_is_capped_in_the_stored_record(
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A persistent Unified session whose command printed past the
     model limit.
@@ -370,7 +383,9 @@ async def test_manual_shell_command_output_is_capped_in_the_stored_record(
     session_id = session.session_id
     await session.close()
 
-    resumed, resumed_connection = await _resume_on_a_new_host(session_id)
+    resumed, resumed_connection = await _resume_on_a_new_host(
+        session_id, process_services=process_services
+    )
     try:
         restored = _shell_history(resumed)
         assert len(restored) == 1
@@ -388,6 +403,7 @@ async def test_manual_shell_command_output_is_capped_in_the_stored_record(
 @pytest.mark.asyncio
 async def test_manual_shell_command_past_the_client_cap_keeps_its_stored_output(
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A persistent Unified session whose command printed past the
     client-facing output cap.
@@ -406,7 +422,9 @@ async def test_manual_shell_command_past_the_client_cap_keeps_its_stored_output(
     session_id = session.session_id
     await session.close()
 
-    resumed, resumed_connection = await _resume_on_a_new_host(session_id)
+    resumed, resumed_connection = await _resume_on_a_new_host(
+        session_id, process_services=process_services
+    )
     try:
         restored = _shell_history(resumed)
         assert len(restored) == 1
@@ -424,6 +442,7 @@ async def test_manual_shell_command_past_the_client_cap_keeps_its_stored_output(
 @pytest.mark.asyncio
 async def test_manual_shell_command_rejects_a_reused_operation_id_after_restart(
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A persistent session holding one recorded shell effect.
     *Do*: Resume through a brand-new Host and rerun the same operation id.
@@ -442,7 +461,9 @@ async def test_manual_shell_command_rejects_a_reused_operation_id_after_restart(
     session_id = session.session_id
     await session.close()
 
-    resumed, resumed_connection = await _resume_on_a_new_host(session_id)
+    resumed, resumed_connection = await _resume_on_a_new_host(
+        session_id, process_services=process_services
+    )
     try:
         with pytest.raises(AppServerResponseError, match="shell-op-1"):
             _ = await resumed_connection.client.request(
@@ -467,6 +488,7 @@ async def test_client_transport_eof_kills_a_running_shell_process(
     backend_contract_session_options: SessionOptions,
     backend_contract_capabilities: ClientCapabilities,
     backend_contract_mistral_api: respx.Route,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A session whose manual `!` command is still running.
     *Do*: Close the client transport without session/stop, like a client that
@@ -475,7 +497,11 @@ async def test_client_transport_eof_kills_a_running_shell_process(
     *Assert*: The server peer task ends and the running command's process dies.
     """
     client_transport, server_transport = memory_transport_pair()
-    harness = await create_harness_server(server_transport, transport_kind="stdio")
+    harness = await create_harness_server(
+        server_transport,
+        transport_kind="stdio",
+        process=HarnessProcess(services=process_services),
+    )
     client = AppServerClient(client_transport, run_peer=harness.serve)
     host = await AppServerHost.connect(
         client,

@@ -8,7 +8,7 @@ use super::event::{dispatch, CommandEvent};
 use super::retry_prompt::build_retry_prompt;
 use super::submission::{new_message_id, start_injected_turn};
 use crate::app::{App, QueuedPrompt, Status};
-use crate::server::Client;
+use crate::server::{Client, EntryHead};
 
 /// Silent continuations before the
 /// failure surfaces as a manual `/retry` offer.
@@ -32,18 +32,21 @@ pub struct RetryContinuation {
 }
 
 /// Continue an interrupted model response, optionally with extra instructions.
-/// Does nothing while a turn is generating or if the last turn was not
-/// interrupted.
+/// Does nothing while a turn is generating; warns when nothing was interrupted.
 pub fn start_retry(app: &mut App, client: &Arc<Client>, cmd_args: &str) {
     if matches!(app.session.status, Status::Generating { .. }) {
         return;
     }
     if !app.session.can_retry {
+        let text = "No interrupted response to continue.";
+        let id = new_message_id();
+        crate::transcript::local::add_command_warning(&mut app.view.transcript, &id, text);
         return;
     }
     let Some((session_id, tx)) = dispatch(app) else {
         return;
     };
+    begin(app);
     app.session.can_retry = false;
     // A manual retry re-opens the incomplete-stream budget.
     app.session.incomplete_stream_retries = 0;
@@ -91,11 +94,9 @@ pub fn offer(app: &mut App, transient: Option<String>) {
     app.session.retry_presentation = Some(presentation);
 }
 
-/// The `/retry` echo becomes transient and the
-/// presentation activates; no presentation leaves the echo mounted.
-pub fn begin(app: &mut App, echo_id: String) {
+/// `/retry` activates the armed presentation, if any.
+pub fn begin(app: &mut App) {
     if let Some(presentation) = &mut app.session.retry_presentation {
-        presentation.transient_ids.push(echo_id);
         presentation.active = true;
     }
 }
@@ -107,51 +108,27 @@ pub fn cancel(app: &mut App) {
     app.session.can_retry = false;
 }
 
-enum EntryKind {
-    Assistant,
-    User,
-    Other,
-}
-
-fn entry_kind(params: &Value) -> EntryKind {
-    if params.pointer("/entry/type").and_then(Value::as_str) != Some("message") {
-        return EntryKind::Other;
-    }
-    match params.pointer("/entry/role").and_then(Value::as_str) {
-        Some("assistant") => EntryKind::Assistant,
-        Some("user") => EntryKind::User,
-        _ => EntryKind::Other,
-    }
-}
-
-fn entry_id(params: &Value) -> Option<String> {
-    params
-        .pointer("/entry/id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-}
-
 /// The retry dispatch of an added entry: a user entry always cancels
 /// the offer, and only the retried turn's first entry consumes the
 /// presentation — removing the transient rows, and continuing the interrupted
 /// answer when the entry is an assistant message. An inactive offer (armed by
 /// a failure, before the user runs `/retry`) survives non-user entries.
-pub fn on_entry_added(app: &mut App, params: &Value) {
+pub fn on_entry_added(app: &mut App, entry: &EntryHead) {
     let Some(presentation) = app.session.retry_presentation.as_ref() else {
         return;
     };
     if !presentation.active {
-        if matches!(entry_kind(params), EntryKind::User) {
+        if entry.message_role() == Some("user") {
             cancel(app);
         }
         return;
     }
     let presentation = app.session.retry_presentation.take().unwrap();
-    match entry_kind(params) {
+    match entry.message_role() {
         // A real user entry cancels the offer; everything stays mounted.
-        EntryKind::User => cancel(app),
-        EntryKind::Other => resolve(app, &presentation, false, None),
-        EntryKind::Assistant => resolve(app, &presentation, true, entry_id(params)),
+        Some("user") => cancel(app),
+        Some("assistant") => resolve(app, &presentation, true, entry.id.clone()),
+        _ => resolve(app, &presentation, false, None),
     }
 }
 
@@ -188,17 +165,14 @@ fn resolve(
 /// which the next failure's presentation captures. A continuation's hidden
 /// entry keeps pointing at the merged row it feeds. A user entry starts a new
 /// turn, so the previous turn's assistant row is no longer its target.
-pub fn track_turn_assistant(app: &mut App, params: &Value) {
-    match entry_kind(params) {
-        EntryKind::User => {
+pub fn track_turn_assistant(app: &mut App, entry: &EntryHead) {
+    let id = match (entry.message_role(), entry.id.clone()) {
+        (Some("user"), _) => {
             app.session.turn_assistant_id = None;
             return;
         }
-        EntryKind::Other => return,
-        EntryKind::Assistant => {}
-    }
-    let Some(id) = entry_id(params) else {
-        return;
+        (Some("assistant"), Some(id)) => id,
+        _ => return,
     };
     let tracked = match app.session.retry_continuation.as_ref() {
         Some(continuation) if continuation.src_id == id => continuation.dst_id.clone(),
@@ -213,12 +187,9 @@ pub fn track_turn_assistant(app: &mut App, params: &Value) {
 pub fn auto_continue_incomplete_stream(
     app: &mut App,
     client: &Arc<Client>,
-    params: &Value,
+    turn: &crate::server::PublicTurn,
 ) -> bool {
-    if params.pointer("/turn/status").and_then(Value::as_str) != Some("failed") {
-        return false;
-    }
-    if params.pointer("/turn/error/code").and_then(Value::as_str) != Some("incomplete_stream") {
+    if turn.failure() != Some("incomplete_stream") {
         return false;
     }
     if app.session.incomplete_stream_retries >= MAX_INCOMPLETE_STREAM_RETRIES {

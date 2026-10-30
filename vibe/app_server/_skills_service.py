@@ -21,6 +21,7 @@ from typing import Any, Protocol
 
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
 from vibe.app_server._model import ProtocolModel, validate_wire
+from vibe.app_server._skill_toggles import set_skill_enabled
 from vibe.app_server.models import (
     SkillCatalogEntry,
     SkillDetailView,
@@ -366,24 +367,12 @@ class SkillsController:
     ) -> RuntimeMutationResponse:
         self._begin_mutation(params.session_id)
         self._require_toggleable(params.name)
-
-        def toggle(current: Any) -> list[str]:
-            names = [str(name) for name in current or []]
-            if params.enabled:
-                return [name for name in names if name != params.name]
-            return names if params.name in names else [*names, params.name]
-
-        failures = await self._host.config_orchestrator.mutate_field(
-            "/disabled_skills",
-            toggle,
+        await set_skill_enabled(
+            self._host.config_orchestrator,
+            params.name,
+            params.enabled,
             reason="toggle a skill from the skills browser",
-            default=[],
         )
-        if failures:
-            raise RequestFailure(
-                ProtocolErrorCode.INTERNAL_ERROR,
-                f"Failed to update configuration: {failures[0]}",
-            ) from failures[0]
         return await self._refreshed()
 
     async def _convert_local(

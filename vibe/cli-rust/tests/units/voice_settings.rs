@@ -5,6 +5,8 @@ use vibe_rs::app::App;
 use vibe_rs::voice::TranscribeState;
 use vibe_rs::voice_app::apply_runtime;
 
+use crate::support::stub;
+
 #[test]
 fn disabling_voice_cancels_recording_and_flushing() {
     for state in [TranscribeState::Recording, TranscribeState::Flushing] {
@@ -53,14 +55,13 @@ fn escape_without_changes_writes_nothing() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     app.command_tx = Some(tx);
     app.session.session_id = Some("session-1".to_owned());
-    let client = std::sync::Arc::new(vibe_rs::server::Client::stub());
     vibe_rs::voice_app::open(&mut app);
 
     let esc = crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Esc,
         crossterm::event::KeyModifiers::NONE,
     );
-    vibe_rs::voice_app::handle_key(&mut app, &client, esc);
+    vibe_rs::voice_app::handle_key(&mut app, &stub(), esc);
 
     assert!(!app.voice_app.open);
     assert!(rx.try_recv().is_err());

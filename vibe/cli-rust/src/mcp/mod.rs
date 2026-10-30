@@ -22,7 +22,6 @@ use serde_json::{json, Value};
 
 use crate::app::App;
 use crate::commands::submission::new_message_id;
-use crate::input::deliver;
 use crate::transcript::local;
 use rows::Row;
 
@@ -99,18 +98,17 @@ fn read_and_open(
     refresh: bool,
     reopened: bool,
 ) {
-    let (Some(session_id), Some(tx)) = (app.session.session_id.clone(), app.mcp.tx.clone()) else {
+    let Some(session_id) = app.session.session_id.clone() else {
         return;
     };
     let client = client.clone();
-    let pending = app.commit_started();
-    tokio::spawn(async move {
+    crate::ui_event::spawn(app, async move {
         let params = json!({"sessionId": session_id});
         let mut response = None;
         if refresh {
             response = rediscover(&client, params.clone()).await.ok();
         }
-        let event = match client.request(method::MCP_READ, params.clone()).await {
+        match client.request(method::MCP_READ, params.clone()).await {
             Ok(value) => Event::Opened {
                 response,
                 state: with_connector_catalog(
@@ -123,8 +121,7 @@ fn read_and_open(
                 reopened,
             },
             Err(error) => Event::Error(format!("Failed to read MCP servers: {error}")),
-        };
-        deliver(Some(tx), event, &pending).await;
+        }
     });
 }
 
@@ -190,7 +187,6 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             add_error(app, &message);
         }
     }
-    app.commit_finished();
 }
 
 fn viewing_pending_action(app: &App, state: &MCPState) -> bool {
@@ -204,12 +200,6 @@ fn viewing_pending_action(app: &App, state: &MCPState) -> bool {
 fn open(app: &mut App, mut state: MCPState, initial_source: &str, reopened: bool) {
     if let Some(error) = &state.connector_error {
         add_error(app, &format!("Could not load connectors.\n{error}"));
-    }
-    if state.sources.is_empty() {
-        if state.connector_error.is_none() {
-            add_result(app, &scope::empty_message(&state));
-        }
-        return;
     }
     if app.mcp.open {
         // A re-read whose catalog read failed must not lift the block.
@@ -232,7 +222,6 @@ fn open(app: &mut App, mut state: MCPState, initial_source: &str, reopened: bool
     // After a flow that left it unusable, show the list rather than loop back.
     let viewing =
         viewing.filter(|source| !(reopened && rows::pending_action(&state, source).is_some()));
-    add_result(app, "MCP and connectors opened...");
     app.mcp.search = crate::search_field::Search::default();
     app.mcp.viewing_name = viewing.map(|source| source.name.clone());
     app.mcp.viewing_kind = viewing.map(|source| source.kind);
@@ -258,7 +247,7 @@ pub fn apply_runtime(app: &mut App, runtime: &Value) {
 }
 
 pub(super) fn state_at(value: &Value, pointer: &str) -> Option<MCPState> {
-    serde_json::from_value(value.pointer(pointer)?.clone()).ok()
+    serde::Deserialize::deserialize(value.pointer(pointer)?).ok()
 }
 
 /// Replace the server state and rebuild the view, keeping the highlight.
@@ -306,10 +295,6 @@ fn select_row_id(app: &mut App, id: &str) {
     {
         app.mcp.list.highlight(index);
     }
-}
-
-pub(super) fn add_result(app: &mut App, text: &str) {
-    local::add_command_result(&mut app.view.transcript, &new_message_id(), text);
 }
 
 fn add_error(app: &mut App, text: &str) {

@@ -110,7 +110,6 @@ fn start_tool_execution(
     if tools.programmatic_enabled()
         && let Some(result) = tool_discovery::dispatch(&call, |request| tools.search(request))
     {
-        let result = result?;
         let observations = result
             .summary
             .map(|summary| Observation::ToolDiscoveryFinished {

@@ -767,7 +767,7 @@ async def test_initialize_caches_the_eval_response_once_bucketing_resolved(
     stored: list[EvalResponse] = []
     monkeypatch.setattr(
         "vibe.core.experiments.session.store_cached_eval_response",
-        lambda _config, response: stored.append(response),
+        lambda _config, response, **_: stored.append(response),
     )
     response = EvalResponse.model_validate({
         "features": {"vibe_cli_system_prompt": {"defaultValue": "cli"}}
@@ -808,7 +808,7 @@ async def test_initialize_keeps_the_cache_when_bucketing_never_resolved(
     stored: list[EvalResponse] = []
     monkeypatch.setattr(
         "vibe.core.experiments.session.store_cached_eval_response",
-        lambda _config, response: stored.append(response),
+        lambda _config, response, **_: stored.append(response),
     )
     manager = ExperimentManager(
         client=_StubClient(EvalResponse.model_validate({"features": {}}))

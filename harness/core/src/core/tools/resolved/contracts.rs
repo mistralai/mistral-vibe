@@ -3,7 +3,9 @@ use serde_json::Value;
 use crate::core::config::HarnessConfig;
 use crate::core::error::CoreError;
 use crate::core::features::file_system;
-use crate::core::tools::arguments::{ArgumentsRejection, validate_arguments, validate_json_schema};
+use crate::core::tools::arguments::{
+    ArgumentsRejection, SCHEMA_REJECTION_PREFIX, validate_arguments, validate_json_schema,
+};
 use crate::core::tools::external::{
     ExternalTool, ExternalToolCall, RuntimeBuiltinToolName, ToolTarget,
 };
@@ -242,10 +244,7 @@ pub(super) fn validate_model_input(
             ArgumentsRejection::Domain(message) => {
                 format!("Invalid arguments for {tool_name}: {message}")
             }
-            rejection => format!(
-                "tool arguments do not satisfy the declared input schema: {}",
-                rejection.detail(schema)
-            ),
+            rejection => format!("{SCHEMA_REJECTION_PREFIX}{}", rejection.detail(schema)),
         })
     })
 }

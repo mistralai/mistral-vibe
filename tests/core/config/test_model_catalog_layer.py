@@ -158,21 +158,62 @@ async def test_an_entry_without_reasoning_leaves_the_levels_to_the_known_model()
 
 
 @pytest.mark.asyncio
-async def test_unknown_reasoning_values_are_dropped_with_a_warning(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    with caplog.at_level(logging.WARNING):
-        config = await _config(
-            _catalog(
-                _entry(_GLM, parameters={"reasoning": ["minimal", "high"]}),
-                _entry(_MEDIUM, parameters={"reasoning": ["ultra"]}),
-            )
+async def test_reasoning_values_outside_the_standard_levels_are_kept() -> None:
+    """*Prepare*: Catalog entries listing levels of the model's own, alone or
+    beside a standard one.
+    *Do*: Build the config.
+    *Assert*: Every level is kept as written, in the catalog's order, and the
+    model starts on its set's default. A default the Mistral SDK cannot send
+    warns.
+    """
+    # Do
+    config = await _config(
+        _catalog(
+            _entry(_GLM, parameters={"reasoning": ["minimal", "high"]}),
+            _entry(_MEDIUM, parameters={"reasoning": ["ultra"]}),
         )
+    )
 
-    assert config.models[_GLM].thinking_levels == ["high"]
-    # No known value left: the off-only set, like an empty list.
-    assert config.models[_MEDIUM].thinking_levels == ["off"]
-    assert "unknown reasoning value 'minimal'" in caplog.text
+    # Assert
+    assert config.models[_GLM].thinking_levels == ["minimal", "high"]
+    assert config.models[_GLM].thinking == "high"
+    assert config.models[_MEDIUM].thinking_levels == ["ultra"]
+    assert config.models[_MEDIUM].thinking == "ultra"
+    assert len(config.validation_warnings) == 1
+    assert "cannot send thinking 'ultra'" in config.validation_warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_the_configs_thinking_levels_win_over_the_catalogs(
+    config_dir: Path,
+) -> None:
+    """*Prepare*: A catalog entry listing low and high, and a user config listing
+    low and a level of the model's own for the same model, set to that level.
+    *Do*: Build the config and compile the model's route.
+    *Assert*: The config's levels are the model's and are offered, the catalog's
+    are not, and its level runs as written. The Mistral SDK cannot send it, which
+    warns.
+    """
+    from vibe.app_server._completion_facts import compile_agent_route_facts
+
+    # Do
+    config = await _config(
+        _catalog(_entry(_GLM, parameters={"reasoning": ["low", "high"]})),
+        config_dir=config_dir,
+        active_model="",
+        models=[
+            {"name": _GLM, "thinking_levels": ["low", "turbo"], "thinking": "turbo"}
+        ],
+    )
+    model = config.models[_GLM]
+    facts = compile_agent_route_facts(config.get_provider_for_model(model), model)
+
+    # Assert
+    assert model.thinking_levels == ["low", "turbo"]
+    assert facts.thinking_levels == ("low", "turbo")
+    assert facts.thinking == "turbo"
+    assert len(config.validation_warnings) == 1
+    assert "cannot send thinking 'turbo'" in config.validation_warnings[0]
 
 
 @pytest.mark.asyncio
@@ -561,7 +602,7 @@ async def test_a_missing_pin_runs_the_default_and_names_no_cause(
     assert config.get_active_model().alias == _MEDIUM
     assert config.validation_warnings == (
         "Model 'glm-5-3' is not available — running 'Mistral Medium'. "
-        "Pick a model with /model to stop this notice.",
+        "Pick another model to stop this notice.",
     )
     stored = tomllib.loads((config_dir / "config.toml").read_text(encoding="utf-8"))
     assert stored["active_model"] == "glm-5-3"
@@ -657,7 +698,7 @@ async def test_a_pin_and_an_override_of_the_same_missing_model_warn_once(
 
     assert config.validation_warnings == (
         f"Model '{_GLM}' is not available — running 'Mistral Medium 3.5'. "
-        "Pick a model with /model to stop this notice.",
+        "Pick another model to stop this notice.",
     )
 
 
@@ -673,7 +714,7 @@ async def test_a_pin_and_an_override_of_two_missing_models_warn_for_each(
 
     assert config.validation_warnings == (
         f"Model '{_GLM}' is not available — running 'Mistral Medium 3.5'. "
-        "Pick a model with /model to stop this notice.",
+        "Pick another model to stop this notice.",
         "Settings for model 'ghost-model' are ignored: no such model is available.",
     )
 

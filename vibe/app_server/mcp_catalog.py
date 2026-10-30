@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -188,68 +188,46 @@ class MCPCatalogService:
         )
         return root.runtime_updated_params()
 
-    async def prepare_config_reload(
-        self, root: SessionBackend
-    ) -> _CatalogReloadPlan | None:
+    async def converge(
+        self, root: SessionBackend, previous: ResolvedMCPCatalog
+    ) -> RuntimeSnapshot | None:
+        """Bring the session's MCP servers to what its config resolves now.
+
+        ``previous`` is what this session last ran: ``/clear`` and rewind share
+        one config between sessions, so only the session knows what it moves
+        from. Servers the config now removes or disables are suspended first.
+        On failure the session goes back to ``previous`` and the error is
+        raised for the caller to retry at the next boundary.
+        """
         if not isinstance(root, SessionMCPCatalogBinding) or not isinstance(
             root, SessionMCPControl
         ):
             return None
         context = _CatalogContext.for_session(root)
-        previous = await self._resolved(
-            context.orchestrator, owner=context.catalog_owner
-        )
-        await context.orchestrator.reload()
         candidate = await self._resolved(
             context.orchestrator, owner=context.catalog_owner
-        )
-        restrictive = await self._suspend_restrictive_changes(
-            context, previous, candidate
-        )
-        return _CatalogReloadPlan(previous=previous, restrictive_names=restrictive)
-
-    async def finish_config_reload(
-        self, root: SessionBackend, plan: _CatalogReloadPlan | None
-    ) -> RuntimeSnapshot | None:
-        if (
-            plan is None
-            or not isinstance(root, SessionMCPCatalogBinding)
-            or not isinstance(root, SessionMCPControl)
-        ):
-            return None
-        context = _CatalogContext.for_session(root)
-        candidate = await self._resolved(
-            context.orchestrator, owner=context.catalog_owner
-        )
-        restrictive = await self._suspend_restrictive_changes(
-            context, plan.previous, candidate
         )
         affected = frozenset(server.name for server in candidate.servers) | frozenset(
-            server.name for server in plan.previous.servers
+            server.name for server in previous.servers
         )
+        suspended: set[str] = set()
         try:
+            await self._suspend_restrictive_changes(
+                context, previous, candidate, suspended=suspended
+            )
             state = await context.require_control().reconfigure_mcp(
                 candidate, force_remote_discovery=False
             )
         except Exception:
+            restrictive = frozenset(suspended)
             self._record_convergence_error(context, affected | restrictive)
+            if restrictive:
+                await self._restore_after_restrictive_failure(
+                    context, previous, affected_names=restrictive
+                )
             raise
         self._clear_convergence_errors(context, affected)
         return self._runtime(context, self._project(context, state))
-
-    async def fail_config_reload(
-        self, root: SessionBackend, plan: _CatalogReloadPlan | None
-    ) -> None:
-        if plan is None or not plan.restrictive_names:
-            return
-        if not isinstance(root, SessionMCPCatalogBinding) or not isinstance(
-            root, SessionMCPControl
-        ):
-            return
-        context = _CatalogContext.for_session(root)
-        await self._restore_after_restrictive_failure(
-            context, plan.previous, affected_names=plan.restrictive_names
-        )
 
     async def dispatch(
         self,
@@ -617,11 +595,17 @@ class MCPCatalogService:
         context: _CatalogContext,
         previous: ResolvedMCPCatalog,
         candidate: ResolvedMCPCatalog,
+        *,
+        suspended: set[str] | None = None,
     ) -> frozenset[str]:
+        """Suspend what ``candidate`` removes or narrows; ``suspended`` collects
+        the names as they go, so a caller can restore them if one fails.
+        """
+        if suspended is None:
+            suspended = set()
         if context.control is None:
             return frozenset()
         next_by_name = {server.name: server for server in candidate.servers}
-        suspended: set[str] = set()
         for old in previous.servers:
             new = next_by_name.get(old.name)
             if (
@@ -913,12 +897,6 @@ class _CatalogContext:
         ):
             return None
         return self.plugin_mcp.entry(name)
-
-
-@dataclass(frozen=True, slots=True)
-class _CatalogReloadPlan:
-    previous: ResolvedMCPCatalog
-    restrictive_names: frozenset[str]
 
 
 def _project_source(

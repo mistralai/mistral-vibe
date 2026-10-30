@@ -59,7 +59,7 @@ pub(super) enum Row {
     /// (one four-row card per option).
     OptionCards {
         selected: usize,
-        opts: &'static [options::Opt],
+        opts: std::borrow::Cow<'static, [options::Opt]>,
     },
     /// The three boxed browser sign-in step cards, stacked without gaps.
     Steps {

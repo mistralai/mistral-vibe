@@ -18,9 +18,9 @@ use crate::core::{
     CompletionCandidate, CompletionFinishReason, CompletionPurpose, ContentBlock, ExternalTool,
     ExternalToolCall, HarnessConfig, HarnessState, HookPoint, Message, Notification,
     NotificationLevel, NotificationSource, PendingLifecycleHook, ProcessTerminalStatus,
-    ProtocolError, QueuedTurn, SkillDefinition, StoredMessage, StructuredContent, TokenUsage,
-    ToolArguments, ToolBatch, ToolCall, ToolExecution, ToolExecutionState, ToolOrigin, ToolResult,
-    TurnOutcome, TurnState,
+    ProtocolError, SkillDefinition, StoredMessage, StructuredContent, TokenUsage, ToolArguments,
+    ToolBatch, ToolCall, ToolExecution, ToolExecutionState, ToolOrigin, ToolResult, TurnOutcome,
+    TurnState,
 };
 
 pub(super) fn fixture_cases() -> Vec<FixtureCase> {
@@ -244,7 +244,6 @@ fn awaiting_state(compaction: Option<CompactionFixturePhase>) -> HarnessState {
         pending_steer: Vec::new(),
         model_input_ready: false,
         output_limit_retries: 0,
-        queued: QueuedTurn::Empty,
     });
     // An earlier reply measured the estimate as short by a quarter.
     state.estimate_correction =
@@ -284,7 +283,6 @@ fn pre_agent_hook_state() -> HarnessState {
         pending_steer: Vec::new(),
         model_input_ready: false,
         output_limit_retries: 0,
-        queued: QueuedTurn::Empty,
     });
     state
 }
@@ -321,7 +319,6 @@ fn completion_hook_state(point: HookPoint) -> HarnessState {
         pending_steer: Vec::new(),
         model_input_ready: false,
         output_limit_retries: 0,
-        queued: QueuedTurn::Empty,
     });
     state
 }
@@ -371,12 +368,6 @@ fn tool_batch_state() -> HarnessState {
         ))],
         model_input_ready: false,
         output_limit_retries: 0,
-        queued: QueuedTurn::Pending {
-            turn_id: "turn-queued".to_string(),
-            messages: vec![StoredMessage::visible(Message::user_text(
-                "queued follow-up",
-            ))],
-        },
     });
     state
 }
@@ -410,7 +401,6 @@ fn skill_read_state() -> HarnessState {
         pending_steer: Vec::new(),
         model_input_ready: false,
         output_limit_retries: 0,
-        queued: QueuedTurn::Empty,
     });
     state
 }

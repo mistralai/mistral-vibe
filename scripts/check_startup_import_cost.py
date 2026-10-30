@@ -6,6 +6,10 @@ Generic, config-driven engine. Targets are declared in a TOML file
 may carry an optional ``budget``. Commands without a budget are measured and
 reported but never fail the run, so a config can ship budget-free and be filled
 in from a baseline run.
+
+By default the wheel is built and installed into a fresh venv for measurement.
+``--python <path>`` instead measures an existing venv interpreter, skipping the
+build, install and wheel-size report.
 """
 
 from __future__ import annotations
@@ -133,6 +137,26 @@ def _venv_python(root: Path) -> Path:
     _run(["uv", "venv", "--python", sys.executable, str(root)])
     bin_dir = "Scripts" if sys.platform == "win32" else "bin"
     return root / bin_dir / "python"
+
+
+def _existing_venv_python(path: Path) -> Path:
+    """Absolutize a venv interpreter passed via ``--python``.
+
+    The path is made absolute before any use: measurements run with
+    ``cwd=python.parent.parent`` (the venv root), so a relative interpreter path
+    would break. The path is deliberately not resolved: a venv interpreter is a
+    symlink to the base interpreter, and resolving it would both fail the
+    ``pyvenv.cfg`` check below and make the subprocess run the base interpreter
+    without the venv. A venv interpreter sits at ``<root>/bin/python`` with
+    ``pyvenv.cfg`` at ``<root>/pyvenv.cfg``.
+    """
+    python = Path(os.path.abspath(path))
+    venv_root = python.parent.parent
+    if not (venv_root / "pyvenv.cfg").is_file():
+        raise SystemExit(
+            f"not a venv interpreter (no pyvenv.cfg at {venv_root}): {path}"
+        )
+    return python
 
 
 def _install(python: Path, wheel: Path, project: Path) -> None:
@@ -285,7 +309,27 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="measure this prebuilt wheel instead of building one",
     )
+    parser.add_argument(
+        "--python",
+        type=Path,
+        default=None,
+        help="measure this existing venv interpreter instead of building and "
+        "installing a wheel into a fresh venv",
+    )
     return parser.parse_args()
+
+
+def _measure_all(config: Config, python: Path) -> list[str]:
+    failures: list[str] = []
+    for command in config.commands:
+        module_count = _report_command(command, python, config.slowest_count)
+        if command.budget is not None and module_count > command.budget:
+            failures.append(
+                f"{command.label}: {module_count} modules exceeds budget {command.budget}"
+            )
+    if config.strace_code is not None:
+        _measure_strace(python, config.strace_code)
+    return failures
 
 
 def main() -> None:
@@ -304,30 +348,26 @@ def main() -> None:
     config = _load_config(config_path)
 
     version = _version(project)
-    failures: list[str] = []
 
-    with tempfile.TemporaryDirectory(prefix="vibe-startup-import-cost.") as tmp:
-        tmp_path = Path(tmp)
-        dist_dir = tmp_path / "dist"
-        dist_dir.mkdir()
-
-        wheel = _wheel_to_measure(project, args.wheel, dist_dir)
-        python = _venv_python(tmp_path / "env")
-        _install(python, wheel, project)
-
+    if args.python is not None:
+        python = _existing_venv_python(args.python)
         print(f"=== startup import cost ({dist_name} {version}) ===\n")
-        for command in config.commands:
-            module_count = _report_command(command, python, config.slowest_count)
-            if command.budget is not None and module_count > command.budget:
-                failures.append(
-                    f"{command.label}: {module_count} modules exceeds budget {command.budget}"
-                )
+        failures = _measure_all(config, python)
+    else:
+        with tempfile.TemporaryDirectory(prefix="vibe-startup-import-cost.") as tmp:
+            tmp_path = Path(tmp)
+            dist_dir = tmp_path / "dist"
+            dist_dir.mkdir()
 
-        if config.strace_code is not None:
-            _measure_strace(python, config.strace_code)
+            wheel = _wheel_to_measure(project, args.wheel, dist_dir)
+            python = _venv_python(tmp_path / "env")
+            _install(python, wheel, project)
 
-        size = wheel.stat().st_size
-        print(f"installed wheel size: {size} bytes ({size / 1024:.1f} KiB)")
+            print(f"=== startup import cost ({dist_name} {version}) ===\n")
+            failures = _measure_all(config, python)
+
+            size = wheel.stat().st_size
+            print(f"installed wheel size: {size} bytes ({size / 1024:.1f} KiB)")
 
     if failures:
         raise SystemExit(

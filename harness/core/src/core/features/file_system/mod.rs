@@ -4,9 +4,9 @@
 )]
 
 mod bash_timeout;
+mod settings;
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::tools::command_environment::CommandEnvironment;
@@ -17,7 +17,14 @@ use crate::core::tools::schema::ToolSchema;
 pub(crate) use bash_timeout::restored_bash_call;
 pub(crate) use bash_timeout::{BashTimeout, BashTimeoutSettings, bash_runtime_arguments};
 
+pub(crate) use settings::{Mode, ReadFileDocuments, ReadFileImages, ReadFileSupport};
+
 pub(crate) const NAMESPACE: &str = "file_system";
+const READ_FILE_DESCRIPTION: &str = "Read a text file with optional zero-indexed line offset and limit. When `was_truncated` is true, read on from `next_offset`. An offset past the end of the file is an error. A directory reads as a listing of its entries, one per line with `/` after each subdirectory, at most 500 at a time.";
+const READ_FILE_EXTRACTED_DOCUMENTS: &str =
+    "PDF, Word, PowerPoint, and email files return their extracted text.";
+const READ_FILE_IMAGE_TEXT: &str = "An image file returns only the text found in the image.";
+const READ_FILE_NATIVE_IMAGE: &str = "An image file returns the image itself.";
 const EDIT_DESCRIPTION: &str = r#"Exact string replacement in a file.
 
 Read the current file first. `old_string` must match exactly, including whitespace, indentation, and line endings. With `replace_all=false` (the default), `old_string` must occur exactly once; set `replace_all=true` only to replace every occurrence. If an edit fails, re-read the file before retrying.
@@ -25,20 +32,29 @@ Read the current file first. `old_string` must match exactly, including whitespa
 Example:
 {"file_path":"src/config.ts","old_string":"const mode = \"old\";","new_string":"const mode = \"new\";","replace_all":false}"#;
 
-/// Whether the Session exposes the file system tools. Omission keeps them
-/// enabled, so settings recorded before this field existed keep their tools.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum Mode {
-    #[default]
-    Enabled,
-    Disabled,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Exposure {
+    Direct,
+    Programmatic,
 }
 
-impl Mode {
-    pub(crate) fn is_enabled(&self) -> bool {
-        matches!(self, Self::Enabled)
-    }
+fn read_file_description(support: ReadFileSupport, exposure: Exposure) -> String {
+    let documents = match support.documents {
+        ReadFileDocuments::Unsupported => None,
+        ReadFileDocuments::ExtractedText => Some(READ_FILE_EXTRACTED_DOCUMENTS),
+    };
+    let images = match (support.images, exposure) {
+        (ReadFileImages::Unsupported, _) => None,
+        (ReadFileImages::ExtractedText, _) => Some(READ_FILE_IMAGE_TEXT),
+        (ReadFileImages::Native, Exposure::Direct) => Some(READ_FILE_NATIVE_IMAGE),
+        // A program cannot look at an image, and the model may never see it.
+        (ReadFileImages::Native, Exposure::Programmatic) => None,
+    };
+    [Some(READ_FILE_DESCRIPTION), documents, images]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) fn search_description(environment: CommandEnvironment) -> String {
@@ -188,9 +204,7 @@ impl ToolName {
     ) -> Option<ToolSpec> {
         let direct_name = self.direct_name(environment)?;
         let description = match self {
-            Self::ReadFile => {
-                "Read a text file with optional zero-indexed line offset and limit. When `was_truncated` is true, read on from `next_offset`. An offset past the end of the file is an error. A directory reads as a listing of its entries, one per line with `/` after each subdirectory, at most 500 at a time."
-            }
+            Self::ReadFile => READ_FILE_DESCRIPTION,
             Self::WriteFile => "Create or overwrite a UTF-8 file.",
             Self::Edit => EDIT_DESCRIPTION,
             Self::Bash => environment.profile()?.bash_description(background),
@@ -206,7 +220,7 @@ impl ToolName {
         Some(ToolSpec {
             name: self,
             direct_name,
-            description,
+            description: description.to_string(),
             input_schema,
             output_schema,
         })
@@ -216,7 +230,7 @@ impl ToolName {
 pub(crate) struct ToolSpec {
     pub(crate) name: ToolName,
     pub(crate) direct_name: &'static str,
-    pub(crate) description: &'static str,
+    pub(crate) description: String,
     pub(crate) input_schema: Value,
     pub(crate) output_schema: Value,
 }
@@ -238,6 +252,27 @@ pub(crate) fn tools(
     ToolName::ALL
         .into_iter()
         .filter_map(|name| name.spec(environment, timeout, background))
+        .collect()
+}
+
+/// The file system tools as `exposure` shows them: `read_file` also says what
+/// the Runtime declared it returns.
+pub(crate) fn exposed_tools(
+    environment: CommandEnvironment,
+    timeout: BashTimeout,
+    background: bool,
+    read_file: ReadFileSupport,
+    exposure: Exposure,
+) -> Vec<ToolSpec> {
+    tools(environment, timeout, background)
+        .into_iter()
+        .map(|spec| match spec.name {
+            ToolName::ReadFile => ToolSpec {
+                description: read_file_description(read_file, exposure),
+                ..spec
+            },
+            _ => spec,
+        })
         .collect()
 }
 

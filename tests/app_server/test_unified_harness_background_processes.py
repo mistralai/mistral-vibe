@@ -11,6 +11,8 @@ from typing import Any, Literal, cast
 
 import pytest
 
+from vibe.app_server._process_services import ProcessServices
+
 pytest.importorskip("mistralai_vibe_local_harness.session_protocol")
 vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
 pytest.importorskip("mistralai_vibe_local_harness.vibe._processes._output")
@@ -161,6 +163,7 @@ async def test_vibe_enables_background_processes_for_every_host_shell_profile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     profile: Literal["unix", "git_bash", "powershell"],
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A Vibe Unified Harness derivation for one supported host-shell profile.
     *Do*: Resolve the Core and local Runtime configuration.
@@ -171,7 +174,7 @@ async def test_vibe_enables_background_processes_for_every_host_shell_profile(
     monkeypatch.setattr(
         "vibe.app_server._runtime._command_environment_mode", lambda: profile
     )
-    process = HarnessProcess(HarnessFilesManager(sources=()))
+    process = HarnessProcess(HarnessFilesManager(sources=()), services=process_services)
 
     # Do
     context = await process.build_unified_session_context(
@@ -198,7 +201,10 @@ async def test_vibe_enables_background_processes_for_every_host_shell_profile(
 
 @pytest.mark.asyncio
 async def test_vibe_background_process_survives_adapter_replacement_and_is_session_scoped(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell_profile: _ShellProfile
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shell_profile: _ShellProfile,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A process-enabled Vibe Harness and scripted turns for two Sessions.
     *Do*: Start a process, replace its adapter, isolate another Session, then use all tools.
@@ -209,7 +215,9 @@ async def test_vibe_background_process_survives_adapter_replacement_and_is_sessi
     monkeypatch.setattr(
         "mistralai_vibe_local_harness.vibe._local_actions.execute_completion", scripted
     )
-    host, storage_root = await _process_host(tmp_path, auto_approve=True)
+    host, storage_root = await _process_host(
+        tmp_path, auto_approve=True, process_services=process_services
+    )
     first = await host.start(_start_params(tmp_path, auto_approve=True))
     first_backend = first.backend
 
@@ -245,10 +253,19 @@ async function main() {{
         f"""
 async function main() {{
   const before = await tools.process.list({{}});
-  const [output, written] = await Promise.all([
-    tools.process.output({{processId: {json.dumps(process_id)}, waitMs: 3000}}),
-    {_interactive_process_writes(shell_profile, process_id)}
-  ]);
+  // Input written before the shell is reading can be lost (pwsh on Windows
+  // starts slowly), so write only once the command has printed "ready".
+  let output = await tools.process.output({{
+    processId: {json.dumps(process_id)}, waitMs: 3000
+  }});
+  let seen = output.output;
+  for (let i = 0; i < 20 && !seen.includes("ready") && output.status === "running"; i++) {{
+    output = await tools.process.output({{
+      processId: {json.dumps(process_id)}, cursor: output.nextCursor, waitMs: 3000
+    }});
+    seen += output.output;
+  }}
+  const written = await {_interactive_process_writes(shell_profile, process_id)};
   const after = await tools.process.output({{
     processId: {json.dumps(process_id)}, cursor: output.nextCursor, waitMs: 3000
   }});
@@ -320,7 +337,10 @@ async function main() {{
 
 @pytest.mark.asyncio
 async def test_vibe_background_process_approval_denial_never_starts_a_process(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell_profile: _ShellProfile
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shell_profile: _ShellProfile,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A Vibe Harness whose shell policy requires approval.
     *Do*: Deny the callback raised by process.start.
@@ -331,7 +351,9 @@ async def test_vibe_background_process_approval_denial_never_starts_a_process(
     monkeypatch.setattr(
         "mistralai_vibe_local_harness.vibe._local_actions.execute_completion", scripted
     )
-    host, storage_root = await _process_host(tmp_path, auto_approve=False)
+    host, storage_root = await _process_host(
+        tmp_path, auto_approve=False, process_services=process_services
+    )
     backend = (await host.start(_start_params(tmp_path, auto_approve=False))).backend
     subscription = await backend.subscribe(
         SessionReadParams(session_id=backend.session_id, history=PageRequest(limit=100))
@@ -366,7 +388,10 @@ async def test_vibe_background_process_approval_denial_never_starts_a_process(
 
 @pytest.mark.asyncio
 async def test_vibe_host_shutdown_stops_a_running_background_process(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell_profile: _ShellProfile
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shell_profile: _ShellProfile,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A Vibe Unified Session with a running background process.
     *Do*: Shut down the Vibe Session Host without explicitly stopping the process.
@@ -377,7 +402,9 @@ async def test_vibe_host_shutdown_stops_a_running_background_process(
     monkeypatch.setattr(
         "mistralai_vibe_local_harness.vibe._local_actions.execute_completion", scripted
     )
-    host, storage_root = await _process_host(tmp_path, auto_approve=True)
+    host, storage_root = await _process_host(
+        tmp_path, auto_approve=True, process_services=process_services
+    )
     backend = (await host.start(_start_params(tmp_path, auto_approve=True))).backend
     await _run_turn(
         backend,
@@ -406,9 +433,9 @@ async def test_vibe_host_shutdown_stops_a_running_background_process(
 
 
 async def _process_host(
-    tmp_path: Path, *, auto_approve: bool
+    tmp_path: Path, *, auto_approve: bool, process_services: ProcessServices
 ) -> tuple[SessionBackendHost, Path]:
-    process = HarnessProcess(HarnessFilesManager(sources=()))
+    process = HarnessProcess(HarnessFilesManager(sources=()), services=process_services)
     options = SessionOptions(cwd=str(tmp_path), auto_approve=auto_approve)
     context = await process.build_unified_session_context(options)
     storage_root = tmp_path / "sessions"

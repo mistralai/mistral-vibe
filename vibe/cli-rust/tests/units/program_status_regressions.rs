@@ -1,11 +1,12 @@
 //! Status survives session transitions and either shell event order.
 
-use serde_json::{json, Value};
-use std::sync::Arc;
+use serde_json::json;
 use std::time::Instant;
 use vibe_rs::app::{App, Status};
 use vibe_rs::program_status::{self, encode_report, BlockedKind, ProgramState};
-use vibe_rs::server::{notification, Client, Notification};
+use vibe_rs::server::notification;
+
+use crate::support::notify;
 
 fn app() -> App {
     let mut app = App::default();
@@ -14,17 +15,6 @@ fn app() -> App {
     app.set_session_id("session".into());
     app.set_status(Status::Ready);
     app
-}
-
-fn notify(app: &mut App, method: &str, params: Value) {
-    assert!(vibe_rs::event_handler::apply_notification(
-        app,
-        &Arc::new(Client::stub()),
-        &Notification {
-            method: method.into(),
-            params
-        },
-    ));
 }
 
 fn report(app: &mut App, state: ProgramState, message: &str) {
@@ -72,7 +62,10 @@ fn status_transitions_preserve_open_dialogs_and_their_messages() {
         let mut app = app();
         if permission {
             let mut callback = vibe_rs::server::ApprovalCallback {
-                callback_id: "a".into(),
+                address: vibe_rs::server::CallbackAddress {
+                    callback_id: "a".into(),
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             callback.detail.effect.display.status_text = "Approve?".into();
@@ -121,7 +114,12 @@ fn status_transitions_preserve_open_dialogs_and_their_messages() {
         } else {
             vibe_rs::question_app::dismiss(
                 &mut app,
-                &vibe_rs::question_app::QuestionSource::Callback("q".into()),
+                &vibe_rs::question_app::QuestionSource::Callback(
+                    vibe_rs::server::CallbackAddress {
+                        callback_id: "q".into(),
+                        ..Default::default()
+                    },
+                ),
             );
         }
         report(&mut app, ProgramState::Error, "");
@@ -260,7 +258,10 @@ fn crash_error_survives_dialog_dismissal_and_pending_work() {
         );
         app.approval
             .enqueue(vibe_rs::server::ApprovalCallback {
-                callback_id: "a".into(),
+                address: vibe_rs::server::CallbackAddress {
+                    callback_id: "a".into(),
+                    ..Default::default()
+                },
                 ..Default::default()
             })
             .unwrap();
@@ -283,7 +284,10 @@ fn crash_error_survives_dialog_dismissal_and_pending_work() {
         assert!(vibe_rs::terminal_notifier::take_program_report(&mut app).is_none());
         vibe_rs::question_app::dismiss(
             &mut app,
-            &vibe_rs::question_app::QuestionSource::Callback("q".into()),
+            &vibe_rs::question_app::QuestionSource::Callback(vibe_rs::server::CallbackAddress {
+                callback_id: "q".into(),
+                ..Default::default()
+            }),
         );
         assert!(vibe_rs::terminal_notifier::take_program_report(&mut app).is_none());
         assert!(!app.terminal_notifier.take_bell());

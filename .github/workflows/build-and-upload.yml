@@ -79,6 +79,12 @@ jobs:
         shell: bash
         run: bash ./scripts/ci/setup-linux-pyinstaller-build.sh
 
+      # vibe-acp bundles vibe-rs for `vibe-acp --setup`.
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
       - name: Inject Sentry DSN
         shell: bash
         env:

@@ -14,6 +14,7 @@ import pytest
 
 from vibe.app_server import stdio
 from vibe.app_server._agent_socket import AgentSocketMount
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._runtime import HarnessProcess, HarnessServer
 from vibe.app_server.transport import (
     InvalidJsonRpcMessage,
@@ -69,7 +70,7 @@ def _stub_stdio_main(monkeypatch: pytest.MonkeyPatch) -> _RecordingCleanup:
     monkeypatch.setattr(
         stdio,
         "parse_arguments",
-        lambda: argparse.Namespace(
+        lambda _argv: argparse.Namespace(
             experimental_harness=False,
             legacy_harness=False,
             multiplex=False,
@@ -143,7 +144,7 @@ def test_stdio_main_neutralizes_stdout_after_serving(
     monkeypatch.setattr(
         stdio,
         "parse_arguments",
-        lambda: argparse.Namespace(
+        lambda _argv: argparse.Namespace(
             multiplex=False, additional_builtin_plugin_roots=[], agent_socket=None
         ),
     )
@@ -211,7 +212,10 @@ async def test_stdio_server_with_an_agent_socket_mounts_it_in_its_process(
 
     await stdio.serve_stdio(reader=BytesIO(), writer=BytesIO(), agent_socket=mount)
 
-    assert built == [{"additional_builtin_plugin_roots": (), "agent_socket": mount}]
+    ((kwargs),) = built
+    assert kwargs["agent_socket"] is mount
+    assert kwargs["additional_builtin_plugin_roots"] == ()
+    assert isinstance(kwargs["services"], ProcessServices)
     harness.serve.assert_awaited_once_with()
 
 

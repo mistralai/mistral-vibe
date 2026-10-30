@@ -4,6 +4,6 @@ from __future__ import annotations
 
 from e2e.app_server.scenario import Timeline
 
-client_args = ("--workdir", "vibe/cli-rust")
-screen_contains = ("Cargo.toml",)
-timeline: Timeline = ["@Cargo"]
+client_args = ("--workdir", "sub")
+screen_contains = ("notes.md",)
+timeline: Timeline = ["@notes"]

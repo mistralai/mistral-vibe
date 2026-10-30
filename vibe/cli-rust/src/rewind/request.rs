@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::Event;
@@ -19,15 +20,13 @@ pub(super) fn select(
     let Some((entry_index, entry_id, preview)) = messages.get(index).cloned() else {
         return;
     };
-    let (Some(session_id), Some(tx)) = (app.session.session_id.clone(), app.rewind.tx.clone())
-    else {
+    let Some(session_id) = app.session.session_id.clone() else {
         return;
     };
     let client = client.clone();
-    let pending = app.commit_started();
-    tokio::spawn(async move {
+    crate::ui_event::spawn(app, async move {
         let params = serde_json::json!({"sessionId": session_id, "entryId": entry_id});
-        let event = match client
+        match client
             .request_err(method::SESSION_REWIND_READ, params)
             .await
         {
@@ -35,70 +34,62 @@ pub(super) fn select(
                 entry_index,
                 entry_id,
                 preview,
-                has_file_changes: result
-                    .get("hasFileChanges")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                has_file_changes: result["hasFileChanges"] == true,
             },
             Err(error) => Event::Failed(error.message),
-        };
-        crate::input::deliver(Some(tx), event, &pending).await;
+        }
     });
 }
 
 /// Send the rewind itself.
 pub(super) fn confirm(app: &mut App, client: &Arc<Client>, inplace: bool) {
-    let (Some(session_id), Some(entry_id), Some(tx)) = (
-        app.session.session_id.clone(),
-        app.rewind.entry_id.clone(),
-        app.rewind.tx.clone(),
-    ) else {
+    let (Some(session_id), Some(entry_id)) =
+        (app.session.session_id.clone(), app.rewind.entry_id.clone())
+    else {
         return;
     };
     let restore_files = app.rewind.restore_files;
     let client = client.clone();
-    let pending = app.commit_started();
-    tokio::spawn(async move {
+    crate::ui_event::spawn(app, async move {
         let params = serde_json::json!({
             "sessionId": session_id.clone(),
             "entryId": entry_id,
             "restoreFiles": restore_files,
             "inplace": inplace,
         });
-        let event = match client.request_err(method::SESSION_REWIND, params).await {
+        match client.request_err(method::SESSION_REWIND, params).await {
             Ok(result) => done(result, session_id, inplace),
             Err(error) => Event::Failed(error.message),
-        };
-        crate::input::deliver(Some(tx), event, &pending).await;
+        }
     });
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RewindResponse {
+    #[serde(default)]
+    message: String,
+    #[serde(default, deserialize_with = "crate::utils::json::lenient")]
+    restore_errors: Vec<String>,
+    state: Option<Box<PublicSessionState>>,
 }
 
 /// Read a `session/rewind` response into the event that applies it.
 fn done(result: Value, old_session_id: String, inplace: bool) -> Event {
-    let Some(state) = result
-        .get("state")
-        .cloned()
-        .and_then(|state| serde_json::from_value::<PublicSessionState>(state).ok())
+    let Ok(RewindResponse {
+        message,
+        restore_errors,
+        state: Some(state),
+    }) = serde_json::from_value(result)
     else {
         return Event::Failed("Rewind returned no session state.".into());
     };
     Event::Done {
-        message: result
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        restore_errors: result
-            .get("restoreErrors")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect(),
+        message,
+        restore_errors,
         old_session_id,
         inplace,
-        state: Box::new(state),
+        state,
     }
 }
 

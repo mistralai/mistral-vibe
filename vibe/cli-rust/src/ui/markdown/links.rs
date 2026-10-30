@@ -135,6 +135,14 @@ impl LinkedLines {
         self.folds.extend(other.folds);
     }
 
+    /// Restyle every span in place; the text, and so the link runs, stay put.
+    pub fn restyle(&mut self, restyle: impl FnMut(&mut Span<'static>)) {
+        self.lines
+            .iter_mut()
+            .flat_map(|line| &mut line.spans)
+            .for_each(restyle);
+    }
+
     /// Insert `span(index)` at the start of each line, shifting its runs by the span's width.
     pub fn prefix(&mut self, span: impl Fn(usize) -> Span<'static>) {
         let rows = self
@@ -151,6 +159,22 @@ impl LinkedLines {
                 fold.hang = fold.hang.saturating_add(width as u16);
             }
         }
+    }
+
+    /// The lines, to restyle or extend at their right edge; link runs keep their columns.
+    pub fn lines_mut(&mut self) -> &mut [Line<'static>] {
+        &mut self.lines
+    }
+
+    /// Insert an unlinked `line` at `at`, shifting the runs, folds and gaps below it.
+    pub fn insert(&mut self, at: usize, line: Line<'static>) {
+        self.lines.insert(at, line);
+        self.runs.insert(at, Vec::new());
+        self.folds.insert(at, None);
+        self.gaps
+            .iter_mut()
+            .filter(|gap| **gap >= at)
+            .for_each(|gap| *gap += 1);
     }
 
     /// Keep only the lines `keep(index, line)` accepts, with their runs.

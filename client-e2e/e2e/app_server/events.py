@@ -1072,12 +1072,16 @@ def web_fetch_without_output(url: str) -> AppServerEvent:
 
 
 def _callback_entry(
-    questions: list[dict[str, Any]], footer_note: str | None, callback_id: str
+    questions: list[dict[str, Any]],
+    footer_note: str | None,
+    callback_id: str,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     return _entry(
         "callback",
         entry_id=callback_id,
         generation_status="in_progress",
+        session_id=session_id,
         callbackId=callback_id,
         title="User input required",
         detail={
@@ -1094,9 +1098,10 @@ def ask_user_question_added(
     *,
     footer_note: str | None = None,
     callback_id: str = "callback-ask_user_question",
+    session_id: str | None = None,
 ) -> AppServerEvent:
     """Build the callback history entry the projector broadcasts alongside the call."""
-    return _added(_callback_entry(questions, footer_note, callback_id))
+    return _added(_callback_entry(questions, footer_note, callback_id, session_id))
 
 
 def ask_user_question_answered(
@@ -1128,9 +1133,10 @@ def ask_user_question(
     footer_note: str | None = None,
     callback_id: str = "callback-ask_user_question",
     request_id: int = 9001,
+    session_id: str | None = None,
 ) -> AppServerEvent:
     """Build the server-to-client `callback/call` an `ask_user_question` tool opens."""
-    entry = _callback_entry(questions, footer_note, callback_id)
+    entry = _callback_entry(questions, footer_note, callback_id, session_id)
     event = _event("callback/call", {"callback": entry})
     event["id"] = request_id
     return event

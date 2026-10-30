@@ -34,6 +34,7 @@ from vibe.setup.auth.whoami import (
     fetch_whoami,
     store_cached_whoami,
 )
+from vibe.utils.oidc_marker import is_oidc_marker
 
 # Re-exports for existing callers (server.py, _resources.py, tests) that used to
 # import these names from ``vibe.app_server._account``. Keeping the alias avoids
@@ -84,25 +85,29 @@ async def reconcile_tenant_domains(
     Covers two cases:
     - Onboarding whoami failed → next startup fetches it and self-heals.
     - Tenant admin changes URLs → next runtime whoami picks up the drift.
+
+    A provider with ``preserve_api_base = true`` opts out of the ``api_base``
+    heal: its configured base is kept verbatim (split-horizon deployments
+    where the CLI reaches the API through a proxy). The ``vibe_base`` heal is
+    unaffected.
     """
     if whoami.api_base is None and whoami.vibe_base is None:
         return
     current = orchestrator.config
 
-    if whoami.api_base:
+    provider = next(
+        (
+            candidate
+            for candidate in current.providers
+            if candidate.name == provider_name and candidate.backend is Backend.MISTRAL
+        ),
+        None,
+    )
+    if whoami.api_base and provider is not None and not provider.preserve_api_base:
         sanitized_api = _sanitize_tenant_url(whoami.api_base, field="api_base")
         if sanitized_api is not None:
             desired_api_base = f"{sanitized_api}/v1"
-            provider = next(
-                (
-                    candidate
-                    for candidate in current.providers
-                    if candidate.name == provider_name
-                    and candidate.backend is Backend.MISTRAL
-                ),
-                None,
-            )
-            if provider is not None and provider.api_base != desired_api_base:
+            if provider.api_base != desired_api_base:
                 await apply_provider_to_config(
                     orchestrator,
                     provider.model_copy(update={"api_base": desired_api_base}),
@@ -122,6 +127,7 @@ class _Plan:
     kind: AccountPlanKind
     name: str
     prompt_switching_to_pro_plan: bool
+    has_paid_vibe_entitlement: bool
 
     @classmethod
     def from_result(cls, result: WhoAmIResult) -> _Plan:
@@ -129,6 +135,7 @@ class _Plan:
             kind=result.plan_type,
             name=result.plan_name.strip(),
             prompt_switching_to_pro_plan=result.prompt_switching_to_pro_plan,
+            has_paid_vibe_entitlement=result.has_paid_vibe_entitlement,
         )
 
     @property
@@ -164,6 +171,8 @@ class _Plan:
 
     @property
     def offers_upgrade(self) -> bool:
+        if self.has_paid_vibe_entitlement:
+            return False
         return (
             self.kind is AccountPlanKind.API
             or (self.kind is AccountPlanKind.CHAT and self.normalized_name == "FREE")
@@ -307,12 +316,29 @@ class AccountController:
 
         plan = _Plan.from_result(result)
         plan_view = AccountPlanView(kind=plan.kind, name=plan.name, title=plan.title)
-        api_key_view = AccountApiKeyView(
-            preview=_key_preview(api_key),
-            scope=_KEY_SCOPES[plan.kind],
-            access_scope=result.primitive_access_scope,
+        api_key_view = (
+            None
+            if is_oidc_marker(api_key)
+            else AccountApiKeyView(
+                preview=_key_preview(api_key),
+                scope=_KEY_SCOPES[plan.kind],
+                access_scope=(
+                    "personal_and_shared"
+                    if result.can_access_private_resources
+                    else "shared_only"
+                )
+                if result.can_access_private_resources is not None
+                else None,
+            )
         )
-        tenant_update = _TenantDomainUpdate(provider_name=provider.name, whoami=result)
+        # The CLI OIDC registration, not account-context, decides which hosts
+        # the ID token may reach: a dedicated api_base or vibe_base written to
+        # config.toml would fail every request until the user edits it out.
+        tenant_update = (
+            None
+            if is_oidc_marker(api_key)
+            else _TenantDomainUpdate(provider_name=provider.name, whoami=result)
+        )
 
         if not self._agent_loop.config.is_active_model_mistral():
             return tenant_update, AccountView(

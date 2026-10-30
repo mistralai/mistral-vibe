@@ -13,8 +13,6 @@ use crate::utils::text;
 pub(super) const BORDER_WIDTH: u16 = 2;
 /// Columns the result container keeps free on the right.
 const RESULT_MARGIN: u16 = 2;
-/// Pad cells a message, notice, or interrupt border keeps before its glyph.
-const INSET_WIDTH: u16 = 2;
 
 /// Cells a tool-bordered row may paint: the entry width less border and margin.
 pub(super) fn body_width(width: u16) -> u16 {
@@ -23,19 +21,14 @@ pub(super) fn body_width(width: u16) -> u16 {
         .saturating_sub(RESULT_MARGIN)
 }
 
-/// Cells an inset-bordered row may paint.
-pub(super) fn inset_body_width(width: u16) -> u16 {
-    body_width(width).saturating_sub(INSET_WIDTH)
-}
-
 /// The tool border opening one row; `⎣` closes the run, as `ExpandingBorder` does.
 pub(super) fn prefix(last: bool, style: Style) -> Span<'static> {
     Span::styled(if last { "⎣ " } else { "⎢ " }, style)
 }
 
-/// The border of a message, notice, or interrupt, two cells in.
-pub(super) fn inset_prefix(last: bool, style: Style) -> Span<'static> {
-    Span::styled(if last { "  ⎣ " } else { "  ⎢ " }, style)
+/// The closing border of a notice or interrupt, two cells in.
+pub(super) fn inset_prefix(style: Style) -> Span<'static> {
+    Span::styled("  ⎣ ", style)
 }
 
 pub(super) fn push_group_header(

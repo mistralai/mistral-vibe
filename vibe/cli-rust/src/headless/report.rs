@@ -13,7 +13,7 @@ use crate::headless_run::StopRequests;
 use crate::run_export::{
     RunError, RunOutcome, RunReport, RunResult, RunUsage, RunWarning, TurnStop,
 };
-use crate::server::{method, RuntimeReadParams};
+use crate::server::{method, ConfigIssue, RuntimeReadParams, RuntimeSnapshot};
 
 /// Build the final report, within the one grace period: read runtime stats,
 /// then stop the session — session/stop closes the session server-side,
@@ -63,38 +63,21 @@ pub(super) async fn build_report(
         .and_then(|r| r.ok());
 
         if let Some(rt) = runtime {
-            let stats = rt.pointer("/runtime/stats").cloned().unwrap_or(Value::Null);
-            let steps_stats = stats.clone();
-            let stats = usage_baseline.run_stats(&stats);
+            let snapshot = RuntimeSnapshot::read(&rt).unwrap_or_default();
+            let stats = usage_baseline.run_stats(&snapshot.stats);
             let run_usage = RunUsage {
-                input_tokens: stats
-                    .get("sessionPromptTokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                output_tokens: stats
-                    .get("sessionCompletionTokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                cached_input_tokens: stats
-                    .get("sessionCachedTokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                total_tokens: stats
-                    .get("sessionPromptTokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0)
-                    + stats
-                        .get("sessionCompletionTokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
+                input_tokens: stats.session_prompt_tokens,
+                output_tokens: stats.session_completion_tokens,
+                cached_input_tokens: stats.session_cached_tokens,
+                total_tokens: stats.total_tokens(),
             };
-            let cost = compute_session_cost(&stats);
+            let cost = stats.cost();
             session_dir = rt
                 .pointer("/sessionLog/path")
                 .and_then(Value::as_str)
                 .map(PathBuf::from);
-            steps = steps_stats.get("modelCalls").and_then(Value::as_u64);
-            warnings = runtime_warnings(rt.pointer("/runtime/issues"));
+            steps = stats.model_calls;
+            warnings = runtime_warnings(snapshot.issues);
             rt_config = rt.get("config").cloned();
             usage = Some(run_usage.clone());
             cost_usd = Some(cost);
@@ -171,54 +154,14 @@ pub fn final_outcome(
 
 /// Map the runtime snapshot's config issues to export warnings. Empty issues
 /// mean no warnings, so the field is left out of the export.
-fn runtime_warnings(issues: Option<&Value>) -> Option<Vec<RunWarning>> {
-    let issues = issues?.as_array()?;
+fn runtime_warnings(issues: Vec<ConfigIssue>) -> Option<Vec<RunWarning>> {
     let warnings: Vec<RunWarning> = issues
-        .iter()
-        .filter_map(|issue| {
-            Some(RunWarning {
-                message: issue.get("message")?.as_str()?.to_owned(),
-                // A process-wide issue, such as a run-server log level, names no file.
-                source: issue
-                    .get("file")
-                    .and_then(Value::as_str)
-                    .filter(|file| !file.is_empty())
-                    .map(str::to_owned),
-            })
+        .into_iter()
+        .map(|issue| RunWarning {
+            message: issue.message,
+            // A process-wide issue, such as a run-server log level, names no file.
+            source: (!issue.file.is_empty()).then_some(issue.file),
         })
         .collect();
     (!warnings.is_empty()).then_some(warnings)
-}
-
-/// Compute session cost from stats with the app server's `session_token_cost` formula.
-pub(super) fn compute_session_cost(stats: &Value) -> f64 {
-    let prompt_tokens = stats
-        .get("sessionPromptTokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let completion_tokens = stats
-        .get("sessionCompletionTokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let cached_tokens = stats
-        .get("sessionCachedTokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let input_price = stats
-        .get("inputPricePerMillion")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-    let output_price = stats
-        .get("outputPricePerMillion")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-    let cached_price = stats
-        .get("cachedInputPricePerMillion")
-        .and_then(Value::as_f64)
-        .unwrap_or(input_price);
-
-    let cached = cached_tokens.min(prompt_tokens);
-    let input_cost = (prompt_tokens - cached) as f64 * input_price + cached as f64 * cached_price;
-    let output_cost = completion_tokens as f64 * output_price;
-    (input_cost + output_cost) / 1_000_000.0
 }

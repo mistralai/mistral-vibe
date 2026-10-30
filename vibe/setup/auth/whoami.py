@@ -1,4 +1,8 @@
-"""Whoami / tenant-domain discovery primitives.
+"""Account plan and tenant-domain discovery primitives.
+
+API keys read ``/api/vibe/whoami``; OIDC sessions read
+``/api/vibe/account-context``, the only one accepting an ID token. Both map
+onto ``WhoAmIResult``.
 
 Lives under ``setup/auth`` (not ``app_server``) because onboarding and the ACP
 auth controller both need it before an app server exists. ``AccountController``
@@ -15,16 +19,21 @@ import time
 from typing import Any, Final, Protocol
 from urllib.parse import urlparse
 
-import httpx
+import httpx2
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from vibe.app_server.models import AccountPlanKind
 from vibe.core.config import ProviderConfig
 from vibe.core.paths import WHOAMI_CACHE_FILE
 from vibe.observability.logging import logger
+from vibe.setup.auth._oidc_config import OidcError
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.utils.oidc_marker import is_oidc_marker
 
 _WHOAMI_PATH = "/api/vibe/whoami"
+_ACCOUNT_CONTEXT_PATH = "/api/vibe/account-context"
+# /whoami reports the key's access scope; /account-context reports the boolean.
+_PRIVATE_ACCESS_BY_SCOPE: Final = {"shared_only": False, "personal_and_shared": True}
 
 # Sentinel for plan fields (user_plan, planName, planType) when there is no
 # Mistral provider configured at all — the user is not one of ours, so there
@@ -52,7 +61,8 @@ class WhoAmIResult(BaseModel):
     customer_id: str | None = None
     api_base: str | None = None
     vibe_base: str | None = None
-    primitive_access_scope: str | None = None
+    has_paid_vibe_entitlement: bool = False
+    can_access_private_resources: bool | None = None
 
     @field_validator("plan_type", mode="before")
     @classmethod
@@ -63,6 +73,19 @@ class WhoAmIResult(BaseModel):
             return AccountPlanKind(value.strip().lower())
         except ValueError as exc:
             raise ValueError(f"Unsupported plan_type: {value}") from exc
+
+    @classmethod
+    def from_whoami(cls, payload: object) -> WhoAmIResult:
+        if not isinstance(payload, dict):
+            raise ValueError("whoami response must be an object")
+        scope = payload.get("primitive_access_scope")
+        can_access_private_resources = (
+            _PRIVATE_ACCESS_BY_SCOPE.get(scope) if isinstance(scope, str) else None
+        )
+        return cls.model_validate({
+            **payload,
+            "can_access_private_resources": can_access_private_resources,
+        })
 
 
 class AccountGatewayUnauthorized(Exception):
@@ -83,7 +106,9 @@ class HttpAccountGateway:
     async def read(
         self, *, base_url: str, api_key: str, timeout: float | None = None
     ) -> WhoAmIResult:
-        url = f"{base_url.rstrip('/')}{_WHOAMI_PATH}"
+        oidc = is_oidc_marker(api_key)
+        path = _ACCOUNT_CONTEXT_PATH if oidc else _WHOAMI_PATH
+        url = f"{base_url.rstrip('/')}{path}"
         client_kwargs: dict[str, object] = {"verify": build_ssl_context()}
         if timeout is not None:
             client_kwargs["timeout"] = timeout
@@ -92,10 +117,10 @@ class HttpAccountGateway:
                 response = await client.get(
                     url, headers={"Authorization": f"Bearer {api_key}"}
                 )
-        except httpx.RequestError as exc:
+        except (httpx2.RequestError, OidcError) as exc:
             raise AccountGatewayUnavailable() from exc
 
-        if response.status_code in {httpx.codes.UNAUTHORIZED, httpx.codes.FORBIDDEN}:
+        if response.status_code in {httpx2.codes.UNAUTHORIZED, httpx2.codes.FORBIDDEN}:
             raise AccountGatewayUnauthorized()
         if not response.is_success:
             raise AccountGatewayUnavailable(
@@ -103,7 +128,10 @@ class HttpAccountGateway:
             )
 
         try:
-            return WhoAmIResult.model_validate(response.json())
+            payload = response.json()
+            if oidc:
+                return WhoAmIResult.model_validate(payload)
+            return WhoAmIResult.from_whoami(payload)
         except (ValueError, ValidationError) as exc:
             raise AccountGatewayUnavailable("Invalid account response") from exc
 
@@ -127,7 +155,7 @@ async def fetch_whoami(
 
 _WHOAMI_CACHE_TTL_SECONDS: Final = 6 * 60 * 60
 # Bump when WhoAmIResult gains a field that older entries would silently default.
-_WHOAMI_CACHE_FORMAT: Final = 2
+_WHOAMI_CACHE_FORMAT: Final = 3
 
 
 def load_cached_whoami(api_key: str) -> WhoAmIResult | None:
@@ -139,6 +167,8 @@ def load_cached_whoami(api_key: str) -> WhoAmIResult | None:
     read/parse error, missing entry, or stale entry yields None so the caller
     refetches.
     """
+    if not _cacheable(api_key):
+        return None
     entry = _read_whoami_entries().get(_whoami_cache_key(api_key))
     if not isinstance(entry, dict) or entry.get("format") != _WHOAMI_CACHE_FORMAT:
         return None
@@ -156,6 +186,8 @@ def load_cached_whoami(api_key: str) -> WhoAmIResult | None:
 
 def store_cached_whoami(api_key: str, result: WhoAmIResult) -> None:
     """Persist a /whoami result under the hashed ``api_key``. Best-effort."""
+    if not _cacheable(api_key):
+        return
     entries = _read_whoami_entries()
     entries[_whoami_cache_key(api_key)] = {
         "format": _WHOAMI_CACHE_FORMAT,
@@ -171,9 +203,16 @@ def clear_cached_whoami(api_key: str) -> None:
     A rejected credential means any cached plan is untrustworthy, so it must not
     keep being served for the TTL. Best-effort; no-op when nothing is cached.
     """
+    if not _cacheable(api_key):
+        return
     entries = _read_whoami_entries()
     if entries.pop(_whoami_cache_key(api_key), None) is not None:
         _write_whoami_entries(entries)
+
+
+def _cacheable(api_key: str) -> bool:
+    # The OIDC marker is shared by every account: never cache account data under it.
+    return not is_oidc_marker(api_key)
 
 
 def _whoami_cache_key(api_key: str) -> str:
@@ -230,11 +269,14 @@ class WhoAmICache:
 
     def peek(self, *, base_url: str, api_key: str) -> WhoAmIResult | None:
         """Return an already-fetched result for reuse, without fetching."""
+        if not _cacheable(api_key):
+            return None
         return self._cache.get((base_url, api_key))
 
     def populate(self, *, base_url: str, api_key: str, result: WhoAmIResult) -> None:
         """Store a known result without fetching, for callers that already have one."""
-        self._cache[(base_url, api_key)] = result
+        if _cacheable(api_key):
+            self._cache[(base_url, api_key)] = result
 
     def invalidate(self, api_key: str) -> None:
         """Evict every in-memory entry for ``api_key`` and drop its disk entry.
@@ -264,7 +306,7 @@ class WhoAmICache:
         """
         key = (base_url, api_key)
         async with self._lock:
-            cached = self._cache.get(key)
+            cached = self._cache.get(key) if _cacheable(api_key) else None
             if cached is not None:
                 return cached
             disk_cached = load_cached_whoami(api_key)
@@ -282,7 +324,8 @@ class WhoAmICache:
                     type(exc).__name__,
                 )
                 return None
-            self._cache[key] = result
+            if _cacheable(api_key):
+                self._cache[key] = result
             store_cached_whoami(api_key, result)
             return result
 
@@ -383,16 +426,23 @@ async def resolve_tenant_domains(
     (``SubscriptionHandler.custom_domains``), falling back to the deployment's
     ``public_api_url`` / ``LE_CHAT_URL`` for SaaS. The handler reads no
     connector or reverse-proxy headers — the returned hosts are the tenant's
-    own API/chat hosts, not a public default. Adopting them is therefore
-    correct in every topology; skipping adoption on the rewrite flag
-    discards real tenant data (regression fixed in this change). Reachability
-    of the returned hosts is the deployment's responsibility, not the CLI's.
+    own API/chat hosts, not a public default. Adopting them is therefore the
+    right default in every topology: skipping adoption casually discards real
+    tenant data (regression fixed in this change). Reachability of the returned
+    hosts is the deployment's responsibility, not the CLI's.
+
+    The one intentional exception is the provider's ``preserve_api_base``
+    flag: when an operator sets it, the configured ``api_base`` is kept
+    verbatim even when whoami advertises a different one (split-horizon
+    deployments where the CLI reaches the API through a proxy whose URL
+    differs from the tenant's public host). ``vibe_base`` (chat URL)
+    adoption is unaffected.
     """
     whoami = await fetch_whoami(console_base_url, api_key)
     if whoami is None or (whoami.api_base is None and whoami.vibe_base is None):
         return provider, current_vibe_base_url
     vibe_base_url = current_vibe_base_url
-    if whoami.api_base:
+    if whoami.api_base and not provider.preserve_api_base:
         sanitized = _sanitize_tenant_url(whoami.api_base, field="api")
         if sanitized is not None:
             provider = provider.model_copy(update={"api_base": f"{sanitized}/v1"})

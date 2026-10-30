@@ -3,7 +3,9 @@
 use serde_json::Value;
 
 use crate::app::App;
-use crate::mcp::{add_result, state_at};
+use crate::commands::submission::new_message_id;
+use crate::mcp::state_at;
+use crate::transcript::local;
 
 /// Seconds a failed connector or MCP load stays up.
 pub(crate) const INTEGRATIONS_UNAVAILABLE_TOAST_SECS: u64 = 10;
@@ -25,5 +27,5 @@ pub fn show_post_init_notices(app: &mut App, runtime: &Value) {
     } else {
         format!("MCP server '{first}' needs OAuth authentication. Run `{command}` to authenticate.")
     };
-    add_result(app, &message);
+    local::add_command_warning(&mut app.view.transcript, &new_message_id(), &message);
 }

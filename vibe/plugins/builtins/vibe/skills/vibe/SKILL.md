@@ -37,7 +37,7 @@ agents, prompts, logs, and session data live here.
   agents/              # Custom agent profiles (*.toml)
   prompts/             # Custom prompts (*.md)
   skills/              # User-level skills (each skill is a subdirectory with SKILL.md)
-  tools/               # Custom tools (<name>.py); descriptions in tools/prompts/<name>.md
+  tools/               # Former custom Python tools, no longer loaded (see below)
   logs/
     vibe.log           # Main log file
     session/           # Session log files
@@ -52,14 +52,17 @@ When in a trusted folder, Vibe also looks for project-local configuration:
 - `.vibe/config.toml` - Project-specific config (overrides user config)
 - `.vibe/hooks.toml` - Project-specific hooks (requires trusted folder)
 - `.vibe/skills/` - Project-specific skills
-- `.vibe/tools/` - Project-specific tools (`<name>.py`); a `prompts/<name>.md` beside them describes the custom tool `<name>`. Same `tools/*.py` + `tools/prompts/*.md` layout as the builtins.
+- `.vibe/tools/` - Former project-specific custom Python tools, no longer loaded (see below)
 - `.vibe/agents/` - Project-specific agents
 - `.vibe/prompts/` - Project-specific prompts
 - `.agents/skills/` - Standard agent skills directory
 
-Custom Python tools will be deprecated in a future release. Recommend skills
-for new extensions. When a user asks for migration help, inspect the custom
-tool's behavior and replace it with an equivalent skill.
+Custom Python tools are no longer supported: Vibe does not load the `.py` files
+in `~/.vibe/tools/` or `.vibe/tools/`, and reports each one as a config issue.
+At startup Vibe also removes the former `tool_paths` setting from
+`config.toml`; the folders it listed stay on disk. Recommend skills for new
+extensions. When a user asks for migration help, inspect the custom tool's
+behavior and replace it with an equivalent skill.
 
 ### AGENTS.md Discovery
 
@@ -87,7 +90,9 @@ Vibe never updates silently. With `enable_update_checks = true` (default), it
 checks for a newer `mistral-vibe` daily and prompts on the next launch when
 one exists. uv tool installs ask `uv tool list --outdated`, so uv settings such
 as `exclude-newer` apply; other installs poll PyPI. Accepting runs
-`uv tool upgrade mistral-vibe`, then `brew upgrade mistral-vibe` as a fallback. Disable via `enable_update_checks
+`uv tool upgrade mistral-vibe`, then `brew upgrade mistral-vibe` as a fallback. On
+Windows, accepting prints the upgrade command to run after closing every Vibe
+session instead, since a running Vibe locks its own files. Disable via `enable_update_checks
 = false`. Run `vibe update` (equivalent to `vibe --check-upgrade`) to check
 immediately, prompt to install a newer version if one exists, and exit. Initial
 install: `uv tool install mistral-vibe`.
@@ -98,8 +103,12 @@ install: `uv tool install mistral-vibe`.
 
 ### Resume
 
-- `vibe -c` / `--continue`: most recent session in this terminal (TTY-scoped;
-  falls back to latest in cwd).
+- `vibe -c` / `--continue`: the last session used in this terminal in the
+  current folder (it moves on a new session's first message, or when a saved
+  session is reopened); otherwise the folder's most recent session. Works with
+  `-p` too. The terminal is the tty device on macOS/Linux, the console window
+  or `WT_SESSION` on Windows; `VIBE_TERMINAL_KEY` overrides it, and an empty
+  value means "no terminal" (folder rule only).
 - `vibe --resume [SESSION_ID]`: specific session; without an id, opens a picker.
 - In-session: `/resume` (alias `/continue`).
 
@@ -169,8 +178,7 @@ Vibe checks `~/.vibe/config.toml`, the trusted project `.vibe/config.toml` and
 the active agent profile for settings it does not use: a misspelt key (with the
 closest setting name), a retired setting such as `include_model_info`, or a
 setting with no effect such as `[tools.grep]`. Each one is a warning at startup,
-and `vibe -p` prints it on stderr. `[tools.<name>]` keys are not checked when a
-custom tool of that name is the one Vibe runs.
+and `vibe -p` prints it on stderr.
 
 To refuse a config with such settings instead, set `strict_config = true` in
 `config.toml` or `VIBE_STRICT_CONFIG=1` in the environment; Vibe then stops with
@@ -212,6 +220,7 @@ edit `config.toml` and run `/reload`; no restart is needed.
 # Behavior
 bypass_tool_permissions = false    # Skip tool approval prompts
 outside_workdir = "ask"            # Outside-workdir file/shell access: "ask" prompts, "deny" refuses with a tool error
+experimental_worktree_copy_on_write = false  # macOS: clone new worktrees of a trusted repo from a template checkout; sets extensions.worktreeConfig in the repo
 system_prompt_id = "cli"          # System prompt: "cli", "lean", or custom .md filename
 compaction_prompt_id = "compact"  # Compaction prompt: built-in "compact" or custom .md filename
 enable_telemetry = true
@@ -224,6 +233,8 @@ api_stream_idle_timeout = 300.0   # Silence after the model starts answering tha
 # auto_compact_threshold = 200000 # optional fallback for models without their own threshold; unset: derived from each model's context window
 compaction_reasoning_limit_tokens = 32000  # Reasoning after which a compaction summary is stopped and asked for once more, briefly, without tools and with reasoning off or lowest; 0 disables
 output_limit_retries = 6          # Answers cut off at the output limit that a turn retries with feedback; 0 ends the turn on the first
+agent_max_output_tokens = 0       # Output cap sent as max_tokens on every agent and subagent request, on any provider, held to the model's max output and to the window's room above the compaction threshold; 0 sends one only where the provider requires one (the model's max_output_tokens)
+compaction_max_output_tokens = 0  # Output cap sent as max_tokens on every compaction request, on any provider, held the same way; 0 sends one only where the provider requires one
 
 # Git commit behavior
 include_commit_signature = true   # Add "Co-Authored-By" to commits
@@ -298,7 +309,8 @@ temperature = 1.0
 input_price = 1.5
 output_price = 7.5
 cached_input_price = 0.15         # per million cached input tokens; omit to bill at input_price
-thinking = "high"                 # "off", "low", "medium", "high", "xhigh", "max"
+thinking = "high"                 # "off", "low", "medium", "high", "xhigh", "max", or a level `thinking_levels` lists; sent to the provider as written. Any other word still loads and is sent, with a config warning; pick another level to fix it
+# thinking_levels = ["off", "high"] # levels /thinking offers, lowest first (plus `thinking` when outside them); any word the provider takes, e.g. ["low", "turbo"], sent as written (on a Mistral provider, the Mistral SDK leaves out a level its own list lacks, such as "turbo", and the config warns). Wins over the provider's catalogue and the known-model table, which still say whether the model takes an effort or a token budget (a budget model has budgets for the standard levels only; another word sends no thinking, with a warning). Omit to offer the model's known levels (else the default five) plus `thinking`, [] for off only. Including "off" claims the model accepts a no-reasoning request (mistral provider)
 # auto_compact_threshold = 200000 # optional; unset: derived from the context window; a value outside the range the window allows is refused with an error: unset it or pick one in range
 supports_images = true            # vision-capable; allows @-mentioned images
 
@@ -334,9 +346,6 @@ smart_approve = "active"
 ### Tool Configuration
 
 ```toml
-# Additional tool search paths
-tool_paths = ["/path/to/custom/tools"]
-
 # Enable only specific tools (glob and regex supported)
 enabled_tools = ["bash", "read_file", "grep"]
 
@@ -583,6 +592,10 @@ HTTP MCP servers can use either static auth or OAuth:
 - For SSH/remote browser callbacks, forward the loopback port:
   `ssh -L 47823:127.0.0.1:47823 <host>`.
 
+MCP sampling is disabled by default. It requires an explicit per-server opt-in
+and a host-provided sampling completion. Vibe's app server does not currently
+provide that completion, so it does not advertise or service sampling requests.
+
 ### Connectors
 
 Mistral connectors are auto-discovered when the active provider is Mistral
@@ -649,6 +662,19 @@ browser_auth_api_base_url = "https://connector.internal.example:443/api"
 browser_auth_allow_origin_rewrite = true
 ```
 
+The same split-horizon setups often reach the API through a proxy whose URL
+differs from the tenant's public API host that `/whoami` advertises. By
+default, sign-in and the runtime config self-heal adopt the whoami-advertised
+`api_base`. Set `preserve_api_base = true` on the provider to keep the
+configured `api_base` verbatim across sign-in and `/reload`; the chat URL
+(`vibe_base_url`) adoption is unaffected:
+
+```toml
+[[providers]]
+api_base = "https://connector.internal.example:443/v1"
+preserve_api_base = true
+```
+
 Self-hosted deployments can point Vibe CLI upgrade and API-key links to their
 Le Chat web deployment, where the Vibe API key is managed:
 
@@ -684,6 +710,13 @@ this order:
 1. `<project>/.vibe/hooks.toml` — loaded first, only when the folder is
    trusted.
 2. `~/.vibe/hooks.toml` — loaded second.
+
+Hooks shipped by native Vibe plugins (`ai.mistral.vibe/hooks.toml`) run too.
+For one event, hooks run in this order: project `hooks.toml`, project plugins,
+`~/.vibe/hooks.toml`, then user plugins. A plugin hook runs in the session's
+read-only copy of its plugin with `PLUGIN_ROOT` and `PLUGIN_DATA` set, like the
+plugin's MCP servers; its payload's `cwd` is still the session folder. Hooks imported from Claude Code or Kimi plugins do
+not run yet: Vibe reports them as a config issue.
 
 A duplicate `name` across the two files is reported as a config issue and the
 project entry wins. Config-load errors (invalid TOML, missing required
@@ -891,7 +924,7 @@ vibe --worktree NAME                # Create/reuse a git worktree under $VIBE_HO
 vibe --worktree                     # Same, but Vibe picks an unused name from the prompt (a random slug when there is no prompt) on a vibe/<name> branch, and never reuses an existing worktree. The prompt must precede the flag or follow a `--`, since --worktree otherwise reads it as NAME.
 vibe --add-dir DIR                  # Extra working dir loaded for context (repeatable). Implicitly trusted.
 vibe --trust                        # Trust cwd for this invocation only (not persisted). Skips the trust prompt.
-vibe -c / --continue                # Continue most recent session in this terminal (TTY-scoped, falls back to latest in cwd)
+vibe -c / --continue                # Continue this terminal's last session in cwd, else the latest in cwd
 vibe --resume [SESSION_ID]          # Resume a specific session
 vibe -v / --version                 # Show version
 vibe --setup                        # Run onboarding/setup
@@ -899,6 +932,8 @@ vibe update / vibe --check-upgrade  # Check for a Vibe update now, prompt to ins
 vibe --max-turns N                  # Max assistant turns (programmatic mode)
 vibe --max-price DOLLARS            # Max cost limit (programmatic mode)
 vibe --max-tokens N                 # Max total session tokens (programmatic mode)
+vibe --system-prompt-file PATH      # Replace Vibe's own system prompt instructions with PATH's text (programmatic mode)
+vibe --model ALIAS                  # Model alias for this run, not saved (programmatic mode)
 vibe --enabled-tools TOOL           # Enable specific tools (repeatable)
 vibe --disabled-tools TOOL          # Disable specific tools (repeatable)
 vibe --output text|json|streaming   # Output format (programmatic mode)
@@ -1019,8 +1054,9 @@ session's model.
   clears it instead. In the rewind panel: `↑/↓` pick option, `Shift+↑/↓`
   scroll, `←`/`Esc` edit previous message, `→` edit next message, `Enter`
   accept, `q` quit.
-- `/branch` - Fork the current conversation into a new resumable session,
-  leaving this session unchanged. Resume the copy with `vibe --resume <id>`.
+- `/branch` (alias `/fork`) - Fork the current conversation into a new resumable
+  session, leaving this session unchanged. Resume the copy with
+  `vibe --resume <id>`.
 - `/loop [schedule] [prompt]` - With the Unified Harness, ask the model to
   schedule a recurring prompt, e.g. `/loop every two minutes check the build`
   or `/loop weekdays at 9am review CI`.
@@ -1042,6 +1078,12 @@ session's model.
   (Unified Harness only). Re-discovers plugins from disk, re-pins the
   snapshot, and prints a diff of added, removed, and updated plugins.
 - `/data-retention` - Show data retention information
+- `/release-notes` (alias `/whatsnew`) - Browse the release notes of every Vibe
+  version, newest first, in a full-screen, searchable pager. When a new
+  session starts after an upgrade (not on resume), Vibe shows the notes of
+  every release since the last one seen
+  (the newest five, then a pointer to `/release-notes`); the last seen version is
+  `seen_whats_new_version` in `~/.vibe/cache.toml`.
 - `/teleport` - Teleport session to Vibe Code Web (only available when Vibe Code is enabled)
 - `/remote-project` - Select the Vibe Code Web project for this repository (only
   available when Vibe Code is enabled)
@@ -1223,7 +1265,8 @@ A plugin tree may contain any combination of:
 | Connectors | `connectors.json` | Connector tool mappings |
 
 Environment variables `PLUGIN_ROOT` and `PLUGIN_DATA` are injected
-automatically into MCP server processes and are reserved.
+automatically into MCP server and hook processes and are reserved. Plugin
+hooks run in the plugin directory.
 
 ### Foreign Plugin Formats
 

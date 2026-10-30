@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from abc import ABC
-from collections import OrderedDict
-import copy
 from enum import StrEnum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -109,20 +107,6 @@ class SessionMetadata(BaseModel):
     # Durable external work products (PRs/MRs) observed during this session.
     # Absent from sessions written before this field existed; defaults to [].
     artifacts: list[SessionArtifact] = Field(default_factory=list)
-
-
-StrToolChoice = Literal["auto", "none", "any", "required"]
-
-
-class AvailableFunction(BaseModel):
-    name: str
-    description: str
-    parameters: dict[str, Any]
-
-
-class AvailableTool(BaseModel):
-    type: Literal["function"] = "function"
-    function: AvailableFunction
 
 
 class FunctionCall(BaseModel):
@@ -280,126 +264,6 @@ class LLMMessage(BaseModel):
             "context_boundary": getattr(v, "context_boundary", None),
         }
 
-    def __add__(self, other: LLMMessage) -> LLMMessage:
-        """Careful: this is not commutative!"""
-        if self.role != other.role:
-            raise ValueError("Can't accumulate messages with different roles")
-
-        if self.name != other.name:
-            raise ValueError("Can't accumulate messages with different names")
-
-        if self.tool_call_id != other.tool_call_id:
-            raise ValueError("Can't accumulate messages with different tool_call_ids")
-
-        content = (self.content or "") + (other.content or "")
-        if not content:
-            content = None
-
-        reasoning_content = (self.reasoning_content or "") + (
-            other.reasoning_content or ""
-        )
-        if not reasoning_content:
-            reasoning_content = None
-
-        reasoning_payloads = [
-            *(self.reasoning_payloads or []),
-            *(other.reasoning_payloads or []),
-        ] or None
-
-        tool_calls_map = OrderedDict[int, ToolCall]()
-        for tool_calls in [self.tool_calls or [], other.tool_calls or []]:
-            for tc in tool_calls:
-                if tc.index is None:
-                    raise ValueError("Tool call chunk missing index")
-                if tc.index not in tool_calls_map:
-                    tool_calls_map[tc.index] = copy.deepcopy(tc)
-                else:
-                    existing_name = tool_calls_map[tc.index].function.name
-                    new_name = tc.function.name
-                    if existing_name and new_name and existing_name != new_name:
-                        raise ValueError(
-                            "Can't accumulate messages with different tool call names"
-                        )
-                    if new_name and not existing_name:
-                        tool_calls_map[tc.index].function.name = new_name
-                    new_args = (tool_calls_map[tc.index].function.arguments or "") + (
-                        tc.function.arguments or ""
-                    )
-                    tool_calls_map[tc.index].function.arguments = new_args
-
-        return LLMMessage(
-            role=self.role,
-            content=content,
-            images=self.images if self.images is not None else other.images,
-            reasoning_content=reasoning_content,
-            reasoning_payloads=reasoning_payloads,
-            reasoning_message_id=self.reasoning_message_id
-            or other.reasoning_message_id,
-            tool_calls=list(tool_calls_map.values()) or None,
-            name=self.name,
-            tool_call_id=self.tool_call_id,
-            tool_result=self.tool_result or other.tool_result,
-            message_id=self.message_id,
-            user_display_content=self.user_display_content
-            if self.user_display_content is not None
-            else other.user_display_content,
-            input_text=(
-                self.input_text if self.input_text is not None else other.input_text
-            ),
-            resources=self.resources if self.resources is not None else other.resources,
-            context_boundary=self.context_boundary or other.context_boundary,
-        )
-
-
-class LLMUsage(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    # Prompt tokens served from the provider cache; a subset of prompt_tokens.
-    cached_tokens: int = 0
-
-    def __add__(self, other: LLMUsage) -> LLMUsage:
-        return LLMUsage(
-            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
-            completion_tokens=self.completion_tokens + other.completion_tokens,
-            cached_tokens=self.cached_tokens + other.cached_tokens,
-        )
-
-
-class StopReason(StrEnum):
-    REFUSAL = "refusal"
-
-
-class StopInfo(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="ignore")
-    reason: str | None = None
-    category: str | None = None
-    explanation: str | None = None
-
-    @property
-    def is_refusal(self) -> bool:
-        return self.reason == StopReason.REFUSAL
-
-
-class LLMChunk(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    message: LLMMessage
-    usage: LLMUsage | None = None
-    correlation_id: str | None = None
-    stop: StopInfo | None = None
-
-    def __add__(self, other: LLMChunk) -> LLMChunk:
-        if self.usage is None and other.usage is None:
-            new_usage = None
-        else:
-            new_usage = (self.usage or LLMUsage()) + (other.usage or LLMUsage())
-        return LLMChunk(
-            message=self.message + other.message,
-            usage=new_usage,
-            correlation_id=other.correlation_id or self.correlation_id,
-            stop=other.stop or self.stop,
-        )
-
 
 class BaseEvent(BaseModel, ABC):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -500,46 +364,3 @@ class AgentProfileChangedEvent(BaseEvent):
 class SessionTitleUpdatedEvent(BaseEvent):
     title: str
     session_id: str
-
-
-class RateLimitError(Exception):
-    def __init__(self, provider: str, model: str) -> None:
-        self.provider = provider
-        self.model = model
-        super().__init__(
-            "Rate limits exceeded. Please wait a moment before trying again."
-        )
-
-
-class ContextTooLongError(Exception):
-    def __init__(self, provider: str, model: str) -> None:
-        self.provider = provider
-        self.model = model
-        super().__init__(
-            "The conversation context exceeds the model's maximum limit. "
-            "Use /rewind to undo recent actions, then /compact to summarize the conversation."
-        )
-
-
-class RefusalError(Exception):
-    def __init__(
-        self,
-        provider: str,
-        model: str,
-        category: str | None = None,
-        explanation: str | None = None,
-    ) -> None:
-        self.provider = provider
-        self.model = model
-        self.category = category
-        self.explanation = explanation
-        super().__init__(self._fmt())
-
-    def _fmt(self) -> str:
-        lead = "The model declined to respond to this request and stopped early."
-        if self.category:
-            lead += f" (category: {self.category})"
-        detail = self.explanation or (
-            "Try rephrasing your request or starting a new conversation."
-        )
-        return f"{lead} {detail}"

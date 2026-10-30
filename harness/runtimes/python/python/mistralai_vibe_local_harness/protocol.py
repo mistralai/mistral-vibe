@@ -252,6 +252,31 @@ RustRuntimeToolFeature = Annotated[
 ]
 
 
+type RustReadFileDocuments = Literal["unsupported", "extracted_text"]
+type RustReadFileImages = Literal["unsupported", "extracted_text", "native"]
+
+
+class RustReadFileSupport(RustProtocolModel):
+    documents: RustReadFileDocuments = Field(
+        default="unsupported", exclude_if=lambda value: value == "unsupported"
+    )
+    images: RustReadFileImages = Field(
+        default="unsupported", exclude_if=lambda value: value == "unsupported"
+    )
+
+
+class RustEnabledFileSystem(RustEnabledRuntimeToolFeature):
+    read_file: RustReadFileSupport = Field(
+        default_factory=RustReadFileSupport,
+        exclude_if=lambda value: value == RustReadFileSupport(),
+    )
+
+
+RustFileSystemFeature = Annotated[
+    RustDisabledRuntimeToolFeature | RustEnabledFileSystem, Field(discriminator="mode")
+]
+
+
 class RustWhenConfiguredSkills(RustProtocolModel):
     mode: Literal["when_configured"] = "when_configured"
 
@@ -510,9 +535,9 @@ class RustToolSettings(RustProtocolModel):
     programmatic: RustProgrammaticToolSettings
     subagents: RustAgentToolFeature
     background_processes: RustRuntimeToolFeature
-    file_system: RustRuntimeToolFeature = Field(
-        default_factory=RustEnabledRuntimeToolFeature,
-        exclude_if=lambda value: value.mode == "enabled",
+    file_system: RustFileSystemFeature = Field(
+        default_factory=RustEnabledFileSystem,
+        exclude_if=lambda value: value == RustEnabledFileSystem(),
     )
     command_environment: RustCommandEnvironment
     skills: RustSkillsFeature = Field(
@@ -1233,7 +1258,6 @@ class RustAgentResultNotificationSource(RustProtocolModel):
 class RustAgentMessageNotificationSource(RustProtocolModel):
     type: Literal["agent_message"] = "agent_message"
     sender_agent_path: str = Field(min_length=1)
-    kind: Literal["task", "message"]
 
 
 RustNotificationSource = Annotated[
@@ -1576,10 +1600,6 @@ class RustUserMessageEvent(RustProtocolModel):
     mode: Literal["queue", "steer"]
 
 
-class RustUnattributedAgentTaskContext(RustProtocolModel):
-    type: Literal["unattributed"] = "unattributed"
-
-
 class RustCurrentAgentTaskContext(RustProtocolModel):
     type: Literal["current"] = "current"
     recipient_agent_path: Annotated[str, Field(min_length=1)]
@@ -1592,17 +1612,13 @@ class RustInheritedAgentTaskContext(RustProtocolModel):
 
 
 type RustAgentTaskContext = Annotated[
-    RustUnattributedAgentTaskContext
-    | RustCurrentAgentTaskContext
-    | RustInheritedAgentTaskContext,
+    RustCurrentAgentTaskContext | RustInheritedAgentTaskContext,
     Field(discriminator="type"),
 ]
 
 
 class RustAgentTaskMessageContext(RustProtocolModel):
-    context: RustAgentTaskContext = Field(
-        default_factory=RustUnattributedAgentTaskContext
-    )
+    context: RustAgentTaskContext
     sender_agent_path: str = Field(min_length=1)
     kind: Literal["task"] = "task"
     content: list[RustContentBlock] = Field(min_length=1)
@@ -2176,6 +2192,7 @@ __all__ = [
     "RustDispatchActionDirective",
     "RustEmbeddedResourceContentBlock",
     "RustEnabledAgentTools",
+    "RustEnabledFileSystem",
     "RustEnabledModelWait",
     "RustEnabledRuntimeToolFeature",
     "RustEvent",
@@ -2183,6 +2200,7 @@ __all__ = [
     "RustFailTurnEvent",
     "RustFailedAgentResult",
     "RustFailedTurn",
+    "RustFileSystemFeature",
     "RustFilesystemAction",
     "RustFilesystemFailedEvent",
     "RustFilesystemLargeOutputPolicy",
@@ -2282,6 +2300,9 @@ __all__ = [
     "RustProvidedToolCallAction",
     "RustProvidedToolDefinition",
     "RustQueueFullRejection",
+    "RustReadFileDocuments",
+    "RustReadFileImages",
+    "RustReadFileSupport",
     "RustReasoningContent",
     "RustReasoningPart",
     "RustReasoningRedactedContent",

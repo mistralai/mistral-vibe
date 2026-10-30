@@ -18,7 +18,12 @@ SCENARIO_DIR = E2E_DIR / "scenarios"
 # Committed golden reference snapshots.
 GOLDEN_DIR = E2E_DIR / "goldens"
 FIXTURE_PATH = E2E_DIR / "fixtures" / "fixture.json"
-WHATS_NEW_FIXTURE = E2E_DIR / "fixtures" / "whats_new.fixture"
+# A frozen release-notes history, so what's-new goldens never churn per release.
+WHATS_NEW_FIXTURE = E2E_DIR / "fixtures" / "whats_new"
+# Eight frozen releases: enough to cap the startup banner and scroll `/release-notes`.
+WHATS_NEW_HISTORY_FIXTURE = E2E_DIR / "fixtures" / "whats_new_history"
+# The client's working directory: a small tree, so startup indexing stays cheap.
+WORKSPACE_DIR = E2E_DIR / "fixtures" / "workspace"
 CLIENT_BIN = VIBE_DIR / "vibe" / "cli-rust" / "target" / "release" / "vibe-rs"
 REPLAY_BIN = CLIENT_BIN.with_name("vibe-replay")
 

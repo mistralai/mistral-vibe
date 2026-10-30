@@ -41,16 +41,19 @@ fn drained_frame(request_id: &Value) -> Value {
     json!({"jsonrpc": "2.0", "method": "replay/drained", "params": {"requestId": request_id}})
 }
 
-/// Methods answered with another method's canned result (reconnect reuses start).
+/// Methods answered with another method's canned result: resume reuses start, continue the saved session.
 fn resolve_response(handshake: &mut Map<String, Value>, method: &str) -> Option<Value> {
     if let Some(entry) = handshake.get_mut(method) {
         return canned(entry);
     }
-    let alias = match method {
-        "session/resume" | "session/continue" => "session/start",
+    let aliases: &[&str] = match method {
+        "session/resume" => &["session/start"],
+        "session/continue" => &["session/resume", "session/start"],
         _ => return None,
     };
-    handshake.get_mut(alias).and_then(canned)
+    aliases
+        .iter()
+        .find_map(|alias| handshake.get_mut(*alias).and_then(canned))
 }
 
 /// A list entry answers its requests in order, repeating the last one; a

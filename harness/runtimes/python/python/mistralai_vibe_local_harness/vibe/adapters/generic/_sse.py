@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
-import httpx
+import httpx2
 
 
-async def iter_sse_lines(response: httpx.Response) -> AsyncGenerator[str]:
-    # SSE delimits lines with CRLF, LF or CR only, but httpx's aiter_lines()
+async def iter_sse_lines(response: httpx2.Response) -> AsyncGenerator[str]:
+    # SSE delimits lines with CRLF, LF or CR only, but httpx2's aiter_lines()
     # follows str.splitlines() and also breaks on U+2028/U+0085/..., which are
     # valid unescaped inside JSON strings, truncating payloads mid-line.
     buffer = b""

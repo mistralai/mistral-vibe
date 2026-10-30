@@ -7,6 +7,7 @@ use anyhow::{bail, Result};
 use serde_json::Value;
 
 use crate::cli::OutputFormat;
+use crate::server::HistoryEntry;
 use crate::transcript::apply_json_patch;
 
 const MAX_TRACKED_ENTRIES: usize = 512;
@@ -124,35 +125,14 @@ pub fn turn_entries(history: &Value, turn_id: Option<&str>) -> Value {
 /// Last assistant text from a history array: all text blocks joined with
 /// `\n\n`, like the server's `PublicMessageEntry.text` property.
 pub fn last_assistant_text(history: &Value) -> Option<String> {
-    let entries = history.as_array()?;
-    entries.iter().rev().find_map(|entry| {
-        if entry.get("type").and_then(Value::as_str) != Some("message") {
+    history.as_array()?.iter().rev().find_map(|entry| {
+        // A draft a post_agent hook rejected: shown while it streamed, never the answer.
+        let retried =
+            entry["outcome"]["type"] == "discarded" && entry["outcome"]["cause"] == "retry";
+        let HistoryEntry::Message(message) = HistoryEntry::from_value(entry) else {
             return None;
-        }
-        if entry.get("role").and_then(Value::as_str) != Some("assistant") {
-            return None;
-        }
-        if sent_back_for_a_retry(entry) {
-            return None;
-        }
-        let blocks = entry.get("content").and_then(Value::as_array)?;
-        let text: Vec<String> = blocks
-            .iter()
-            .filter_map(|b| {
-                if b.get("type").and_then(Value::as_str) == Some("text") {
-                    b.get("text").and_then(Value::as_str).map(str::to_owned)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let joined = text.join("\n\n");
-        (!joined.is_empty()).then_some(joined)
+        };
+        let text = message.text("\n\n");
+        (message.role == "assistant" && !retried && !text.is_empty()).then_some(text)
     })
-}
-
-/// A draft a post_agent hook rejected: shown while it streamed, never the answer.
-fn sent_back_for_a_retry(entry: &Value) -> bool {
-    entry.pointer("/outcome/type").and_then(Value::as_str) == Some("discarded")
-        && entry.pointer("/outcome/cause").and_then(Value::as_str) == Some("retry")
 }

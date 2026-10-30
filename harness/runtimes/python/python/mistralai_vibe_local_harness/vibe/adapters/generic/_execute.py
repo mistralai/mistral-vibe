@@ -16,7 +16,7 @@ import json
 import logging
 from typing import Any, cast
 
-import httpx
+import httpx2
 
 from mistralai_vibe_local_harness.protocol import (
     RustAssistantMessage,
@@ -223,6 +223,11 @@ async def execute_generic_completion(
 
     headers = dict(request.headers)
     headers.update(config.request_headers())
+    headers.update({
+        name: value
+        for name, value in credential.headers.items()
+        if name.lower() not in {"authorization", "x-api-key", "anthropic-version"}
+    })
 
     base = request.base_url or provider.api_base.rstrip("/")
     url = f"{base}{request.endpoint}"
@@ -230,22 +235,22 @@ async def execute_generic_completion(
         provider.name, route.model, wire, route.reasoning_setting(wire)
     )
 
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(
+    async with httpx2.AsyncClient(
+        timeout=httpx2.Timeout(
             config.timeout_s, read=config.stream_guard().read_timeout_seconds
         ),
         transport=env_proxy_transport(
             verify=build_ssl_context(
                 use_system_trust_store=config.enable_system_trust_store
             ),
-            limits=httpx.Limits(
+            limits=httpx2.Limits(
                 max_keepalive_connections=5,
                 max_connections=10,
                 keepalive_expiry=MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS,
             ),
             socket_options=keepalive_socket_options(),
         ),
-        follow_redirects=True,
+        follow_redirects=credential.follow_redirects,
         # Mistral-hosted models reached through the generic (OpenAI-compatible)
         # path still return mistral-correlation-id; capture it like the native
         # adapter. Non-Mistral providers omit the header (sink gets None).
@@ -308,7 +313,7 @@ def _warn_on_workless_completion(
 
 async def _complete_once(
     *,
-    client: httpx.AsyncClient,
+    client: httpx2.AsyncClient,
     url: str,
     body: bytes,
     headers: dict[str, str],
@@ -371,7 +376,9 @@ async def _complete_once(
             category=accumulated.stop.category, explanation=accumulated.stop.explanation
         )
     return _to_completion_result(
-        accumulated,
+        accumulated.model_copy(
+            update={"message": adapter.finish_message(accumulated.message)}
+        ),
         wire=wire,
         usage=reply_token_usage(wire, raw_usage),
         source=CompletionSource(provider=provider.name, model=model),
@@ -406,7 +413,7 @@ def _reported_usage(response_data: dict[str, Any]) -> dict[str, Any] | None:
 
 
 async def _stream_json_chunks(
-    client: httpx.AsyncClient,
+    client: httpx2.AsyncClient,
     url: str,
     body: bytes,
     headers: dict[str, str],

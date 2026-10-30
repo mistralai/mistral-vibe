@@ -20,7 +20,7 @@ handshake = {"config/fields/read": _fields}
 timeline: Timeline = ["/model", "\r", "\x1b[B", "\r", "\r"]
 
 screen_contains = (
-    "'active_model' is enforced by your",
-    "administrator. Contact your admin to change it.",
+    "'active_model' is enforced by your administrator.",
+    "Contact your admin to change it.",
 )
 screen_excludes = ("Configuration reloaded",)

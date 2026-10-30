@@ -6,7 +6,8 @@ use vibe_rs::app::{App, Status};
 use vibe_rs::teleport::{self, Reply};
 use vibe_rs::vibe_code_project::{self as project, Event, Reply as ProjectReply, State};
 
-use crate::teleport_support::{emit, rows, running, stub, view, view_json};
+use crate::support::{stub, transcript_rows, with_status};
+use crate::teleport_support::{emit, running, view, view_json};
 
 #[test]
 fn stale_saved_project_recovers_into_the_picker() {
@@ -16,7 +17,7 @@ fn stale_saved_project_recovers_into_the_picker() {
         json!({"kind": "failed", "error": {"message": "gone", "code": "saved_project_stale"}}),
     );
     assert!(app.teleport.is_none());
-    assert!(rows(&app).is_empty());
+    assert!(transcript_rows(&app).is_empty());
 
     teleport::apply_reply(
         &mut app,
@@ -35,7 +36,7 @@ fn stale_saved_project_recovers_into_the_picker() {
         app.vibe_code_project.teleport_prompt.as_deref(),
         Some("ship it")
     );
-    assert_eq!(rows(&app)[0].1, teleport::STALE_PROJECT_MESSAGE);
+    assert_eq!(transcript_rows(&app)[0].1, teleport::STALE_PROJECT_MESSAGE);
 }
 
 #[test]
@@ -59,7 +60,7 @@ fn a_late_recover_leaves_a_newer_teleport_alone() {
         .as_ref()
         .is_some_and(|op| op.operation_id == operation_id));
     assert_eq!(
-        rows(&app)[1],
+        transcript_rows(&app)[1],
         ("command_error".into(), "gone".into(), false)
     );
 }
@@ -80,7 +81,10 @@ fn unrecovered_stale_project_shows_the_original_error() {
         },
     );
     assert!(!app.vibe_code_project.open);
-    assert_eq!(rows(&app), [("command_error".into(), "gone".into(), false)]);
+    assert_eq!(
+        transcript_rows(&app),
+        [("command_error".into(), "gone".into(), false)]
+    );
 }
 
 #[test]
@@ -98,12 +102,11 @@ fn recover_error_from_a_previous_session_is_dropped() {
             view: None,
         },
     );
-    assert!(rows(&app).is_empty());
+    assert!(transcript_rows(&app).is_empty());
 }
 
 fn opening(prompt: Option<&str>) -> App {
-    let mut app = App::default();
-    app.session.status = Status::Ready;
+    let mut app = with_status(Status::Ready);
     app.session.session_id = Some("session".into());
     app.vibe_code_project = State {
         pending: true,
@@ -142,7 +145,7 @@ fn a_resolved_saved_link_teleports_without_showing_the_picker() {
     assert_eq!(op.picker_id, "picker");
     assert_eq!(op.prompt.as_deref(), Some("ship it"));
     assert_eq!(
-        rows(&app),
+        transcript_rows(&app),
         [("teleport_status".into(), "Teleporting...".into(), true)]
     );
 }
@@ -154,7 +157,10 @@ fn an_unresolved_teleport_opens_the_picker_and_explains_a_changed_remote() {
     assert!(app.vibe_code_project.open);
     assert!(app.vibe_code_project.teleport_pending);
     assert!(app.teleport.is_none());
-    assert_eq!(rows(&app)[0].1, project::teleport::REMOTE_CHANGED_MESSAGE);
+    assert_eq!(
+        transcript_rows(&app)[0].1,
+        project::teleport::REMOTE_CHANGED_MESSAGE
+    );
 }
 
 fn selected(app: &mut App) {
@@ -182,7 +188,7 @@ fn escape_during_selection_does_not_start_the_teleport() {
     app.vibe_code_project.cancel_requested = true;
     selected(&mut app);
     assert!(app.teleport.is_none());
-    assert!(!rows(&app)
+    assert!(!transcript_rows(&app)
         .iter()
         .any(|(_, text, _)| text.starts_with("Linked")));
 }
@@ -198,7 +204,7 @@ fn selecting_a_project_continues_the_pending_teleport() {
     let op = app.teleport.as_ref().expect("teleport started");
     assert_eq!(op.picker_id, "picker");
     assert_eq!(op.prompt.as_deref(), Some("ship it"));
-    assert!(!rows(&app)
+    assert!(!transcript_rows(&app)
         .iter()
         .any(|(_, text, _)| text.starts_with("Linked")));
 }

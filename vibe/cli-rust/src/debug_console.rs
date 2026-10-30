@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
 
 use crate::ui::theme;
@@ -102,8 +101,6 @@ pub struct DebugConsole {
     pub scroll: u16,
     /// Body height of the last render; the fill-viewport target.
     pub body_height: u16,
-    /// Sender carrying page and poll answers to the main thread.
-    pub tx: Option<Sender<Event>>,
     /// The session id the poll task reads on every tick; `set_session_id`
     /// updates it so polling survives a session switch.
     pub session_tx: Option<watch::Sender<String>>,

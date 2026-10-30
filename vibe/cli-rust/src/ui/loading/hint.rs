@@ -3,6 +3,7 @@
 use ratatui::text::Span;
 
 use crate::app::App;
+use crate::focus::Focus;
 use crate::hints::{action, key, Hint};
 use crate::message_queue;
 use crate::ui::hint_line;
@@ -22,9 +23,19 @@ pub(super) fn starting(app: &App) -> Vec<Hint> {
 
 /// A running turn or shell command; queue actions need a reachable, empty input.
 pub(super) fn running(app: &App) -> Vec<Hint> {
-    // A picker owns Esc and Ctrl+C, so neither interrupts nor cancels behind it.
-    if app.picker_focused() {
+    // A picker owns Esc and Ctrl+C; in a child view Ctrl+C only warns, so neither interrupts.
+    if app.picker_focused() || app.subagents.viewed_subagent_id.is_some() {
         return Vec::new();
+    }
+    // The focused subagent list takes Esc back to the input; Ctrl+C first clears a typed prompt.
+    if app.focus() == Focus::SubagentList {
+        if !app.chat_input.full_text().is_empty() {
+            return Vec::new();
+        }
+        return match message_queue::has_removable(app) {
+            true => vec![CANCEL_LAST_QUEUED],
+            false => vec![(key::CTRL_C, action::INTERRUPT)],
+        };
     }
     // Ctrl+C cancels a queued prompt before interrupting.
     if !message_queue::has_removable(app) {
@@ -54,15 +65,8 @@ pub(super) fn push(spans: &mut Vec<Span<'_>>, prefix: String, hints: &[Hint]) {
         }
         return;
     }
-    let key = hint_line::key_style();
     spans.push(Span::styled(format!("({prefix}"), muted));
-    for (index, (keys, action)) in hints.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::styled(" · ", muted));
-        }
-        spans.push(Span::styled(*keys, key));
-        spans.push(Span::styled(format!(" to {action}"), muted));
-    }
+    spans.extend(hint_line::inline_spans(hints));
     spans.push(Span::styled(")", muted));
 }
 

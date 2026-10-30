@@ -2,12 +2,14 @@
 
 use std::sync::Arc;
 
+use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::mpsc::Sender;
 
 use crate::app::App;
 use crate::narrator_manager::{self, ReadAloudTracking, Speech};
-use crate::server::{method, Client, NarrationSummarizeParams, NarrationSummarizeResponse};
+use crate::server::{
+    method, Client, EntryHead, NarrationSummarizeParams, NarrationSummarizeResponse, PublicTurn,
+};
 
 /// One turn's accumulated data.
 #[derive(Debug, Default)]
@@ -112,7 +114,6 @@ pub struct Narrator {
     cancel: Option<tokio::task::AbortHandle>,
     /// Animation frame of the narrator row.
     pub frame: usize,
-    pub tx: Option<Sender<Event>>,
     /// The TTS client exists only with a `speech` config.
     pub speech_config: Option<crate::tts::SpeechConfig>,
     pub speech: Option<Speech>,
@@ -147,19 +148,13 @@ pub fn on_turn_cancel(app: &mut App) {
 
 /// Narrator tracking, entryAdded half: the user entry's id and
 /// the assistant entry's text feed the turn summary tracker.
-pub fn track_narrator_added(app: &mut App, params: &Value) {
-    let Some(entry) = params.get("entry") else {
+pub fn track_narrator_added(app: &mut App, params: &Value, entry: &EntryHead) {
+    let Some(id) = entry.id.as_deref() else {
         return;
     };
-    if entry.get("type").and_then(Value::as_str) != Some("message") {
-        return;
-    }
-    let Some(id) = entry.get("id").and_then(Value::as_str) else {
-        return;
-    };
-    match entry.get("role").and_then(Value::as_str) {
+    match entry.message_role() {
         Some("user") => on_user_message(app, id),
-        Some("assistant") => on_assistant_text(app, &entry_text(entry)),
+        Some("assistant") => on_assistant_text(app, &entry_text(&params["entry"])),
         _ => {}
     }
 }
@@ -185,27 +180,17 @@ pub fn track_narrator_updated(app: &mut App, params: &Value) {
 /// A message entry's text blocks, joined with a blank line like the server's
 /// `PublicMessageEntry.text`.
 fn entry_text(entry: &Value) -> String {
-    entry
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-                .filter_map(|block| block.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        })
+    let message = crate::server::MessageEntry::deserialize(entry);
+    message
+        .map(|message| message.text("\n\n"))
         .unwrap_or_default()
 }
 
 /// The failed turn's error message for the summary request: the raw wire
 /// message, else its code.
-pub fn turn_error_message(params: &Value) -> String {
-    params
-        .pointer("/turn/error/message")
-        .and_then(Value::as_str)
-        .or_else(|| params.pointer("/turn/error/code").and_then(Value::as_str))
+pub fn turn_error_message(turn: &PublicTurn) -> String {
+    turn.error_message()
+        .or(turn.error_code())
         .unwrap_or_default()
         .to_owned()
 }
@@ -213,9 +198,8 @@ pub fn turn_error_message(params: &Value) -> String {
 /// An `incomplete_stream` failure with no
 /// queued server work auto-retries, and the retried turn's summary carries no
 /// error.
-pub fn retries_incomplete_stream(app: &App, params: &Value) -> bool {
-    params.pointer("/turn/error/code").and_then(Value::as_str) == Some("incomplete_stream")
-        && app.queue.is_empty()
+pub fn retries_incomplete_stream(app: &App, turn: &PublicTurn) -> bool {
+    turn.error_code() == Some("incomplete_stream") && app.queue.is_empty()
 }
 
 /// Request the turn's summary to read aloud.
@@ -227,8 +211,7 @@ pub fn on_turn_end(app: &mut App, client: &Arc<Client>) {
     if !app.session.startup_config.narrator_enabled || !can_speak {
         return;
     }
-    let (Some(session_id), Some(tx)) = (app.session.session_id.clone(), app.narrator.tx.clone())
-    else {
+    let (Some(session_id), Some(tx)) = (app.session.session_id.clone(), app.events.clone()) else {
         return;
     };
     app.narrator.state = NarratorState::Summarizing;
@@ -258,12 +241,11 @@ pub fn on_turn_end(app: &mut App, client: &Arc<Client>) {
                 .ok()
                 .and_then(|response| response.summary)
         });
-        let _ = tx
-            .send(Event::Summary {
-                generation,
-                summary,
-            })
-            .await;
+        let event = Event::Summary {
+            generation,
+            summary,
+        };
+        let _ = tx.send(event.into()).await;
     });
     app.narrator.cancel = Some(handle.abort_handle());
 }

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
 
-import httpx
+import httpx2
 from pydantic import BaseModel, ConfigDict
 
 from vibe.core.utils.retry import async_retry
@@ -65,7 +65,7 @@ class AdminConfigApplyResult:
 
 
 @async_retry(tries=MANAGED_CONFIG_RETRY_TRIES, delay_seconds=0.5, backoff_factor=2.0)
-async def _fetch_response(url: str, headers: dict[str, str]) -> httpx.Response:
+async def _fetch_response(url: str, headers: dict[str, str]) -> httpx2.Response:
     async with VibeAsyncHTTPClient(verify=build_ssl_context()) as client:
         response = await client.get(
             url, headers=headers, timeout=MANAGED_CONFIG_TIMEOUT
@@ -89,12 +89,12 @@ async def fetch_managed_config(base_url: str, api_key: str) -> ManagedConfigResu
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
         response = await _fetch_response(url, headers)
-    except httpx.HTTPStatusError as exc:
+    except httpx2.HTTPStatusError as exc:
         logger.debug(
             "Managed config fetch status=%s url=%s", exc.response.status_code, url
         )
         return ManagedConfigResult(error=f"HTTP {exc.response.status_code}")
-    except httpx.RequestError as exc:
+    except httpx2.RequestError as exc:
         logger.debug("Managed config fetch failed url=%s error=%s", url, exc)
         return ManagedConfigResult(error=str(exc))
     except Exception as exc:

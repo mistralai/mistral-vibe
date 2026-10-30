@@ -1,11 +1,12 @@
 //! MCP browser rows, wire tolerance and runtime adoption.
 
-use std::sync::Arc;
-
 use serde_json::{json, Value};
 use vibe_rs::app::App;
 use vibe_rs::mcp::{self, rows, rows::Row};
-use vibe_rs::server::{Client, MCPSourceKind, MCPSourceStatus, MCPState};
+use vibe_rs::server::{MCPSourceKind, MCPSourceStatus, MCPState};
+use vibe_rs::ui_event::{self, UiEvent};
+
+use crate::support::stub;
 
 fn source(name: &str, kind: &str, extra: Value) -> Value {
     let mut source = json!({
@@ -38,16 +39,16 @@ fn open_app(runtime: &Value) -> App {
 }
 
 /// Route the browser's own requests through a channel the test drains.
-fn with_channel(app: &mut App) -> tokio::sync::mpsc::Receiver<mcp::Event> {
+fn with_channel(app: &mut App) -> tokio::sync::mpsc::Receiver<UiEvent> {
     let (tx, rx) = tokio::sync::mpsc::channel(8);
-    app.mcp.tx = Some(tx);
+    app.events = Some(tx);
     rx
 }
 
-fn drain(app: &mut App, rx: &mut tokio::sync::mpsc::Receiver<mcp::Event>) {
-    let client = Arc::new(Client::stub());
+fn drain(app: &mut App, rx: &mut tokio::sync::mpsc::Receiver<UiEvent>) {
+    let client = stub();
     while let Ok(event) = rx.try_recv() {
-        mcp::apply_event(app, &client, event);
+        ui_event::apply(app, &client, event);
     }
 }
 
@@ -87,8 +88,10 @@ fn private_connectors_warning_leads_connectors_without_taking_the_highlight() {
         }),
     ));
     let rows = rows::rows(&app.mcp);
-    assert!(matches!(rows[1], Row::PrivateConnectorsHidden));
-    assert!(matches!(rows[2], Row::Manage));
+    let warning = connector_lead(&rows);
+    assert!(matches!(rows[warning], Row::PrivateConnectorsHidden));
+    assert!(matches!(&rows[warning + 1], Row::Detail(hint) if hint == rows::KEY_HINT));
+    assert!(matches!(rows[warning + 2], Row::Manage));
     assert!(matches!(&rows[app.mcp.list.selected()], Row::Source(row) if row.name == "gh"));
 }
 
@@ -101,7 +104,8 @@ fn private_connectors_warning_shows_without_any_connector() {
     let rows = rows::rows(&app.mcp);
     assert!(matches!(&rows[3], Row::Header(title) if title == "Available Connectors"));
     assert!(matches!(rows[4], Row::PrivateConnectorsHidden));
-    assert_eq!(rows.len(), 5);
+    assert!(matches!(&rows[5], Row::Detail(hint) if hint == rows::KEY_HINT));
+    assert_eq!(rows.len(), 6);
 }
 
 #[test]
@@ -115,13 +119,13 @@ fn private_connectors_warning_shows_when_no_source_is_visible() {
         initial_source: String::new(),
         reopened: false,
     };
-    mcp::apply_event(&mut app, &Arc::new(Client::stub()), event);
-    assert!(!app.mcp.open);
-    let transcript = &app.view.transcript;
-    assert!(transcript
-        .lines()
-        .filter_map(|entry| transcript.entry_content(entry.id))
-        .any(|content| content.to_string().contains("run `vibe --setup`")));
+    mcp::apply_event(&mut app, &stub(), event);
+    assert!(app.mcp.open);
+    let rows = rows::rows(&app.mcp);
+    assert!(matches!(
+        rows[connector_lead(&rows)],
+        Row::PrivateConnectorsHidden
+    ));
 }
 
 #[test]
@@ -133,7 +137,21 @@ fn private_connectors_warning_stays_while_search_matches_nothing() {
     app.mcp.search.query = "zzz".to_owned();
     let rows = rows::rows(&app.mcp);
     assert!(matches!(rows[1], Row::PrivateConnectorsHidden));
-    assert_eq!(rows.len(), 2);
+    assert!(matches!(&rows[2], Row::Detail(hint) if hint == rows::KEY_HINT));
+    assert_eq!(rows.len(), 3);
+}
+
+#[test]
+fn the_key_hint_shows_only_when_connectors_fail_or_are_scoped() {
+    let has_hint = |extra: Value| {
+        let app = open_app(&runtime(vec![source("gh", "connector", json!({}))], extra));
+        rows::rows(&app.mcp)
+            .iter()
+            .any(|row| matches!(row, Row::Detail(hint) if hint == rows::KEY_HINT))
+    };
+    assert!(!has_hint(json!({})));
+    assert!(has_hint(json!({"connectorError": "HTTP 401"})));
+    assert!(has_hint(json!({"privateConnectorsHidden": true})));
 }
 
 fn shared_only_app() -> App {
@@ -228,7 +246,7 @@ fn private_connectors_block_survives_a_reread_without_the_flag() {
         initial_source: String::new(),
         reopened: false,
     };
-    mcp::apply_event(&mut app, &Arc::new(Client::stub()), event);
+    mcp::apply_event(&mut app, &stub(), event);
     assert!(app.mcp.state.private_connectors_hidden);
     assert!(source_rows(&app)[0].blocked);
 }
@@ -283,7 +301,7 @@ fn manage_row_leads_connectors_but_never_takes_the_initial_highlight() {
         json!({"manageConnectorsUrl": "https://studio.example/connectors"}),
     ));
     let rows = rows::rows(&app.mcp);
-    assert!(matches!(rows[1], Row::Manage));
+    assert!(matches!(rows[connector_lead(&rows)], Row::Manage));
     assert!(matches!(&rows[app.mcp.list.selected()], Row::Source(row) if row.name == "gh"));
 }
 
@@ -326,9 +344,41 @@ fn closed_browser_ignores_runtime_updates() {
 fn refreshing_label_only_shows_in_the_list_view() {
     let mut app = open_app(&runtime(vec![source("fs", "server", json!({}))], json!({})));
     app.mcp.refreshing = true;
-    assert_eq!(rows::title(&app.mcp), "MCP Servers  (refreshing)");
+    assert_eq!(
+        rows::title(&app.mcp),
+        "MCP Servers & Connectors  (refreshing)"
+    );
     app.mcp.viewing_name = Some("fs".to_owned());
     assert_eq!(rows::title(&app.mcp), "MCP Server: fs");
+}
+
+/// The first row under the "Available Connectors" header.
+fn connector_lead(rows: &[Row]) -> usize {
+    1 + rows
+        .iter()
+        .position(|row| matches!(row, Row::Header(title) if title == "Available Connectors"))
+        .expect("connectors section")
+}
+
+#[test]
+fn an_empty_catalog_shows_both_sections_with_their_empty_notes() {
+    let app = open_app(&runtime(vec![], json!({})));
+    let notes: Vec<String> = rows::rows(&app.mcp)
+        .iter()
+        .filter_map(|row| match row {
+            Row::Header(text) | Row::Note(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        notes,
+        [
+            "Local MCP Servers",
+            "No local MCP servers configured.",
+            "Available Connectors",
+            "No connectors available.",
+        ]
+    );
 }
 
 fn status(app: &App, name: &str) -> MCPSourceStatus {
@@ -343,7 +393,7 @@ fn status(app: &App, name: &str) -> MCPSourceStatus {
 
 #[test]
 fn rejected_toggle_restores_the_server_state_and_warns() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = open_app(&runtime(vec![source("fs", "server", json!({}))], json!({})));
     mcp::set_disabled(&mut app, &client, true);
     assert_eq!(status(&app, "fs"), MCPSourceStatus::Disabled);
@@ -365,7 +415,7 @@ fn toggle_failed(name: &str, tool_name: Option<&str>) -> mcp::Event {
 
 #[test]
 fn rejected_toggle_keeps_the_paint_of_toggles_still_in_flight() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let sources = vec![
         source("a", "server", json!({})),
         source("b", "server", json!({})),
@@ -381,7 +431,7 @@ fn rejected_toggle_keeps_the_paint_of_toggles_still_in_flight() {
 
 #[test]
 fn rejected_tool_toggle_restores_only_that_tool() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let tools = json!({"tools": [{"name": "read"}, {"name": "write"}]});
     let mut app = open_app(&runtime(vec![source("fs", "server", tools)], json!({})));
     mcp::select(&mut app);
@@ -399,19 +449,17 @@ fn rejected_tool_toggle_restores_only_that_tool() {
 
 #[test]
 fn enable_waits_for_the_server_before_painting_a_status() {
-    let client = Arc::new(Client::stub());
     let disabled = json!({"status": "disabled"});
     let mut app = open_app(&runtime(vec![source("fs", "server", disabled)], json!({})));
-    mcp::set_disabled(&mut app, &client, false);
+    mcp::set_disabled(&mut app, &stub(), false);
     assert_eq!(status(&app, "fs"), MCPSourceStatus::Disabled);
 }
 
 #[test]
 fn plugin_server_toggles_are_refused_locally() {
-    let client = Arc::new(Client::stub());
     let plugin = json!({"pluginName": "devtools"});
     let mut app = open_app(&runtime(vec![source("fs", "server", plugin)], json!({})));
-    mcp::set_disabled(&mut app, &client, true);
+    mcp::set_disabled(&mut app, &stub(), true);
     assert_eq!(status(&app, "fs"), MCPSourceStatus::Connected);
     let toast = &app.overlays.toasts.back().unwrap().text;
     assert_eq!(
@@ -430,7 +478,7 @@ fn opened(app: &mut App, reopened: bool) {
         initial_source: "weather".to_owned(),
         reopened,
     };
-    mcp::apply_event(app, &Arc::new(Client::stub()), event);
+    mcp::apply_event(app, &stub(), event);
 }
 
 #[test]
@@ -503,7 +551,7 @@ fn unusable_runtime() -> Value {
     )
 }
 
-fn connecting_app() -> (App, tokio::sync::mpsc::Receiver<mcp::Event>) {
+fn connecting_app() -> (App, tokio::sync::mpsc::Receiver<UiEvent>) {
     let mut app = open_app(&unusable_runtime());
     let rx = with_channel(&mut app);
     app.mcp.connecting = Some("deepwiki".to_owned());
@@ -573,7 +621,7 @@ fn a_failed_connect_leaves_another_viewed_connector_alone() {
         name: "deepwiki".to_owned(),
         message: "Could not connect DeepWiki (HTTP 503).".to_owned(),
     };
-    mcp::apply_event(&mut app, &Arc::new(Client::stub()), failed);
+    mcp::apply_event(&mut app, &stub(), failed);
     assert_eq!(app.mcp.viewing_name.as_deref(), Some("wiki"));
     assert_eq!(app.mcp.connecting.as_deref(), Some("wiki"));
     assert_eq!(app.overlays.toasts.len(), 1);
@@ -587,7 +635,7 @@ fn a_failed_connect_returns_from_its_own_view() {
         name: "deepwiki".to_owned(),
         message: "Could not connect DeepWiki (HTTP 503).".to_owned(),
     };
-    mcp::apply_event(&mut app, &Arc::new(Client::stub()), failed);
+    mcp::apply_event(&mut app, &stub(), failed);
     assert_eq!(app.mcp.viewing_name, None);
     assert_eq!(app.mcp.connecting, None);
 }
@@ -602,7 +650,7 @@ fn open_named(query: &str) -> App {
         initial_source: query.to_owned(),
         reopened: false,
     };
-    mcp::apply_event(&mut app, &Arc::new(Client::stub()), event);
+    mcp::apply_event(&mut app, &stub(), event);
     app
 }
 
@@ -647,12 +695,11 @@ async fn toggle_response_without_runtime_rereads_the_catalog() {
     let mut rx = with_channel(&mut app);
     app.session.session_id = Some("session".to_owned());
 
-    mcp::apply_event(
-        &mut app,
-        &Arc::new(Client::stub()),
-        mcp::Event::Toggled(json!({})),
-    );
+    mcp::apply_event(&mut app, &stub(), mcp::Event::Toggled(json!({})));
 
     let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await;
-    assert!(matches!(event, Ok(Some(mcp::Event::Error(_)))));
+    assert!(matches!(
+        event,
+        Ok(Some(UiEvent::Mcp(mcp::Event::Error(_))))
+    ));
 }

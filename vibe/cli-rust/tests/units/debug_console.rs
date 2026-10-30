@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
@@ -24,6 +24,8 @@ use vibe_rs::input;
 use vibe_rs::mouse;
 use vibe_rs::server::Client;
 use vibe_rs::ui::theme;
+
+use crate::support::{ctrl, key, mouse, press, send_mouse, stub};
 
 fn entry(id: &str, level: &str, message: &str) -> LogEntry {
     LogEntry {
@@ -261,7 +263,7 @@ fn a_poll_during_the_fill_does_not_stall_the_next_page() {
 
 #[test]
 fn stale_answers_are_dropped_but_still_release_the_in_flight_slot() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = App::default();
     app.debug_console.open = true;
     app.debug_console
@@ -298,10 +300,10 @@ fn stale_answers_are_dropped_but_still_release_the_in_flight_slot() {
 async fn a_stale_poll_after_a_reopen_retries_the_first_page() {
     let (client, mut frames) = Client::stub_answering();
     let client = Arc::new(client);
-    let (tx, _rx) = mpsc::channel::<debug_console::Event>(8);
+    let (tx, _rx) = mpsc::channel::<vibe_rs::ui_event::UiEvent>(8);
     let mut app = App::default();
     app.debug_console.open = true;
-    app.debug_console.tx = Some(tx);
+    app.events = Some(tx);
     app.set_session_id("session".to_owned());
     let current = app.debug_console.generation.load(Ordering::Relaxed);
     // A poll answer from before a close/reopen: dropped, but the reopened
@@ -326,10 +328,10 @@ async fn a_stale_poll_after_a_reopen_retries_the_first_page() {
 async fn a_stale_page_from_the_previous_session_is_dropped_and_refetched() {
     let (client, mut frames) = Client::stub_answering();
     let client = Arc::new(client);
-    let (tx, _rx) = mpsc::channel::<debug_console::Event>(8);
+    let (tx, _rx) = mpsc::channel::<vibe_rs::ui_event::UiEvent>(8);
     let mut app = App::default();
     app.debug_console.open = true;
-    app.debug_console.tx = Some(tx);
+    app.events = Some(tx);
     app.set_session_id("old".to_owned());
     let current = app.debug_console.generation.load(Ordering::Relaxed);
     // The session switched while the old session's page was in flight.
@@ -355,7 +357,6 @@ async fn a_stale_page_from_the_previous_session_is_dropped_and_refetched() {
 
 #[test]
 fn a_page_landing_at_the_top_does_not_snap_to_the_bottom() {
-    let client = Arc::new(Client::stub());
     let mut app = App::default();
     app.debug_console.open = true;
     app.set_session_id("session".to_owned());
@@ -374,7 +375,7 @@ fn a_page_landing_at_the_top_does_not_snap_to_the_bottom() {
     // Reaching the top loads the previous page.
     apply_event(
         &mut app,
-        &client,
+        &stub(),
         Event::Page {
             generation: current,
             session: "session".to_owned(),
@@ -397,7 +398,7 @@ fn a_page_landing_at_the_top_does_not_snap_to_the_bottom() {
 
 #[test]
 fn a_fresh_page_answer_fills_and_a_fresh_poll_appends() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = App::default();
     app.debug_console.open = true;
     app.set_session_id("session".to_owned());
@@ -576,11 +577,10 @@ fn the_fill_loop_stops_at_the_entry_bound() {
 
 #[test]
 fn a_poll_does_not_rekick_paging_at_the_entry_bound() {
-    let client = Arc::new(Client::stub());
-    let (tx, _rx) = mpsc::channel::<debug_console::Event>(8);
+    let (tx, _rx) = mpsc::channel::<vibe_rs::ui_event::UiEvent>(8);
     let mut app = App::default();
     app.debug_console.open = true;
-    app.debug_console.tx = Some(tx);
+    app.events = Some(tx);
     app.set_session_id("session".to_owned());
     let console = bounded_console();
     app.debug_console.entries = console.entries;
@@ -589,7 +589,7 @@ fn a_poll_does_not_rekick_paging_at_the_entry_bound() {
     app.debug_console.cursor = console.cursor;
     app.debug_console.has_more = true;
     let current = app.debug_console.generation.load(Ordering::Relaxed);
-    apply_event(&mut app, &client, Event::Polled(current, vec![]));
+    apply_event(&mut app, &stub(), Event::Polled(current, vec![]));
     assert!(!app.debug_console.page_in_flight.load(Ordering::Relaxed));
 }
 
@@ -644,7 +644,7 @@ fn the_view_resolves_top_and_bottom() {
 
 #[test]
 fn plain_navigation_keys_scroll_the_console_but_printable_keys_fall_through() {
-    let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let plain = |code| key(code);
     assert!(matches!(
         scroll_for_key(&plain(KeyCode::Up)),
         Some(Scroll::Up)
@@ -673,12 +673,11 @@ fn plain_navigation_keys_scroll_the_console_but_printable_keys_fall_through() {
 
 #[test]
 fn scroll_home_canonicalizes_without_a_render() {
-    let client = Arc::new(Client::stub());
     let mut app = App::default();
     app.debug_console.open = true;
     app.debug_console.wrap_counts = vec![1; 10];
     app.debug_console.body_height = 4;
-    scroll_home(&mut app, &client);
+    scroll_home(&mut app, &stub());
     // Clamped to the top immediately, not left at u16::MAX for the render to
     // fix: a degenerate panel that never draws must not strand the offset.
     assert_eq!(app.debug_console.scroll, 6);
@@ -699,14 +698,14 @@ fn console_app() -> App {
 
 #[tokio::test]
 async fn ctrl_backslash_toggles_the_debug_console() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = App::default();
     app.set_session_id("session".to_owned());
     // A legacy terminal sends Ctrl+\ as byte 0x1c, which crossterm decodes as
     // Ctrl+'4'; the Kitty protocol reports the backslash itself.
     let forms = [
         KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL),
-        KeyEvent::new(KeyCode::Char('4'), KeyModifiers::CONTROL),
+        ctrl('4'),
     ];
     for ctrl_backslash in forms {
         assert_eq!(
@@ -724,7 +723,7 @@ async fn ctrl_backslash_toggles_the_debug_console() {
 
 #[tokio::test]
 async fn the_debug_command_toggles_the_console() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
     let mut app = App::default();
     app.set_session_id("session".to_owned());
@@ -743,8 +742,8 @@ async fn polls_follow_session_changes_while_the_console_is_open() {
     let (client, mut frames) = Client::stub_answering();
     let client = Arc::new(client);
     let mut app = App::default();
-    let (tx, mut rx) = mpsc::channel::<debug_console::Event>(8);
-    app.debug_console.tx = Some(tx);
+    let (tx, mut rx) = mpsc::channel::<vibe_rs::ui_event::UiEvent>(8);
+    app.events = Some(tx);
     app.set_session_id("old".to_owned());
     debug_console::toggle(&mut app, &client);
     assert!(app.debug_console.open);
@@ -768,7 +767,7 @@ async fn polls_follow_session_changes_while_the_console_is_open() {
             }
             event = rx.recv() => {
                 let Some(event) = event else { break };
-                apply_event(&mut app, &client, event);
+                vibe_rs::ui_event::apply(&mut app, &client, event);
             }
         }
     }
@@ -811,10 +810,10 @@ fn a_session_switch_clears_the_consoles_log_state() {
 async fn a_filling_poll_after_a_session_switch_keeps_older_history_reachable() {
     let (client, mut frames) = Client::stub_answering();
     let client = Arc::new(client);
-    let (tx, _rx) = mpsc::channel::<debug_console::Event>(8);
+    let (tx, _rx) = mpsc::channel::<vibe_rs::ui_event::UiEvent>(8);
     let mut app = App::default();
     app.debug_console.open = true;
-    app.debug_console.tx = Some(tx);
+    app.events = Some(tx);
     app.set_session_id("old".to_owned());
     app.set_session_id("new".to_owned());
     let current = app.debug_console.generation.load(Ordering::Relaxed);
@@ -843,15 +842,11 @@ async fn a_filling_poll_after_a_session_switch_keeps_older_history_reachable() {
 
 #[tokio::test]
 async fn navigation_keys_scroll_the_console_while_it_is_open() {
-    let client = Arc::new(Client::stub());
-    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
     let mut app = console_app();
-    let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
-    assert!(!input::handle_key(&mut app, &client, &config_tx, up));
+    assert!(!press(&mut app, KeyCode::Up));
     assert_eq!(app.debug_console.scroll, 1);
     // Printable keys still reach the composer.
-    let letter = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
-    assert!(!input::handle_key(&mut app, &client, &config_tx, letter));
+    assert!(!press(&mut app, KeyCode::Char('a')));
     assert_eq!(app.chat_input.input, "a");
     assert_eq!(app.debug_console.scroll, 1);
 }
@@ -882,65 +877,53 @@ fn the_panel_docks_only_where_the_main_area_stays_usable() {
 
 #[tokio::test]
 async fn a_hidden_console_does_not_take_the_navigation_keys() {
-    let client = Arc::new(Client::stub());
-    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
     let mut app = console_app();
     // A terminal too narrow for the dock hides the panel while it stays open.
     app.debug_console.visible = false;
     // A two-line prompt: Up moves the composer's caret up a row.
     app.chat_input.input = "first\nsecond".into();
     app.chat_input.cursor = app.chat_input.input.len();
-    let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
-    assert!(!input::handle_key(&mut app, &client, &config_tx, up));
+    assert!(!press(&mut app, KeyCode::Up));
     assert_eq!(app.debug_console.scroll, 0);
     assert!(app.chat_input.cursor < app.chat_input.input.len());
 }
 
 #[tokio::test]
 async fn the_queue_selection_mode_keeps_the_navigation_keys() {
-    let client = Arc::new(Client::stub());
-    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
     let mut app = console_app();
     app.queue.selected = Some("queued".to_owned());
-    let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
-    assert!(!input::handle_key(&mut app, &client, &config_tx, up));
+    assert!(!press(&mut app, KeyCode::Up));
     assert_eq!(app.debug_console.scroll, 0);
 }
 
 #[tokio::test]
 async fn queue_editing_keeps_the_navigation_keys() {
-    let client = Arc::new(Client::stub());
-    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
     let mut app = console_app();
     app.queue.selected = Some("queued".to_owned());
     app.queue.editing = true;
     // A two-line prompt: Up moves the composer's caret up a row.
     app.chat_input.input = "first\nsecond".into();
     app.chat_input.cursor = app.chat_input.input.len();
-    let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
-    assert!(!input::handle_key(&mut app, &client, &config_tx, up));
+    assert!(!press(&mut app, KeyCode::Up));
     assert_eq!(app.debug_console.scroll, 0);
     assert!(app.chat_input.cursor < app.chat_input.input.len());
 }
 
 #[tokio::test]
 async fn an_open_completion_popup_keeps_the_navigation_keys() {
-    let client = Arc::new(Client::stub());
-    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
     let mut app = console_app();
     app.completion.entries = vec![CompletionEntry {
         label: "/debug".to_owned(),
         description: String::new(),
         origin: None,
     }];
-    let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
-    assert!(!input::handle_key(&mut app, &client, &config_tx, up));
+    assert!(!press(&mut app, KeyCode::Up));
     assert_eq!(app.debug_console.scroll, 0);
 }
 
 #[test]
 fn the_wheel_scrolls_the_console_log() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = console_app();
     debug_console::wheel(&mut app, &client, true);
     assert_eq!(app.debug_console.scroll, 2); // one wheel notch
@@ -1030,35 +1013,21 @@ fn drawn_console_app() -> (App, Terminal<TestBackend>) {
 
 #[test]
 fn a_wheel_over_the_console_header_or_border_does_not_scroll_the_log() {
-    let client = Arc::new(Client::stub());
-    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
     let (mut app, _terminal) = drawn_console_app();
-    let wheel_up = |column: u16, row: u16| MouseEvent {
-        kind: MouseEventKind::ScrollUp,
-        column,
-        row,
-        modifiers: KeyModifiers::NONE,
-    };
+    let wheel_up = |column: u16, row: u16| mouse(MouseEventKind::ScrollUp, column, row);
     // The log body scrolls.
-    mouse::handle(&mut app, &client, &config_tx, wheel_up(80, 3));
+    send_mouse(&mut app, wheel_up(80, 3));
     assert_eq!(app.debug_console.scroll, 2);
     // The header above it and the panel's border stay inert.
-    mouse::handle(&mut app, &client, &config_tx, wheel_up(80, 0));
-    mouse::handle(&mut app, &client, &config_tx, wheel_up(72, 3));
+    send_mouse(&mut app, wheel_up(80, 0));
+    send_mouse(&mut app, wheel_up(72, 3));
     assert_eq!(app.debug_console.scroll, 2);
 }
 
 #[test]
 fn a_click_released_off_the_log_body_does_not_copy() {
-    let client = Arc::new(Client::stub());
-    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
     let (mut app, _terminal) = drawn_console_app();
-    let click = |kind: MouseEventKind, column: u16, row: u16| MouseEvent {
-        kind,
-        column,
-        row,
-        modifiers: KeyModifiers::NONE,
-    };
+    let click = |kind: MouseEventKind, column: u16, row: u16| mouse(kind, column, row);
     let copied = |app: &App| {
         app.overlays
             .toasts
@@ -1066,16 +1035,12 @@ fn a_click_released_off_the_log_body_does_not_copy() {
             .any(|toast| toast.text == "Copied to clipboard")
     };
     // A click on a log line copies it.
-    mouse::handle(
+    send_mouse(
         &mut app,
-        &client,
-        &config_tx,
         click(MouseEventKind::Down(MouseButton::Left), 80, 3),
     );
-    mouse::handle(
+    send_mouse(
         &mut app,
-        &client,
-        &config_tx,
         click(MouseEventKind::Up(MouseButton::Left), 80, 3),
     );
     assert!(copied(&app));
@@ -1083,43 +1048,31 @@ fn a_click_released_off_the_log_body_does_not_copy() {
     // The router keeps the pressed target wherever the pointer is released,
     // but a release off the body (the border, or outside the panel) copies
     // nothing.
-    mouse::handle(
+    send_mouse(
         &mut app,
-        &client,
-        &config_tx,
         click(MouseEventKind::Down(MouseButton::Left), 80, 3),
     );
-    mouse::handle(
+    send_mouse(
         &mut app,
-        &client,
-        &config_tx,
         click(MouseEventKind::Up(MouseButton::Left), 72, 3),
     );
     assert!(!copied(&app));
-    mouse::handle(
+    send_mouse(
         &mut app,
-        &client,
-        &config_tx,
         click(MouseEventKind::Down(MouseButton::Left), 80, 3),
     );
-    mouse::handle(
+    send_mouse(
         &mut app,
-        &client,
-        &config_tx,
         click(MouseEventKind::Up(MouseButton::Left), 10, 3),
     );
     assert!(!copied(&app));
     // A release on the header's pad row above the body copies nothing either.
-    mouse::handle(
+    send_mouse(
         &mut app,
-        &client,
-        &config_tx,
         click(MouseEventKind::Down(MouseButton::Left), 80, 3),
     );
-    mouse::handle(
+    send_mouse(
         &mut app,
-        &client,
-        &config_tx,
         click(MouseEventKind::Up(MouseButton::Left), 80, 1),
     );
     assert!(!copied(&app));

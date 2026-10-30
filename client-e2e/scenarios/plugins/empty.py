@@ -11,4 +11,4 @@ request_methods = METHODS
 timeline: Timeline = ["/plugins\r"]
 
 screen_contains = ("No plugins are installed for this session.",)
-screen_excludes = ("Plugins opened...",)
+screen_excludes = ("Search plugins",)

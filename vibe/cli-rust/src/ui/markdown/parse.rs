@@ -27,7 +27,7 @@ pub(super) fn parse_with_links(text: &str, profile: Profile) -> Parsed {
         inline: Vec::new(),
         styles: vec![base],
         stack: Vec::new(),
-        in_quote: false,
+        quote_depth: 0,
         link: None,
         link_saves: Vec::new(),
         links: Vec::new(),
@@ -62,7 +62,7 @@ struct Builder {
     inline: Vec<Sc>,
     styles: Vec<Style>,
     stack: Vec<Frame>,
-    in_quote: bool,
+    quote_depth: usize,
     /// The open explicit link's index in `links`; autolinking must not run inside it.
     link: Option<usize>,
     /// Saved `link` values for an open link or image, restored at its end; later spans win.
@@ -168,12 +168,16 @@ impl Builder {
 
     fn start(&mut self, tag: Tag) {
         match tag {
-            Tag::Heading { level, .. } => self.styles.push(
-                Style::default()
-                    .fg(theme::md_heading(super::heading::level(level)))
-                    .add_modifier(super::heading::modifier(level)),
-            ),
-            Tag::BlockQuote => self.in_quote = true,
+            Tag::Heading { level, .. } => self
+                .styles
+                .push(theme::md_heading(super::heading::level(level))),
+            Tag::BlockQuote => {
+                self.quote_depth += 1;
+                self.styles.push(match self.profile {
+                    Profile::Assistant => self.style().patch(theme::muted_style()),
+                    Profile::Widget => self.style(),
+                });
+            }
             Tag::CodeBlock(kind) => {
                 self.code = Some(String::new());
                 self.lang = fence::lang(&kind);
@@ -244,13 +248,15 @@ impl Builder {
                     let inline = std::mem::take(&mut self.inline);
                     self.push_block(Block::Quote(inline));
                 }
-                self.in_quote = false;
+                self.quote_depth = self.quote_depth.saturating_sub(1);
+                self.styles.pop();
             }
             TagEnd::CodeBlock => {
                 if let Some(code) = self.code.take() {
                     let code = code.trim_end_matches('\n');
                     let lang = std::mem::take(&mut self.lang);
-                    self.push_block(Block::Code(fence::lines(code, &lang)));
+                    let lines = fence::lines(code, &lang);
+                    self.push_block(Block::Code(lang, lines));
                 }
             }
             TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
@@ -294,7 +300,7 @@ impl Builder {
         if inline.is_empty() {
             return;
         }
-        if self.in_quote {
+        if self.quote_depth > 0 {
             self.push_block(Block::Quote(inline));
         } else {
             self.push_block(Block::Paragraph(inline));

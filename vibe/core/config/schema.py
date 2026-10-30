@@ -2,15 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Self
+from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, PrivateAttr
 from pydantic.fields import FieldInfo
 
 from vibe.core.utils.merge import MergeStrategy
-
-if TYPE_CHECKING:
-    from vibe.core.config.harness_files import HarnessFilesManager
 
 
 class DuplicateMergeMetadataError(TypeError):
@@ -52,18 +49,12 @@ class ConfigSchema(BaseModel):
         """
         return True
 
-    def check_layer_keys(
-        self,
-        layers: Sequence[tuple[str, Mapping[str, Any]]],
-        *,
-        harness_files: HarnessFilesManager | None = None,
-    ) -> None:
+    def check_layer_keys(self, layers: Sequence[tuple[str, Mapping[str, Any]]]) -> None:
         """Look at each layer's raw keys once the merged config is valid.
 
         The merge reads only declared keys; a schema overrides this to say
         what it makes of the rest. ``layers`` are (layer name, raw data) pairs
-        in stack order. ``harness_files`` are the files of the session the
-        config is for, or ``None`` for the process's own.
+        in stack order.
         """
 
     @classmethod

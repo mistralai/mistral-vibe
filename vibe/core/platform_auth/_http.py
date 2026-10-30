@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from typing import Any
 
-import httpx
+import httpx2
 
 from vibe.core.platform_auth._credentials_port import (
     PlatformCredentialProvider,
@@ -29,17 +29,17 @@ class UntrustedPlatformDestination(ValueError):
     pass
 
 
-class _PlatformAuth(httpx.Auth):
+class _PlatformAuth(httpx2.Auth):
     def __init__(
         self, target: PlatformCredentialTarget, provider: PlatformCredentialProvider
     ) -> None:
         self._target = target
         self._provider = provider
-        self._base_url = httpx.URL(target.base_url)
+        self._base_url = httpx2.URL(target.base_url)
 
     async def async_auth_flow(
-        self, request: httpx.Request
-    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        self, request: httpx2.Request
+    ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
         if not _is_in_scope(request.url, self._base_url):
             raise UntrustedPlatformDestination(
                 f"Platform credential cannot authorize {request.url}"
@@ -51,7 +51,7 @@ class _PlatformAuth(httpx.Auth):
         _inject_headers(request, resolved)
 
         response = yield request
-        if response.status_code == httpx.codes.UNAUTHORIZED:
+        if response.status_code == httpx2.codes.UNAUTHORIZED:
             await self._provider.reject(
                 self._target, observed=resolved.identity, reason="http_unauthorized"
             )
@@ -83,13 +83,13 @@ class MistralPlatformHTTPClient(VibeAsyncHTTPClient):
 
     async def send(
         self,
-        request: httpx.Request,
+        request: httpx2.Request,
         *,
         stream: bool = False,
-        auth: Any = httpx.USE_CLIENT_DEFAULT,
-        follow_redirects: Any = httpx.USE_CLIENT_DEFAULT,
-    ) -> httpx.Response:
-        if auth is not httpx.USE_CLIENT_DEFAULT:
+        auth: Any = httpx2.USE_CLIENT_DEFAULT,
+        follow_redirects: Any = httpx2.USE_CLIENT_DEFAULT,
+    ) -> httpx2.Response:
+        if auth is not httpx2.USE_CLIENT_DEFAULT:
             raise ValueError("MistralPlatformHTTPClient owns request authentication")
         if follow_redirects is True:
             raise ValueError("MistralPlatformHTTPClient does not follow redirects")
@@ -98,7 +98,7 @@ class MistralPlatformHTTPClient(VibeAsyncHTTPClient):
         )
 
 
-def _is_in_scope(url: httpx.URL, base_url: httpx.URL) -> bool:
+def _is_in_scope(url: httpx2.URL, base_url: httpx2.URL) -> bool:
     if _origin(url) != _origin(base_url):
         return False
     raw_path = url.raw_path.partition(b"?")[0]
@@ -110,14 +110,14 @@ def _is_in_scope(url: httpx.URL, base_url: httpx.URL) -> bool:
     )
 
 
-def _origin(url: httpx.URL) -> tuple[str, str | None, int | None]:
+def _origin(url: httpx2.URL) -> tuple[str, str | None, int | None]:
     default_port = {"http": 80, "https": 443}.get(url.scheme)
     port = url.port if url.port is not None else default_port
     return url.scheme, url.host, port
 
 
 def _inject_headers(
-    request: httpx.Request, snapshot: PlatformCredentialSnapshot
+    request: httpx2.Request, snapshot: PlatformCredentialSnapshot
 ) -> None:
     for name, value in snapshot.headers.items():
         if name in request.headers:

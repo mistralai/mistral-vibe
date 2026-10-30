@@ -17,7 +17,7 @@ from vibe.setup.auth.api_key_persistence import (
     ProviderCredentialsPersistRequest,
     ProviderCredentialsPersistResult,
 )
-from vibe.setup.onboarding.context import OnboardingContext
+from vibe.setup.auth.onboarding_context import OnboardingContext
 
 
 async def _noop_tenant_domain_resolver(

@@ -1,20 +1,20 @@
 //! Approval keys: j/k wrap like the arrows, and the mount grace period swallows decisions only.
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyCode;
 use serde_json::json;
 use tokio::sync::mpsc;
 use vibe_rs::app::{App, Status};
 use vibe_rs::approval;
-use vibe_rs::server::{ApprovalCallback, Client};
+use vibe_rs::server::ApprovalCallback;
 
-fn open_approval() -> (App, mpsc::Receiver<approval::Event>) {
-    let mut app = App::default();
-    app.session.status = Status::Ready;
+use crate::support::{key, stub, with_status};
+
+fn open_approval() -> (App, mpsc::Receiver<vibe_rs::ui_event::UiEvent>) {
+    let mut app = with_status(Status::Ready);
     let (tx, rx) = mpsc::channel(4);
-    app.approval.tx = Some(tx);
+    app.events = Some(tx);
     let callback: ApprovalCallback = serde_json::from_value(json!({
         "callbackId": "approval-1",
         "sessionId": "session-1",
@@ -28,8 +28,7 @@ fn open_approval() -> (App, mpsc::Receiver<approval::Event>) {
 }
 
 fn press(app: &mut App, code: KeyCode) {
-    let client = Arc::new(Client::stub());
-    approval::handle_key(app, &client, KeyEvent::new(code, KeyModifiers::NONE));
+    approval::handle_key(app, &stub(), key(code));
 }
 
 #[tokio::test]

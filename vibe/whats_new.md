@@ -1,7 +1,0 @@
-# What's new in v3.0.3
-
-- **Active model in the footer**: see which model and thinking level your next prompt uses, right next to the token counter, and click it to switch
-- **Scoped post_agent hooks**: run a `post_agent` hook only after a specific subagent, or only after the main agent with `match = "main"`.
-- **Deny outside-workdir access**: set `outside_workdir = "deny"` to keep the agent inside your project without approval prompts.
-
-Something off? Tell us on [GitHub](https://github.com/mistralai/mistral-vibe/issues).

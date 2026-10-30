@@ -3,7 +3,7 @@ from __future__ import annotations
 from http import HTTPStatus
 from typing import TYPE_CHECKING
 
-import httpx
+import httpx2
 
 from vibe.core.model_catalog._constants import (
     MODEL_CATALOG_TIMEOUT_SECONDS,
@@ -42,7 +42,7 @@ class ModelCatalogClient:
     def _client(self) -> VibeAsyncHTTPClient:
         if self._http is None:
             self._http = VibeAsyncHTTPClient(
-                timeout=httpx.Timeout(MODEL_CATALOG_TIMEOUT_SECONDS),
+                timeout=httpx2.Timeout(MODEL_CATALOG_TIMEOUT_SECONDS),
                 verify=build_ssl_context(),
             )
         return self._http
@@ -54,7 +54,7 @@ class ModelCatalogClient:
             response = await self._client.get(
                 self._url, headers={"Authorization": f"Bearer {api_key}"}
             )
-        except httpx.HTTPError as exc:
+        except httpx2.HTTPError as exc:
             logger.warning("Model catalog request failed: %s", exc)
             return None
 

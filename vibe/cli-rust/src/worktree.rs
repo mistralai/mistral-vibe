@@ -1,5 +1,6 @@
 //! The session worktree, tracked from the `worktree` transcript effect.
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::app::App;
@@ -143,8 +144,7 @@ pub fn track_patch(app: &mut App, patch: &Value) {
                 }
             }
             "/worktree" => {
-                if let Ok(worktree) = serde_json::from_value::<PublicSessionWorktree>(value.clone())
-                {
+                if let Ok(worktree) = PublicSessionWorktree::deserialize(value) {
                     track(
                         app,
                         WorktreeInfo {

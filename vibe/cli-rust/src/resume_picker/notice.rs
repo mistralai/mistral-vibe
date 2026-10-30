@@ -89,36 +89,24 @@ pub(super) fn close(app: &mut App) {
         app.view
             .transcript_cache
             .start_history(app.view.transcript.entry_count());
-        // Exiting the preview rebuilds the transcript: re-decide the
-        // custom-tools deprecation on the session restored underneath.
-        crate::startup::banners::rebuild_custom_tools_deprecation(app);
     }
 }
 
 /// The server's resume refusal mounts under one id, so a second attempt
 /// replaces the first instead of stacking under it.
 pub(super) const ATTEMPT_ERROR_ID: &str = "rs-resume-attempt-error";
-const CANCELLED_ID: &str = "rs-resume-cancelled";
 
-/// Drop the picker's attempt notices: a new preview or a successful resume
-/// supersedes them, and the local-entry preservation would otherwise carry
-/// them into the previewed or resumed session's transcript.
+/// Drop the attempt error, which preservation would otherwise carry into the next transcript.
 pub(super) fn clear_attempts(app: &mut App) {
     app.view.transcript.remove(ATTEMPT_ERROR_ID);
-    app.view.transcript.remove(CANCELLED_ID);
 }
 
 pub(super) fn result(app: &mut App, text: &str) {
-    local::add_command_result(
+    local::add_command_status(
         &mut app.view.transcript,
         &submission::new_message_id(),
         text,
     );
-}
-
-/// The picker's own cancellation result; cleared by `clear_attempts`.
-pub(super) fn cancelled(app: &mut App, text: &str) {
-    local::add_command_result(&mut app.view.transcript, CANCELLED_ID, text);
 }
 
 pub(super) fn error(app: &mut App, id: &str, text: &str) {

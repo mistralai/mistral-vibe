@@ -349,9 +349,9 @@ fn reasoning_only_completion_ends_the_turn_with_empty_visible_output() {
 }
 
 ///
-/// *Prepare*: A session exposes two programmatic tools and receives a discovery request with an unknown field.
-/// *Do*: Complete the first model call with that best-match discovery request.
-/// *Assert*: Core ignores the unknown field and reports the discovery summary before requesting the next completion.
+/// *Prepare*: A session exposes two programmatic tools.
+/// *Do*: Complete the first model call with a best-match discovery request.
+/// *Assert*: Core reports the discovery summary before requesting the next completion.
 ///
 #[test]
 fn tool_discovery_reports_the_completed_summary() {
@@ -386,7 +386,6 @@ fn tool_discovery_reports_the_completed_summary() {
             "mode": "best_match",
             "query": "search GitHub",
             "connectors": ["github"],
-            "ignored": {"future": true},
         }),
     )];
     let discovery_result = "---\nmode: best_match\nrelevantFunctionCount: 2\nrelatedFunctionCount: 2\nrelatedConnectorCount: 1\nrelevantConnectorNoticeCount: 1\n---\n\n# Best Matching Tool Candidates\n\n1. github.search_issues - 1.9\n2. github.search_pull_requests - 1.8\n\n# Connector Guidance\n\n<connector-guidance>\n  <connector>\n    <name>github</name>\n    <status>connected</status>\n    <guidance>GitHub tools</guidance>\n  </connector>\n</connector-guidance>";

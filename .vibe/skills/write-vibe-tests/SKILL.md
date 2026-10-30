@@ -27,7 +27,6 @@ If a refactor changes no observable behavior but breaks many tests, the tests ar
 | Config | Pydantic model validation, layer merge outputs, migration results |
 | Sessions | Runtime session operations, durability/recovery and app-server projections; JSONL/metadata only for the supported read-only historical importer |
 | Terminal UI (`vibe/cli-rust`) | Rust unit tests for pure logic, `client-e2e` scenarios and goldens for rendering and interaction (see `vibe/cli-rust/AGENTS.md`) |
-| Onboarding wizard (`vibe-acp --setup`) | Textual snapshots, rendered user-visible state |
 | ACP | ACP session updates and protocol-facing content, not core internals |
 
 ## Prefer Fakes Over Mocks
@@ -53,7 +52,7 @@ Prefer "make it testable" refactors first: isolate I/O, extract pure functions, 
 
 ## Test Shape
 
-- Python stack: `pytest` + `pytest-asyncio` + `pytest-textual-snapshot` (onboarding only) + `respx`.
+- Python stack: `pytest` + `pytest-asyncio` + `respx`.
 - Use descriptive test names; do not add test docstrings. Pytest displays docstrings instead of node IDs when present, which hurts.
 - Arrange, act, and assert clearly, but optimize for readability over ceremony.
 - Keep tests deterministic, fast, and explicit about failure.

@@ -6,6 +6,7 @@ from pydantic import ValidationError
 import pytest
 
 from tests.app_server._helpers import setup_client
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.client import AppServerClient, AppServerConnectionClosed
 from vibe.app_server.protocol import (
     AppServerResponseError,
@@ -19,8 +20,12 @@ from vibe.app_server.transport import memory_transport_pair
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method", ["tools/list", "stats/read", "diagnostics/list"])
-async def test_retired_rpc_returns_method_not_found(method: str) -> None:
-    client, client_transport, server_transport = await setup_client()
+async def test_retired_rpc_returns_method_not_found(
+    method: str, process_services: ProcessServices
+) -> None:
+    client, client_transport, server_transport = await setup_client(
+        process_services=process_services
+    )
     try:
         with pytest.raises(AppServerResponseError) as error:
             await client.request(method)

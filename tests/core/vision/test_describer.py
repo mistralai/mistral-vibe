@@ -6,14 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.mock.utils import mock_llm_chunk
+from mistralai_vibe_local_harness.vibe import UtilityCompletionError, UtilityReply
+from tests.mock.utils import utility_reply
 from vibe.core.config import ModelConfig
-from vibe.core.llm.exceptions import BackendError, PayloadSummary
 from vibe.core.types import (
     FileImageSource,
     ImageAttachment,
     InlineImageSource,
-    LLMChunk,
     LLMMessage,
     Role,
 )
@@ -38,12 +37,12 @@ class RecordingComplete:
 
     async def __call__(
         self, *, model: ModelConfig, messages: Sequence[LLMMessage]
-    ) -> LLMChunk:
+    ) -> UtilityReply:
         self.calls.append((model, messages))
         reply = self._replies[min(len(self.calls) - 1, len(self._replies) - 1)]
         if reply == "__raise__":
             raise RuntimeError("vision provider is down")
-        return mock_llm_chunk(content=reply)
+        return utility_reply(reply)
 
 
 def _png(tmp_path: Path, name: str = "x.png") -> ImageAttachment:
@@ -207,13 +206,13 @@ class TestDescribeReport:
 
         async def complete(
             *, model: ModelConfig, messages: Sequence[LLMMessage]
-        ) -> LLMChunk:
+        ) -> UtilityReply:
             nonlocal peak, live
             live += 1
             peak = max(peak, live)
             await asyncio.sleep(0)
             live -= 1
-            return mock_llm_chunk(content="a description")
+            return utility_reply("a description")
 
         await ImageDescriber(complete).describe_all(
             [
@@ -227,26 +226,24 @@ class TestDescribeReport:
 
 
 class TestFailedDescriptionReason:
-    def test_a_backend_error_reduces_to_the_provider_message(self) -> None:
-        # BackendError renders as a multi-line diagnostic block; a notice has
-        # room for the one line that says what to fix.
-        error = BackendError(
-            provider="mistral",
-            endpoint="https://api.mistral.ai",
+    def test_a_multi_line_error_reduces_to_its_first_line(self) -> None:
+        # A notice has room for the one line that says what to fix.
+        error = RuntimeError(
+            "top_p must be 1 when using greedy sampling.\nrequest_id: abc"
+        )
+
+        reason = FailedDescription(alias="shot.png", error=error).reason
+
+        assert reason == "top_p must be 1 when using greedy sampling."
+
+    def test_a_provider_error_reduces_to_the_provider_explanation(self) -> None:
+        error = UtilityCompletionError(
+            "Client error '400 Bad Request' for url 'https://llm.example'\n"
+            "For more information check: https://developer.mozilla.org: "
+            "top_p must be 1 when using greedy sampling.",
             status=400,
-            reason="Bad Request",
-            headers={},
-            body_text='{"message":"top_p must be 1 when using greedy sampling."}',
-            parsed_error="top_p must be 1 when using greedy sampling.",
-            model="mistral-vibe-cli-latest",
-            payload_summary=PayloadSummary(
-                model="mistral-vibe-cli-latest",
-                message_count=2,
-                approx_chars=1448,
-                temperature=0.0,
-                has_tools=False,
-                tool_choice=None,
-            ),
+            rejection=None,
+            explanation="top_p must be 1 when using greedy sampling.",
         )
 
         reason = FailedDescription(alias="shot.png", error=error).reason

@@ -1,34 +1,17 @@
 //! Enqueue results can be reduced after their turn's completion notifications.
 
 use serde_json::json;
-use std::sync::Arc;
 use vibe_rs::app::{App, Status};
 use vibe_rs::message_queue::{self, QueueEvent, QueueItem};
-use vibe_rs::server::{notification, Client, Notification};
+use vibe_rs::server::notification;
 
-fn notify(app: &mut App, method: &str, params: serde_json::Value) {
-    assert!(vibe_rs::event_handler::apply_notification(
-        app,
-        &Arc::new(Client::stub()),
-        &Notification {
-            method: method.into(),
-            params
-        },
-    ));
-}
+use crate::support::{notify, queued, stub};
 
 fn pending() -> QueueItem {
     QueueItem {
         queue_item_id: None,
-        message_id: "message-1".into(),
-        server_message_id: "message-1".into(),
-        text: "hi".into(),
-        images: Vec::new(),
-        mentions: None,
-        sent: true,
-        ever_sent: true,
         revision: 1,
-        replacing: false,
+        ..queued("message-1", "hi")
     }
 }
 
@@ -51,7 +34,7 @@ fn completed(app: &mut App, status: &str) {
 fn accepted(app: &mut App) {
     message_queue::apply_event(
         app,
-        &Arc::new(Client::stub()),
+        &stub(),
         QueueEvent::Accepted {
             message_id: "message-1".into(),
             queue_item_id: "queue-1".into(),
@@ -109,7 +92,7 @@ fn dropping_a_promoted_prompt_settles_completion_once() {
             if rejected {
                 message_queue::apply_event(
                     &mut app,
-                    &Arc::new(Client::stub()),
+                    &stub(),
                     QueueEvent::Rejected {
                         message_id: "message-1".into(),
                         error: None,
@@ -117,7 +100,7 @@ fn dropping_a_promoted_prompt_settles_completion_once() {
                 );
             } else {
                 app.queue.selected = Some("message-1".into());
-                message_queue::remove_selected(&mut app, &Arc::new(Client::stub()));
+                message_queue::remove_selected(&mut app, &stub());
             }
             assert!(app.queue.is_empty());
             let rings = status != "interrupted";
@@ -208,7 +191,10 @@ fn dismissing_a_dialog_after_a_late_enqueue_restores_the_outcome() {
         );
         vibe_rs::question_app::dismiss(
             &mut app,
-            &vibe_rs::question_app::QuestionSource::Callback("q".into()),
+            &vibe_rs::question_app::QuestionSource::Callback(vibe_rs::server::CallbackAddress {
+                callback_id: "q".into(),
+                ..Default::default()
+            }),
         );
         assert_eq!(
             vibe_rs::terminal_notifier::take_program_report(&mut app),
@@ -246,7 +232,7 @@ fn a_replacement_settling_after_completion_finalizes_the_consumed_edit() {
     completed(&mut app, "completed");
     message_queue::apply_event(
         &mut app,
-        &Arc::new(Client::stub()),
+        &stub(),
         QueueEvent::GroupReplaced {
             server_message_id: "message-1".into(),
             revision: 1,

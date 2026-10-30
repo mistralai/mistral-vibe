@@ -106,6 +106,8 @@ fn headless_options(output: OutputFormat, output_dir: &std::path::Path) -> Headl
         max_tokens: None,
         time_limit: None,
         output_dir: Some(output_dir.to_path_buf()),
+        system_prompt: None,
+        model: None,
         agent: None,
         auto_approve: false,
         enabled_tools: Vec::new(),

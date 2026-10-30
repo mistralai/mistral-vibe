@@ -8,7 +8,7 @@ fn entry(id: &str, local: bool) -> Value {
     json!({
         "id": id,
         "type": "message",
-        "role": if local { "command" } else { "assistant" },
+        "role": if local { "command_status" } else { "assistant" },
         "content": [{"type": "text", "text": id}],
         "generationStatus": "completed",
         "local": local,

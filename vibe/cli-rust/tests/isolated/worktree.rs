@@ -91,7 +91,7 @@ fn empty_name_is_falsy() {
     let cli = Cli::parse_from(["vibe", "--worktree", ""]);
     assert_eq!(cli.worktree_request(None), None);
     let config = cli
-        .interactive_agent_config(Some("/work".into()), cli.worktree_request(None))
+        .interactive_agent_config(Some("/work".into()), cli.worktree_request(None), None)
         .unwrap();
     assert!(!config.trust_workspace);
     assert_eq!(config.worktree, None);
@@ -109,6 +109,7 @@ fn interactive_worktree_grants_trust_and_rides_agent_config() {
         .interactive_agent_config(
             Some("/work".into()),
             cli.worktree_request(Some("ignored".into())),
+            None,
         )
         .unwrap();
     assert!(config.trust_workspace);
@@ -121,7 +122,7 @@ fn interactive_worktree_grants_trust_and_rides_agent_config() {
     );
     // The wire field is skipped when unset (the server's optional `WorktreeInput`).
     let bare = Cli::parse_from(["vibe"])
-        .interactive_agent_config(Some("/work".into()), None)
+        .interactive_agent_config(Some("/work".into()), None, None)
         .unwrap();
     let json = serde_json::to_value(&bare).unwrap();
     assert!(json.get("worktree").is_none());
@@ -135,7 +136,7 @@ fn interactive_bare_worktree_uses_the_initial_prompt() {
     let cli = Cli::parse_from(["vibe", "say hi", "--worktree"]);
     let auto = cli.interactive_initial_prompt(None);
     let config = cli
-        .interactive_agent_config(None, cli.worktree_request(auto))
+        .interactive_agent_config(None, cli.worktree_request(auto), None)
         .unwrap();
     assert_eq!(
         config.worktree,
@@ -157,7 +158,7 @@ fn headless_worktree_grants_trust_and_carries_prompt() {
             prompt: Some("do the thing".into())
         })
     );
-    let config = vibe_rs::headless::agent_config(&options, Some("/work".into())).unwrap();
+    let config = vibe_rs::headless::agent_config(&options, Some("/work".into()), None).unwrap();
     assert!(config.trust_workspace);
     assert!(config.headless);
     assert_eq!(
@@ -198,7 +199,7 @@ fn worktree_combines_with_continue_and_resume() {
 fn resume_params_strip_the_worktree_field() {
     let cli = Cli::parse_from(["vibe", "--worktree", "demo"]);
     let config = cli
-        .interactive_agent_config(Some("/work".into()), cli.worktree_request(None))
+        .interactive_agent_config(Some("/work".into()), cli.worktree_request(None), None)
         .unwrap();
     let params = resume_params("session-1", &config);
     // The server rejects `worktree` on resume, so the rebind omits it.
@@ -206,7 +207,7 @@ fn resume_params_strip_the_worktree_field() {
     assert_eq!(params["agentConfig"]["trustWorkspace"], true);
     // Trust survives.
     let plain = Cli::parse_from(["vibe"])
-        .interactive_agent_config(Some("/work".into()), None)
+        .interactive_agent_config(Some("/work".into()), None, None)
         .unwrap();
     let params = resume_params("session-1", &plain);
     assert!(params["agentConfig"].get("worktree").is_none());

@@ -1,12 +1,10 @@
 //! The focused free-text row is a full-width cursor bar, like any focused option.
 
-use ratatui::backend::TestBackend;
-use ratatui::buffer::Buffer;
 use ratatui::style::Color;
-use ratatui::Terminal;
 use vibe_rs::app::App;
 use vibe_rs::question_app::other_option_idx;
-use vibe_rs::server::{QuestionChoice, UserQuestion};
+
+use crate::support::{question, render, row, with_questions};
 
 const WIDTH: u16 = 60;
 const HEIGHT: u16 = 20;
@@ -14,35 +12,19 @@ const HEIGHT: u16 = 20;
 const LAST_COLUMN: u16 = WIDTH - 3;
 
 fn app_with_answer(answer: &str) -> App {
-    let mut app = App::default();
-    app.question_app.questions.push(UserQuestion {
-        question: "Choose".into(),
-        header: String::new(),
-        options: vec![QuestionChoice {
-            label: "First".into(),
-            description: String::new(),
-        }],
-        multi_select: true,
-        hide_other: false,
-    });
+    let mut app = with_questions(vec![question("Choose", &["First"], true)]);
     app.question_app.other_texts.insert(0, answer.into());
     app.view.cursor_on = true;
     app
 }
 
-fn row_text(buffer: &Buffer, y: u16) -> String {
-    (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect()
-}
-
 /// Background of the last content cell on the row showing `needle`.
 fn row_end_bg(app: &mut App, needle: &str) -> Color {
-    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("terminal");
-    terminal
-        .draw(|f| vibe_rs::ui::question_app::draw(app, f, f.area()))
-        .expect("draw");
-    let buffer = terminal.backend().buffer();
+    let buffer = render(WIDTH, HEIGHT, |f| {
+        vibe_rs::ui::question_app::draw(app, f, f.area())
+    });
     let y = (0..HEIGHT)
-        .find(|&y| row_text(buffer, y).contains(needle))
+        .find(|&y| row(&buffer, y).contains(needle))
         .unwrap_or_else(|| panic!("no row shows {needle:?}"));
     buffer[(LAST_COLUMN, y)].bg
 }

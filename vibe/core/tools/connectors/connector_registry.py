@@ -10,7 +10,7 @@ import re
 import time
 from typing import Any, ClassVar
 
-import httpx
+import httpx2
 
 from vibe.core.paths import CONNECTOR_BOOTSTRAP_CACHE_FILE
 from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
@@ -239,11 +239,11 @@ def _bootstrap_error_message(exc: Exception) -> str:
     return f"Failed to load connectors: {type(exc).__name__}{suffix}"
 
 
-def _unwrap_http_status_error(exc: Exception) -> httpx.HTTPStatusError | None:
+def _unwrap_http_status_error(exc: Exception) -> httpx2.HTTPStatusError | None:
     """Extract an HTTPStatusError from an exception or ExceptionGroup."""
-    if found := first_of_type(exc, httpx.HTTPStatusError):
+    if found := first_of_type(exc, httpx2.HTTPStatusError):
         return found
-    if isinstance(exc.__cause__, httpx.HTTPStatusError):
+    if isinstance(exc.__cause__, httpx2.HTTPStatusError):
         return exc.__cause__
     return None
 

@@ -7,7 +7,7 @@ use vibe_rs::input_modes::{classify_submitted, submitted_value, ClassifiedInput,
 use vibe_rs::skill::Skill;
 use vibe_rs::voice::VoiceEvent;
 
-use crate::teleport_support::stub;
+use crate::support::send_key;
 
 #[test]
 fn pastes_that_only_look_prefixed_stay_literal_prompts() {
@@ -43,11 +43,10 @@ fn dictation_never_switches_the_mode() {
 #[test]
 fn undo_after_typing_a_mode_over_selected_text_restores_it() {
     let mut app = App::default();
-    let (tx, _rx) = tokio::sync::mpsc::channel(1);
     input::handle_paste(&mut app, "draft".to_owned());
     app.chat_input.anchor = Some(0);
 
-    input::handle_key(&mut app, &stub(), &tx, KeyCode::Char('!').into());
+    send_key(&mut app, KeyCode::Char('!').into());
     assert_eq!(
         (app.chat_input.mode, app.chat_input.input.as_str()),
         (InputMode::Bash, "")
@@ -63,12 +62,13 @@ fn undo_after_typing_a_mode_over_selected_text_restores_it() {
 #[test]
 fn modified_backspace_at_the_start_also_leaves_the_mode() {
     let mut app = App::default();
-    let (tx, _rx) = tokio::sync::mpsc::channel(1);
     app.chat_input.load_full_text("/config".to_owned());
     app.chat_input.cursor = 0;
 
-    let alt_backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT);
-    input::handle_key(&mut app, &stub(), &tx, alt_backspace);
+    send_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT),
+    );
 
     assert_eq!(
         (app.chat_input.mode, app.chat_input.input.as_str()),
@@ -79,11 +79,12 @@ fn modified_backspace_at_the_start_also_leaves_the_mode() {
 #[test]
 fn shift_backspace_on_an_empty_shell_input_returns_to_prompt_mode() {
     let mut app = App::default();
-    let (tx, _rx) = tokio::sync::mpsc::channel(1);
     app.chat_input.mode = InputMode::Bash;
 
-    let shift_backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::SHIFT);
-    input::handle_key(&mut app, &stub(), &tx, shift_backspace);
+    send_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::SHIFT),
+    );
 
     assert_eq!(
         (app.chat_input.mode, app.chat_input.input.as_str()),

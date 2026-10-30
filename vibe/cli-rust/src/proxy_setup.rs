@@ -169,15 +169,11 @@ pub fn apply_read(app: &mut App, result: Result<ProxySettingsView, String>) {
     if read_for != app.session.session_id || !crate::input::composer_reachable(app) {
         return;
     }
-    let id = new_message_id();
     match result {
-        Ok(settings) => {
-            local::add_command_result(&mut app.view.transcript, &id, "Proxy setup opened...");
-            app.proxy_setup = ProxySetupApp::new(settings);
-        }
+        Ok(settings) => app.proxy_setup = ProxySetupApp::new(settings),
         Err(error) => local::add_command_error(
             &mut app.view.transcript,
-            &id,
+            &new_message_id(),
             &format!("Failed to read proxy settings: {error}"),
         ),
     }
@@ -186,11 +182,6 @@ pub fn apply_read(app: &mut App, result: Result<ProxySettingsView, String>) {
 fn cancel(app: &mut App) {
     app.overlays.last_escape = None;
     app.proxy_setup = ProxySetupApp::default();
-    local::add_command_result(
-        &mut app.view.transcript,
-        &new_message_id(),
-        "Proxy setup cancelled.",
-    );
 }
 
 /// Enter writes every change, even none.
@@ -206,7 +197,7 @@ fn save(app: &mut App, client: &Arc<Client>) {
     tokio::spawn(async move {
         let params = json!({"sessionId": session_id, "changes": changes});
         let event = match client.request_err(method::CONFIG_PROXY_WRITE, params).await {
-            Ok(_) => CommandEvent::Result(SAVED_MESSAGE.to_owned()),
+            Ok(_) => CommandEvent::Status(SAVED_MESSAGE.to_owned()),
             Err(error) => CommandEvent::Error(format!(
                 "Failed to apply: proxy settings — {}",
                 error.message

@@ -153,6 +153,10 @@ fn body(
     {
         return None;
     }
+    // A fence's top rule carries its language label, painted in the border color.
+    if chrome && fence_glyph(buf, first_x, y) && first_symbol == EDGE[1] {
+        return None;
+    }
     let mut lo = first_x.min(content_start);
     let is_chrome = |x: u16, symbol: &str| {
         (CHROME_GLYPHS.contains(&symbol)

@@ -1,6 +1,6 @@
 //! Scrollbar track clicks page toward the pointer and repeat while held.
 
-use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::MouseEventKind;
 use ratatui::layout::Rect;
 
 use vibe_rs::{
@@ -9,6 +9,8 @@ use vibe_rs::{
     mouse::MouseTarget,
     ui::scrollbar::{Side, State},
 };
+
+use crate::support::{down, drag, mouse, up};
 
 const AREA: Rect = Rect::new(0, 0, 11, 10);
 const BAR: Rect = Rect::new(10, 0, 1, 10);
@@ -183,7 +185,7 @@ fn wheel_cancels_held_track_click() {
     register(&mut app, MouseTarget::Completion, 100, 10, 90);
 
     press(&mut app, 0);
-    mouse::route(&mut app, event(MouseEventKind::ScrollUp, BAR.x, 0));
+    mouse::route(&mut app, mouse(MouseEventKind::ScrollUp, BAR.x, 0));
 
     assert!(!mouse::is_track_paging(&app));
 }
@@ -221,29 +223,10 @@ fn tick(app: &mut App, count: usize) {
 }
 
 fn press(app: &mut App, row: u16) {
-    mouse::route(
-        app,
-        event(MouseEventKind::Down(MouseButton::Left), BAR.x, row),
-    );
+    mouse::route(app, down(BAR.x, row));
 }
 
 fn click(app: &mut App, row: u16) {
     press(app, row);
-    mouse::route(
-        app,
-        event(MouseEventKind::Up(MouseButton::Left), BAR.x, row),
-    );
-}
-
-fn drag(column: u16, row: u16) -> MouseEvent {
-    event(MouseEventKind::Drag(MouseButton::Left), column, row)
-}
-
-fn event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
-    MouseEvent {
-        kind,
-        column,
-        row,
-        modifiers: KeyModifiers::NONE,
-    }
+    mouse::route(app, up(BAR.x, row));
 }

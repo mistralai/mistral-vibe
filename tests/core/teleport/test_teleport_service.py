@@ -7,7 +7,7 @@ import threading
 from typing import Any
 from unittest.mock import AsyncMock
 
-import httpx
+import httpx2
 import pytest
 import zstandard
 
@@ -44,8 +44,8 @@ def _make_service(tmp_path: Path, **kwargs: Any) -> TeleportService:
 
 
 def _mock_handler() -> Any:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "sessionId": "controller-session-id",
@@ -188,11 +188,11 @@ class TestTeleportServiceExecute:
         seen_body: dict[str, object] | None = None
         seen_url: str | None = None
 
-        async def handler(request: httpx.Request) -> httpx.Response:
+        async def handler(request: httpx2.Request) -> httpx2.Response:
             nonlocal seen_body, seen_url
             seen_url = str(request.url)
             seen_body = json.loads(request.content)
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "sessionId": "controller-session-id",
@@ -204,7 +204,7 @@ class TestTeleportServiceExecute:
             )
 
         async with VibeAsyncHTTPClient(
-            transport=httpx.MockTransport(handler)
+            transport=httpx2.MockTransport(handler)
         ) as client:
             service = _make_service(
                 tmp_path,
@@ -322,7 +322,7 @@ class TestTeleportServiceExecute:
     @pytest.mark.asyncio
     async def test_execute_push_confirmation_approved(self, tmp_path: Path) -> None:
         async with VibeAsyncHTTPClient(
-            transport=httpx.MockTransport(_mock_handler())
+            transport=httpx2.MockTransport(_mock_handler())
         ) as client:
             service = _make_service(tmp_path, client=client)
             service._git.fetch = AsyncMock()
@@ -391,12 +391,12 @@ class TestTeleportServiceExecute:
     ) -> None:
         event_loop_thread = threading.get_ident()
 
-        async def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, text="project not found")
+        async def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(404, text="project not found")
 
         project_store = TrackingProjectsStore(tmp_path / "projects.toml")
         async with VibeAsyncHTTPClient(
-            transport=httpx.MockTransport(handler)
+            transport=httpx2.MockTransport(handler)
         ) as client:
             service = _make_service(
                 tmp_path, client=client, project_store=project_store

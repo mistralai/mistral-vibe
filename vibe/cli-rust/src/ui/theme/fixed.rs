@@ -51,8 +51,6 @@ pub mod monokai {
     pub const RED: Color = Color::Rgb(244, 0, 95);
     pub const GREEN: Color = Color::Rgb(0x98, 0xE0, 0x24);
     pub const CYAN: Color = Color::Rgb(88, 209, 235);
-    pub const BRIGHT_BLUE: Color = Color::Rgb(157, 101, 255);
-    pub const BLACK: Color = Color::Rgb(26, 26, 26);
 }
 
 /// Terminal palette that resolves ANSI colors under light themes.
@@ -62,7 +60,6 @@ pub mod alabaster {
     pub const RED: Color = Color::Rgb(170, 55, 49);
     pub const GREEN: Color = Color::Rgb(0x44, 0x8C, 0x27);
     pub const CYAN: Color = Color::Rgb(0, 131, 178);
-    pub const BRIGHT_WHITE: Color = Color::Rgb(247, 247, 247);
 }
 
 /// A Rich named color.

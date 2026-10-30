@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "3.0.3"
+version = "3.0.4"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -32,6 +32,7 @@ dependencies = [
     "annotated-types==0.7.0",
     "anyio==4.15.1",
     "attrs==26.1.0",
+    "authlib==1.9.1",
     "beautifulsoup4==4.14.3",
     "cachetools==7.0.6",
     "certifi==2026.10.19",
@@ -47,11 +48,8 @@ dependencies = [
     "giturlparse==0.15.0",
     "google-auth==2.62.0",
     "googleapis-common-protos==1.74.0",
-    "h11==0.16.0",
-    "httpcore==1.0.9",
+    "h11==0.16.0 ; sys_platform != 'emscripten'",
     "httpcore2==2.16.0 ; sys_platform != 'emscripten'",
-    "httpx==0.28.1",
-    "httpx-sse==0.4.3",
     "httpx2==2.16.0",
     "httpx2-jsfetch==1.0 ; sys_platform == 'emscripten'",
     "humanize==4.16.0",
@@ -60,18 +58,16 @@ dependencies = [
     "jaraco-context==6.1.2",
     "jaraco-functools==4.4.0",
     "jeepney==0.9.0 ; sys_platform == 'linux'",
+    "joserfc==1.7.7",
     "jsonpatch==1.33",
     "jsonpath-python==1.1.5",
     "jsonpointer==3.1.1",
     "jsonschema==4.26.0",
     "jsonschema-specifications==2025.9.1",
     "keyring==25.7.0",
-    "linkify-it-py==2.1.0",
-    "markdown-it-py==4.0.0",
     "markdownify==1.2.3",
-    "mcp==1.30.0",
-    "mdit-py-plugins==0.5.0",
-    "mdurl==0.1.2",
+    "mcp==2.3.0",
+    "mcp-types==2.3.0",
     "miniaudio==1.71 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or sys_platform == 'win32'",
     "mistralai==3.5.0",
     "more-itertools==11.0.2",
@@ -85,7 +81,6 @@ dependencies = [
     "opentelemetry-semantic-conventions==0.66b1",
     "packaging==26.3",
     "pexpect==4.9.0",
-    "platformdirs==4.9.6",
     "protobuf==6.33.6",
     "ptyprocess==0.7.0",
     "pyasn1==0.6.4",
@@ -94,9 +89,7 @@ dependencies = [
     "pydantic==2.13.4",
     "pydantic-core==2.46.4",
     "pydantic-settings==2.14.2",
-    "pygments==2.20.0",
     "pyjwt==2.15.1",
-    "pyperclip==1.11.0",
     "python-dateutil==2.9.0.post0",
     "python-dotenv==1.2.2",
     "python-multipart==0.0.32",
@@ -107,25 +100,22 @@ dependencies = [
     "referencing==0.37.0",
     "requests==2.34.2",
     "rfc8785==0.1.4",
-    "rich==15.0.0",
     "rpds-py==0.30.0",
     "secretstorage==3.5.0 ; sys_platform == 'linux'",
     "sentry-sdk==2.64.0",
     "setproctitle==1.3.7",
     "six==1.17.0",
     "smmap==5.0.3",
+    "socksio==1.0.0",
     "soupsieve==2.9.2",
     "sse-starlette==3.4.1",
     "starlette==1.3.1",
-    "textual==8.2.8",
-    "textual-speedups==0.2.1",
     "tomli-w==1.2.0",
     "tree-sitter==0.26.0",
     "tree-sitter-bash==0.25.1",
     "truststore==0.10.4",
     "typing-extensions==4.16.0",
     "typing-inspection==0.4.2",
-    "uc-micro-py==2.0.0",
     "urllib3==2.8.0",
     "uuid-utils==1.0.0",
     "uvicorn==0.46.0 ; sys_platform != 'emscripten'",
@@ -196,6 +186,8 @@ cache-keys = [
     { file = "vibe/cli-rust/Cargo.toml" },
     { file = "vibe/cli-rust/Cargo.lock" },
     { file = "vibe/cli-rust/src/**/*.rs" },
+    { file = "vibe/cli-rust/build.rs" },
+    { file = "vibe/whats_new/*.md" },
     { file = "harness/core/Cargo.toml" },
     { file = "harness/core/Cargo.lock" },
     { file = "harness/core/src/**/*.rs" },
@@ -206,12 +198,6 @@ cache-keys = [
 index-strategy = "first-index"
 package = true
 required-version = ">=0.8.0"
-override-dependencies = [
-    # pytest-textual-snapshot exact-pins syrupy==4.8.0, which caps pytest<9.
-    # syrupy 4.8.0 runs fine on pytest 9 (generation, comparison and diffs all
-    # verified); the cap is conservative, so override it to clear GHSA-6w46-j5rx-g56g.
-    "pytest>=9.0.3",
-]
 
 [tool.uv.build-backend]
 # Read only by the builds the backend hands to uv_build: the sdist (the backend
@@ -230,13 +216,16 @@ dev = [
     "pre-commit>=4.2.0",
     "pyinstrument>=5.1.2",
     "pyright>=1.1.403",
-    "pytest>=8.3.5",
+    "pytest>=9.0.3",
     "pytest-asyncio>=1.2.0",
-    "pytest-textual-snapshot>=1.1.0",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
     "pyte>=0.8.2",
+    # respx models its routes on HTTPX; Vibe's clients are HTTPX2 (see
+    # tests/stubs/respx_httpx2.py).
+    "httpx>=0.28.1,<1",
     "respx>=0.22.0",
+    "rich>=14.0.0",
     "ruff>=0.15.18",
     "tomlkit>=0.13.0",
     "twine>=5.0.0",

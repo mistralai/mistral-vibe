@@ -8,8 +8,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::mpsc::Sender;
 
 use crate::app::{App, Status, ToastSeverity};
 use crate::server::{ApprovalCallback, ApprovalDecisionType, Client};
@@ -20,7 +20,7 @@ const DEFAULT_TYPING_DEBOUNCE_MS: u64 = 1000;
 const TYPING_DEBOUNCE_ENV_VAR: &str = "VIBE_TYPING_GRACE_PERIOD_MS";
 pub const MAX_PENDING_APPROVALS: usize = 64;
 const RECENT_CALLBACK_CAPACITY: usize = 256;
-const RESPONSE_ERROR_TOAST_SECS: u64 = 5;
+pub(crate) const RESPONSE_ERROR_TOAST_SECS: u64 = 5;
 
 pub enum Event {
     Responded {
@@ -51,20 +51,19 @@ pub struct State {
     pub detail_preview: Option<crate::server::FileEditEffectOutput>,
     responding: bool,
     recent_callback_ids: VecDeque<String>,
-    pub tx: Option<Sender<Event>>,
 }
 
 impl State {
     pub fn enqueue(&mut self, callback: ApprovalCallback) -> Result<bool, Box<ApprovalCallback>> {
-        let callback_id = callback.callback_id.as_str();
+        let callback_id = callback.address.callback_id.as_str();
         let duplicate = self
             .active
             .as_ref()
-            .is_some_and(|active| active.callback_id == callback_id)
+            .is_some_and(|active| active.address.callback_id == callback_id)
             || self
                 .pending
                 .iter()
-                .any(|pending| pending.callback_id == callback_id)
+                .any(|pending| pending.address.callback_id == callback_id)
             || self
                 .recent_callback_ids
                 .iter()
@@ -103,7 +102,7 @@ impl State {
         self.detail_preview = None;
         self.responding = false;
         self.recent_callback_ids
-            .push_back(callback.callback_id.clone());
+            .push_back(callback.address.callback_id.clone());
         if self.recent_callback_ids.len() > RECENT_CALLBACK_CAPACITY {
             self.recent_callback_ids.pop_front();
         }
@@ -176,7 +175,7 @@ pub fn on_callback_call(app: &mut App, params: &Value) -> bool {
     if raw.pointer("/detail/kind").and_then(Value::as_str) != Some("approval") {
         return true;
     }
-    let Ok(callback) = serde_json::from_value::<ApprovalCallback>(raw.clone()) else {
+    let Ok(callback) = ApprovalCallback::deserialize(raw) else {
         tracing::warn!(?params, "approval callback is malformed");
         return true;
     };
@@ -188,7 +187,7 @@ pub fn on_callback_call(app: &mut App, params: &Value) -> bool {
         Ok(false) => true,
         Err(callback) => {
             tracing::debug!(
-                callback_id = callback.callback_id,
+                callback_id = callback.address.callback_id,
                 capacity = MAX_PENDING_APPROVALS,
                 "approval backlog full; deferring callback delivery"
             );
@@ -214,7 +213,7 @@ pub fn apply_event(app: &mut App, event: Event) {
         .approval
         .active
         .as_ref()
-        .is_none_or(|callback| callback.callback_id != *callback_id)
+        .is_none_or(|callback| callback.address.callback_id != *callback_id)
     {
         return;
     }

@@ -128,12 +128,8 @@ against the schema (`vibe.core.config._setting_keys`). It reports:
 - a setting with no effect under the unified harness, such as `[tools.grep]` or
   `tools.read_file.max_read_bytes`.
 
-A tool setting is checked against the tool's own settings model. A custom tool
-reads its own settings, so `[tools.<name>]` is not checked when the tool
-manager selects a custom tool for that name, including one that replaces a
-builtin. When the selected variant is the builtin, for example because the
-custom tool is unavailable or has a lower `selection_priority`, the builtin's
-settings model applies.
+A tool setting is checked against the tool's own settings model. Settings of a
+tool that is not builtin, such as an MCP tool, are not checked.
 
 By default each finding is a warning. It is logged, shown at startup, written to
 stderr and the export by `vibe -p`, and returned in `validation_warnings` by

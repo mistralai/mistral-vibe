@@ -17,3 +17,4 @@ timeline: Timeline = [
 ]
 
 screen_contains = ("Resumed session 00000000", "Reply in the resumed session.")
+screen_excludes = ("Resuming session",)

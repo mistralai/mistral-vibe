@@ -27,7 +27,7 @@ use crate::core::features::permissions::{ApprovalFailureReason, ApprovalOutcome}
 use crate::core::hooks::{HookCall, HookPoint, HookResult};
 use crate::core::state::hook_binding_ids;
 use crate::core::state::{
-    ActivePhase, ActiveTurn, HarnessState, InterruptionResolution, QueuedTurn, TurnState,
+    ActivePhase, ActiveTurn, HarnessState, InterruptionResolution, TurnState,
 };
 use crate::core::step_protocol::Action;
 use crate::core::step_protocol::DeterminismContext;
@@ -267,10 +267,7 @@ fn apply_compaction_resolution(
                 turn_id,
                 error: error.clone(),
             });
-            let turn_id = state.finish_turn(TurnOutcome::Failed {
-                error: error.clone(),
-            })?;
-            outcome.complete_turn(turn_id, TurnOutcome::Failed { error });
+            state.finish_turn(TurnOutcome::Failed { error })?;
             Ok(outcome)
         }
     }
@@ -522,23 +519,13 @@ fn apply_lifecycle_hook_resolution(
                 error: error.clone(),
             })?;
             outcome.observe(Observation::TurnFailed {
-                turn_id: completed_turn_id.clone(),
-                error: error.clone(),
+                turn_id: completed_turn_id,
+                error,
             });
-            outcome.complete_turn(completed_turn_id, TurnOutcome::Failed { error });
             Ok(outcome)
         }
         HookResolution::CommitPreAgentTurn { turn_id, message } => {
-            // A follow-up queued while the hook was pending belongs to the committed turn.
-            let queued = match std::mem::replace(&mut state.turn, TurnState::Idle) {
-                TurnState::Active(active) => active.queued,
-                _ => {
-                    return Err(CoreError::invariant(
-                        "a pre-agent hook resolved without an active turn",
-                    ));
-                }
-            };
-            commit_turn(state, turn_id, vec![message], queued)
+            commit_turn(state, turn_id, message)
         }
         HookResolution::ResolveCompletion(resolution) => {
             apply_completion_event(state, CompletionEvent::Hook(resolution), determinism)
@@ -635,11 +622,10 @@ fn apply_completion_finish(
             });
             let turn_id = state.finish_turn(TurnOutcome::Completed { output: Vec::new() })?;
             outcome.observe(Observation::TurnCompleted {
-                turn_id: turn_id.clone(),
+                turn_id,
                 output: Vec::new(),
                 stop_reason: None,
             });
-            outcome.complete_turn(turn_id, TurnOutcome::Completed { output: Vec::new() });
         }
         CompletionFinish::Rejected {
             action_id,
@@ -652,15 +638,12 @@ fn apply_completion_finish(
                 cause: CandidateDiscardCause::Rejected,
             });
             state.require_active_mut()?.iterations = next_iteration;
-            let turn_id = state.finish_turn(TurnOutcome::Rejected {
-                reason: reason.clone(),
-            })?;
+            let turn_id = state.finish_turn(TurnOutcome::Rejected { reason })?;
             outcome.observe(Observation::TurnCompleted {
-                turn_id: turn_id.clone(),
+                turn_id,
                 output: Vec::new(),
                 stop_reason: None,
             });
-            outcome.complete_turn(turn_id, TurnOutcome::Rejected { reason });
         }
         CompletionFinish::Failed { action_id, error } => {
             outcome.observe(Observation::AgentCompletionCandidateDiscarded {
@@ -674,10 +657,7 @@ fn apply_completion_finish(
                 turn_id: active_turn_id(state)?.to_string(),
                 error: error.clone(),
             });
-            let turn_id = state.finish_turn(TurnOutcome::Failed {
-                error: error.clone(),
-            })?;
-            outcome.complete_turn(turn_id, TurnOutcome::Failed { error });
+            state.finish_turn(TurnOutcome::Failed { error })?;
         }
     }
     Ok(outcome)
@@ -804,16 +784,11 @@ fn handle_user_message(
     let message = StoredMessage::visible(content_to_user_message(content)?);
     match mode {
         UserMessageMode::Queue => match &mut state.turn {
-            TurnState::Idle | TurnState::Terminal { .. } => {
-                start_turn(state, turn_id, vec![message], QueuedTurn::Empty)
-            }
+            TurnState::Idle | TurnState::Terminal { .. } => start_turn(state, turn_id, message),
             TurnState::Compacting { .. } => Err(CoreError::invalid_command(
                 "cannot start a turn while compaction is pending",
             )),
-            TurnState::Active(active) => {
-                active.queued.enqueue(turn_id, message)?;
-                Ok(Outcome::quiet())
-            }
+            TurnState::Active(_) => Err(invalid_state(state)),
         },
         UserMessageMode::Steer => {
             require_active_turn_id(state, &turn_id, "steer")?;
@@ -934,34 +909,15 @@ fn preflight_agent_action(state: &mut HarnessState, action: Action) -> Result<Ou
 fn start_turn(
     state: &mut HarnessState,
     turn_id: String,
-    mut messages: Vec<StoredMessage>,
-    queued: QueuedTurn,
+    message: StoredMessage,
 ) -> Result<Outcome, CoreError> {
-    if messages.is_empty() {
-        return Err(CoreError::invalid_command(
-            "a turn must contain at least one user message",
-        ));
-    }
-    let mut turn_messages = match queued {
-        QueuedTurn::Empty => Vec::new(),
-        QueuedTurn::Pending {
-            turn_id: queued_turn_id,
-            messages,
-        } => {
-            require_turn_id("queued turn", &queued_turn_id, &turn_id)?;
-            messages
-        }
-    };
-    turn_messages.append(&mut messages);
     let hook_binding_ids = hook_binding_ids(state, HookPoint::PreAgentTurn, None);
+
     if !hook_binding_ids.is_empty() {
-        let user_content = turn_messages
-            .into_iter()
-            .flat_map(|stored| match stored.message {
-                Message::User { content } => content,
-                _ => Vec::new(),
-            })
-            .collect::<Vec<_>>();
+        let user_content = match message.message {
+            Message::User { content } => content,
+            _ => Vec::new(),
+        };
         validate_non_empty_content(&user_content, "pre-agent user content")?;
         let pending =
             PendingLifecycleHook::pre_agent_turn(turn_id.clone(), user_content, hook_binding_ids)?;
@@ -972,26 +928,21 @@ fn start_turn(
             pending_steer: Vec::new(),
             model_input_ready: false,
             output_limit_retries: 0,
-            queued: QueuedTurn::Empty,
         });
         return Ok(Outcome::action(pending_single_action(state)?));
     }
-    commit_turn(state, turn_id, turn_messages, QueuedTurn::Empty)
+    commit_turn(state, turn_id, message)
 }
 
 fn commit_turn(
     state: &mut HarnessState,
     turn_id: String,
-    turn_messages: Vec<StoredMessage>,
-    queued: QueuedTurn,
+    message: StoredMessage,
 ) -> Result<Outcome, CoreError> {
-    let content = turn_messages
-        .iter()
-        .flat_map(|stored| match &stored.message {
-            Message::User { content } => content.clone(),
-            _ => Vec::new(),
-        })
-        .collect();
+    let content = match &message.message {
+        Message::User { content } => content.clone(),
+        _ => Vec::new(),
+    };
     let mut outcome = Outcome::quiet();
     outcome.observe(Observation::TurnStarted {
         turn_id: turn_id.clone(),
@@ -1023,7 +974,7 @@ fn commit_turn(
             notification,
         });
     }
-    messages.extend(turn_messages);
+    messages.push(message);
     state.context.extend_new_turn(messages)?;
     let phase = next_completion(state)?;
     state.turn = TurnState::Active(ActiveTurn {
@@ -1033,7 +984,6 @@ fn commit_turn(
         pending_steer: Vec::new(),
         model_input_ready: true,
         output_limit_retries: 0,
-        queued,
     });
     let action = pending_single_action(state)?;
     outcome.absorb(outcome_for_action(state, action)?);
@@ -1124,7 +1074,7 @@ fn abandon_turn(
         ),
     };
     outcome.observe(terminal);
-    outcome.complete_turn(state.finish_turn(turn_outcome.clone())?, turn_outcome);
+    state.finish_turn(turn_outcome)?;
     for action_id in pending_ids {
         outcome.observe(Observation::ActionAbandoned {
             turn_id: expected_turn_id.clone(),
@@ -1194,26 +1144,16 @@ fn finish_completed_turn(
     output: Vec<ContentBlock>,
     stop_reason: Option<TurnStopReason>,
 ) -> Result<Outcome, CoreError> {
-    let queued = state.require_active_mut()?.queued.take();
     let turn_id = state.finish_turn(TurnOutcome::Completed {
         output: output.clone(),
     })?;
     let mut outcome = Outcome::quiet();
     outcome.observe(Observation::TurnCompleted {
-        turn_id: turn_id.clone(),
-        output: output.clone(),
+        turn_id,
+        output,
         stop_reason,
     });
-    outcome.complete_turn(turn_id, TurnOutcome::Completed { output });
-    let Some((queued_turn_id, queued_messages)) = queued else {
-        return Ok(outcome);
-    };
-    let next = start_turn(state, queued_turn_id, queued_messages, QueuedTurn::Empty)?;
-    // `absorb` would let the queued turn's (absent) completion win; this turn
-    // did finish and the Runtime needs to hear it.
-    let completed = outcome.completed.clone();
-    let mut outcome = outcome.after(next);
-    outcome.completed = completed;
+
     Ok(outcome)
 }
 
@@ -1236,146 +1176,6 @@ mod tests {
             state.require_active().unwrap().phase,
             ActivePhase::AwaitingCompaction { .. }
         ));
-    }
-
-    #[test]
-    fn queue_preserves_the_pending_action_and_starts_after_completion() {
-        let state = started();
-        let pending_action_id = awaiting_action_id(&state);
-        let queued = advance(state, user_message("next turn", UserMessageMode::Queue)).unwrap();
-
-        assert_eq!(queued.effect, None);
-        assert_eq!(awaiting_action_id(&queued.state), pending_action_id);
-        assert_eq!(queued_messages(&queued.state).len(), 1);
-
-        let completed = advance_llm(queued.state, assistant_text("first answer"));
-
-        assert_eq!(
-            completed.output(),
-            Some(vec![ContentBlock::text("first answer".to_string())])
-        );
-        assert!(matches!(completed.effect, Some(Action::Completion { .. })));
-        assert_eq!(
-            message_text(completed.state.context.messages().last().unwrap()),
-            "next turn"
-        );
-        assert!(queued_messages(&completed.state).is_empty());
-    }
-
-    /// A queued turn belongs to the turn that was running when it was queued.
-    ///
-    /// Before `TurnState`, `queued_user_messages` and `queued_turn_id` were
-    /// session-level and outlived a failed turn. The stale identity then rejected
-    /// the next turn with a queued-turn mismatch, wedging the session until a turn
-    /// happened to reuse the old id. Scoping the queue to `ActiveTurn` makes the
-    /// discard structural.
-    #[test]
-    fn a_failed_turn_discards_its_queued_follow_up() {
-        let state = started();
-        let queued = advance(state, user_message("queued work", UserMessageMode::Queue))
-            .unwrap()
-            .state;
-        assert_eq!(queued_messages(&queued).len(), 1);
-
-        let action_id = awaiting_action_id(&queued);
-        let failed = advance(
-            queued,
-            HarnessCommand::CompletionFailed {
-                action_id,
-                error: ProtocolError {
-                    code: "upstream_unavailable".to_string(),
-                    message: "the model provider is unavailable".to_string(),
-                    retryable: true,
-                    details: Value::Null,
-                },
-            },
-        )
-        .unwrap()
-        .state;
-
-        assert!(matches!(
-            turn_outcome(&failed),
-            Some(TurnOutcome::Failed { .. })
-        ));
-        assert!(queued_messages(&failed).is_empty());
-
-        // A differently identified turn is now accepted rather than rejected
-        // against the dead turn's queued identity.
-        let next = advance(
-            failed,
-            user_message_for("turn-2", "a fresh request", UserMessageMode::Queue),
-        )
-        .unwrap();
-
-        assert!(matches!(next.effect, Some(Action::Completion { .. })));
-        assert_eq!(next.state.active_turn_id(), Some("turn-2"));
-    }
-
-    /// A queue command can arrive while the pre-agent hook is pending; the
-    /// skip completes its turn and must start the queued turn, not drop it.
-    #[test]
-    fn a_pre_agent_skip_starts_the_queued_follow_up() {
-        let mut config = config();
-        add_always_hook(&mut config, HookPoint::PreAgentTurn);
-        let state = started_with(config);
-        let hook_action_id = awaiting_action_id(&state);
-
-        let queued = advance(
-            state,
-            user_message_for("turn-2", "queued work", UserMessageMode::Queue),
-        )
-        .unwrap();
-        assert_eq!(awaiting_action_id(&queued.state), hook_action_id);
-        assert_eq!(queued_messages(&queued.state).len(), 1);
-
-        let skipped = advance(
-            queued.state,
-            HarnessCommand::HookCompleted {
-                action_id: hook_action_id,
-                result: HookResult::PreAgentTurn(PreAgentTurnOutput::Skip {
-                    reason: vec![ContentBlock::text("disabled by policy".to_string())],
-                }),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(
-            skipped.output(),
-            Some(vec![ContentBlock::text("disabled by policy".to_string())])
-        );
-        assert_eq!(skipped.state.active_turn_id(), Some("turn-2"));
-        assert!(queued_messages(&skipped.state).is_empty());
-    }
-
-    /// A queue command can arrive while the pre-agent hook is pending; the
-    /// continue commits its turn and must keep the queued follow-up.
-    #[test]
-    fn a_pre_agent_continue_keeps_the_queued_follow_up() {
-        let mut config = config();
-        add_always_hook(&mut config, HookPoint::PreAgentTurn);
-        let state = started_with(config);
-        let hook_action_id = awaiting_action_id(&state);
-
-        let queued = advance(
-            state,
-            user_message_for("turn-2", "queued work", UserMessageMode::Queue),
-        )
-        .unwrap();
-        assert_eq!(queued_messages(&queued.state).len(), 1);
-
-        let continued = advance(
-            queued.state,
-            HarnessCommand::HookCompleted {
-                action_id: hook_action_id,
-                result: HookResult::PreAgentTurn(PreAgentTurnOutput::Continue {
-                    user_content: vec![ContentBlock::text("start work".to_string())],
-                }),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(continued.state.active_turn_id(), Some("turn-1"));
-        assert_eq!(queued_messages(&continued.state).len(), 1);
     }
 
     #[test]

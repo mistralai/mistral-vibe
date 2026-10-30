@@ -1,4 +1,4 @@
-strace_code = "import vibe"
+strace_code = "import vibe.app_server.stdio"
 slowest_count = 15
 
 # Budgets set from baseline run (observed module count + ~10% headroom).
@@ -9,9 +9,9 @@ code = "import vibe"
 budget = 68
 
 [[commands]]
-label = "from vibe.cli.launcher import main"
-code = "from vibe.cli.launcher import main"
-budget = 77
+label = "from vibe.acp.entrypoint import main"
+code = "from vibe.acp.entrypoint import main"
+budget = 620
 
 [[commands]]
 label = "import vibe.app_server.stdio"

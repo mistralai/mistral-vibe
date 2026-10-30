@@ -279,7 +279,7 @@ fn push_reasoning(
 
 fn push_interrupt(lines: &mut LinkedLines) {
     lines.push(Line::from(vec![
-        inset_prefix(true, theme::text(theme::foreground())),
+        inset_prefix(theme::text(theme::foreground())),
         Span::styled(
             "Interrupted · What should Vibe do instead?",
             theme::text(theme::warning()),

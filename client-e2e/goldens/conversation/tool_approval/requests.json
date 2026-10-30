@@ -31,7 +31,6 @@
   "params": {
    "result": {
     "callbackId": "callback-approve-once",
-    "error": null,
     "output": {
      "decision": {
       "type": "approve"
@@ -48,7 +47,6 @@
   "params": {
    "result": {
     "callbackId": "callback-approve-session",
-    "error": null,
     "output": {
      "decision": {
       "type": "approve_for_session"
@@ -65,7 +63,6 @@
   "params": {
    "result": {
     "callbackId": "callback-approve-permanently",
-    "error": null,
     "output": {
      "decision": {
       "type": "approve_permanently"
@@ -82,7 +79,6 @@
   "params": {
    "result": {
     "callbackId": "callback-deny",
-    "error": null,
     "output": {
      "decision": {
       "type": "deny"

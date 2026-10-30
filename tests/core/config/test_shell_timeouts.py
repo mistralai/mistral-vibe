@@ -164,13 +164,23 @@ async def _load_tools(toml: str, tmp_path: Path) -> dict[str, dict[str, Any]]:
             id="both set",
         ),
         pytest.param("permission = 'ask'\n", {}, id="neither set"),
+        pytest.param(
+            "default_timeout = 120\n",
+            {"default_timeout": 120},
+            id="only a default within Vibe's maximum set",
+        ),
+        pytest.param(
+            "default_timeout = 300\n",
+            {"default_timeout": 300},
+            id="only a default equal to Vibe's maximum set",
+        ),
     ],
 )
-async def test_a_shell_tool_takes_both_timeouts_or_neither(
+async def test_a_shell_tool_takes_its_timeouts_as_set(
     tmp_path: Path, tool: str, settings: str, expected: dict[str, int]
 ) -> None:
     """*Prepare*: A `config.toml` whose shell tool sets both its default and
-    maximum timeouts, or neither.
+    maximum timeouts, neither, or only a default within Vibe's maximum.
     *Do*: Load the config.
     *Assert*: It loads, with the timeouts as set and none added.
     """
@@ -194,7 +204,7 @@ async def test_a_shell_tool_takes_both_timeouts_or_neither(
         pytest.param(
             "default_timeout = 600\n",
             "default_timeout is set without max_timeout_seconds. Set both, or neither.",
-            id="only the default set",
+            id="only a default above Vibe's maximum set",
         ),
         pytest.param(
             "max_timeout_seconds = 60\n",
@@ -206,11 +216,10 @@ async def test_a_shell_tool_takes_both_timeouts_or_neither(
 async def test_a_shell_timeout_set_without_the_other_is_a_config_error(
     tmp_path: Path, tool: str, settings: str, message: str
 ) -> None:
-    """*Prepare*: A `config.toml` whose shell tool sets its default timeout
-    without a maximum, or its maximum without a default.
+    """*Prepare*: A `config.toml` whose shell tool sets a default timeout above
+    Vibe's maximum without a maximum, or its maximum without a default.
     *Do*: Load the config.
-    *Assert*: Loading fails, naming both settings; the missing one is not
-    worked out from the one set.
+    *Assert*: Loading fails, naming both settings.
     """
     # Do / Assert
     with pytest.raises(ValidationError) as exc_info:

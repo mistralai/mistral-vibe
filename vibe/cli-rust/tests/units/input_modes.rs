@@ -8,6 +8,8 @@ use vibe_rs::input_modes::{
 };
 use vibe_rs::skill::Skill;
 
+use crate::support::{ctrl, key};
+
 #[test]
 fn full_text_keeps_mode_prefix_outside_the_editable_body() {
     let mut input = ChatInput::default();
@@ -144,8 +146,7 @@ fn a_mode_character_opens_its_mode_only_over_empty_or_fully_selected_text() {
     assert_eq!((input.cursor, input.anchor), (0, None));
 
     let mut input = ChatInput::default();
-    let ctrl = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL);
-    assert!(!input.apply_mode_key(&ctrl));
+    assert!(!input.apply_mode_key(&ctrl('/')));
     assert_eq!(input.mode, InputMode::Prompt);
 }
 
@@ -231,10 +232,6 @@ fn pasting_over_the_whole_prompt_opens_the_mode() {
 
     assert_eq!(app.chat_input.mode, InputMode::Slash);
     assert_eq!(app.chat_input.input, "model");
-}
-
-fn key(code: KeyCode) -> KeyEvent {
-    KeyEvent::new(code, KeyModifiers::NONE)
 }
 
 fn prompt(text: &str, cursor: usize, anchor: Option<usize>) -> ChatInput {

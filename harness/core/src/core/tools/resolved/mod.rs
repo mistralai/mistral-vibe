@@ -268,7 +268,18 @@ fn validate_tool_groups(config: &HarnessConfig) -> Result<(), CoreError> {
 }
 
 fn build_top_level_tools(config: &HarnessConfig) -> Vec<ToolDefinition> {
-    let mut tools = Vec::new();
+    // Caller direct tools come first: placed after `run_typescript`, models such as
+    // `mistral-large-4` treat them as program functions and never call them directly.
+    let mut tools: Vec<ToolDefinition> = config
+        .tool_groups()
+        .flat_map(|group| &group.tools)
+        .filter(|tool| tool.exposure.is_direct())
+        .map(|tool| ToolDefinition {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters: tool.input_schema.clone(),
+        })
+        .collect();
     if config.settings.tools.programmatic.is_enabled() {
         tools.push(tool_discovery::direct_tool(
             &config.settings.prompts.discovery_description,
@@ -277,7 +288,7 @@ fn build_top_level_tools(config: &HarnessConfig) -> Vec<ToolDefinition> {
             &config.settings.prompts.programs.description,
         ));
     }
-    tools.extend(assembly::direct_tools(config));
+    tools.extend(assembly::builtin_direct_tools(config));
     tools
 }
 

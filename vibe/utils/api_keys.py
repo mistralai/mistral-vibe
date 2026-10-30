@@ -9,6 +9,7 @@ import os
 from types import MappingProxyType
 
 from vibe.utils.keyring import get_api_key_from_keyring
+from vibe.utils.oidc_marker import oidc_enabled
 from vibe.utils.secrets import holding_secrets
 
 
@@ -18,6 +19,7 @@ class ApiKeySource(StrEnum):
     SESSION = "session"
     ENVIRONMENT = "environment"
     KEYRING = "keyring"
+    OIDC = "oidc"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +43,8 @@ class ApiKeyOrigin:
                 return f"env var {self.env_var}"
             case ApiKeySource.KEYRING:
                 return "the keyring"
+            case ApiKeySource.OIDC:
+                return "the CLI OIDC session"
 
 
 # The credentials of the code running in this context, by environment variable
@@ -96,6 +100,11 @@ def resolve_api_key_with_origin(env_key: str) -> tuple[str, ApiKeyOrigin] | None
     """
     if not env_key:
         return None
+    if env_key == "MISTRAL_API_KEY" and oidc_enabled():
+        from vibe.setup.auth._oidc_runtime import stored_oidc_credential
+
+        token = stored_oidc_credential()
+        return (token, ApiKeyOrigin(ApiKeySource.OIDC, env_key)) if token else None
     credentials = _session_credentials.get()
     if credentials is not None and (token := credentials.get(env_key)):
         return token, ApiKeyOrigin(ApiKeySource.SESSION, env_key)

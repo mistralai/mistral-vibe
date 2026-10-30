@@ -1,14 +1,14 @@
 //! Regression: rapid clicks on a foldable entry chained into word selection instead of toggling it.
 
-use std::sync::Arc;
-
-use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 use serde_json::json;
 
 use vibe_rs::app::App;
 use vibe_rs::mouse::{self, MouseTarget};
 use vibe_rs::selection::Granularity;
+
+use crate::support::{mouse, send_mouse};
 
 /// Screen rows the reasoning entry occupies, and a column inside the transcript.
 const ENTRY_TOP: u16 = 2;
@@ -31,15 +31,7 @@ fn transcript() -> App {
 }
 
 fn send(app: &mut App, kind: MouseEventKind, at: (u16, u16)) {
-    let client = Arc::new(vibe_rs::server::Client::stub());
-    let (config_tx, _rx) = tokio::sync::mpsc::channel(1);
-    let event = MouseEvent {
-        kind,
-        column: at.0,
-        row: at.1,
-        modifiers: KeyModifiers::NONE,
-    };
-    mouse::handle(app, &client, &config_tx, event);
+    send_mouse(app, mouse(kind, at.0, at.1));
 }
 
 fn click(app: &mut App, at: (u16, u16)) {

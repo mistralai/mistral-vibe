@@ -24,6 +24,13 @@ from vibe.core.git.repo import (
     sanitized_git,
     untrusted_status_options,
 )
+from vibe.core.git.worktree.copy_on_write import (
+    CopyOnWriteOutcome,
+    evict_unused as evict_unused_templates,
+    populate as populate_from_template,
+    schedule_refresh as schedule_template_refresh,
+    templates_root,
+)
 from vibe.core.git.worktree.naming import (
     worktree_name_from_text,
     worktree_name_with_suffix,
@@ -107,6 +114,9 @@ class PreparedWorktree:
     trust_store: TrustedFoldersManager | None = field(
         default=None, compare=False, repr=False
     )
+    # None when copy-on-write creation was not asked for, or nothing was created.
+    copy_on_write: CopyOnWriteOutcome | None = None
+    checkout_ms: int | None = None
 
     def inspect_for_cleanup(self) -> WorktreeCleanupState:
         """Inspect worktree state relative to the session-start HEAD.
@@ -305,9 +315,12 @@ class WorktreeRepository:
     meant, and which subdirectory of a prepared worktree the caller lands in.
     """
 
-    def __init__(self, git: GitRepo, base: Path) -> None:
+    def __init__(
+        self, git: GitRepo, base: Path, *, copy_on_write: bool = False
+    ) -> None:
         self._git = git
         self._base = base
+        self._copy_on_write = copy_on_write
 
     # GitPython keeps `git cat-file --batch` children alive holding handles into
     # .git until the Repo is closed, which is why closing is the context
@@ -321,6 +334,7 @@ class WorktreeRepository:
         *,
         repository_root: Path | None = None,
         trust_store: TrustedFoldersManager | None = None,
+        copy_on_write: bool = False,
     ) -> Iterator[WorktreeRepository]:
         git = GitRepo.open(
             base if repository_root is None else repository_root,
@@ -328,7 +342,7 @@ class WorktreeRepository:
             trust_root=repository_root,
         )
         try:
-            yield cls(git, base)
+            yield cls(git, base, copy_on_write=copy_on_write)
         finally:
             git.close()
 
@@ -557,10 +571,14 @@ class WorktreeRepository:
         rather than a missing one.
 
         Read off the same open as ``linked()``, so a caller needing both pays
-        for one repository rather than two.
+        for one repository rather than two. A copy-on-write template is left
+        out: nobody works in it, so no session can sit there.
         """
+        templates = templates_root()
         return tuple(
-            (record.root.resolve(), record.branch) for record in self._git.records()
+            (root, record.branch)
+            for record in self._git.records()
+            if not (root := record.root.resolve()).is_relative_to(templates)
         )
 
     def linked(self) -> tuple[LinkedWorktree, ...]:
@@ -643,7 +661,7 @@ class WorktreeRepository:
         if on_progress is not None:
             on_progress(WorktreeCreationProgress(WorktreeCreationPhase.CHECKING_OUT))
         try:
-            self._git.add_worktree(
+            copy_on_write = self._git.add_worktree(
                 target,
                 branch,
                 branch_created=branch_created,
@@ -652,6 +670,11 @@ class WorktreeRepository:
                     None
                     if on_progress is None
                     else partial(_report_checkout_progress, on_progress)
+                ),
+                populate=(
+                    partial(populate_from_template, self._git, self.bucket)
+                    if self._copy_on_write
+                    else None
                 ),
             )
         except Exception:
@@ -667,8 +690,21 @@ class WorktreeRepository:
                 e.add_note(note)
             raise
         claim.write(record.model_copy(update={"base_commit": prepared.base_commit}))
-        _log_create_timings(started, based, checked_out, name=record.name)
-        return prepared
+        _log_create_timings(
+            started, based, checked_out, name=record.name, copy_on_write=copy_on_write
+        )
+        if (
+            copy_on_write is not None
+            and copy_on_write is not CopyOnWriteOutcome.UNSUPPORTED
+        ):
+            schedule_template_refresh(
+                self._paths.repo_root, self.bucket, self._git.trust_store
+            )
+        return replace(
+            prepared,
+            copy_on_write=copy_on_write,
+            checkout_ms=int((checked_out - based) * 1000),
+        )
 
     def restore(
         self, claim: WorktreeClaim, recovery: WorktreeRecoveryRecord
@@ -1012,7 +1048,12 @@ class ManagedWorktree:
 
     @staticmethod
     def empty_trash() -> None:
-        """Delete what removals moved aside, including what an earlier one left."""
+        """Delete what removals moved aside, including what an earlier one left.
+
+        Also the templates of repositories that no longer have a managed
+        worktree: each holds a full checkout that only its worktrees use.
+        """
+        evict_unused_templates({claim.bucket for claim in WorktreeClaim.all()})
         trash = WorktreeClaim.trash_root()
         try:
             entries = tuple(trash.iterdir())
@@ -1564,7 +1605,7 @@ def _forget_checkout(
     git = _git_python()
     try:
         with git.repo(repo_root) as repo:
-            if branch in (head.name for head in repo.heads):
+            if GitRepo(repo).branch_exists(branch):
                 _unhooked(repo, trust_store=trust_store, trust_root=repo_root).branch(
                     "-D", branch
                 )
@@ -1643,14 +1684,21 @@ def _report_checkout_progress(
 
 
 def _log_create_timings(
-    started: float, based: float, checked_out: float, *, name: str
+    started: float,
+    based: float,
+    checked_out: float,
+    *,
+    name: str,
+    copy_on_write: CopyOnWriteOutcome | None,
 ) -> None:
     logger.info(
-        "Worktree created name=%s total_ms=%d base_ref_ms=%d checkout_ms=%d",
+        "Worktree created name=%s total_ms=%d base_ref_ms=%d checkout_ms=%d "
+        "copy_on_write=%s",
         name,
         (time.monotonic() - started) * 1000,
         (based - started) * 1000,
         (checked_out - based) * 1000,
+        copy_on_write,
     )
 
 

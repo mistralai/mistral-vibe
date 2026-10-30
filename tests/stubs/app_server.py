@@ -7,6 +7,7 @@ from vibe.app_server._account import AccountGateway
 from vibe.app_server._identity import IdentityGateway
 from vibe.app_server._model import ProtocolModel
 from vibe.app_server._projector import EventProjector
+from vibe.app_server._session_peers import SessionPeerError
 from vibe.app_server._session_spawn import SessionSpawnError
 from vibe.app_server.events import AppServerEvent, ClientProjection
 from vibe.app_server.models import (
@@ -20,6 +21,14 @@ from vibe.app_server.protocol import (
     ClientCapabilities,
     ClientInfo,
     Notification,
+    SessionPeerArchiveParams,
+    SessionPeerArchiveResponse,
+    SessionPeerListParams,
+    SessionPeerListResponse,
+    SessionPeerReadParams,
+    SessionPeerReadResponse,
+    SessionPeerSendParams,
+    SessionPeerSendResponse,
     SessionSpawnParams,
     SessionSpawnResponse,
 )
@@ -60,6 +69,26 @@ class FakeSessionBackendServices:
 
     async def spawn_session(self, params: SessionSpawnParams) -> SessionSpawnResponse:
         raise SessionSpawnError("This client cannot start sessions")
+
+    async def list_peer_sessions(
+        self, params: SessionPeerListParams
+    ) -> SessionPeerListResponse:
+        raise SessionPeerError("This client cannot reach other sessions")
+
+    async def read_peer_session(
+        self, params: SessionPeerReadParams
+    ) -> SessionPeerReadResponse:
+        raise SessionPeerError("This client cannot reach other sessions")
+
+    async def send_to_peer_session(
+        self, params: SessionPeerSendParams
+    ) -> SessionPeerSendResponse:
+        raise SessionPeerError("This client cannot reach other sessions")
+
+    async def archive_peer_sessions(
+        self, params: SessionPeerArchiveParams
+    ) -> SessionPeerArchiveResponse:
+        raise SessionPeerError("This client cannot reach other sessions")
 
 
 class CoreEventProjection:

@@ -15,9 +15,10 @@ use vibe_rs::setup::wizard::Screen;
 const WIDTHS: [u16; 4] = [3, 12, 40, 80];
 const MAX_HEIGHT: u16 = 30;
 
-const SCREENS: [Screen; 7] = [
+const SCREENS: [Screen; 8] = [
     Screen::Welcome,
     Screen::ThemeSelection,
+    Screen::ProviderChoice,
     Screen::AuthMethod,
     Screen::SignInTarget,
     Screen::CustomDomain,

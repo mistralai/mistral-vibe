@@ -287,6 +287,8 @@ def test_session_start_wraps_vibe_configuration_in_agent_config() -> None:
             "headless": True,
             "trustWorkspace": False,
             "mcpServers": [],
+            "terminalKey": None,
+            "systemPrompt": None,
         },
         "historyLimit": 100,
         "idempotencyKey": None,
@@ -298,6 +300,11 @@ def test_session_start_wraps_vibe_configuration_in_agent_config() -> None:
         "firstTurn": None,
         "startedBySessionId": None,
     }
+
+
+def test_a_blank_session_system_prompt_is_refused() -> None:
+    with pytest.raises(ValidationError, match="system prompt must not be blank"):
+        AgentConfig(system_prompt=" \n")
 
 
 def test_initialize_accepts_the_desktop_entrypoint_off_the_wire() -> None:

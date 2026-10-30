@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 
-import httpx
+import httpx2
 import pytest
 
 pytest.importorskip("mistralai_vibe_local_harness.vibe")
@@ -13,11 +13,13 @@ pytest.importorskip("mistralai_vibe_local_harness.vibe")
 from mistralai_vibe_local_harness.vibe.completion_profile import (
     CatalogueEntry,
     InputModality,
+    ReasoningControl,
     ReasoningSupport,
     WarningCode,
     catalogue_endpoint,
     credential_fingerprint,
 )
+from vibe import __version__
 from vibe.app_server import _completion_facts
 from vibe.app_server._agent_socket import OUTCOME_ERROR_FIELD
 from vibe.app_server._completion_facts import (
@@ -25,6 +27,7 @@ from vibe.app_server._completion_facts import (
     compile_agent_compaction_threshold,
     compile_agent_route_facts,
     compile_session_model_facts,
+    provider_catalogue_fetcher,
 )
 from vibe.app_server.run_export import RunOutcome
 from vibe.core.config import ModelConfig, ProviderConfig
@@ -249,17 +252,17 @@ def test_the_default_level_set_leaves_reasoning_unknown() -> None:
 
 
 def test_the_configs_level_set_wins_over_a_known_models() -> None:
-    """*Prepare*: A known model whose table row stops at high, while its config
-    lists low, high and max, as a newer version under the same name takes.
+    """*Prepare*: Mistral Large 4, whose table row lists low, high and max, while
+    its config lists low, medium and high.
     *Do*: Compile the session's facts at each listed level.
     *Assert*: The config's levels apply, and each level runs as written.
     """
     # Prepare
     provider = _provider()
 
-    for level in ("low", "high", "max"):
+    for level in ("low", "medium", "high"):
         model = _model(
-            "mistral-large-4", thinking=level, thinking_levels=["low", "high", "max"]
+            "mistral-large-4", thinking=level, thinking_levels=["low", "medium", "high"]
         )
 
         # Do
@@ -267,7 +270,7 @@ def test_the_configs_level_set_wins_over_a_known_models() -> None:
 
         # Assert
         assert facts.agent_reasoning == ReasoningSupport(
-            ("low", "high", "max"), can_turn_off=False
+            ("low", "medium", "high"), can_turn_off=False
         )
         assert facts.agent_thinking == level
         assert facts.warnings == ()
@@ -295,21 +298,114 @@ def test_a_level_outside_the_configs_level_set_runs_and_is_offered() -> None:
     assert route.thinking_levels == ("low", "medium", "high", "max")
 
 
-def test_a_level_outside_the_known_levels_runs_when_the_config_lists_none() -> None:
-    """*Prepare*: Mistral Large 4, whose known levels are off and high, set to max
-    with no level set in its config.
-    *Do*: Compile the session's facts.
-    *Assert*: The session runs at max: with no listed levels, Vibe sends the level
-    and the provider says whether the model takes it.
+@pytest.mark.parametrize(
+    ("levels", "thinking", "expected_levels", "expected_offered"),
+    [
+        (["low", "turbo"], "turbo", ("low", "turbo"), ("low", "turbo")),
+        (
+            ["off", "high", "turbo", "low"],
+            "turbo",
+            ("low", "turbo", "high"),
+            ("off", "high", "turbo", "low"),
+        ),
+        (["low", "high"], "ultra", ("low", "high"), ("low", "high", "ultra")),
+    ],
+    ids=["listed", "ranked-around-own-level", "unlisted-goes-last"],
+)
+def test_a_level_of_the_models_own_runs_as_written_over_a_known_model(
+    levels: list[str],
+    thinking: str,
+    expected_levels: tuple[str, ...],
+    expected_offered: tuple[str, ...],
+) -> None:
+    """*Prepare*: A known model, served on an OpenAI-compatible route, whose table
+    row stops at high, while its config lists a level of its own, and sets it or a
+    word it does not list.
+    *Do*: Compile the session's facts and the picker's levels.
+    *Assert*: The config's levels are the model's, lowest first with the own level
+    kept in its place; the session runs the level as written, and the picker
+    offers the list in the config's order, an unlisted level last.
     """
     # Prepare
-    model = _model("mistral-large-4", thinking="max")
+    provider = _provider(backend=Backend.GENERIC)
+    model = _model("mistral-large-4", thinking=thinking, thinking_levels=levels)
+
+    # Do
+    facts = compile_session_model_facts(provider, model, model)
+    route = compile_agent_route_facts(provider, model)
+
+    # Assert
+    assert facts.agent_reasoning is not None
+    assert facts.agent_reasoning.levels == expected_levels
+    assert facts.agent_thinking == thinking
+    assert route.thinking == thinking
+    assert route.thinking_levels == expected_offered
+
+
+def test_a_mistral_route_runs_any_level_as_written() -> None:
+    """*Prepare*: A Mistral model whose config lists a level of its own first and
+    is set to it.
+    *Do*: Compile the session's facts.
+    *Assert*: The level runs as written with every listed level kept: the harness
+    does not judge it. The Mistral SDK leaves it out of the request, which the
+    config warns about.
+    """
+    # Prepare
+    model = _model(thinking="turbo", thinking_levels=["turbo", "high"])
 
     # Do
     facts = compile_session_model_facts(_provider(), model, model)
 
     # Assert
-    assert facts.agent_thinking == "max"
+    assert facts.agent_thinking == "turbo"
+    assert facts.agent_reasoning is not None
+    assert facts.agent_reasoning.levels == ("turbo", "high")
+
+
+def test_the_configs_own_levels_win_over_the_catalogues(
+    catalogue: _CountingFetcher,
+) -> None:
+    """*Prepare*: An Anthropic catalogue that lists low and high for the model, and
+    a config that lists low and a level of the model's own, set to it.
+    *Do*: Compile the session's facts.
+    *Assert*: The config's levels apply and its level runs as written; the
+    catalogue still says how the model takes reasoning.
+    """
+    # Prepare
+    catalogue.entry = CatalogueEntry(
+        reasoning=ReasoningSupport(("low", "high"), can_turn_off=True)
+    )
+    provider = _provider(backend=Backend.GENERIC, api_style="anthropic").model_copy(
+        update={"api_key_env_var": _KEY_VAR}
+    )
+    model = _model(thinking="turbo", thinking_levels=["low", "turbo"])
+
+    # Do
+    facts = compile_session_model_facts(provider, model, model)
+
+    # Assert
+    assert facts.agent_reasoning == ReasoningSupport(
+        ("low", "turbo"), can_turn_off=False
+    )
+    assert facts.agent_thinking == "turbo"
+    assert catalogue.fetched == ["custom-model"]
+
+
+def test_a_level_outside_the_known_levels_runs_when_the_config_lists_none() -> None:
+    """*Prepare*: Mistral Large 4, whose known levels are low, high and max, set to xhigh
+    with no level set in its config.
+    *Do*: Compile the session's facts.
+    *Assert*: The session runs at xhigh: with no listed levels, Vibe sends the level
+    and the provider says whether the model takes it.
+    """
+    # Prepare
+    model = _model("mistral-large-4", thinking="xhigh")
+
+    # Do
+    facts = compile_session_model_facts(_provider(), model, model)
+
+    # Assert
+    assert facts.agent_thinking == "xhigh"
 
 
 @pytest.mark.parametrize("levels", [[], ["off"]])
@@ -335,6 +431,21 @@ def test_an_off_only_level_set_keeps_the_models_known_reasoning(
     assert facts.agent_reasoning.levels
     assert facts.agent_reasoning.can_turn_off
     assert facts.agent_thinking == "off"
+
+
+@pytest.mark.parametrize(("agent_cap", "warns"), [(None, False), (1_000, True)])
+def test_an_agent_cap_too_small_to_reason_warns(
+    agent_cap: int | None, warns: bool
+) -> None:
+    model = _model("claude-haiku-4-5", thinking="high")
+    provider = _provider(backend=Backend.GENERIC, api_style="anthropic")
+
+    facts = compile_session_model_facts(
+        provider, model, model, agent_max_tokens=agent_cap
+    )
+
+    codes = [warning.code for warning in facts.warnings]
+    assert (WarningCode.REASONING_BUDGET_UNAVAILABLE in codes) is warns
 
 
 def test_reasoning_off_on_a_model_that_always_reasons_runs_as_written() -> None:
@@ -375,7 +486,7 @@ class _CountingFetcher:
         await asyncio.sleep(0.01)
         self.in_flight -= 1
         if self.fail:
-            raise httpx.ConnectError("refused")
+            raise httpx2.ConnectError("refused")
         return self.entry
 
 
@@ -476,6 +587,34 @@ def test_a_failed_catalogue_warns_and_falls_to_the_next_layer(
     assert catalogue.fetched == ["custom-model"]
 
 
+def test_a_client_that_cannot_be_built_costs_the_catalogue_not_the_session(
+    catalogue: _CountingFetcher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A proxy in the environment the client cannot transport, such
+    as SOCKS without `socksio`, so building the catalogue client fails before
+    any request.
+    *Do*: Compile the session's facts.
+    *Assert*: The compile succeeds with a guessed window, the fetcher is never
+    asked, and the session start does not fail.
+    """
+
+    # Prepare
+    def _unbuildable_client(**_kwargs: object) -> httpx2.AsyncClient:
+        raise ImportError(
+            "Using SOCKS proxy, but the 'socksio' package is not installed."
+        )
+
+    monkeypatch.setattr(_completion_facts, "VibeAsyncHTTPClient", _unbuildable_client)
+
+    # Do
+    facts = compile_session_model_facts(_keyed_provider(), _model(), _model())
+
+    # Assert
+    assert facts.agent.context_window == 262_144
+    assert [warning.code for warning in facts.warnings] == [WarningCode.WINDOW_GUESSED]
+    assert catalogue.fetched == []
+
+
 def test_a_compile_on_the_event_loop_reads_only_the_cache(
     catalogue: _CountingFetcher,
 ) -> None:
@@ -531,23 +670,22 @@ def test_a_route_without_a_key_or_catalogue_asks_nothing(
         '{"endpoint": "e"}',
         '{"endpoint": "e", "model": "m", "context_window": -1}',
         '{"endpoint": "e", "model": "m", '
-        '"reasoning": {"levels": ["huge"], "can_turn_off": false, "control": "effort"}}',
+        '"reasoning": {"levels": [7], "can_turn_off": false, "control": "effort"}}',
+        '{"endpoint": "e", "model": "m", '
+        '"reasoning": {"levels": ["off"], "can_turn_off": false, "control": "effort"}}',
     ],
-    ids=["not-json", "not-object", "no-model", "bad-window", "bad-level"],
+    ids=["not-json", "not-object", "no-model", "bad-window", "bad-level", "off-level"],
 )
 def test_a_saved_catalogue_answer_round_trips_and_a_bad_one_is_ignored(
     stored: str,
 ) -> None:
-    """*Prepare*: A catalogue answer with every fact, and a stored value that is
-    not one.
+    """*Prepare*: A catalogue answer with every fact, a level of the model's own
+    among its levels, and a stored value that is not one.
     *Do*: Store the answer and read both back.
     *Assert*: The answer comes back whole; the bad value reads as nothing, so a
     reopen asks the catalogue instead of failing.
     """
-    from mistralai_vibe_local_harness.vibe.completion_profile import (
-        ReasoningControl,
-        ReasoningSupport,
-    )
+    from mistralai_vibe_local_harness.vibe.completion_profile import ReasoningSupport
 
     # Prepare
     snapshot = _completion_facts.CatalogueSnapshot(
@@ -558,7 +696,7 @@ def test_a_saved_catalogue_answer_round_trips_and_a_bad_one_is_ignored(
             max_output_tokens=8_192,
             input_modalities=_TEXT_ONLY,
             reasoning=ReasoningSupport(
-                ("low", "high"),
+                ("low", "turbo", "high"),
                 can_turn_off=True,
                 control=ReasoningControl.BUDGET_TOKENS,
             ),
@@ -572,6 +710,28 @@ def test_a_saved_catalogue_answer_round_trips_and_a_bad_one_is_ignored(
     # Assert
     assert restored == snapshot
     assert ignored is None
+
+
+def test_a_saved_catalogue_answer_reads_its_standard_levels_lowest_first() -> None:
+    """*Prepare*: A saved catalogue answer listing high before low, with a level
+    of the model's own between them.
+    *Do*: Read it back.
+    *Assert*: The standard levels come lowest first and the own level keeps its
+    place, so the lowest a compaction asks for is low.
+    """
+    # Prepare
+    stored = (
+        '{"endpoint": "e", "model": "m", "reasoning": {"levels": '
+        '["high", "turbo", "low"], "can_turn_off": false, "control": "effort"}}'
+    )
+
+    # Do
+    restored = _completion_facts.CatalogueSnapshot.from_pin(stored)
+
+    # Assert
+    assert restored is not None
+    assert restored.entry.reasoning is not None
+    assert restored.entry.reasoning.levels == ("low", "turbo", "high")
 
 
 def test_a_reopen_with_a_saved_answer_asks_the_catalogue_nothing(
@@ -671,3 +831,31 @@ def test_off_on_a_model_that_always_reasons_is_left_to_the_provider() -> None:
 
     # Assert
     assert facts.agent_thinking == "off"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "user_agent"),
+    [
+        (_provider(), f"mistral-client-python/Mistral-Vibe/{__version__}"),
+        (
+            _provider(backend=Backend.GENERIC, api_style="anthropic"),
+            f"Mistral-Vibe/{__version__}",
+        ),
+    ],
+)
+async def test_the_catalogue_lookup_identifies_vibe(
+    provider: ProviderConfig, user_agent: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(_KEY_VAR, "test-key")
+    sent: list[str | None] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request.headers.get("user-agent"))
+        return httpx2.Response(200, json={"id": "m"})
+
+    keyed = provider.model_copy(update={"api_key_env_var": _KEY_VAR})
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+        await provider_catalogue_fetcher(keyed, client).fetch("m")
+
+    assert sent == [user_agent]

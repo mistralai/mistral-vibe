@@ -45,12 +45,12 @@ pub(crate) use crate::core::hooks::{
 pub(crate) use crate::core::hooks::{HookToolKey, HookToolTarget};
 pub(crate) use crate::core::model_context::ModelContext;
 pub(crate) use crate::core::state::{
-    ActivePhase, ActiveTurn, HarnessState, QueuedTurn, StateInspection, TurnState,
+    ActivePhase, ActiveTurn, HarnessState, StateInspection, TurnState,
 };
 use crate::core::step_protocol::DeterminismContext;
 pub(crate) use crate::core::step_protocol::{
     AcceptedToolResult, ActionAbandonedCause, CandidateDiscardCause, Observation, Outcome,
-    Transition, TurnCompletion,
+    Transition,
 };
 pub(crate) use crate::core::step_protocol::{
     Action, CompletionActionKind, CompletionPurpose, ModelInputUpdate, ModelMessageUpdate,
@@ -94,7 +94,6 @@ pub(crate) use crate::core::{advance_in_place, initial_state, reconfigure_in_pla
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Step {
     pub state: HarnessState,
-    pub completed: Option<TurnCompletion>,
     pub effect: Option<Action>,
     pub effects: Vec<Action>,
     pub accepted_tool_result: Option<AcceptedToolResult>,
@@ -151,7 +150,6 @@ pub(crate) fn advance(mut state: HarnessState, command: HarnessCommand) -> Resul
     let effects = transition.effects;
     let effect = effects.first().cloned();
     Ok(Step {
-        completed: transition.completed,
         state,
         effect,
         effects,
@@ -163,7 +161,7 @@ impl Step {
     /// The output the finished turn produced, mirroring what the Runtime would
     /// report as a completed turn.
     pub(crate) fn output(&self) -> Option<Vec<ContentBlock>> {
-        match &self.completed.as_ref()?.outcome {
+        match turn_outcome(&self.state)? {
             TurnOutcome::Completed { output } => Some(output.clone()),
             TurnOutcome::Rejected { .. } => Some(Vec::new()),
             TurnOutcome::Failed { .. } | TurnOutcome::Interrupted { .. } => None,
@@ -172,7 +170,7 @@ impl Step {
 
     /// Why the turn produced no answer, for the paths that record a reason.
     pub(crate) fn rejection_reason(&self) -> Option<&str> {
-        match &self.completed.as_ref()?.outcome {
+        match turn_outcome(&self.state)? {
             TurnOutcome::Rejected { reason } => Some(reason),
             TurnOutcome::Interrupted { reason } => reason.as_deref(),
             TurnOutcome::Completed { .. } | TurnOutcome::Failed { .. } => None,
@@ -191,13 +189,6 @@ pub(crate) fn turn_outcome(state: &HarnessState) -> Option<&TurnOutcome> {
 /// How many completions the active turn has committed.
 pub(crate) fn iterations(state: &HarnessState) -> u32 {
     state.active().map_or(0, |active| active.iterations)
-}
-
-pub(crate) fn queued_messages(state: &HarnessState) -> &[StoredMessage] {
-    match state.active().map(|active| &active.queued) {
-        Some(QueuedTurn::Pending { messages, .. }) => messages,
-        Some(QueuedTurn::Empty) | None => &[],
-    }
 }
 
 pub(crate) fn reconfigure(

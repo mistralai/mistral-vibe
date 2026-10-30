@@ -95,8 +95,25 @@ fn build_generic_system_prompt(config: &HarnessConfig) -> String {
             .expect("validated background processes have a command environment");
         sections.push(background_processes::prompt_section(command_profile));
     }
-    if config.settings.tools.subagents.is_enabled() {
-        sections.push(config.settings.prompts.agent_tools.guidance.clone());
+    // An agent that cannot create children reads only the guidance for the tools it has.
+    let agent_tools = &config.settings.tools.subagents;
+    if agent_tools.can_spawn() {
+        let prompts = &config.settings.prompts.agent_tools;
+        let mut guidance = vec![prompts.guidance_intro.as_str()];
+        if agent_tools.can_list_configs() {
+            guidance.push(&prompts.list_configs_guidance);
+        }
+        guidance.push(&prompts.guidance);
+        sections.push(guidance.join(" "));
+    } else if agent_tools.is_enabled() {
+        sections.push(
+            config
+                .settings
+                .prompts
+                .agent_tools
+                .messaging_guidance
+                .clone(),
+        );
     }
     if skill_mode.exposes(config.skills()) {
         sections.push(skills::rules_prompt_section().to_string());
@@ -162,6 +179,57 @@ mod tests {
         assert_eq!(build_intro_prompt(true, true), defaults.intro);
         assert_eq!(build_autonomy_prompt(true, true), defaults.autonomy);
     }
+    /// *Prepare*: One agent with every agent operation and one that can only send messages,
+    /// as on the deepest allowed level.
+    /// *Do*: Build both system prompts.
+    /// *Assert*: The agent that can create children reads the full agents guidance; the other
+    /// reads the messaging guidance, which names no child operation.
+    #[test]
+    fn an_agent_that_cannot_spawn_reads_only_the_messaging_guidance() {
+        let prompts = PromptSettings::default().agent_tools;
+        let parent = config();
+        let mut leaf = config();
+        leaf.settings.tools.subagents = serde_json::from_value(json!({
+            "mode": "enabled",
+            "operations": ["send_message"],
+        }))
+        .expect("send_message-only agent tools are valid");
+
+        let parent_prompt = build_generic_system_prompt(&parent);
+        let leaf_prompt = build_generic_system_prompt(&leaf);
+
+        assert!(parent_prompt.contains(&prompts.guidance));
+        assert!(!parent_prompt.contains(&prompts.messaging_guidance));
+        assert!(leaf_prompt.contains(&prompts.messaging_guidance));
+        assert!(!leaf_prompt.contains("list_configs"));
+        assert!(!leaf_prompt.contains("spawn"));
+    }
+    /// *Prepare*: Two agents that can create children, one with `list_configs` and one without.
+    /// *Do*: Build both system prompts.
+    /// *Assert*: Only the agent with `list_configs` is told to call it or reads about configs.
+    #[test]
+    fn agents_guidance_names_list_configs_only_when_it_is_enabled() {
+        let prompts = PromptSettings::default().agent_tools;
+        let with_list_configs = config();
+        let mut without_list_configs = config();
+        without_list_configs.settings.tools.subagents = serde_json::from_value(json!({
+            "mode": "enabled",
+            "operations": ["list", "spawn", "send_message", "interrupt"],
+        }))
+        .expect("agent tools without list_configs are valid");
+
+        let with_prompt = build_generic_system_prompt(&with_list_configs);
+        let without_prompt = build_generic_system_prompt(&without_list_configs);
+
+        assert!(with_prompt.contains(&format!(
+            "{} {} {}",
+            prompts.guidance_intro, prompts.list_configs_guidance, prompts.guidance
+        )));
+        assert!(
+            without_prompt.contains(&format!("{} {}", prompts.guidance_intro, prompts.guidance))
+        );
+        assert!(!without_prompt.contains("config"));
+    }
     #[test]
     fn system_prompt_indexes_generic_tool_groups_and_skills() {
         let mut config = config();
@@ -208,7 +276,7 @@ mod tests {
         assert!(!system_prompt.contains("`tools.self.sleep({ seconds })`"));
         assert!(system_prompt.contains("<name>review</name>"));
         assert!(system_prompt.contains("<description>Review &lt;code&gt; safely.</description>"));
-        assert!(system_prompt.contains("<path>/skills/review&lt;&amp;/SKILL.md</path>"));
+        assert!(!system_prompt.contains("/skills/review"));
         assert!(system_prompt.contains("<name>project</name>"));
         assert!(system_prompt.contains("`tools.agents"));
         let tool_use = system_prompt
@@ -292,7 +360,7 @@ mod tests {
         assert!(!prompt.contains("await step"));
         assert!(prompt.contains("proactively call the `skill` tool"));
         assert!(prompt.contains(
-            "Do not read a root `SKILL.md` path with `read_file` after loading a skill."
+            "Load a skill only with `skill`, never by reading its root `SKILL.md` path with `read_file`."
         ));
 
         assert!(prompt.contains(

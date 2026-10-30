@@ -1043,6 +1043,33 @@ def test_release_removes_a_clean_worktree_and_its_branch(tmp_path: Path) -> None
     assert _claim(repo, worktree.name).read() is None
 
 
+@pytest.mark.parametrize(
+    ("git_cli_repo", "block_ref_files"),
+    [("files", True), ("reftable", False)],
+    indirect=["git_cli_repo"],
+)
+def test_release_removes_the_branch_without_gitpython_ref_files(
+    tmp_path: Path,
+    git_cli_repo: Repo,
+    block_ref_files: bool,
+    request: pytest.FixtureRequest,
+) -> None:
+    # Reftable needs git 2.45 or later; blocking GitPython's ref file reads
+    # checks the same code on any git.
+    repo = _track_repo(git_cli_repo)
+    repo.git.commit("--allow-empty", "-m", "initial")
+    if block_ref_files:
+        request.getfixturevalue("no_gitpython_ref_files")
+    worktree = _prepare_auto(tmp_path)
+    _hold(worktree.root, "session-a")
+
+    release = _release(worktree.root, "session-a")
+
+    assert release.outcome is WorktreeReleaseOutcome.REMOVED
+    assert release.branch_deleted is True
+    assert repo.git.branch("--list", worktree.branch) == ""
+
+
 @pytest.mark.parametrize("dirt", ["uncommitted", "untracked", "commit"])
 def test_release_saves_the_work_before_removing_a_worktree(
     tmp_path: Path, dirt: str

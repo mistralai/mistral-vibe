@@ -1,42 +1,13 @@
 //! What the question app records as an answer, when it submits, and the mount grace period.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyCode;
 use vibe_rs::app::App;
 use vibe_rs::question_app::{other_option_idx, submit_option_idx};
-use vibe_rs::question_input::handle_key;
-use vibe_rs::server::{Client, QuestionChoice, UserQuestion};
 
-fn question(multi_select: bool) -> UserQuestion {
-    UserQuestion {
-        question: "Pick".into(),
-        header: String::new(),
-        options: ["Alpha", "Beta"]
-            .into_iter()
-            .map(|label| QuestionChoice {
-                label: label.into(),
-                description: String::new(),
-            })
-            .collect(),
-        multi_select,
-        hide_other: false,
-    }
-}
-
-fn open(questions: Vec<UserQuestion>) -> App {
-    let mut app = App::default();
-    app.question_app.open = true;
-    app.question_app.questions = questions;
-    app
-}
-
-fn press(app: &mut App, code: KeyCode) {
-    let client = Arc::new(Client::stub());
-    handle_key(app, &client, KeyEvent::new(code, KeyModifiers::NONE));
-}
+use crate::support::{pick, press_question as press, with_question, with_questions};
 
 fn submit_multi(app: &mut App, ticked: &[usize]) {
     app.question_app
@@ -50,7 +21,7 @@ fn submit_multi(app: &mut App, ticked: &[usize]) {
 
 #[test]
 fn multi_select_joins_the_ticked_labels_in_option_order() {
-    let mut app = open(vec![question(true)]);
+    let mut app = with_question(true);
 
     submit_multi(&mut app, &[1, 0]);
 
@@ -63,7 +34,7 @@ fn multi_select_joins_the_ticked_labels_in_option_order() {
 
 #[test]
 fn multi_select_with_free_text_marks_the_answer_as_other() {
-    let mut app = open(vec![question(true)]);
+    let mut app = with_question(true);
     app.question_app.other_texts.insert(0, "  custom  ".into());
     let other = other_option_idx(&app).unwrap();
 
@@ -77,7 +48,7 @@ fn multi_select_with_free_text_marks_the_answer_as_other() {
 
 #[test]
 fn a_ticked_but_empty_free_text_row_is_left_out() {
-    let mut app = open(vec![question(true)]);
+    let mut app = with_question(true);
     let other = other_option_idx(&app).unwrap();
 
     submit_multi(&mut app, &[0, other]);
@@ -90,7 +61,7 @@ fn a_ticked_but_empty_free_text_row_is_left_out() {
 
 #[test]
 fn submitting_a_multi_select_without_ticks_is_a_no_op() {
-    let mut app = open(vec![question(true)]);
+    let mut app = with_question(true);
 
     submit_multi(&mut app, &[]);
 
@@ -100,7 +71,7 @@ fn submitting_a_multi_select_without_ticks_is_a_no_op() {
 
 #[test]
 fn enter_on_a_multi_select_option_ticks_it_without_answering() {
-    let mut app = open(vec![question(true)]);
+    let mut app = with_question(true);
 
     press(&mut app, KeyCode::Enter);
 
@@ -114,7 +85,7 @@ fn enter_on_a_multi_select_option_ticks_it_without_answering() {
 
 #[test]
 fn single_select_saves_an_option_at_once_and_submits_the_last_question() {
-    let mut app = open(vec![question(false)]);
+    let mut app = with_question(false);
 
     press(&mut app, KeyCode::Enter);
 
@@ -127,7 +98,7 @@ fn single_select_saves_an_option_at_once_and_submits_the_last_question() {
 
 #[test]
 fn single_select_free_text_needs_text_to_answer() {
-    let mut app = open(vec![question(false)]);
+    let mut app = with_question(false);
     app.question_app
         .list
         .select(other_option_idx(&app).unwrap());
@@ -150,7 +121,7 @@ fn single_select_free_text_needs_text_to_answer() {
 
 #[test]
 fn the_app_submits_only_once_every_question_is_answered() {
-    let mut app = open(vec![question(false), question(false)]);
+    let mut app = with_questions(vec![pick(false), pick(false)]);
 
     press(&mut app, KeyCode::Enter);
     assert!(app.question_app.open);
@@ -168,7 +139,7 @@ fn the_app_submits_only_once_every_question_is_answered() {
 
 #[test]
 fn enter_and_esc_are_ignored_within_the_grace_period_but_navigation_is_not() {
-    let mut app = open(vec![question(false)]);
+    let mut app = with_question(false);
     app.question_app.mount_time = Some(Instant::now());
 
     press(&mut app, KeyCode::Down);

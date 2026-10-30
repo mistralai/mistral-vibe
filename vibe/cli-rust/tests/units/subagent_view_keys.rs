@@ -1,21 +1,15 @@
-//! Keys around the subagent list and read-only child views: draft keeping, Ctrl+C warning and quit.
-
-use std::sync::Arc;
+//! Keys around the subagent list and read-only child views: draft keeping, Esc, Ctrl+C warning and quit.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use tokio::sync::mpsc;
 use vibe_rs::app::App;
-use vibe_rs::config;
-use vibe_rs::input::handle_key;
 use vibe_rs::quit_manager::QuitConfirmKey;
-use vibe_rs::server::{Client, PublicChildSession, SessionStatus};
+use vibe_rs::server::{PublicChildSession, SessionStatus};
 use vibe_rs::subagents::{self, Severity, READ_ONLY_MESSAGE};
+
+use crate::support::send_key;
 
 struct Harness {
     app: App,
-    client: Arc<Client>,
-    config_tx: mpsc::Sender<config::Loaded>,
-    _config_rx: mpsc::Receiver<config::Loaded>,
 }
 
 impl Harness {
@@ -32,19 +26,12 @@ impl Harness {
             ..Default::default()
         });
         subagents::refresh(&mut app);
-        let (config_tx, _config_rx) = mpsc::channel(1);
-        Self {
-            app,
-            client: Arc::new(Client::stub()),
-            config_tx,
-            _config_rx,
-        }
+        Self { app }
     }
 
     /// Press a key; true means the application exits.
     fn press(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
-        let key = KeyEvent::new(code, modifiers);
-        handle_key(&mut self.app, &self.client, &self.config_tx, key)
+        send_key(&mut self.app, KeyEvent::new(code, modifiers))
     }
 
     fn ctrl_c(&mut self) -> bool {
@@ -111,4 +98,22 @@ async fn escape_from_a_child_view_cancels_the_pending_quit_confirmation() {
     );
     assert!(harness.app.quit.is_confirmed(QuitConfirmKey::CtrlC));
     assert!(harness.ctrl_c());
+}
+
+#[tokio::test]
+async fn escape_on_the_focused_list_returns_to_the_input_on_main() {
+    let mut harness = Harness::new();
+    assert!(subagents::focus_first(&mut harness.app));
+    assert!(!harness.press(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(harness.app.subagents.list.options.selected(), 1);
+
+    assert!(!harness.press(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!harness.app.subagents.list.focused);
+    assert!(harness.app.view.app_focus);
+    assert_eq!(harness.app.subagents.list.options.selected(), 0, "Main row");
+    assert_eq!(harness.app.subagents.viewed_subagent_id, None);
+    assert!(
+        harness.app.overlays.last_escape.is_none(),
+        "leaving the list does not arm the double Esc"
+    );
 }

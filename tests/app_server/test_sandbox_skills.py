@@ -50,7 +50,6 @@ _BUILTIN_SKILLS = Path(__file__).parents[2] / "vibe/plugins/builtins/vibe/skills
 _INSTALL_MARKER = " skills-install "
 _UPLOAD_MARKERS = (_INSTALL_MARKER, "mistralai-vibe-request-")
 _BASE_DIR = re.compile(r"Base directory for this skill: ([^\\\n]+)")
-_SKILL_PATH = re.compile(r"<path>([^<]+/SKILL\.md)</path>")
 
 
 @pytest.fixture
@@ -149,9 +148,9 @@ async def test_the_builtin_skills_are_copied_once_and_reused_by_a_later_run(
     *Do*: Run a session that loads the built-in `vibe:vibe` skill, then a
     second one on the same sandbox.
     *Assert*: The first run uploads once, and its copies hold the built-in
-    skills' files; the model is told sandbox paths for every skill and for the
-    loaded one's base directory; the second run uploads nothing and is told
-    the same paths; neither touches the workspace.
+    skills' files; the model is told the loaded skill's sandbox base
+    directory; the second run uploads nothing and is told the same directory;
+    neither touches the workspace.
     """
     # Do
     first, first_input = await _run_skill(project, monkeypatch, "vibe:vibe")
@@ -172,19 +171,12 @@ async def test_the_builtin_skills_are_copied_once_and_reused_by_a_later_run(
     assert _uploads(second) == []
 
     root = f"{sandbox_tmp}/{SKILLS_DIRNAME}/"
-    paths = _SKILL_PATH.findall(first_input)
-    assert len(paths) == len(builtins)
-    assert all(path.startswith(root) for path in paths)
-    assert {path.removeprefix(root).removesuffix("/SKILL.md") for path in paths} == (
-        set(copies)
-    )
     vibe_digest = next(
         digest
         for digest, copy in copies.items()
         if copy["SKILL.md"] == builtins["vibe"]
     )
     assert _BASE_DIR.findall(first_input) == [f"{root}{vibe_digest}"]
-    assert _SKILL_PATH.findall(second_input) == paths
     assert _BASE_DIR.findall(second_input) == [f"{root}{vibe_digest}"]
     assert str(_BUILTIN_SKILLS) not in first_input
     assert _workspace_changes(project) == ""
@@ -221,7 +213,6 @@ async def test_a_user_skill_is_copied_with_its_files(
     assert sorted(copy) == ["SKILL.md", "scripts/run.sh"]
     base_dir = f"{sandbox_tmp}/{SKILLS_DIRNAME}/{digest}"
     assert _BASE_DIR.findall(model_input) == [base_dir]
-    assert f"<path>{base_dir}/SKILL.md</path>" in model_input
     assert "<file>scripts/run.sh</file>" in model_input
     assert str(skill_dir) not in model_input
     assert _workspace_changes(project) == ""
@@ -251,7 +242,6 @@ async def test_a_project_skill_is_read_in_the_sandbox_and_wins_over_a_user_skill
     assert "Project release." in model_input
     assert "User release." not in model_input
     assert _BASE_DIR.findall(model_input) == [str(skill_dir)]
-    assert f"<path>{skill_dir}/SKILL.md</path>" in model_input
     assert "<file>checklist.md</file>" in model_input
     assert not any(
         b"Project release." in copy["SKILL.md"]

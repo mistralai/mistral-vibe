@@ -1,21 +1,16 @@
 //! A plain click on the footer's model opens `/model`; busy turns, drags and double clicks do not.
 
-use std::sync::Arc;
 use std::time::Instant;
 
-use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::backend::TestBackend;
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::Terminal;
+use crossterm::event::{MouseButton, MouseEventKind};
 use tokio::sync::mpsc;
 
 use vibe_rs::app::{App, Status};
-use vibe_rs::mouse;
 use vibe_rs::pointer::{self, Shape};
-use vibe_rs::server::Client;
 use vibe_rs::telemetry::{self, event, TelemetryEvent};
 use vibe_rs::ui::bottom_bar;
+
+use crate::support::{bottom_bar, bottom_bar_row, click, mouse, send_mouse};
 
 const WIDTH: u16 = 120;
 const MODEL: &str = "mistral-medium-3.5[medium]";
@@ -27,50 +22,24 @@ fn footer() -> (App, u16) {
     app.session.cwd = Some("/tmp/project".into());
     app.session.tokens = (0, 600_000);
     app.session.startup_config.active_model = MODEL.into();
-    let start = redraw(&mut app).find(MODEL).expect("model") as u16;
+    let start = bottom_bar_row(&mut app, WIDTH).find(MODEL).expect("model") as u16;
     (app, start)
-}
-
-fn paint(app: &mut App) -> Buffer {
-    let mut terminal = Terminal::new(TestBackend::new(WIDTH, 1)).expect("terminal");
-    terminal
-        .draw(|frame| bottom_bar::draw(app, frame, Rect::new(0, 0, WIDTH, 1)))
-        .expect("draw");
-    terminal.backend().buffer().clone()
-}
-
-fn redraw(app: &mut App) -> String {
-    let buffer = paint(app);
-    (0..WIDTH).map(|x| buffer[(x, 0)].symbol()).collect()
 }
 
 /// Hovering the model shows no link style or hand, and a click leaves `/model` closed.
 fn assert_inert(app: &mut App, start: u16) {
     hover(app, start + 2);
-    let buffer = paint(app);
+    let buffer = bottom_bar(app, WIDTH);
     assert!(!bottom_bar::model_at(app, (start + 2, 0)));
     assert_eq!(pointer::shape(app), Shape::Default);
     assert_eq!(buffer[(start + 2, 0)].style(), buffer[(2, 0)].style());
 
-    click(app, start + 2);
+    click(app, start + 2, 0);
     assert!(!app.model_picker.open);
 }
 
 fn send(app: &mut App, kind: MouseEventKind, column: u16) {
-    let client = Arc::new(Client::stub());
-    let (config_tx, _rx) = mpsc::channel(1);
-    let event = MouseEvent {
-        kind,
-        column,
-        row: 0,
-        modifiers: KeyModifiers::NONE,
-    };
-    mouse::handle(app, &client, &config_tx, event);
-}
-
-fn click(app: &mut App, column: u16) {
-    send(app, MouseEventKind::Down(MouseButton::Left), column);
-    send(app, MouseEventKind::Up(MouseButton::Left), column);
+    send_mouse(app, mouse(kind, column, 0));
 }
 
 fn hover(app: &mut App, column: u16) {
@@ -83,7 +52,7 @@ fn a_plain_click_on_the_model_opens_the_picker_and_records_the_footer_entry() {
     let (tx, mut rx) = mpsc::channel(telemetry::TELEMETRY_CHANNEL_CAP);
     app.telemetry_tx = Some(tx);
 
-    click(&mut app, start + 2);
+    click(&mut app, start + 2, 0);
 
     assert!(app.model_picker.open);
     let events: Vec<TelemetryEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -133,7 +102,7 @@ fn the_model_shows_the_link_style_and_pointer_hand_once_ready() {
     let (mut app, start) = footer();
 
     hover(&mut app, start + 2);
-    let buffer = paint(&mut app);
+    let buffer = bottom_bar(&mut app, WIDTH);
 
     assert_eq!(pointer::shape(&app), Shape::Pointer);
     assert_ne!(buffer[(start + 2, 0)].style(), buffer[(2, 0)].style());
@@ -165,9 +134,9 @@ fn a_release_off_the_model_does_not_open_the_picker() {
 fn a_double_click_on_the_model_opens_the_picker_without_selecting_a_word() {
     let (mut app, start) = footer();
 
-    click(&mut app, start + 2);
-    redraw(&mut app);
-    click(&mut app, start + 2);
+    click(&mut app, start + 2, 0);
+    bottom_bar_row(&mut app, WIDTH);
+    click(&mut app, start + 2, 0);
 
     assert!(app.model_picker.open);
     assert!(

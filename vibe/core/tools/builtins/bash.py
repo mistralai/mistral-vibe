@@ -406,8 +406,9 @@ class BashToolConfig(BaseToolConfig):
     default_timeout: int | None = Field(
         default=None,
         description=(
-            "Seconds a command may run when the call gives no timeout. Set it with"
-            " `max_timeout_seconds`, or neither. Unset, Vibe's own default applies."
+            "Seconds a command may run when the call gives no timeout. Set alone, it"
+            " must be at most Vibe's own maximum (300). Unset, Vibe's own default"
+            " applies."
         ),
     )
     max_timeout_seconds: int | None = Field(

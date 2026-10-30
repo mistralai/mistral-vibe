@@ -32,6 +32,44 @@ pub(super) fn status(app: &mut App, client: &Arc<Client>) {
     });
 }
 
+/// The `providerAuth/read` auth view, or `None` when the read fails.
+pub(super) async fn read(client: &Client, session_id: &str) -> Option<Value> {
+    match client
+        .request(method::PROVIDER_AUTH_READ, json!({"sessionId": session_id}))
+        .await
+    {
+        Ok(mut value) => Some(value.get_mut("auth")?.take()),
+        Err(error) => {
+            tracing::warn!(%error, "provider auth read failed");
+            None
+        }
+    }
+}
+
+/// The `/whoami` line naming the credential source in use, e.g.
+/// `- **Credential source (MISTRAL_API_KEY)**: Process environment`.
+pub fn active_source_line(view: &Value) -> Option<String> {
+    if view.pointer("/authKind").and_then(Value::as_str) != Some("api_key") {
+        return None;
+    }
+    let in_use = sources(view)
+        .into_iter()
+        .find(|source| source.state == "in_use")?;
+    let env_var = view
+        .pointer("/apiKeyEnvVar")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let env_file_path = view
+        .pointer("/envFilePath")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    Some(format!(
+        "- **Credential source ({})**: {}",
+        literal(env_var),
+        source_label(&in_use, env_file_path)
+    ))
+}
+
 /// Mount the `/status` message, whose exact counts render muted.
 pub(crate) fn add_agent_statistics(app: &mut App, id: &str, text: &str) {
     local::add_message(&mut app.view.transcript, id, "agent_statistics", text);

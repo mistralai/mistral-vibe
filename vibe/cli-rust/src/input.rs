@@ -242,10 +242,15 @@ fn handle_key_inner(
                 | KeyCode::End
                 | KeyCode::PageUp
                 | KeyCode::PageDown
-        ) || (plain && matches!(key.code, KeyCode::Char('j') | KeyCode::Char('k')));
+        ) || (plain && matches!(key.code, KeyCode::Char('j' | 'k' | 'a')));
         match key.code {
             _ if list_key => {
                 subagents::handle_list_key(app, key);
+                return false;
+            }
+            // Esc on the list in main chat hands focus back with Main highlighted.
+            KeyCode::Esc if app.subagents.viewed_subagent_id.is_none() => {
+                subagents::leave_list(app);
                 return false;
             }
             // App-level bindings still run while the list is focused.
@@ -548,23 +553,17 @@ pub(crate) fn select_theme(app: &mut App, client: &Arc<Client>) {
     theme_picker::preview(app);
     app.theme_picker.open = false;
     let client = client.clone();
-    let theme_tx = app.theme_picker.tx.clone();
-    let pending = app.commit_started();
-    tokio::spawn(async move {
+    crate::ui_event::spawn(app, async move {
         let ops = vec![config_write::set_op("/theme", theme)];
         let result =
             config_write::write(&client, &session_id, ops, "app-server config update").await;
-        let applied = result.ok().and_then(|result| {
-            result
-                .pointer("/runtime/config/theme")
-                .and_then(|value| value.as_str())
-                .map(str::to_owned)
-        });
-        let event = match applied {
+        let applied = result
+            .ok()
+            .and_then(|result| crate::server::RuntimeSnapshot::config(&result)?.theme);
+        match applied {
             Some(name) => theme_picker::Event::Applied(name),
             None => theme_picker::Event::Failed,
-        };
-        deliver(theme_tx, event, &pending).await;
+        }
     });
 }
 
@@ -671,9 +670,13 @@ pub fn handle_artifacts_modal_key(app: &mut App, key: KeyEvent) {
 
 /// Hand a commit's answer to the main thread, which releases the commit once it
 /// has applied it. With no receiver the commit is released here instead.
-pub(crate) async fn deliver<T>(tx: Option<mpsc::Sender<T>>, event: T, pending: &Arc<AtomicU32>) {
+pub(crate) async fn deliver<T>(
+    tx: Option<mpsc::Sender<T>>,
+    event: impl Into<T>,
+    pending: &Arc<AtomicU32>,
+) {
     let sent = match tx {
-        Some(tx) => tx.send(event).await.is_ok(),
+        Some(tx) => tx.send(event.into()).await.is_ok(),
         None => false,
     };
     if !sent {

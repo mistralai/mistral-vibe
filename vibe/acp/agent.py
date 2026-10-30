@@ -1071,17 +1071,8 @@ class VibeAcpAgent(AcpAgent):
                     await session.app_server.resources.config.update(
                         {"active_model": model}, reload_runtime=True
                     )
-                case "thinking", str(level) if level in {
-                    "off",
-                    "low",
-                    "medium",
-                    "high",
-                    "xhigh",
-                    "max",
-                }:
-                    await session.app_server.resources.config.set_thinking(
-                        cast(Any, level)
-                    )
+                case "thinking", str(level) if level.strip():
+                    await session.app_server.resources.config.set_thinking(level)
                 case "max_turns", str(raw):
                     await session.app_server.resources.sessions.update_settings(
                         max_turns=int(raw)

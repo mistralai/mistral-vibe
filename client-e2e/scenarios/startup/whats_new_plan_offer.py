@@ -20,7 +20,7 @@ Path(_home, "cache.toml").write_text(
     'seen_whats_new_version = "0.0.0"\n'
 )
 
-env = {"VIBE_HOME": _home, "VIBE_WHATS_NEW_FILE": os.fspath(WHATS_NEW_FIXTURE)}
+env = {"VIBE_HOME": _home, "VIBE_WHATS_NEW_DIR": os.fspath(WHATS_NEW_FIXTURE)}
 
 _URL = "https://chat.mistral.ai/code/extensions?focus=key"
 
@@ -40,8 +40,8 @@ handshake = {
 screen_contains = ("Switch to your Vibe Pro API key",)
 expected_actions = [Action("open_url", _URL)]
 
-# The offer's `Vibe Pro API key` link spans one-based columns 18-33 on row 12.
-_CLICK = "\x1b[<0;20;12M\x1b[<0;20;12m"
+# The offer's `Vibe Pro API key` link spans one-based columns 18-33 on row 16.
+_CLICK = "\x1b[<0;20;16M\x1b[<0;20;16m"
 
 # The banner mounts after startup; the capture after typing settles it.
 capture_startup = False

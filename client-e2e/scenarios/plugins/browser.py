@@ -31,4 +31,4 @@ timeline: Timeline = [
     _ESCAPE,
 ]
 
-screen_contains = ("Plugins opened...", "Plugins closed.")
+screen_excludes = ("Search plugins", "Plugins closed.")

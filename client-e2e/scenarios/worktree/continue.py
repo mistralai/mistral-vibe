@@ -1,8 +1,7 @@
 """--worktree NAME with -c resumes the saved session scoped to the worktree.
 
-Python prepares the worktree first and its session lookups run inside it; the
-Rust handshake sequences the same way: the settle precedes the session list,
-which is scoped to the worktree directory, and the resume rebinds onto it.
+The settle precedes the continue, which is scoped to the worktree directory and
+rebinds the client onto the session the server picks there.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from e2e.app_server.scenario import Timeline
 _RESUMED = "00000000-0000-4000-8000-000000000003"
 
 client_args = ("--worktree", "feature", "-c")
-request_methods = {"session/list", "session/resume"}
+request_methods = {"session/continue"}
 on_request = {
     "session/start": [
         # The worktree already exists, so this run reuses it: the settle

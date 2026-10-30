@@ -119,7 +119,6 @@ pub fn apply_event(app: &mut App, event: Event) {
         level::set_config_log_level(restore.as_deref());
         crate::ui::notice::show(app, &format!("Failed to persist log level: {error}"), 4);
     }
-    app.commit_finished();
 }
 
 /// Esc applies: the session tier lands in-process, the config tier is persisted.
@@ -179,23 +178,17 @@ fn write_config(
     let Some(session_id) = app.session.session_id.clone() else {
         return;
     };
-    let tx = app.log_level_picker.tx.clone();
     let client = client.clone();
-    let pending = app.commit_started();
-    tokio::spawn(async move {
+    crate::ui_event::spawn(app, async move {
         let op = if cleared {
             json!({"op": "remove", "path": LOG_LEVEL_PATH, "targetLayer": null})
         } else {
             json!({"op": "set", "path": LOG_LEVEL_PATH, "value": level, "targetLayer": null})
         };
-        let event =
-            match crate::config_write::write(&client, &session_id, vec![op], "log level picker")
-                .await
-            {
-                Ok(_) => Event::Applied,
-                Err(error) => Event::Failed { error, restore },
-            };
-        crate::input::deliver(tx, event, &pending).await;
+        match crate::config_write::write(&client, &session_id, vec![op], "log level picker").await {
+            Ok(_) => Event::Applied,
+            Err(error) => Event::Failed { error, restore },
+        }
     });
 }
 

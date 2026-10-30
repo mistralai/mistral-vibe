@@ -3,11 +3,65 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use vibe_rs::update_notifier::gateway::UpdateSource;
 use vibe_rs::update_prompt::{
-    apply_key, option_span, UpdateChoice, UpdatePromptMode, UpdatePromptResult, UpdatePromptState,
+    apply_key, manual_update_command, manual_update_lines, option_span, UpdateChoice,
+    UpdatePromptMode, UpdatePromptResult, UpdatePromptState,
 };
 
 fn dialog(mode: UpdatePromptMode) -> UpdatePromptState {
-    UpdatePromptState::new("2.25.6", "2.99.0", mode, UpdateSource::Pypi)
+    let mut state = UpdatePromptState::new("2.25.6", "2.99.0", mode, UpdateSource::Pypi);
+    state.manual_update = false;
+    state
+}
+
+#[test]
+fn posix_runs_the_update_in_place() {
+    let state = UpdatePromptState::new(
+        "1.0.0",
+        "2.0.0",
+        UpdatePromptMode::Startup,
+        UpdateSource::Uv,
+    );
+    assert_eq!(state.manual_update, cfg!(windows));
+}
+
+#[test]
+fn enter_on_update_answers_manual_update_without_running_it() {
+    for mode in [UpdatePromptMode::Startup, UpdatePromptMode::CheckUpgrade] {
+        let mut state = dialog(mode);
+        state.manual_update = true;
+        assert_eq!(
+            apply_key(&mut state, key(KeyCode::Enter, KeyModifiers::empty())),
+            Some(UpdatePromptResult::ManualUpdate)
+        );
+        assert!(!state.updating, "a manual update never starts the run");
+    }
+}
+
+#[test]
+fn manual_update_lines_name_the_versions_and_the_install_command() {
+    let mut state = dialog(UpdatePromptMode::Startup);
+    state.source = UpdateSource::Uv;
+    let [instructions, command] = manual_update_lines(&state);
+    assert!(instructions.contains("from 2.25.6 to 2.99.0"));
+    assert!(instructions.contains("close every running Vibe session"));
+    assert!(command.contains("uv tool upgrade mistral-vibe"));
+}
+
+#[test]
+fn manual_command_follows_the_install_manager() {
+    assert_eq!(
+        manual_update_command(UpdateSource::Uv),
+        "uv tool upgrade mistral-vibe"
+    );
+    assert_eq!(
+        manual_update_command(UpdateSource::Brew),
+        "brew upgrade mistral-vibe"
+    );
+    // An undetected manager falls back to the documented uv install, never a second pip copy.
+    assert_eq!(
+        manual_update_command(UpdateSource::Pypi),
+        "uv tool upgrade mistral-vibe"
+    );
 }
 
 fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {

@@ -8,14 +8,18 @@ import sys
 import tomllib
 from typing import Any, cast
 
+import httpx
 import pytest
+import respx
 import tomli_w
 
 from tests.app_server.backend_contract.conftest import (
     BackendContractConnection,
     wait_for_background_integrations,
 )
+from tests.constants import CONNECTORS_BOOTSTRAP_PATH, MISTRAL_BASE_URL
 from vibe.app_server._mcp_auth import MCPAuthenticationService
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server._session_backend_port import (
     SessionBackendError,
@@ -50,9 +54,9 @@ from vibe.app_server.transport import JsonRpcTransport, memory_transport_pair
 _HEALTHY_SERVER = "healthy"
 _OAUTH_SERVER = "oauth"
 _MCP_SERVER_SOURCE = """
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-mcp = FastMCP("backend-contract")
+mcp = MCPServer("backend-contract")
 
 
 @mcp.tool()
@@ -203,8 +207,40 @@ async def test_mcp_catalog_read_refresh_toggle_remove_and_compatibility_aliases(
 
 
 @pytest.mark.asyncio
+async def test_local_mcp_servers_stay_usable_when_connectors_reject_the_key(
+    backend_contract_connection: BackendContractConnection, respx_mock: respx.MockRouter
+) -> None:
+    """A shared-only or service-account key the connector service rejects must
+    not take the user's local MCP servers down with it.
+    """
+    respx_mock.get(f"{MISTRAL_BASE_URL}{CONNECTORS_BOOTSTRAP_PATH}").mock(
+        return_value=httpx.Response(401)
+    )
+    session = await backend_contract_connection.host.open_session()
+    try:
+        await session.resources.runtime.wait_until_ready()
+        await wait_for_background_integrations()
+
+        read = MCPReadResponse.model_validate(
+            await backend_contract_connection.client.request(
+                "mcp_catalog/read", MCPReadParams(session_id=session.session_id)
+            )
+        )
+        state = await session.resources.mcp.read()
+
+        healthy = _source(read, _HEALTHY_SERVER)
+        assert healthy.status is MCPSourceStatus.ENABLED
+        assert {tool.name for tool in healthy.tools} == {"echo", "summarize"}
+        assert any(source.name == _HEALTHY_SERVER for source in state.sources)
+        assert state.connector_error is not None
+        assert "401" in state.connector_error
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_mcp_catalog_add_login_logout_aliases_and_notification_order(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     backend_type = _backend_class()
 
@@ -234,7 +270,7 @@ async def test_mcp_catalog_add_login_logout_aliases_and_notification_order(
     monkeypatch.setattr(backend_type, "suspend_mcp", keep_current_state)
     monkeypatch.setattr(MCPAuthenticationService, "login", login)
     monkeypatch.setattr(MCPAuthenticationService, "logout", logout)
-    connection = await _connect_recording_client()
+    connection = await _connect_recording_client(process_services=process_services)
     session_id: str | None = None
     try:
         started = SessionStartResponse.model_validate(
@@ -310,7 +346,7 @@ async def test_mcp_catalog_add_login_logout_aliases_and_notification_order(
 
 @pytest.mark.asyncio
 async def test_mcp_catalog_auth_required_is_deduplicated_across_backend_events(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     backend_type = _backend_class()
     original_subscribe = backend_type.subscribe
@@ -331,7 +367,7 @@ async def test_mcp_catalog_auth_required_is_deduplicated_across_backend_events(
         )
 
     monkeypatch.setattr(backend_type, "subscribe", subscribe_twice)
-    connection = await _connect_recording_client()
+    connection = await _connect_recording_client(process_services=process_services)
     session_id: str | None = None
     try:
         started = SessionStartResponse.model_validate(
@@ -412,9 +448,9 @@ async def test_mcp_login_for_disabled_source_performs_no_runtime_authorization(
 
 @pytest.mark.asyncio
 async def test_sessionless_mcp_mutations_do_not_build_a_session_runtime_and_bootstrap(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
-    process = HarnessProcess()
+    process = HarnessProcess(services=process_services)
     build_calls = 0
     build_name = "build_unified_session_context"
     original_build = getattr(process, build_name)
@@ -442,7 +478,9 @@ async def test_sessionless_mcp_mutations_do_not_build_a_session_runtime_and_boot
     monkeypatch.setattr(process, build_name, tracked_build)
     monkeypatch.setattr(MCPAuthenticationService, "login", login)
     monkeypatch.setattr(MCPAuthenticationService, "logout", logout)
-    connection = await _connect_recording_client(process=process)
+    connection = await _connect_recording_client(
+        process=process, process_services=process_services
+    )
     session_id: str | None = None
     try:
         added = MCPAddResponse.model_validate(
@@ -661,9 +699,9 @@ class _RecordingConnection:
 
 
 async def _connect_recording_client(
-    *, process: HarnessProcess | None = None
+    *, process: HarnessProcess | None = None, process_services: ProcessServices
 ) -> _RecordingConnection:
-    effective_process = process or HarnessProcess()
+    effective_process = process or HarnessProcess(services=process_services)
     client_transport, server_transport = memory_transport_pair()
     recording = _RecordingTransport(cast(JsonRpcTransport, client_transport))
     harness = await create_harness_server(

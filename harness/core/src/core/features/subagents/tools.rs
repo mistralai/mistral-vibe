@@ -15,7 +15,7 @@ struct ListInput {}
 #[derive(JsonSchema)]
 #[schemars(deny_unknown_fields)]
 struct SpawnInput {
-    /// The child's name: one path segment, without `/`, other than `.` or `..`. The child's agent path is this agent's path followed by `/name`.
+    /// The child's name: one path segment, without `/`, other than `.` or `..`. The child's agent path is your path followed by `/name`.
     #[schemars(length(min = 1), regex(pattern = r"^(?!\.{1,2}$)[^/]+$"))]
     name: String,
     #[schemars(length(min = 1))]
@@ -41,7 +41,7 @@ fn default_context() -> SpawnContext {
 #[derive(JsonSchema)]
 #[schemars(deny_unknown_fields)]
 struct MessageInput {
-    /// The recipient's agent path: absolute, such as `/root/researcher`, or relative to this agent, such as `researcher` for a direct child.
+    /// The recipient's agent path: absolute, such as `/root/researcher`, or relative to you, such as `researcher` for a direct child.
     #[schemars(length(min = 1))]
     agent_path: String,
     #[schemars(length(min = 1))]

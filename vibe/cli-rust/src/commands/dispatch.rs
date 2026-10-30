@@ -10,10 +10,9 @@ use super::simple::{
     DATA_RETENTION_MESSAGE,
 };
 use super::stress;
-use super::submission::{clear_and_remember, new_message_id, NOTICE_TIMEOUT_SECS};
+use super::submission::{clear_and_remember, NOTICE_TIMEOUT_SECS};
 use crate::app::App;
 use crate::server::Client;
-use crate::transcript::local;
 use crate::{
     config, log_level_picker, mcp, model_picker, paste_image, resume_picker, rewind, theme_picker,
     ui,
@@ -28,16 +27,10 @@ pub(super) fn run_command(
 ) -> bool {
     clear_and_remember(app, value);
     crate::telemetry::slash_command_used(app, command, "builtin");
-    if !matches!(command, "/resume" | "/continue") {
-        let echo_id = new_message_id();
-        local::add_message(&mut app.view.transcript, &echo_id, "command", value);
-        if command == "/retry" {
-            super::retry::begin(app, echo_id);
-        }
-    }
     match command {
         "/exit" => return true,
         "/config" => config::open(app, client, config_tx),
+        "/release-notes" | "/whatsnew" => crate::release_notes::open(app),
         "/voice" => crate::voice_app::open(app),
         "/proxy-setup" => crate::proxy_setup::open(app, client),
         "/theme" => theme_picker::open(app),
@@ -48,8 +41,8 @@ pub(super) fn run_command(
         "/log-level" => log_level_picker::open(app),
         "/debug" => crate::debug_console::toggle(app, client),
         "/resume" | "/continue" => resume_picker::open(app, client),
-        "/rewind" => rewind::start(app, client),
-        "/branch" => super::branch::branch_session(app, client),
+        "/rewind" => rewind::command(app, client),
+        "/branch" | "/fork" => super::branch::branch_session(app, client),
         "/mcp" | "/connectors" => mcp::show(app, client, value),
         "/plugins" => crate::plugins::show(app, client),
         "/reload-plugins" => crate::plugins::reload(app, client),

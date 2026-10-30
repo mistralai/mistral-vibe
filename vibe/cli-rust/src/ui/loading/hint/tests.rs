@@ -50,8 +50,35 @@ fn composer_queue_hints_need_the_composer_to_own_the_keys() {
     app.subagents.list.focused = true;
     assert_eq!(
         running(&app),
+        [CANCEL_LAST_QUEUED],
+        "the list takes Esc and Enter; Ctrl+C still cancels"
+    );
+    app.queue.items.clear();
+    assert_eq!(running(&app), [("Ctrl+C", "interrupt")]);
+}
+
+#[test]
+fn the_focused_list_advertises_only_the_ctrl_c_step_that_runs() {
+    let mut app = busy_app(Status::Generating {
+        since: Instant::now(),
+    });
+    app.subagents.list.focused = true;
+    app.chat_input.input = "draft".into();
+    assert!(running(&app).is_empty(), "Ctrl+C first clears the prompt");
+
+    app.chat_input.input.clear();
+    app.subagents.viewed_subagent_id = Some("child".into());
+    assert!(
+        running(&app).is_empty(),
+        "in a child view Ctrl+C only warns"
+    );
+
+    app.subagents.viewed_subagent_id = None;
+    app.approval.open = true;
+    assert_eq!(
+        running(&app),
         [("Esc", "interrupt")],
-        "the list takes Enter"
+        "an approval over the list keeps its own hints"
     );
 }
 

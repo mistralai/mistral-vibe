@@ -32,4 +32,4 @@ timeline: Timeline = [
 
 capture_startup = False
 settle_per_key = True
-screen_contains = ("Resume cancelled.",)
+screen_excludes = ("Resume cancelled.",)

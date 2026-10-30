@@ -1,16 +1,11 @@
-"""Tool settings a config can still carry that no tool reads any more."""
+"""Files in the custom tool folders, which Vibe no longer reads."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from vibe.app_server.models import ConfigIssue
-from vibe.core.paths import DEFAULT_TOOL_DIR
-
-if TYPE_CHECKING:
-    from vibe.core.config import VibeConfigSchema
 
 SPAWN_DESCRIPTION_OVERRIDE_IGNORED = (
     "This file overrides the description of the former `task` tool and has no "
@@ -20,17 +15,30 @@ SPAWN_DESCRIPTION_OVERRIDE_IGNORED = (
 )
 
 
-def ignored_tool_settings(
-    config: VibeConfigSchema, tool_search_paths: Iterable[Path]
-) -> list[ConfigIssue]:
-    # Tool settings without effect, such as [tools.grep], are config warnings
-    # (vibe.core.config._setting_keys), which strict_config refuses.
+def custom_tool_unsupported(name: str) -> str:
+    return (
+        f"Custom Python tool `{name}` is no longer supported and was not loaded. "
+        "Ask Vibe to migrate it to a skill."
+    )
+
+
+def ignored_tool_settings(tool_dirs: Iterable[Path]) -> list[ConfigIssue]:
+    """One issue per file in ``~/.vibe/tools/`` or ``.vibe/tools/`` that Vibe skips.
+
+    Tool settings without effect, such as [tools.grep], are config warnings
+    (vibe.core.config._setting_keys), which strict_config refuses.
+    """
     issues: list[ConfigIssue] = []
-    builtin_dir = DEFAULT_TOOL_DIR.path.resolve()
-    for base in tool_search_paths:
-        if base.resolve() == builtin_dir:
-            continue
-        override = base / "prompts" / "task.md"
+    for tool_dir in tool_dirs:
+        # Listed, never imported: importing a module runs its code.
+        issues.extend(
+            ConfigIssue(
+                file=str(tool_file), message=custom_tool_unsupported(tool_file.stem)
+            )
+            for tool_file in sorted(tool_dir.glob("*.py"))
+            if not tool_file.name.startswith("_")
+        )
+        override = tool_dir / "prompts" / "task.md"
         if override.is_file():
             issues.append(
                 ConfigIssue(
@@ -40,4 +48,8 @@ def ignored_tool_settings(
     return issues
 
 
-__all__ = ["SPAWN_DESCRIPTION_OVERRIDE_IGNORED", "ignored_tool_settings"]
+__all__ = [
+    "SPAWN_DESCRIPTION_OVERRIDE_IGNORED",
+    "custom_tool_unsupported",
+    "ignored_tool_settings",
+]

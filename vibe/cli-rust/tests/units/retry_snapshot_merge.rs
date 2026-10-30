@@ -6,20 +6,12 @@ use vibe_rs::commands::retry::RetryContinuation;
 use vibe_rs::commands::retry_continuation;
 use vibe_rs::server::PublicSessionState;
 
-fn entry(id: &str, role: &str, text: &str) -> Value {
-    json!({
-        "id": id,
-        "type": "message",
-        "role": role,
-        "content": [{"type": "text", "text": text}],
-        "generationStatus": "completed",
-    })
-}
+use crate::support::message;
 
 fn add_message(app: &mut App, id: &str, role: &str, text: &str) {
     app.view
         .transcript
-        .add(&json!({"entry": entry(id, role, text)}));
+        .add(&json!({"entry": message(id, role, text)}));
 }
 
 fn state(history: Vec<Value>, event_id: u64) -> PublicSessionState {
@@ -49,7 +41,7 @@ fn bounded_page_keeps_the_loaded_prefix_and_the_continuation() {
 
     // The page holds only the newer continuation source; the older interrupted
     // answer is off-page and must survive via the already-loaded prefix.
-    let page = vec![entry("src", "assistant", " Part two. Part three.")];
+    let page = vec![message("src", "assistant", " Part two. Part three.")];
     app.view.transcript.load_live_snapshot(&state(page, 9));
     retry_continuation::reconcile_snapshot(&mut app, true);
 
@@ -74,7 +66,7 @@ fn an_unrelated_page_replaces_state_and_drops_the_continuation() {
         base_content: base,
     });
 
-    let page = vec![entry("fresh", "assistant", "Unrelated page.")];
+    let page = vec![message("fresh", "assistant", "Unrelated page.")];
     app.view.transcript.load_live_snapshot(&state(page, 9));
     retry_continuation::reconcile_snapshot(&mut app, true);
 

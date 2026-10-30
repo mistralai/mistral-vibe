@@ -29,20 +29,6 @@ _FILTERED_EXCEPTION_NAMES: frozenset[str] = frozenset({
     "RealtimeTranscriptionException"
 })
 
-# Mistral-owned host: BackendError against it stays reported (it flags real
-# API/inference faults). Errors from other endpoints are dropped — they are
-# usually the user's own provider config and can carry user data.
-_MISTRAL_ENDPOINT_HOST = "api.mistral.ai"
-
-
-def _is_third_party_backend_error(exc: BaseException) -> bool:
-    if type(exc).__name__ != "BackendError":
-        return False
-    endpoint = getattr(exc, "endpoint", "")
-    if not isinstance(endpoint, str):
-        return False
-    return _MISTRAL_ENDPOINT_HOST not in endpoint
-
 
 def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
     """Walk cause/context so a filtered exception wrapped by another is still caught."""
@@ -106,12 +92,10 @@ def _is_benign_oserror(exc: OSError) -> bool:
 def _is_benign_exception(exc: BaseException) -> bool:
     if isinstance(exc, _FILTERED_EXCEPTIONS):
         return True
-    # Walk the cause/context chain: filtered types are often wrapped (e.g. a
-    # BackendError re-raised as a generic RuntimeError).
+    # Walk the cause/context chain: filtered types are often wrapped in a
+    # generic RuntimeError.
     if any(
-        type(e).__name__ in _FILTERED_EXCEPTION_NAMES
-        or _is_third_party_backend_error(e)
-        for e in _exception_chain(exc)
+        type(e).__name__ in _FILTERED_EXCEPTION_NAMES for e in _exception_chain(exc)
     ):
         return True
     # Clean exits (sys.exit(0) / sys.exit(None)) propagating through asyncio tasks.

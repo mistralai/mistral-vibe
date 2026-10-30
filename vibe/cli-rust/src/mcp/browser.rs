@@ -5,19 +5,18 @@ use std::sync::Arc;
 use crate::server::Client;
 
 use super::rows::{self, Row, SourceAction};
-use super::{add_result, reconcile_selection, Event};
+use super::{reconcile_selection, Event};
 use crate::app::App;
 use crate::option_list::Click;
 use crate::selection::RegionId;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
-/// Esc: close the browser and mount the closed message.
+/// Esc: close the browser.
 pub fn close(app: &mut App) {
     app.mcp.open = false;
     app.mcp.search = crate::search_field::Search::default();
     app.mcp.viewing_name = None;
     app.mcp.viewing_kind = None;
-    add_result(app, "MCP and connectors closed.");
 }
 
 /// Esc in the tool list: back to the source list, highlighting its first row.
@@ -59,11 +58,11 @@ pub(super) fn request_action(app: &mut App) {
     if viewing_action(app).is_none() {
         return;
     }
-    let Some(tx) = app.mcp.tx.clone() else {
+    let Some(tx) = app.events.clone() else {
         return;
     };
     app.commit_started();
-    if tx.try_send(Event::ActionRequested).is_err() {
+    if tx.try_send(Event::ActionRequested.into()).is_err() {
         app.commit_finished();
     }
 }

@@ -19,7 +19,7 @@ from vibe.core.config.layers.agent_profile import AgentProfileLayer
 from vibe.core.config.layers.discovered import DiscoveredConfigLayer
 from vibe.core.config.patch import AddOperationPatch
 from vibe.core.tools.base import ToolPermission
-from vibe.core.tools.manager import ToolManager
+from vibe.core.tools.manager import ToolManager, discover_tool_defaults
 from vibe.core.trusted_folders import trusted_folders_manager
 
 _DISCOVERED_LAYER_DISABLED = pytest.mark.skip(
@@ -386,7 +386,7 @@ async def test_build_default_orchestrator_discovered_layer_sits_below_toml(
 @pytest.mark.asyncio
 async def test_tool_defaults_can_be_written_to_discovered_layer() -> None:
     orchestrator = await build_default_orchestrator()
-    discovered_tools = ToolManager.discover_tool_defaults()
+    discovered_tools = discover_tool_defaults()
 
     result = await orchestrator.set_field(
         "/tools",

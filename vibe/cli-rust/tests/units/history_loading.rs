@@ -1,28 +1,22 @@
 //! Session histories prepare bottom-up without paging or moving old scroll state.
 
-use std::sync::Arc;
-
 use serde_json::{json, Value};
 use vibe_rs::app::App;
 use vibe_rs::resume_picker::{self, Event};
-use vibe_rs::server::{Client, PublicSessionState};
 use vibe_rs::transcript::Transcript;
 use vibe_rs::utils::transcript_cache::TranscriptCache;
+
+use crate::support::{session_state, stub};
 
 fn message(index: usize) -> Value {
     json!({"id": format!("message-{index}"), "type": "message", "role": "assistant",
         "content": [{"type": "text", "text": format!("Message {index}")}]})
 }
 
-fn state(id: &str, history: Vec<Value>) -> PublicSessionState {
-    serde_json::from_value(json!({"eventId": 1, "session": {"id": id}, "history": history}))
-        .unwrap()
-}
-
 #[test]
 fn all_components_prepare_automatically_from_the_bottom() {
     let mut transcript = Transcript::default();
-    transcript.load_snapshot(&state("saved", (0..53).map(message).collect()));
+    transcript.load_snapshot(&session_state("saved", (0..53).map(message).collect()));
     let revisions: Vec<_> = transcript
         .lines()
         .map(|entry| (entry.id.to_owned(), entry.rev))
@@ -55,12 +49,12 @@ fn all_components_prepare_automatically_from_the_bottom() {
 #[test]
 fn preparation_restarts_for_a_different_history() {
     let mut transcript = Transcript::default();
-    transcript.load_snapshot(&state("first", (0..100).map(message).collect()));
+    transcript.load_snapshot(&session_state("first", (0..100).map(message).collect()));
     let mut cache = TranscriptCache::default();
     cache.start_history(transcript.entry_count());
     assert!(cache.advance_history(&transcript));
     assert_eq!(cache.history_from(), 75);
-    transcript.load_snapshot(&state("second", (0..3).map(message).collect()));
+    transcript.load_snapshot(&session_state("second", (0..3).map(message).collect()));
     cache.start_history(transcript.entry_count());
     assert!(cache.advance_history(&transcript));
     assert_eq!(cache.history_from(), 0);
@@ -87,7 +81,7 @@ fn a_tool_group_is_never_split_from_its_header() {
     }));
     history.extend((41..81).map(message));
     let mut transcript = Transcript::default();
-    transcript.load_snapshot(&state("saved", history));
+    transcript.load_snapshot(&session_state("saved", history));
     let mut cache = TranscriptCache::default();
     cache.start_history(transcript.entry_count());
     assert!(cache.advance_history(&transcript));
@@ -106,7 +100,7 @@ fn accepting_a_preview_starts_at_the_bottom_even_mid_preparation() {
     app.resume_picker.preview_request = 2;
     app.view
         .transcript
-        .load_snapshot(&state("old", (0..100).map(message).collect()));
+        .load_snapshot(&session_state("old", (0..100).map(message).collect()));
     app.view.transcript_cache.start_history(100);
     app.view.scroll = 20;
     app.view.scroll_target = 40;
@@ -114,10 +108,10 @@ fn accepting_a_preview_starts_at_the_bottom_even_mid_preparation() {
     app.view.scroll_to_entry = Some(5);
     resume_picker::apply_event(
         &mut app,
-        &Arc::new(Client::stub()),
+        &stub(),
         Event::Preview {
             request: 2,
-            state: state("new", (0..3).map(message).collect()),
+            state: session_state("new", (0..3).map(message).collect()),
         },
     );
     assert_eq!(app.view.scroll, 0);
@@ -135,15 +129,15 @@ fn a_stale_preview_does_not_replace_or_reset_the_selected_session() {
     app.resume_picker.preview_request = 2;
     app.view
         .transcript
-        .load_snapshot(&state("selected", vec![message(99)]));
+        .load_snapshot(&session_state("selected", vec![message(99)]));
     app.view.scroll = 20;
     app.view.scroll_target = 20;
     resume_picker::apply_event(
         &mut app,
-        &Arc::new(Client::stub()),
+        &stub(),
         Event::Preview {
             request: 1,
-            state: state("old", vec![message(0)]),
+            state: session_state("old", vec![message(0)]),
         },
     );
     assert_eq!(app.view.transcript.entry(0).unwrap().id, "message-99");
@@ -153,13 +147,13 @@ fn a_stale_preview_does_not_replace_or_reset_the_selected_session() {
 
 #[test]
 fn reopening_on_the_current_session_rejects_the_previous_picker_reply() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = App::default();
     app.session.session_id = Some("current".into());
     app.resume_picker.preview_request = 1;
     app.view
         .transcript
-        .load_snapshot(&state("current", vec![message(42)]));
+        .load_snapshot(&session_state("current", vec![message(42)]));
     resume_picker::open(&mut app, &client);
     resume_picker::apply_event(
         &mut app,
@@ -174,7 +168,7 @@ fn reopening_on_the_current_session_rejects_the_previous_picker_reply() {
         &client,
         Event::Preview {
             request: 1,
-            state: state("old", vec![message(0)]),
+            state: session_state("old", vec![message(0)]),
         },
     );
     assert_eq!(app.view.transcript.entry(0).unwrap().id, "message-42");
@@ -182,12 +176,12 @@ fn reopening_on_the_current_session_rejects_the_previous_picker_reply() {
 
 #[test]
 fn reopening_the_picker_cannot_accept_an_old_preview() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = App::default();
     app.resume_picker.preview_request = 1;
     app.view
         .transcript
-        .load_snapshot(&state("current", vec![message(42)]));
+        .load_snapshot(&session_state("current", vec![message(42)]));
     resume_picker::open(&mut app, &client);
     resume_picker::apply_event(
         &mut app,
@@ -202,7 +196,7 @@ fn reopening_the_picker_cannot_accept_an_old_preview() {
         &client,
         Event::Preview {
             request: 1,
-            state: state("old", vec![message(0)]),
+            state: session_state("old", vec![message(0)]),
         },
     );
     assert_eq!(app.view.transcript.entry(0).unwrap().id, "message-42");

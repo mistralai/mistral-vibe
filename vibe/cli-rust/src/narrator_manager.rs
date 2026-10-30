@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::{json, Value};
-use tokio::sync::mpsc::Sender;
 use tokio::task::AbortHandle;
 
 use crate::app::App;
@@ -92,7 +91,7 @@ pub fn speak(app: &mut App, text: String) {
     stop(app);
     let (Some(cfg), Some(tx), Some(session_id)) = (
         app.narrator.speech_config.clone(),
-        app.narrator.tx.clone(),
+        app.events.clone(),
         app.session.session_id.clone(),
     ) else {
         app.narrator.state = NarratorState::Idle;
@@ -102,8 +101,19 @@ pub fn speak(app: &mut App, text: String) {
     let id = app.narrator.speech_id;
     let stop = Arc::new(AtomicBool::new(false));
     let task_stop = stop.clone();
+    let credential_client = app.credential_client.clone();
     let task = tokio::spawn(async move {
-        let event = match speak_summary(&cfg, &session_id, &text, task_stop, &tx, id).await {
+        let event = match speak_summary(
+            &cfg,
+            credential_client.as_deref(),
+            &session_id,
+            &text,
+            task_stop,
+            &tx,
+            id,
+        )
+        .await
+        {
             Ok(()) => Event::Finished { id },
             Err(error) => {
                 tracing::warn!(error = %error.message, "TTS speak failed");
@@ -113,7 +123,7 @@ pub fn speak(app: &mut App, text: String) {
                 }
             }
         };
-        let _ = tx.send(event).await;
+        let _ = tx.send(event.into()).await;
     });
     app.narrator.speech = Some(Speech {
         id,
@@ -125,10 +135,11 @@ pub fn speak(app: &mut App, text: String) {
 /// Synthesize and play the summary, checking the device before paying for the TTS request.
 async fn speak_summary(
     cfg: &SpeechConfig,
+    credential_client: Option<&crate::server::Client>,
     session_id: &str,
     text: &str,
     stop: Arc<AtomicBool>,
-    tx: &Sender<Event>,
+    tx: &crate::ui_event::Sender,
     id: u64,
 ) -> Result<(), AudioError> {
     let env_var = cfg.api_key_env_var.clone();
@@ -139,10 +150,17 @@ async fn speak_summary(
     .map_err(|e| AudioError::backend(e.to_string()))?;
     available?;
     let metadata = tts::audio_request_metadata(session_id);
-    let audio = tts::speak(cfg, &api_key.unwrap_or_default(), text, metadata).await?;
+    let audio = tts::speak(
+        cfg,
+        credential_client,
+        &api_key.unwrap_or_default(),
+        text,
+        metadata,
+    )
+    .await?;
     let pcm = wav::decode_wav(&audio).map_err(AudioError::decode)?;
     let done = audio_player::play(pcm, stop).await?;
-    let _ = tx.send(Event::Speaking { id }).await;
+    let _ = tx.send(Event::Speaking { id }.into()).await;
     done.await.unwrap_or(Ok(()))
 }
 

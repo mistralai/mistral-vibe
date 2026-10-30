@@ -1,18 +1,10 @@
 //! The option under the mouse gets Textual's faint hover background, unless it is highlighted.
 
-use ratatui::backend::TestBackend;
-use ratatui::buffer::Buffer;
-use ratatui::Terminal;
-
 use vibe_rs::app::{App, ModelOption};
 use vibe_rs::model_picker;
 use vibe_rs::ui::theme;
 
-fn redraw(app: &mut App) -> Buffer {
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    terminal.draw(|frame| app.draw(frame)).expect("draw");
-    terminal.backend().buffer().clone()
-}
+use crate::support::redraw;
 
 /// The model picker drawn once, and the first cell of each option row.
 fn picker() -> (App, Vec<(u16, u16)>) {

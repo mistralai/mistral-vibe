@@ -1,10 +1,9 @@
 """Disk cache of the last fetched admin-managed config TOML.
 
-A session start fetches the org config and is built from the answer. The
-cache is what it falls back to when that fetch fails (offline, endpoint
-down), and what requests outside a session read. Of those, only the
-new-session picker's config reads fetch, and only when it holds nothing for
-the key. An answer that the org enforces nothing is cached as an empty policy.
+Every session build applies it, and the process refreshes it in the
+background once it is older than the org config's refresh limit (see
+``vibe.app_server._org_config_service``). An answer that the org enforces nothing is
+cached as an empty policy.
 
 The cache is keyed by the hashed Mistral API key (the shared per-user cache
 key), TTL-bounded so very stale policy is never applied, and written
@@ -22,7 +21,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from vibe.core.paths import MANAGED_CONFIG_CACHE_FILE
-from vibe.core.utils.keyed_json_cache import load_keyed_entry, store_keyed_entry
+from vibe.core.utils.keyed_json_cache import load_keyed_record, store_keyed_entry
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
@@ -42,9 +41,15 @@ def managed_config_cache_key(config: VibeConfigSchema) -> str | None:
 
 def load_cached_managed_config(key: str | None) -> str | None:
     """Return the fresh cached managed-config TOML stored under ``key``."""
+    record = load_cached_managed_config_record(key)
+    return record[0] if record is not None else None
+
+
+def load_cached_managed_config_record(key: str | None) -> tuple[str, int] | None:
+    """The fresh cached TOML under ``key`` and when it was stored."""
     if key is None:
         return None
-    return load_keyed_entry(
+    return load_keyed_record(
         MANAGED_CONFIG_CACHE_FILE.path,
         key,
         ttl_seconds=MANAGED_CONFIG_CACHE_TTL_SECONDS,
@@ -52,8 +57,12 @@ def load_cached_managed_config(key: str | None) -> str | None:
     )
 
 
-def store_cached_managed_config(key: str | None, toml_text: str) -> None:
+def store_cached_managed_config(
+    key: str | None, toml_text: str, *, stored_at: int | None = None
+) -> None:
     """Cache the last fetched managed-config TOML under ``key``."""
     if key is None:
         return
-    store_keyed_entry(MANAGED_CONFIG_CACHE_FILE.path, key, toml_text)
+    store_keyed_entry(
+        MANAGED_CONFIG_CACHE_FILE.path, key, toml_text, stored_at=stored_at
+    )

@@ -1,12 +1,19 @@
-//! Settled status rows: the compact indicator and the client checkpoint message.
+//! Status rows: progress indicators, command outcomes and errors, and the client checkpoint message.
 
-use ratatui::style::Modifier;
+use std::cmp::Ordering;
+
+use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
 
-use super::super::super::markdown::{LinkKind, LinkedLines, Sc};
+use super::super::super::markdown::{self, LinkKind, LinkedLines, Sc};
 use super::super::super::{pulse, theme};
+use crate::selection::{fold, Fold};
 use crate::server::CheckpointEntry;
 use crate::transcript::grouping::{compaction_failed, paints_compaction};
+use crate::utils::clean;
+
+/// Columns the `✓`/`⚠`/`✕` marker and its pad take before the text.
+const MARKER_WIDTH: u16 = 2;
 
 /// A single status row — pulse
 /// spinner while in progress, ✓ on success, ✕ on error. No border. A blank
@@ -30,6 +37,47 @@ pub(super) fn push_compact_status(
         Span::styled(format!("{glyph} "), theme::text(color)),
         Span::styled(text.to_string(), theme::text(theme::foreground())),
     ]));
+}
+
+/// A command outcome: `glyph` then the markdown body, extra lines aligned under the first.
+pub(super) fn push_command_status(
+    lines: &mut LinkedLines,
+    text: &str,
+    width: u16,
+    glyph: &'static str,
+    color: Color,
+) {
+    let mut body = markdown::status_linked(text, width.saturating_sub(MARKER_WIDTH));
+    let first = body
+        .lines()
+        .iter()
+        .position(|line| !markdown::is_blank_line(line))
+        .unwrap_or_default();
+    let marker = format!("{glyph} ");
+    body.prefix(|index| match index.cmp(&first) {
+        Ordering::Less => Span::raw(""),
+        Ordering::Equal => Span::styled(marker.clone(), theme::text(color)),
+        Ordering::Greater => Span::raw("  "),
+    });
+    lines.append(body);
+}
+
+/// A failure: `✕` in the error color, then the sanitized `Error:` text.
+pub(super) fn push_command_error(lines: &mut LinkedLines, text: &str, width: u16) {
+    let content = format!("Error: {}", clean::clean_output(text));
+    let rows = fold::wrap_hard(&content, width.saturating_sub(MARKER_WIDTH) as usize);
+    lines.push_gap();
+    for (index, (row, gap)) in rows.into_iter().enumerate() {
+        let marker = match index {
+            0 => Span::styled("✕ ", theme::text(theme::error())),
+            _ => Span::raw("  "),
+        };
+        let line = Line::from(vec![
+            marker,
+            Span::styled(row, theme::text(theme::foreground())),
+        ]);
+        lines.push_folded(line, Fold::hung(gap, MARKER_WIDTH));
+    }
 }
 
 /// A client checkpoint settles as a status message; a server compaction paints
@@ -97,3 +145,6 @@ pub(super) fn push_teleport_status(
 }
 
 const TELEPORT_LINK_LABEL: &str = "Vibe Code Web";
+
+#[cfg(test)]
+mod tests;

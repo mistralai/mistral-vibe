@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import os
 from urllib.parse import urlsplit
 
@@ -10,7 +11,7 @@ from vibe.core.config import (
     UtilityFeature,
     VibeConfigSchema,
 )
-from vibe.core.llm.backend.factory import create_backend
+from vibe.core.llm.completion import CompletionTransport, complete_once
 from vibe.core.llm.model_probe import MODEL_AVAILABILITY, PROBE_TIMEOUT_SECONDS
 from vibe.core.telemetry.build_metadata import build_request_metadata
 from vibe.core.telemetry.send import TelemetryClient
@@ -19,7 +20,6 @@ from vibe.core.types import LLMMessage, Role
 from vibe.core.utils.matching import name_matches
 from vibe.observability.logging import logger
 from vibe.utils.api_keys import resolve_api_key
-from vibe.utils.http import get_user_agent
 
 # One small model under two names, in preference order: the name the Mistral API
 # meters for this CLI, then the public one self-hosted deployments serve. Aliases
@@ -140,10 +140,10 @@ async def run_utility_completion(  # noqa: PLR0913 - one concern per keyword, al
     session_id: str | None = None,
     telemetry: TelemetryClient | None = None,
 ) -> str | None:
-    """Run a single non-streaming completion for a background nicety.
+    """Run a single completion for a background nicety.
 
-    Owns model selection, backend construction, budgets, user-agent and the
-    request metadata so features don't re-implement the seam. Returns the raw
+    Owns model selection, budgets and the request metadata so features don't
+    re-implement the seam. Returns the raw
     message content; the caller decides how to clean and interpret it.
 
     ``feature`` picks the model and the telemetry label; calls without one
@@ -174,30 +174,25 @@ async def run_utility_completion(  # noqa: PLR0913 - one concern per keyword, al
             nb_prompt_chars=len(user_content),
             call_type=call_type,
         )
-    backend = create_backend(
+    result = await complete_once(
         provider=provider,
-        timeout=request_timeout_seconds,
-        retry_max_elapsed_time=retry_budget_seconds,
+        model=model,
+        messages=[
+            LLMMessage(role=Role.system, content=system_prompt),
+            LLMMessage(role=Role.user, content=user_content),
+        ],
+        temperature=0.0,
+        max_tokens=max_tokens,
+        metadata=build_request_metadata(
+            launch_context=launch_context, session_id=session_id, call_type=call_type
+        ).model_dump(exclude_none=True),
+        transport=replace(
+            CompletionTransport.from_config(config),
+            timeout_s=request_timeout_seconds,
+            retry_budget_s=retry_budget_seconds,
+        ),
     )
-    async with backend:
-        result = await backend.complete(
-            model=model,
-            messages=[
-                LLMMessage(role=Role.system, content=system_prompt),
-                LLMMessage(role=Role.user, content=user_content),
-            ],
-            temperature=0.0,
-            tools=None,
-            tool_choice=None,
-            max_tokens=max_tokens,
-            extra_headers={"user-agent": get_user_agent(provider.backend)},
-            metadata=build_request_metadata(
-                launch_context=launch_context,
-                session_id=session_id,
-                call_type=call_type,
-            ).model_dump(exclude_none=True),
-        )
-    return result.message.content
+    return result.text
 
 
 def _call_type(

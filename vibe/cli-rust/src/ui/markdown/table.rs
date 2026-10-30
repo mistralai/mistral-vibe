@@ -59,7 +59,7 @@ fn render_row(
 ) {
     let empty = Vec::new();
     let fill = if header {
-        Style::default().fg(theme::primary())
+        theme::md_table_header()
     } else {
         Style::default()
     };
@@ -152,5 +152,5 @@ fn cell_spans(lines: &[Vec<Sc>], text: &[Sc], x: usize, y: u16) -> Vec<TableCell
 }
 
 fn border() -> Style {
-    Style::default().fg(theme::md_table_border())
+    theme::md_keyline()
 }

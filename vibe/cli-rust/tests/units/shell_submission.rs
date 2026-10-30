@@ -1,17 +1,15 @@
-use std::sync::Arc;
-
 use tokio::sync::mpsc;
 use vibe_rs::app::{App, Status};
 use vibe_rs::commands::submission;
 use vibe_rs::config;
-use vibe_rs::server::Client;
+
+use crate::support::{stub, with_status};
 
 #[tokio::test]
 async fn a_second_shell_command_during_startup_is_rejected_and_preserved() {
-    let mut app = App::default();
-    app.session.status = Status::Starting;
+    let mut app = with_status(Status::Starting);
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
+    let client = stub();
 
     app.chat_input.load_full_text("!first".to_owned());
     submission::submit(&mut app, &client, &config_tx);
@@ -38,9 +36,8 @@ fn shell_running_app() -> App {
 
 fn submit_text(app: &mut App, text: &str) -> bool {
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
     app.chat_input.load_full_text(text.to_owned());
-    submission::submit(app, &client, &config_tx)
+    submission::submit(app, &stub(), &config_tx)
 }
 
 fn last_toast(app: &App) -> Option<&str> {

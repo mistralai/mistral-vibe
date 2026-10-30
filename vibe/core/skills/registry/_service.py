@@ -21,6 +21,7 @@ from vibe.core.skills.registry._client import RegistrySkillsClient, RegistrySkil
 from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
 from vibe.core.skills.registry.models import SkillVersionInfo
 from vibe.observability.logging import logger
+from vibe.utils.paths import resolves_within
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
@@ -589,7 +590,7 @@ def _manifest_path_for_scope(
                 "no project skills manifest is available for a project-scoped pin"
             )
         path = project_paths[0]
-        if not _within_project_roots(path, effective_roots):
+        if not resolves_within(path, effective_roots):
             raise RegistrySkillsError(
                 f"refusing to write a project skills manifest outside the "
                 f"project root: {path}"
@@ -699,32 +700,13 @@ def _local_skill_dir(
         else:
             return None
         target = base / "skills" / name
-        if not _within_project_roots(target, roots):
+        if not resolves_within(target, roots):
             logger.warning(
                 "Refusing project skill write outside the project root: %s", target
             )
             return None
         return target
     return GLOBAL_SKILLS_DIR.path / name
-
-
-def _within_project_roots(base: Path, roots: Sequence[Path]) -> bool:
-    """Is ``base`` inside a project root once symlinks are resolved?
-
-    Project manifest discovery follows symlinks, so a repository-controlled
-    ``.vibe`` link could otherwise redirect writes outside the workspace.
-    """
-    try:
-        resolved = base.resolve()
-    except OSError:
-        return False
-    for root in roots:
-        try:
-            if resolved.is_relative_to(root.resolve()):
-                return True
-        except OSError:
-            continue
-    return False
 
 
 def convert_skill_to_local(
@@ -819,7 +801,7 @@ def remove_skill(
         paths = [
             path
             for path in _manifest.project_manifest_paths_sync(effective_roots)
-            if _within_project_roots(path, effective_roots)
+            if resolves_within(path, effective_roots)
         ]
     else:
         paths = [_manifest.global_manifest_path()]

@@ -57,6 +57,11 @@ async def fetch_and_cache_model_catalog(
     A successful response — including an empty one — is authoritative and
     overwrites the on-disk cache.
     """
+    from vibe.core.telemetry.send import resolve_credential_cache_key
+
+    if not config.experimental_enable_model_catalog:
+        return None
+    cache_key = await resolve_credential_cache_key(config)
     try:
         response = await refresh_model_catalog(config)
     except Exception:
@@ -70,7 +75,7 @@ async def fetch_and_cache_model_catalog(
         next((entry.id for entry in response.models if entry.recommended), "none"),
     )
     try:
-        store_cached_model_catalog(config, response)
+        store_cached_model_catalog(config, response, fetched_for=cache_key)
     except Exception:
         logger.exception("Failed to cache the model catalog")
     return response

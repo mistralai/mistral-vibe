@@ -46,6 +46,7 @@ async fn run() -> Result<std::process::ExitCode> {
         }
         Err(error) => error.exit(),
     };
+    let acp_setup = vibe_rs::startup::init_entrypoint(cli.setup);
     let invocation_cwd = std::env::current_dir().ok();
     // Resolve the headless paths right after parse, before --workdir changes
     // directory, so relative paths name what the caller meant.
@@ -194,8 +195,11 @@ async fn run() -> Result<std::process::ExitCode> {
     } else {
         cli.worktree_request(cli.interactive_initial_prompt(stdin_prompt.clone()))
     };
-    let interactive_agent_config =
-        cli.interactive_agent_config(Some(cwd_text.clone()), worktree_request)?;
+    let interactive_agent_config = cli.interactive_agent_config(
+        Some(cwd_text.clone()),
+        worktree_request,
+        vibe_rs::terminal_key::current(),
+    )?;
     // After argument errors; before anything spawns or draws.
     terminal::require_interactive_terminal();
 
@@ -250,12 +254,15 @@ async fn run() -> Result<std::process::ExitCode> {
     };
     // The startup update prompt runs after the worktree settle and before
     // the terminal is taken over. A non-worktree run settles
-    // nothing, so its prompt timing is unchanged.
-    update_flow::maybe_run_startup_update_prompt(
-        &startup_config,
-        early.as_ref().map(|start| &start.child),
-    )
-    .await;
+    // nothing, so its prompt timing is unchanged. An IDE-launched setup
+    // (`vibe-acp --setup`) cannot act on a `vibe` update, so it skips it.
+    if !acp_setup {
+        update_flow::maybe_run_startup_update_prompt(
+            &startup_config,
+            early.as_ref().map(|start| &start.child),
+        )
+        .await;
+    }
     // Install before the TUI owns the terminal, so a failure exits cleanly.
     let mut shutdown = match shutdown {
         Some(signals) => signals,
@@ -463,6 +470,7 @@ async fn run() -> Result<std::process::ExitCode> {
             }
         };
     app.trust.tx = trust_tx;
+    app.credential_client = Some(client.clone());
     let channels = vibe_rs::channels::connect(&mut app);
     // The index watches from here: the build overlaps the boot instead of
     // delaying the first frame.

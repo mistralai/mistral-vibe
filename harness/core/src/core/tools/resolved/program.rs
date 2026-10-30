@@ -129,6 +129,7 @@ impl AcceptedProgramGroups {
                     command_environment,
                     super::assembly::bash_timeout(config),
                     config.settings.tools.background_processes.is_enabled(),
+                    config.settings.tools.file_system.read_file(),
                 ),
             });
         }
@@ -298,15 +299,17 @@ fn filesystem_program_tools(
     environment: CommandEnvironment,
     timeout: file_system::BashTimeout,
     background: bool,
+    read_file: file_system::ReadFileSupport,
 ) -> Vec<ProgramTool> {
-    file_system::tools(environment, timeout, background)
+    let exposure = file_system::Exposure::Programmatic;
+    file_system::exposed_tools(environment, timeout, background, read_file, exposure)
         .into_iter()
         .map(|spec| {
             let function_name = spec.direct_name.to_string();
             ProgramTool {
                 runtime_name: function_name.clone(),
                 function_name,
-                description: spec.description.to_string(),
+                description: spec.description,
                 input_schema: spec.input_schema,
                 output_schema: Some(spec.output_schema),
                 target: ToolTarget::RuntimeBuiltin {

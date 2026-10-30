@@ -4,11 +4,14 @@ import httpx
 from pydantic import ValidationError
 import pytest
 
+from tests.conftest import build_test_vibe_config
+from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from vibe.app_server._account import (
     AccountGatewayUnauthorized,
     AccountGatewayUnavailable,
     HttpAccountGateway,
     WhoAmIResult,
+    reconcile_tenant_domains,
 )
 from vibe.app_server.models import AccountPlanKind, AccountView
 from vibe.app_server.protocol import AccountReadParams
@@ -105,3 +108,62 @@ def test_account_wire_models_reject_extra_fields() -> None:
             "sessionId": "session",
             "apiKey": "client-secret",
         })
+
+
+class _ReconcileSpies:
+    """Records what reconcile_tenant_domains asks the persistence layer to do."""
+
+    def __init__(self) -> None:
+        self.provider_calls: list[str] = []  # captured api_base per call
+        self.vibe_calls: list[str] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from vibe.app_server import _account as account_module
+
+        async def _fake_apply_provider_to_config(
+            _orchestrator, provider, *, reason: str
+        ) -> bool:
+            self.provider_calls.append(provider.api_base)
+            return True
+
+        async def _fake_apply_vibe_base_url(
+            _orchestrator, vibe_base_url, *, reason: str
+        ) -> bool:
+            self.vibe_calls.append(vibe_base_url)
+            return True
+
+        monkeypatch.setattr(
+            account_module, "apply_provider_to_config", _fake_apply_provider_to_config
+        )
+        monkeypatch.setattr(
+            account_module, "apply_vibe_base_url", _fake_apply_vibe_base_url
+        )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_tenant_domains_preserves_api_base_when_opted_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The preserve_api_base flag skips the api_base heal but not the chat heal."""
+    spies = _ReconcileSpies()
+    spies.install(monkeypatch)
+
+    from vibe.core.config import DEFAULT_PROVIDERS
+
+    provider = DEFAULT_PROVIDERS[0].model_copy(
+        update={"api_base": "https://connector.acme:443/v1", "preserve_api_base": True}
+    )
+    config = build_test_vibe_config(providers=[provider])
+    await reconcile_tenant_domains(
+        FakeConfigOrchestrator(config),
+        WhoAmIResult(
+            plan_type=AccountPlanKind.API,
+            plan_name="FREE",
+            api_base="https://api.tenant.acme",
+            vibe_base="https://chat.tenant.acme",
+        ),
+        provider_name=config.get_active_provider().name,
+    )
+
+    assert spies.provider_calls == []  # api heal opted out
+    assert spies.vibe_calls == ["https://chat.tenant.acme"]  # chat still healed

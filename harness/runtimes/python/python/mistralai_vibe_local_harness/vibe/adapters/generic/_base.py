@@ -130,6 +130,14 @@ class APIAdapter(ABC):
         self, data: dict[str, Any], provider: ProviderView
     ) -> LLMChunk: ...
 
+    def finish_message(self, message: LLMMessage) -> LLMMessage:
+        """Settle a fully streamed message before it becomes the completion result.
+
+        Called once per completion. Override when what a streamed block means
+        is known only once the whole stream has arrived.
+        """
+        return message
+
     async def parse_stream(
         self, responses: AsyncGenerator[dict[str, Any]], provider: ProviderView
     ) -> AsyncGenerator[ParsedStreamChunk]:

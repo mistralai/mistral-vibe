@@ -11,11 +11,11 @@ settle_per_key = True
 screen_contains = ("Directory received.",)
 
 timeline: Timeline = [
-    "@client-e2e/fixtures",
+    "@data",
     "\t",
     "\r",
     turn_started(),
-    user_msg("@client-e2e/fixtures/"),
+    user_msg("@data/"),
     assistant_msg("Directory received."),
     turn_completed(),
 ]

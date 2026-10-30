@@ -96,7 +96,7 @@ pub fn load_page(app: &mut App, client: &Arc<Client>) {
         console.page_in_flight.store(false, Ordering::Relaxed);
         return;
     };
-    let Some(tx) = console.tx.clone() else {
+    let Some(tx) = app.events.clone() else {
         console.page_in_flight.store(false, Ordering::Relaxed);
         return;
     };
@@ -135,7 +135,7 @@ fn start_polling(
     mut session_rx: tokio::sync::watch::Receiver<String>,
 ) {
     let console = &app.debug_console;
-    let Some(tx) = console.tx.clone() else {
+    let Some(tx) = app.events.clone() else {
         return;
     };
     let generation = console.generation.clone();
@@ -171,7 +171,11 @@ fn start_polling(
                 .and_then(|value| super::parse_entries(&value))
                 .unwrap_or_default();
             in_flight.store(false, Ordering::Relaxed);
-            if tx.send(Event::Polled(observed, entries)).await.is_err() {
+            if tx
+                .send(Event::Polled(observed, entries).into())
+                .await
+                .is_err()
+            {
                 return;
             }
         }

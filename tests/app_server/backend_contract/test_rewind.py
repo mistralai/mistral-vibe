@@ -12,6 +12,7 @@ import pytest
 import respx
 
 from tests.app_server.backend_contract.conftest import connect_backend_contract_host
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.models import PublicMessageEntry
 from vibe.app_server.protocol import (
     AppServerResponseError,
@@ -350,6 +351,7 @@ async def test_fork_rewind_attaches_a_truncated_child_and_keeps_the_source_whole
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_session: AppServerSession,
+    process_services: ProcessServices,
 ) -> None:
     backend_contract_mistral_api.mock(
         side_effect=[
@@ -376,7 +378,9 @@ async def test_fork_rewind_attaches_a_truncated_child_and_keeps_the_source_whole
     # would read it: from storage, once this connection has let go of it.
     await backend_contract_persistent_session.close()
     connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         source = await connection.host.read_session(source_session_id)
@@ -522,6 +526,7 @@ async def test_in_place_rewind_restores_a_file_the_rewound_turn_created(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
     tmp_path: Path,
+    process_services: ProcessServices,
 ) -> None:
     target = tmp_path / "created.txt"
     backend_contract_mistral_api.mock(
@@ -535,6 +540,7 @@ async def test_in_place_rewind_restores_a_file_the_rewound_turn_created(
     connection = await connect_backend_contract_host(
         session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         session = await connection.host.open_session()
@@ -560,6 +566,7 @@ async def test_in_place_rewind_restores_a_file_the_rewound_turn_overwrote(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
     tmp_path: Path,
+    process_services: ProcessServices,
 ) -> None:
     target = tmp_path / "config.yaml"
     target.write_text("key: original", encoding="utf-8")
@@ -574,6 +581,7 @@ async def test_in_place_rewind_restores_a_file_the_rewound_turn_overwrote(
     connection = await connect_backend_contract_host(
         session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         session = await connection.host.open_session()
@@ -601,6 +609,7 @@ async def test_a_fork_restores_files_of_the_turns_it_inherited(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
     tmp_path: Path,
+    process_services: ProcessServices,
 ) -> None:
     inherited = tmp_path / "inherited.txt"
     rewound = tmp_path / "rewound.txt"
@@ -622,6 +631,7 @@ async def test_a_fork_restores_files_of_the_turns_it_inherited(
     connection = await connect_backend_contract_host(
         session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         session = await connection.host.open_session()

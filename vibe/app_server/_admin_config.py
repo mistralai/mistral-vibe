@@ -1,10 +1,12 @@
-"""Org config: fetch, load into the admin layer, cache fallback, and reporting."""
+"""Org config: loading it into the admin layer, and reporting what it did.
+
+``OrgConfigService`` (``_org_config_service``) holds and refreshes it.
+"""
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum, auto
 from typing import Final, Protocol
 
@@ -13,13 +15,10 @@ from vibe.core.config.admin_config import (
     MANAGED_CONFIG_TIMEOUT,
     AdminConfigApplyResult,
     AdminConfigOutcome,
-    fetch_managed_config,
 )
 from vibe.core.config.layers.admin import admin_layer, enforced_keys
-from vibe.core.config.managed_config_cache import load_cached_managed_config
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.observability.logging import logger
-from vibe.utils.api_keys import resolve_api_key
 
 _FETCH_FAILURES = frozenset({
     AdminConfigOutcome.FETCH_FAILED,
@@ -47,9 +46,10 @@ class OrgConfigSource(StrEnum):
     """Which org config a session build applies."""
 
     CACHED = auto()
-    """The cached copy: every build except a session start."""
-    FETCHED = auto()
-    """The server's answer now, over the cached copy: a session start."""
+    """The copy the process holds: every build except a session start."""
+    ENSURED = auto()
+    """The copy the process holds, waiting for a first one when it holds
+    none: a session start."""
     NONE = auto()
     """Local config only: the last fallback when the org config cannot be used."""
 
@@ -63,52 +63,28 @@ class OrgConfigAttempt:
     source: OrgConfigSource
     saved: str | None = None
     """The cached copy the build applied."""
-    fetched: str | None = None
-    """The server's answer the build applied (``""``: the org enforces
-    nothing); ``None`` when nothing was fetched or the answer was rolled back.
-    Cached once the session can run under it."""
     fetch_outcome: AdminConfigApplyResult | None = None
-    """What the fetch did, for a build that fetched."""
+    """Why a start with nothing cached still has no org config."""
     saved_failure: AdminConfigApplyResult | None = None
     """Why the cached copy did not apply, when one is cached."""
+    considered: str | None = None
+    """The cached copy the build tried, applied or not."""
 
     @property
     def cache_failure(self) -> AdminConfigApplyResult | None:
-        """The cached copy's failure, for the session to report: only when no
-        fetched answer replaced the cached copy, and the fetch has no failure
-        of its own to report.
+        """The cached copy's failure, for the session to report, unless the
+        fetch has a failure of its own to report.
         """
-        if self.saved_failure is None or self.fetched is not None:
-            return None
         fetch = self.fetch_outcome
         if fetch is not None and fetch.outcome is not AdminConfigOutcome.FETCH_FAILED:
             return None
         return self.saved_failure
 
-    @property
-    def loaded(self) -> str | None:
-        """The org config the build applied; ``None`` when none."""
-        if self.fetched is None:
-            return self.saved
-        return self.fetched or None
-
     def next_source(self) -> OrgConfigSource | None:
-        """The build to try after this one failed, or ``None`` when its failure
-        is not the org config's.
-
-        Never builds the same org config twice: the cached copy only when it
-        differs from what failed, and local config only after a build that
-        applied an org config.
+        """The build to try after this one failed: local config after a build
+        that applied an org config, else ``None``, the failure being local.
         """
-        if self.loaded is None:
-            return None
-        if (
-            self.source is OrgConfigSource.FETCHED
-            and self.saved is not None
-            and self.saved != self.loaded
-        ):
-            return OrgConfigSource.CACHED
-        return OrgConfigSource.NONE
+        return None if self.saved is None else OrgConfigSource.NONE
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,19 +97,7 @@ class OrgConfigReport:
     """The fetch outcome, or the failure the build fell back from."""
     excluded_agent: str | None = None
     fetch_outcome: AdminConfigApplyResult | None = None
-    """What became of the fetched answer, for a build that fetched:
-    ``APPLY_FAILED`` when the build could not run under it."""
-
-    @property
-    def fetched_answer_rejected(self) -> bool:
-        """The build could not run under the fetched answer in its folder. The
-        project config there can be the cause, so a rebuild in another folder
-        fetches again rather than read an older cached copy.
-        """
-        return (
-            self.fetch_outcome is not None
-            and self.fetch_outcome.outcome is AdminConfigOutcome.APPLY_FAILED
-        )
+    """Why a start with nothing cached still has no org config."""
 
 
 @dataclass(slots=True)
@@ -145,6 +109,13 @@ class OrgConfigReportSlot:
     """
 
     report: OrgConfigReport | None = None
+    loaded: str = ""
+    """The org config TOML this context's config runs; ``""`` for none. What a
+    session opened on it (/clear, rewind) starts following from. Kept by
+    ``take``: it is not news to report."""
+    refused: set[str] = field(default_factory=set)
+    """Org configs a session on this context could not run under: no session
+    on it tries them again until ``/reload``."""
 
     def take(self) -> OrgConfigReport | None:
         report, self.report = self.report, None
@@ -193,64 +164,9 @@ def report_admin_config_outcome(
         telemetry.send_admin_config_applied(outcome=result.outcome, error=result.error)
 
 
-async def refresh_admin_layer(
-    orchestrator: ConfigOrchestrator[VibeConfigSchema],
-    *,
-    preflight: Preflight | None = None,
-) -> AdminConfigApplyResult:
-    """Parseable TOML that fails merged-config validation is rolled back so it
-    never stays in the live layer; otherwise it would re-break every later
-    ``reload`` and config edit for the session. On success the merged config is
-    already refreshed.
-    """
-    fetched = await fetch_admin_toml(orchestrator)
-    if isinstance(fetched, AdminConfigApplyResult):
-        return fetched
-    return await load_admin_layer(orchestrator, fetched, preflight=preflight)
-
-
-async def fetch_admin_toml(
-    orchestrator: ConfigOrchestrator[VibeConfigSchema],
-) -> str | AdminConfigApplyResult:
-    """The org config TOML, or why there is none.
-
-    Never raises, and returns within ``MANAGED_CONFIG_FETCH_BUDGET``: a session
-    start and ``/reload`` both wait on it, and any failure is a failed fetch,
-    never a failed start or reload.
-    """
-    try:
-        async with asyncio.timeout(MANAGED_CONFIG_FETCH_BUDGET):
-            return await _fetch_admin_toml(orchestrator)
-    except TimeoutError:
-        error = "timed out"
-    except Exception as exc:
-        error = str(exc)
-    return AdminConfigApplyResult(AdminConfigOutcome.FETCH_FAILED, error=error)
-
-
-async def _fetch_admin_toml(
-    orchestrator: ConfigOrchestrator[VibeConfigSchema],
-) -> str | AdminConfigApplyResult:
-    config = orchestrator.config
-    provider = config.get_mistral_provider()
-    api_key = resolve_api_key(provider.api_key_env_var) if provider else None
-    if not api_key:
-        return AdminConfigApplyResult(AdminConfigOutcome.NO_API_KEY)
-
-    fetched = await fetch_managed_config(config.vibe_base_url, api_key)
-    if fetched.error is not None:
-        # A fetch failure keeps the cached policy: the session stays under
-        # the last known org config instead of silently falling back to
-        # unenforced settings.
-        return AdminConfigApplyResult(
-            AdminConfigOutcome.FETCH_FAILED, error=fetched.error
-        )
-    managed = fetched.config
-    if managed is None or not managed.is_enabled or managed.toml is None:
-        # A valid answer that the org enforces nothing ("no_config", or an
-        # admin who turned it off).
-        return AdminConfigApplyResult(AdminConfigOutcome.DISABLED)
-    return managed.toml
+def answer_outcome(toml_text: str) -> str | AdminConfigApplyResult:
+    """What ``load_fetched_admin_config`` takes for a cached answer."""
+    return toml_text or AdminConfigApplyResult(AdminConfigOutcome.DISABLED)
 
 
 async def load_fetched_admin_config(
@@ -309,7 +225,7 @@ async def load_admin_layer(
         return AdminConfigApplyResult(AdminConfigOutcome.PARSE_FAILED, error=str(exc))
 
     try:
-        await orchestrator.reload(preflight=preflight)
+        await orchestrator.reload_layer(layer.name, preflight=preflight)
     except BaseException as exc:
         # Cancellation must roll the layer back and still propagate: callers
         # (shutdown, a superseded refresh) await the cancellation itself, and
@@ -317,7 +233,7 @@ async def load_admin_layer(
         layer.restore(previous)
         if not isinstance(exc, Exception):
             raise
-        await orchestrator.reload()
+        await orchestrator.reload_layer(layer.name)
         logger.warning("Admin-managed config failed validation", exc_info=exc)
         return AdminConfigApplyResult(AdminConfigOutcome.APPLY_FAILED, error=str(exc))
 
@@ -326,19 +242,16 @@ async def load_admin_layer(
     )
 
 
-async def apply_cached_admin_config(
-    orchestrator: ConfigOrchestrator[VibeConfigSchema], cache_key: str | None
+async def apply_held_admin_config(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], held: str | None
 ) -> tuple[str | None, AdminConfigApplyResult | None]:
-    """Apply the last cached managed config. Returns it if it applied, else
-    why it did not.
+    """Apply the org config the process holds. Returns the copy it tried, and
+    why it did not apply.
 
-    At a session start it is the fallback the fetch replaces; for requests
-    outside a session (``agents/list``, ``config/read``) it is the only
-    source, since those fetch only to fill it. A stale, corrupt, or invalid cached
-    policy is never fatal: it is skipped. One this folder's config rejects
-    is returned as a failure, for a session to report.
+    A copy this folder's config rejects is never fatal: it is skipped, and
+    returned as a failure for a session to report.
     """
-    cached = load_cached_managed_config(cache_key)
+    cached = held
     if not cached:
         return None, None
     result = await load_admin_layer(orchestrator, cached)
@@ -346,20 +259,20 @@ async def apply_cached_admin_config(
         logger.debug(
             "Cached managed config not applied outcome=%s", result.outcome.value
         )
-        return None, result
+        return cached, result
     return cached, None
 
 
 __all__ = [
+    "MANAGED_CONFIG_FETCH_BUDGET",
     "AdminConfigTelemetry",
     "OrgConfigAttempt",
     "OrgConfigReport",
     "OrgConfigReportSlot",
     "OrgConfigSource",
-    "apply_cached_admin_config",
-    "fetch_admin_toml",
+    "answer_outcome",
+    "apply_held_admin_config",
     "load_admin_layer",
     "load_fetched_admin_config",
-    "refresh_admin_layer",
     "report_admin_config_outcome",
 ]

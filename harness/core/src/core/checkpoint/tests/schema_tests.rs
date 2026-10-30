@@ -628,3 +628,37 @@ fn restore_rejects_invalid_pre_agent_content_and_pending_notifications() {
         assert!(checkpoint.restore(config()).is_err(), "restored {label}");
     }
 }
+
+#[test]
+fn restore_reads_queued_agent_tasks_from_older_checkpoints_as_messages() {
+    for saved_kind in [Some("task"), Some("message"), None] {
+        // Prepare
+        let mut source = json!({"type": "agent_message", "sender_agent_path": "/root/child"});
+        if let Some(kind) = saved_kind {
+            source["kind"] = json!(kind);
+        }
+        let mut checkpoint = checkpoint_with_turn(json!({ "type": "idle" }));
+        checkpoint["notifications"] = json!([{
+            "type": "pending",
+            "notification": {
+                "id": "notification-1",
+                "source": source,
+                "level": "info",
+                "message": "Agent input",
+                "content": [{"type": "text", "text": "retained advice"}]
+            }
+        }]);
+
+        // Do
+        let decoded = decode_checkpoint(&checkpoint.to_string()).unwrap();
+        let restored = decoded.restore(config()).unwrap();
+        let recaptured = serde_json::to_value(Checkpoint::capture(&restored).unwrap()).unwrap();
+
+        // Assert
+        assert_eq!(
+            recaptured["notifications"][0]["notification"]["source"],
+            json!({"type": "agent_message", "sender_agent_path": "/root/child"}),
+            "{saved_kind:?}"
+        );
+    }
+}

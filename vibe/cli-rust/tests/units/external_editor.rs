@@ -1,22 +1,14 @@
 //! Ctrl+G external editor: request gating, editor resolution, and loading the saved text.
 
 use std::path::Path;
-use std::sync::Arc;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vibe_rs::app::App;
-use vibe_rs::config;
 use vibe_rs::external_editor::{apply, command, edited_text, get_editor};
-use vibe_rs::input::{handle_key, handle_paste};
+use vibe_rs::input::handle_paste;
 use vibe_rs::input_modes::InputMode;
 use vibe_rs::long_paste::placeholder;
-use vibe_rs::server::Client;
 
-fn press_ctrl_g(app: &mut App) {
-    let (config_tx, _config_rx) = tokio::sync::mpsc::channel::<config::Loaded>(1);
-    let key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
-    handle_key(app, &Arc::new(Client::stub()), &config_tx, key);
-}
+use crate::support::{ctrl, send_key};
 
 fn long_paste() -> String {
     (0..12)
@@ -31,7 +23,7 @@ fn ctrl_g_requests_the_editor_without_touching_the_draft() {
     app.chat_input.input = "keep my draft".into();
     app.chat_input.cursor = 4;
 
-    press_ctrl_g(&mut app);
+    send_key(&mut app, ctrl('g'));
 
     assert!(app.external_editor_requested);
     assert_eq!(app.chat_input.input, "keep my draft");
@@ -42,7 +34,7 @@ fn ctrl_g_is_ignored_while_the_composer_is_hidden() {
     let mut app = App::default();
     app.subagents.viewed_subagent_id = Some("child".into());
 
-    press_ctrl_g(&mut app);
+    send_key(&mut app, ctrl('g'));
 
     assert!(!app.external_editor_requested);
 }

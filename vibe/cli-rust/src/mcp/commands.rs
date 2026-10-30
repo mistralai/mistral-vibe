@@ -42,7 +42,7 @@ fn status(app: &mut App, client: &Arc<Client>, args: &str) {
             .request_err(method::MCP_READ, json!({"sessionId": session_id}))
             .await
         {
-            Ok(value) => CommandEvent::Result(status_text(&value)),
+            Ok(value) => status_event(&value),
             Err(error) => {
                 CommandEvent::Error(format!("Failed to read MCP servers: {}", error.message))
             }
@@ -51,19 +51,19 @@ fn status(app: &mut App, client: &Arc<Client>, args: &str) {
     });
 }
 
-fn status_text(value: &Value) -> String {
+fn status_event(value: &Value) -> CommandEvent {
     let state = super::state_at(value, "/mcp").unwrap_or_default();
     let statuses = state.statuses();
     if statuses.is_empty() {
-        return "No MCP servers configured.".to_owned();
+        return CommandEvent::Status("No MCP servers configured.".to_owned());
     }
-    let mut lines = vec!["### MCP auth status".to_owned(), String::new()];
+    let mut lines = vec!["## MCP auth status".to_owned(), String::new()];
     lines.extend(
         statuses
             .into_iter()
             .map(|(alias, status)| format!("- `{alias}`: `{status}`")),
     );
-    lines.join("\n")
+    CommandEvent::Result(lines.join("\n"))
 }
 
 fn login(app: &mut App, client: &Arc<Client>, alias: &str) {
@@ -98,7 +98,7 @@ async fn login_event(client: &Arc<Client>, session_id: &str, alias: &str) -> Com
         )
         .await
     {
-        Ok(_) => CommandEvent::Result(format!("MCP server `{alias}` authenticated.")),
+        Ok(_) => CommandEvent::Status(format!("MCP server `{alias}` authenticated.")),
         Err(error) => CommandEvent::Error(error.message),
     }
 }
@@ -124,7 +124,7 @@ fn logout(app: &mut App, client: &Arc<Client>, alias: &str) {
             )
             .await
         {
-            Ok(_) => CommandEvent::Result(format!("MCP server `{alias}` logged out.")),
+            Ok(_) => CommandEvent::Status(format!("MCP server `{alias}` logged out.")),
             Err(error) => CommandEvent::Error(error.message),
         };
         send(&tx, &pending, event, false);
@@ -187,7 +187,7 @@ fn add(app: &mut App, client: &Arc<Client>, raw_args: &str) {
         send(
             &tx,
             &pending,
-            CommandEvent::Result(format!("{head}\n{tail}")),
+            CommandEvent::Status(format!("{head}\n{tail}")),
             args.login,
         );
         if args.login {

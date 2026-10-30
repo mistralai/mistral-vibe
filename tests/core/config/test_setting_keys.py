@@ -70,7 +70,7 @@ def test_unknown_nested_keys_are_named_with_their_path() -> None:
     }
 
 
-def test_unknown_tool_setting_is_named_but_custom_tools_are_left_alone() -> None:
+def test_unknown_tool_setting_is_named_but_mcp_tools_are_left_alone() -> None:
     issues = _issues({
         "tools": {
             "bash": {"permission": "always", "alowlist": ["ls"]},
@@ -88,12 +88,26 @@ def test_tool_settings_without_effect_are_flagged() -> None:
 
 
 def test_retired_settings_are_flagged_as_no_longer_used() -> None:
-    issues = _issues({"include_model_info": False, "include_prompt_detail": False})
+    issues = _issues({
+        "include_model_info": False,
+        "include_prompt_detail": False,
+        "api_connect_timeout": 5.0,
+    })
 
     assert issues == {
         "include_model_info": KeyIssueKind.RETIRED,
         "include_prompt_detail": KeyIssueKind.RETIRED,
+        "api_connect_timeout": KeyIssueKind.RETIRED,
     }
+
+
+def test_tool_paths_left_in_a_config_is_flagged_as_no_longer_used() -> None:
+    # The startup migration drops it from the files Vibe writes, but not from
+    # an agent profile.
+    assert _issues({"tool_paths": ["/tools"]}, layer="agent-profile") == {
+        "tool_paths": KeyIssueKind.RETIRED
+    }
+    assert _issues({"tool_paths": []}) == {}
 
 
 def test_effective_settings_raise_no_issue() -> None:
@@ -197,111 +211,46 @@ async def test_strict_config_accepts_a_clean_config() -> None:
     assert not config.validation_warnings
 
 
-_CUSTOM_WEB_FETCH = """
-from pydantic import BaseModel
-
-from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
-
-
-class Args(BaseModel):
-    pass
-
-
-class Result(BaseModel):
-    pass
-
-
-class WebFetchConfig(BaseToolConfig):
-    proxy_host: str = ""
-
-
-class WebFetch(BaseTool[Args, Result, WebFetchConfig, BaseToolState]):
-    description = "A custom tool that replaces the builtin web_fetch"
-
-    async def run(self, args, ctx=None):
-        yield Result()
-"""
-
-
 @pytest.mark.asyncio
-async def test_strict_config_accepts_the_settings_of_a_custom_tool_with_a_builtin_name(
-    tmp_path: Path,
+async def test_strict_config_refuses_the_settings_of_a_former_custom_tool(
+    tmp_working_directory: Path,
 ) -> None:
-    # The custom tool is the one the session runs, so it reads `proxy_host`.
-    (tmp_path / "my_web_fetch.py").write_text(_CUSTOM_WEB_FETCH)
-
-    config = await _supplied({
-        "strict_config": True,
-        "tool_paths": [str(tmp_path)],
-        "tools": {"web_fetch": {"proxy_host": "proxy.internal"}},
-    })
-
-    assert config.tools["web_fetch"]["proxy_host"] == "proxy.internal"
-    assert not config.validation_warnings
-
-
-@pytest.mark.asyncio
-async def test_a_builtin_tool_setting_is_still_checked_beside_a_custom_tool(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "my_web_fetch.py").write_text(_CUSTOM_WEB_FETCH)
-
-    config = await _supplied({
-        "tool_paths": [str(tmp_path)],
-        "tools": {"bash": {"alowlist": ["ls"]}},
-    })
-
-    assert "`tools.bash.alowlist`" in config.validation_warnings[0]
-
-
-@pytest.mark.parametrize(
-    "not_selected",
-    [
-        "    selection_priority = -1\n",
-        "    @classmethod\n    def is_available(cls, config=None):\n        return False\n",
-    ],
-    ids=["lower-priority", "unavailable"],
-)
-@pytest.mark.asyncio
-async def test_strict_config_refuses_a_builtin_setting_when_the_custom_tool_is_not_selected(
-    tmp_path: Path, not_selected: str
-) -> None:
-    # The builtin web_fetch runs and never reads `proxy_host`.
-    (tmp_path / "my_web_fetch.py").write_text(_CUSTOM_WEB_FETCH + not_selected)
+    # A custom web_fetch read `proxy_host`; the builtin runs now and never does.
+    tools_dir = tmp_working_directory / ".vibe" / "tools"
+    tools_dir.mkdir(parents=True)
+    (tools_dir / "my_web_fetch.py").write_text("raise RuntimeError('imported')\n")
+    trusted_folders_manager.add_trusted(tmp_working_directory)
 
     with pytest.raises(UnusedConfigKeysError, match="tools.web_fetch.proxy_host"):
         await _supplied({
             "strict_config": True,
-            "tool_paths": [str(tmp_path)],
             "tools": {"web_fetch": {"proxy_host": "proxy.internal"}},
         })
 
 
 @pytest.mark.asyncio
-async def test_strict_config_sees_the_custom_tool_of_the_session_workspace(
-    tmp_path: Path, tmp_working_directory: Path
+async def test_checking_tool_settings_never_imports_custom_tools(
+    tmp_path: Path, tmp_working_directory: Path, config_dir: Path
 ) -> None:
-    # The session runs in another workspace than the process, as an app-server
-    # session does, and that workspace's project tool replaces web_fetch.
-    workspace = tmp_path / "workspace"
-    tools_dir = workspace / ".vibe" / "tools"
-    tools_dir.mkdir(parents=True)
-    (tools_dir / "my_web_fetch.py").write_text(_CUSTOM_WEB_FETCH)
-    (workspace / ".vibe" / "config.toml").write_text(
-        tomli_w.dumps({
-            "strict_config": True,
-            "tools": {"web_fetch": {"proxy_host": "proxy.internal"}},
-        })
+    # Worktree naming, project links and run-server settings load the config
+    # this way, outside a session.
+    marker = tmp_path / "imported.txt"
+    module = f"from pathlib import Path\nPath({str(marker)!r}).write_text('x')\n"
+    for tools_dir in (tmp_working_directory / ".vibe" / "tools", config_dir / "tools"):
+        tools_dir.mkdir(parents=True)
+        (tools_dir / "marker.py").write_text(module)
+    (tmp_working_directory / ".vibe" / "config.toml").write_text(
+        tomli_w.dumps({"tools": {"bash": {"allowlist": ["ls"]}}})
     )
-    trusted_folders_manager.add_trusted(workspace)
-    session_files = HarnessFilesManager(sources=("user", "project")).for_session(
-        workspace
+    trusted_folders_manager.add_trusted(tmp_working_directory)
+
+    await build_default_orchestrator(
+        harness_files=HarnessFilesManager(sources=("user", "project")).for_session(
+            tmp_working_directory
+        )
     )
 
-    orchestrator = await build_default_orchestrator(harness_files=session_files)
-
-    assert orchestrator.config.tools["web_fetch"]["proxy_host"] == "proxy.internal"
-    assert not orchestrator.config.validation_warnings
+    assert not marker.exists()
 
 
 def test_a_legacy_name_vibe_still_reads_is_checked_like_its_setting() -> None:

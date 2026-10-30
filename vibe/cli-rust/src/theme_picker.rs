@@ -74,7 +74,6 @@ pub fn apply_event(app: &mut App, event: Event) {
             theme::set_active(&app.session.startup_config.theme);
         }
     }
-    app.commit_finished();
 }
 
 /// Restore the theme active before the picker opened (Esc / cancel).

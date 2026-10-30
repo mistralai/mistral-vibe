@@ -1,4 +1,4 @@
-"""A failed subagent stays listed once its batch ends; only a stopped one leaves."""
+"""A failed subagent stays listed once its batch ends; a waiting one hides and a stopped one leaves."""
 
 from __future__ import annotations
 
@@ -13,15 +13,15 @@ from e2e.app_server.events import (
 from e2e.app_server.scenario import Timeline
 
 _PROMPT = "delegate three investigations"
-_FAILED = {"child_session_id": "child-session-2", "name": "explore-2"}
-_STOPPED = {"child_session_id": "child-session-3", "name": "explore-3"}
+_FAILED_ID, _FAILED_NAME = "child-session-2", "explore-2"
+_STOPPED_ID, _STOPPED_NAME = "child-session-3", "explore-3"
 
 screen_contains = (
-    "Explore (Explore 1) [ready]",
     "Explore (Explore 2) [failed]",
+    "1 subagent waiting",
     "One investigation failed.",
 )
-screen_excludes = ("Explore 3",)
+screen_excludes = ("Explore (Explore 1)", "Explore 3", "a to show")
 
 timeline: Timeline = [
     f"{_PROMPT}\r",
@@ -29,11 +29,11 @@ timeline: Timeline = [
     user_msg(_PROMPT),
     subagent("find the grouping code"),
     child_session_updated(),
-    child_session_updated(**_FAILED),
-    child_session_updated(**_STOPPED),
+    child_session_updated(child_session_id=_FAILED_ID, name=_FAILED_NAME),
+    child_session_updated(child_session_id=_STOPPED_ID, name=_STOPPED_NAME),
     child_session_updated("idle"),
-    child_session_updated("archived", **_STOPPED),
-    child_session_updated("failed", **_FAILED),
+    child_session_updated("archived", child_session_id=_STOPPED_ID, name=_STOPPED_NAME),
+    child_session_updated("failed", child_session_id=_FAILED_ID, name=_FAILED_NAME),
     assistant_msg("One investigation failed."),
     turn_completed(),
 ]

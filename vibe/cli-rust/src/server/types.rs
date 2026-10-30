@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::effect::EffectEntry;
@@ -324,7 +324,8 @@ pub struct InitializeParams {
 pub struct ClientInfo {
     pub name: String,
     /// App-server `ClientInfo.entrypoint`: `programmatic` in headless mode, `cli`
-    /// for the TUI. Drives analytics launch-context (ADR 0008).
+    /// for the TUI, `acp` for `vibe-acp --setup`. Drives analytics launch-context
+    /// (ADR 0008).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<String>,
     pub version: String,
@@ -351,6 +352,10 @@ pub struct ClientCapabilities {
 pub struct SessionStartParams {
     pub agent_config: AgentConfig,
     pub history_limit: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "skip_default_bool")]
+    pub session_only: bool,
 }
 
 /// `WorktreeInput` (app-server `protocol.py`): create-or-reuse a named worktree,
@@ -391,6 +396,8 @@ pub struct AgentConfig {
     pub max_price: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_session_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
     #[serde(skip_serializing_if = "skip_default_bool", default)]
     pub headless: bool,
     #[serde(skip_serializing_if = "skip_default_bool", default)]
@@ -399,6 +406,8 @@ pub struct AgentConfig {
     pub workspace_roots: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeInput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_key: Option<String>,
 }
 
 fn skip_default_bool(b: &bool) -> bool {
@@ -598,7 +607,7 @@ pub struct PublicSessionState {
     #[serde(default)]
     pub turns: Option<Vec<Value>>,
     #[serde(default)]
-    pub turn_queue: Option<Value>,
+    pub turn_queue: Option<crate::server::PublicTurnQueue>,
     /// Provider retry in flight (app-server `PublicRetryState`); `None` when idle.
     #[serde(default)]
     pub retrying: Option<PublicRetryState>,
@@ -676,7 +685,7 @@ pub enum HistoryEntry {
 impl HistoryEntry {
     /// Parse a stored entry `Value`; unknown or invalid shapes render as `Unknown`.
     pub fn from_value(value: &Value) -> Self {
-        serde_json::from_value(value.clone()).unwrap_or(Self::Unknown)
+        Self::deserialize(value).unwrap_or(Self::Unknown)
     }
 
     /// `generation_status == "in_progress"`: the entry is still streaming.
@@ -705,10 +714,21 @@ pub struct MessageEntry {
     pub role: String,
     #[serde(default)]
     pub source: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_message_content")]
+    #[serde(default, deserialize_with = "crate::utils::json::lenient")]
     pub content: Vec<MessageContent>,
     #[serde(default)]
     pub user_display_content: Option<serde_json::Value>,
+}
+
+impl MessageEntry {
+    /// The text blocks joined with `separator`.
+    pub fn text(&self, separator: &str) -> String {
+        let texts = self.content.iter().filter_map(|content| match content {
+            MessageContent::Text { text } => Some(text.as_str()),
+            _ => None,
+        });
+        texts.collect::<Vec<_>>().join(separator)
+    }
 }
 
 fn assistant_role() -> String {
@@ -726,19 +746,6 @@ pub enum MessageContent {
     },
     #[serde(other)]
     Other,
-}
-
-fn deserialize_message_content<'de, D>(deserializer: D) -> Result<Vec<MessageContent>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = Value::deserialize(deserializer)?;
-    Ok(value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| serde_json::from_value(item.clone()).ok())
-        .collect())
 }
 
 #[derive(Debug, Clone, Deserialize)]

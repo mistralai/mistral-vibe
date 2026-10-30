@@ -29,8 +29,6 @@ pub use steering::{
     reconcile_snapshot, steer_pending,
 };
 
-use tokio::sync::mpsc::Sender;
-
 use crate::app::App;
 use crate::server::ImageAttachment;
 
@@ -102,8 +100,6 @@ pub struct QueueController {
     consumed: Vec<String>,
     /// Monotonic desired-state revision for merged queue items.
     next_revision: u64,
-    /// Enqueue answers, applied on the main thread.
-    pub tx: Option<Sender<QueueEvent>>,
 }
 
 /// Cap for late enqueue-answer ids and consumed server queue ids.

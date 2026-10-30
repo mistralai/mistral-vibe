@@ -10,6 +10,7 @@ from tests.app_server.backend_contract.conftest import (
     BackendContractConnection,
     connect_backend_contract_host,
 )
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.host import AppServerHost
 from vibe.app_server.protocol import (
     AppServerResponseError,
@@ -77,9 +78,11 @@ async def _rename(
     )
 
 
-async def _list_on_a_new_host() -> list[str | None]:
+async def _list_on_a_new_host(*, process_services: ProcessServices) -> list[str | None]:
     connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         return [session.title for session in await connection.host.list_sessions()]
@@ -90,6 +93,7 @@ async def _list_on_a_new_host() -> list[str | None]:
 @pytest.mark.asyncio
 async def test_renaming_an_unsaved_session_titles_it_without_persisting_it(
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A session with persistent logging that never ran a Turn.
     *Do*: Rename it, then list sessions from a new Host.
@@ -112,7 +116,7 @@ async def test_renaming_an_unsaved_session_titles_it_without_persisting_it(
     assert response.title == "Manual title"
     assert snapshot.session.title == "Manual title"
     assert log.persisted is False
-    assert await _list_on_a_new_host() == []
+    assert await _list_on_a_new_host(process_services=process_services) == []
 
 
 @pytest.mark.asyncio
@@ -120,6 +124,7 @@ async def test_a_renamed_saved_session_is_listed_under_its_new_title(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A persisted session that ran one Turn.
     *Do*: Rename it, close it, and list sessions from a new Host.
@@ -137,7 +142,7 @@ async def test_a_renamed_saved_session_is_listed_under_its_new_title(
     finally:
         await session.close()
 
-    assert await _list_on_a_new_host() == ["New title"]
+    assert await _list_on_a_new_host(process_services=process_services) == ["New title"]
 
 
 @pytest.mark.asyncio
@@ -145,6 +150,7 @@ async def test_passive_host_lists_and_reads_a_persisted_public_session(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     backend_contract_mistral_api.mock(
         return_value=backend_contract_mistral_response("saved")
@@ -157,7 +163,9 @@ async def test_passive_host_lists_and_reads_a_persisted_public_session(
         await session.close()
 
     passive_connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         sessions = await passive_connection.host.list_sessions()
@@ -175,10 +183,13 @@ async def test_host_catalog_paginates_persisted_sessions_and_selects_the_latest(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
-    async def persist(prompt: str) -> str:
+    async def persist(prompt: str, *, process_services: ProcessServices) -> str:
         connection = await connect_backend_contract_host(
-            session_options=SessionOptions(), capabilities=ClientCapabilities()
+            session_options=SessionOptions(),
+            capabilities=ClientCapabilities(),
+            process_services=process_services,
         )
         session = await connection.host.open_session()
         try:
@@ -195,9 +206,9 @@ async def test_host_catalog_paginates_persisted_sessions_and_selects_the_latest(
         ]
     )
     session_ids = [
-        await persist("first"),
-        await persist("second"),
-        await persist("third"),
+        await persist("first", process_services=process_services),
+        await persist("second", process_services=process_services),
+        await persist("third", process_services=process_services),
     ]
 
     first_page = SessionListResponse.model_validate(
@@ -217,7 +228,6 @@ async def test_host_catalog_paginates_persisted_sessions_and_selects_the_latest(
     ]
 
     assert set(session_ids).issubset(page_ids)
-    assert first_page.continue_session_id == session_ids[-1]
 
     continued = await backend_contract_persistent_connection.host.continue_session()
     try:

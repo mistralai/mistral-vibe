@@ -16,6 +16,7 @@ from tests.app_server.backend_contract.conftest import (
     BackendContractConnection,
     connect_backend_contract_host,
 )
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.events import (
     CallbackRequested,
     HistoryEntryAdded,
@@ -96,6 +97,7 @@ async def test_stateful_subagent_runs_through_the_backend(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
     tmp_path,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: Mock a parent that discovers and invokes the stateful subagent tool.
     *Do*: Run a parent turn through the Unified Harness backend.
@@ -158,6 +160,7 @@ async def test_stateful_subagent_runs_through_the_backend(
     connection = await connect_backend_contract_host(
         session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         session = await connection.host.open_session()
@@ -202,6 +205,7 @@ async def test_read_file_tool_call_runs_through_the_backend(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
     tmp_path,
+    process_services: ProcessServices,
 ) -> None:
     target = tmp_path / "notes.txt"
     target.write_text("from file\n", encoding="utf-8")
@@ -229,6 +233,7 @@ async def test_read_file_tool_call_runs_through_the_backend(
             cwd=str(tmp_path), enabled_tools=["read_file"], auto_approve=True
         ),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         session = await connection.host.open_session()
@@ -255,6 +260,7 @@ async def test_shell_tool_call_runs_through_the_backend(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
     tmp_path,
+    process_services: ProcessServices,
 ) -> None:
     backend_contract_mistral_api.mock(
         side_effect=[
@@ -282,6 +288,7 @@ async def test_shell_tool_call_runs_through_the_backend(
             cwd=str(tmp_path), enabled_tools=["bash"], auto_approve=True
         ),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         session = await connection.host.open_session()
@@ -308,6 +315,7 @@ async def test_shell_tool_call_waits_for_approval(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
     tmp_path,
+    process_services: ProcessServices,
 ) -> None:
     backend_contract_mistral_api.mock(
         side_effect=[
@@ -333,6 +341,7 @@ async def test_shell_tool_call_waits_for_approval(
     connection = await connect_backend_contract_host(
         session_options=SessionOptions(cwd=str(tmp_path), enabled_tools=["bash"]),
         capabilities=ClientCapabilities(callback_kinds=["approval"]),
+        process_services=process_services,
     )
     try:
         session = await connection.host.open_session()
@@ -370,6 +379,7 @@ async def test_outside_workdir_deny_fails_the_call_back_to_the_model_without_ask
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
     tmp_path: Path,
+    process_services: ProcessServices,
 ) -> None:
     config_file = config_dir / "config.toml"
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
@@ -400,6 +410,7 @@ async def test_outside_workdir_deny_fails_the_call_back_to_the_model_without_ask
     connection = await connect_backend_contract_host(
         session_options=SessionOptions(cwd=str(work), enabled_tools=["read_file"]),
         capabilities=ClientCapabilities(callback_kinds=["approval"]),
+        process_services=process_services,
     )
     try:
         session = await connection.host.open_session()
@@ -441,6 +452,7 @@ async def test_interrupt_closes_shell_approval_callback(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
     tmp_path,
+    process_services: ProcessServices,
 ) -> None:
     backend_contract_mistral_api.mock(
         return_value=backend_contract_mistral_response(
@@ -463,6 +475,7 @@ async def test_interrupt_closes_shell_approval_callback(
     connection = await connect_backend_contract_host(
         session_options=SessionOptions(cwd=str(tmp_path), enabled_tools=["bash"]),
         capabilities=ClientCapabilities(callback_kinds=["approval"]),
+        process_services=process_services,
     )
     callback_id: str | None = None
     try:

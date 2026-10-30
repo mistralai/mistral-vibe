@@ -27,19 +27,19 @@ Path(_home, "cache.toml").write_text(
 
 env = {
     "VIBE_HOME": _home,
-    # The shipped whats_new.md changes every release, which would churn this
-    # golden; the clients render the frozen fixture body instead. The path
-    # must be absolute: the client runs with cwd=VIBE_DIR, not the scenario's.
-    "VIBE_WHATS_NEW_FILE": os.fspath(WHATS_NEW_FIXTURE),
+    # The shipped release notes change every release, which would churn this
+    # golden; the clients render the frozen fixture history instead. The path
+    # must be absolute: the client runs with cwd=WORKSPACE_DIR, not the scenario's.
+    "VIBE_WHATS_NEW_DIR": os.fspath(WHATS_NEW_FIXTURE),
 }
 
-screen_contains = ("What's new in v9.9.9-fixture",)
+screen_contains = ("Release notes", "v9.9.9")
 
 _URI = "vscode:extension/mistralai.mistral-vibe-code"
 expected_actions = [Action("open_url", _URI)]
 
-# The fixture's `VS Code extension` link spans one-based columns 13-29 on its bullet row.
-_CLICK = "\x1b[<0;16;10M\x1b[<0;16;10m"
+# The fixture's `VS Code extension` link spans one-based columns 13-29 on row 12.
+_CLICK = "\x1b[<0;16;12M\x1b[<0;16;12m"
 
 # The banner mounts after startup; the capture after typing settles it.
 capture_startup = False

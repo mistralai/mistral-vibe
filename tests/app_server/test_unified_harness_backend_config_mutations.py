@@ -11,21 +11,19 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import Mock
 
 import pytest
 
 from tests.app_server.test_unified_harness_backend_adapter import (
-    _admin_result,
     _RecordingSession,
     _stub_unified_context,
 )
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._session_backend_port import SessionBackendError
 from vibe.app_server.protocol import AppServerResponseError, ProtocolErrorCode
 from vibe.core.config import VibeConfigSchema
-from vibe.core.config.admin_config import AdminConfigOutcome
 
 
 @pytest.mark.asyncio
@@ -39,7 +37,6 @@ async def test_unified_config_reload_reports_a_refused_config_as_a_configuration
     session keeps its derivation, nothing is applied.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from vibe.app_server import _unified_harness_backend_adapter as adapter_module
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedHarnessBackendAdapter,
     )
@@ -52,10 +49,6 @@ async def test_unified_config_reload_reports_a_refused_config_as_a_configuration
         async def reload(self, **_kwargs: object) -> None:
             raise InvalidConfigError(refusal)
 
-    async def no_admin_fetch(_orchestrator: object) -> object:
-        return _admin_result(AdminConfigOutcome.DISABLED)
-
-    monkeypatch.setattr(adapter_module, "fetch_admin_toml", no_admin_fetch)
     orchestrator = RefusingOrchestrator(build_test_vibe_config())
     context, derivation = _stub_unified_context(tmp_path, orchestrator)
     session = _RecordingSession()
@@ -148,45 +141,11 @@ def test_a_rejected_config_write_raises_with_its_reason(
 
 
 @pytest.mark.asyncio
-async def test_a_config_reload_the_mcp_catalog_cannot_build_is_a_configuration_error() -> (
-    None
-):
-    """*Prepare*: A server whose MCP catalog reloads the config first, on a
-    config the running agent refuses.
-    *Do*: Dispatch ``config/reload``.
-    *Assert*: The configuration error with the refusal, before the session's
-    own reload runs.
-    """
-    from vibe.app_server.server import AppServer
-    from vibe.app_server.transport import memory_transport_pair
-    from vibe.core.config.builder import InvalidConfigError
-
-    refusal = "The 'lean' agent runs tools.bash with max_timeout_seconds 1200"
-
-    class RefusingCatalog:
-        async def prepare_config_reload(self, _root: object) -> None:
-            raise InvalidConfigError(refusal)
-
-    root = Mock()
-    _, transport = memory_transport_pair()
-    server = AppServer(
-        transport,
-        session_backend_host_factory=lambda _: cast(Any, object()),
-        mcp_catalog_service=cast(Any, RefusingCatalog()),
-    )
-
-    with pytest.raises(SessionBackendError) as caught:
-        await server._dispatch_backend_config(root, "config/reload", {"sessionId": "s"})
-
-    assert caught.value.code == ProtocolErrorCode.INVALID_PARAMS
-    assert str(caught.value) == f"Cannot load the Vibe config. {refusal}"
-    assert caught.value.data == {"kind": "configuration"}
-    root.reload_config.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_a_config_reload_of_a_config_toml_the_schema_refuses_is_a_configuration_error(
-    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A live session, then a direct edit of `config.toml` that sets
     `tools.bash.default_timeout` without `max_timeout_seconds`.
@@ -195,7 +154,6 @@ async def test_a_config_reload_of_a_config_toml_the_schema_refuses_is_a_configur
     any other config the user must fix; the session keeps its configuration.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from vibe.app_server import _unified_harness_backend_adapter as adapter_module
     from vibe.app_server._runtime import HarnessProcess
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedHarnessBackendAdapter,
@@ -203,12 +161,8 @@ async def test_a_config_reload_of_a_config_toml_the_schema_refuses_is_a_configur
     )
     from vibe.app_server.protocol import ConfigReloadParams, SessionOptions
 
-    async def no_admin_fetch(_orchestrator: object) -> object:
-        return _admin_result(AdminConfigOutcome.DISABLED)
-
-    monkeypatch.setattr(adapter_module, "fetch_admin_toml", no_admin_fetch)
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
-    process = HarnessProcess()
+    process = HarnessProcess(services=process_services)
     context = await process.build_unified_session_context(
         SessionOptions(cwd=str(tmp_path))
     )

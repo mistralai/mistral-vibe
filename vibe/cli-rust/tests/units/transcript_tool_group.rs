@@ -4,6 +4,8 @@ use serde_json::json;
 use vibe_rs::server::PublicSessionState;
 use vibe_rs::transcript::Transcript;
 
+use crate::support::live;
+
 fn effect(id: &str, state: &str) -> serde_json::Value {
     json!({
         "id": id,
@@ -65,15 +67,6 @@ fn agent_change(id: &str) -> serde_json::Value {
 
 fn unknown_entry(id: &str) -> serde_json::Value {
     json!({"id": id, "type": "future_kind"})
-}
-
-/// Live entries, reduced one `history/entryAdded` at a time.
-fn live(entries: &[serde_json::Value]) -> Transcript {
-    let mut transcript = Transcript::default();
-    for entry in entries {
-        transcript.add(&json!({ "entry": entry }));
-    }
-    transcript
 }
 
 /// The same history mounted by a rebuild.

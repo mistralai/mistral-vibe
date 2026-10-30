@@ -1,16 +1,13 @@
 //! The app-server crash notice renders and settles the session state.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::backend::TestBackend;
-use ratatui::Terminal;
 use serde_json::json;
-use std::sync::Arc;
 use vibe_rs::app::{App, Status};
 use vibe_rs::commands::submission;
 use vibe_rs::config;
 use vibe_rs::event_loop::notifications::surface_server_close;
-use vibe_rs::server::Client;
 use vibe_rs::ui;
+
+use crate::support::{ctrl, render, rows, send_key, stub};
 
 const WIDTH: u16 = 120;
 const HEIGHT: u16 = 30;
@@ -24,15 +21,7 @@ fn a_crash_notice_is_visible_in_the_transcript() {
     app.view.transcript.add(&json!({
         "entry": {"id": "n1", "type": "notice", "level": "error", "message": MESSAGE, "local": true}
     }));
-    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("terminal");
-    terminal
-        .draw(|frame| ui::draw(&mut app, frame))
-        .expect("draw");
-    let buffer = terminal.backend().buffer();
-    let screen: String = (0..HEIGHT)
-        .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
-        .map(|(x, y)| buffer[(x, y)].symbol().to_string())
-        .collect();
+    let screen = rows(&render(WIDTH, HEIGHT, |frame| ui::draw(&mut app, frame))).concat();
     assert!(
         screen.contains("App server crashed"),
         "crash notice is not rendered"
@@ -48,15 +37,7 @@ fn a_server_notice_without_a_rendered_kind_mounts_nothing() {
     app.view.transcript.add(&json!({
         "entry": {"id": "n1", "type": "notice", "level": "info", "message": "Session title updated"}
     }));
-    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("terminal");
-    terminal
-        .draw(|frame| ui::draw(&mut app, frame))
-        .expect("draw");
-    let buffer = terminal.backend().buffer();
-    let screen: String = (0..HEIGHT)
-        .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
-        .map(|(x, y)| buffer[(x, y)].symbol().to_string())
-        .collect();
+    let screen = rows(&render(WIDTH, HEIGHT, |frame| ui::draw(&mut app, frame))).concat();
     assert!(
         !screen.contains("Session title updated"),
         "server notice rendered a message"
@@ -102,13 +83,12 @@ fn a_crash_locks_the_session() {
 
 #[test]
 fn a_submit_after_a_crash_goes_nowhere() {
-    let client = Arc::new(Client::stub());
     let (config_tx, _config_rx) = tokio::sync::mpsc::channel::<config::Loaded>(1);
     let mut app = App::default();
     assert!(surface_server_close(&mut app, true));
     app.chat_input.input = "hello?".into();
 
-    submission::submit(&mut app, &client, &config_tx);
+    submission::submit(&mut app, &stub(), &config_tx);
 
     // Nothing was sent to the dead server and the draft stays untouched.
     assert_eq!(app.chat_input.input, "hello?");
@@ -120,14 +100,10 @@ fn a_submit_after_a_crash_goes_nowhere() {
 #[test]
 fn ctrl_c_after_a_crash_exits_on_the_first_press() {
     // The notice says "Press Ctrl+C to exit": no draft clearing, no confirmation.
-    let client = Arc::new(Client::stub());
-    let (config_tx, _config_rx) = tokio::sync::mpsc::channel::<config::Loaded>(1);
     let mut app = App::default();
     assert!(surface_server_close(&mut app, true));
     app.chat_input.input = "hello?".into();
-    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let ctrl_c = ctrl('c');
 
-    assert!(vibe_rs::input::handle_key(
-        &mut app, &client, &config_tx, ctrl_c
-    ));
+    assert!(send_key(&mut app, ctrl_c));
 }

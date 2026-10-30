@@ -3,17 +3,18 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use serde_json::json;
-use std::sync::Arc;
 
 use vibe_rs::app::App;
-use vibe_rs::resume_picker::{self, Event, Session};
-use vibe_rs::server::{Client, PublicSessionState};
+use vibe_rs::resume_picker::{self, Event};
+use vibe_rs::server::PublicSessionState;
+
+use crate::support::{stub, with_picker};
 
 const BUSY: &str = "This session is open in another Vibe process. Close it there to continue here.";
 
 #[test]
 fn deleting_a_locked_row_toasts_the_busy_refusal() {
-    let mut app = picker();
+    let mut app = with_picker();
     lock(&mut app);
     resume_picker::handle_key(&mut app, &stub(), KeyEvent::from(KeyCode::Char('d')));
     assert!(app.resume_picker.delete_confirm.is_none());
@@ -23,7 +24,7 @@ fn deleting_a_locked_row_toasts_the_busy_refusal() {
 
 #[test]
 fn a_failed_delete_toasts_instead_of_mounting_a_notice() {
-    let mut app = picker();
+    let mut app = with_picker();
     app.resume_picker.deleting = Some("busy".into());
     resume_picker::apply_event(
         &mut app,
@@ -42,7 +43,7 @@ fn a_failed_delete_toasts_instead_of_mounting_a_notice() {
 
 #[test]
 fn a_successful_resume_drops_the_stale_attempt_error() {
-    let mut app = picker();
+    let mut app = with_picker();
     let _channels = vibe_rs::channels::connect(&mut app);
     // A previous attempt's refusal is still mounted on the live transcript.
     app.view.transcript.add(&json!({
@@ -67,18 +68,6 @@ fn a_successful_resume_drops_the_stale_attempt_error() {
     );
     assert!(!screen_text(&app).contains(BUSY));
     assert!(screen_text(&app).contains("Resumed session"));
-}
-
-fn picker() -> App {
-    let mut app = App::default();
-    app.resume_picker.open = true;
-    app.resume_picker.sessions = vec![Session {
-        id: "busy".into(),
-        title: "Saved implementation".into(),
-        ..Default::default()
-    }];
-    app.resume_picker.list.highlight(0);
-    app
 }
 
 fn lock(app: &mut App) {
@@ -125,8 +114,4 @@ fn screen_text(app: &App) -> String {
             _ => None,
         })
         .collect()
-}
-
-fn stub() -> Arc<Client> {
-    Arc::new(Client::stub())
 }

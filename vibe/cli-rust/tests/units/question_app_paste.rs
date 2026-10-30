@@ -1,55 +1,13 @@
 //! Paste routing into the question app's free-text row.
 
-use vibe_rs::app::App;
 use vibe_rs::question_app::other_option_idx;
 use vibe_rs::question_input::handle_paste;
-use vibe_rs::server::{QuestionChoice, UserQuestion};
 
-fn app_with_question() -> App {
-    let mut app = App::default();
-    app.question_app.questions.push(UserQuestion {
-        question: "Choose".into(),
-        header: String::new(),
-        options: vec![
-            QuestionChoice {
-                label: "First".into(),
-                description: String::new(),
-            },
-            QuestionChoice {
-                label: "Second".into(),
-                description: String::new(),
-            },
-        ],
-        multi_select: false,
-        hide_other: false,
-    });
-    app
-}
-
-fn app_with_multi_select_question() -> App {
-    let mut app = App::default();
-    app.question_app.questions.push(UserQuestion {
-        question: "Pick".into(),
-        header: String::new(),
-        options: vec![
-            QuestionChoice {
-                label: "Alpha".into(),
-                description: String::new(),
-            },
-            QuestionChoice {
-                label: "Beta".into(),
-                description: String::new(),
-            },
-        ],
-        multi_select: true,
-        hide_other: false,
-    });
-    app
-}
+use crate::support::with_question;
 
 #[test]
 fn paste_keeps_every_line_in_the_free_text_row() {
-    let mut app = app_with_question();
+    let mut app = with_question(false);
     app.question_app
         .list
         .highlight(other_option_idx(&app).unwrap());
@@ -63,14 +21,14 @@ fn paste_keeps_every_line_in_the_free_text_row() {
 
 #[test]
 fn paste_ticks_the_free_text_row_only_while_it_has_text() {
-    let mut app = app_with_multi_select_question();
+    let mut app = with_question(true);
     let other_idx = other_option_idx(&app).unwrap();
     app.question_app.list.highlight(other_idx);
 
     handle_paste(&mut app, "custom answer".into());
     assert!(app.question_app.multi_selections[&0].contains(&other_idx));
 
-    let mut app = app_with_multi_select_question();
+    let mut app = with_question(true);
     app.question_app.list.highlight(other_idx);
 
     handle_paste(&mut app, "   \n  ".into());
@@ -79,7 +37,7 @@ fn paste_ticks_the_free_text_row_only_while_it_has_text() {
 
 #[test]
 fn paste_reattaches_a_scrolled_away_viewport() {
-    let mut app = app_with_question();
+    let mut app = with_question(false);
     app.question_app
         .list
         .highlight(other_option_idx(&app).unwrap());
@@ -92,7 +50,7 @@ fn paste_reattaches_a_scrolled_away_viewport() {
 
 #[test]
 fn paste_on_an_option_row_is_dropped() {
-    let mut app = app_with_question();
+    let mut app = with_question(false);
 
     handle_paste(&mut app, "one\ntwo".into());
 
@@ -102,7 +60,7 @@ fn paste_on_an_option_row_is_dropped() {
 
 #[test]
 fn paste_inserts_at_the_cursor_inside_existing_text() {
-    let mut app = app_with_question();
+    let mut app = with_question(false);
     app.question_app
         .list
         .highlight(other_option_idx(&app).unwrap());
@@ -117,7 +75,7 @@ fn paste_inserts_at_the_cursor_inside_existing_text() {
 
 #[test]
 fn paste_normalises_every_line_boundary_to_a_newline() {
-    let mut app = app_with_question();
+    let mut app = with_question(false);
     app.question_app
         .list
         .highlight(other_option_idx(&app).unwrap());
@@ -132,7 +90,7 @@ fn paste_normalises_every_line_boundary_to_a_newline() {
 
 #[test]
 fn an_empty_paste_leaves_the_free_text_row_untouched() {
-    let mut app = app_with_question();
+    let mut app = with_question(false);
     app.question_app
         .list
         .highlight(other_option_idx(&app).unwrap());

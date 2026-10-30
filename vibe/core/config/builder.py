@@ -5,7 +5,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping
 import copy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from pydantic import BeforeValidator, ValidationError
 from pydantic.fields import FieldInfo
@@ -19,9 +19,6 @@ from vibe.core.config.layer import (
 )
 from vibe.core.config.schema import ConfigFragment, ConfigSchema, MergeFieldMetadata
 from vibe.core.utils.merge import MergeStrategy
-
-if TYPE_CHECKING:
-    from vibe.core.config.harness_files import HarnessFilesManager
 
 
 class ConfigMergeError(ValueError):
@@ -69,12 +66,8 @@ class _LayerData:
 class ConfigBuilder[S: ConfigSchema]:
     """Collects layers and merges them into an immutable Config[S]."""
 
-    def __init__(
-        self, schema: type[S], *, harness_files: HarnessFilesManager | None = None
-    ) -> None:
+    def __init__(self, schema: type[S]) -> None:
         self._schema = schema
-        # The session's files, which the key check finds its custom tools with.
-        self._harness_files = harness_files
         self._layers: list[ConfigLayer[RawConfig]] = []
         self._lock = asyncio.Lock()
 
@@ -96,7 +89,7 @@ class ConfigBuilder[S: ConfigSchema]:
 
     def copy(self) -> ConfigBuilder[S]:
         """Return a new builder for the same schema with deep-copied layers."""
-        new_builder = ConfigBuilder(self._schema, harness_files=self._harness_files)
+        new_builder = ConfigBuilder(self._schema)
         new_builder.add_layers([copy.deepcopy(layer) for layer in self._layers])
         return new_builder
 
@@ -141,10 +134,7 @@ class ConfigBuilder[S: ConfigSchema]:
             config = self._schema.validate_merged(
                 merged, origins=origins, defined_entries=defined_entries
             )
-            config.check_layer_keys(
-                [(ld.name, ld.data) for ld in layer_dicts],
-                harness_files=self._harness_files,
-            )
+            config.check_layer_keys([(ld.name, ld.data) for ld in layer_dicts])
             return config
 
     def _merge_fields(

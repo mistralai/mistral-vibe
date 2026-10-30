@@ -22,7 +22,7 @@ from e2e.app_server.config import (
     REPLAY_BIN,
     REPLAY_NOW_MS,
     ROWS,
-    VIBE_DIR,
+    WORKSPACE_DIR,
 )
 from e2e.app_server.replay import replay_fixture
 from e2e.app_server.scenario import Action, AppServerEvent, Request, Scenario
@@ -104,7 +104,7 @@ def capture_scenario(scenario: Scenario, launch: Launcher = exec_launch) -> Capt
             env["VIBE_REPLAY_STEP_FIFO"] = step_fifo
         spec = CaptureSpec(
             command=(os.fspath(CLIENT_BIN), *scenario.client_args),
-            cwd=os.fspath(VIBE_DIR),
+            cwd=os.fspath(WORKSPACE_DIR),
             env=env,
             rows=ROWS,
             columns=COLUMNS,
@@ -172,7 +172,7 @@ def capture_headless_scenario(scenario: Scenario) -> HeadlessCapture:
         env["VIBE_REPLAY_STEP_FIFO"] = step_fifo
         process = subprocess.Popen(
             (CLIENT_BIN, *scenario.client_args),
-            cwd=VIBE_DIR,
+            cwd=WORKSPACE_DIR,
             env=env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -266,6 +266,8 @@ def _environment(
         "VIBE_REPLAY_REQUEST_LOG": os.fspath(request_log),
         # Replay types at machine speed, so the trust gate answers at once.
         "VIBE_TEST_TRUST_GRACE_MS": "0",
+        # Pin the terminal key so the PTY's device name never reaches a golden.
+        "VIBE_TERMINAL_KEY": "e2e-terminal",
         **overrides,
         # Keep clipboard assertions inside the PTY instead of mutating the host.
         "SSH_TTY": "/dev/pts/0",

@@ -37,7 +37,7 @@ pub(super) fn push_notice(
         _ => theme::warning(),
     };
     lines.push(Line::from(vec![
-        inset_prefix(true, theme::text(color)),
+        inset_prefix(theme::text(color)),
         Span::styled(notice.message.to_string(), theme::text(color)),
     ]));
 }

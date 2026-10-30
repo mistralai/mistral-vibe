@@ -7,14 +7,25 @@ use crate::update_notifier::cache::{
     FileSystemUpdateCacheRepository, UpdateCache, UpdateCacheRepository,
 };
 
-/// Show when a stored cache exists and its seen
-/// version is absent or differs from the current one. No cache at all (or a
-/// section missing the required fields) shows nothing and stamps nothing.
+/// What the cache says the user last saw.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LastSeen {
+    /// No cache yet (a fresh install): show nothing, stamp nothing.
+    NoCache,
+    /// A cache whose seen version is absent when no banner was ever stamped.
+    Seen(Option<String>),
+}
+
+pub fn last_seen() -> LastSeen {
+    match FileSystemUpdateCacheRepository.get() {
+        Some(cache) => LastSeen::Seen(cache.seen_whats_new_version),
+        None => LastSeen::NoCache,
+    }
+}
+
+/// Whether a cache exists and its seen version differs from `current_version`.
 pub fn should_show(current_version: &str) -> bool {
-    let Some(cache) = FileSystemUpdateCacheRepository.get() else {
-        return false;
-    };
-    cache.seen_whats_new_version.as_deref() != Some(current_version)
+    matches!(last_seen(), LastSeen::Seen(seen) if seen.as_deref() != Some(current_version))
 }
 
 /// Stamp the current version as shown, keeping the stored latest version and

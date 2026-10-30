@@ -36,6 +36,7 @@ pub(super) fn dispatch(
         MouseTarget::Approval => approval::handle_mouse(app, client, event),
         MouseTarget::Mcp => mcp::mouse(app, event),
         MouseTarget::Plugins => crate::plugins::mouse(app, event),
+        MouseTarget::ReleaseNotes => crate::release_notes::mouse(app, event),
         MouseTarget::McpOAuth => {
             if picked(app, event, |app| &mut app.mcp_oauth.list) {
                 mcp_oauth::select(app);

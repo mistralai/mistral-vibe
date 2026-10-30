@@ -174,6 +174,24 @@ def test_persist_provider_does_not_pin_field_defaults_into_mistral_entry(
     assert "project_id" not in mistral_entry
     assert "region" not in mistral_entry
     assert "extra_headers" not in mistral_entry
+    assert "preserve_api_base" not in mistral_entry
+
+
+def test_persist_provider_round_trips_preserve_api_base(config_dir: Path) -> None:
+    """exclude_defaults=True would drop a False flag, so only True proves the
+    field survives the TOML round trip.
+    """
+    config_file = config_dir / "config.toml"
+    config_file.write_text("", encoding="utf-8")
+
+    preserved = _mistral_provider().model_copy(
+        update={"api_base": "https://connector.acme:443/v1", "preserve_api_base": True}
+    )
+    _ = persist_provider_to_config(preserved)
+
+    persisted = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    mistral_entry = next(p for p in persisted["providers"] if p["name"] == "mistral")
+    assert mistral_entry["preserve_api_base"] is True
 
 
 def test_persist_provider_keeps_custom_browser_auth_urls(config_dir: Path) -> None:

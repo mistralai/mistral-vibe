@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from vibe.core.skills.registry._client import RegistrySkillsError
-from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
+from vibe.core.skills.registry._manifest import (
+    ManifestEntry,
+    SkillManifest,
+    pinned_names_sync,
+)
 from vibe.core.skills.registry._service import (
     CatalogItem,
     RegistrySyncResult,
@@ -46,6 +50,7 @@ __all__ = [
     "import_skill",
     "list_catalog",
     "list_skill_versions",
+    "pinned_names_sync",
     "project_scope_available",
     "publish_local_pins",
     "refresh_registry_skills",

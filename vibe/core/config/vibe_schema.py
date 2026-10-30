@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from enum import StrEnum
+import functools
 import json
 import os
 from pathlib import Path
 import tomllib
+import typing
 from typing import Annotated, Any, ClassVar, Self
 
 from dotenv import dotenv_values
@@ -21,12 +23,9 @@ from pydantic import (
 
 from vibe.core.agents.models import REMOVED_BUILTIN_AGENTS, BuiltinAgentName
 from vibe.core.config._defaults import (
-    DEFAULT_API_CONNECT_TIMEOUT,
-    DEFAULT_API_POOL_TIMEOUT,
     DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
     DEFAULT_API_STREAM_IDLE_TIMEOUT,
     DEFAULT_API_TIMEOUT,
-    DEFAULT_API_WRITE_TIMEOUT,
     DEFAULT_COMPACTION_REASONING_LIMIT_TOKENS,
     DEFAULT_CONSOLE_BASE_URL,
     DEFAULT_MISTRAL_API_ENV_KEY,
@@ -43,10 +42,7 @@ from vibe.core.config._defaults import (
 # (vibe_schema.py imports from vibe.observability.logging). The constant
 # lives in vibe.config_values.
 from vibe.core.config._model_aliases import build_alias_index, warn_ignored_alias
-from vibe.core.config.harness_files import (
-    HarnessFilesManager,
-    get_harness_files_manager,
-)
+from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.models import (
     ACTIVE_MODEL_SELECTOR,
@@ -312,14 +308,15 @@ def _without_orphan_model_overrides(
     return {**data, "models": kept}, orphans
 
 
-def _without_unknown_thinking_levels(
+def _without_blank_thinking_levels(
     data: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
-    """Drop thinking values Vibe has no level for, and say which.
+    """Drop thinking values that are not words, and say which.
 
-    One unknown word must not stop the config from loading: the session could
-    not open, and the pickers that would fix it with it. The model then runs at
-    its default level until the user picks one.
+    Any word is a level, but a blank or a number is none: one such typo must
+    not stop the config from loading, or the session could not open, and the
+    pickers that would fix it with it. The model then runs at its default level
+    until the user picks one.
     """
     models = data.get("models")
     if not isinstance(models, Mapping):
@@ -331,32 +328,29 @@ def _without_unknown_thinking_levels(
             kept[alias] = payload
             continue
         payload = dict(payload)
-        thinking = payload.get("thinking")
-        if "thinking" in payload and thinking not in THINKING_LEVELS:
+        if "thinking" in payload and not _is_word(thinking := payload["thinking"]):
             del payload["thinking"]
             warnings.append(
-                f"Model '{alias}': thinking {thinking!r} is not a thinking level "
-                f"({', '.join(THINKING_LEVELS)}); using the model's default. "
-                "Pick one with /thinking."
+                f"Model '{alias}': thinking {thinking!r} is not a level; using the "
+                "model's default. Pick another thinking level."
             )
         levels = payload.get("thinking_levels")
-        if isinstance(levels, list):
-            unknown = [level for level in levels if level not in THINKING_LEVELS]
-            if unknown:
-                known = [level for level in levels if level in THINKING_LEVELS]
-                if known:
-                    payload["thinking_levels"] = known
-                else:
-                    del payload["thinking_levels"]
-                warnings.append(
-                    f"Model '{alias}': thinking_levels "
-                    f"{', '.join(repr(level) for level in unknown)} ignored; "
-                    f"the levels are {', '.join(THINKING_LEVELS)}."
-                )
+        if isinstance(levels, list) and not all(map(_is_word, levels)):
+            words = [level for level in levels if _is_word(level)]
+            if words:
+                payload["thinking_levels"] = words
+            else:
+                del payload["thinking_levels"]
+            ignored = ", ".join(repr(level) for level in levels if not _is_word(level))
+            warnings.append(f"Model '{alias}': thinking_levels {ignored} ignored.")
         kept[alias] = payload
     if not warnings:
         return data, []
     return {**data, "models": kept}, warnings
+
+
+def _is_word(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _expand_paths(v: Any) -> list[Path]:
@@ -375,10 +369,10 @@ def _reject_invalid_shell_timeouts(
     tools: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     """A shell tool's `default_timeout` and `max_timeout_seconds` are finite
-    numbers of seconds above 0, set together or not at all, and the default is
-    not above the maximum. One without the other is a configuration error, and
-    neither is worked out from the other; a default above the maximum is not
-    lowered quietly.
+    numbers of seconds above 0, and the default is not above the maximum. A
+    default set alone runs under Vibe's own maximum when within it; any other
+    partial pair is a configuration error, and a default above the maximum is
+    not lowered quietly.
 
     Checked here so a config fails at load; the unified harness's own rule is
     `bash_timeout` in the local harness's `vibe/_shell_tools.py`.
@@ -436,6 +430,26 @@ def _normalize_log_level(value: Any) -> Any:
     return normalized
 
 
+@functools.cache
+def _mistral_efforts() -> frozenset[str]:
+    """The efforts the Mistral SDK puts on the wire; it leaves any other out."""
+    from mistralai.client.models import ReasoningEffort
+
+    return frozenset(
+        value
+        for member in typing.get_args(ReasoningEffort)
+        for value in typing.get_args(member)
+        if isinstance(value, str)
+    )
+
+
+def _mistral_thinking_levels() -> list[str]:
+    """The SDK's efforts as Vibe names them: the standard levels in order, then its own."""
+    efforts = {"off" if effort == "none" else effort for effort in _mistral_efforts()}
+    standard = [level for level in THINKING_LEVELS if level in efforts]
+    return [*standard, *sorted(efforts - set(standard))]
+
+
 class VibeConfigSchema(ConfigSchema):
     # Fields a runtime layer populates (model catalog, GrowthBook, managed
     # shell), never the user's files. The settings UI hides them; declare a new
@@ -464,12 +478,7 @@ class VibeConfigSchema(ConfigSchema):
     def defines_entry(cls, key: str, payload: Any) -> bool:
         return key != "models" or _defines_model(payload)
 
-    def check_layer_keys(
-        self,
-        layers: Sequence[tuple[str, Mapping[str, Any]]],
-        *,
-        harness_files: HarnessFilesManager | None = None,
-    ) -> None:
+    def check_layer_keys(self, layers: Sequence[tuple[str, Mapping[str, Any]]]) -> None:
         from vibe.core.config._setting_keys import (
             UnusedConfigKeysError,
             check_strict_config_env,
@@ -478,11 +487,7 @@ class VibeConfigSchema(ConfigSchema):
         )
 
         check_strict_config_env()
-        issues = find_unused_keys(
-            type(self),
-            layers,
-            custom_tools=self._custom_tool_names(layers, harness_files),
-        )
+        issues = find_unused_keys(type(self), layers)
         if not issues:
             return
         if self.strict_config:
@@ -493,30 +498,6 @@ class VibeConfigSchema(ConfigSchema):
             )
         self._validation_warnings.extend(notice(issues))
 
-    def _custom_tool_names(
-        self,
-        layers: Sequence[tuple[str, Mapping[str, Any]]],
-        harness_files: HarnessFilesManager | None,
-    ) -> frozenset[str]:
-        """Names of the custom tools on the paths the session's tools load from.
-
-        ``harness_files`` are the session's, so its own project and trust
-        decide which tool directories count.
-
-        A builtin name counts only when the tool manager selects the custom
-        variant, so a misspelt builtin setting is still caught beside an
-        unavailable or lower-priority custom tool of the same name. Only looked
-        up when a layer configures tools, since it imports custom tool files;
-        the session's tool manager reuses what this discovers.
-        """
-        if not any(data.get("tools") for _, data in layers):
-            return frozenset()
-        from vibe.core.tools.manager import ToolManager
-
-        return ToolManager(
-            lambda: self, defer_mcp=True, harness_files=harness_files
-        ).custom_config_tool_names
-
     @classmethod
     def validate_merged(
         cls,
@@ -526,7 +507,7 @@ class VibeConfigSchema(ConfigSchema):
         defined_entries: dict[str, dict[str, tuple[str, ...]]],
     ) -> Self:
         data, orphans = _without_orphan_model_overrides(data)
-        data, thinking_warnings = _without_unknown_thinking_levels(data)
+        data, thinking_warnings = _without_blank_thinking_levels(data)
         config = super().validate_merged(
             data, origins=origins, defined_entries=defined_entries
         )
@@ -683,17 +664,6 @@ class VibeConfigSchema(ConfigSchema):
             " 'outside_workdir' under [tools.<name>]."
         ),
     )
-    tool_paths: Annotated[
-        list[Path], WithConcatMerge(), BeforeValidator(_expand_paths)
-    ] = Field(
-        default_factory=list,
-        description=(
-            "Additional directories or files to explore for custom tools. "
-            "Paths may be absolute or relative to the current working directory. "
-            "Directories are shallow-searched for tool definition files, "
-            "while files are loaded directly if valid."
-        ),
-    )
     enabled_tools: Annotated[list[str], WithReplaceMerge()] = Field(
         default_factory=list,
         description=(
@@ -832,7 +802,7 @@ class VibeConfigSchema(ConfigSchema):
         description=(
             "Experimental: pull shared workspace skills from Mistral"
             " (api.mistral.ai) and make them available alongside local skills."
-            " Requires a Mistral provider and API key. Local and builtin skills take"
+            " Requires a Mistral provider and API key. Local skills take"
             " precedence on name collision."
         ),
     )
@@ -843,6 +813,14 @@ class VibeConfigSchema(ConfigSchema):
             " provider at session start and cache it per user on disk. Requires"
             " a Mistral provider and API key; any failure silently falls back"
             " to local config."
+        ),
+    )
+    experimental_enable_local_projects: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Experimental, in development: switch Vibe Desktop to local projects"
+            " (local_projects.toml) instead of project links. Not used yet."
+            " Read once when Vibe Desktop starts its app server."
         ),
     )
     experimental_enable_pr_monitoring: Annotated[bool, WithReplaceMerge()] = Field(
@@ -940,6 +918,17 @@ class VibeConfigSchema(ConfigSchema):
         le=100,
         description="Maximum number of recent managed worktrees kept locally.",
     )
+    experimental_worktree_copy_on_write: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Experimental, macOS only: create managed worktrees of a trusted"
+            " repository by cloning an idle template checkout with APFS"
+            " copy-on-write, which uses less disk and is faster on large"
+            " repositories. Keeps one template checkout per repository under"
+            " ~/.vibe/worktrees/.templates, and sets extensions.worktreeConfig"
+            " in the repository's .git/config. Falls back to a normal checkout."
+        ),
+    )
     bypass_tool_permissions: Annotated[bool, WithReplaceMerge()] = False
     raise_on_compaction_failure: Annotated[bool, WithReplaceMerge()] = Field(
         default=False,
@@ -1021,6 +1010,28 @@ class VibeConfigSchema(ConfigSchema):
             "silence as before the first output (api_timeout). Unified harness only."
         ),
     )
+    agent_max_output_tokens: Annotated[int, WithReplaceMerge()] = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Output token cap sent as max_tokens on every agent and subagent "
+            "request, whatever the provider, held to the model's max output and "
+            "to the room the context window leaves above the compaction "
+            "threshold. 0 sends a cap only where the provider requires one: the "
+            "model's max_output_tokens. Unified harness only."
+        ),
+    )
+    compaction_max_output_tokens: Annotated[int, WithReplaceMerge()] = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Output token cap sent as max_tokens on every compaction request, "
+            "whatever the provider, held to the compaction model's max output and "
+            "to the room its context window leaves above the compaction "
+            "threshold. 0 sends a cap only where the provider requires one: the "
+            "compaction model's max_output_tokens. Unified harness only."
+        ),
+    )
     compaction_reasoning_limit_tokens: Annotated[int, WithReplaceMerge()] = Field(
         default=DEFAULT_COMPACTION_REASONING_LIMIT_TOKENS,
         ge=0,
@@ -1042,11 +1053,21 @@ class VibeConfigSchema(ConfigSchema):
             "the turn on the first cut-off answer. Unified harness only."
         ),
     )
-    api_connect_timeout: Annotated[float, WithReplaceMerge()] = (
-        DEFAULT_API_CONNECT_TIMEOUT
+    api_connect_timeout: Annotated[float, WithReplaceMerge()] = Field(
+        default=10.0,
+        deprecated="No longer used; remove this setting from your config.",
+        description="Retired: accepted for older configs, with no effect.",
     )
-    api_write_timeout: Annotated[float, WithReplaceMerge()] = DEFAULT_API_WRITE_TIMEOUT
-    api_pool_timeout: Annotated[float, WithReplaceMerge()] = DEFAULT_API_POOL_TIMEOUT
+    api_write_timeout: Annotated[float, WithReplaceMerge()] = Field(
+        default=30.0,
+        deprecated="No longer used; remove this setting from your config.",
+        description="Retired: accepted for older configs, with no effect.",
+    )
+    api_pool_timeout: Annotated[float, WithReplaceMerge()] = Field(
+        default=10.0,
+        deprecated="No longer used; remove this setting from your config.",
+        description="Retired: accepted for older configs, with no effect.",
+    )
     vibe_base_url: Annotated[str, WithReplaceMerge()] = DEFAULT_VIBE_BASE_URL
     vibe_code_sessions_base_url: Annotated[str, WithReplaceMerge()] = (
         "https://chat.mistral.ai"
@@ -1415,12 +1436,61 @@ class VibeConfigSchema(ConfigSchema):
             # an unreachable catalog and a typo all look the same from here.
             message = (
                 f"Model '{unknown}' is not available — running '{label or fallback}'. "
-                "Pick a model with /model to stop this notice."
+                "Pick another model to stop this notice."
             )
             logger.warning("%s", message)
             self._validation_warnings.append(message)
             object.__setattr__(self, "_missing_pin", unknown)
             object.__setattr__(self, "active_model", UNPINNED_ACTIVE_MODEL)
+        return self
+
+    @model_validator(mode="after")
+    def _warn_unlisted_thinking(self) -> VibeConfigSchema:
+        # The provider still judges the word; the warning flags a likely typo,
+        # and the pickers offer the level beside the model's own to move off it.
+        for model in self.models.values():
+            if not model.thinking_is_set:
+                continue
+            # Like the harness: a standard word in any case, a model's own as written.
+            written = model.thinking.strip()
+            if written.lower() in THINKING_LEVELS or written in model.thinking_levels:
+                continue
+            if self._mistral_sdk_drops_thinking(model):
+                continue
+            message = (
+                f"Model '{model.alias}': thinking {model.thinking!r} is neither a "
+                f"standard level ({', '.join(THINKING_LEVELS)}) nor in its "
+                f"thinking_levels ({', '.join(model.thinking_levels)}); the "
+                "provider may refuse it. Pick another thinking level."
+            )
+            logger.warning("%s", message)
+            self._validation_warnings.append(message)
+        return self
+
+    def _mistral_sdk_drops_thinking(self, model: ModelConfig) -> bool:
+        if not model.thinking_is_set:
+            return False
+        written = model.thinking.strip()
+        if written.lower() in THINKING_LEVELS or written in _mistral_efforts():
+            return False
+        return any(
+            provider.name == model.provider and provider.backend == Backend.MISTRAL
+            for provider in self.providers
+        )
+
+    @model_validator(mode="after")
+    def _warn_thinking_the_mistral_sdk_drops(self) -> VibeConfigSchema:
+        for model in self.models.values():
+            if not self._mistral_sdk_drops_thinking(model):
+                continue
+            message = (
+                f"Model '{model.alias}': the Mistral client cannot send thinking "
+                f"{model.thinking!r}, so its requests go without a thinking level "
+                f"(it sends {', '.join(_mistral_thinking_levels())}). Pick another "
+                "thinking level."
+            )
+            logger.warning("%s", message)
+            self._validation_warnings.append(message)
         return self
 
     @model_validator(mode="after")
@@ -1561,13 +1631,13 @@ def outside_workdir_denied(config: VibeConfigSchema) -> bool:
 
 
 def create_default_config() -> dict[str, Any]:
-    from vibe.core.tools.manager import ToolManager
+    from vibe.core.tools.manager import discover_tool_defaults
 
     config_dict = VibeConfigSchema.model_construct().model_dump(
         mode="json", exclude_none=True
     )
     if isinstance(config_dict.get("models"), dict):
         config_dict["models"] = serialize_model_configs(config_dict["models"])
-    if tool_defaults := ToolManager.discover_tool_defaults():
+    if tool_defaults := discover_tool_defaults():
         config_dict["tools"] = tool_defaults
     return config_dict

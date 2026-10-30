@@ -80,26 +80,6 @@
               ];
           });
 
-        # textual-speedups 0.2.1 ships no macOS x86_64 cp314 wheel, so there
-        # uv2nix builds it from the sdist; source builds need the maturin
-        # backend and the vendored Rust crates inside the Nix sandbox.
-        textual-speedups = prev.textual-speedups.overrideAttrs (old:
-          lib.optionalAttrs (old.passthru.format == "pyproject") {
-            cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
-              inherit (old) pname version src;
-              # Matches textual-speedups 0.2.1 in nixpkgs; the sdist's
-              # Cargo.lock is identical to the upstream v0.2.1 tag.
-              hash = "sha256-Bz4ocEziOlOX4z5F9EDry99YofeGyxL/6OTIf/WEgK4=";
-            };
-            nativeBuildInputs = (old.nativeBuildInputs or [])
-              ++ final.resolveBuildSystem {maturin = [];}
-              ++ [
-                pkgs.rustPlatform.cargoSetupHook
-                pkgs.cargo
-                pkgs.rustc
-              ];
-          });
-
         # The wheel override applies only where the Harness lockfile at
         # harness/core is reachable: trees that ship it build the wheel;
         # trees that do not never build it, so the derivation stays plain
@@ -182,15 +162,15 @@
       # its sources does not rebuild the Python wheel, and vice versa.
       craneLib = crane.mkLib pkgs;
 
-      # crane expects the crate at the source root, but banners.rs
-      # include_str!s whats_new.md from above the cli-rust crate. Flatten
-      # the crate to the source root and move the file in beside it.
+      # crane expects the crate at the source root, but build.rs embeds the
+      # release notes from ../whats_new, above the cli-rust crate. Flatten
+      # the crate to the source root and move the directory in beside it.
       rustCliSrc = pkgs.runCommand "vibe-rs-src" {} ''
         cp -r ${./vibe/cli-rust} $out
         chmod -R +w $out
-        cp ${./vibe/whats_new.md} $out/whats_new.md
-        substituteInPlace $out/src/startup/banners.rs \
-          --replace-fail '../../../whats_new.md' '../../whats_new.md'
+        cp -r ${./vibe/whats_new} $out/whats_new
+        substituteInPlace $out/build.rs \
+          --replace-fail '"../whats_new"' '"whats_new"'
       '';
 
       rustCli = craneLib.buildPackage {

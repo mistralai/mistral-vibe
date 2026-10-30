@@ -2,10 +2,10 @@
 
 use std::time::{Duration, Instant};
 
-use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use vibe_rs::terminal_input_filter::TerminalInputFilter;
+
+use crate::support::mouse;
 
 fn key(character: char) -> Event {
     Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
@@ -24,12 +24,7 @@ fn release(character: char, modifiers: KeyModifiers) -> Event {
 }
 
 fn mouse_move() -> Event {
-    Event::Mouse(MouseEvent {
-        kind: MouseEventKind::Moved,
-        column: 1,
-        row: 1,
-        modifiers: KeyModifiers::NONE,
-    })
+    Event::Mouse(mouse(MouseEventKind::Moved, 1, 1))
 }
 
 fn report_events(terminator: Event) -> Vec<Event> {

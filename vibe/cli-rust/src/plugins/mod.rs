@@ -78,20 +78,20 @@ pub fn reload(app: &mut App, client: &Arc<Client>) {
 
 pub fn apply_event(app: &mut App, event: Event) {
     match event {
-        Event::Read(Ok(None)) => add_result(app, NO_PLUGIN_BACKEND),
+        Event::Read(Ok(None)) => add_status(app, NO_PLUGIN_BACKEND),
         Event::Read(Ok(Some(catalog)))
             if catalog.plugins.is_empty() && catalog.dropped.is_empty() =>
         {
-            add_result(app, NONE_INSTALLED);
+            add_status(app, NONE_INSTALLED);
         }
         Event::Read(Ok(Some(catalog))) => open(app, catalog),
         Event::Read(Err(error)) => add_error(app, &format!("Failed to read plugins: {error}")),
         Event::Reloaded(result) => {
             app.plugins.reloading = false;
             match result {
-                Ok(None) => add_result(app, NO_PLUGIN_BACKEND),
+                Ok(None) => add_status(app, NO_PLUGIN_BACKEND),
                 Ok(Some((changes, catalog))) => {
-                    add_result(app, &text::reload_report(&changes, &catalog));
+                    add_status(app, &text::reload_report(&changes, &catalog));
                     if app.plugins.open {
                         app.plugins.catalog = catalog;
                         reset_highlight(app);
@@ -107,7 +107,6 @@ fn open(app: &mut App, catalog: PluginCatalogState) {
     if app.plugins.open {
         return;
     }
-    add_result(app, "Plugins opened...");
     app.plugins = State {
         open: true,
         catalog,
@@ -167,7 +166,6 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
 
 fn close(app: &mut App) {
     app.plugins = fresh(app);
-    add_result(app, "Plugins closed.");
 }
 
 fn back(app: &mut App) {
@@ -243,8 +241,8 @@ pub fn mouse(app: &mut App, event: MouseEvent) {
     }
 }
 
-fn add_result(app: &mut App, text: &str) {
-    local::add_command_result(&mut app.view.transcript, &new_message_id(), text);
+fn add_status(app: &mut App, text: &str) {
+    local::add_command_status(&mut app.view.transcript, &new_message_id(), text);
 }
 
 fn add_error(app: &mut App, text: &str) {

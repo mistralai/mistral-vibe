@@ -1,7 +1,7 @@
 # ruff: noqa: I002 -- new modules here do without postponed annotations.
 """Transports for the Runtime's outbound HTTP connections.
 
-HTTPX applies the proxy settings of the environment only to the transports it
+HTTPX2 applies the proxy settings of the environment only to the transports it
 builds itself. A client that needs its own transport, for example to set socket
 options, gets the same routing from ``env_proxy_transport``. Its ``NO_PROXY``
 rules also accept CIDR ranges and ports.
@@ -16,20 +16,20 @@ from typing import TypedDict, Unpack
 from urllib.parse import urlparse
 from urllib.request import getproxies
 
-import httpx
+import httpx2
 
 type SocketOption = tuple[int, int, int]
 
 
 class TransportOptions(TypedDict, total=False):
     verify: ssl.SSLContext
-    limits: httpx.Limits
+    limits: httpx2.Limits
     socket_options: Sequence[SocketOption]
 
 
 def env_proxy_transport(
     **options: Unpack[TransportOptions],
-) -> httpx.AsyncBaseTransport:
+) -> httpx2.AsyncBaseTransport:
     """A transport that sends each request through the proxy the environment sets."""
     proxy_info = getproxies()
     proxies = {
@@ -38,7 +38,7 @@ def env_proxy_transport(
         if (proxy_url := _normalize_proxy_url(proxy_info.get(scheme)))
     }
     if not proxies:
-        return httpx.AsyncHTTPTransport(trust_env=False, **options)
+        return httpx2.AsyncHTTPTransport(trust_env=False, **options)
     no_proxy = tuple(
         part.strip() for part in proxy_info.get("no", "").split(",") if part.strip()
     )
@@ -56,7 +56,7 @@ def keepalive_socket_options() -> tuple[SocketOption, ...]:
     answer. A peer that is alive answers the probes, however long its response
     takes.
 
-    Platforms name these options differently and can reject one of them. HTTPX
+    Platforms name these options differently and can reject one of them. HTTPX2
     sets the options after it connects, and a rejected option fails the
     connection, so only the options that a new socket accepts are returned.
     """
@@ -86,7 +86,7 @@ def _accepts(probe: socket.socket, option: SocketOption) -> bool:
     return True
 
 
-class _EnvProxyTransport(httpx.AsyncBaseTransport):
+class _EnvProxyTransport(httpx2.AsyncBaseTransport):
     def __init__(
         self,
         proxies: dict[str, str],
@@ -94,13 +94,13 @@ class _EnvProxyTransport(httpx.AsyncBaseTransport):
         **options: Unpack[TransportOptions],
     ) -> None:
         self._no_proxy = no_proxy
-        self._direct = httpx.AsyncHTTPTransport(trust_env=False, **options)
+        self._direct = httpx2.AsyncHTTPTransport(trust_env=False, **options)
         self._proxies = {
-            scheme: httpx.AsyncHTTPTransport(proxy=proxy, trust_env=False, **options)
+            scheme: httpx2.AsyncHTTPTransport(proxy=proxy, trust_env=False, **options)
             for scheme, proxy in proxies.items()
         }
 
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         if _should_bypass_proxy(request.url, self._no_proxy):
             return await self._direct.handle_async_request(request)
         transport = self._proxies.get(request.url.scheme) or self._proxies.get("all")
@@ -120,7 +120,7 @@ def _normalize_proxy_url(value: str | None) -> str | None:
     return f"http://{value}"
 
 
-def _should_bypass_proxy(url: httpx.URL, no_proxy: tuple[str, ...]) -> bool:
+def _should_bypass_proxy(url: httpx2.URL, no_proxy: tuple[str, ...]) -> bool:
     host = url.host
     if host is None:
         return False

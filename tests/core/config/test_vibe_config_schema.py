@@ -37,6 +37,9 @@ def test_retired_settings_stay_loadable_and_are_deprecated_in_public_schema() ->
         "raise_on_compaction_failure": True,
         "include_model_info": False,
         "include_prompt_detail": False,
+        "api_connect_timeout": 5.0,
+        "api_write_timeout": 5.0,
+        "api_pool_timeout": 5.0,
     }
     config = VibeConfigSchema.model_validate(values)
     serialized = config.model_dump()
@@ -102,6 +105,32 @@ provider = "mistral"
     assert config.enable_otel is True
 
 
+@pytest.mark.asyncio
+async def test_provider_preserve_api_base_survives_toml_load(tmp_path: Path) -> None:
+    toml_path = tmp_path / "config.toml"
+    toml_path.write_text(
+        """\
+[[providers]]
+name = "mistral"
+api_base = "https://connector.internal.example:443/v1"
+backend = "mistral"
+preserve_api_base = true
+"""
+    )
+
+    from vibe.core.config.layers.user import UserConfigLayer
+    from vibe.core.config.orchestrator import ConfigOrchestrator
+
+    layer = UserConfigLayer(path=toml_path)
+    orchestrator = await ConfigOrchestrator[VibeConfigSchema].create(
+        schema=VibeConfigSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    provider = next(p for p in orchestrator.config.providers if p.name == "mistral")
+
+    assert provider.preserve_api_base is True
+    assert provider.api_base == "https://connector.internal.example:443/v1"
+
+
 def test_stream_idle_timeout_defaults_to_300_seconds_and_is_never_negative() -> None:
     assert VibeConfigSchema().api_stream_idle_timeout == 300.0
     with pytest.raises(ValidationError):
@@ -114,8 +143,20 @@ def test_compaction_and_output_limits_default_on() -> None:
     assert config.output_limit_retries == 6
 
 
+def test_output_caps_default_off() -> None:
+    config = VibeConfigSchema()
+    assert config.agent_max_output_tokens == 0
+    assert config.compaction_max_output_tokens == 0
+
+
 @pytest.mark.parametrize(
-    "setting", [{"compaction_reasoning_limit_tokens": -1}, {"output_limit_retries": -1}]
+    "setting",
+    [
+        {"compaction_reasoning_limit_tokens": -1},
+        {"output_limit_retries": -1},
+        {"agent_max_output_tokens": -1},
+        {"compaction_max_output_tokens": -1},
+    ],
 )
 def test_compaction_and_output_limits_reject_invalid_values(
     setting: dict[str, object],

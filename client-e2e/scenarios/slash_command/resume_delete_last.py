@@ -23,7 +23,6 @@ handshake = {
         ],
         "nextCursor": None,
         "previousCursor": None,
-        "continueSessionId": None,
     }
 }
 

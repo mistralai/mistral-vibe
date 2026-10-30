@@ -116,8 +116,13 @@ def start_session_input_schema(models: Sequence[SpawnModel]) -> dict[str, Any]:
     levels = "; ".join(
         f"{model.alias}: {', '.join(model.levels)}" for model in models if model.levels
     )
+    # The standard levels, then any level of a model's own its config lists.
+    offered_levels = dict.fromkeys((
+        *THINKING_LEVELS,
+        *(level for model in models for level in model.levels),
+    ))
     properties["reasoning_effort"] = {
-        "anyOf": [{"type": "string", "enum": list(THINKING_LEVELS)}, {"type": "null"}],
+        "anyOf": [{"type": "string", "enum": list(offered_levels)}, {"type": "null"}],
         "default": None,
         "description": (
             "How hard the model thinks, only when the user asks, among the levels "
@@ -194,8 +199,8 @@ async def run_start_session(
     origin = origin_of(parent_session_id)
     if origin.awaits_user:
         raise SessionSpawnError(
-            "Another session started this one, so it cannot start sessions until "
-            "the user writes to it. Do the task here."
+            "Another session started or messaged this one, so it cannot start "
+            "sessions until the user writes to it. Do the task here."
         )
     inherited = origin.settings
     model, reasoning_effort = _model_choice(args, origin)
@@ -228,7 +233,8 @@ async def run_start_session(
         ) from exc
     title = spawned.title or args.title
     return StartSessionResult(
-        session_id=spawned.session_id,
+        # The client's id is the one its peer tools take.
+        session_id=spawned.client_session_id or spawned.session_id,
         title=title,
         url=spawned.url,
         message=_started_message(title, spawned.url),

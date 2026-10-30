@@ -1,15 +1,17 @@
 //! Edit-effect diff rows.
 
 mod line_numbers;
+mod sides;
 mod wrap;
 
 use line_numbers::next_line_number;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
+use sides::Sides;
 use unicode_width::UnicodeWidthStr;
 pub use wrap::{banded, wrap_row};
 
-use super::super::{highlight, theme};
+use super::super::theme;
 use super::difflib;
 
 /// The row tint over the backdrop, per theme brightness.
@@ -91,6 +93,7 @@ pub fn render_edit_diff(occurrences: &[DiffOccurrence], lang: &str) -> Vec<DiffR
         // a real empty line anchored at `start_line`.
         let old = split_lines(&occurrence.old_lines);
         let new = split_lines(&occurrence.new_lines);
+        let sides = Sides::new(&old, &new, lang);
         let offset = occurrence.start_line.unwrap_or(1).saturating_sub(1) as usize;
         for (index, hunk) in difflib::unified_diff(&old, &new, CONTEXT_LINES)
             .iter()
@@ -105,7 +108,7 @@ pub fn render_edit_diff(occurrences: &[DiffOccurrence], lang: &str) -> Vec<DiffR
                 hunk,
                 occurrence.start_line.map(|_| offset),
                 gutter_width,
-                lang,
+                &sides,
             ));
         }
     }
@@ -121,25 +124,37 @@ fn render_hunk(
     hunk: &difflib::Hunk,
     offset: Option<usize>,
     gutter_width: u16,
-    lang: &str,
+    sides: &Sides,
 ) -> Vec<DiffRow> {
     let mut old_lineno = hunk.old_start;
     let mut new_lineno = hunk.new_start;
     let mut rows = Vec::new();
     for (prefix, code) in &hunk.rows {
+        let side_lineno = if *prefix == '-' {
+            old_lineno
+        } else {
+            new_lineno
+        };
         let lineno = next_line_number(*prefix, &mut old_lineno, &mut new_lineno);
+        let spans = sides.line(*prefix, side_lineno);
         rows.push(row(
             *prefix,
             offset.map(|offset| lineno + offset),
             gutter_width,
             code,
-            lang,
+            spans,
         ));
     }
     rows
 }
 
-fn row(prefix: char, lineno: Option<usize>, gutter_width: u16, code: &str, lang: &str) -> DiffRow {
+fn row(
+    prefix: char,
+    lineno: Option<usize>,
+    gutter_width: u16,
+    code: &str,
+    spans_hint: Option<Vec<Span<'static>>>,
+) -> DiffRow {
     let band = band(prefix);
     let background = band.unwrap_or_else(theme::background);
     let (sign_style, lineno_style) = gutter_styles(prefix, background);
@@ -156,7 +171,7 @@ fn row(prefix: char, lineno: Option<usize>, gutter_width: u16, code: &str, lang:
         ));
     }
     spans.push(Span::styled(format!("{prefix} "), sign_style));
-    spans.extend(body(code, prefix, lang));
+    spans.extend(body(code, prefix, spans_hint));
     DiffRow {
         border: border_style(prefix),
         band,
@@ -241,9 +256,8 @@ fn dim_muted(background: Color) -> Style {
     }
 }
 
-/// The code, highlighted a line at a time (so no parser state crosses rows),
-/// dimmed on removed ANSI rows.
-fn body(code: &str, prefix: char, lang: &str) -> Vec<Span<'static>> {
+/// The row's code, from its side's whole-text highlight, dimmed on removed ANSI rows.
+fn body(code: &str, prefix: char, highlighted: Option<Vec<Span<'static>>>) -> Vec<Span<'static>> {
     // A tab occupies no cell, so it would leave the row's band and the cells it
     // covers unpainted; render it as one space.
     let code = &code.replace('\t', " ");
@@ -259,10 +273,7 @@ fn body(code: &str, prefix: char, lang: &str) -> Vec<Span<'static>> {
             },
         )]
     };
-    let Some(rows) = highlight::code(code, lang) else {
-        return plain();
-    };
-    let Some(spans) = rows.into_iter().next() else {
+    let Some(spans) = highlighted else {
         return plain();
     };
     spans

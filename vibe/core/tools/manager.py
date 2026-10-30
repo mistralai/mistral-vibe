@@ -1,18 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass
-import hashlib
-import importlib.util
+from collections.abc import Callable
+import importlib
 import inspect
 from pathlib import Path
-import re
-import sys
 import threading
 from typing import TYPE_CHECKING, Any, TypeGuard
-
-from cachetools import LRUCache
 
 from vibe.core.config.harness_files import (
     HarnessFilesManager,
@@ -30,103 +24,63 @@ if TYPE_CHECKING:
     from vibe.core.tools.mcp.registry import MCPRegistry
 
 
-def _try_canonical_module_name(path: Path) -> str | None:
-    """Extract canonical module name for vibe package files.
+_BUILTIN_PACKAGE = "vibe.core.tools.builtins"
 
-    Prevents Pydantic class identity mismatches when the same module
-    is imported via dynamic discovery and regular imports.
-    """
-    try:
-        parts = path.resolve().parts
-    except (OSError, ValueError):
-        return None
-
-    package_indices = [
-        idx
-        for idx, part in enumerate(parts)
-        if part == "vibe"
-        and idx + 1 < len(parts)
-        and (
-            parts[idx + 1] in {"acp", "cli", "core", "setup"}
-            or parts[idx + 1].endswith(".py")
-        )
-    ]
-    if not package_indices:
-        return None
-
-    vibe_idx = package_indices[-1]
-    if vibe_idx + 1 >= len(parts):
-        return None
-
-    module_parts = [p.removesuffix(".py") for p in parts[vibe_idx:]]
-    return ".".join(module_parts)
+# Every derivation of every session in the process lists the builtin tools
+# again, and the builtin files never change while Vibe runs.
+_builtin_tools: tuple[type[BaseTool], ...] | None = None
+_builtin_tools_lock = threading.Lock()
 
 
-def _compute_module_name(path: Path) -> str:
-    """Return canonical module name for vibe files, hash-based synthetic name otherwise."""
-    if canonical := _try_canonical_module_name(path):
-        return canonical
-
-    resolved = path.resolve()
-    path_hash = hashlib.md5(str(resolved).encode()).hexdigest()[:8]
-    stem = re.sub(r"[^0-9A-Za-z_]", "_", path.stem) or "mod"
-    return f"vibe_tools_discovered_{stem}_{path_hash}"
-
-
-@dataclass(frozen=True, slots=True)
-class FailedToolFile:
-    path: Path
-    error: str
-
-
-@dataclass(frozen=True, slots=True)
-class _DiscoveredTools:
-    tools: tuple[tuple[type[BaseTool], bool], ...] = ()
-    failed_custom_files: tuple[FailedToolFile, ...] = ()
+def _discover_builtin_tools() -> tuple[type[BaseTool], ...]:
+    global _builtin_tools
+    with _builtin_tools_lock:
+        if _builtin_tools is not None:
+            return _builtin_tools
+        tools: list[type[BaseTool]] = []
+        for path in sorted(DEFAULT_TOOL_DIR.path.glob("*.py")):
+            if path.name.startswith("_"):
+                continue
+            try:
+                tools.extend(_tool_classes_of(f"{_BUILTIN_PACKAGE}.{path.stem}"))
+            except Exception as exc:
+                logger.warning("Failed to load tools from %s: %s", path, exc)
+        _builtin_tools = tuple(tools)
+        return _builtin_tools
 
 
-# Every derivation of every session in the process discovers tools again. A tool
-# module stays imported once loaded (see ``_load_tools_from_file``), so what a
-# search path yields is fixed by the tool files it lists. Keyed on that listing
-# rather than the directory mtime, whose coarse granularity on Linux can hide a
-# file added in the same tick as the previous scan. Bounded because each
-# worktree brings its own project tool paths. A failed import is not cached so a
-# fixed file loads on the next scan.
-_discovered_tools: LRUCache[Path, tuple[tuple[Path, ...], _DiscoveredTools]] = LRUCache(
-    maxsize=256
-)
-_discovered_tools_lock = threading.Lock()
+def builtin_tool_classes() -> tuple[type[BaseTool], ...]:
+    """Every builtin tool class, including each variant of a name."""
+    return _discover_builtin_tools()
 
 
-def _discover_tools_in(base: Path, builtin_dir: Path) -> _DiscoveredTools:
-    if base.is_dir():
-        files = tuple(base.glob("*.py"))
-    elif base.name.endswith(".py") and base.is_file():
-        files = (base,)
-    else:
-        return _DiscoveredTools()
-    with _discovered_tools_lock:
-        cached = _discovered_tools.get(base)
-    if cached is not None and cached[0] == files:
-        return cached[1]
-    tools: list[tuple[type[BaseTool], bool]] = []
-    failed: list[FailedToolFile] = []
-    for path in files:
-        is_custom = not path.resolve().is_relative_to(builtin_dir)
+def discover_tool_defaults() -> dict[str, dict[str, Any]]:
+    defaults: dict[str, dict[str, Any]] = {}
+    for cls in _discover_builtin_tools():
         try:
-            loaded = ToolManager._load_tools_from_file(path) or ()
-        except Exception as exc:
-            logger.warning("Failed to load tools from %s: %s", path, exc)
-            if is_custom:
-                failed.append(FailedToolFile(path, f"{type(exc).__name__}: {exc}"))
+            tool_name = cls.get_name()
+            config_class = cls._get_tool_config_class()
+            defaults[tool_name] = config_class().model_dump(exclude_none=True)
+        except Exception as e:
+            logger.warning("Failed to get defaults for tool %s: %s", cls.__name__, e)
             continue
-        tools.extend((tool, is_custom) for tool in loaded)
-    discovered = _DiscoveredTools(tuple(tools), tuple(failed))
-    if failed:
-        return discovered
-    with _discovered_tools_lock:
-        _discovered_tools[base] = (files, discovered)
-    return discovered
+    return defaults
+
+
+def _tool_classes_of(module_name: str) -> list[type[BaseTool]]:
+    module = importlib.import_module(module_name)
+    # Builtin tool modules import shared base classes (e.g. BashOutput) from
+    # sibling files; drop those re-exports so they are not registered twice
+    # under the importing module.
+    return [
+        tool_obj
+        for tool_obj in vars(module).values()
+        if inspect.isclass(tool_obj)
+        and tool_obj.__module__ == module.__name__
+        and issubclass(tool_obj, BaseTool)
+        and tool_obj is not BaseTool
+        and not inspect.isabstract(tool_obj)
+    ]
 
 
 class NoSuchToolError(Exception):
@@ -136,8 +90,8 @@ class NoSuchToolError(Exception):
 class ToolManager:
     """Manages tool discovery and instantiation for an Agent.
 
-    Discovers available tools from the provided search paths. Each Agent
-    should have its own ToolManager instance.
+    Lists the builtin tools, then MCP and connector tools. Each Agent should
+    have its own ToolManager instance.
     """
 
     def __init__(
@@ -162,19 +116,15 @@ class ToolManager:
         self._mcp_registry = mcp_registry
         self._connector_registry = connector_registry
         self._instances: dict[str, BaseTool] = {}
-        self._search_paths: list[Path] = self._compute_search_paths(self._config)
         self._lock = threading.Lock()
         self._mcp_integrated = False
 
         self._tool_variants_by_name: dict[str, list[type[BaseTool]]] = {}
-        self._custom_tool_variants_by_name: dict[str, list[bool]] = {}
         # Historical one-class-per-name registry. When multiple classes publish the
         # same name, this is the fallback used if no variant is active.
         self._all_tools: dict[str, type[BaseTool]] = {}
-        for tool_class, is_custom in self._iter_tool_classes_with_origin(
-            self._search_paths
-        ):
-            self._register_discovered_tool_variant(tool_class, is_custom=is_custom)
+        for tool_class in _discover_builtin_tools():
+            self._register_discovered_tool_variant(tool_class)
         if not defer_mcp:
             self.integrate_all()
 
@@ -189,125 +139,9 @@ class ToolManager:
     def _config(self) -> VibeConfigSchema:
         return self._config_getter()
 
-    def _compute_search_paths(self, config: VibeConfigSchema) -> list[Path]:
-        paths: list[Path] = [DEFAULT_TOOL_DIR.path]
-
-        paths.extend(config.tool_paths)
-
-        mgr = self._harness_files
-        paths.extend(mgr.project_tools_dirs)
-        paths.extend(mgr.user_tools_dirs)
-
-        unique: list[Path] = []
-        seen: set[Path] = set()
-        for p in paths:
-            rp = p.resolve()
-            if rp not in seen:
-                seen.add(rp)
-                unique.append(rp)
-        return unique
-
-    @staticmethod
-    def _iter_tool_classes(search_paths: list[Path]) -> Iterator[type[BaseTool]]:
-        """Iterate over all search_paths to find tool classes.
-
-        A search path is either a directory of tool files (``<dir>/*.py``, e.g.
-        ``.vibe/tools/``) or a single ``.py`` file. Tool files sit directly in
-        the directory — the same flat layout as the builtins.
-        """
-        for tool_class, _ in ToolManager._iter_tool_classes_with_origin(search_paths):
-            yield tool_class
-
-    @staticmethod
-    def _iter_tool_classes_with_origin(
-        search_paths: list[Path],
-    ) -> Iterator[tuple[type[BaseTool], bool]]:
-        builtin_dir = DEFAULT_TOOL_DIR.path.resolve()
-        for base in search_paths:
-            yield from _discover_tools_in(base, builtin_dir).tools
-
-    @property
-    def search_paths(self) -> tuple[Path, ...]:
-        return tuple(self._search_paths)
-
-    @property
-    def failed_custom_tool_files(self) -> list[FailedToolFile]:
-        builtin_dir = DEFAULT_TOOL_DIR.path.resolve()
-        return [
-            failed
-            for base in self._search_paths
-            for failed in _discover_tools_in(base, builtin_dir).failed_custom_files
-        ]
-
-    @staticmethod
-    def _load_tools_from_file(file_path: Path) -> list[type[BaseTool]] | None:
-        if not file_path.is_file():
-            return
-        name = file_path.name
-        if name.startswith("_"):
-            return
-
-        module_name = _compute_module_name(file_path)
-
-        if module_name in sys.modules:
-            module = sys.modules[module_name]
-        else:
-            spec = importlib.util.spec_from_file_location(module_name, file_path)
-            if spec is None or spec.loader is None:
-                return
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = module
-            try:
-                spec.loader.exec_module(module)
-            except Exception:
-                del sys.modules[module_name]
-                raise
-
-        # Builtin tool modules import shared base classes (e.g. BashOutput) from
-        # sibling files; drop those re-exports so they are not registered twice
-        # under the importing module. Custom tool files may legitimately re-export
-        # tool classes, so the filter is scoped to the builtin directory only.
-        is_builtin = file_path.resolve().is_relative_to(DEFAULT_TOOL_DIR.path.resolve())
-
-        tools = []
-        for tool_obj in vars(module).values():
-            if not inspect.isclass(tool_obj):
-                continue
-            if is_builtin and tool_obj.__module__ != module.__name__:
-                continue
-            if not issubclass(tool_obj, BaseTool) or tool_obj is BaseTool:
-                continue
-            if inspect.isabstract(tool_obj):
-                continue
-            tools.append(tool_obj)
-        return tools
-
-    @staticmethod
-    def discover_tool_defaults(
-        search_paths: list[Path] | None = None,
-    ) -> dict[str, dict[str, Any]]:
-        if search_paths is None:
-            search_paths = [DEFAULT_TOOL_DIR.path]
-
-        defaults: dict[str, dict[str, Any]] = {}
-        for cls in ToolManager._iter_tool_classes(search_paths):
-            try:
-                tool_name = cls.get_name()
-                config_class = cls._get_tool_config_class()
-                defaults[tool_name] = config_class().model_dump(exclude_none=True)
-            except Exception as e:
-                logger.warning(
-                    "Failed to get defaults for tool %s: %s", cls.__name__, e
-                )
-                continue
-        return defaults
-
-    def _register_discovered_tool_variant(
-        self, tool_class: type[BaseTool], *, is_custom: bool
-    ) -> None:
+    def _register_discovered_tool_variant(self, tool_class: type[BaseTool]) -> None:
         name = tool_class.get_name()
         self._tool_variants_by_name.setdefault(name, []).append(tool_class)
-        self._custom_tool_variants_by_name.setdefault(name, []).append(is_custom)
         self._all_tools[name] = tool_class
 
     @property
@@ -350,50 +184,6 @@ class ToolManager:
             }
         return result
 
-    @property
-    def custom_tool_names(self) -> set[str]:
-        available_names = set(self.available_tools)
-        custom_names: set[str] = set()
-        with self._lock:
-            for name in available_names:
-                fallback_tool_class = self._all_tools.get(name)
-                if fallback_tool_class is None:
-                    continue
-                selected = self._select_available_variant_with_index(
-                    name, fallback_tool_class
-                )
-                if selected is None:
-                    continue
-                _, discovery_index = selected
-                if self._is_custom_variant(name, discovery_index):
-                    custom_names.add(name)
-        return custom_names
-
-    @property
-    def custom_config_tool_names(self) -> frozenset[str]:
-        """Names whose ``[tools.<name>]`` settings a custom tool reads.
-
-        ``get_tool_config`` reads a tool's settings with the variant it selects,
-        so a builtin name is listed only when that variant is a custom tool.
-        """
-        with self._lock:
-            return frozenset(
-                name
-                for name, fallback_tool_class in self._all_tools.items()
-                if self._is_custom_variant(
-                    name,
-                    self._select_registered_variant_with_index(
-                        name, fallback_tool_class
-                    )[1],
-                )
-            )
-
-    def _is_custom_variant(self, name: str, discovery_index: int) -> bool:
-        custom_variants = self._custom_tool_variants_by_name.get(name, [])
-        return (
-            discovery_index < len(custom_variants) and custom_variants[discovery_index]
-        )
-
     def _is_tool_available(self, cls: type[BaseTool]) -> bool:
         if (
             cls.local_managed_shell_only
@@ -405,11 +195,7 @@ class ToolManager:
         return self._is_tool_runtime_available(cls)
 
     def _is_tool_runtime_available(self, cls: type[BaseTool]) -> bool:
-        # Backwards-compatibility check to avoid breaking
-        # existing custom tools that call is_available without parameters
-        if inspect.signature(cls.is_available).parameters:
-            return cls.is_available(self._config)
-        return cls.is_available()
+        return cls.is_available(self._config)
 
     def _is_enabled_for_shell_rollout(self, cls: type[BaseTool]) -> bool:
         match cls.shell_rollout:
@@ -434,16 +220,7 @@ class ToolManager:
     def _select_available_variant(
         self, name: str, fallback: type[BaseTool]
     ) -> type[BaseTool] | None:
-        selected = self._select_available_variant_with_index(name, fallback)
-        if selected is None:
-            return None
-        return selected[0]
-
-    def _select_available_variant_with_index(
-        self, name: str, fallback: type[BaseTool]
-    ) -> tuple[type[BaseTool], int] | None:
         selected_tool_class: type[BaseTool] | None = None
-        selected_discovery_index = 0
         selected_rank: tuple[int, int] | None = None
 
         for discovery_index, tool_class in enumerate(
@@ -457,12 +234,9 @@ class ToolManager:
                 continue
 
             selected_tool_class = tool_class
-            selected_discovery_index = discovery_index
             selected_rank = rank
 
-        if selected_tool_class is None:
-            return None
-        return selected_tool_class, selected_discovery_index
+        return selected_tool_class
 
     @staticmethod
     def _tool_selection_priority(tool_class: type[BaseTool]) -> int:
@@ -471,16 +245,8 @@ class ToolManager:
     def _select_registered_variant(
         self, name: str, fallback: type[BaseTool]
     ) -> type[BaseTool]:
-        return self._select_registered_variant_with_index(name, fallback)[0]
-
-    def _select_registered_variant_with_index(
-        self, name: str, fallback: type[BaseTool]
-    ) -> tuple[type[BaseTool], int]:
-        selected = self._select_available_variant_with_index(name, fallback)
-        if selected is not None:
-            return selected
         # The fallback is the variant registered last.
-        return fallback, len(self._tool_variants_for_name(name, fallback)) - 1
+        return self._select_available_variant(name, fallback) or fallback
 
     def _tool_class_for_config(self, tool_name: str) -> type[BaseTool] | None:
         fallback_tool_class = self._all_tools.get(tool_name)

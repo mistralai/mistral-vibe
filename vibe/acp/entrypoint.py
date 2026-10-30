@@ -11,6 +11,7 @@ from vibe._experimental_harness import (
     ExperimentalHarnessUnavailableError,
     require_experimental_harness,
 )
+from vibe.cli.launcher import exec_rust_cli
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.harness_files import init_harness_files_manager
 from vibe.core.paths import LOG_FILE, bootstrap_vibe_home
@@ -18,10 +19,11 @@ from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.utils.windows_asyncio import silence_proactor_transport_teardown_warnings
 from vibe.observability.logging import init_file_logging
 
-# Configure line buffering for subprocess communication
-sys.stdout.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
-sys.stderr.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
-sys.stdin.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
+# Read by vibe-rs; an env var rather than a flag so an older vibe-rs ignores it.
+SETUP_ENTRYPOINT_ENV = "VIBE_SETUP_ENTRYPOINT"
+# Hidden mode the bundled vibe-rs spawns for `--setup`: only setup/* RPCs work, the
+# bundle lacks vibe-app-server's PTY helper, built-in skills and backend adapter.
+SETUP_APP_SERVER_FLAG = "--setup-app-server"
 
 
 @dataclass
@@ -39,7 +41,32 @@ def parse_arguments() -> Arguments:
     return Arguments(setup=args.setup)
 
 
+def _run_setup() -> None:
+    # A frozen bundle ships no vibe-app-server: vibe-rs spawns this executable.
+    frozen = getattr(sys, "frozen", False)
+    exec_rust_cli(
+        ["--setup"],
+        extra_env={SETUP_ENTRYPOINT_ENV: "acp"},
+        app_server_cmd=[sys.executable, SETUP_APP_SERVER_FLAG] if frozen else None,
+    )
+
+
 def main() -> None:
+    if sys.argv[1:2] == [SETUP_APP_SERVER_FLAG]:
+        from vibe.app_server.stdio import main as app_server_main
+
+        app_server_main(sys.argv[2:])
+        return
+    args = parse_arguments()
+    if args.setup:
+        # Before the dotenv load: vibe-rs must tell ~/.vibe/.env keys from real env.
+        _run_setup()
+        return
+
+    # Configure line buffering for subprocess communication
+    sys.stdout.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
+    sys.stderr.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
+    sys.stdin.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
     silence_proactor_transport_teardown_warnings()
 
     # The gate must run before the harness files manager and file logging:
@@ -52,21 +79,9 @@ def main() -> None:
     from vibe.acp.agent import run_acp_server
     from vibe.core.config import load_dotenv_values
     from vibe.observability.sentry import init_sentry
-    from vibe.setup.onboarding import run_onboarding
 
     environ_before_dotenv_load = os.environ.copy()
     load_dotenv_values()
-    args = parse_arguments()
-    if args.setup:
-        run_onboarding(
-            launch_context=build_launch_context(
-                agent_entrypoint="acp",
-                agent_version=__version__,
-                client_name="vibe_acp",
-                client_version=__version__,
-            )
-        )
-        sys.exit(0)
 
     try:
         orchestrator = asyncio.run(build_default_orchestrator())

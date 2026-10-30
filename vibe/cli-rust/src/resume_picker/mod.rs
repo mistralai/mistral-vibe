@@ -17,15 +17,20 @@ use crate::session_exit;
 
 pub(crate) use notice::load_history;
 pub use notice::rebase;
-use request::Call;
 pub use request::{held, lease_locked};
 
-#[derive(Clone, Default)]
+/// One `session/list` item (app-server `PublicSession`).
+#[derive(Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Session {
     pub id: String,
+    #[serde(default, deserialize_with = "crate::utils::json::null_default")]
     pub title: String,
+    #[serde(default, deserialize_with = "crate::utils::json::null_default")]
     pub preview: String,
+    #[serde(default, deserialize_with = "crate::utils::json::null_default")]
     pub updated_at: u64,
+    #[serde(default)]
     pub cwd: Option<String>,
 }
 
@@ -54,20 +59,8 @@ pub enum Event {
 pub fn open(app: &mut App, client: &Arc<Client>) {
     begin(app);
     let cwd = app.session.cwd.clone();
-    if let Some(call) = call(app, client) {
-        request::list(call, cwd);
-    }
+    request::list(app, client, cwd);
     subscribe(app, client);
-}
-
-/// The handles a spawned call needs; `None` once the picker channel is gone.
-fn call(app: &mut App, client: &Arc<Client>) -> Option<Call> {
-    let tx = app.resume_picker.tx.clone()?;
-    Some(Call {
-        client: client.clone(),
-        tx,
-        pending: app.commit_started(),
-    })
 }
 
 fn begin(app: &mut App) {
@@ -105,9 +98,7 @@ pub fn subscribe(app: &mut App, client: &Arc<Client>) {
         return;
     }
     app.resume_picker.subscribed = true;
-    if let Some(call) = call(app, client) {
-        request::leases(call, app.session.session_id.clone());
-    }
+    request::leases(app, client, app.session.session_id.clone());
 }
 
 /// One `session/lease/updated` notification: the lock set follows while the
@@ -163,7 +154,6 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
         KeyCode::Esc if app.resume_picker.delete_confirm.take().is_some() => {}
         KeyCode::Esc => {
             notice::close(app);
-            notice::cancelled(app, "Resume cancelled.");
             drop_initial_prompt(app);
         }
         KeyCode::Up => navigate(app, client, false),
@@ -258,18 +248,16 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             crate::turn_summary::cancel(app);
             crate::message_queue::adopt(app, state.turn_queue.as_ref());
             // Reset the subagent views; the resumed state owns its own children.
-            crate::subagents::reset_views(app);
             app.subagents.seed_snapshot(state.child_sessions.clone());
+            crate::subagents::reset_views(app);
             crate::subagents::refresh(app);
             // Every history row is rebuilt fresh on resume, so manual
             // expansion state resets to the fold flag.
             app.view.expanded.clear();
             app.todo_tracker.seed_from_history(state.history.as_ref());
+            crate::startup::banners::dismiss_whats_new(app);
             load_history(app, &state);
             crate::worktree::track_state(app, &state);
-            // The transcript is rebuilt on resume, so re-decide the
-            // custom-tools deprecation against the resumed session.
-            crate::startup::banners::rebuild_custom_tools_deprecation(app);
             app.set_status(Status::Ready);
             notice::result(app, &format!("Resumed session `{}`", short_id(&id)));
             crate::message_queue::flush_pending(app, client);
@@ -367,12 +355,7 @@ fn preview(app: &mut App, client: &Arc<Client>) {
     app.resume_picker.previewing = true;
     app.resume_picker.preview_request += 1;
     let request = app.resume_picker.preview_request;
-    if let Some(tx) = app.resume_picker.tx.clone() {
-        // Hold the app busy until the preview answer lands, so the replay idle
-        // marker waits for it; `resume` events balance this in the event loop.
-        app.commit_started();
-        request::preview(client.clone(), tx, id, request);
-    }
+    request::preview(app, client, id, request);
 }
 
 fn resume(app: &mut App, client: &Arc<Client>) {
@@ -397,16 +380,13 @@ fn resume(app: &mut App, client: &Arc<Client>) {
         return;
     }
     let id = session.id.clone();
-    let Some(call) = call(app, client) else {
-        return;
-    };
     // Busy without a spinner: the
     // status stays as it is, so Esc can still cancel and notifications flow.
     app.resume_picker.resuming = true;
     app.commit_started();
     // A picker resume resends the session's agent config too.
     let params = crate::startup::resume_params(&id, &app.session.agent_config);
-    request::resume(call, id, params);
+    request::resume(app, client, id, params);
 }
 
 fn delete(app: &mut App, client: &Arc<Client>) {
@@ -437,11 +417,8 @@ fn delete(app: &mut App, client: &Arc<Client>) {
         return;
     }
     app.resume_picker.delete_confirm = None;
-    let Some(call) = call(app, client) else {
-        return;
-    };
     app.resume_picker.deleting = Some(id.clone());
-    request::delete(call, id);
+    request::delete(app, client, id);
 }
 
 /// The first 8 characters of a session id.

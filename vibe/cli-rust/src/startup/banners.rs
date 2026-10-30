@@ -1,9 +1,10 @@
-//! Startup banner mounts: what's-new, the VS Code extension promo, the
-//! custom-tools deprecation, and the untrusted-config warning.
+//! Startup banner mounts: what's-new, the VS Code extension promo, and
+//! the untrusted-config warning.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::app::App;
@@ -12,14 +13,10 @@ use crate::commands::CommandEvent;
 use crate::server::{method, Client, WorkspaceUntrustedConfigResponse};
 use crate::terminal_detect;
 use crate::transcript::local;
-use crate::utils::{cache_store, whats_new_cache};
+use crate::utils::cache_store;
+use crate::utils::whats_new_cache::{self, LastSeen};
+use crate::whats_new;
 
-/// The shipped what's-new body. The
-/// `VIBE_WHATS_NEW_FILE` env var (test-only) reads a runtime file instead of
-/// the compile-time body; missing, unreadable, or empty content skips the
-/// banner.
-const WHATS_NEW_MD: &str = include_str!("../../../whats_new.md");
-const WHATS_NEW_FILE_ENV: &str = "VIBE_WHATS_NEW_FILE";
 const VSCODE_EXTENSION_URI: &str = "vscode:extension/mistralai.mistral-vibe-code";
 const VSCODE_EXTENSION_LINK_LABEL: &str = "VS Code extension";
 /// The VS Code extension promo start: 2026-05-28 16:00 UTC.
@@ -33,48 +30,34 @@ const UNTRUSTED_WARNING_KEY: &str = "dirs";
 /// Mount the post-ready banners once the session history is loaded.
 pub fn mount(app: &mut App, runtime: &Value, client: &Arc<Client>) {
     let promo_eligible = should_show_promo();
-    if whats_new_cache::should_show(env!("CARGO_PKG_VERSION")) {
-        mount_whats_new(app, promo_eligible);
+    let current = env!("CARGO_PKG_VERSION");
+    // A resumed conversation stays last on screen: what's new waits for a fresh session.
+    let fresh = !app.view.transcript.has_server_entries() && !app.session.resume_picker_shown;
+    let seen = match whats_new_cache::last_seen() {
+        LastSeen::Seen(seen) if fresh && seen.as_deref() != Some(current) => Some(seen),
+        _ => None,
+    };
+    if let Some(seen) = seen {
+        mount_whats_new(app, seen.as_deref(), promo_eligible);
+        whats_new_cache::mark_seen(current);
     } else if promo_eligible {
         app.view.promo = Some(promo_standalone());
         record_promo_shown();
     }
-    // The deprecation is checked once per session after the initial history,
-    // whatever session the handshake attached; a later resume rebuild re-checks.
     app.session.runtime = runtime.clone();
-    show_custom_tools_deprecation(app, runtime);
     fetch_untrusted_config(app, client);
 }
 
-/// The what's-new body to mount, or `None` to skip the banner (missing,
-/// unreadable, or empty after trimming).
-fn whats_new_body() -> Option<String> {
-    if let Ok(path) = std::env::var(WHATS_NEW_FILE_ENV) {
-        return std::fs::read_to_string(path)
-            .ok()
-            .as_deref()
-            .and_then(non_empty);
-    }
-    non_empty(WHATS_NEW_MD)
-}
-
-fn non_empty(body: &str) -> Option<String> {
-    let trimmed = body.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_owned())
-}
-
-fn mount_whats_new(app: &mut App, promo_eligible: bool) {
-    let Some(body) = whats_new_body() else {
-        // Fall back to the standalone promo and still mark the version as seen
-        // when the what's-new body is absent.
+/// Mount every release's notes newer than `seen`; with none, the promo shows alone.
+fn mount_whats_new(app: &mut App, seen: Option<&str>, promo_eligible: bool) {
+    let entries = whats_new::entries();
+    let Some(body) = whats_new::startup_body(whats_new::unseen(&entries, seen)) else {
         if promo_eligible {
             app.view.promo = Some(promo_standalone());
             record_promo_shown();
         }
-        whats_new_cache::mark_seen(env!("CARGO_PKG_VERSION"));
         return;
     };
-    let after_history = app.view.transcript.has_server_entries();
     if promo_eligible {
         record_promo_shown();
     }
@@ -87,10 +70,8 @@ fn mount_whats_new(app: &mut App, promo_eligible: bool) {
         &mut app.view.transcript,
         &whats_new.id,
         &whats_new.text(None),
-        after_history,
     );
     app.session.whats_new = Some(whats_new);
-    whats_new_cache::mark_seen(env!("CARGO_PKG_VERSION"));
 }
 
 /// The mounted what's-new entry and the parts its text is rebuilt from.
@@ -146,44 +127,6 @@ pub fn dismiss_whats_new(app: &mut App) {
     }
 }
 
-/// Once per session, whenever the runtime lists a custom tool; the mounted
-/// entry's id guards against showing it twice.
-pub fn show_custom_tools_deprecation(app: &mut App, runtime: &Value) {
-    if app.session.custom_tools_deprecation_id.is_some() {
-        return;
-    }
-    let names = custom_tool_names(runtime);
-    if names.is_empty() {
-        return;
-    }
-    let id = new_message_id();
-    local::add_custom_tools_deprecation(&mut app.view.transcript, &id, &names);
-    app.session.custom_tools_deprecation_id = Some(id);
-}
-
-/// A transcript rebuild drops the mounted message and re-decides it against
-/// the latest known runtime, so a resume re-shows the banner for the session
-/// it landed on.
-pub fn rebuild_custom_tools_deprecation(app: &mut App) {
-    if let Some(id) = app.session.custom_tools_deprecation_id.take() {
-        app.view.transcript.remove(&id);
-    }
-    let runtime = app.session.runtime.clone();
-    show_custom_tools_deprecation(app, &runtime);
-}
-
-/// The `runtime.tools` entries flagged `isCustom` (app-server `ToolSummary.is_custom`).
-fn custom_tool_names(runtime: &Value) -> Vec<String> {
-    runtime
-        .pointer("/runtime/tools")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|tool| tool.get("isCustom").and_then(Value::as_bool) == Some(true))
-        .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_owned))
-        .collect()
-}
-
 fn promo_standalone() -> String {
     format!(
         "We now have a [{VSCODE_EXTENSION_LINK_LABEL}]({VSCODE_EXTENSION_URI}) with a rich UI. Check it out!"
@@ -237,7 +180,7 @@ fn fetch_untrusted_config(app: &mut App, client: &Arc<Client>) {
 /// The untrusted-config warning's gate and body: warn once per folder,
 /// still surfacing new ones, then record the folders as acknowledged.
 pub fn untrusted_warning(response: &Value) -> Option<String> {
-    let parsed: WorkspaceUntrustedConfigResponse = serde_json::from_value(response.clone()).ok()?;
+    let parsed = WorkspaceUntrustedConfigResponse::deserialize(response).ok()?;
     if parsed.dirs.is_empty() {
         return None;
     }

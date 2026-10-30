@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable, Mapping
 from http import HTTPStatus
 import logging
 import time
@@ -40,9 +41,11 @@ class ConnectorGatewayClient:
         enable_system_trust_store: bool = False,
         startup_timeout_s: float = 30.0,
         tool_timeout_s: float = 300.0,
+        headers_resolver: Callable[[str], Awaitable[Mapping[str, str]]] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
+        self._headers_resolver = headers_resolver
         self._http_policy = MCPHTTPTransportPolicy(
             enable_system_trust_store=enable_system_trust_store
         )
@@ -136,8 +139,17 @@ class ConnectorGatewayClient:
             tool_timeout_s=self._tool_timeout_s,
             sampling_enabled=False,
         )
+        headers: Mapping[str, str] = {"Authorization": f"Bearer {self._api_key}"}
+        if self._headers_resolver is not None:
+            try:
+                headers = await self._headers_resolver(str(server.url))
+            except Exception:
+                raise ConnectorRuntimeFailure(
+                    "connector_authorization_required",
+                    "Connector authorization is required",
+                ) from None
         authorization = MCPAuthorizationSnapshot(
-            headers={"Authorization": f"Bearer {self._api_key}"},
+            headers=headers,
             connection_revision="connector-gateway/v1",
             descriptor_revision="connector-gateway/v1",
         )

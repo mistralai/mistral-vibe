@@ -5,6 +5,8 @@ use vibe_rs::commands::clear::{apply_cleared, cleared, new_conversation_text};
 use vibe_rs::commands::CommandEvent;
 use vibe_rs::server::TokenUsage;
 
+use crate::support::stub;
+
 #[test]
 fn clearing_adopts_the_replacement_session() {
     let result = serde_json::json!({
@@ -107,10 +109,9 @@ async fn a_failed_clear_leaves_the_context_gauge_alone() {
     let (tx, mut commands) = tokio::sync::mpsc::channel(8);
     app.command_tx = Some(tx);
     let (config_tx, _config_rx) = tokio::sync::mpsc::channel(1);
-    let client = std::sync::Arc::new(vibe_rs::server::Client::stub());
 
     app.chat_input.load_full_text("/clear".to_owned());
-    vibe_rs::commands::submission::submit(&mut app, &client, &config_tx);
+    vibe_rs::commands::submission::submit(&mut app, &stub(), &config_tx);
     let event = tokio::time::timeout(std::time::Duration::from_secs(5), commands.recv())
         .await
         .expect("the clear answers")

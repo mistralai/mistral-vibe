@@ -117,11 +117,11 @@ async def test_manage_connectors_url_none_when_identity_incomplete(monkeypatch) 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("scope", "expected"),
-    [("shared_only", True), ("personal_and_shared", False), (None, False)],
+    ("can_access_private_resources", "expected"),
+    [(False, True), (True, False), (None, False)],
 )
-async def test_private_connectors_hidden_only_for_shared_only_keys(
-    monkeypatch, scope: str | None, expected: bool
+async def test_private_connectors_hidden_from_account_context(
+    monkeypatch, can_access_private_resources: bool | None, expected: bool
 ) -> None:
     config = build_test_vibe_config(enable_connectors=True)
     provider = connector_catalog._ConnectorProvider(
@@ -131,7 +131,9 @@ async def test_private_connectors_hidden_only_for_shared_only_keys(
         connector_catalog, "_resolve_provider", lambda _config: provider
     )
     whoami = WhoAmIResult(
-        plan_type=AccountPlanKind.API, plan_name="FREE", primitive_access_scope=scope
+        plan_type=AccountPlanKind.CHAT,
+        plan_name="FREE",
+        can_access_private_resources=can_access_private_resources,
     )
     resolve = AsyncMock(return_value=whoami)
     monkeypatch.setattr(connector_catalog._WHOAMI_CACHE, "resolve", resolve)
@@ -168,7 +170,7 @@ async def test_private_connectors_hidden_retries_whoami_only_after_cooldown(
     resolve.return_value = WhoAmIResult(
         plan_type=AccountPlanKind.API,
         plan_name="FREE",
-        primitive_access_scope="shared_only",
+        can_access_private_resources=False,
     )
 
     assert await connector_catalog._private_connectors_hidden(config) is True
@@ -198,7 +200,7 @@ async def test_private_connectors_hidden_reads_disk_cache_during_cooldown(
         WhoAmIResult(
             plan_type=AccountPlanKind.API,
             plan_name="FREE",
-            primitive_access_scope="shared_only",
+            can_access_private_resources=False,
         ),
     )
 
@@ -754,7 +756,7 @@ async def test_a_server_without_a_connector_service_has_no_connectors(
     *Assert*: A 404 is an empty catalog, not a failure to warn about; a 503
       still fails.
     """
-    import httpx
+    import httpx2
 
     # Prepare
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
@@ -762,9 +764,9 @@ async def test_a_server_without_a_connector_service_has_no_connectors(
     async def fetch(
         base_url: str, _api_key: str, _builtins: tuple[str, ...] = ()
     ) -> object:
-        request = httpx.Request("GET", f"{base_url}/v1/connectors/bootstrap")
-        response = httpx.Response(status, request=request)
-        raise httpx.HTTPStatusError("bootstrap", request=request, response=response)
+        request = httpx2.Request("GET", f"{base_url}/v1/connectors/bootstrap")
+        response = httpx2.Response(status, request=request)
+        raise httpx2.HTTPStatusError("bootstrap", request=request, response=response)
 
     service = ConnectorCatalogService(
         implicit_source_enabled=False,

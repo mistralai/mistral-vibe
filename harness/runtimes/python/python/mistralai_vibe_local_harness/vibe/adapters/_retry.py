@@ -21,7 +21,7 @@ import logging
 import random
 import time
 
-import httpx
+import httpx2
 
 from mistralai_vibe_local_harness.vibe._runtime_config import (
     ProviderRetry,
@@ -111,7 +111,7 @@ class RetryNotices:
     """The retry notice of one completion, from announcement to recovery.
 
     A notice stays up until the provider accepts a later attempt.
-    ``clear_on_success`` is an HTTPX response hook, so it clears the notice as
+    ``clear_on_success`` is an HTTPX2 response hook, so it clears the notice as
     soon as a successful status arrives, before the response body streams.
     """
 
@@ -124,7 +124,7 @@ class RetryNotices:
         if self._observer is not None:
             await self._observer(retry)
 
-    async def clear_on_success(self, response: httpx.Response) -> None:
+    async def clear_on_success(self, response: httpx2.Response) -> None:
         if not response.is_success or not self._showing:
             return
         self._showing = False

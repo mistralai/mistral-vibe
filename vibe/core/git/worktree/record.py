@@ -31,6 +31,8 @@ from vibe.observability.logging import logger
 CLAIMS_DIR_NAME = ".claims"
 # Removed worktrees are renamed here, which is atomic, then deleted at leisure.
 TRASH_DIR_NAME = ".trash"
+# Copy-on-write templates (see copy_on_write.py): checkouts, but nobody's.
+TEMPLATES_DIR_NAME = ".templates"
 RECORD_FILENAME = "record.json"
 RECOVERY_FILENAME = "recovery.json"
 HOLDERS_DIR_NAME = "holders"
@@ -148,6 +150,7 @@ class WorktreeClaim:
         if len(parts) < _BUCKET_AND_NAME_PARTS or parts[0] in {
             CLAIMS_DIR_NAME,
             TRASH_DIR_NAME,
+            TEMPLATES_DIR_NAME,
         }:
             return None
         return cls(bucket=parts[0], name=parts[1])

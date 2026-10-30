@@ -1,4 +1,4 @@
-//! Local and single-RPC slash commands (`/help`, `/status`, `/log`, `/whoami`, ...).
+//! Local and RPC-backed slash commands (`/help`, `/status`, `/log`, `/whoami`, ...).
 
 use std::sync::Arc;
 
@@ -7,7 +7,7 @@ use crate::server::Client;
 use serde_json::Value;
 
 use super::event::{dispatch, reload_result, CommandEvent};
-use super::provider_auth::literal;
+use super::provider_auth::{self, literal};
 use super::submission::{new_message_id, NOTICE_TIMEOUT_SECS};
 use crate::app::App;
 use crate::post_ready::{self, AccountReads};
@@ -19,6 +19,8 @@ pub(super) const DATA_RETENTION_MESSAGE: &str = "## Your Data Helps Improve Mist
 
 pub fn help_text() -> String {
     let mut lines = vec![
+        "## Help".to_owned(),
+        String::new(),
         "### Keyboard Shortcuts".to_owned(),
         String::new(),
         "- `Enter` Submit message".to_owned(),
@@ -91,9 +93,9 @@ pub(super) fn status_text(app: &App) -> String {
         format_count_markdown(stats.steps),
         format_count_markdown(stats.session_prompt_tokens),
         format_count_markdown(stats.session_completion_tokens),
-        format_count_markdown(stats.session_prompt_tokens + stats.session_completion_tokens),
-        format_count_markdown(stats.last_turn_total_tokens),
-        stats.session_cost,
+        format_count_markdown(stats.total_tokens()),
+        format_count_markdown(stats.last_turn_prompt_tokens + stats.last_turn_completion_tokens),
+        stats.cost(),
     )
 }
 
@@ -116,11 +118,10 @@ pub(super) fn read_log(app: &mut App, client: &Arc<Client>) {
             Ok(value) if value.pointer("/log/persisted") != Some(&serde_json::Value::Bool(true)) => {
                 CommandEvent::Error("The current session has not been persisted yet.".to_owned())
             }
-            Ok(value) => CommandEvent::Result(value
-                .pointer("/log/path")
-                .and_then(serde_json::Value::as_str)
-                .map(|path| format!("## Current Log Directory\n\n`{path}`\n\nYou can send this directory to share your interaction."))
-                .unwrap_or_else(|| "The current session has not been persisted yet.".to_owned())),
+            Ok(value) => match value.pointer("/log/path").and_then(serde_json::Value::as_str) {
+                Some(path) => CommandEvent::Result(format!("## Current Log Directory\n\n`{path}`\n\nYou can send this directory to share your interaction.")),
+                None => CommandEvent::Error("The current session has not been persisted yet.".to_owned()),
+            },
             Err(error) => CommandEvent::Error(format!("Failed to read session log: {error}")),
         };
         let _ = tx.try_send(result);
@@ -157,9 +158,9 @@ pub(super) fn rename_session(app: &mut App, client: &Arc<Client>, value: &str) {
                 .and_then(serde_json::Value::as_str)
                 .map(|title| CommandEvent::Renamed(title.to_owned()))
                 .unwrap_or_else(|| {
-                    CommandEvent::Result("Failed to rename session: invalid response".to_owned())
+                    CommandEvent::Error("Failed to rename session: invalid response".to_owned())
                 }),
-            Err(error) => CommandEvent::Result(format!("Failed to rename session: {error}")),
+            Err(error) => CommandEvent::Error(format!("Failed to rename session: {error}")),
         };
         let _ = tx.try_send(event);
     });
@@ -179,9 +180,8 @@ pub(super) fn reload_config(app: &mut App, client: &Arc<Client>) {
             .await;
         let event = match result {
             Ok(value) => reload_result(value),
-            // The server's reason, say a config the running agent refuses;
-            // the context alone would only say the request failed.
-            Err(error) => CommandEvent::Result(format!(
+            // The server's reason; the context alone would only say the request failed.
+            Err(error) => CommandEvent::Error(format!(
                 "Failed to reload config: {}",
                 crate::server::request_error::describe(&error)
             )),
@@ -191,24 +191,30 @@ pub(super) fn reload_config(app: &mut App, client: &Arc<Client>) {
 }
 
 pub(super) fn whoami(app: &mut App, client: &Arc<Client>) {
-    // The post-ready fetch already read both, so answer from that cache; only a
-    // model switch (a different credential) sends us back to the server.
+    // The post-ready fetch already read identity and account, so only a model
+    // switch (a different credential) re-reads them; the credential source is
+    // always read fresh, like `/status`.
     let cached = app
         .whoami
         .hit(&app.session.startup_config.active_model)
-        .map(whoami_text);
-    if let Some(text) = cached {
-        add_text(app, &text);
-        return;
-    }
+        .cloned();
     let Some((session_id, tx)) = dispatch(app) else {
+        if let Some(reads) = &cached {
+            add_text(app, &whoami_text(reads, None));
+        }
         return;
     };
-    app.begin_command_loading();
+    if cached.is_none() {
+        app.begin_command_loading();
+    }
     let client = client.clone();
     tokio::spawn(async move {
-        let reads = post_ready::read(&client, &session_id).await;
-        let _ = tx.try_send(CommandEvent::Whoami(reads));
+        let auth = provider_auth::read(&client, &session_id);
+        let (reads, auth) = match cached {
+            Some(reads) => (Some(reads), auth.await),
+            None => tokio::join!(post_ready::read(&client, &session_id), auth),
+        };
+        let _ = tx.try_send(CommandEvent::Whoami { reads, auth });
     });
 }
 
@@ -228,13 +234,19 @@ fn identity_name(identity: &Value, email: Option<&str>) -> Option<String> {
     }
 }
 
-/// The `/whoami` body, or a fallback when no Mistral identity is available.
-pub fn whoami_text(reads: &AccountReads) -> String {
-    let identity = &reads.identity;
-    if identity.is_null() {
-        return "## Who am I\n\nNo Mistral account information is available.".to_owned();
-    }
+/// The `/whoami` body, or a fallback when no Mistral identity is available;
+/// either way it ends with the credential source in use, when known.
+pub fn whoami_text(reads: &AccountReads, auth: Option<&Value>) -> String {
     let mut lines = vec!["## Who am I".to_owned(), String::new()];
+    let source = auth.and_then(provider_auth::active_source_line);
+    if reads.identity.is_null() {
+        lines.push("No Mistral account information is available.".to_owned());
+        if let Some(source) = source {
+            lines.extend([String::new(), source]);
+        }
+        return lines.join("\n");
+    }
+    let identity = &reads.identity;
     let email = identity
         .get("email")
         .and_then(Value::as_str)
@@ -270,5 +282,6 @@ pub fn whoami_text(reads: &AccountReads) -> String {
             lines.push(format!("- **{label}**: {}", literal(value)));
         }
     }
+    lines.extend(source);
     lines.join("\n")
 }

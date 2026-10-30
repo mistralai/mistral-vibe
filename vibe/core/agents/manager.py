@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import TYPE_CHECKING, Final
 
 from vibe.core.agents.diagnostics import excluded_agent_message
@@ -239,6 +240,15 @@ class AgentManager:
         if enabled := self.config.enabled_agents:
             return name_matches(name, enabled)
         return not name_matches(name, self.config.disabled_agents)
+
+    def under(self, orchestrator: ConfigOrchestrator[VibeConfigSchema]) -> AgentManager:
+        """The same agents read against ``orchestrator``, a candidate config:
+        switching there touches neither this manager nor its config.
+        """
+        view = copy.copy(self)
+        view._orchestrator = orchestrator
+        view._forced_agents = set(self._forced_agents)
+        return view
 
     def switch_profile(self, name: str) -> None:
         profile = self.get_agent(name)

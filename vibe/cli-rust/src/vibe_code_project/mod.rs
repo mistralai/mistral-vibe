@@ -154,7 +154,11 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, reply: Reply) {
                     return teleport::continue_pending(app, client, project_id);
                 }
                 if response.view.saved_project_link_cleared {
-                    result(app, teleport::REMOTE_CHANGED_MESSAGE);
+                    local::add_command_warning(
+                        &mut app.view.transcript,
+                        &new_message_id(),
+                        teleport::REMOTE_CHANGED_MESSAGE,
+                    );
                 }
             }
             let state = &mut app.vibe_code_project;
@@ -260,5 +264,5 @@ pub fn select(app: &mut App, client: &Arc<Client>) {
 }
 
 fn result(app: &mut App, text: &str) {
-    local::add_command_result(&mut app.view.transcript, &new_message_id(), text);
+    local::add_command_status(&mut app.view.transcript, &new_message_id(), text);
 }

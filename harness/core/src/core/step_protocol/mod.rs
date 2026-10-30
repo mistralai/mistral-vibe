@@ -15,7 +15,7 @@ pub(crate) use determinism::DeterminismContext;
 pub(crate) use observation::AcceptedToolResult;
 pub(crate) use observation::{
     ActionAbandonedCause, CandidateDiscardCause, Observation, Outcome, ToolDiscoveryKind,
-    ToolDiscoverySummary, Transition, TurnCompletion, TurnStopReason, WarningCode,
+    ToolDiscoverySummary, Transition, TurnStopReason, WarningCode,
 };
 
 use crate::core::capabilities::HarnessCapabilitySet;

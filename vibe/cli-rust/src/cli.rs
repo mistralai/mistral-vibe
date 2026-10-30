@@ -43,7 +43,7 @@ pub struct Cli {
     #[arg(long = "workdir", env = "VIBE_CWD", overrides_with = "cwd")]
     pub cwd: Option<PathBuf>,
 
-    /// Continue from the most recent saved session.
+    /// Continue this terminal's last session in this folder, else the folder's most recent.
     #[arg(short = 'c', long = "continue", action = ArgAction::SetTrue, conflicts_with = "resume", overrides_with = "continue_session")]
     pub continue_session: bool,
 
@@ -102,6 +102,15 @@ pub struct Cli {
     )]
     pub prompt_file: Option<PathBuf>,
 
+    /// Replace Vibe's own system prompt instructions with the text in PATH
+    /// (headless mode only). Project context and AGENTS.md still follow it.
+    #[arg(
+        long = "system-prompt-file",
+        value_name = "PATH",
+        overrides_with = "system_prompt_file"
+    )]
+    pub system_prompt_file: Option<PathBuf>,
+
     /// On every exit, write export.json (Vibe version, effective config,
     /// token usage, cost, stop reason, outcome) and a copy of the session
     /// journal (session/) to DIR.
@@ -113,6 +122,11 @@ pub struct Cli {
     /// config setting.
     #[arg(long = "agent", value_name = "NAME", overrides_with = "agent")]
     pub agent: Option<String>,
+
+    /// Model alias to use instead of 'active_model' (headless mode only, new
+    /// sessions). Not saved as the default.
+    #[arg(long = "model", value_name = "ALIAS", overrides_with = "model")]
+    pub model: Option<String>,
 
     /// Approves all tool calls without prompting for the selected agent.
     #[arg(long = "auto-approve", visible_alias = "yolo", action = ArgAction::SetTrue, overrides_with = "auto_approve")]
@@ -326,25 +340,11 @@ pub enum StartupResume {
     Picker,
     /// `--resume <id>` resumes that exact session.
     ById(String),
-    /// `--continue` resumes the most recent saved session.
+    /// `--continue` resumes the session the server picks for this terminal and folder.
     Continue,
 }
 
-impl StartupResume {
-    /// The saved session this intent attaches, once `--continue` has been
-    /// resolved against the session list. `None` keeps the session
-    /// `session/start` opened.
-    pub fn target(&self, continue_session_id: Option<String>) -> Option<String> {
-        match self {
-            Self::None | Self::Picker => None,
-            Self::ById(id) => Some(id.clone()),
-            Self::Continue => continue_session_id,
-        }
-    }
-}
-
-/// The session a headless run works in: `-c` continues the latest one,
-/// `--resume <id>` that exact one.
+/// The session a headless run works in: `-c` as `--continue` does, `--resume <id>` that exact one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum HeadlessSession {
     #[default]
@@ -364,6 +364,8 @@ pub struct HeadlessOptions {
     pub max_tokens: Option<u64>,
     pub time_limit: Option<f64>,
     pub output_dir: Option<PathBuf>,
+    pub system_prompt: Option<String>,
+    pub model: Option<String>,
     pub agent: Option<String>,
     pub auto_approve: bool,
     pub enabled_tools: Vec<String>,
@@ -388,10 +390,14 @@ pub struct ExecutionControl {
 
 impl Cli {
     /// Resolve the headless paths against the invocation directory, before
-    /// `--workdir` changes it: a relative `--output-dir` or `--prompt-file`
-    /// names what the caller meant.
+    /// `--workdir` changes it: a relative `--output-dir`, `--prompt-file` or
+    /// `--system-prompt-file` names what the caller meant.
     pub fn resolve_headless_paths(&mut self, invocation_cwd: &Path) {
-        for slot in [&mut self.output_dir, &mut self.prompt_file] {
+        for slot in [
+            &mut self.output_dir,
+            &mut self.prompt_file,
+            &mut self.system_prompt_file,
+        ] {
             if let Some(path) = slot.as_mut() {
                 *path = resolve_invocation_path(path, invocation_cwd);
             }
@@ -517,6 +523,14 @@ impl Cli {
             return Err("No prompt provided for programmatic mode".to_owned());
         }
         let session = self.headless_session()?;
+        if self.model.is_some() && session != HeadlessSession::New {
+            return Err("--model only applies to a new session".to_owned());
+        }
+        let system_prompt = self
+            .system_prompt_file
+            .as_deref()
+            .map(crate::headless_prompt::read_system_prompt_file)
+            .transpose()?;
         let execution_control = self.execution_control();
         let worktree = self.worktree_request(Some(prompt.clone()));
         Ok(HeadlessOptions {
@@ -527,6 +541,8 @@ impl Cli {
             max_tokens: self.max_tokens,
             time_limit: self.time_limit,
             output_dir: self.output_dir.clone(),
+            system_prompt,
+            model: self.model.clone(),
             agent: execution_control.agent,
             auto_approve: execution_control.auto_approve,
             enabled_tools: self.enabled_tools.clone(),
@@ -548,6 +564,7 @@ impl Cli {
         &self,
         cwd: Option<String>,
         worktree: Option<WorktreeInput>,
+        terminal_key: Option<String>,
     ) -> Result<AgentConfig> {
         let execution_control = self.execution_control();
         Ok(AgentConfig {
@@ -559,11 +576,13 @@ impl Cli {
             max_turns: None,
             max_price: None,
             max_session_tokens: None,
+            system_prompt: None,
             headless: false,
             // A worktree implies trust.
             trust_workspace: self.trust || worktree.is_some(),
             workspace_roots: crate::utils::paths::resolve_add_dirs(&self.add_dir)?,
             worktree,
+            terminal_key,
         })
     }
 

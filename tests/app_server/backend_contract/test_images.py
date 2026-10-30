@@ -10,13 +10,14 @@ import httpx
 import pytest
 import respx
 
-from tests.mock.utils import mock_llm_chunk
+from mistralai_vibe_local_harness.vibe import UtilityReply
+from tests.mock.utils import utility_reply
 from vibe.app_server import _vision
 from vibe.app_server.models import FileImageSource, ImageAttachment
 from vibe.app_server.protocol import SessionOptions
 from vibe.app_server.session import AppServerSession
 from vibe.core.config import ModelConfig
-from vibe.core.types import LLMChunk, LLMMessage
+from vibe.core.types import LLMMessage
 
 # A valid 1x1 PNG: the Harness reads the file's dimensions to cost the image.
 _PNG = base64.b64decode(
@@ -49,9 +50,9 @@ async def test_a_described_image_reaches_the_model_as_its_description(
 
     async def describe(
         *, model: ModelConfig, messages: Sequence[LLMMessage], **_: object
-    ) -> LLMChunk:
+    ) -> UtilityReply:
         descriptions.append(messages)
-        return mock_llm_chunk(content="a red error dialog")
+        return utility_reply("a red error dialog")
 
     monkeypatch.setattr(_vision, "complete_vision", describe)
     config = backend_contract_session.resources.config

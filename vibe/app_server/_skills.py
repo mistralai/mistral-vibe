@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,9 +22,8 @@ from typing import TYPE_CHECKING
 from pydantic import ValidationError
 
 from vibe.app_server.models import ConfigIssue
-from vibe.core.paths import VIBE_HOME
 from vibe.core.skills.manager import SkillManager
-from vibe.core.skills.models import DISABLE_MODEL_INVOCATION_FIELD, SkillInfo
+from vibe.core.skills.models import SkillInfo
 from vibe.core.tools.builtins.skill import render_skill_result, sample_skill_files
 from vibe.core.utils import name_matches
 
@@ -82,10 +80,7 @@ def discover_session_skills(
     pointed at its copy there, and the project's own skills are those read
     from the sandbox.
     """
-    # The Python builtins reach a unified session as skills of the shipped
-    # `vibe` plugin, so loading them here too would offer each one twice under
-    # two names.
-    manager = SkillManager(config, harness_files=harness_files, include_builtins=False)
+    manager = SkillManager(config, harness_files=harness_files)
     issues = [
         ConfigIssue(file=str(issue.file), message=issue.message)
         for issue in sorted(
@@ -259,11 +254,11 @@ def project_core_skills(  # noqa: PLR0912, PLR0915 - host and sandbox halves of 
             path: str = location.path
             resolved = location.path
         else:
-            host_path = skill.skill_path or _materialize_builtin_skill(skill)
-            if host_path is None:
+            if skill.skill_path is None:
+                logger.warning("Dropped root skill %r: it has no path", name)
                 continue
-            path = str(host_path)
-            resolved = str(_resolved(host_path))
+            path = str(skill.skill_path)
+            resolved = str(_resolved(skill.skill_path))
         if resolved in claimed:
             logger.debug(
                 "Skipping root skill %r at %s: the path is already configured by a plugin",
@@ -291,45 +286,6 @@ def project_core_skills(  # noqa: PLR0912, PLR0915 - host and sandbox halves of 
     )
 
 
-def builtin_skills_dir() -> Path:
-    return VIBE_HOME.path / "builtin-skills"
-
-
-def _materialize_builtin_skill(skill: SkillInfo) -> Path | None:
-    path = builtin_skills_dir() / skill.name / "SKILL.md"
-    content = _render_builtin_skill(skill)
-    try:
-        if path.is_file() and path.read_text(encoding="utf-8") == content:
-            return path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-    except OSError as error:
-        logger.warning(
-            "Dropped builtin skill %r: failed to materialize %s: %s",
-            skill.name,
-            path,
-            error,
-        )
-        return None
-    return path
-
-
-def _render_builtin_skill(skill: SkillInfo) -> str:
-    lines = [
-        "---",
-        f"name: {json.dumps(skill.name)}",
-        f"description: {json.dumps(skill.description)}",
-    ]
-    if skill.allowed_tools:
-        lines.append("allowed-tools: " + json.dumps(list(skill.allowed_tools)))
-    if not skill.user_invocable:
-        lines.append("user-invocable: false")
-    if not skill.model_invocable:
-        lines.append(f"{DISABLE_MODEL_INVOCATION_FIELD}: true")
-    lines.extend(["---", "", skill.prompt, ""])
-    return "\n".join(lines)
-
-
 def _accept_skill(
     name: str, *, description: str, path: str
 ) -> RustSkillDefinition | None:
@@ -351,7 +307,6 @@ def _resolved(path: Path) -> Path:
 
 __all__ = [
     "SkillProjection",
-    "builtin_skills_dir",
     "discover_session_skills",
     "project_core_skills",
     "project_model_invocable_plugin_contexts",

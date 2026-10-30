@@ -6,27 +6,24 @@ use serde_json::{json, Value};
 
 use super::{back, rows, Event, TOAST_SECS};
 use crate::app::{App, ToastSeverity};
-use crate::input::deliver;
 use crate::server::{method, Client, MCPSourceKind};
 
 /// Connect `name`; its detail view reads `Connecting...` until the answer lands.
 pub(super) fn start(app: &mut App, client: &Arc<Client>, name: String) {
-    let (Some(session_id), Some(tx)) = (app.session.session_id.clone(), app.mcp.tx.clone()) else {
+    let Some(session_id) = app.session.session_id.clone() else {
         return;
     };
     app.mcp.connecting = Some(name.clone());
     let client = client.clone();
-    let pending = app.commit_started();
-    tokio::spawn(async move {
+    crate::ui_event::spawn(app, async move {
         let params = json!({"sessionId": session_id, "alias": name});
-        let event = match client.request_err(method::CONNECTOR_CONNECT, params).await {
+        match client.request_err(method::CONNECTOR_CONNECT, params).await {
             Ok(response) => Event::Connected { name, response },
             Err(error) => Event::ConnectFailed {
                 name,
                 message: error.message,
             },
-        };
-        deliver(Some(tx), event, &pending).await;
+        }
     });
 }
 

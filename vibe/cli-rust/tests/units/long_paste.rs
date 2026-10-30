@@ -1,12 +1,12 @@
 //! Long pastes: collapse criterion, atomic placeholder, expansion on re-paste and submit.
 
-use std::sync::Arc;
-
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyCode;
 use vibe_rs::app::App;
 use vibe_rs::input::handle_paste;
 use vibe_rs::input_modes::InputMode;
 use vibe_rs::long_paste::{is_long, placeholder, HINT, MAX_INLINE_CHARS, MAX_INLINE_LINES};
+
+use crate::support::{ctrl, press, send_key};
 
 fn lines(count: usize) -> String {
     (0..count)
@@ -67,13 +67,10 @@ fn pasting_the_same_text_right_away_shows_it_in_full() {
 #[test]
 fn typing_ends_the_offer_so_the_same_paste_collapses_again() {
     let mut app = App::default();
-    let client = Arc::new(vibe_rs::server::Client::stub());
-    let (config_tx, _config_rx) = tokio::sync::mpsc::channel(1);
     let text = lines(30);
     handle_paste(&mut app, text.clone());
 
-    let typed = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
-    vibe_rs::input::handle_key(&mut app, &client, &config_tx, typed);
+    press(&mut app, KeyCode::Char('x'));
 
     assert!(app.overlays.notice.is_none());
     assert!(app.chat_input.expandable_paste.is_none());
@@ -155,13 +152,11 @@ fn a_rewound_slash_prompt_keeps_its_prefix_out_of_the_offsets() {
 #[test]
 fn the_same_paste_sent_three_times_stays_three_placeholders() {
     let mut app = App::default();
-    let client = Arc::new(vibe_rs::server::Client::stub());
-    let (config_tx, _config_rx) = tokio::sync::mpsc::channel(1);
-    let newline = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+    let newline = ctrl('j');
     let text = format!("{}\n", lines(12));
     for index in 0..3 {
         if index > 0 {
-            vibe_rs::input::handle_key(&mut app, &client, &config_tx, newline);
+            send_key(&mut app, newline);
         }
         handle_paste(&mut app, text.clone());
     }

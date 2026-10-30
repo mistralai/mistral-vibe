@@ -50,13 +50,16 @@ async def test_fetch_whoami_returns_result_on_success(respx_mock) -> None:
         vibe_base="https://chat.acme",
     )
     assert result is not None
-    assert result.primitive_access_scope is None
+    assert result.can_access_private_resources is None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scope", ["shared_only", "personal_and_shared"])
-async def test_fetch_whoami_parses_primitive_access_scope(
-    respx_mock, scope: str
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    [("shared_only", False), ("personal_and_shared", True), ("future_scope", None)],
+)
+async def test_fetch_whoami_maps_primitive_access_scope(
+    respx_mock, scope: str, expected: bool | None
 ) -> None:
     respx_mock.get("https://console.test/api/vibe/whoami").mock(
         return_value=httpx.Response(
@@ -72,7 +75,26 @@ async def test_fetch_whoami_parses_primitive_access_scope(
     result = await fetch_whoami("https://console.test", "secret")
 
     assert result is not None
-    assert result.primitive_access_scope == scope
+    assert result.can_access_private_resources is expected
+
+
+@pytest.mark.asyncio
+async def test_fetch_whoami_ignores_account_context_field_on_whoami(respx_mock) -> None:
+    respx_mock.get("https://console.test/api/vibe/whoami").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "plan_type": "API",
+                "plan_name": "FREE",
+                "can_access_private_resources": True,
+            },
+        )
+    )
+
+    result = await fetch_whoami("https://console.test", "secret")
+
+    assert result is not None
+    assert result.can_access_private_resources is None
 
 
 @pytest.mark.asyncio
@@ -343,6 +365,64 @@ async def test_resolve_tenant_domains_adopts_only_api_base_with_origin_rewrite_o
     )
 
     assert new_provider.api_base == "https://api.tenant.acme/v1"
+    assert new_vibe == "https://vibe.configured"
+
+
+@pytest.mark.asyncio
+async def test_resolve_tenant_domains_preserves_api_base_when_opted_in(
+    respx_mock,
+) -> None:
+    # Split-horizon opt-out: the configured api_base is a proxy the CLI must
+    # keep using even though whoami advertises the tenant's public host. The
+    # chat URL is still adopted.
+    respx_mock.get("https://connector.acme:443/api/vibe/whoami").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "plan_type": "API",
+                "plan_name": "FREE",
+                "api_base": "https://api.tenant.acme",
+                "vibe_base": "https://chat.tenant.acme",
+            },
+        )
+    )
+    provider = _mistral_provider().model_copy(
+        update={"api_base": "https://connector.acme:443/v1", "preserve_api_base": True}
+    )
+
+    new_provider, new_vibe = await resolve_tenant_domains(
+        provider, "https://connector.acme:443", "secret", "https://vibe.configured"
+    )
+
+    assert new_provider.api_base == "https://connector.acme:443/v1"
+    assert new_vibe == "https://chat.tenant.acme"
+
+
+@pytest.mark.asyncio
+async def test_resolve_tenant_domains_preserve_flag_keeps_provider_untouched(
+    respx_mock,
+) -> None:
+    # Per-field contract: with the flag on and only api_base advertised, the
+    # provider object comes back unchanged (no partial update, no defaulting).
+    respx_mock.get("https://connector.acme:443/api/vibe/whoami").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "plan_type": "API",
+                "plan_name": "FREE",
+                "api_base": "https://api.tenant.acme",
+            },
+        )
+    )
+    provider = _mistral_provider().model_copy(
+        update={"api_base": "https://connector.acme:443/v1", "preserve_api_base": True}
+    )
+
+    new_provider, new_vibe = await resolve_tenant_domains(
+        provider, "https://connector.acme:443", "secret", "https://vibe.configured"
+    )
+
+    assert new_provider == provider  # untouched
     assert new_vibe == "https://vibe.configured"
 
 

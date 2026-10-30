@@ -18,6 +18,7 @@ from tests.constants import (
     MISTRAL_BASE_URL,
 )
 from vibe.app_server._loop_prompt import LOOP_INSTRUCTIONS, project_loop_preview
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.models import PublicMessageEntry
 from vibe.app_server.protocol import (
     ClientCapabilities,
@@ -80,7 +81,11 @@ def test_preview_truncated_inside_opening_marker(marker_chars: int) -> None:
     ],
 )
 async def test_loop_preview_is_clean_live_stored_listed_and_resumed(
-    config_dir: Path, tmp_path: Path, respx_mock: respx.MockRouter, prompt: str
+    config_dir: Path,
+    tmp_path: Path,
+    respx_mock: respx.MockRouter,
+    prompt: str,
+    process_services: ProcessServices,
 ) -> None:
     config_path = config_dir / "config.toml"
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
@@ -101,7 +106,9 @@ async def test_loop_preview_is_clean_live_stored_listed_and_resumed(
         )
     )
     connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     session = await connection.host.open_session()
     try:
@@ -117,7 +124,9 @@ async def test_loop_preview_is_clean_live_stored_listed_and_resumed(
         await session.close()
 
     passive = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         listed = await passive.host.list_sessions()

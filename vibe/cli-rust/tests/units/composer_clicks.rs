@@ -1,51 +1,34 @@
 //! Composer clicks through the mouse router: chain wrap, drag reset, right clicks.
 
-use std::sync::Arc;
-
-use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 
 use vibe_rs::app::App;
 use vibe_rs::chat_input::selection_range;
-use vibe_rs::config;
 use vibe_rs::mouse::{self, MouseTarget};
-use vibe_rs::server::Client;
+
+use crate::support::{mouse, send_mouse};
 
 const TEXT: &str = "hello world foo";
 const ROW: u16 = 11;
 
 struct Composer {
     app: App,
-    client: Arc<Client>,
-    config_tx: tokio::sync::mpsc::Sender<config::Loaded>,
-    _config_rx: tokio::sync::mpsc::Receiver<config::Loaded>,
 }
 
 impl Composer {
     fn new() -> Self {
-        let (config_tx, _config_rx) = tokio::sync::mpsc::channel(1);
         let mut app = App::default();
         let area = Rect::new(0, 10, 40, 3);
         app.view.input_area = area;
         mouse::register_region(&mut app, area, MouseTarget::Composer);
         app.chat_input.input = TEXT.to_owned();
         app.chat_input.cursor = TEXT.len();
-        Self {
-            app,
-            client: Arc::new(Client::stub()),
-            config_tx,
-            _config_rx,
-        }
+        Self { app }
     }
 
     fn send(&mut self, kind: MouseEventKind, offset: u16) {
-        let event = MouseEvent {
-            kind,
-            column: offset + 2,
-            row: ROW,
-            modifiers: KeyModifiers::NONE,
-        };
-        mouse::handle(&mut self.app, &self.client, &self.config_tx, event);
+        send_mouse(&mut self.app, mouse(kind, offset + 2, ROW));
     }
 
     fn click(&mut self, offset: u16) {

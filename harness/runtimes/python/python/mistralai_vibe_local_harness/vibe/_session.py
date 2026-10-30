@@ -25,6 +25,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustFailTurnEvent,
     RustHarnessCapabilitySet,
     RustHarnessConfig,
+    RustHarnessHookBinding,
     RustImageContentBlock,
     RustPluginContextDefinition,
     RustProtocolError,
@@ -412,6 +413,22 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             and self._session_metadata.subagent_spawn_key is not None
         )
 
+    def _hook_bindings(self) -> list[RustHarnessHookBinding]:
+        """The hook bindings this session was started or last resumed with."""
+        if self._session_metadata is not None:
+            return list(self._session_metadata.hook_bindings)
+        if self._runtime is not None:
+            return list(self._runtime.runtime_state.session_metadata.hook_bindings)
+        return []
+
+    @property
+    def started_by_session_id(self) -> str | None:
+        if self._session_metadata is not None:
+            return self._session_metadata.started_by_session_id
+        if self._runtime is not None:
+            return self._runtime.runtime_state.session_metadata.started_by_session_id
+        return None
+
     def pin(self, pin: SessionPin) -> str | None:
         """The value stored for a session pin (see ``SessionPin``)."""
         if self._session_metadata is not None:
@@ -512,8 +529,24 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         return self._reserved_turn_id
 
     @property
-    def _has_active_work(self) -> bool:
-        if self._reserved_turn_id is not None or self._turn_queue:
+    def turn_waits(self) -> bool:
+        """A queued turn would wait: a turn runs or is reserved, or others are
+        queued ahead of it.
+        """
+        return (
+            self.active_turn_id is not None
+            or self._reserved_turn_id is not None
+            or bool(self._turn_queue)
+        )
+
+    @property
+    def has_active_work(self) -> bool:
+        """A turn runs, is reserved or queued, or work it started still runs:
+        a background process, a title being written.
+        """
+        if self.active_turn_id is not None or self._reserved_turn_id is not None:
+            return True
+        if self._turn_queue:
             return True
         if self._queue_drain_task is not None and not self._queue_drain_task.done():
             return True
@@ -795,7 +828,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         """Move an idle Session and persist the cwd with its public checkpoint."""
         async with self._lifecycle_lock:
             self._reject_compaction()
-            if self._has_active_work:
+            if self.has_active_work:
                 raise HarnessSessionBusyError(self._session_id)
             destination = config.local.workspace
             if destination == self._workspace:
@@ -1182,7 +1215,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         push_to_core: bool = True,
         cached_only: bool = False,
     ) -> MCPRouteSnapshot:
-        self._reject_active_turn()
+        self._reject_integration_change()
         return await self._require_mcp_runtime().reconfigure(
             configuration,
             force_remote_discovery=force_remote_discovery,
@@ -1223,7 +1256,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     async def suspend_mcp(
         self, *, name: str, tool_name: str | None
     ) -> MCPRouteSnapshot:
-        self._reject_active_turn()
+        self._reject_integration_change()
         return await self._require_mcp_runtime().suspend(name=name, tool_name=tool_name)
 
     async def read_connectors(self) -> ConnectorRouteSnapshot:
@@ -1236,15 +1269,12 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         *,
         push_to_core: bool = True,
     ) -> ConnectorRouteSnapshot:
-        # Before promotion no Core holds the routes: a reserved turn's Runtime
-        # is built from this snapshot, so changing it cannot split a turn.
-        # During promotion the Runtime is being built from it, so it can.
         # Routes alone, kept from Core, are like discover_pending_mcp: any
         # turn can take them, and they reach Core with the next push.
-        if self._promotion_conflict_id is not None:
+        if push_to_core:
+            self._reject_integration_change()
+        elif self._promotion_conflict_id is not None:
             raise HarnessTurnConflictError(self._promotion_conflict_id)
-        if self._runtime is not None and push_to_core:
-            self._reject_active_turn()
         return await self._require_connector_runtime().reconfigure(
             catalog, selection, push_to_core=push_to_core
         )
@@ -2152,7 +2182,9 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         if callback is not None:
             if _field(result, "error", default=None) is not None:
                 self._closed_callback_ids.add(callback_id)
-            self._publish_event(_callback_resolved_event(callback, result))
+            resolved = _callback_resolved_event(callback, result)
+            self._publish_event(resolved)
+            await self._record_settled_user_input(resolved)
             self._publish_session_state_update()
         if approval_waiter is not None and not approval_waiter.done():
             approval_waiter.set_result(grant)
@@ -2508,7 +2540,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         """Reject a move before its destination plugins are materialized."""
         async with self._lifecycle_lock:
             self._reject_compaction()
-            if self._has_active_work:
+            if self.has_active_work:
                 raise HarnessSessionBusyError(self._session_id)
             if self._runtime is None:
                 binding = self._pending_plugin_binding or empty_plugin_binding()
@@ -2931,6 +2963,26 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             if self._open_callbacks.pop(callback_id, None) is not None:
                 self._publish_session_state_update()
 
+    async def _record_settled_user_input(self, resolved_event: JsonObject) -> None:
+        """Keep a settled question in durable history so a reopened session shows it.
+
+        The record is for display only: a failed write must not keep the
+        answer from the turn waiting on it.
+        """
+        callback = cast(JsonObject, resolved_event["callback"])
+        runtime = self._runtime
+        detail = cast(JsonObject, callback["detail"])
+        if runtime is None or detail["kind"] != "user_input":
+            return
+        try:
+            await runtime.append_public_history_entries([callback])
+        except Exception:
+            logger.warning(
+                "Settled question not kept in history",
+                extra={"session_id": self._session_id},
+                exc_info=True,
+            )
+
     async def _interrupt_active_turn_from_callback(
         self, callback: JsonObject | None
     ) -> None:
@@ -2972,12 +3024,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         turn_id = self._turn_task_ids.get(task)
         if runtime is None or turn_id is None:
             return False
-        latest_turn = runtime.projection.latest_turn
-        return (
-            latest_turn is not None
-            and latest_turn.id == turn_id
-            and latest_turn.status != "in_progress"
-        )
+        return runtime.turn_has_ended(turn_id)
 
     async def _close_open_callbacks(self, reason: str) -> None:
         # Answering and closing share one claim until persistence and local state
@@ -3004,7 +3051,9 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         self._open_callbacks = {}
         self._closed_callback_ids.update(callbacks)
         for callback in callbacks.values():
-            self._publish_event(_callback_cancelled_event(callback, reason))
+            cancelled = _callback_cancelled_event(callback, reason)
+            self._publish_event(cancelled)
+            await self._record_settled_user_input(cancelled)
         for waiter in self._approval_waiters.values():
             if not waiter.done():
                 waiter.set_result(ApprovalGrant.DENY)
@@ -3054,6 +3103,18 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+
+    def _reject_integration_change(self) -> None:
+        """Refuse an MCP or connector change that could split a turn.
+
+        Before promotion no Core holds the routes: a reserved turn's Runtime is
+        built from these snapshots, so changing them cannot split a turn.
+        During promotion the Runtime is being built from them, so it can.
+        """
+        if self._promotion_conflict_id is not None:
+            raise HarnessTurnConflictError(self._promotion_conflict_id)
+        if self._runtime is not None:
+            self._reject_active_turn()
 
     def _reject_active_turn(self) -> None:
         if self._promotion_conflict_id is not None:

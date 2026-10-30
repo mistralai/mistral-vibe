@@ -14,6 +14,7 @@ import pytest
 from vibe.app_server._connection_protocol import ClientInfo
 from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server._host import HostRequestHandler
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.protocol import SkillsListParams, SkillsListResponse
 from vibe.core.config.harness_files import HarnessFilesManager
 
@@ -41,7 +42,7 @@ async def _list(handler: HostRequestHandler, params: SkillsListParams) -> list[s
 
 @pytest.mark.asyncio
 async def test_lists_a_trusted_projects_skills_without_a_session(
-    tmp_path: Path,
+    tmp_path: Path, process_services: ProcessServices
 ) -> None:
     """Prepare a project skill.
 
@@ -51,7 +52,9 @@ async def test_lists_a_trusted_projects_skills_without_a_session(
     """
     _write_skill(tmp_path, "code-review", "Review a diff.")
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user", "project")), builtin_plugin_roots=[]
+        HarnessFilesManager(sources=("user", "project")),
+        builtin_plugin_roots=[],
+        org_config=process_services.org_config,
     )
 
     names = await _list(
@@ -62,7 +65,9 @@ async def test_lists_a_trusted_projects_skills_without_a_session(
 
 
 @pytest.mark.asyncio
-async def test_does_not_list_an_untrusted_projects_skills(tmp_path: Path) -> None:
+async def test_does_not_list_an_untrusted_projects_skills(
+    tmp_path: Path, process_services: ProcessServices
+) -> None:
     """Prepare a project skill in a folder nobody trusted.
 
     Do list skills for it without asking for trust.
@@ -71,7 +76,9 @@ async def test_does_not_list_an_untrusted_projects_skills(tmp_path: Path) -> Non
     """
     _write_skill(tmp_path, "code-review", "Review a diff.")
     harness_files = HarnessFilesManager(sources=("user", "project"))
-    handler = HostRequestHandler(harness_files, builtin_plugin_roots=[])
+    handler = HostRequestHandler(
+        harness_files, builtin_plugin_roots=[], org_config=process_services.org_config
+    )
 
     names = await _list(handler, SkillsListParams(cwd=str(tmp_path)))
 
@@ -79,7 +86,9 @@ async def test_does_not_list_an_untrusted_projects_skills(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_trust_for_a_listing_does_not_outlive_it(tmp_path: Path) -> None:
+async def test_trust_for_a_listing_does_not_outlive_it(
+    tmp_path: Path, process_services: ProcessServices
+) -> None:
     """Prepare a project skill and list it with workspace trust.
 
     Do list again without trust.
@@ -88,7 +97,9 @@ async def test_trust_for_a_listing_does_not_outlive_it(tmp_path: Path) -> None:
     """
     _write_skill(tmp_path, "code-review", "Review a diff.")
     harness_files = HarnessFilesManager(sources=("user", "project"))
-    handler = HostRequestHandler(harness_files, builtin_plugin_roots=[])
+    handler = HostRequestHandler(
+        harness_files, builtin_plugin_roots=[], org_config=process_services.org_config
+    )
 
     await _list(handler, SkillsListParams(cwd=str(tmp_path), trust_workspace=True))
     names = await _list(handler, SkillsListParams(cwd=str(tmp_path)))
@@ -98,8 +109,12 @@ async def test_trust_for_a_listing_does_not_outlive_it(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_named_session_is_not_the_hosts_to_answer() -> None:
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+async def test_a_named_session_is_not_the_hosts_to_answer(
+    process_services: ProcessServices,
+) -> None:
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     with pytest.raises(RequestFailure):
         await handler.dispatch(

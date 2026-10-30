@@ -1,4 +1,4 @@
-"""ANSI-light selection over a thought disclosure header uses the ALABASTER blend."""
+"""ANSI-light selection over a thought disclosure header keeps the selection background."""
 
 from __future__ import annotations
 

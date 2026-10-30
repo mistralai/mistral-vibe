@@ -14,7 +14,8 @@ use crate::server::{method, Client};
 /// Shown when a running turn parks a saved pick until it ends.
 pub const PARKED_MESSAGE: &str = "Saved; it applies when the current turn ends.";
 
-/// The canonical five, used until the server sends the model's own set.
+/// The server's default set, used until it sends the model's own: a server
+/// offers whatever levels the model's config lists, as written.
 pub const THINKING_LEVELS: [&str; 5] = ["off", "low", "medium", "high", "max"];
 
 /// A `/model` pick waiting on its thinking level.
@@ -36,7 +37,6 @@ impl Default for ThinkingPicker {
             // Skew-safe default until the server sends the model's set.
             levels: THINKING_LEVELS.iter().map(|it| it.to_string()).collect(),
             model_pick: None,
-            tx: None,
         }
     }
 }
@@ -69,7 +69,6 @@ pub fn apply_event(app: &mut App, event: Event) {
             crate::transcript::local::add_command_error(&mut app.view.transcript, &id, &error);
         }
     }
-    app.commit_finished();
 }
 
 /// Open the picker highlighted on the current thinking level.
@@ -198,14 +197,12 @@ fn commit(
         return;
     };
     let client = client.clone();
-    let thinking_tx = app.thinking_picker.tx.clone();
-    let pending = app.commit_started();
-    tokio::spawn(async move {
+    crate::ui_event::spawn(app, async move {
         let written =
             crate::model_enforcement::write(&client, &session_id, saved, ops, reason).await;
         // Only a clean, applied write is worth reloading: `config/reload` is
         // idle-only, so a parked pick would read as failed.
-        let event = match written {
+        match written {
             Err(error) => failed(&failure_prefix, &error),
             Ok(true) => Event::Parked,
             Ok(false) => {
@@ -223,8 +220,7 @@ fn commit(
                     ),
                 }
             }
-        };
-        crate::input::deliver(thinking_tx, event, &pending).await;
+        }
     });
 }
 
@@ -255,35 +251,24 @@ pub fn apply_runtime(app: &mut App, response: &Value) {
     if app.thinking_picker.model_pick.is_some() {
         return;
     }
-    if let Some(level) = response
-        .pointer("/runtime/config/activeModel/thinking")
-        .and_then(Value::as_str)
-    {
-        app.thinking_picker.current_level = level.to_owned();
+    let Some(model) = crate::server::RuntimeSnapshot::config(response).and_then(|c| c.active_model)
+    else {
+        return;
+    };
+    if let Some(level) = model.thinking {
+        app.thinking_picker.current_level = level;
     }
-    let levels = response
-        .pointer("/runtime/config/activeModel/thinkingLevels")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        });
+    let levels = model.thinking_levels;
     // An absent or empty array keeps the previous set (defensive only: the
     // server normalizes [] before it reaches the wire). Only a genuinely new
     // set re-anchors the highlight — runtime pushes arrive for unrelated
     // config changes too, and must not move the user's selection — and keeps
     // `selected` indexing into `levels`.
-    if let Some(levels) = levels.filter(|it: &Vec<String>| !it.is_empty()) {
-        if levels != app.thinking_picker.levels {
-            let current = app.thinking_picker.current_level.clone();
-            app.thinking_picker
-                .list
-                .highlight(index_of(&levels, &current));
-            app.thinking_picker.levels = levels;
-        }
+    if !levels.is_empty() && levels != app.thinking_picker.levels {
+        let current = &app.thinking_picker.current_level;
+        let index = index_of(&levels, current);
+        app.thinking_picker.list.highlight(index);
+        app.thinking_picker.levels = levels;
     }
 }
 

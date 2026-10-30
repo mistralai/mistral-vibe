@@ -5,8 +5,10 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use vibe_rs::key_burst::{KeyBurst, KEY_GAP, PASTE_GAP};
 
+use crate::support::{ctrl, key};
+
 fn press(code: KeyCode) -> Event {
-    Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    Event::Key(key(code))
 }
 
 fn release(code: KeyCode) -> Event {
@@ -108,7 +110,7 @@ fn non_text_key_flushes_the_burst_first() {
 #[test]
 fn shortcuts_are_never_absorbed() {
     let mut bursts = KeyBurst::default();
-    let ctrl_c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    let ctrl_c = Event::Key(ctrl('c'));
 
     let out = bursts.push(vec![ctrl_c.clone()], Instant::now());
 

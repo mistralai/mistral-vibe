@@ -100,16 +100,14 @@ fn start_login(app: &mut App, client: &Arc<Client>) {
     app.mcp_oauth.generation += 1;
     let generation = app.mcp_oauth.generation;
     let name = app.mcp_oauth.server_name.clone();
-    let (Some(session_id), Some(tx)) = (app.session.session_id.clone(), app.mcp_oauth.tx.clone())
-    else {
+    let Some(session_id) = app.session.session_id.clone() else {
         return;
     };
     let client = client.clone();
     // The login answer repaints the bottom app, so hold the replay marker with a
     // commit until it lands (mirrors `connector_auth`), else the capture races
     // the "Preparing authentication..." placeholder.
-    let pending = app.commit_started();
-    tokio::spawn(async move {
+    crate::ui_event::spawn(app, async move {
         let error = client
             .request(
                 method::MCP_LOGIN,
@@ -118,7 +116,7 @@ fn start_login(app: &mut App, client: &Arc<Client>) {
             .await
             .err()
             .map(|error| error.to_string());
-        crate::input::deliver(Some(tx), Event { generation, error }, &pending).await;
+        Event { generation, error }
     });
 }
 
@@ -133,7 +131,6 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             }
         }
     }
-    app.commit_finished();
 }
 
 /// The `mcp/authUrl` notification of the running login.

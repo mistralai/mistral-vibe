@@ -16,7 +16,8 @@ from vibe.app_server._connection_protocol import (
 )
 from vibe.app_server._model import validate_wire
 from vibe.app_server._platform_credentials import ConnectionPlatformCredentialProvider
-from vibe.app_server._runtime import create_harness_server
+from vibe.app_server._process_services import ProcessServices
+from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.protocol import (
     IdentityReadParams,
@@ -171,9 +172,15 @@ async def test_unavailable_response_never_falls_back_to_an_api_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_app_server_resolves_host_credentials_over_json_rpc() -> None:
+async def test_app_server_resolves_host_credentials_over_json_rpc(
+    process_services: ProcessServices,
+) -> None:
     client_transport, server_transport = memory_transport_pair()
-    server = await create_harness_server(server_transport, transport_kind="in_process")
+    server = await create_harness_server(
+        server_transport,
+        transport_kind="in_process",
+        process=HarnessProcess(services=process_services),
+    )
     client = AppServerClient(client_transport, run_peer=server.serve)
     await client.initialize(
         ClientInfo(name="desktop-test", version="1", entrypoint="desktop"),
@@ -239,11 +246,15 @@ async def test_app_server_resolves_host_credentials_over_json_rpc() -> None:
 
 @pytest.mark.asyncio
 async def test_connection_without_capability_keeps_api_key_mode(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "cli-api-key")
     client_transport, server_transport = memory_transport_pair()
-    server = await create_harness_server(server_transport, transport_kind="in_process")
+    server = await create_harness_server(
+        server_transport,
+        transport_kind="in_process",
+        process=HarnessProcess(services=process_services),
+    )
     client = AppServerClient(client_transport, run_peer=server.serve)
     await client.initialize(ClientInfo(name="cli-test", version="1", entrypoint="cli"))
     await client.notify("initialized")
@@ -261,13 +272,16 @@ async def test_connection_without_capability_keeps_api_key_mode(
 
 @pytest.mark.asyncio
 async def test_identity_read_uses_connection_oauth_credentials(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "api-key-that-must-not-be-used")
     gateway = _ResolvingIdentityGateway()
     client_transport, server_transport = memory_transport_pair()
     server = await create_harness_server(
-        server_transport, transport_kind="in_process", identity_gateway=gateway
+        server_transport,
+        transport_kind="in_process",
+        identity_gateway=gateway,
+        process=HarnessProcess(services=process_services),
     )
     client = AppServerClient(client_transport, run_peer=server.serve)
     requests: list[PlatformCredentialsResolveParams] = []
@@ -345,13 +359,16 @@ async def test_identity_read_uses_connection_oauth_credentials(
 
 @pytest.mark.asyncio
 async def test_identity_read_without_capability_keeps_api_key_credentials(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "cli-identity-api-key")
     gateway = _ResolvingIdentityGateway()
     client_transport, server_transport = memory_transport_pair()
     server = await create_harness_server(
-        server_transport, transport_kind="in_process", identity_gateway=gateway
+        server_transport,
+        transport_kind="in_process",
+        identity_gateway=gateway,
+        process=HarnessProcess(services=process_services),
     )
     client = AppServerClient(client_transport, run_peer=server.serve)
     session_id: str | None = None

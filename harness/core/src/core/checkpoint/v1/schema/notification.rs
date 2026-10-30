@@ -6,30 +6,15 @@ use crate::core::features::notifications::{
     AsyncToolNotificationStatus, NotificationLevel, NotificationSource, ProcessTerminalStatus,
     SubagentNotificationStatus,
 };
-use crate::core::helpers::AgentMessageKind;
 use crate::core::wire::content::ContentBlock;
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+/// The kind that earlier checkpoints record for queued agent input. Only messages are queued
+/// now, so a saved queued task restores as a message from the same sender.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-enum CheckpointAgentMessageKind {
+enum SavedAgentMessageKind {
     Task,
     Message,
-}
-
-impl CheckpointAgentMessageKind {
-    fn capture(kind: &AgentMessageKind) -> Self {
-        match kind {
-            AgentMessageKind::Task => Self::Task,
-            AgentMessageKind::Message => Self::Message,
-        }
-    }
-
-    fn restore(self) -> AgentMessageKind {
-        match self {
-            Self::Task => AgentMessageKind::Task,
-            Self::Message => AgentMessageKind::Message,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
@@ -115,7 +100,8 @@ impl CheckpointAsyncToolNotificationStatus {
 enum CheckpointNotificationSource {
     AgentMessage {
         sender_agent_path: String,
-        kind: CheckpointAgentMessageKind,
+        #[serde(default, skip_serializing)]
+        kind: Option<SavedAgentMessageKind>,
     },
     AgentResult {
         sender_agent_path: String,
@@ -140,12 +126,9 @@ enum CheckpointNotificationSource {
 impl CheckpointNotificationSource {
     fn capture(source: &NotificationSource) -> Self {
         match source {
-            NotificationSource::AgentMessage {
-                sender_agent_path,
-                kind,
-            } => Self::AgentMessage {
+            NotificationSource::AgentMessage { sender_agent_path } => Self::AgentMessage {
                 sender_agent_path: sender_agent_path.clone(),
-                kind: CheckpointAgentMessageKind::capture(kind),
+                kind: None,
             },
             NotificationSource::AgentResult {
                 sender_agent_path,
@@ -178,11 +161,8 @@ impl CheckpointNotificationSource {
         match self {
             Self::AgentMessage {
                 sender_agent_path,
-                kind,
-            } => NotificationSource::AgentMessage {
-                sender_agent_path,
-                kind: kind.restore(),
-            },
+                kind: _,
+            } => NotificationSource::AgentMessage { sender_agent_path },
             Self::AgentResult {
                 sender_agent_path,
                 termination,

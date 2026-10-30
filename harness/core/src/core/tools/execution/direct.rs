@@ -223,7 +223,8 @@ mod tests {
         let message = step.state.context.messages().last().unwrap();
         assert_eq!(message_role(&message.message), Role::Tool);
         assert!(message_text(message).contains("InvalidToolCall"));
-        assert!(message_text(message).contains("at most 10 items"));
+        assert!(message_text(message).contains("at /connectors:"));
+        assert!(message_text(message).contains("has more than 10 items"));
     }
 
     #[test]

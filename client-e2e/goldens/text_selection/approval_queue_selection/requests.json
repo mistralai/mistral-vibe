@@ -31,7 +31,6 @@
   "params": {
    "result": {
     "callbackId": "callback-first",
-    "error": null,
     "output": {
      "decision": {
       "type": "approve"

@@ -15,13 +15,11 @@ repos:
       - id: end-of-file-fixer
         exclude: |
           (?x)^(
-            tests/snapshots/.*\.svg$|
             client-e2e/goldens/.*\.svg$
           )
       - id: trailing-whitespace
         exclude: |
           (?x)^(
-            tests/snapshots/.*\.svg$|
             client-e2e/goldens/.*\.svg$
           )
 
@@ -46,7 +44,6 @@ repos:
         args: [--write-changes]
         exclude: |
           (?x)^(
-            __snapshots__/.*\.svg$|
             client-e2e/goldens/.*\.svg$
           )
 

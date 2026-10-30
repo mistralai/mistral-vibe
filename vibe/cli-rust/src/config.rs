@@ -267,7 +267,7 @@ pub(crate) fn write(
     };
     let client = client.clone();
     let tx = tx.clone();
-    let runtime_tx = app.model_picker.tx.clone();
+    let events_tx = app.events.clone();
     let pending = app.commit_started();
     let op = op.to_owned();
     tokio::spawn(async move {
@@ -292,7 +292,7 @@ pub(crate) fn write(
             }
         };
         let failed = matches!(event, model_picker::Event::Failed(_));
-        crate::input::deliver(runtime_tx, event, &pending).await;
+        crate::input::deliver(events_tx, event, &pending).await;
         // A failed write may still have moved layers; its toast already reports the failure.
         load(session_id, &client, &tx, !failed);
     });

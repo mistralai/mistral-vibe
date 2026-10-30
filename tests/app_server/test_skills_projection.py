@@ -15,7 +15,6 @@ import pytest
 
 from vibe.app_server._skills import (
     SkillProjection,
-    builtin_skills_dir,
     discover_session_skills,
     project_core_skills,
 )
@@ -315,96 +314,20 @@ def test_a_skill_core_would_reject_is_dropped_without_taking_the_others_down() -
     assert set(projection.payloads) == {"review"}
 
 
-def test_builtin_skills_are_written_to_disk_so_core_has_an_honest_path() -> None:
-    """Prepare the shipped builtins, which carry no ``skill_path``.
+def test_a_root_skill_without_a_path_is_dropped_not_raised() -> None:
+    """Prepare a pathless root skill.
 
-    Do project them.
+    Do project it.
 
-    Assert each got a real ``SKILL.md``. Core requires the path to end in
-    ``SKILL.md`` and the prompt tells the model those paths are readable, so a
-    fabricated one would be a lie the model can act on.
+    Assert nothing raises and no definition survives. A skill the session
+    cannot point at on disk is a degraded session, not a dead one.
     """
-    from vibe.core.skills.builtins import BUILTIN_SKILLS
-
     projection = project_core_skills(
-        BUILTIN_SKILLS, plugin_skills={}, plugin_contexts=[]
-    )
-
-    assert {definition.name for definition in projection.definitions} == set(
-        BUILTIN_SKILLS
-    )
-    for definition in projection.definitions:
-        path = Path(definition.path)
-        assert path.is_file()
-        assert path.parent.parent == builtin_skills_dir()
-        assert BUILTIN_SKILLS[definition.name].prompt in path.read_text(
-            encoding="utf-8"
-        )
-
-
-def test_materializing_a_builtin_twice_leaves_the_file_alone() -> None:
-    """Prepare a projection that has already run once.
-
-    Do project again.
-
-    Assert the file was not rewritten. Every derivation re-projects, and a
-    rewrite per derivation would churn mtimes a file watcher reacts to.
-    """
-    from vibe.core.skills.builtins import BUILTIN_SKILLS
-
-    first = project_core_skills(BUILTIN_SKILLS, plugin_skills={}, plugin_contexts=[])
-    path = Path(first.definitions[0].path)
-    stamp = path.stat().st_mtime_ns
-
-    second = project_core_skills(BUILTIN_SKILLS, plugin_skills={}, plugin_contexts=[])
-
-    assert Path(second.definitions[0].path) == path
-    assert path.stat().st_mtime_ns == stamp
-
-
-def test_a_builtin_that_cannot_be_written_is_dropped_not_raised(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Prepare a read-only home so materialization fails.
-
-    Do project the builtins.
-
-    Assert nothing raises and no definition survives. A home Vibe cannot write
-    to is a degraded session, not a dead one.
-    """
-    from vibe.core.skills.builtins import BUILTIN_SKILLS
-
-    def _refuse(*args: object, **kwargs: object) -> None:
-        raise OSError("read-only file system")
-
-    monkeypatch.setattr(Path, "mkdir", _refuse)
-    monkeypatch.setattr(Path, "write_text", _refuse)
-
-    projection = project_core_skills(
-        BUILTIN_SKILLS, plugin_skills={}, plugin_contexts=[]
+        {"ghost": _skill("ghost")}, plugin_skills={}, plugin_contexts=[]
     )
 
     assert projection.definitions == ()
     assert projection.payloads == {}
-
-
-def test_materialization_does_not_change_what_a_builtin_reports_as_its_source() -> None:
-    """Prepare the builtins.
-
-    Do project them.
-
-    Assert they still report ``BUILTIN``. The write target is deliberately a
-    sibling of the skills search path: inside it, ``SkillManager`` would
-    rediscover the builtins as ``LOCAL`` and the CLI would relabel them.
-    """
-    from vibe.core.skills.builtins import BUILTIN_SKILLS
-
-    project_core_skills(BUILTIN_SKILLS, plugin_skills={}, plugin_contexts=[])
-
-    for skill in BUILTIN_SKILLS.values():
-        assert skill.source is SkillSource.BUILTIN
-        assert skill.skill_path is None
-    assert builtin_skills_dir().name not in {"skills"}
 
 
 def test_a_plugin_definition_without_a_resolved_skill_is_left_without_a_payload(
@@ -472,31 +395,3 @@ def test_denying_the_skill_tool_denies_plugin_skills_too(tmp_path: Path) -> None
     # Withheld from Core, not from the user: `/toolkit:deploy` injects the body
     # out of the payload map without Core ever loading the skill itself.
     assert "toolkit:deploy" in {skill.name for skill in denied.catalogue}
-
-
-def test_a_unified_session_takes_the_builtins_from_the_plugin_not_from_python(
-    tmp_path: Path,
-) -> None:
-    """Prepare a session whose only plugin is the shipped ``vibe`` one.
-
-    Do discover the catalogue.
-
-    Assert no Python builtin came through as a root skill. They reach a unified
-    session as ``vibe:`` plugin skills, so loading them here as well would offer
-    each one twice, under two names, out of two copies free to disagree.
-    """
-    from vibe.core.config import VibeConfigSchema
-    from vibe.core.config.harness_files import HarnessFilesManager
-    from vibe.core.skills.builtins import BUILTIN_SKILLS
-
-    _, projection = discover_session_skills(
-        VibeConfigSchema,
-        harness_files=HarnessFilesManager(sources=(), cwd=tmp_path),
-        plugin_skills={},
-        plugin_contexts=[],
-        skill_tool_available=True,
-    )
-
-    offered = {definition.name for definition in projection.definitions}
-    assert offered.isdisjoint(BUILTIN_SKILLS)
-    assert {skill.name for skill in projection.catalogue}.isdisjoint(BUILTIN_SKILLS)

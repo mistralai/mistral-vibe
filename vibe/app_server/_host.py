@@ -15,8 +15,17 @@ from vibe.app_server._config_errors import USER_CONFIG_ERRORS, user_config_error
 from vibe.app_server._connection_protocol import ClientInfo
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
 from vibe.app_server._history_projection import project_message_history
+from vibe.app_server._local_projects_controller import (
+    LOCAL_PROJECT_METHODS,
+    LocalProjectsController,
+)
+from vibe.app_server._local_skills_controller import (
+    LOCAL_SKILL_METHODS,
+    LocalSkillsController,
+)
 from vibe.app_server._missing_layers import MissingLayerFetches
 from vibe.app_server._model import ProtocolModel, validate_wire
+from vibe.app_server._org_config_service import OrgConfigService
 from vibe.app_server._project_links import (
     ProjectLinksAuthError,
     ProjectLinksController,
@@ -30,7 +39,7 @@ from vibe.app_server._projection import (
     project_skill_summaries,
 )
 from vibe.app_server._session_model import active_model_is_pinned
-from vibe.app_server._setup import SetupRequestHandler
+from vibe.app_server._setup import SetupRequestHandler, _launch_context
 from vibe.app_server._state import build_stored_public_state, history_page
 from vibe.app_server._workspace import (
     WorkspaceTrustError,
@@ -122,7 +131,7 @@ from vibe.core.session.saved_sessions import (
 )
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.skills.manager import SkillManager
-from vibe.core.skills.models import SkillSource
+from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.trusted_folders import TrustedFoldersManager
 from vibe.core.types import LLMMessage, SessionMetadata
 from vibe.observability.logging import logger
@@ -140,6 +149,7 @@ _HOST_METHODS = frozenset({
     "projectLinks/resolveRoot",
     "projectLinks/save",
     "projectLinks/unlink",
+    *LOCAL_PROJECT_METHODS,
     "session/delete",
     "session/history/list",
     "session/read",
@@ -152,6 +162,7 @@ _HOST_METHODS = frozenset({
     "setup/store-credential",
     "setup/submit-choices",
     "skills/list",
+    *LOCAL_SKILL_METHODS,
     "workspace/trust/decision",
     "workspace/trust/untrustedConfig",
     "workspace/trust/status",
@@ -168,15 +179,21 @@ class HostRequestHandler:
         self,
         harness_files: HarnessFilesManager,
         *,
+        org_config: OrgConfigService,
         image_fallback: bool = False,
         builtin_plugin_roots: Sequence[Path] | None = None,
     ) -> None:
         self._harness_files = harness_files
+        self._org_config = org_config
         self._image_fallback = image_fallback
         self._builtin_plugin_roots = builtin_plugin_roots
         self._project_links = ProjectLinksController()
+        self._local_projects = LocalProjectsController()
         self._setup = SetupRequestHandler(harness_files)
-        self._missing_layers = MissingLayerFetches()
+        self._local_skills = LocalSkillsController(
+            self._local_skill_files, self._load_orchestrator
+        )
+        self._missing_layers = MissingLayerFetches(org_config)
 
     def handles(self, method: str) -> bool:
         return method in _HOST_METHODS
@@ -252,6 +269,10 @@ class HostRequestHandler:
                     client_info=client_info,
                     attached_session_id=session_id,
                 )
+            case _ if method in LOCAL_SKILL_METHODS:
+                response = await self._local_skills.dispatch(method, raw_params)
+            case _ if method in LOCAL_PROJECT_METHODS:
+                response = await self._local_projects.dispatch(method, raw_params)
             case _ if method.startswith("setup/"):
                 # The server rejects pre-initialize requests, so a live
                 # setup call always carries the handshake's client info.
@@ -428,11 +449,7 @@ class HostRequestHandler:
         skill_mgr = SkillManager(
             config_getter=lambda: config, harness_files=session_files
         )
-        skills_count = sum(
-            1
-            for skill in skill_mgr.available_skills.values()
-            if skill.source is not SkillSource.BUILTIN
-        )
+        skills_count = len(skill_mgr.available_skills)
         hooks_count = len(load_hooks_from_fs(harness_files=session_files).hooks)
         mcp_servers_total = len(config.mcp_servers)
         mcp_servers_enabled = sum(
@@ -707,11 +724,23 @@ class HostRequestHandler:
             sanitize_artifacts_in_raw_metadata(raw_metadata, session_dir=session_path)
         )
 
+    async def setup_telemetry(self, client_info: ClientInfo) -> TelemetryClient:
+        config = await self._load_config(None)
+        return TelemetryClient(
+            config_getter=lambda: config, launch_context=_launch_context(client_info)
+        )
+
     async def _load_config(self, cwd: str | None) -> VibeConfigSchema:
         return (await self._load_orchestrator(self._session_files(cwd))).config
 
     def _session_files(self, cwd: str | None) -> HarnessFilesManager:
         return self._harness_files.for_session(self._cwd(cwd))
+
+    def _local_skill_files(self, project_root: Path | None) -> HarnessFilesManager:
+        # The user's own skills follow the user's config, wherever this server runs.
+        if project_root is None:
+            return replace(self._session_files(None), sources=("user",))
+        return self._session_files(str(project_root))
 
     async def _load_orchestrator(
         self, session_files: HarnessFilesManager, *, org_config: bool = True
@@ -719,7 +748,9 @@ class HostRequestHandler:
         orchestrator = await build_default_orchestrator(harness_files=session_files)
         # Match the session path so host reads (agents/list) see rollout flags
         # like smart_approve_available and the enforced default agent.
-        await apply_cached_layers(orchestrator, org_config=org_config)
+        await apply_cached_layers(
+            orchestrator, self._org_config if org_config else None
+        )
         return orchestrator
 
     async def _load_picker_orchestrator(

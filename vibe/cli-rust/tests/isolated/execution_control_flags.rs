@@ -96,6 +96,8 @@ fn session_start_params_without_flags_match_default_payload() {
             ..Default::default()
         },
         history_limit: HISTORY_LIMIT,
+        model: None,
+        session_only: false,
     };
     let value: Value = serde_json::to_value(&params).unwrap();
     assert_eq!(value["agentConfig"], json!({"cwd": "/work"}));
@@ -113,12 +115,14 @@ fn smart_approve_resolves_agent_in_headless_options() {
 fn headless_yolo_without_agent_is_a_session_wide_bypass() {
     let cli = Cli::parse_from(["vibe", "-p", "hi", "--yolo"]);
     let options = cli.headless_options(None).unwrap();
-    let config = vibe_rs::headless::agent_config(&options, Some("/work".into())).unwrap();
+    let config = vibe_rs::headless::agent_config(&options, Some("/work".into()), None).unwrap();
     assert!(config.agent.is_none());
     assert!(config.auto_approve);
     let params = SessionStartParams {
         agent_config: config,
         history_limit: HISTORY_LIMIT,
+        model: None,
+        session_only: false,
     };
     let value: Value = serde_json::to_value(&params).unwrap();
     assert!(value["agentConfig"].get("agent").is_none());

@@ -1,11 +1,10 @@
 //! Mutation responses apply their `runtime` only when they carry one.
 
-use std::sync::Arc;
-
 use serde_json::json;
 use vibe_rs::app::App;
-use vibe_rs::server::Client;
 use vibe_rs::{connector_auth, event_handler, mcp};
+
+use crate::support::stub;
 
 fn app_with_steps(steps: u64) -> App {
     let mut app = App::default();
@@ -17,14 +16,13 @@ fn app_with_steps(steps: u64) -> App {
 fn connector_refresh_applies_the_runtime_its_response_carries() {
     let mut app = app_with_steps(1);
     app.connector_auth.open = true;
-    app.commit_started();
     let event = connector_auth::Event::Refreshed {
         generation: app.connector_auth.generation,
         tool_count: 0,
         response: Some(json!({"toolCount": 0, "runtime": {"stats": {"steps": 3}}})),
     };
 
-    connector_auth::apply_event(&mut app, &Arc::new(Client::stub()), event);
+    connector_auth::apply_event(&mut app, &stub(), event);
 
     assert_eq!(app.session.stats.steps, 3);
     assert_eq!(
@@ -40,7 +38,7 @@ fn toggle_response_without_runtime_keeps_the_current_runtime() {
 
     mcp::apply_event(
         &mut app,
-        &Arc::new(Client::stub()),
+        &stub(),
         mcp::Event::Toggled(json!({"runtime": null})),
     );
 

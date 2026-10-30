@@ -107,8 +107,8 @@ Setting `CARGO_BUILD_FLAGS` to select features (`--features`/`-F`,
 `--no-default-features`, `--all-features`) or a `--target` skips this detection.
 
 `VIBE_SKIP_RUST_TUI=1` may be used by development-only checks that do not need
-the terminal binary, and by CI builds that package only vibe-acp (it does not
-contain the terminal binary). Public releases always build both native
+the terminal binary, and by test-only vibe-acp bundles that skip the setup
+wizard (vibe-acp bundles the terminal binary for `--setup`). Public releases always build both native
 components. The source distribution bundles both Rust sources, so building from
 it needs Rust.
 

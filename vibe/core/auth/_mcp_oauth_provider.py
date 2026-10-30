@@ -5,14 +5,14 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Final, Literal
 
-import httpx
+import httpx2
 from mcp.client.auth import OAuthClientProvider
 from mcp.client.auth.oauth2 import OAuthContext
 
 from vibe.core.auth.mcp_oauth import MCPOAuthInvalidGrant, MCPOAuthTransientRefreshError
 
 if TYPE_CHECKING:
-    from mcp.shared.auth import OAuthClientMetadata
+    from mcp.shared.auth import AuthorizationCodeResult, OAuthClientMetadata
 
     from vibe.core.auth.mcp_oauth import KeyringTokenStorage
 
@@ -20,13 +20,13 @@ if TYPE_CHECKING:
 _OAUTH_INVALID_GRANT: Final = "invalid_grant"
 
 
-async def _classify_refresh_error(response: httpx.Response) -> tuple[str, bool]:
+async def _classify_refresh_error(response: httpx2.Response) -> tuple[str, bool]:
     """Return a reason and whether the refresh failed permanently (invalid_grant)."""
     try:
-        # body arrives unread in the httpx auth flow
+        # body arrives unread in the httpx2 auth flow
         await response.aread()
         payload = response.json()
-    except (ValueError, httpx.HTTPError):
+    except (ValueError, httpx2.HTTPError):
         return f"HTTP {response.status_code}", False
     if not isinstance(payload, dict):
         return f"HTTP {response.status_code}", False
@@ -92,7 +92,8 @@ class RefreshAwareOAuthClientProvider(OAuthClientProvider):
         *,
         server_alias: str,
         redirect_handler: Callable[[str], Awaitable[None]] | None = None,
-        callback_handler: Callable[[], Awaitable[tuple[str, str | None]]] | None = None,
+        callback_handler: Callable[[], Awaitable[AuthorizationCodeResult]]
+        | None = None,
         client_metadata_url: str | None = None,
     ) -> None:
         super().__init__(
@@ -120,30 +121,10 @@ class RefreshAwareOAuthClientProvider(OAuthClientProvider):
         await super()._initialize()
         self.context.token_expiry_time = self._storage.token_expiry_time
 
-    async def _handle_refresh_response(self, response: httpx.Response) -> bool:
-        """Two corrections over the base class implementation:
-        1. Only clear stored tokens on a genuine invalid_grant error.
-        2. Preserve the previous refresh_token if the server did not return one.
-        """
-        if response.status_code == httpx.codes.OK:
-            previous_refresh_token = (
-                self.context.current_tokens.refresh_token
-                if self.context.current_tokens
-                else None
-            )
-            refreshed = await super()._handle_refresh_response(response)
-            tokens = self.context.current_tokens
-            if (
-                not refreshed
-                or tokens is None
-                or tokens.refresh_token is not None
-                or previous_refresh_token is None
-            ):
-                return refreshed
-            tokens = tokens.model_copy(update={"refresh_token": previous_refresh_token})
-            self.context.current_tokens = tokens
-            await self.context.storage.set_tokens(tokens)
-            return True
+    async def _handle_refresh_response(self, response: httpx2.Response) -> bool:
+        """Only clear stored tokens on a genuine invalid_grant error."""
+        if response.status_code == httpx2.codes.OK:
+            return await super()._handle_refresh_response(response)
         reason, is_invalid_grant = await _classify_refresh_error(response)
         if is_invalid_grant:
             self.context.clear_tokens()

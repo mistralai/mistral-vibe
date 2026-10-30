@@ -144,6 +144,11 @@ class ProviderConfig(BaseModel):
     # returned URLs are re-homed onto the configured browser auth base URLs
     # instead of being rejected for an origin mismatch.
     browser_auth_allow_origin_rewrite: bool = False
+    # When True, tenant-domain resolution and reconciliation never overwrite the
+    # configured api_base with the /whoami-advertised one. For split-horizon
+    # deployments (e.g. an SAP Cloud Connector proxying the real API host) the
+    # CLI-reachable api_base differs from the tenant's public API host on purpose.
+    preserve_api_base: bool = False
     api_style: str = "openai"
     backend: Backend = Backend.GENERIC
     reasoning_field_name: str = "reasoning_content"
@@ -192,8 +197,7 @@ class ProviderConfig(BaseModel):
     def uses_vertex(self) -> bool:
         """Whether this provider authenticates through Google ADC.
 
-        ``MistralBackend`` ignores ``api_style`` entirely, so the backend
-        choice decides first, exactly as ``create_backend`` does.
+        The Mistral backend ignores ``api_style``, so the backend decides first.
         """
         return self.backend != Backend.MISTRAL and self.api_style == "vertex-anthropic"
 
@@ -230,8 +234,8 @@ class _MCPBase(BaseModel):
         default=60.0, gt=0, description="Timeout in seconds for tool execution."
     )
     sampling_enabled: bool = Field(
-        default=True,
-        description="Allow this MCP server to request LLM completions via sampling/createMessage.",
+        default=False,
+        description="Opt this MCP server into sampling/createMessage when the host provides a sampling completion.",
     )
     disabled: bool = Field(
         default=False,
@@ -525,7 +529,8 @@ class ModelConfig(BaseModel):
     top_p: float | None = Field(default=None, gt=0, le=1)
     # The model's max output, sent as Anthropic's required max_tokens; other
     # providers get no cap. None takes the known max output, else 32,768.
-    # A session's own ``max_tokens`` limit, when set, takes precedence.
+    # A session's own ``max_tokens`` limit, ``agent_max_output_tokens`` and
+    # ``compaction_max_output_tokens`` take precedence and reach every provider.
     max_output_tokens: int | None = Field(default=None, ge=1)
     input_price: float = 0.0  # Price per million input tokens
     output_price: float = 0.0  # Price per million output tokens
@@ -561,7 +566,12 @@ class ModelConfig(BaseModel):
         # distinct from unset, which keeps the five. The catalog mapping relies
         # on the distinction (unspecified vs explicitly none). Duplicates are
         # dropped in first-seen order: the picker renders one row per level.
-        return list(dict.fromkeys(value)) or ["off"]
+        return list(dict.fromkeys(map(_standard_case, value))) or ["off"]
+
+    @field_validator("thinking", mode="after")
+    @classmethod
+    def _thinking_in_standard_case(cls, value: ThinkingLevel) -> ThinkingLevel:
+        return _standard_case(value)
 
     @property
     def default_thinking(self) -> ThinkingLevel:
@@ -593,6 +603,15 @@ class ModelConfig(BaseModel):
         differently from a set someone deliberately wrote.
         """
         return set(self.thinking_levels) != set(DEFAULT_THINKING_LEVELS)
+
+
+def _standard_case(level: ThinkingLevel) -> ThinkingLevel:
+    """A standard word in any case is the standard level, as the harness reads it;
+    a model's own level keeps its case.
+    """
+    written = level.strip()
+    standard = written.lower()
+    return standard if standard in THINKING_LEVELS else written
 
 
 def normalize_model_configs(value: Any) -> Any:

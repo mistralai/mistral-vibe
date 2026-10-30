@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tokio::sync::mpsc::Sender;
 
 use crate::app::App;
 use crate::server::{
@@ -31,7 +30,6 @@ pub struct Feedback {
     pub hide_at: Option<Instant>,
     pub snooze_duration_seconds: Option<u64>,
     checking: bool,
-    pub tx: Option<Sender<Event>>,
 }
 
 pub enum Event {
@@ -49,7 +47,7 @@ pub fn maybe_show(app: &mut App, client: &Arc<Client>, session_id: Option<String
     if app.feedback.checking || app.feedback.message != Message::Hidden {
         return;
     }
-    let (Some(session_id), Some(tx)) = (session_id, app.feedback.tx.clone()) else {
+    let (Some(session_id), Some(tx)) = (session_id, app.events.clone()) else {
         return;
     };
     app.feedback.checking = true;
@@ -94,7 +92,6 @@ pub fn maybe_show(app: &mut App, client: &Arc<Client>, session_id: Option<String
 }
 
 pub fn apply_event(app: &mut App, event: Event) {
-    app.commit_finished();
     match event {
         Event::Checked {
             show,
@@ -140,15 +137,13 @@ pub fn hide_expired(app: &mut App) {
 }
 
 fn record(app: &App, client: &Arc<Client>, action: FeedbackAction, rating: Option<u8>) {
-    let (Some(session_id), Some(tx)) = (app.session.session_id.clone(), app.feedback.tx.clone())
-    else {
+    let Some(session_id) = app.session.session_id.clone() else {
         return;
     };
     let version = app.session.startup_config.server_version.clone();
     let model = app.model_picker.current_model.clone();
-    let pending = app.commit_started();
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::ui_event::spawn(app, async move {
         if let Some(rating) = rating {
             let properties = BTreeMap::from([
                 ("model".to_owned(), Value::String(model)),
@@ -164,7 +159,7 @@ fn record(app: &App, client: &Arc<Client>, action: FeedbackAction, rating: Optio
             let _ = request(&client, method::TELEMETRY_RECORD, params).await;
         }
         record_action(&client, &session_id, action).await;
-        crate::input::deliver(Some(tx), Event::Recorded, &pending).await;
+        Event::Recorded
     });
 }
 

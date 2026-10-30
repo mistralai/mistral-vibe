@@ -4,6 +4,7 @@
   "params": {
    "agentConfig": {
     "cwd": "<cwd>",
+    "terminalKey": "e2e-terminal",
     "trustWorkspace": true,
     "worktree": {
      "branch": "feature",
@@ -49,6 +50,7 @@
   "params": {
    "agentConfig": {
     "cwd": "<cwd>",
+    "terminalKey": "e2e-terminal",
     "trustWorkspace": true,
     "worktree": {
      "branch": "feature",

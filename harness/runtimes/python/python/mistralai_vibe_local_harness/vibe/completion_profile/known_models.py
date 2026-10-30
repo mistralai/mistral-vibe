@@ -84,10 +84,12 @@ _MISTRAL_MEDIUM_3_5 = KnownModel(
 _MISTRAL_LARGE_2512 = KnownModel(
     context_window=262_144, input_modalities=TEXT_AND_IMAGE, reasoning=NO_REASONING
 )
+# The Mistral API takes only the efforts low, high and max for Mistral Large 4,
+# and rejects none, so its reasoning cannot be turned off.
 _MISTRAL_LARGE_4 = KnownModel(
     context_window=1_048_576,
     input_modalities=TEXT_AND_IMAGE,
-    reasoning=ReasoningSupport(("high",), can_turn_off=True),
+    reasoning=ReasoningSupport(("low", "high", "max"), can_turn_off=False),
 )
 
 # The Mistral API lists this window and no image input for GLM 5.3, and takes only

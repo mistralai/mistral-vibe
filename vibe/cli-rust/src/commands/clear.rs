@@ -12,7 +12,6 @@ use crate::resume_picker::short_id;
 use crate::server::Client;
 use crate::server::{method, PublicSessionState, SessionHistoryClearParams, TokenUsage};
 use crate::session_exit::is_resumable;
-use crate::transcript::local;
 
 /// Bound on the pre-clear `session/log/read`; past it the notice omits the previous session.
 const PREVIOUS_SESSION_READ_TIMEOUT: Duration = Duration::from_millis(500);
@@ -87,12 +86,6 @@ fn reset_transcript(app: &mut App) {
     app.view.transcript_cache.invalidate_layouts();
     app.view.scroll = 0;
     app.view.scroll_target = 0;
-    local::add_message(
-        &mut app.view.transcript,
-        &new_message_id(),
-        "command",
-        "clear",
-    );
 }
 
 /// Adopt the session `session/history/clear` created, on the main thread.

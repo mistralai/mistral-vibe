@@ -12,12 +12,14 @@ from unittest.mock import AsyncMock, patch
 import urllib.parse
 
 import httpx
+import httpx2
 import keyring
 from keyring.backend import KeyringBackend
 import keyring.backends.fail
 import keyring.errors
 from mcp.client.auth import OAuthFlowError
 from mcp.shared.auth import (
+    AuthorizationCodeResult,
     OAuthClientInformationFull,
     OAuthClientMetadata,
     OAuthMetadata,
@@ -454,11 +456,11 @@ class TestLoopbackCallbackHandler:
 
         serve_task = asyncio.create_task(handler.serve_once())
         driver_task = asyncio.create_task(driver())
-        code, state = await serve_task
+        result = await serve_task
         response = await driver_task
 
-        assert code == "AUTH_CODE_123"
-        assert state == "STATE_XYZ"
+        assert result.code == "AUTH_CODE_123"
+        assert result.state == "STATE_XYZ"
         assert b"200 OK" in response
         assert b"Login complete" in response
 
@@ -509,10 +511,10 @@ class TestLoopbackCallbackHandler:
         driver_task = asyncio.create_task(
             _send_callback(port, "code=AUTH_CODE_123&state=STATE_XYZ")
         )
-        code, state = await serve_task
+        result = await serve_task
         await driver_task
-        assert code == "AUTH_CODE_123"
-        assert state == "STATE_XYZ"
+        assert result.code == "AUTH_CODE_123"
+        assert result.state == "STATE_XYZ"
 
     @pytest.mark.asyncio
     async def test_cancelling_the_callback_wait_releases_port(self) -> None:
@@ -664,8 +666,8 @@ class TestBuildOAuthProvider:
         async def on_url(_url: str) -> None:
             return None
 
-        async def cb() -> tuple[str, str | None]:
-            return "code", None
+        async def cb() -> AuthorizationCodeResult:
+            return AuthorizationCodeResult(code="code")
 
         provider = build_oauth_provider(
             srv, redirect_handler=on_url, callback_handler=cb
@@ -687,8 +689,8 @@ class TestBuildOAuthProvider:
         async def on_url(_url: str) -> None:
             return None
 
-        async def cb() -> tuple[str, str | None]:
-            return "code", None
+        async def cb() -> AuthorizationCodeResult:
+            return AuthorizationCodeResult(code="code")
 
         provider = build_oauth_provider(
             srv, redirect_handler=on_url, callback_handler=cb
@@ -704,8 +706,8 @@ class TestBuildOAuthProvider:
         async def on_url(_url: str) -> None:
             return None
 
-        async def cb() -> tuple[str, str | None]:
-            return "code", None
+        async def cb() -> AuthorizationCodeResult:
+            return AuthorizationCodeResult(code="code")
 
         provider = build_oauth_provider(
             srv, redirect_handler=on_url, callback_handler=cb
@@ -721,8 +723,8 @@ class TestBuildOAuthProvider:
         async def on_url(_url: str) -> None:
             return None
 
-        async def cb() -> tuple[str, str | None]:
-            return "code", None
+        async def cb() -> AuthorizationCodeResult:
+            return AuthorizationCodeResult(code="code")
 
         provider = build_oauth_provider(
             srv, redirect_handler=on_url, callback_handler=cb
@@ -746,8 +748,8 @@ class TestBuildOAuthProvider:
         async def on_url(_url: str) -> None:
             return None
 
-        async def cb() -> tuple[str, str | None]:
-            return "code", None
+        async def cb() -> AuthorizationCodeResult:
+            return AuthorizationCodeResult(code="code")
 
         with pytest.raises(TypeError, match="OAuth"):
             build_oauth_provider(srv, redirect_handler=on_url, callback_handler=cb)
@@ -762,8 +764,8 @@ class TestRefreshAwareProvider:
         async def on_url(_url: str) -> None:
             return None
 
-        async def cb() -> tuple[str, str | None]:
-            return "code", None
+        async def cb() -> AuthorizationCodeResult:
+            return AuthorizationCodeResult(code="code")
 
         provider = build_oauth_provider(
             srv, redirect_handler=on_url, callback_handler=cb
@@ -779,7 +781,7 @@ class TestRefreshAwareProvider:
         self, memory_keyring: _MemoryKeyring
     ) -> None:
         provider = self._provider(memory_keyring)
-        response = httpx.Response(
+        response = httpx2.Response(
             200,
             json={
                 "access_token": "NEW_ACCESS",
@@ -803,7 +805,7 @@ class TestRefreshAwareProvider:
         self, memory_keyring: _MemoryKeyring
     ) -> None:
         provider = self._provider(memory_keyring)
-        response = httpx.Response(
+        response = httpx2.Response(
             200,
             json={
                 "access_token": "NEW_ACCESS",
@@ -827,7 +829,7 @@ class TestRefreshAwareProvider:
         self, memory_keyring: _MemoryKeyring
     ) -> None:
         provider = self._provider(memory_keyring)
-        response = httpx.Response(
+        response = httpx2.Response(
             400, json={"error": "invalid_grant", "error_description": "expired"}
         )
 
@@ -841,8 +843,8 @@ class TestRefreshAwareProvider:
         self, memory_keyring: _MemoryKeyring
     ) -> None:
         provider = self._provider(memory_keyring)
-        response = httpx.Response(
-            400, stream=httpx.ByteStream(b'{"error": "invalid_grant"}')
+        response = httpx2.Response(
+            400, stream=httpx2.ByteStream(b'{"error": "invalid_grant"}')
         )
 
         with pytest.raises(MCPOAuthInvalidGrant):
@@ -855,7 +857,7 @@ class TestRefreshAwareProvider:
         self, memory_keyring: _MemoryKeyring
     ) -> None:
         provider = self._provider(memory_keyring)
-        response = httpx.Response(503, text="upstream unavailable")
+        response = httpx2.Response(503, text="upstream unavailable")
 
         with pytest.raises(MCPOAuthTransientRefreshError):
             await provider._handle_refresh_response(response)
@@ -868,7 +870,7 @@ class TestRefreshAwareProvider:
         self, memory_keyring: _MemoryKeyring
     ) -> None:
         provider = self._provider(memory_keyring)
-        response = httpx.Response(400, json={"error": "temporarily_unavailable"})
+        response = httpx2.Response(400, json={"error": "temporarily_unavailable"})
 
         with pytest.raises(MCPOAuthTransientRefreshError):
             await provider._handle_refresh_response(response)
@@ -897,12 +899,12 @@ class TestRefreshAwareProvider:
 
 
 class TestRefreshAwareProviderThroughHttpxFlow:
-    """Drive the real httpx auth flow so the token-endpoint response reaches our
+    """Drive the real httpx2 auth flow so the token-endpoint response reaches our
     override unread, exactly as it does against a live server (e.g. Sentry).
 
     A direct call to ``_handle_refresh_response`` cannot catch the unread-body
-    class of bug because httpx only reads the body *after* resuming the auth-flow
-    generator; these tests exercise that seam via ``httpx.AsyncClient``.
+    class of bug because httpx2 only reads the body *after* resuming the auth-flow
+    generator; these tests exercise that seam via ``httpx2.AsyncClient``.
     """
 
     def _armed_provider(
@@ -913,8 +915,8 @@ class TestRefreshAwareProviderThroughHttpxFlow:
         async def on_url(_url: str) -> None:
             return None
 
-        async def cb() -> tuple[str, str | None]:
-            return "code", None
+        async def cb() -> AuthorizationCodeResult:
+            return AuthorizationCodeResult(code="code")
 
         provider = build_oauth_provider(
             srv, redirect_handler=on_url, callback_handler=cb
@@ -933,7 +935,7 @@ class TestRefreshAwareProviderThroughHttpxFlow:
         return provider
 
     async def _drive_refresh(self, provider: RefreshAwareOAuthClientProvider) -> None:
-        async with httpx.AsyncClient() as client:
+        async with httpx2.AsyncClient() as client:
             await client.get("https://mcp.sentry.dev/mcp", auth=provider)
 
     @respx.mock
@@ -1076,12 +1078,12 @@ class TestUnwrapOAuthRefreshError:
 
         raised = MCPOAuthInvalidGrant(server_alias="linear", reason="invalid_grant")
 
-        class _RaisingAuth(httpx.Auth):
+        class _RaisingAuth(httpx2.Auth):
             requires_response_body = True
 
             async def async_auth_flow(
-                self, request: httpx.Request
-            ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+                self, request: httpx2.Request
+            ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
                 raise raised
                 yield request  # pragma: no cover
 
@@ -1153,8 +1155,8 @@ class TestPerformOAuthLogin:
                 MCPOAuthInvalidGrant(server_alias="demo", reason="expired token")
             )
         errors.append(
-            httpx.ConnectError(
-                "connection refused", request=httpx.Request("POST", srv.url)
+            httpx2.ConnectError(
+                "connection refused", request=httpx2.Request("POST", srv.url)
             )
         )
 

@@ -62,10 +62,8 @@ pub fn steer_pending(app: &mut App, client: &Arc<Client>) -> bool {
         return true;
     }
     app.queue.steering = Some(queue_item_id.clone());
-    let tx = app.queue.tx.clone();
-    let pending = app.commit_started();
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::ui_event::spawn(app, async move {
         let params = TurnQueueSteerParams {
             session_id,
             queue_item_id: queue_item_id.clone(),
@@ -74,10 +72,8 @@ pub fn steer_pending(app: &mut App, client: &Arc<Client>) -> bool {
         let accepted = match serde_json::to_value(params) {
             Ok(value) => match client.request(method::TURN_QUEUE_STEER, value).await {
                 Ok(result)
-                    if result.get("queueItemId").and_then(|value| value.as_str())
-                        == Some(queue_item_id.as_str())
-                        && result.get("turnId").and_then(|value| value.as_str())
-                            == Some(expected_turn_id.as_str()) =>
+                    if result["queueItemId"] == queue_item_id.as_str()
+                        && result["turnId"] == expected_turn_id.as_str() =>
                 {
                     Some(true)
                 }
@@ -93,11 +89,10 @@ pub fn steer_pending(app: &mut App, client: &Arc<Client>) -> bool {
             },
             Err(_) => Some(false),
         };
-        let event = QueueEvent::SteerSettled {
+        QueueEvent::SteerSettled {
             queue_item_id,
             accepted,
-        };
-        crate::input::deliver(tx, event, &pending).await;
+        }
     });
     true
 }
@@ -118,16 +113,11 @@ pub(crate) fn settled(
 
 /// Finalize the queued widgets only when their accepted steer enters history.
 pub fn history_added(app: &mut App, client: &Arc<Client>, params: &serde_json::Value) -> bool {
-    let Some(entry) = params.get("entry") else {
-        return false;
-    };
-    if entry.get("type").and_then(|value| value.as_str()) != Some("message")
-        || entry.get("role").and_then(|value| value.as_str()) != Some("user")
-        || entry.get("source").and_then(|value| value.as_str()) != Some("turn_steer")
-    {
+    let entry = &params["entry"];
+    if entry["type"] != "message" || entry["role"] != "user" || entry["source"] != "turn_steer" {
         return false;
     }
-    let Some(entry_id) = entry.get("id").and_then(|value| value.as_str()) else {
+    let Some(entry_id) = entry["id"].as_str() else {
         return false;
     };
     let Some(queue_item_id) = app.queue.steering.as_deref() else {
@@ -151,7 +141,7 @@ pub fn reconcile_snapshot(
 ) {
     let Some(queue_item_id) = app.queue.steering.clone() else {
         if let Some(queue) = &state.turn_queue {
-            super::sync(app, queue);
+            super::snapshot::apply(app, queue);
         }
         return;
     };
@@ -163,26 +153,20 @@ pub fn reconcile_snapshot(
     let steered = server_message_id.as_deref().is_some_and(|message_id| {
         state.history.as_ref().is_some_and(|history| {
             history.iter().any(|entry| {
-                entry.get("id").and_then(|value| value.as_str()) == Some(message_id)
-                    && entry.get("role").and_then(|value| value.as_str()) == Some("user")
-                    && entry.get("source").and_then(|value| value.as_str()) == Some("turn_steer")
+                entry["id"] == message_id
+                    && entry["role"] == "user"
+                    && entry["source"] == "turn_steer"
             })
         })
     });
-    let still_queued = state.turn_queue.as_ref().is_some_and(|queue| {
-        queue
-            .get("items")
-            .and_then(|value| value.as_array())
-            .is_some_and(|items| {
-                items.iter().any(|item| {
-                    item.get("id").and_then(|value| value.as_str()) == Some(queue_item_id.as_str())
-                })
-            })
-    });
+    let still_queued = state
+        .turn_queue
+        .as_ref()
+        .is_some_and(|queue| queue.items.iter().any(|item| item.id == queue_item_id));
     let started = state.turns.as_ref().is_some_and(|turns| {
-        turns.iter().any(|turn| {
-            turn.get("queueItemId").and_then(|value| value.as_str()) == Some(queue_item_id.as_str())
-        })
+        turns
+            .iter()
+            .any(|turn| turn["queueItemId"] == queue_item_id.as_str())
     });
     if steered {
         if let Some(server_message_id) = server_message_id {
@@ -197,7 +181,7 @@ pub fn reconcile_snapshot(
         discard(app, client, server_message_id.as_deref());
     }
     if let Some(queue) = &state.turn_queue {
-        super::sync(app, queue);
+        super::snapshot::apply(app, queue);
     }
 }
 

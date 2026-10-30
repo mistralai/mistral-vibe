@@ -546,6 +546,26 @@ def test_model_request_carries_the_configured_top_p_and_no_output_cap(
     assert "max_tokens" not in request
 
 
+@pytest.mark.parametrize("streaming_mock_server", [_text_reply], indirect=True)
+@pytest.mark.parametrize("backend", ["generic", "mistral"])
+def test_model_request_carries_the_configured_agent_output_cap(
+    streaming_mock_server: StreamingMockServer, e2e_workdir: Path, backend: str
+) -> None:
+    write_e2e_config(
+        Path(os.environ["VIBE_HOME"]),
+        streaming_mock_server.api_base,
+        backend=backend,
+        settings=["agent_max_output_tokens = 123"],
+        model_settings=["max_output_tokens = 456"],
+    )
+
+    result = run_vibe_headless(e2e_workdir, ["-p", "hello"])
+
+    assert result.returncode == 0, result.stderr
+    request: dict[str, Any] = dict(streaming_mock_server.requests[0])
+    assert request["max_tokens"] == 123
+
+
 def _overloaded_once(
     request_index: int, _payload: ChatCompletionsRequestPayload
 ) -> int:

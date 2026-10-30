@@ -22,7 +22,7 @@ use crate::headless_startup::print_keyring_preflight;
 use crate::run_export::RunOutcome;
 use crate::server::{signal, Connect, Launch};
 
-pub use config::{agent_config, build_disabled_tools, turn_id_from};
+pub use config::{agent_config, build_disabled_tools, start_params, turn_id_from};
 pub use drive::{drive, stopped_report, turn_error_outcome};
 pub use open::open_failure;
 pub use report::final_outcome;

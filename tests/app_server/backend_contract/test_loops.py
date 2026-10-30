@@ -14,6 +14,7 @@ from tests.app_server.backend_contract.conftest import (
     BackendContractConnection,
     connect_backend_contract_host,
 )
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.models import (
     PublicMessageEntry,
     PublicNoticeEntry,
@@ -60,6 +61,7 @@ async def test_session_state_and_catalogue_report_active_loops(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A persisted session with one scheduled loop.
     *Do*: Read its state while live, then list sessions from a passive Host.
@@ -86,7 +88,9 @@ async def test_session_state_and_catalogue_report_active_loops(
         await session.close()
 
     passive_connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         listed = await passive_connection.host.list_sessions()
@@ -128,6 +132,7 @@ async def test_loop_schedule_survives_resume_from_a_new_host(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A persisted session with one scheduled loop, then a fresh backend Host.
     *Do*: Resume the session and list its loops.
@@ -143,7 +148,9 @@ async def test_loop_schedule_survives_resume_from_a_new_host(
     session_id = session.session_id
     await session.close()
     resumed_connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
 
     # Do
@@ -212,6 +219,7 @@ async def test_unified_due_loop_runs_as_an_unsolicited_turn(
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
     tmp_path: Path,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A persisted Unified session whose loop is already due.
     *Do*: Resume it and wait for the background scheduler.
@@ -228,7 +236,9 @@ async def test_unified_due_loop_runs_as_an_unsolicited_turn(
         return_value=backend_contract_mistral_response("scheduled response")
     )
     resumed_connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
 
     # Do
@@ -271,6 +281,7 @@ async def test_unified_fired_loop_prompt_keeps_its_marker_across_fork(
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
     tmp_path: Path,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A resumed Unified session whose due loop has fired.
     *Do*: Fork the session, then fork that fork.
@@ -287,7 +298,9 @@ async def test_unified_fired_loop_prompt_keeps_its_marker_across_fork(
         return_value=backend_contract_mistral_response("scheduled response")
     )
     resumed_connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     resumed = await resumed_connection.host.resume_session(session_id)
 
@@ -327,6 +340,7 @@ async def test_headless_unified_resume_does_not_fire_due_loops(
     backend_contract_mistral_api: respx.Route,
     backend_contract_persistent_connection: BackendContractConnection,
     tmp_path: Path,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A persisted Unified session with an overdue loop.
     *Do*: Resume the session in headless mode and allow scheduler time to elapse.
@@ -340,7 +354,9 @@ async def test_headless_unified_resume_does_not_fire_due_loops(
     await session.close()
     _mark_unified_loop_due(tmp_path, session_id)
     resumed_connection = await connect_backend_contract_host(
-        session_options=SessionOptions(headless=True), capabilities=ClientCapabilities()
+        session_options=SessionOptions(headless=True),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
 
     # Do

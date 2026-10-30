@@ -21,6 +21,7 @@ pub enum SignInEvent {
     Started { sign_in_url: String },
     StatusChanged(SignInStatus),
     Completed { api_key: String },
+    OidcCompleted,
     Failed { message: String },
 }
 

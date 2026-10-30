@@ -20,25 +20,18 @@ pub(super) fn load(app: &App) {
     if callback.detail.effect.kind != "file_edit" {
         return;
     }
-    let callback_id = callback.callback_id.clone();
+    let callback_id = callback.address.callback_id.clone();
     let input = callback.detail.effect.input.clone();
     let cwd = app.session.cwd.clone();
-    let tx = app.approval.tx.clone();
-    let pending = app.commit_started();
-    tokio::spawn(async move {
+    crate::ui_event::spawn(app, async move {
         let output = tokio::task::spawn_blocking(move || build(&input, cwd.as_deref()))
             .await
             .ok()
             .flatten();
-        crate::input::deliver(
-            tx,
-            Event::Preview {
-                callback_id,
-                output,
-            },
-            &pending,
-        )
-        .await;
+        Event::Preview {
+            callback_id,
+            output,
+        }
     });
 }
 

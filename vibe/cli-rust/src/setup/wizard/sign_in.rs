@@ -45,6 +45,7 @@ pub fn sign_in_actions(state: &mut BrowserSignInState, event: SignInEvent) -> Ve
             Vec::new()
         }
         SignInEvent::Completed { api_key } => vec![Action::SubmitApiKey(api_key)],
+        SignInEvent::OidcCompleted => vec![Action::CompleteOidc],
         SignInEvent::Failed { message } => {
             state.variant = SignInVariant::Error;
             state.message = message;

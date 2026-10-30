@@ -3,7 +3,7 @@
 //! events in `wizard::sign_in`, so this module knows nothing about the
 //! wizard.
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::sign_in_flow::{run_sign_in, SignInEvent};
 use super::sign_in_gateway::SignInGateway;
@@ -13,7 +13,8 @@ use super::sign_in_gateway::SignInGateway;
 /// open a browser long after its receiver was replaced.
 pub struct SignInHandle {
     rx: mpsc::Receiver<SignInEvent>,
-    abort: tokio::task::AbortHandle,
+    abort: Option<tokio::task::AbortHandle>,
+    cancel: Option<oneshot::Sender<()>>,
 }
 
 impl SignInHandle {
@@ -23,8 +24,31 @@ impl SignInHandle {
     }
 
     /// Stop the background flow.
-    pub fn abort(&self) {
-        self.abort.abort();
+    pub fn abort(mut self) {
+        self.stop();
+    }
+
+    pub(super) fn oidc(rx: mpsc::Receiver<SignInEvent>, cancel: oneshot::Sender<()>) -> Self {
+        Self {
+            rx,
+            abort: None,
+            cancel: Some(cancel),
+        }
+    }
+
+    fn stop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        if let Some(abort) = self.abort.take() {
+            abort.abort();
+        }
+    }
+}
+
+impl Drop for SignInHandle {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -67,6 +91,7 @@ pub fn spawn(
     };
     SignInHandle {
         rx,
-        abort: task.abort_handle(),
+        abort: Some(task.abort_handle()),
+        cancel: None,
     }
 }

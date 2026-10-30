@@ -39,6 +39,7 @@ from tests.stubs.local_sandbox import (
     run_turn,
 )
 from vibe.app_server._agents_md_hooks import agents_md_hook
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._runtime import HarnessProcess
 from vibe.app_server.local import (
     ClientDescriptor,
@@ -136,7 +137,9 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return build_trusted_project(tmp_path / "project", monkeypatch)
 
 
-def test_a_sandboxed_session_never_loads_project_files(tmp_path: Path) -> None:
+def test_a_sandboxed_session_never_loads_project_files(
+    tmp_path: Path, process_services: ProcessServices
+) -> None:
     """*Prepare*: Project config, skills and hooks would come from the host's disk.
     *Do*: Build a sandboxed harness process that asks for them.
     *Assert*: Host project sources are refused; user-only sources are accepted.
@@ -145,9 +148,11 @@ def test_a_sandboxed_session_never_loads_project_files(tmp_path: Path) -> None:
 
     with pytest.raises(HeadlessUsageError, match="cannot load project files"):
         HarnessProcess(
-            HarnessFilesManager(sources=("user", "project")), sandbox=sandbox
+            HarnessFilesManager(sources=("user", "project")),
+            sandbox=sandbox,
+            services=process_services,
         )
-    HarnessProcess(sandbox=sandbox)
+    HarnessProcess(sandbox=sandbox, services=process_services)
 
 
 @pytest.mark.asyncio

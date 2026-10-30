@@ -8,7 +8,6 @@ use serde_json::json;
 use super::rows::{self, Row};
 use super::{Event, TOAST_SECS};
 use crate::app::{App, ToastSeverity};
-use crate::input::deliver;
 
 /// One toggle request, kept to undo its paint on rejection.
 pub struct Toggle {
@@ -78,7 +77,7 @@ fn reject_plugin_toggle(app: &mut App, name: &str, kind: MCPSourceKind) -> bool 
 
 /// Send a toggle; its answer carries the runtime the browser then adopts.
 fn request_toggle(app: &mut App, client: &Arc<Client>, toggle: Toggle, disabled: bool) {
-    let (Some(session_id), Some(tx)) = (app.session.session_id.clone(), app.mcp.tx.clone()) else {
+    let Some(session_id) = app.session.session_id.clone() else {
         return;
     };
     let (method, mut params) = match toggle.kind {
@@ -98,16 +97,14 @@ fn request_toggle(app: &mut App, client: &Arc<Client>, toggle: Toggle, disabled:
     };
     params["sessionId"] = json!(session_id);
     let client = client.clone();
-    let pending = app.commit_started();
-    tokio::spawn(async move {
-        let event = match client.request(method, params).await {
+    crate::ui_event::spawn(app, async move {
+        match client.request(method, params).await {
             Ok(value) => Event::Toggled(value),
             Err(error) => Event::ToggleFailed {
                 toggle,
                 message: error.to_string(),
             },
-        };
-        deliver(Some(tx), event, &pending).await;
+        }
     });
 }
 

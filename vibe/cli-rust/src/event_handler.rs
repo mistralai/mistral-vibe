@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use crate::server::{notification, server_method};
-use crate::server::{Client, Notification};
+use crate::server::{Client, EntryHead, EntryParams, Notification, PublicTurn};
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -72,6 +73,7 @@ pub fn apply_startup_event(
                 "config error: {message}"
             );
             app.session.startup_error = Some(message);
+            app.view.transcript.remove(RESUME_STATUS_ID);
             app.set_status(Status::Failed);
             false
         }
@@ -82,22 +84,25 @@ pub fn apply_startup_event(
                 "startup failed: {error}"
             );
             app.session.startup_error = Some(error);
+            app.view.transcript.remove(RESUME_STATUS_ID);
             app.set_status(Status::Failed);
             false
         }
     }
 }
 
-/// Auto-resume opening line: `--continue`/`--resume <id>` say so on the first
-/// frame, while the handshake attaches that session.
+/// The auto-resume status row, settled in place once the attach lands.
+const RESUME_STATUS_ID: &str = "rs-startup-resume";
+
+/// `--continue`/`--resume <id>` show a resume status while the handshake attaches.
 pub fn announce_resume(app: &mut App) {
     if matches!(
         app.session.startup_resume,
         StartupResume::ById(_) | StartupResume::Continue
     ) {
-        local::add_command_result(
+        local::add_progress_status(
             &mut app.view.transcript,
-            &submission::new_message_id(),
+            RESUME_STATUS_ID,
             "Resuming session\u{2026}",
         );
     }
@@ -144,22 +149,25 @@ fn spawn_background_update_check(enabled: bool) {
     });
 }
 
-/// Auto-resume closing line: what the attach did.
+/// Settle the auto-resume status with what the attach did; a failure becomes an error row.
 fn attach_notice(app: &mut App, attach: startup::Attach) {
-    let id = submission::new_message_id();
     let transcript = &mut app.view.transcript;
-    match attach {
-        startup::Attach::Started => {}
-        startup::Attach::Resumed(session) => local::add_command_result(
-            transcript,
-            &id,
-            &format!("Resumed session `{}`", resume_picker::short_id(&session)),
-        ),
-        startup::Attach::NoPrevious => {
-            local::add_command_result(transcript, &id, "No previous sessions found.")
+    let text = match attach {
+        startup::Attach::Started => return transcript.remove(RESUME_STATUS_ID),
+        startup::Attach::Resumed(session) => {
+            format!("Resumed session {}.", resume_picker::short_id(&session))
         }
-        startup::Attach::Failed(message) => local::add_command_error(transcript, &id, &message),
+        startup::Attach::NoPrevious => "No previous sessions found.".to_owned(),
+        startup::Attach::Failed(message) => {
+            transcript.remove(RESUME_STATUS_ID);
+            let id = submission::new_message_id();
+            return local::add_command_error(transcript, &id, &message);
+        }
+    };
+    if !transcript.contains(RESUME_STATUS_ID) {
+        local::add_progress_status(transcript, RESUME_STATUS_ID, &text);
     }
+    local::settle_status(transcript, RESUME_STATUS_ID, &text);
 }
 
 fn apply_ready(
@@ -195,11 +203,8 @@ fn apply_ready(
     };
     crate::terminal_notifier::configure(app, &runtime);
     if !app.session.resumed {
-        let title = runtime
-            .pointer("/sessionLog/title")
-            .and_then(Value::as_str)
-            .or(state.session.title.as_deref())
-            .unwrap_or("");
+        let title = runtime["sessionLog"]["title"].as_str();
+        let title = title.or(state.session.title.as_deref()).unwrap_or("");
         app.terminal_notifier.set_default_title(title);
     }
     app.subagents.status_list_enabled = startup::read_show_subagent_status_list(&runtime);
@@ -226,10 +231,7 @@ fn apply_ready(
     }
     app.session.tokens = startup::read_tokens(&runtime);
     app.subagents.main_tokens = app.session.tokens;
-    apply_stats(
-        app,
-        runtime.pointer("/runtime/stats").unwrap_or(&Value::Null),
-    );
+    app.session.stats = crate::utils::json::read(&runtime["runtime"]["stats"]);
     // This run's `--worktree` verdict (the announce), pinned apart from the
     // session's own tracking: a resumed session's restored effect carries the
     // original run's `created`, and reuse must stay non-cleaning.
@@ -364,13 +366,8 @@ pub fn apply_runtime_value(app: &mut App, runtime: &Value) {
     model_picker::apply_runtime(app, runtime);
     crate::thinking_picker::apply_runtime(app, runtime);
     agents::apply_runtime(app, runtime);
-    // The custom-tools deprecation is not re-checked on a plain runtime
-    // refresh, only after the initial history and a transcript rebuild.
     app.session.runtime = runtime.clone();
-    apply_stats(
-        app,
-        runtime.pointer("/runtime/stats").unwrap_or(&Value::Null),
-    );
+    app.session.stats = crate::utils::json::read(&runtime["runtime"]["stats"]);
     completion_manager::refresh(app);
     mcp::apply_runtime(app, runtime);
 }
@@ -381,55 +378,6 @@ pub fn apply_response_runtime(app: &mut App, response: &Value) {
         apply_runtime_value(app, response);
         config_issues::show_updated_config_warnings(app, response);
     }
-}
-
-fn apply_stats(app: &mut App, stats: &Value) {
-    app.session.stats.steps = stats.get("steps").and_then(Value::as_u64).unwrap_or(0);
-    app.session.stats.session_prompt_tokens = stats
-        .get("sessionPromptTokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    app.session.stats.session_completion_tokens = stats
-        .get("sessionCompletionTokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    app.session.stats.session_cached_tokens = stats
-        .get("sessionCachedTokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    app.session.stats.last_turn_total_tokens = stats
-        .get("lastTurnPromptTokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        + stats
-            .get("lastTurnCompletionTokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-    app.session.stats.last_turn_cached_tokens = stats
-        .get("lastTurnCachedTokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let input_price = stats
-        .get("inputPricePerMillion")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-    let output_price = stats
-        .get("outputPricePerMillion")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-    let cached_price = stats
-        .get("cachedInputPricePerMillion")
-        .and_then(Value::as_f64)
-        .unwrap_or(input_price);
-    app.session.stats.session_cost =
-        (app.session
-            .stats
-            .session_prompt_tokens
-            .saturating_sub(app.session.stats.session_cached_tokens) as f64
-            * input_price
-            + app.session.stats.session_cached_tokens as f64 * cached_price
-            + app.session.stats.session_completion_tokens as f64 * output_price)
-            / 1_000_000.0;
 }
 
 fn apply_final_startup_config(app: &mut App, config: startup_cache::StartupConfig) {
@@ -451,11 +399,11 @@ fn show_startup_config(app: &mut App, config: startup_cache::StartupConfig) {
 
 /// A live reasoning row starts with the bulk fold state; other live entries
 /// keep their default collapsed state.
-fn expand_live_reasoning(app: &mut App, params: &Value) {
+fn expand_live_reasoning(app: &mut App, entry: &EntryHead) {
     if app.view.tools_collapsed {
         return;
     }
-    let Some(id) = params.pointer("/entry/id").and_then(Value::as_str) else {
+    let Some(id) = entry.id.as_deref() else {
         return;
     };
     if app.view.transcript.is_reasoning(id) {
@@ -473,19 +421,17 @@ fn record_todos(app: &mut App, raw: Option<&Value>) {
 }
 
 /// The stored entry an update points at, cloned out before `record_todos` takes `&mut app`.
-fn updated_entry_raw(app: &App, params: &Value) -> Option<Value> {
-    params
-        .get("entryId")
-        .and_then(Value::as_str)
-        .and_then(|id| app.view.transcript.entry_raw(id))
-        .cloned()
+fn updated_entry_raw(app: &App, params: &EntryParams) -> Option<Value> {
+    let id = params.entry_id.as_deref()?;
+    app.view.transcript.entry_raw(id).cloned()
 }
 
-fn sync_loading_label(app: &mut App, params: &Value) {
+fn sync_loading_label(app: &mut App, params: &EntryParams) {
     if !matches!(app.session.status, Status::Generating { .. }) {
         return;
     }
-    match params.pointer("/entry/type").and_then(Value::as_str) {
+    let entry = &params.entry;
+    match entry.entry_type() {
         Some("reasoning") => {
             app.view
                 .loading
@@ -493,12 +439,9 @@ fn sync_loading_label(app: &mut App, params: &Value) {
         }
         // Hook notices steer the loading status; other detail kinds
         // leave it untouched, so nothing else resets it here.
-        Some("notice") => match params.pointer("/entry/detail/kind").and_then(Value::as_str) {
+        Some("notice") => match entry.detail_kind() {
             Some("hook_started") => {
-                let name = params
-                    .pointer("/entry/detail/hookName")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                let name = entry.detail.hook_name.as_deref().unwrap_or_default();
                 app.view
                     .loading
                     .set_label(format!("Running hook {name}").trim_end());
@@ -514,21 +457,10 @@ fn sync_loading_label(app: &mut App, params: &Value) {
         // default once a settled result lands, but only when no other call is
         // live.
         Some("effect") => {
-            let id = params
-                .pointer("/entry/id")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let running = params
-                .pointer("/entry/generationStatus")
-                .and_then(Value::as_str)
-                == Some("in_progress");
-            if running {
-                app.view.loading.set_label(
-                    params
-                        .pointer("/entry/detail/display/statusText")
-                        .and_then(Value::as_str)
-                        .unwrap_or(""),
-                );
+            let id = entry.id.as_deref().unwrap_or("");
+            if entry.generation_status.as_deref() == Some("in_progress") {
+                let status = entry.detail.display.status_text.as_deref();
+                app.view.loading.set_label(status.unwrap_or_default());
             } else if !app.view.transcript.has_live_tool_calls(id) {
                 app.view
                     .loading
@@ -539,7 +471,7 @@ fn sync_loading_label(app: &mut App, params: &Value) {
             // An `entryUpdated` patch carries no entry; the merged effect still
             // re-states its label, and a settling one resets it unless another
             // call is still live.
-            let id = params.get("entryId").and_then(Value::as_str).unwrap_or("");
+            let id = params.entry_id.as_deref().unwrap_or("");
             match app.view.transcript.effect_loading_status(id) {
                 Some((status, false)) => app.view.loading.set_label(&status),
                 Some((_, true)) => {
@@ -595,7 +527,7 @@ fn is_foreign_session_notification(app: &App, event: &Notification) -> bool {
     ) {
         return false;
     }
-    let Some(session_id) = event.params.get("sessionId").and_then(Value::as_str) else {
+    let Some(session_id) = event.params["sessionId"].as_str() else {
         return false;
     };
     app.session
@@ -617,17 +549,13 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
         return true;
     }
     if event.method == notification::REPLAY_DRAINED {
-        if let Some(id) = event.params.get("requestId").and_then(Value::as_u64) {
+        if let Some(id) = event.params["requestId"].as_u64() {
             client.mark_replay_drained(id);
         }
         return true;
     }
     if event.method == server_method::CALLBACK_CALL
-        && event
-            .params
-            .pointer("/callback/detail/kind")
-            .and_then(Value::as_str)
-            == Some("approval")
+        && event.params["callback"]["detail"]["kind"] == "approval"
     {
         return approval::on_callback_call(app, &event.params);
     }
@@ -657,28 +585,21 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
     }
     match event.method.as_str() {
         notification::HISTORY_ENTRY_ADDED => {
-            if event
-                .params
-                .pointer("/entry/detail/kind")
-                .and_then(Value::as_str)
-                == Some("session_title_updated")
-            {
-                if let Some(title) = event
-                    .params
-                    .pointer("/entry/detail/title")
-                    .and_then(Value::as_str)
-                {
+            let params = EntryParams::read(&event.params);
+            let entry = &params.entry;
+            if entry.detail_kind() == Some("session_title_updated") {
+                if let Some(title) = &entry.detail.title {
                     app.terminal_notifier.set_default_title(title);
                 }
             }
-            if let Some(entry_id) = event.params.pointer("/entry/id").and_then(Value::as_str) {
+            if let Some(entry_id) = &entry.id {
                 crate::commands::shell::apply_started(app, client, entry_id);
             }
-            if entry_finishes_reasoning(&event.params) {
+            if entry_finishes_reasoning(entry) {
                 app.view.transcript.settle_reasoning();
             }
             message_queue::steering_history_added(app, client, &event.params);
-            retry::on_entry_added(app, &event.params);
+            retry::on_entry_added(app, entry);
             app.view.transcript.add(&event.params);
             crate::program_status::shell_history_updated(app);
             crate::worktree::track_entry(app, &event.params);
@@ -686,35 +607,32 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             retry_continuation::merge_continuation(app);
             // Track the turn's assistant message inside the resolve, so a
             // continuation's hidden entry maps to the merged row it feeds.
-            retry::track_turn_assistant(app, &event.params);
-            expand_live_reasoning(app, &event.params);
-            sync_loading_label(app, &event.params);
-            turn_summary::track_narrator_added(app, &event.params);
+            retry::track_turn_assistant(app, entry);
+            expand_live_reasoning(app, entry);
+            sync_loading_label(app, &params);
+            turn_summary::track_narrator_added(app, &event.params, entry);
             if let Some(entry) = event.params.get("entry") {
                 subagents::remember_parent_instruction_from_entry(app, entry);
             }
         }
         notification::HISTORY_ENTRY_UPDATED => {
+            let params = EntryParams::read(&event.params);
             app.view.transcript.update(&event.params);
             crate::program_status::shell_history_updated(app);
             crate::worktree::track_entry(app, &event.params);
-            record_todos(app, updated_entry_raw(app, &event.params).as_ref());
-            retry_continuation::merge_continuation(app);
-            sync_loading_label(app, &event.params);
-            turn_summary::track_narrator_updated(app, &event.params);
             // The wire patch carries no entry; the stored one is post-patch.
-            if let Some(id) = event.params.get("entryId").and_then(Value::as_str) {
-                let entry = app.view.transcript.entry_raw(id).cloned();
-                if let Some(entry) = entry {
-                    subagents::remember_parent_instruction_from_entry(app, &entry);
-                }
+            let entry = updated_entry_raw(app, &params);
+            record_todos(app, entry.as_ref());
+            retry_continuation::merge_continuation(app);
+            sync_loading_label(app, &params);
+            turn_summary::track_narrator_updated(app, &event.params);
+            if let Some(entry) = updated_entry_raw(app, &params) {
+                subagents::remember_parent_instruction_from_entry(app, &entry);
             }
         }
         notification::SESSION_SNAPSHOT => {
             if let Some(state) = event.params.get("state") {
-                if let Ok(state) =
-                    serde_json::from_value::<crate::server::PublicSessionState>(state.clone())
-                {
+                if let Ok(state) = crate::server::PublicSessionState::deserialize(state) {
                     message_queue::reconcile_snapshot(app, client, &state);
                     // ADR 0009: a live same-session snapshot retains the loaded
                     // contiguous prefix and merges the page into it; a
@@ -734,23 +652,19 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                     sync_retrying_label(app, &state);
                     app.expand_rebuilt_tools();
                     app.subagents.seed_snapshot(state.child_sessions.clone());
+                    if !same_session {
+                        subagents::reset_views(app);
+                    }
                     subagents::refresh(app);
                 }
             }
         }
         notification::TURN_STARTED => {
-            app.session.active_turn_id = event
-                .params
-                .pointer("/turn/id")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let queue_item_id = event
-                .params
-                .pointer("/turn/queueItemId")
-                .and_then(Value::as_str);
+            let turn = PublicTurn::read(&event.params);
+            app.session.active_turn_id = turn.id;
             let interrupt = message_queue::take_interrupt_on_start(app);
-            if let Some(queue_item_id) = queue_item_id {
-                if message_queue::turn_started(app, client, queue_item_id) {
+            if let Some(queue_item_id) = turn.queue_item_id {
+                if message_queue::turn_started(app, client, &queue_item_id) {
                     feedback::maybe_show(app, client, app.session.session_id.clone());
                 }
             }
@@ -771,7 +685,8 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
         // The server promotes the next queued prompt itself; the loading area goes
         // idle until its `turn/started` arrives.
         notification::TURN_COMPLETED => {
-            let status = event.params.pointer("/turn/status").and_then(Value::as_str);
+            let turn = PublicTurn::read(&event.params);
+            let status = turn.status();
             let context = if status == Some("failed") {
                 crate::terminal_notifier::NotificationContext::Failed
             } else {
@@ -787,12 +702,14 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             app.session.active_turn_id = None;
             // The retried turn ended; its merged row is final until a snapshot replaces it.
             app.session.retry_continuation = None;
-            if retry::auto_continue_incomplete_stream(app, client, &event.params) {
+            if retry::auto_continue_incomplete_stream(app, client, &turn) {
                 return true;
             }
-            let retryable = is_retryable_turn_error(&event.params);
+            let retryable = turn
+                .failure()
+                .is_some_and(|code| RETRYABLE_ERROR_CODES.contains(&code));
             app.session.can_retry = retryable;
-            if let Some((message, hint)) = turn_error_message(app, &event.params, retryable) {
+            if let Some((message, hint)) = turn_error_message(app, &turn, retryable) {
                 app.terminal_notifier.set_error_message(&message);
                 let id = new_message_id();
                 local::add_command_error(
@@ -814,11 +731,8 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             // (`incomplete_stream` with no queued work); an interrupt drops the
             // data entirely; then the summary is requested.
             let interrupted = match status {
-                Some("failed") if !turn_summary::retries_incomplete_stream(app, &event.params) => {
-                    turn_summary::on_turn_error(
-                        app,
-                        &turn_summary::turn_error_message(&event.params),
-                    );
+                Some("failed") if !turn_summary::retries_incomplete_stream(app, &turn) => {
+                    turn_summary::on_turn_error(app, &turn_summary::turn_error_message(&turn));
                     false
                 }
                 Some("interrupted") => {
@@ -829,12 +743,10 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             };
             turn_summary::on_turn_end(app, client);
             if !interrupted && !app.queue.is_empty() && !app.queue.paused {
-                app.session.deferred_completion = event
-                    .params
-                    .pointer("/turn/queueItemId")
-                    .and_then(Value::as_str)
+                app.session.deferred_completion = turn
+                    .queue_item_id
                     .filter(|id| app.queue.promotion_pending(id))
-                    .map(|id| (id.to_owned(), context));
+                    .map(|id| (id, context));
             } else if app.approval.open || app.question_app.open {
                 app.terminal_notifier.remember_completion(if interrupted {
                     crate::program_status::ProgramState::Idle
@@ -855,29 +767,21 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             }
         }
         notification::SESSION_STATS_UPDATED => {
-            let current = event
-                .params
-                .pointer("/stats/contextTokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let max = event
-                .params
-                .get("contextWindow")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
+            let stats: crate::server::SessionStats =
+                crate::utils::json::read(&event.params["stats"]);
+            let current = stats.context_tokens;
+            let max = event.params["contextWindow"].as_u64().unwrap_or(0);
             // The context progress masks the session budget with
             // the viewed child's own context usage while a subagent is viewed.
             app.subagents.main_tokens = (current, max);
             if app.subagents.viewed_subagent_id.is_none() {
                 app.session.tokens = (current, max);
             }
-            apply_stats(app, event.params.get("stats").unwrap_or(&Value::Null));
+            app.session.stats = stats;
         }
         notification::ARTIFACTS_CREATED | notification::ARTIFACTS_UPDATED => {
             if let Some(artifact) = event.params.get("artifact") {
-                if let Ok(artifact) =
-                    serde_json::from_value::<crate::server::PublicSessionArtifact>(artifact.clone())
-                {
+                if let Ok(artifact) = crate::server::PublicSessionArtifact::deserialize(artifact) {
                     artifacts::upsert(app, artifact);
                 }
             }
@@ -892,9 +796,8 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
         // A child session update upserts the child, announces the ready
         // transition, and coalesce the viewed child's transcript refresh.
         notification::CHILD_SESSION_UPDATED => {
-            if let Ok(params) = serde_json::from_value::<crate::server::ChildSessionUpdatedParams>(
-                event.params.clone(),
-            ) {
+            if let Ok(params) = crate::server::ChildSessionUpdatedParams::deserialize(&event.params)
+            {
                 let session = params.child_session.clone();
                 app.subagents.replace_child_session(params.child_session);
                 let announced = app
@@ -920,8 +823,8 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                 serde_json::from_value::<crate::server::PublicSessionState>(state).ok()
             }) {
                 app.set_session_id(state.session.id.clone());
-                subagents::reset_views(app);
                 app.subagents.seed_snapshot(state.child_sessions.clone());
+                subagents::reset_views(app);
                 subagents::refresh(app);
             }
         }
@@ -944,11 +847,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             }
         }
         notification::ERROR => {
-            if let Some(message) = event
-                .params
-                .pointer("/error/message")
-                .and_then(Value::as_str)
-            {
+            if let Some(message) = event.params["error"]["message"].as_str() {
                 app.show_toast(message.to_owned(), ToastSeverity::Error, SERVER_TOAST_SECS);
             }
         }
@@ -964,18 +863,13 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
         }
         // Forwarded by the client: a callback the user must answer.
         server_method::CALLBACK_CALL => {
-            if event
-                .params
-                .pointer("/callback/detail/kind")
-                .and_then(Value::as_str)
-                == Some("user_input")
-            {
-                question_app::on_callback_call(app, &event.params);
+            if event.params["callback"]["detail"]["kind"] == "user_input" {
+                return question_app::on_callback_call(app, &event.params);
             }
         }
         // `/mcp login` streams the OAuth URL: show it and open the browser.
         notification::MCP_AUTH_URL => {
-            let Some(url) = event.params.get("url").and_then(Value::as_str) else {
+            let Some(url) = event.params["url"].as_str() else {
                 return true;
             };
             // The OAuth bottom-app owns the URL of the login it started; only
@@ -984,7 +878,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                 crate::mcp_oauth::on_auth_url(app, url);
                 return true;
             }
-            local::add_command_result(
+            local::add_command_warning(
                 &mut app.view.transcript,
                 &submission::new_message_id(),
                 &format!("Open this URL in your browser:\n\n  {url}"),
@@ -1000,15 +894,11 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
     true
 }
 
-fn entry_finishes_reasoning(params: &Value) -> bool {
-    match params.pointer("/entry/type").and_then(Value::as_str) {
-        Some("message") => {
-            params.pointer("/entry/role").and_then(Value::as_str) == Some("assistant")
-        }
+fn entry_finishes_reasoning(entry: &EntryHead) -> bool {
+    match entry.entry_type() {
+        Some("message") => entry.role.as_deref() == Some("assistant"),
         Some("effect" | "callback") => true,
-        Some("checkpoint") => {
-            params.pointer("/entry/kind").and_then(Value::as_str) == Some("compaction")
-        }
+        Some("checkpoint") => entry.kind.as_deref() == Some("compaction"),
         _ => false,
     }
 }
@@ -1021,33 +911,16 @@ const RETRYABLE_ERROR_CODES: &[&str] = &[
     "incomplete_stream",
 ];
 
-/// Whether a `turn/completed` notification carries a retryable failure.
-fn is_retryable_turn_error(params: &Value) -> bool {
-    let status = params.pointer("/turn/status").and_then(Value::as_str);
-    if status != Some("failed") {
-        return false;
-    }
-    let Some(code) = params.pointer("/turn/error/code").and_then(Value::as_str) else {
-        return false;
-    };
-    RETRYABLE_ERROR_CODES.contains(&code)
-}
-
 /// The error text shown
 /// in the transcript on a failed turn. Returns `(message, hint)` where hint
 /// is the `/retry` suffix for retryable errors.
-fn turn_error_message(app: &App, params: &Value, retryable: bool) -> Option<(String, String)> {
-    let status = params.pointer("/turn/status").and_then(Value::as_str)?;
-    if status != "failed" {
+fn turn_error_message(app: &App, turn: &PublicTurn, retryable: bool) -> Option<(String, String)> {
+    if turn.status() != Some("failed") {
         return None;
     }
-    let message = match params.pointer("/turn/error/code").and_then(Value::as_str) {
+    let message = match turn.error_code() {
         Some("rate_limit") => rate_limit_message(app.whoami.account()),
-        _ => params
-            .pointer("/turn/error/message")
-            .and_then(Value::as_str)
-            .unwrap_or("Turn failed")
-            .to_owned(),
+        _ => turn.error_message().unwrap_or("Turn failed").to_owned(),
     };
     let hint = if retryable {
         "\n\nRun /retry [additional instructions] to continue the interrupted response.".to_owned()

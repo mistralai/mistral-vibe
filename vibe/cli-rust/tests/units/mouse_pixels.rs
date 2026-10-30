@@ -1,11 +1,13 @@
 //! SGR-pixels mouse reports: support probe, pixel-to-cell conversion, motion coalescing.
 
-use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
 
 use vibe_rs::mouse::pixels::{
     cell_size, cells, is_answered, reported_grid, settle, supports, transition, validated,
     Coalesce, Grid, ENABLE,
 };
+
+use crate::support::{down, mouse};
 
 const GRID: Grid = Grid {
     columns: 100,
@@ -64,7 +66,7 @@ fn edge_reports_wrapped_by_crossterm_map_to_the_first_cell() {
 
 #[test]
 fn cell_reports_pass_through_without_pixel_mode() {
-    let (cell, row) = cells(None, event(MouseEventKind::Moved, 7, 3));
+    let (cell, row) = cells(None, mouse(MouseEventKind::Moved, 7, 3));
 
     assert_eq!((cell.column, cell.row), (7, 3));
     assert_eq!(row, 3.0);
@@ -185,7 +187,7 @@ fn other_events_reset_motion_coalescing() {
 #[test]
 fn presses_and_other_events_are_never_dropped() {
     let mut coalesce = Coalesce::default();
-    let press = Event::Mouse(event(MouseEventKind::Down(MouseButton::Left), 5, 4));
+    let press = Event::Mouse(down(5, 4));
 
     assert!(coalesce.keep(None, &press));
     assert!(coalesce.keep(None, &press));
@@ -202,13 +204,13 @@ fn a_report_around_a_switch_to_cells_reads_in_the_units_nearer_the_pointer() {
     };
 
     assert_eq!(read(pixels(drag, 515, 430)), ((51, 21), true));
-    assert_eq!(read(event(drag, 49, 19)), ((49, 19), false));
-    assert_eq!(read(event(drag, 49, 0)), ((49, 0), false));
+    assert_eq!(read(mouse(drag, 49, 19)), ((49, 19), false));
+    assert_eq!(read(mouse(drag, 49, 0)), ((49, 0), false));
 }
 
 #[test]
 fn a_tie_around_a_switch_reads_in_the_new_units() {
-    let tie = event(MouseEventKind::Moved, 0, 0);
+    let tie = mouse(MouseEventKind::Moved, 0, 0);
 
     assert!(settle(GRID, (0, 0), tie, true).1);
     assert!(!settle(GRID, (0, 0), tie, false).1);
@@ -223,16 +225,7 @@ fn an_edge_pixel_report_around_a_switch_stays_a_pixel_report() {
 
 /// A 0-based SGR-pixels report as crossterm parses it: minus one, wrapping at 0.
 fn pixels(kind: MouseEventKind, x: u16, y: u16) -> MouseEvent {
-    event(kind, x.wrapping_sub(1), y.wrapping_sub(1))
-}
-
-fn event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
-    MouseEvent {
-        kind,
-        column,
-        row,
-        modifiers: KeyModifiers::NONE,
-    }
+    mouse(kind, x.wrapping_sub(1), y.wrapping_sub(1))
 }
 
 #[cfg(unix)]

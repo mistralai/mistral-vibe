@@ -29,6 +29,10 @@ pub enum Row {
 }
 
 pub const MANAGE_CONNECTORS_LABEL: &str = "+ Add more connectors in Studio";
+pub const CONNECTORS_UNAVAILABLE: &str = "Connectors could not be loaded.";
+const NO_LOCAL_SERVERS: &str = "No local MCP servers configured.";
+const NO_CONNECTORS: &str = "No connectors available.";
+pub const KEY_HINT: &str = "Run /status to see which API key is in use.";
 
 pub struct SourceRow {
     pub name: String,
@@ -132,11 +136,7 @@ pub fn title(app: &MCPApp) -> String {
         };
         return format!("{prefix}: {}", source.label());
     }
-    let title = if sources(&app.state, MCPSourceKind::Connector).is_empty() {
-        "MCP Servers"
-    } else {
-        "MCP Servers & Connectors"
-    };
+    let title = "MCP Servers & Connectors";
     if app.refreshing {
         format!("{title}  (refreshing)")
     } else {
@@ -147,29 +147,36 @@ pub fn title(app: &MCPApp) -> String {
 fn list_rows(state: &MCPState, query: &str) -> Vec<Row> {
     let servers = filtered_sources(state, MCPSourceKind::Server, query);
     let connectors = filtered_sources(state, MCPSourceKind::Connector, query);
+    let searching = !query.trim().is_empty();
     // Kept even with no connector, which would otherwise read as "none configured".
     let private_hidden = state.private_connectors_hidden;
-    if servers.is_empty() && connectors.is_empty() && !private_hidden {
+    if searching && servers.is_empty() && connectors.is_empty() && !private_hidden {
         return vec![Row::Note(
-            if query.trim().is_empty() {
-                "No MCP servers or connectors configured"
-            } else {
-                "No matching MCP servers or connectors"
-            }
-            .to_owned(),
+            "No matching MCP servers or connectors".to_owned(),
         )];
     }
+    // Both sections show when not searching, so an empty one reads as "none", not an error.
     let mut rows = Vec::new();
-    if !servers.is_empty() {
-        add_source_group(&mut rows, state, "Local MCP Servers", &servers, Vec::new());
+    if !searching || !servers.is_empty() {
+        let leads = empty_note(servers.is_empty() && !searching, NO_LOCAL_SERVERS);
+        add_source_group(&mut rows, state, "Local MCP Servers", &servers, leads);
     }
-    if !connectors.is_empty() || private_hidden {
-        if !servers.is_empty() {
+    if !searching || !connectors.is_empty() || private_hidden {
+        if !rows.is_empty() {
             rows.push(Row::Blank);
         }
         let mut leads = Vec::new();
+        let empty = connectors.is_empty() && !searching;
+        if state.connector_error.is_some() {
+            leads.extend(empty_note(empty, CONNECTORS_UNAVAILABLE));
+        } else if !private_hidden {
+            leads.extend(empty_note(empty, NO_CONNECTORS));
+        }
         if private_hidden {
             leads.push(Row::PrivateConnectorsHidden);
+        }
+        if state.connector_error.is_some() || private_hidden {
+            leads.push(Row::Detail(KEY_HINT.to_owned()));
         }
         if state.manage_connectors_url.is_some() {
             leads.push(Row::Manage);
@@ -177,6 +184,14 @@ fn list_rows(state: &MCPState, query: &str) -> Vec<Row> {
         add_source_group(&mut rows, state, "Available Connectors", &connectors, leads);
     }
     rows
+}
+
+fn empty_note(empty: bool, note: &str) -> Vec<Row> {
+    if empty {
+        vec![Row::Note(note.to_owned())]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Sources of one kind, in menu order.

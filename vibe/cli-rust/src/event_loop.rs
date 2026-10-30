@@ -9,7 +9,6 @@ use tokio::sync::{mpsc, watch};
 use crate::app::App;
 use crate::commands::CommandEvent;
 use crate::config;
-use crate::resume_picker::Event as ResumeEvent;
 use crate::server::{method, Client, Notification, SHUTDOWN_GRACE};
 use crate::session_exit;
 use crate::startup::StartupEvent;
@@ -42,14 +41,6 @@ pub const RELEASE_KEY: u8 = 24;
 pub const COMMAND_CHANNEL_CAP: usize = 16;
 /// Bounded voice-event channel; transcription deltas burst, drop on full.
 pub const VOICE_CHANNEL_CAP: usize = 256;
-/// Bounded prompt-queue channel; one answer per accepted prompt.
-pub const QUEUE_CHANNEL_CAP: usize = 32;
-/// Bounded approval result/preview channel; one response and one preview are expected.
-pub const APPROVAL_CHANNEL_CAP: usize = 4;
-/// Bounded feedback-result channel; at most one eligibility or record request is active.
-pub const FEEDBACK_CHANNEL_CAP: usize = 2;
-/// Bounded narrator channel; one summary and one clip are live, and senders await rather than drop.
-pub const NARRATOR_CHANNEL_CAP: usize = 2;
 /// How the steady loop ended: a plain quit, or the handshake's missing-key
 /// verdict — the wizard is a pre-session surface that never runs inside the
 /// TUI, so the loop hands its parts back to `main` for the wizard round and
@@ -112,28 +103,11 @@ pub struct EventSources {
     pub notifications: mpsc::Receiver<Notification>,
     pub ready: mpsc::Receiver<StartupEvent>,
     pub config: mpsc::Receiver<config::Loaded>,
-    pub theme: mpsc::Receiver<crate::theme_picker::Event>,
-    pub model: mpsc::Receiver<crate::model_picker::Event>,
-    pub log_level: mpsc::Receiver<crate::log_level_picker::Event>,
-    pub thinking: mpsc::Receiver<crate::thinking_picker::Event>,
-    pub agents: mpsc::Receiver<crate::agents::Event>,
-    pub resume: mpsc::Receiver<ResumeEvent>,
-    pub rewind: mpsc::Receiver<crate::rewind::Event>,
-    pub mcp: mpsc::Receiver<crate::mcp::Event>,
-    pub mcp_oauth: mpsc::Receiver<crate::mcp_oauth::Event>,
-    pub connector_auth: mpsc::Receiver<crate::connector_auth::Event>,
+    pub events: mpsc::Receiver<crate::ui_event::UiEvent>,
     pub commands: mpsc::Receiver<CommandEvent>,
-    pub queue: mpsc::Receiver<crate::message_queue::QueueEvent>,
-    pub approval: mpsc::Receiver<crate::approval::Event>,
-    pub feedback: mpsc::Receiver<crate::feedback::Event>,
-    pub paste_image: mpsc::Receiver<crate::paste_image::Event>,
-    pub narrator: mpsc::Receiver<crate::turn_summary::Event>,
     pub voice: mpsc::Receiver<VoiceEvent>,
     pub telemetry: mpsc::Receiver<crate::telemetry::TelemetryEvent>,
     pub files: watch::Receiver<u64>,
-    pub subagents: mpsc::Receiver<crate::subagents::Event>,
-    pub older_history: mpsc::Receiver<crate::older_history::Event>,
-    pub debug_console: mpsc::Receiver<crate::debug_console::Event>,
 }
 
 impl EventLoop {

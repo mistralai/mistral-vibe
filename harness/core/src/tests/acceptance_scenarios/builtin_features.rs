@@ -1,4 +1,7 @@
 use super::*;
+use crate::core::InputModality;
+
+const READ_FILE_TEXT_DESCRIPTION: &str = "Read a text file with optional zero-indexed line offset and limit. When `was_truncated` is true, read on from `next_offset`. An offset past the end of the file is an error. A directory reads as a listing of its entries, one per line with `/` after each subdirectory, at most 500 at a time.";
 
 /// *Prepare*: The default test configuration omits every built-in feature switch.
 /// *Do*: Serialize it and open a Session.
@@ -176,7 +179,7 @@ fn disabled_programmatic_tool_calling_keeps_direct_provided_tools() {
 
     assert_eq!(
         catalog_names(&completion),
-        ["read_file", "write_file", "edit", "bash", "list_events"]
+        ["list_events", "read_file", "write_file", "edit", "bash"]
     );
 }
 
@@ -260,6 +263,55 @@ fn disabled_file_system_rejects_dependent_features() {
             .expect("dependent features reject session creation");
         assert_eq!(error.to_string(), expected);
     }
+}
+
+/// *Prepare*: A Session declares extracted document text and native `read_file` images while its
+/// agent model reads images, and finishes a Turn.
+/// *Do*: Reconfigure it for a model without image input, keeping the declaration, and start a
+/// Turn.
+/// *Assert*: The first `read_file` describes the image itself; after the switch, Core replaces
+/// the model tool catalog and leaves the image sentence out, with no new declaration.
+#[test]
+fn native_read_file_images_are_described_only_while_the_model_receives_images() {
+    let vision = with_tools(
+        config(),
+        json!({"file_system": {
+            "mode": "enabled",
+            "read_file": {"documents": "extracted_text", "images": "native"},
+        }}),
+    );
+    let mut runtime = SynchronousRuntime::new(vision.clone());
+    let first = runtime.start_turn("vision", "read the scan");
+    assert_eq!(
+        read_file_tool_description(&first),
+        format!(
+            "{READ_FILE_TEXT_DESCRIPTION} PDF, Word, PowerPoint, and email files return their extracted text. An image file returns the image itself."
+        )
+    );
+    runtime.finish_turn_with_text("vision", &first, "done");
+
+    let mut text_only = vision;
+    text_only.settings.context.model_facts.input_modalities = vec![InputModality::Text];
+    runtime.reconfigure_settings(
+        text_only.settings,
+        completed("vision", vec![json!({"type": "text", "text": "done"})]),
+    );
+    let next = runtime
+        .apply(
+            user_message("text-only", "read it again", "queue"),
+            running("text-only")
+                .dispatch(llm_call(0))
+                .observe(turn_started("text-only", "read it again")),
+        )
+        .only_action();
+
+    assert_eq!(next["model_input"]["tool_catalog"]["type"], "replace");
+    assert_eq!(
+        read_file_tool_description(&next),
+        format!(
+            "{READ_FILE_TEXT_DESCRIPTION} PDF, Word, PowerPoint, and email files return their extracted text."
+        )
+    );
 }
 
 /// *Prepare*: A Session enables skills, once with no skill configured and once with one.
@@ -439,6 +491,16 @@ fn catalog_names(completion: &Value) -> Vec<String> {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_string())
         .collect()
+}
+
+fn read_file_tool_description(completion: &Value) -> &str {
+    completion["model_input"]["tool_catalog"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "read_file")
+        .and_then(|tool| tool["description"].as_str())
+        .expect("the model tool catalog carries read_file")
 }
 
 fn system_text(completion: &Value) -> String {

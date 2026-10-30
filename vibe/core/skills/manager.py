@@ -13,7 +13,6 @@ from vibe.core.config.harness_files import (
     HarnessFilesManager,
     get_harness_files_manager,
 )
-from vibe.core.skills.builtins import BUILTIN_SKILLS
 from vibe.core.skills.models import (
     REGISTRY_LATEST_ALIAS,
     RegistryRef,
@@ -120,11 +119,9 @@ class SkillManager:
         config_getter: Callable[[], VibeConfigSchema],
         *,
         harness_files: HarnessFilesManager | None = None,
-        include_builtins: bool = True,
     ) -> None:
         self._config_getter = config_getter
         self._harness_files = harness_files or get_harness_files_manager()
-        self._include_builtins = include_builtins
         self._search_paths = self._compute_search_paths(self._config)
         self._config_issues: list[SkillConfigIssue] = []
         self._discovered = self._discover_skills()
@@ -194,7 +191,7 @@ class SkillManager:
         return unique
 
     def _discover_skills(self) -> dict[str, SkillInfo]:
-        skills: dict[str, SkillInfo] = {**self._reserved_builtins}
+        skills: dict[str, SkillInfo] = {}
         for base, scope in self._search_paths:
             if not base.is_dir():
                 continue
@@ -212,9 +209,7 @@ class SkillManager:
             if name not in skills:
                 skills[name] = info
             else:
-                logger.debug(
-                    "Skipping registry skill '%s'; a local/builtin skill wins", name
-                )
+                logger.debug("Skipping registry skill '%s'; a local skill wins", name)
         return skills
 
     def _discover_skills_in_dir(
@@ -231,13 +226,6 @@ class SkillManager:
                 skill_file, source=SkillSource.LOCAL, scope=scope
             )
             if skill_info is None:
-                continue
-            if skill_info.name in self._reserved_builtins:
-                logger.debug(
-                    "Skipping skill '%s' at %s because builtin skill names are reserved",
-                    skill_info.name,
-                    skill_info.skill_path,
-                )
                 continue
             if skill_info.name in skills:
                 logger.debug(
@@ -299,8 +287,8 @@ class SkillManager:
         Collapsing by name here is what made those unreachable. The browser
         collapses for display and keeps this set for per-scope actions.
 
-        Builtins are excluded, and skills matched by ``disabled_skills`` are
-        kept so one turned off can be turned back on.
+        Skills matched by ``disabled_skills`` are kept so one turned off can
+        be turned back on.
 
         Reads the discovery done at construction rather than re-walking the
         search paths, so listing does not hit the disk on the event loop.
@@ -400,16 +388,8 @@ class SkillManager:
             return None
 
     @property
-    def _reserved_builtins(self) -> Mapping[str, SkillInfo]:
-        # The names are reserved because the builtins occupy them. A caller that
-        # sources them elsewhere occupies nothing, so nothing is held back.
-        return BUILTIN_SKILLS if self._include_builtins else {}
-
-    @property
     def custom_skills_count(self) -> int:
-        return sum(
-            name not in self._reserved_builtins for name in self.available_skills
-        )
+        return len(self.available_skills)
 
     def get_skill(self, name: str) -> SkillInfo | None:
         return self.available_skills.get(name)

@@ -7,7 +7,7 @@ Skills contain task-specific instructions. When a request matches a skill descri
 
 Call `skill` only with a name listed in `<available-skills>`. Connector names and unlisted names in skill instructions are not skills.
 
-Do not read a root `SKILL.md` path with `read_file` after loading a skill. Use `read_file` only for support or reference files mentioned by the loaded skill."#
+Load a skill only with `skill`, never by reading its root `SKILL.md` path with `read_file`. A listed skill's files may not exist until `skill` loads it. After loading, use `read_file` only for support or reference files mentioned by the loaded skill."#
 }
 
 pub(crate) fn catalog_prompt_section<'a>(
@@ -20,11 +20,9 @@ pub(crate) fn catalog_prompt_section<'a>(
                 r#"  <skill>
     <name>{}</name>
     <description>{}</description>
-    <path>{}</path>
   </skill>"#,
                 escape_xml(&skill.name),
-                escape_xml(&skill.description),
-                escape_xml(&skill.path)
+                escape_xml(&skill.description)
             )
         })
         .collect::<Vec<_>>();

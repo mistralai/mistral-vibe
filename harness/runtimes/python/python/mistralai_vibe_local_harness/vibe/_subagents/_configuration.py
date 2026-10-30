@@ -595,7 +595,14 @@ def _policy_ceiling(
         allowed_environment_names=sorted(adapter.env),
         approval_bypass=adapter.bypass_approval,
         max_turn_iterations=config.settings.turn.max_iterations,
-        max_output_tokens=adapter.max_tokens,
+        max_output_tokens=min(
+            (
+                cap
+                for cap in (adapter.max_tokens, adapter.agent_max_tokens)
+                if cap is not None
+            ),
+            default=None,
+        ),
     )
 
 
@@ -629,6 +636,15 @@ def _binding_digest(
                     "model": adapter.model,
                     "temperature": adapter.temperature,
                     "max_tokens": adapter.max_tokens,
+                    # Only when set, so a binding without them keeps its digest.
+                    **{
+                        name: cap
+                        for name, cap in (
+                            ("agent_max_tokens", adapter.agent_max_tokens),
+                            ("compaction_max_tokens", adapter.compaction_max_tokens),
+                        )
+                        if cap is not None
+                    },
                     "timeout_s": adapter.timeout_s,
                     "retry_max_elapsed_time_s": adapter.retry_max_elapsed_time_s,
                     "cwd": str(adapter.workspace.cwd),

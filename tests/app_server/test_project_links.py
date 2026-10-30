@@ -8,6 +8,7 @@ import pytest
 
 from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server._host import HostRequestHandler
+from vibe.app_server._process_services import ProcessServices
 import vibe.app_server._project_links as project_links
 from vibe.app_server._project_links import (
     ProjectLinksAuthError,
@@ -307,6 +308,62 @@ class TestResolveRoot:
         monkeypatch.setattr(controller, "_inspect_directory", _raise)
         result = await controller.resolve_root(str(REPO_ROOT))
         assert result["rejectReason"] == "nested_unresolvable"
+
+
+class TestInspectRootWithoutGit:
+    @pytest.fixture(autouse=True)
+    def _no_git(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setenv("GIT_PYTHON_GIT_EXECUTABLE", str(tmp_path / "no-git"))
+
+    @pytest.mark.asyncio
+    async def test_plain_directory_is_eligible(
+        self, controller: ProjectLinksController, tmp_path: Path
+    ) -> None:
+        directory = tmp_path / "notes"
+        directory.mkdir()
+
+        result = await controller.inspect_root(str(directory))
+
+        assert result["eligible"] is True
+        assert result["rejectReason"] is None
+        assert result["root"] == {
+            "directoryPath": str(directory.resolve()),
+            "directoryName": "notes",
+            "git": None,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("marker_is_file", [False, True])
+    async def test_directory_inside_a_checkout_asks_for_git(
+        self, controller: ProjectLinksController, tmp_path: Path, marker_is_file: bool
+    ) -> None:
+        checkout = tmp_path / "widgets"
+        chosen = checkout / "src"
+        chosen.mkdir(parents=True)
+        if marker_is_file:
+            (checkout / ".git").write_text("gitdir: /elsewhere/.git/worktrees/w\n")
+        else:
+            (checkout / ".git").mkdir()
+
+        result = await controller.inspect_root(str(chosen))
+
+        assert result["eligible"] is False
+        assert result["rejectReason"] == "git_unavailable"
+        assert result["root"] is None
+
+    @pytest.mark.asyncio
+    async def test_saving_a_checkout_is_an_invalid_request(
+        self, controller: ProjectLinksController, tmp_path: Path
+    ) -> None:
+        (tmp_path / ".git").mkdir()
+
+        with pytest.raises(ProjectLinksInvalidRequest):
+            await controller.save(
+                str(tmp_path),
+                project_id="p1",
+                project_name="widgets",
+                expected_github_repo_url=None,
+            )
 
 
 class TestInspectRoot:
@@ -977,10 +1034,13 @@ class TestProjectLinksJsonRpc:
 
     @pytest.mark.asyncio
     async def test_dispatches_without_attached_session(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
     ) -> None:
         controller = _FakeProjectLinksController()
-        handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+        handler = HostRequestHandler(
+            HarnessFilesManager(sources=("user",)),
+            org_config=process_services.org_config,
+        )
         monkeypatch.setattr(handler, "_project_links", controller)
 
         result = await handler.dispatch(
@@ -1005,10 +1065,13 @@ class TestProjectLinksJsonRpc:
 
     @pytest.mark.asyncio
     async def test_dispatches_inspect_root_without_attached_session(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
     ) -> None:
         controller = _FakeProjectLinksController()
-        handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+        handler = HostRequestHandler(
+            HarnessFilesManager(sources=("user",)),
+            org_config=process_services.org_config,
+        )
         monkeypatch.setattr(handler, "_project_links", controller)
 
         result = await handler.dispatch(
@@ -1025,10 +1088,13 @@ class TestProjectLinksJsonRpc:
 
     @pytest.mark.asyncio
     async def test_dispatches_save_without_attached_session(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
     ) -> None:
         controller = _FakeProjectLinksController()
-        handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+        handler = HostRequestHandler(
+            HarnessFilesManager(sources=("user",)),
+            org_config=process_services.org_config,
+        )
         monkeypatch.setattr(handler, "_project_links", controller)
 
         result = await handler.dispatch(
@@ -1062,9 +1128,16 @@ class TestProjectLinksJsonRpc:
     )
     @pytest.mark.asyncio
     async def test_maps_controller_errors(
-        self, monkeypatch: pytest.MonkeyPatch, error: Exception, code: ProtocolErrorCode
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        error: Exception,
+        code: ProtocolErrorCode,
+        process_services: ProcessServices,
     ) -> None:
-        handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+        handler = HostRequestHandler(
+            HarnessFilesManager(sources=("user",)),
+            org_config=process_services.org_config,
+        )
         monkeypatch.setattr(
             handler, "_project_links", _FakeProjectLinksController(error)
         )

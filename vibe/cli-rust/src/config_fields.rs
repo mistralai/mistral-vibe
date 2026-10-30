@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Clone)]
@@ -43,85 +44,71 @@ pub struct Loaded {
     pub error: Option<String>,
 }
 
+/// App-server `ConfigFieldsReadResponse`.
+#[derive(Deserialize)]
+struct WireResponse {
+    #[serde(deserialize_with = "crate::utils::json::lenient")]
+    fields: Vec<WireField>,
+    #[serde(default, deserialize_with = "crate::utils::json::lenient")]
+    targets: Vec<String>,
+}
+
+/// App-server `ConfigFieldWire`.
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct WireField {
+    name: String,
+    kind: String,
+    description: String,
+    value: Value,
+    path: String,
+    popular: bool,
+    enum_choices: Vec<String>,
+    value_labels: BTreeMap<String, String>,
+    #[serde(deserialize_with = "crate::utils::json::lenient")]
+    layer_values: Vec<WireLayer>,
+}
+
+#[derive(Deserialize)]
+struct WireLayer {
+    layer: String,
+    #[serde(default)]
+    value: Value,
+}
+
 pub fn parse(result: &Value) -> Loaded {
-    let Some(wires) = result.get("fields").and_then(Value::as_array) else {
+    let Ok(response) = WireResponse::deserialize(result) else {
         return Loaded {
             error: Some("unexpected config/fields/read response".into()),
             ..Loaded::default()
         };
     };
     Loaded {
-        fields: wires.iter().map(field).collect(),
-        targets: strings(result.get("targets")),
+        fields: response.fields.into_iter().map(field).collect(),
+        targets: response.targets,
         error: None,
     }
 }
 
-fn field(wire: &Value) -> ConfigField {
-    let layers = wire.get("layerValues").and_then(Value::as_array);
+fn field(wire: WireField) -> ConfigField {
+    let layers: Vec<_> = wire
+        .layer_values
+        .into_iter()
+        .map(|item| (item.layer, item.value))
+        .collect();
     ConfigField {
-        name: string(wire.get("name")),
-        popular: wire
-            .get("popular")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        path: string(wire.get("path")),
-        raw_value: wire.get("value").cloned().unwrap_or(Value::Null),
-        kind: string(wire.get("kind")),
-        writable: layers
-            .and_then(|items| items.first())
-            .and_then(|item| item.get("layer"))
-            .and_then(Value::as_str)
-            .is_none_or(|layer| layer != "admin"),
-        overridden: layers.is_some_and(|items| {
-            items
-                .iter()
-                .any(|item| item.get("layer").and_then(Value::as_str) != Some("default"))
-        }),
-        enum_choices: strings(wire.get("enumChoices")),
-        description: string(wire.get("description")),
-        value_labels: wire
-            .get("valueLabels")
-            .and_then(Value::as_object)
-            .map(|labels| {
-                labels
-                    .iter()
-                    .filter_map(|(key, value)| {
-                        value.as_str().map(|value| (key.clone(), value.to_owned()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-        layers: layers
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| {
-                        Some((
-                            item.get("layer")?.as_str()?.to_owned(),
-                            item.get("value").cloned().unwrap_or(Value::Null),
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        writable: layers.first().is_none_or(|(layer, _)| layer != "admin"),
+        overridden: layers.iter().any(|(layer, _)| layer != "default"),
+        name: wire.name,
+        popular: wire.popular,
+        path: wire.path,
+        raw_value: wire.value,
+        kind: wire.kind,
+        enum_choices: wire.enum_choices,
+        description: wire.description,
+        value_labels: wire.value_labels,
+        layers,
     }
-}
-
-fn string(value: Option<&Value>) -> String {
-    value.and_then(Value::as_str).unwrap_or_default().to_owned()
-}
-fn strings(value: Option<&Value>) -> Vec<String> {
-    value
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 pub fn format_value(value: &Value) -> String {

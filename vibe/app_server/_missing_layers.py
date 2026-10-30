@@ -10,8 +10,8 @@ from the caches the fetches wrote.
 
 Once a fetch fails, or is still running at its limit, later reads stop waiting
 for it until the process restarts. GrowthBook and the catalog share that memory
-with the session path; the org config keeps its own, since a session start
-always refetches it.
+with the session path. The org config is the process's ``OrgConfigService``,
+which backs off after a failure and retries on its own.
 """
 
 from __future__ import annotations
@@ -20,15 +20,9 @@ import asyncio
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
-from vibe.app_server._admin_config import fetch_admin_toml, load_fetched_admin_config
 from vibe.app_server._cached_layers import apply_cached_layers
 from vibe.app_server._launch_context import client_launch_context
-from vibe.core.config.admin_config import AdminConfigOutcome
 from vibe.core.config.default_orchestrator import build_default_orchestrator
-from vibe.core.config.managed_config_cache import (
-    load_cached_managed_config,
-    store_cached_managed_config,
-)
 from vibe.core.experiments import wait as experiments_wait
 from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.experiments.cache import load_cached_eval_response
@@ -42,28 +36,26 @@ from vibe.core.model_catalog import wait as model_catalog_wait
 from vibe.core.model_catalog.cache import load_cached_model_catalog
 from vibe.core.model_catalog.session import fetch_and_cache_model_catalog
 from vibe.core.model_catalog.wait import ModelCatalogWait, model_catalog_failed
-from vibe.core.telemetry.send import get_mistral_provider_and_api_key
-from vibe.core.utils.fetch_wait import FetchFailures, FetchWait
+from vibe.core.telemetry.send import (
+    credential_cache_key_is_current,
+    get_mistral_provider_and_api_key,
+)
+from vibe.core.utils.fetch_wait import FetchWait
 from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
     from vibe.app_server._connection_protocol import ClientInfo
+    from vibe.app_server._org_config_service import OrgConfigKey, OrgConfigService
     from vibe.core.config import VibeConfigSchema
     from vibe.core.config.harness_files import HarnessFilesManager
     from vibe.core.config.orchestrator import ConfigOrchestrator
-
-_org_config_failures = FetchFailures()
-
-
-def reset_org_config_fetch_failed() -> None:
-    """Forget a failed org config fetch; for test isolation."""
-    _org_config_failures.reset()
 
 
 class MissingLayerFetches:
     """The picker's config reads, and the fetches they share."""
 
-    def __init__(self) -> None:
+    def __init__(self, org_config: OrgConfigService) -> None:
+        self._org_config = org_config
         # Holds each task so it is not collected mid-flight, and lets a
         # concurrent read for the same credential wait on it, not refetch.
         self._tasks: dict[tuple[str, str], asyncio.Task[Any]] = {}
@@ -75,39 +67,40 @@ class MissingLayerFetches:
         what nothing is cached for.
         """
         orchestrator = await build_default_orchestrator(harness_files=harness_files)
-        cache_key, _, _ = await apply_cached_layers(orchestrator)
+        org_key, _, _ = await apply_cached_layers(orchestrator, self._org_config)
         if not await self._fetch_missing(
-            orchestrator.config, cache_key, harness_files, client_info
+            orchestrator.config, org_key, harness_files, client_info
         ):
             return orchestrator
         # Rebuilt rather than re-applied: the org config's cache key is read
         # from the config before the org config applies.
         orchestrator = await build_default_orchestrator(harness_files=harness_files)
-        await apply_cached_layers(orchestrator)
+        await apply_cached_layers(orchestrator, self._org_config)
         return orchestrator
 
     async def _fetch_missing(
         self,
         config: VibeConfigSchema,
-        cache_key: str | None,
+        org_key: OrgConfigKey | None,
         harness_files: HarnessFilesManager,
         client_info: ClientInfo,
     ) -> bool:
         """Fetch what *config* has no cache for, and wait for it. Returns
         whether anything was fetched.
         """
-        if cache_key is None:
+        if org_key is None:
             # No Mistral credential: none of the three can be fetched.
             return False
+        cache_key = org_key.cache_key
         org = None
         if (
-            not _org_config_failures.failed
-            and load_cached_managed_config(cache_key) is None
+            not self._org_config.failed_recently(org_key)
+            and await self._org_config.load(org_key) is None
         ):
             org = self._task(
                 "org_config",
                 cache_key,
-                lambda: _fetch_org_config(harness_files, cache_key),
+                lambda: _fetch_org_config(harness_files, self._org_config),
             )
 
         async def with_org_config() -> VibeConfigSchema:
@@ -120,6 +113,10 @@ class MissingLayerFetches:
 
         async def fetch_experiments() -> None:
             fetch_config = await with_org_config()
+            # The org config applied was the fetching account's: a sign-in
+            # since then makes it another account's, so skip this read.
+            if not credential_cache_key_is_current(cache_key):
+                return
             if not _experiments_missing(fetch_config):
                 return
             _limit_this_fetch(ExperimentsWait)
@@ -129,6 +126,10 @@ class MissingLayerFetches:
 
         async def fetch_model_catalog() -> None:
             fetch_config = await with_org_config()
+            # The org config applied was the fetching account's: a sign-in
+            # since then makes it another account's, so skip this read.
+            if not credential_cache_key_is_current(cache_key):
+                return
             if not _model_catalog_missing(fetch_config):
                 return
             _limit_this_fetch(ModelCatalogWait)
@@ -194,33 +195,20 @@ def _limit_this_fetch(wait: Callable[[asyncio.Task[Any]], FetchWait]) -> None:
 
 
 async def _fetch_org_config(
-    harness_files: HarnessFilesManager, cache_key: str
+    harness_files: HarnessFilesManager, org_config: OrgConfigService
 ) -> VibeConfigSchema:
-    """Fetch and cache the org config; returns the config it applies to."""
+    """Fill the process's org config; returns the config it applies to."""
     orchestrator = await build_default_orchestrator(harness_files=harness_files)
-    fetched = await fetch_admin_toml(orchestrator)
-    result, answer = await load_fetched_admin_config(orchestrator, fetched)
-    if result.outcome in {
-        AdminConfigOutcome.FETCH_FAILED,
-        AdminConfigOutcome.PARSE_FAILED,
-    }:
-        # A fetch that failed or a payload that will not parse is not this
-        # folder's fault, and will not improve within the process.
+    org_key, _, _ = await apply_cached_layers(orchestrator, None)
+    failure = await org_config.ensure(org_key)
+    if failure is not None:
         logger.info(
             "Org config not fetched for a read outside a session outcome=%s",
-            result.outcome.value,
+            failure.outcome.value,
         )
-        _org_config_failures.mark()
-    elif answer is not None:
-        # Without the Core check a session start runs before caching: a read
-        # has no session to build. A session start still fetches for itself.
-        store_cached_managed_config(cache_key, answer)
-    elif isinstance(fetched, str):
-        # Parsed fine, but this folder's merged config rejected it: cached
-        # anyway, since another folder may accept it, and every folder
-        # re-validates the cached copy at apply time, as a session does.
-        store_cached_managed_config(cache_key, fetched)
+        return orchestrator.config
+    await apply_cached_layers(orchestrator, org_config)
     return orchestrator.config
 
 
-__all__ = ["MissingLayerFetches", "reset_org_config_fetch_failed"]
+__all__ = ["MissingLayerFetches"]

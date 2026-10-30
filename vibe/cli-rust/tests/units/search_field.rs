@@ -1,18 +1,13 @@
 //! The shared list search model: `/` focuses, Esc leaves then clears, list keys pass through.
 
-use std::sync::Arc;
-
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyCode;
 use serde_json::json;
 use tokio::sync::mpsc;
 use vibe_rs::app::App;
 use vibe_rs::search_field::{self, Outcome, Search};
-use vibe_rs::server::Client;
 use vibe_rs::{config, config_fields, plugins};
 
-fn key(code: KeyCode) -> KeyEvent {
-    KeyEvent::new(code, KeyModifiers::NONE)
-}
+use crate::support::{key, stub};
 
 fn press(search: &mut Search, code: KeyCode) -> Outcome {
     search_field::handle_key(search, &key(code))
@@ -99,7 +94,7 @@ fn config_app() -> App {
 
 #[test]
 fn config_navigates_with_j_k_and_searches_after_slash() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let (tx, _rx) = mpsc::channel(1);
     let mut app = config_app();
     let send = |app: &mut App, code| config::handle_key(app, &client, &tx, key(code));
@@ -127,7 +122,7 @@ fn config_navigates_with_j_k_and_searches_after_slash() {
 
 #[test]
 fn enter_in_the_search_field_views_the_highlighted_plugin() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = App::default();
     let state =
         serde_json::from_value(json!({"plugins": [{"name": "alpha"}, {"name": "beta"}]})).unwrap();

@@ -8,6 +8,9 @@
 //! (still sent for other surfaces; the wizard never reads it), and the
 //! outcome tags deserialize through the typed enums.
 
+#[path = "onboarding_oidc.rs"]
+mod onboarding_oidc;
+
 use serde_json::Value;
 
 use super::onboarding_seed::status;

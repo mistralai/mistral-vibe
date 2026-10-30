@@ -101,9 +101,7 @@ fn cache_and_copy(app: &mut App, f: &mut Frame, spans: &[RowSpan]) -> bool {
     true
 }
 
-/// Highlight one row. A folded group header composites its label's
-/// `text-opacity: 55%` over the selection colors, while its marker
-/// indicator repaints with the raw selection style.
+/// Highlight one row; a group header's label is dimmed, its marker keeps the raw selection style.
 fn paint_row(buf: &mut Buffer, chat: Rect, style: Style, (y, x0, x1): RowSpan) {
     if is_group_header(buf, chat, y) {
         let label = group_label_style();
@@ -130,29 +128,15 @@ fn is_group_header(buf: &Buffer, chat: Rect, y: u16) -> bool {
         .is_some_and(|cell| matches!(cell.symbol(), "⏵" | "⏷" | "■" | "□"))
 }
 
-/// The selected group-header label: the label's text-opacity blends its color
-/// toward the selection background, with ANSI themes resolving the selection
-/// colors through the `monokai` (dark) or `alabaster` (light) palette and
-/// folding the label's dim in.
+/// Selected group-header label: selection text at 55% opacity, or SGR dim on ANSI themes.
 fn group_label_style() -> Style {
-    use theme::fixed::{alabaster, monokai};
-    use theme::DIM_FACTOR;
     /// The header's `text-opacity`.
     const TEXT_OPACITY: f32 = 0.55;
 
-    let (bg, fg) = if theme::is_ansi() {
-        // The theme's raw `screen-selection-*` colors, indexed into the palette
-        // picked by dark vs light (`bright_blue`/`black` vs `cyan`/`bright_white`).
-        let (bg, selection_fg) = if theme::is_dark() {
-            (monokai::BRIGHT_BLUE, monokai::BLACK)
-        } else {
-            (alabaster::CYAN, alabaster::BRIGHT_WHITE)
-        };
-        let dimmed = theme::blend(bg, selection_fg, DIM_FACTOR);
-        (bg, theme::blend(bg, dimmed, TEXT_OPACITY))
-    } else {
-        let bg = theme::selection_bg();
-        (bg, theme::blend(bg, theme::selection_fg(), TEXT_OPACITY))
-    };
-    Style::default().fg(fg).bg(bg)
+    let style = Style::default().bg(theme::selection_bg());
+    if theme::is_ansi() {
+        return style.fg(theme::selection_fg()).add_modifier(Modifier::DIM);
+    }
+    let fg = theme::blend(theme::selection_bg(), theme::selection_fg(), TEXT_OPACITY);
+    style.fg(fg)
 }

@@ -3,7 +3,8 @@
   "method": "session/start",
   "params": {
    "agentConfig": {
-    "cwd": "<cwd>"
+    "cwd": "<cwd>",
+    "terminalKey": "e2e-terminal"
    },
    "historyLimit": 200
   }
@@ -42,7 +43,8 @@
   "method": "session/start",
   "params": {
    "agentConfig": {
-    "cwd": "<cwd>"
+    "cwd": "<cwd>",
+    "terminalKey": "e2e-terminal"
    },
    "historyLimit": 200
   }

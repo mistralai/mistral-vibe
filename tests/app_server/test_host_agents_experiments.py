@@ -16,6 +16,7 @@ import pytest
 import vibe.app_server._cached_layers as cached_layers_module
 from vibe.app_server._connection_protocol import ClientInfo
 from vibe.app_server._host import HostRequestHandler
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.protocol import AgentsListParams, AgentsListResponse
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.experiments.active import ExperimentName
@@ -34,14 +35,16 @@ def _smart_approve_available_response() -> EvalResponse:
 
 @pytest.mark.asyncio
 async def test_agents_list_offers_smart_approve_from_cached_experiment(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     monkeypatch.setattr(
         cached_layers_module,
         "load_cached_eval_response",
         lambda _config: _smart_approve_available_response(),
     )
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     result = await handler.dispatch(
         "agents/list",

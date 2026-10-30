@@ -6,10 +6,8 @@ use serde_json::Value;
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalCallback {
-    #[serde(default)]
-    pub callback_id: String,
-    #[serde(default)]
-    pub session_id: String,
+    #[serde(flatten)]
+    pub address: super::CallbackAddress,
     #[serde(default)]
     pub detail: ApprovalDetail,
 }

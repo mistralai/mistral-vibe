@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
-import httpx
+import httpx2
 import pytest
 
 from tests.conftest import build_test_vibe_config
@@ -113,12 +113,12 @@ def _rival_definition() -> PluginMCPServerDefinition:
     )
 
 
-def _unauthorized() -> httpx.HTTPStatusError:
-    request = httpx.Request("POST", "https://mcp.figma.test/mcp")
-    return httpx.HTTPStatusError(
+def _unauthorized() -> httpx2.HTTPStatusError:
+    request = httpx2.Request("POST", "https://mcp.figma.test/mcp")
+    return httpx2.HTTPStatusError(
         "401 Unauthorized",
         request=request,
-        response=httpx.Response(401, request=request),
+        response=httpx2.Response(401, request=request),
     )
 
 
@@ -742,3 +742,94 @@ async def test_logging_out_of_a_plugin_server_notifies_the_harness() -> None:
 
     # Assert
     assert root.notified == ["figma"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_convergence_restores_the_servers_it_suspended() -> None:
+    """*Prepare*: A session running one server; its config then disables it.
+    *Do*: Converge with a reconfigure that fails.
+    *Assert*: The server suspended on the way is reconfigured back to what the
+    session ran, and the error reaches the caller.
+    """
+    from vibe.core.config import MCPStdio
+
+    # Prepare
+    catalog, authentication = _catalog()
+    server = MCPStdio(name="docs", transport="stdio", command="fake-mcp")
+    root = _root(catalog, configured=[server])
+    service = MCPCatalogService(authentication)
+    previous = await service.resolve_catalog(root._orchestrator)
+    root._orchestrator._config = build_test_vibe_config(
+        mcp_servers=[server.model_copy(update={"disabled": True})]
+    )
+    reconfigured: list[ResolvedMCPCatalog] = []
+    failures = [RuntimeError("Core is down")]
+
+    async def reconfigure(
+        configuration: ResolvedMCPCatalog, *, force_remote_discovery: bool
+    ) -> SessionMCPState:
+        reconfigured.append(configuration)
+        if failures:
+            raise failures.pop()
+        return root._state
+
+    root.reconfigure_mcp = reconfigure  # type: ignore[method-assign]
+
+    # Do
+    with pytest.raises(RuntimeError):
+        await service.converge(cast(Any, root), previous)
+
+    # Assert
+    assert root.suspended == ["docs"]
+    assert reconfigured[-1] == previous
+
+
+@pytest.mark.asyncio
+async def test_a_convergence_that_fails_while_suspending_restores_what_it_suspended() -> (
+    None
+):
+    """*Prepare*: A session running two servers; its config then disables both.
+    *Do*: Converge with the second suspension failing.
+    *Assert*: The server already suspended is reconfigured back to what the
+    session ran, and the error reaches the caller.
+    """
+    from vibe.core.config import MCPStdio
+
+    # Prepare
+    catalog, authentication = _catalog()
+    servers = [
+        MCPStdio(name="docs", transport="stdio", command="fake-mcp"),
+        MCPStdio(name="wiki", transport="stdio", command="fake-mcp"),
+    ]
+    root = _root(catalog, configured=servers)
+    service = MCPCatalogService(authentication)
+    previous = await service.resolve_catalog(root._orchestrator)
+    root._orchestrator._config = build_test_vibe_config(
+        mcp_servers=[server.model_copy(update={"disabled": True}) for server in servers]
+    )
+    reconfigured: list[ResolvedMCPCatalog] = []
+    suspend = root.suspend_mcp
+
+    async def suspend_until_wiki(
+        *, name: str, tool_name: str | None, reason: str
+    ) -> SessionMCPState:
+        if name == "wiki":
+            raise RuntimeError("Core is down")
+        return await suspend(name=name, tool_name=tool_name, reason=reason)
+
+    async def reconfigure(
+        configuration: ResolvedMCPCatalog, *, force_remote_discovery: bool
+    ) -> SessionMCPState:
+        reconfigured.append(configuration)
+        return root._state
+
+    root.suspend_mcp = suspend_until_wiki  # type: ignore[method-assign]
+    root.reconfigure_mcp = reconfigure  # type: ignore[method-assign]
+
+    # Do
+    with pytest.raises(RuntimeError):
+        await service.converge(cast(Any, root), previous)
+
+    # Assert
+    assert root.suspended == ["docs"]
+    assert reconfigured == [previous]

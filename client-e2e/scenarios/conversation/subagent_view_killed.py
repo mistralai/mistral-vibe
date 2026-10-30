@@ -63,6 +63,7 @@ timeline: Timeline = [
     child_session_updated(status="archived"),  # the kill, held until the view is open
     {"release": 5},  # the running turn plus the idle child; the kill is held
     "\x1b[B",  # Down — focus the list on the Main row
+    "a",  # a — show the hidden waiting child
     "\x1b[B",  # Down — highlight the idle child row
     "\r",  # Enter — open the view
     {"release": 2},  # the turn completes, then the kill lands while viewing

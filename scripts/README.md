@@ -42,11 +42,19 @@ and be filled in from a baseline run (observed count + ~10% headroom). Once a
 `budget` is set, exceeding it exits non-zero. The shipped `startup_import_cost.vibe.toml`
 already carries baselined budgets, so a regression overshoot fails the step.
 
+The shipped budgets cover `import vibe` (68), `from vibe.acp.entrypoint import
+main` (620) and `import vibe.app_server.stdio` (888); `strace_code` measures the
+app-server import.
+
 ### Usage
 
 ```bash
 # Run the measurement (enforces budgets when set; exits non-zero on overshoot)
 uv run scripts/check_startup_import_cost.py
+
+# Measure an existing venv interpreter instead of building and installing a
+# wheel (skips the wheel-size report; the path must be a venv interpreter)
+uv run scripts/check_startup_import_cost.py --python .venv/bin/python
 
 # Override the project or config
 uv run scripts/check_startup_import_cost.py --project vibe --config path/to/config.toml

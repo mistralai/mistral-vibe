@@ -103,7 +103,7 @@ from vibe.app_server.models import (
     WorkspaceTrustStatus,
     validate_turn_input_entries,
 )
-from vibe.app_server.provider_auth import ProviderAuthView
+from vibe.app_server.provider_auth import ProviderAuthView, ProviderCredentialSourceKind
 from vibe.app_server.review import (
     ReviewFile,
     ReviewFileStatus,
@@ -181,6 +181,10 @@ SERVER_METHODS: tuple[str, ...] = (
     "projectLinks/resolveRoot",
     "projectLinks/save",
     "projectLinks/unlink",
+    "projects/create",
+    "projects/list",
+    "projects/remove",
+    "projects/rename",
     "review/approve",
     "review/baseline",
     "review/hunks",
@@ -221,6 +225,12 @@ SERVER_METHODS: tuple[str, ...] = (
     "session/subagents/wait",
     "session/title/update",
     "session/turns/list",
+    "setup/oidc-start",
+    "setup/oidc-poll",
+    "setup/oidc-cancel",
+    "setup/oidc-probe",
+    "setup/oidc-clear",
+    "setup/oidc-headers",
     "setup/status",
     "setup/store-credential",
     "setup/submit-choices",
@@ -232,6 +242,11 @@ SERVER_METHODS: tuple[str, ...] = (
     "skills/import",
     "skills/installed",
     "skills/list",
+    "skills/local/delete",
+    "skills/local/list",
+    "skills/local/read",
+    "skills/local/setEnabled",
+    "skills/local/write",
     "skills/remove",
     "skills/setAlias",
     "skills/setEnabled",
@@ -402,6 +417,11 @@ class AgentConfig(ProtocolModel):
     headless: bool = False
     trust_workspace: bool = False
     mcp_servers: list[SessionMCPServer] = Field(default_factory=list)
+    # The terminal the client runs in; `--continue` prefers its last session.
+    terminal_key: str | None = Field(default=None, min_length=1)
+    # Replaces Vibe's product prompt (or the active agent's own) only: Core's
+    # guidance still comes first, and project context and AGENTS.md follow.
+    system_prompt: str | None = None
 
     @field_validator("cwd", "workdir")
     @classmethod
@@ -411,6 +431,14 @@ class AgentConfig(ProtocolModel):
         # that wants the default omits the field instead.
         if value == "":
             raise ValueError("Session cwd must not be empty")
+        return value
+
+    @field_validator("system_prompt")
+    @classmethod
+    def _reject_blank_system_prompt(cls, value: str | None) -> str | None:
+        # A blank one would silently fall back to the product prompt.
+        if value is not None and not value.strip():
+            raise ValueError("Session system prompt must not be blank")
         return value
 
 
@@ -457,7 +485,8 @@ class SessionStartParams(SessionOpenParams):
     # the user's default.
     session_only: bool = False
     first_turn: SessionStartTurn | None = None
-    # The session that started this one to hand it first_turn. The new session
+    # The session that started this one to hand it first_turn; saved with the
+    # session and listed by `session/list`. The new session
     # cannot start sessions until the user writes to it, so started sessions
     # cannot chain on their own.
     started_by_session_id: str | None = None
@@ -495,7 +524,6 @@ class SessionLeaseHolder(ProtocolModel):
 
 class SessionReadResponse(EventWatermarkResponse):
     state: PublicSessionState
-    lease_holder: SessionLeaseHolder | None = None
 
 
 class SessionLeaseUpdate(ProtocolModel):
@@ -683,16 +711,28 @@ class SessionListParams(ProtocolModel):
     # ``None`` asks for both.
     pinned: bool | None = None
     include_archived: bool = False
+    # Only the given sessions, read without the others; and extras for the
+    # page's sessions when asked for.
+    session_ids: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    include: list[SessionListInclude] = Field(
+        default_factory=list, exclude_if=lambda value: not value
+    )
+
+
+type SessionListInclude = Literal["pullRequests"]
 
 
 class SessionListResponse(ProtocolModel):
     items: list[PublicSession] = Field(default_factory=list)
     next_cursor: str | None = None
     previous_cursor: str | None = None
-    # The session `--continue` would resume: the tty-scoped last-session
-    # pointer when it still exists, else the most recently updated session.
-    # Resolved server-side so the pointer stays behind the app-server boundary.
-    continue_session_id: str | None = None
+    # By session id, for the page's sessions, only when asked for with
+    # `include`; left out of every other answer.
+    pull_requests: dict[str, list[PublicSessionArtifact]] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @property
     def data(self) -> list[PublicSession]:
@@ -706,6 +746,18 @@ class SessionDeleteParams(ProtocolModel):
 class SessionArchiveParams(ProtocolModel):
     session_id: str
     archived: bool
+    # Refuse, as a conflict with `data.refusal` "busy", a session that is
+    # working (a turn running or queued, or work a turn started), checked in one
+    # step with the archive.
+    require_idle: bool = Field(default=False, exclude_if=lambda value: not value)
+
+
+# `data.refusal` of a `conflict` the server decided over another session's
+# request: an archive requiring idle, or a message `sentBySession`.
+type PeerRefusal = Literal["archived", "busy", "paused"]
+PEER_REFUSAL_ARCHIVED: Final = "archived"
+PEER_REFUSAL_BUSY: Final = "busy"
+PEER_REFUSAL_PAUSED: Final = "paused"
 
 
 class SessionArchiveResponse(ProtocolModel):
@@ -1460,6 +1512,98 @@ class SkillsListResponse(ProtocolModel):
     skills: list[SkillSummary]
 
 
+class SkillsLocalListParams(ProtocolModel):
+    project_root: str | None = None
+    # Apply the project's own config layers, as a session trusting it would.
+    trust_workspace: bool = False
+
+
+class LocalSkillSummary(ProtocolModel):
+    # The folder; ``skill_name`` is the frontmatter name toggles act on.
+    name: str
+    skill_name: str
+    description: str
+    path: str
+    enabled: bool
+    # A pattern or another config layer decides ``enabled``.
+    locked: bool
+
+
+class SkillsLocalListResponse(ProtocolModel):
+    skills: list[LocalSkillSummary]
+
+
+class SkillsLocalReadParams(ProtocolModel):
+    name: str
+    project_root: str | None = None
+    # Apply the project's own config layers, as a session trusting it would.
+    trust_workspace: bool = False
+
+
+class LocalSkillView(ProtocolModel):
+    name: str
+    skill_name: str
+    description: str
+    body: str
+    assets: dict[str, str]
+    # Capped: a folder like node_modules would otherwise send thousands.
+    skipped_paths: list[str]
+    path: str
+    version: str
+    enabled: bool
+    locked: bool
+
+
+class SkillsLocalReadResponse(ProtocolModel):
+    skill: LocalSkillView
+
+
+class SkillsLocalWriteParams(ProtocolModel):
+    name: str
+    description: str
+    body: str
+    assets: dict[str, str] = Field(default_factory=dict)
+    expected_version: str | None = None
+    # Applied on create only, even over an "off" a deleted namesake left.
+    enabled: bool | None = None
+    project_root: str | None = None
+    # Apply the project's own config layers, as a session trusting it would.
+    trust_workspace: bool = False
+
+
+class SkillsLocalWriteResponse(ProtocolModel):
+    skill: LocalSkillView
+
+
+class SkillsLocalDeleteParams(ProtocolModel):
+    name: str
+    project_root: str | None = None
+    # Other checkouts whose skills share the skill's on/off by name; while one
+    # still has it, the delete keeps the "off".
+    other_project_roots: list[str] = Field(default_factory=list)
+
+
+class SkillsLocalSetEnabledParams(ProtocolModel):
+    name: str
+    enabled: bool
+    project_root: str | None = None
+    # Apply the project's own config layers, as a session trusting it would.
+    trust_workspace: bool = False
+
+
+class SkillsLocalSetEnabledResponse(ProtocolModel):
+    skill: LocalSkillSummary
+
+
+type LocalSkillRefusalReason = Literal[
+    "in_the_way", "skipped_file", "locked", "not_a_project_folder", "unreadable"
+]
+
+
+class LocalSkillRefusalData(ProtocolModel):
+    reason: LocalSkillRefusalReason
+
+
 SkillScopeArg = str
 
 
@@ -2158,6 +2302,7 @@ class SetupStatusResponse(ProtocolModel):
     active_model: str
     theme: str
     supports_browser_sign_in: bool
+    oidc_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
     # The server's view of the key: process env (including the loaded dotenv)
     # first, then the keyring — the ``resolve_api_key`` order.
     has_api_key: bool
@@ -2167,6 +2312,15 @@ class SetupStatusResponse(ProtocolModel):
     # The administrator-pinned console URL (`VIBE_CUSTOM_CONSOLE_URL`), when
     # set: the wizard locks its sign-in domain to it.
     pinned_console_url: str | None = None
+    # The Mistral provider `--setup` also offers when the seeded provider has
+    # no browser sign-in (a litellm or local model is active).
+    mistral_provider: SetupProviderView | None = None
+    # The provider's credential source in use, as ``/status`` reports it
+    # (``providerAuth/read``); ``process_env`` means a key setup saves is shadowed.
+    active_credential_source: ProviderCredentialSourceKind | None = None
+    # The offered Mistral provider's own credential source, so the wizard
+    # warns for the provider the user picks, never the seeded one's.
+    mistral_active_credential_source: ProviderCredentialSourceKind | None = None
 
 
 class SetupStoreCredentialParams(ProtocolModel):
@@ -2226,7 +2380,11 @@ class ProjectLinksListResponse(ProtocolModel):
 
 
 type ProjectLinksResolveRootRejectReason = Literal[
-    "not_git", "unsupported_remote", "nested_unresolvable", "no_commits"
+    "not_git",
+    "unsupported_remote",
+    "nested_unresolvable",
+    "no_commits",
+    "git_unavailable",
 ]
 
 
@@ -2340,6 +2498,51 @@ class ProjectLinksUnlinkResponse(ProtocolModel):
     unlinked: Literal[True]
 
 
+type LocalProjectCloudState = Literal["requested", "creating", "backed", "retired"]
+
+
+class LocalProjectCloudView(ProtocolModel):
+    project_id: str
+    state: LocalProjectCloudState
+
+
+class LocalProjectView(ProtocolModel):
+    id: str
+    name: str
+    # The first root is the session working folder.
+    root_paths: list[str]
+    created_at: int
+    updated_at: int
+    cloud: LocalProjectCloudView | None = None
+
+
+class ProjectsListParams(ProtocolModel):
+    pass
+
+
+class ProjectsListResponse(ProtocolModel):
+    projects: list[LocalProjectView]
+
+
+class ProjectsCreateParams(ProtocolModel):
+    root_path: str = Field(min_length=1)
+    # Defaults to the folder name.
+    name: str | None = None
+
+
+class ProjectsRenameParams(ProtocolModel):
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+
+
+class ProjectsRemoveParams(ProtocolModel):
+    id: str = Field(min_length=1)
+
+
+class ProjectMutationResponse(ProtocolModel):
+    project: LocalProjectView
+
+
 class LoopsListParams(ProtocolModel):
     session_id: str
 
@@ -2436,11 +2639,15 @@ class _TurnQueueInputParams(ProtocolModel):
 
 
 class TurnEnqueueParams(_TurnQueueInputParams):
-    pass
+    # Another session sent it, not the user.
+    sent_by_session: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class TurnEnqueueResponse(ProtocolModel):
     queue_item_id: str
+    # Whether it waits behind a running or queued turn, rather than starting
+    # at once.
+    waits: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class TurnQueueReplaceParams(_TurnQueueInputParams):
@@ -2647,6 +2854,131 @@ class SessionSpawnResponse(ProtocolModel):
     # The client's own id and address for the session, opaque to the server.
     client_session_id: str | None = None
     url: str | None = None
+
+
+SESSION_PEER_LIST_METHOD = "session/peer/list"
+SESSION_PEER_READ_METHOD = "session/peer/read"
+SESSION_PEER_SEND_METHOD = "session/peer/send"
+SESSION_PEER_ARCHIVE_METHOD = "session/peer/archive"
+"""Server requests asking a client that advertised ``sessionPeers`` about the
+other sessions it hosts in the calling session's project. Each arrives on the
+calling session's own connection, which names the caller; every session id in
+them is the client's."""
+
+type PeerSessionStatus = Literal[
+    "working", "idle", "waiting_for_user", "failed", "archived"
+]
+
+
+class SessionPeerListParams(ProtocolModel):
+    # Only these sessions, in this order; otherwise the project's other
+    # sessions, most recently active first.
+    session_ids: list[str] | None = Field(default=None, min_length=1)
+    statuses: list[PeerSessionStatus] | None = Field(default=None, min_length=1)
+    limit: int = Field(ge=1)
+    cursor: str | None = None
+
+
+def _is_empty(value: object) -> bool:
+    return not value
+
+
+class PeerPullRequest(ProtocolModel):
+    url: str
+    title: str | None = Field(default=None, exclude_if=_is_empty)
+    number: int | None = Field(default=None, exclude_if=_is_empty)
+    state: str | None = Field(default=None, exclude_if=_is_empty)
+    checks: str | None = Field(default=None, exclude_if=_is_empty)
+    review: str | None = Field(default=None, exclude_if=_is_empty)
+    merge: str | None = Field(default=None, exclude_if=_is_empty)
+    source_branch: str | None = Field(default=None, exclude_if=_is_empty)
+    target_branch: str | None = Field(default=None, exclude_if=_is_empty)
+
+
+class PeerSessionSummary(ProtocolModel):
+    """Fields with nothing to say are left out, to keep a listing short."""
+
+    session_id: str
+    title: str | None = Field(default=None, exclude_if=_is_empty)
+    status: PeerSessionStatus
+    # Why it waits on the user, such as an approval.
+    status_detail: str | None = Field(default=None, exclude_if=_is_empty)
+    url: str | None = Field(default=None, exclude_if=_is_empty)
+    updated_at: str | None = Field(default=None, exclude_if=_is_empty)
+    cwd: str | None = Field(default=None, exclude_if=_is_empty)
+    started_by_session_id: str | None = Field(default=None, exclude_if=_is_empty)
+    queued_messages: int = Field(default=0, exclude_if=_is_empty)
+    pull_requests: list[PeerPullRequest] = Field(
+        default_factory=list, exclude_if=_is_empty
+    )
+
+
+class SessionPeerListResponse(ProtocolModel):
+    sessions: list[PeerSessionSummary]
+    next_cursor: str | None = None
+    # Asked for by id, but not a session of this project.
+    not_found: list[str] = Field(default_factory=list)
+
+
+class SessionPeerReadParams(ProtocolModel):
+    target_session_id: str = Field(min_length=1)
+    limit: int = Field(ge=1)
+    # The `next_cursor` of the newer page: reads the page before it.
+    cursor: str | None = None
+    include_tool_calls: bool = False
+    max_message_chars: int = Field(ge=1)
+
+
+class PeerSessionMessage(ProtocolModel):
+    role: Literal["user", "assistant", "tool"]
+    text: str
+
+
+class SessionPeerReadResponse(ProtocolModel):
+    session_id: str
+    title: str | None = None
+    status: PeerSessionStatus
+    # Why it waits on the user, such as an approval.
+    status_detail: str | None = None
+    url: str | None = None
+    queued_messages: int = Field(default=0, ge=0)
+    messages: list[PeerSessionMessage]
+    # Reads the older messages before these.
+    next_cursor: str | None = None
+
+
+class SessionPeerSendParams(ProtocolModel):
+    target_session_id: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    # Stable across replays of one tool call.
+    idempotency_key: str = Field(min_length=1)
+
+
+class SessionPeerSendResponse(ProtocolModel):
+    session_id: str
+    title: str | None = None
+    url: str | None = None
+    # Whether the message waits behind a turn already running there.
+    queued: bool
+
+
+class SessionPeerArchiveParams(ProtocolModel):
+    session_ids: list[str] = Field(min_length=1)
+
+
+class PeerSessionArchived(ProtocolModel):
+    session_id: str
+    title: str | None = Field(default=None, exclude_if=_is_empty)
+
+
+class PeerSessionNotArchived(ProtocolModel):
+    session_id: str
+    error: str
+
+
+class SessionPeerArchiveResponse(ProtocolModel):
+    archived: list[PeerSessionArchived]
+    failed: list[PeerSessionNotArchived] = Field(default_factory=list)
 
 
 class CallbackResultError(ProtocolModel):

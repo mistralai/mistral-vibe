@@ -15,7 +15,9 @@ import pytest
 import tomli_w
 
 from vibe.app_server import _runtime as runtime_module
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.protocol import SessionOptions
+from vibe.core.config.shell_timeouts import VIBE_MAX_SHELL_TIMEOUT_SECONDS
 from vibe.core.tools.builtins.bash import BashToolConfig
 from vibe.core.tools.builtins.experimental_bash import ExperimentalBashToolConfig
 from vibe.core.tools.builtins.git_bash import GitBashToolConfig
@@ -27,6 +29,8 @@ from vibe.core.tools.builtins.windows_shell import WindowsShellToolConfig
     [
         ("unix", None, (120, 300)),
         ("unix", {"permission": "ask"}, (120, 300)),
+        ("unix", {"default_timeout": 60}, (60, 300)),
+        ("git_bash", {"default_timeout": "120"}, (120, 300)),
         (
             "powershell",
             {"default_timeout": 300, "max_timeout_seconds": 600},
@@ -65,14 +69,16 @@ async def test_unified_runtime_states_and_passes_vibes_bash_timeouts(
     profile: Literal["unix", "git_bash", "powershell"],
     tool_settings: dict[str, object] | None,
     expected: tuple[int, int],
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A command tool for one shell profile, with both timeouts set in
-    `config.toml`, or neither; the longest maximum is the longest a session
-    starts with, 2**53 - 1.
+    `config.toml`, neither, or only a default; the longest maximum is the
+    longest a session starts with, 2**53 - 1.
     *Do*: Derive the Core configuration used to start the session, and start a
     turn with it.
     *Assert*: Core always gets both timeouts, exactly: Vibe's 120 and 300
-    seconds, or those set in `config.toml`; the command tool's schema states the
+    seconds, those set in `config.toml`, or the default set with Vibe's 300
+    seconds; the command tool's schema states the
     same, and the configuration hashes as the local harness hashes it at
     session start.
     """
@@ -101,7 +107,7 @@ async def test_unified_runtime_states_and_passes_vibes_bash_timeouts(
     monkeypatch.setattr(
         "vibe.app_server._runtime._command_environment_mode", lambda: profile
     )
-    process = runtime_module.HarnessProcess()
+    process = runtime_module.HarnessProcess(services=process_services)
     try:
         context = await process.build_unified_session_context(
             SessionOptions(cwd=str(tmp_path))
@@ -114,6 +120,7 @@ async def test_unified_runtime_states_and_passes_vibes_bash_timeouts(
 
     # Assert
     assert (BASH_TIMEOUT.default_seconds, BASH_TIMEOUT.max_seconds) == (120, 300)
+    assert BASH_TIMEOUT.max_seconds == VIBE_MAX_SHELL_TIMEOUT_SECONDS
     assert derivation.core_config.settings.tools.bash_timeout == (
         RustBashTimeoutSettings(default_seconds=expected[0], max_seconds=expected[1])
     )

@@ -21,7 +21,11 @@ pub(crate) fn default_status() -> SetupStatus {
         theme: "auto".into(),
         supports_browser_sign_in: true,
         has_api_key: false,
+        oidc_enabled: false,
         enable_system_trust_store: false,
         pinned_console_url: None,
+        mistral_provider: None,
+        active_credential_source: None,
+        mistral_active_credential_source: None,
     }
 }

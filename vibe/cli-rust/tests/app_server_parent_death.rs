@@ -41,10 +41,11 @@ fn ends_within(mut pipe: File, budget: Duration) -> bool {
 
 /// A stand-in app-server that ignores its arguments and never reads its
 /// stdin, so the end of the client's pipe cannot end it. It ends on SIGTERM,
-/// which it records in `signals`, after `ready` once it handles it.
+/// which it records in `signals` after `ready`, once its foreground `sleep 1`
+/// ends: it signals no child, as a signal sent before a child's exec is lost.
 fn deaf_app_server(signals: &str) -> Launch {
     let script =
-        r#"trap 'echo TERM >> "$0"; kill $!; exit 0' TERM; echo ready > "$0"; sleep 3600 & wait"#;
+        r#"trap 'echo TERM >> "$0"; exit 0' TERM; echo ready > "$0"; while :; do sleep 1; done"#;
     Launch {
         program: "sh".into(),
         args: vec!["-c".into(), script.into(), signals.into()],

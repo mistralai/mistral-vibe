@@ -40,7 +40,7 @@ pub fn short_circuit(app: &App, installed: bool) -> Option<&'static str> {
 
 fn set_installed(app: &mut App, client: &Arc<Client>, installed: bool) {
     if let Some(notice) = short_circuit(app, installed) {
-        local::add_command_result(&mut app.view.transcript, &new_message_id(), notice);
+        local::add_command_status(&mut app.view.transcript, &new_message_id(), notice);
         return;
     }
     // Replayed at ready, a deferred command can race the Shift+Tab switch sent just before it.
@@ -101,5 +101,5 @@ pub fn apply_event(app: &mut App, event: Event) {
     } else {
         "Lean agent uninstalled."
     };
-    local::add_command_result(&mut app.view.transcript, &id, notice);
+    local::add_command_status(&mut app.view.transcript, &id, notice);
 }

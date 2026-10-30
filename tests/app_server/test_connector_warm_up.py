@@ -7,19 +7,22 @@ from typing import Any
 
 import pytest
 
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._runtime import HarnessProcess
 
 _start_connector_warm_up = HarnessProcess.start_connector_warm_up
 
 
-def _process(resolve: Any) -> HarnessProcess:
-    process = HarnessProcess()
+def _process(resolve: Any, *, process_services: ProcessServices) -> HarnessProcess:
+    process = HarnessProcess(services=process_services)
     process.connector_catalog.resolve_catalog = resolve
     return process
 
 
 @pytest.mark.asyncio
-async def test_the_connector_catalog_is_fetched_at_start() -> None:
+async def test_the_connector_catalog_is_fetched_at_start(
+    process_services: ProcessServices,
+) -> None:
     """*Prepare*: A process with no session open.
     *Do*: Start the warm-up.
     *Assert*: The catalog is resolved once, from the process's own config.
@@ -32,7 +35,7 @@ async def test_the_connector_catalog_is_fetched_at_start() -> None:
         calls.append(orchestrator)
         resolved.set()
 
-    process = _process(resolve)
+    process = _process(resolve, process_services=process_services)
 
     # Do
     _start_connector_warm_up(process)
@@ -45,7 +48,9 @@ async def test_the_connector_catalog_is_fetched_at_start() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_failed_warm_up_is_left_to_the_sessions() -> None:
+async def test_a_failed_warm_up_is_left_to_the_sessions(
+    process_services: ProcessServices,
+) -> None:
     """*Prepare*: A process whose catalog fetch fails.
     *Do*: Warm up, then close.
     *Assert*: Nothing is raised: a session's own load reports the failure.
@@ -55,7 +60,7 @@ async def test_a_failed_warm_up_is_left_to_the_sessions() -> None:
     async def resolve(_orchestrator: object, **_: object) -> None:
         raise RuntimeError("connectors down")
 
-    process = _process(resolve)
+    process = _process(resolve, process_services=process_services)
 
     # Do
     _start_connector_warm_up(process)
@@ -69,7 +74,9 @@ async def test_a_failed_warm_up_is_left_to_the_sessions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_closing_the_process_cancels_the_warm_up() -> None:
+async def test_closing_the_process_cancels_the_warm_up(
+    process_services: ProcessServices,
+) -> None:
     """*Prepare*: A warm-up stuck on a catalog fetch.
     *Do*: Close the process.
     *Assert*: The fetch is cancelled rather than outliving the process.
@@ -81,7 +88,7 @@ async def test_closing_the_process_cancels_the_warm_up() -> None:
         started.set()
         await asyncio.Event().wait()
 
-    process = _process(resolve)
+    process = _process(resolve, process_services=process_services)
     _start_connector_warm_up(process)
     await asyncio.wait_for(started.wait(), timeout=5)
     warm_up = process._connector_warm_up

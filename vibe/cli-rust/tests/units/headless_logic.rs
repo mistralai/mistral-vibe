@@ -444,6 +444,8 @@ fn headless_options_with_budgets() -> HeadlessOptions {
         max_tokens: Some(10000),
         time_limit: None,
         output_dir: None,
+        system_prompt: None,
+        model: None,
         agent: None,
         auto_approve: false,
         enabled_tools: vec![],
@@ -457,12 +459,23 @@ fn headless_options_with_budgets() -> HeadlessOptions {
 
 #[test]
 fn agent_config_serializes_max_turns_when_set() {
-    let config = agent_config(&headless_options_with_budgets(), None).unwrap();
+    let config = agent_config(&headless_options_with_budgets(), None, None).unwrap();
     let json = serde_json::to_value(&config).unwrap();
     assert_eq!(json.get("maxTurns").and_then(Value::as_u64), Some(5));
     // Price and token budgets should be omitted (None + skip_serializing_if).
     assert!(json.get("maxPrice").is_none());
     assert!(json.get("maxSessionTokens").is_none());
+}
+
+#[test]
+fn agent_config_drops_the_terminal_key_for_an_agent_socket_run() {
+    let mut options = headless_options_with_budgets();
+    let key = || Some("/dev/ttys003".to_owned());
+    let in_terminal = agent_config(&options, None, key()).unwrap();
+    assert_eq!(in_terminal.terminal_key, key());
+    options.agent_socket = Some("agent.sock".into());
+    let in_sandbox = agent_config(&options, None, key()).unwrap();
+    assert_eq!(in_sandbox.terminal_key, None);
 }
 
 #[test]

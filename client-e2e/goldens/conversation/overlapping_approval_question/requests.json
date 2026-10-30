@@ -31,7 +31,6 @@
   "params": {
    "result": {
     "callbackId": "callback-tool-approval",
-    "error": null,
     "output": {
      "decision": {
       "type": "approve"

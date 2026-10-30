@@ -6,7 +6,6 @@ import pytest
 
 from tests.conftest import ConfigBuilder, build_test_vibe_config
 from vibe.core.config import MissingAPIKeyError, ProviderConfig
-from vibe.core.llm.backend.mistral import MistralBackend
 from vibe.core.types import Backend
 from vibe.utils.api_keys import ApiKeySource, active_api_key, resolve_api_key
 import vibe.utils.keyring as keyring_utils
@@ -156,25 +155,6 @@ def test_check_api_key_raises_when_neither_env_nor_keyring(
 
     with pytest.raises(MissingAPIKeyError):
         config.require_active_provider_api_key()
-
-
-def test_mistral_backend_reads_keyring_only_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
-    monkeypatch.setattr(
-        keyring, "get_password", lambda service, username: "keyring-key"
-    )
-    provider = ProviderConfig(
-        name="mistral",
-        api_base="https://api.mistral.ai/v1",
-        api_key_env_var="MISTRAL_API_KEY",
-        backend=Backend.MISTRAL,
-    )
-
-    backend = MistralBackend(provider)
-
-    assert backend._api_key == "keyring-key"
 
 
 def test_mistral_api_key_resolves_from_keyring(

@@ -3,13 +3,11 @@
 //! the boot lands. The landing itself is inseparable from the async
 //! select (verified by the PTY/e2e behavior instead), like the paint hold.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyCode;
 
 use vibe_rs::setup::wizard::{holds_welcome_enter, OnboardingState, Screen};
 
-fn key(code: KeyCode) -> KeyEvent {
-    KeyEvent::new(code, KeyModifiers::NONE)
-}
+use crate::support::key;
 
 fn welcome(done: bool) -> OnboardingState {
     OnboardingState {

@@ -1,9 +1,7 @@
 //! Session-artifact labels, latest-first list, count label, bar rendering and
 //! the artifacts modal's highlight state.
 
-use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
-use ratatui::Terminal;
 use serde_json::{json, Value};
 
 use vibe_rs::app::App;
@@ -12,19 +10,12 @@ use vibe_rs::artifacts_modal;
 use vibe_rs::server::PublicSessionArtifact;
 use vibe_rs::ui::bottom_bar;
 
+use crate::support::bottom_bar_row;
+
 const WIDTH: u16 = 120;
 const URL: &str = "https://github.com/mistral-ai/vibe/pull/123";
 const T1: &str = "2026-10-18T10:00:00+00:00";
 const T2: &str = "2026-10-18T11:00:00+00:00";
-
-fn render_row(app: &mut App, width: u16) -> String {
-    let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
-    terminal
-        .draw(|frame| bottom_bar::draw(app, frame, Rect::new(0, 0, width, 1)))
-        .expect("draw");
-    let buffer = terminal.backend().buffer();
-    (0..width).map(|x| buffer[(x, 0)].symbol()).collect()
-}
 
 fn artifact(
     id: &str,
@@ -184,7 +175,7 @@ fn the_bar_paints_a_single_artifact_as_a_link_that_opens_its_url() {
     app.session.tokens = (0, 600_000);
     app.session.artifacts = vec![github("a1", 123, T1)];
 
-    let row = render_row(&mut app, WIDTH);
+    let row = bottom_bar_row(&mut app, WIDTH);
 
     let link = "PR #123";
     let x = (WIDTH as usize - link.len()) / 2;
@@ -204,7 +195,7 @@ fn the_bar_paints_a_count_link_that_opens_the_modal_when_several_artifacts() {
     app.session.tokens = (0, 600_000);
     app.session.artifacts = vec![github("a1", 123, T1), github("a2", 124, T2)];
 
-    let row = render_row(&mut app, WIDTH);
+    let row = bottom_bar_row(&mut app, WIDTH);
 
     let link = "PRs (2)";
     let x = (WIDTH as usize - link.len()) / 2;
@@ -224,7 +215,7 @@ fn the_bar_hides_the_link_when_it_does_not_fit() {
     app.session.tokens = (0, 600_000);
     app.session.artifacts = vec![github("a1", 123, T1)];
 
-    let row = render_row(&mut app, 30);
+    let row = bottom_bar_row(&mut app, 30);
 
     assert!(!row.contains("PR #123"));
     assert!(app.view.bottom_bar_link.is_none());
@@ -235,7 +226,7 @@ fn the_bar_without_an_artifact_paints_no_link() {
     let mut app = App::default();
     app.session.cwd = Some("/tmp/project".into());
 
-    let row = render_row(&mut app, WIDTH);
+    let row = bottom_bar_row(&mut app, WIDTH);
 
     assert!(!row.contains("PR #"));
     assert!(app.view.bottom_bar_link.is_none());
@@ -329,7 +320,7 @@ fn the_bar_link_shows_the_synced_status() {
         T1,
     )];
 
-    let row = render_row(&mut app, WIDTH);
+    let row = bottom_bar_row(&mut app, WIDTH);
 
     assert!(row.contains("PR #123 (action needed)"));
 }

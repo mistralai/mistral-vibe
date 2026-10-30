@@ -30,6 +30,8 @@ fn options() -> HeadlessOptions {
         max_tokens: None,
         time_limit: None,
         output_dir: None,
+        system_prompt: None,
+        model: None,
         agent: None,
         auto_approve: false,
         enabled_tools: Vec::new(),

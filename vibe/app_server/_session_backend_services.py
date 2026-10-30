@@ -10,6 +10,14 @@ from vibe.app_server.models import PublicCallbackEntry
 from vibe.app_server.protocol import (
     ClientCapabilities,
     ClientInfo,
+    SessionPeerArchiveParams,
+    SessionPeerArchiveResponse,
+    SessionPeerListParams,
+    SessionPeerListResponse,
+    SessionPeerReadParams,
+    SessionPeerReadResponse,
+    SessionPeerSendParams,
+    SessionPeerSendResponse,
     SessionSpawnParams,
     SessionSpawnResponse,
 )
@@ -36,6 +44,22 @@ class SessionBackendServices(Protocol):
     async def spawn_session(
         self, params: SessionSpawnParams
     ) -> SessionSpawnResponse: ...
+
+    async def list_peer_sessions(
+        self, params: SessionPeerListParams
+    ) -> SessionPeerListResponse: ...
+
+    async def read_peer_session(
+        self, params: SessionPeerReadParams
+    ) -> SessionPeerReadResponse: ...
+
+    async def send_to_peer_session(
+        self, params: SessionPeerSendParams
+    ) -> SessionPeerSendResponse: ...
+
+    async def archive_peer_sessions(
+        self, params: SessionPeerArchiveParams
+    ) -> SessionPeerArchiveResponse: ...
 
 
 @runtime_checkable

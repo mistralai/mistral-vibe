@@ -1,28 +1,20 @@
-use std::sync::Arc;
-
 use vibe_rs::app::App;
 use vibe_rs::message_queue::{self, QueueEvent, QueueItem, ReplacementOutcome};
-use vibe_rs::server::Client;
+
+use crate::support::stub;
 
 fn queued(message_id: &str, text: &str) -> QueueItem {
     QueueItem {
-        queue_item_id: Some("queue-1".to_string()),
-        message_id: message_id.to_string(),
-        server_message_id: message_id.to_string(),
-        text: text.to_string(),
-        images: Vec::new(),
-        mentions: None,
-        sent: true,
-        ever_sent: true,
+        queue_item_id: Some("queue-1".into()),
         revision: 1,
-        replacing: false,
+        ..crate::support::queued(message_id, text)
     }
 }
 
 #[test]
 fn prompt_added_while_a_promoted_replace_settles_keeps_fifo_order() {
     let mut app = App::default();
-    let client = Arc::new(Client::stub());
+    let client = stub();
     app.queue.items.push(queued("message-1", "committed"));
     let mut unsent = queued("message-2", "second");
     unsent.server_message_id = "message-1".to_string();

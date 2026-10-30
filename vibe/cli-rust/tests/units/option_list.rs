@@ -1,21 +1,15 @@
 //! Option lists: highlight, viewport, hit map and the click rules.
 
-use std::sync::Arc;
-
 use ratatui::layout::Rect;
 use serde_json::json;
 use vibe_rs::app::App;
 use vibe_rs::mcp::{self, rows, rows::Row};
 use vibe_rs::option_list::{Click, MultiAction, OptionList, SingleAction};
-use vibe_rs::server::Client;
+
+use crate::support::{key, mouse, stub};
 
 fn click(kind: crossterm::event::MouseEventKind, row: u16) -> crossterm::event::MouseEvent {
-    crossterm::event::MouseEvent {
-        kind,
-        column: 4,
-        row,
-        modifiers: crossterm::event::KeyModifiers::NONE,
-    }
+    mouse(kind, 4, row)
 }
 
 fn press_release(row: u16) -> [crossterm::event::MouseEvent; 2] {
@@ -186,7 +180,7 @@ fn hits_cover_only_the_visible_option_lines() {
 
 #[test]
 fn approval_click_highlights_an_option_without_answering() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = App::default();
     app.approval.list.layout_rows(4, Rect::new(2, 10, 40, 4));
 
@@ -254,15 +248,12 @@ fn mcp_click_on_the_highlight_while_searching_leaves_search_and_opens_it() {
 
 #[test]
 fn mcp_search_keeps_the_viewport_on_the_highlight() {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::KeyCode;
     let mut app = mcp_app();
 
     mcp::search::focus(&mut app);
     assert!(!app.mcp.list.free_scroll());
 
-    mcp::search::handle_key(
-        &mut app,
-        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
-    );
+    mcp::search::handle_key(&mut app, key(KeyCode::Char('b')));
     assert!(!app.mcp.list.free_scroll());
 }

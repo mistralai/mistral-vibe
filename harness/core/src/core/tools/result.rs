@@ -9,6 +9,18 @@ use crate::core::wire::message::{Message, ToolOutcome};
 use crate::core::wire::tool::{ProtocolError, StructuredContent, ToolResult};
 
 pub(crate) fn invalid_tool_call_result(reason: String) -> ToolResult {
+    invalid_tool_call_result_with_code("invalid_tool_call", reason)
+}
+
+/// Arguments the tool's own schema accepted but its handler could not parse.
+/// The model still gets an `InvalidToolCall` and can carry on, but the code
+/// marks the failure as a mismatch between the schema and the handler rather
+/// than a model mistake.
+pub(crate) fn tool_arguments_contract_mismatch_result(reason: String) -> ToolResult {
+    invalid_tool_call_result_with_code("tool_arguments_contract_mismatch", reason)
+}
+
+fn invalid_tool_call_result_with_code(code: &str, reason: String) -> ToolResult {
     ToolResult::Failure {
         content: text_content(
             json!({
@@ -22,7 +34,7 @@ pub(crate) fn invalid_tool_call_result(reason: String) -> ToolResult {
         structured_content: StructuredContent::Absent,
         meta: None,
         error: ProtocolError {
-            code: "invalid_tool_call".to_string(),
+            code: code.to_string(),
             message: reason,
             retryable: false,
             details: Value::Null,

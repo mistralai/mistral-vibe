@@ -49,6 +49,8 @@ pub struct SetupStatus {
     /// provider's backend — not a URL-presence guess.
     pub supports_browser_sign_in: bool,
     pub has_api_key: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub oidc_enabled: bool,
     /// The server-resolved TLS trust flag (ADR 0015): the fully-resolved
     /// effective config, not just env var and user config.toml.
     #[serde(default)]
@@ -57,6 +59,18 @@ pub struct SetupStatus {
     /// the server resolved one: the wizard locks its sign-in domain to it.
     #[serde(default)]
     pub pinned_console_url: Option<String>,
+    /// The Mistral provider `--setup` also offers when `provider` has no
+    /// browser sign-in.
+    #[serde(default)]
+    pub mistral_provider: Option<ProviderView>,
+    /// The credential source in use, as `/status` reports it: `process_env`
+    /// means a key the wizard saves is shadowed by the shell.
+    #[serde(default)]
+    pub active_credential_source: Option<String>,
+    /// The offered Mistral provider's own source: the wizard warns for the
+    /// provider the user picks, never the seeded one's.
+    #[serde(default)]
+    pub mistral_active_credential_source: Option<String>,
 }
 
 /// `setup/store-credential`'s outcome, the server's key-persist contract
@@ -173,7 +187,7 @@ pub async fn submit_choices(
 }
 
 /// One request with the old-server skew classified.
-async fn call(
+pub(super) async fn call(
     client: &Client,
     method_name: &str,
     params: serde_json::Value,
@@ -187,6 +201,10 @@ async fn call(
             error.message
         ))),
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// `method_not_found` (app-server `ProtocolErrorCode`) or JSON-RPC `-32601`.

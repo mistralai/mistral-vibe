@@ -1,16 +1,15 @@
 //! Paint-order hit testing and press-to-release ownership.
 
-use std::sync::Arc;
-
-use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 
 use vibe_rs::app::App;
 use vibe_rs::chat_input;
 use vibe_rs::mouse::{self, MouseTarget};
 use vibe_rs::selection::{Granularity, Region};
-use vibe_rs::server::Client;
 use vibe_rs::vibe_code_project::{self as project, Create, Field};
+
+use crate::support::{down, drag, mouse, stub, up};
 
 #[test]
 fn a_bottom_panel_only_owns_its_painted_rectangle() {
@@ -32,28 +31,10 @@ fn a_left_button_gesture_keeps_its_starting_owner() {
     mouse::register_region(&mut app, Rect::new(0, 0, 20, 6), MouseTarget::Transcript);
     mouse::register_region(&mut app, Rect::new(0, 6, 20, 4), MouseTarget::Mcp);
 
-    assert_eq!(
-        mouse::route(
-            &mut app,
-            event(MouseEventKind::Down(MouseButton::Left), 5, 7)
-        ),
-        Some(MouseTarget::Mcp)
-    );
-    assert_eq!(
-        mouse::route(
-            &mut app,
-            event(MouseEventKind::Drag(MouseButton::Left), 5, 4)
-        ),
-        Some(MouseTarget::Mcp)
-    );
-    assert_eq!(
-        mouse::route(&mut app, event(MouseEventKind::Up(MouseButton::Left), 5, 4)),
-        Some(MouseTarget::Mcp)
-    );
-    assert_eq!(
-        mouse::route(&mut app, event(MouseEventKind::Up(MouseButton::Left), 5, 4)),
-        None
-    );
+    assert_eq!(mouse::route(&mut app, down(5, 7)), Some(MouseTarget::Mcp));
+    assert_eq!(mouse::route(&mut app, drag(5, 4)), Some(MouseTarget::Mcp));
+    assert_eq!(mouse::route(&mut app, up(5, 4)), Some(MouseTarget::Mcp));
+    assert_eq!(mouse::route(&mut app, up(5, 4)), None);
 }
 
 #[test]
@@ -62,7 +43,7 @@ fn resume_picker_ignores_wheel_while_loading() {
     mouse::register_region(&mut app, Rect::new(0, 0, 20, 10), MouseTarget::ResumePicker);
 
     assert_eq!(
-        mouse::route(&mut app, event(MouseEventKind::ScrollDown, 5, 5)),
+        mouse::route(&mut app, mouse(MouseEventKind::ScrollDown, 5, 5)),
         None
     );
     assert_eq!(app.resume_picker.list.scroll(), 0);
@@ -95,13 +76,7 @@ fn scrollbar_track_does_not_fall_through_to_its_content() {
         0,
     );
 
-    assert_eq!(
-        mouse::route(
-            &mut app,
-            event(MouseEventKind::Down(MouseButton::Left), 10, 9)
-        ),
-        None
-    );
+    assert_eq!(mouse::route(&mut app, down(10, 9)), None);
     assert!(!app.view.mouse.is_dragging_scrollbar());
 }
 
@@ -112,19 +87,13 @@ fn starting_a_new_gesture_clears_remote_project_press_state() {
     mouse::register_region(&mut app, area, MouseTarget::RemoteProject);
     app.vibe_code_project.list.layout_rows(10, area);
     assert_eq!(
-        mouse::route(
-            &mut app,
-            event(MouseEventKind::Down(MouseButton::Left), 5, 5)
-        ),
+        mouse::route(&mut app, down(5, 5)),
         Some(MouseTarget::RemoteProject)
     );
     app.vibe_code_project.list.press((5, 5));
 
     assert_eq!(
-        mouse::route(
-            &mut app,
-            event(MouseEventKind::Down(MouseButton::Left), 6, 6)
-        ),
+        mouse::route(&mut app, down(6, 6)),
         Some(MouseTarget::RemoteProject)
     );
     assert_eq!(app.vibe_code_project.list.release((5, 5)), None);
@@ -145,13 +114,7 @@ fn scrollbar_registration_is_not_capped_by_other_regions() {
         0,
     );
 
-    assert_eq!(
-        mouse::route(
-            &mut app,
-            event(MouseEventKind::Down(MouseButton::Left), 30, 0)
-        ),
-        None
-    );
+    assert_eq!(mouse::route(&mut app, down(30, 0)), None);
     assert!(app.view.mouse.is_dragging_scrollbar());
 }
 
@@ -165,23 +128,11 @@ fn remote_project_fields_extend_selection_during_a_drag() {
         branch: Field::new("main".into()),
         branch_focused: false,
     });
-    let client = Arc::new(Client::stub());
+    let client = stub();
 
-    project::input::mouse(
-        &mut app,
-        &client,
-        event(MouseEventKind::Down(MouseButton::Left), 10, 5),
-    );
-    project::input::mouse(
-        &mut app,
-        &client,
-        event(MouseEventKind::Drag(MouseButton::Left), 13, 5),
-    );
-    project::input::mouse(
-        &mut app,
-        &client,
-        event(MouseEventKind::Up(MouseButton::Left), 13, 5),
-    );
+    project::input::mouse(&mut app, &client, down(10, 5));
+    project::input::mouse(&mut app, &client, drag(13, 5));
+    project::input::mouse(&mut app, &client, up(13, 5));
 
     let name = &app.vibe_code_project.create.as_ref().unwrap().name;
     assert_eq!(
@@ -200,14 +151,14 @@ fn remote_project_reuses_double_and_triple_click_selection() {
         ..Region::default()
     };
     mouse::register_region(&mut app, Rect::new(2, 2, 20, 4), MouseTarget::RemoteProject);
-    let client = Arc::new(Client::stub());
+    let client = stub();
 
     for granularity in [Granularity::Char, Granularity::Word, Granularity::Paragraph] {
         for kind in [
             MouseEventKind::Down(MouseButton::Left),
             MouseEventKind::Up(MouseButton::Left),
         ] {
-            let event = event(kind, 5, 3);
+            let event = mouse(kind, 5, 3);
             assert_eq!(
                 mouse::route(&mut app, event),
                 Some(MouseTarget::RemoteProject)
@@ -237,13 +188,4 @@ fn the_auth_app_owns_the_padding_beside_its_options() {
         mouse::target_at(&app, (row.x - 1, row.y)),
         Some(MouseTarget::McpOAuth)
     );
-}
-
-fn event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
-    MouseEvent {
-        kind,
-        column,
-        row,
-        modifiers: KeyModifiers::NONE,
-    }
 }

@@ -60,6 +60,7 @@ pub enum MouseTarget {
     DebugConsole,
     Config,
     ConfigEditor,
+    ReleaseNotes,
     Trust,
     BottomBar,
     TodoRow,
@@ -260,6 +261,7 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
             }
         }
         MouseTarget::Plugins => crate::plugins::wheel(app, !up),
+        MouseTarget::ReleaseNotes => crate::release_notes::wheel(app, !up),
         MouseTarget::ProxySetup => app.proxy_setup.wheel(up, MOUSE_SCROLL_STEP as usize),
         MouseTarget::ConfigEditor => crate::config_edit::wheel(app, if up { -1 } else { 1 }),
         MouseTarget::Trust => crate::trust_folders::wheel(app, up),

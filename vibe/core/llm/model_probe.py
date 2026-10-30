@@ -190,31 +190,31 @@ async def _probe(
     *, provider: ProviderConfig, model: ModelConfig, timeout_seconds: float
 ) -> bool | None:
     """True if served, False on a client error, None when inconclusive."""
-    from vibe.core.llm.backend.factory import create_backend
-    from vibe.core.llm.exceptions import BackendError
+    from mistralai_vibe_local_harness.vibe import UtilityCompletionError
+    from vibe.core.llm.completion import CompletionTransport, complete_once
     from vibe.core.telemetry.build_metadata import build_request_metadata
-    from vibe.utils.http import get_user_agent
+    from vibe.utils.http import system_trust_store_enabled
 
     start = time.perf_counter()
     try:
         async with asyncio.timeout(timeout_seconds):
-            backend = create_backend(
-                provider=provider, timeout=timeout_seconds, retry_max_elapsed_time=0
+            await complete_once(
+                provider=provider,
+                model=model,
+                messages=[LLMMessage(role=Role.user, content=_PROBE_PROMPT)],
+                temperature=0.0,
+                max_tokens=_PROBE_MAX_TOKENS,
+                # Labelled so it is never counted as a model turn.
+                metadata=build_request_metadata(
+                    launch_context=None, session_id=None, call_type="secondary_call"
+                ).model_dump(exclude_none=True),
+                transport=CompletionTransport(
+                    timeout_s=timeout_seconds,
+                    retry_budget_s=0,
+                    stream_idle_timeout_s=None,
+                    enable_system_trust_store=system_trust_store_enabled(),
+                ),
             )
-            async with backend:
-                await backend.complete(
-                    model=model,
-                    messages=[LLMMessage(role=Role.user, content=_PROBE_PROMPT)],
-                    temperature=0.0,
-                    tools=None,
-                    tool_choice=None,
-                    max_tokens=_PROBE_MAX_TOKENS,
-                    extra_headers={"user-agent": get_user_agent(provider.backend)},
-                    # Labelled so it is never counted as a model turn.
-                    metadata=build_request_metadata(
-                        launch_context=None, session_id=None, call_type="secondary_call"
-                    ).model_dump(exclude_none=True),
-                )
     except TimeoutError:
         logger.debug(
             "Availability probe for '%s' on '%s' timed out after %.1fs",
@@ -223,7 +223,7 @@ async def _probe(
             timeout_seconds,
         )
         return None
-    except BackendError as exc:
+    except UtilityCompletionError as exc:
         if not _is_refusal(exc.status):
             logger.debug(
                 "Availability probe for '%s' on '%s' reached no verdict (status %s)",

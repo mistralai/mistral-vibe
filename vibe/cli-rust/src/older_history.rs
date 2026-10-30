@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tokio::sync::mpsc::Sender;
 
 use crate::app::App;
 use crate::server::{method, Client, HISTORY_LIMIT};
@@ -35,7 +34,6 @@ pub fn parse_page(page: &Value) -> Option<OlderPage> {
 /// At most one page request is in flight.
 #[derive(Default)]
 pub struct OlderHistory {
-    pub tx: Option<Sender<Event>>,
     loading: bool,
 }
 
@@ -53,7 +51,7 @@ pub fn load_older_history_page(app: &mut App, client: &Arc<Client>) {
     let Some(cursor) = app.view.transcript.history_before_cursor().cloned() else {
         return;
     };
-    let Some(tx) = app.older_history.tx.clone() else {
+    let Some(tx) = app.events.clone() else {
         return;
     };
     app.older_history.loading = true;

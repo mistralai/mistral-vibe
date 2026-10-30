@@ -17,7 +17,7 @@ use crate::core::step_protocol::{
     CommandState, PendingActionInspection, PendingCompletionPurpose,
     PendingFilesystemOperationInspection, SessionStatus, Turn,
 };
-use crate::core::step_protocol::{DeterminismContext, Observation, Outcome, TurnCompletion};
+use crate::core::step_protocol::{DeterminismContext, Observation, Outcome};
 use crate::core::tools::context::ToolContext;
 use crate::core::tools::execution::ToolBatch;
 use crate::core::tools::resolved::ResolvedTools;
@@ -430,7 +430,7 @@ impl HarnessState {
         }
     }
 
-    pub(crate) fn turn_view(&self, completed: Option<TurnCompletion>) -> Result<Turn, CoreError> {
+    pub(crate) fn turn_view(&self) -> Result<Turn, CoreError> {
         if !self.pending_actions().is_empty() {
             return match &self.turn {
                 TurnState::Active(active) => Ok(Turn::Running {
@@ -443,9 +443,6 @@ impl HarnessState {
                     "session has pending actions but no pending turn state",
                 )),
             };
-        }
-        if let Some(TurnCompletion { turn_id, outcome }) = completed {
-            return Ok(terminal_turn(turn_id, outcome));
         }
         Ok(match &self.turn {
             TurnState::Idle => Turn::Idle,
@@ -562,10 +559,6 @@ pub(crate) struct ActiveTurn {
     /// Agent completions this turn discarded because they reached the output
     /// token limit; bounded by `settings.turn.output_limit_recovery`.
     pub output_limit_retries: u32,
-    /// User messages that arrived mid-turn and start the next turn once this
-    /// one completes normally. Scoped to the active turn, so terminating a turn
-    /// discards them rather than carrying a stale turn id into the next one.
-    pub queued: QueuedTurn,
 }
 
 /// What the Runtime is currently waiting on for the active turn.
@@ -647,60 +640,6 @@ impl ActivePhase {
                 }),
                 None => Ok(InterruptionResolution::Quiet),
             },
-        }
-    }
-}
-
-/// A turn's queued follow-up. One variant carries both the identity and the
-/// messages, so there is no way to have one without the other.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) enum QueuedTurn {
-    #[default]
-    Empty,
-    Pending {
-        turn_id: String,
-        messages: Vec<StoredMessage>,
-    },
-}
-
-impl QueuedTurn {
-    /// Adds a message to the queued turn, or opens one.
-    ///
-    /// A queued turn holds exactly one turn identity: a second identity means
-    /// the Runtime is queueing two turns at once, which the protocol does not
-    /// allow.
-    pub(crate) fn enqueue(
-        &mut self,
-        turn_id: String,
-        message: StoredMessage,
-    ) -> Result<(), CoreError> {
-        match self {
-            Self::Empty => {
-                *self = Self::Pending {
-                    turn_id,
-                    messages: vec![message],
-                };
-                Ok(())
-            }
-            Self::Pending {
-                turn_id: pending_turn_id,
-                messages,
-            } => {
-                if *pending_turn_id != turn_id {
-                    return Err(CoreError::invalid_command(format!(
-                        "queued turn mismatch: expected {pending_turn_id:?}, got {turn_id:?}"
-                    )));
-                }
-                messages.push(message);
-                Ok(())
-            }
-        }
-    }
-
-    pub(crate) fn take(&mut self) -> Option<(String, Vec<StoredMessage>)> {
-        match std::mem::take(self) {
-            Self::Empty => None,
-            Self::Pending { turn_id, messages } => Some((turn_id, messages)),
         }
     }
 }

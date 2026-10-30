@@ -4,7 +4,7 @@ import asyncio
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Collection, Iterable
 import copy
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from jsonpatch import JsonPatchException, apply_patch
 from jsonpointer import JsonPointer, JsonPointerException
@@ -33,9 +33,6 @@ from vibe.core.config.types import (
 )
 from vibe.core.utils.concurrency import run_sync
 from vibe.observability.logging import logger
-
-if TYPE_CHECKING:
-    from vibe.core.config.harness_files import HarnessFilesManager
 
 
 class ConfigPatchValidationError(Exception):
@@ -143,13 +140,9 @@ class ConfigOrchestrator[S: ConfigSchema]:
         layers: list[ConfigLayer[RawConfig]],
         default_layer_resolver: DefaultLayerResolver,
         bus: EventBus | None = None,
-        harness_files: HarnessFilesManager | None = None,
     ) -> ConfigOrchestrator[S]:
-        """Build an orchestrator from a schema and an ordered list of layers.
-
-        ``harness_files`` are the files of the session the config is for.
-        """
-        builder = ConfigBuilder[S](schema, harness_files=harness_files)
+        """Build an orchestrator from a schema and an ordered list of layers."""
+        builder = ConfigBuilder[S](schema)
         builder.add_layers(layers)
         config = await builder.build()
         instance = cls(builder, config, default_layer_resolver, bus)
@@ -225,11 +218,24 @@ class ConfigOrchestrator[S: ConfigSchema]:
         async with self._mutation_lock:
             await self._reload_locked(preflight=preflight)
 
+    async def reload_layer(
+        self, name: str, *, preflight: Callable[[S], Awaitable[None]] | None = None
+    ) -> None:
+        """Re-read one layer and re-merge it with the others as last loaded."""
+        async with self._mutation_lock:
+            await self.get_layer(name).invalidate_cache()
+            await self._rebuild_locked(force_load=False, preflight=preflight)
+
     async def _reload_locked(
         self, *, preflight: Callable[[S], Awaitable[None]] | None = None
     ) -> None:
+        await self._rebuild_locked(force_load=True, preflight=preflight)
+
+    async def _rebuild_locked(
+        self, *, force_load: bool, preflight: Callable[[S], Awaitable[None]] | None
+    ) -> None:
         try:
-            candidate = await self._builder.build(force_load=True)
+            candidate = await self._builder.build(force_load=force_load)
         except ValidationError as exc:
             # A config file edited by hand can break a schema rule; say what to fix.
             raise InvalidConfigError.from_validation_error(exc) from exc

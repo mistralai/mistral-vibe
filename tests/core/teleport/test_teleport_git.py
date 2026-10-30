@@ -7,6 +7,7 @@ import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from git import Repo
+from git.exc import GitCommandError
 import pytest
 
 from vibe.core.teleport.errors import (
@@ -42,15 +43,24 @@ def make_mock_repo(
         ]
     else:
         mock.remotes = []
-    mock.head.commit.hexsha = commit
-    mock.head.is_detached = is_detached
-    mock.active_branch.name = branch
+
+    def symbolic_ref(*args: str) -> str:
+        if args[-1] != "HEAD" or is_detached:
+            raise GitCommandError("git symbolic-ref", 1)
+        return f"refs/heads/{branch}"
+
+    def rev_parse(*args: str) -> str:
+        if args == ("--verify", "HEAD^{commit}") and commit is None:
+            raise GitCommandError("git rev-parse", 128)
+        return commit or "abc123"
+
+    mock.git.symbolic_ref.side_effect = symbolic_ref
+    mock.git.rev_parse.side_effect = rev_parse
     mock.git.diff.return_value = diff
     mock.git.return_value.diff.return_value = diff
     mock.git.return_value.rev_parse.return_value = ".git/index"
     mock.git.branch.return_value = ""
     mock.git.rev_list.return_value = "0"
-    mock.git.rev_parse.return_value = "abc123"
     mock.index.path = str(Path("/tmp/mock-index"))
     mock.remote.return_value = make_mock_remote(urls[0] if urls else "")
     return mock
@@ -256,6 +266,39 @@ class TestGitRepositoryGetInfo:
         ):
             await repo.get_metadata()
 
+    @pytest.mark.parametrize(
+        ("git_cli_repo", "block_ref_files"),
+        [("files", True), ("reftable", False)],
+        indirect=["git_cli_repo"],
+    )
+    @pytest.mark.asyncio
+    async def test_reads_branch_commit_and_default_branch(
+        self,
+        tmp_path: Path,
+        git_cli_repo: Repo,
+        block_ref_files: bool,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        # Reftable needs git 2.45 or later; blocking GitPython's ref file reads
+        # checks the same code on any git.
+        source_repo = git_cli_repo
+        source_repo.git.commit("--allow-empty", "-m", "initial")
+        source_repo.git.remote("add", "origin", "git@github.com:owner/repo.git")
+        source_repo.git.update_ref("refs/remotes/origin/main", "HEAD")
+        source_repo.git.symbolic_ref(
+            "refs/remotes/origin/HEAD", "refs/remotes/origin/main"
+        )
+        source_repo.git.checkout("-b", "feature")
+        if block_ref_files:
+            request.getfixturevalue("no_gitpython_ref_files")
+
+        async with GitRepository(tmp_path) as git_repo:
+            info = await git_repo.get_metadata()
+
+        assert info.branch == "feature"
+        assert info.commit == source_repo.git.rev_parse("HEAD")
+        assert info.default_branch == "main"
+
     @pytest.mark.asyncio
     async def test_get_metadata_skips_diff(self, repo: GitRepository) -> None:
         mock = make_mock_repo(
@@ -444,39 +487,3 @@ class TestGitRepositoryPushCurrentBranch:
         mock = make_mock_repo(urls=["git@github.com:owner/repo.git"], branch="main")
         with patch.object(repo, "_repo_or_raise", return_value=mock):
             assert await repo.push_current_branch() is True
-
-
-class TestGitRepositoryGetRemoteDefaultBranch:
-    @pytest.fixture
-    def repo(self, tmp_path: Path) -> GitRepository:
-        return GitRepository(tmp_path)
-
-    @pytest.mark.asyncio
-    async def test_returns_default_branch_when_head_exists(
-        self, repo: GitRepository
-    ) -> None:
-        mock = MagicMock()
-        mock_head_ref = MagicMock()
-        mock_head_ref.reference.name = "origin/main"
-        mock.remotes.__getitem__.return_value.refs.HEAD = mock_head_ref
-        mock.git.rev_parse.return_value = "abc123"
-        result = await repo._get_remote_default_branch(mock, "origin")
-        assert result == "origin/main"
-
-    @pytest.mark.asyncio
-    async def test_returns_none_when_remote_not_found(
-        self, repo: GitRepository
-    ) -> None:
-        mock = MagicMock()
-        mock.remotes.__getitem__.side_effect = IndexError("No item found")
-        result = await repo._get_remote_default_branch(mock, "upstream")
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_returns_none_when_head_ref_missing(
-        self, repo: GitRepository
-    ) -> None:
-        mock = MagicMock()
-        mock.remotes.__getitem__.return_value.refs.HEAD = None
-        result = await repo._get_remote_default_branch(mock, "origin")
-        assert result is None

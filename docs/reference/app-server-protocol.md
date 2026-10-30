@@ -226,9 +226,88 @@ reports the outcome as unknown, and an answer arriving later is logged and
 dropped. Clients that do not advertise the capability never see the
 tool.
 
+A client that advertises `capabilities.sessionPeers` hosts the other sessions
+of a session's project: its sessions are offered `list_sessions`,
+`read_session`, `send_to_session` and `archive_sessions`. Listing and reading
+are allowed by default and callable from programs, so a model filters sessions
+on any field in code; sending and archiving ask, like `start_session`, and
+only as direct calls. Each call sends the client a
+request on the calling session's own connection, and the client answers for
+that session's project only:
+
+- **`session/peer/list`** `{sessionIds?, statuses?, limit, cursor?}`
+  answers `{sessions, nextCursor?, notFound}`: the given sessions in that
+  order, or the project's other sessions most recently active first, a page
+  at a time, archived ones only when `statuses` names them. Each is
+  `{sessionId, title?, status, statusDetail?, url?, updatedAt?, cwd?,
+  startedBySessionId?, queuedMessages?, pullRequests?}`, a field left out
+  when it says nothing: `pullRequests` is its artifacts with their state,
+  checks, review and branches. `notFound` lists the asked ids that are not
+  sessions of the project.
+- **`session/peer/read`** `{targetSessionId, limit, cursor?,
+  includeToolCalls, maxMessageChars}` answers at once with `{sessionId, title?, status,
+  statusDetail?, url?, queuedMessages, messages: [{role, text}], nextCursor?}`:
+  a page of its user and assistant messages, oldest first, the latest page
+  unless `cursor` asks for the one before it, and with `includeToolCalls` a
+  `tool` line per tool call naming what it ran or touched. A message longer
+  than `maxMessageChars` is cut and says so. It never waits for the target.
+- **`session/peer/send`** `{targetSessionId, text, idempotencyKey}` queues
+  `text` as the target's next turn and answers `{sessionId, title?, url?,
+  queued}`, `queued` when the message waits behind a running or queued turn,
+  as the server's `waits` says.
+- **`session/peer/archive`** `{sessionIds}` archives those sessions, as the
+  user's archive action does, and answers `{archived: [{sessionId, title?}],
+  failed: [{sessionId, error}]}`; one that is not a session of the project, is
+  the caller itself, or is working, has queued messages or waits for the user,
+  fails alone.
+
+Session ids are the client's: the `clientSessionId` a `session/spawn` answer
+carries, which `start_session` then returns to the model. `status` is
+`working`, `idle`, `waiting_for_user` (an approval or question blocks it;
+`statusDetail` says which), `failed` or `archived`; a session another process
+holds (its lease, as `session/archive` with `requireIdle` sees it) is
+`working`, and one no process holds is `idle`. The client refuses a send to the calling session
+itself, and queues a sent message with `sentBySession: true` on
+`session/turn/enqueue`. The turn such a message starts is not the user's: in
+it, as in one another session started, the session cannot start or message
+sessions until the user writes to it. A refusal or a
+malformed answer is a tool error the model reads; a disconnect during a send
+reports the outcome as unknown.
+
+The server, which holds each session's turns and queue, decides what a client
+could only race, and says why with `data.refusal` on a `conflict`.
+`session/turn/enqueue` with `sentBySession` refuses `"archived"` once the
+session is archived (read from its saved metadata, so an archive by another
+process counts) and `"paused"` while its queue is paused, which would hold the
+message until the user resumes it; otherwise it answers `waits: true` when the
+message waits behind a running or queued turn. `session/archive` with
+`requireIdle: true` refuses `"busy"` while the session is working: a turn runs,
+is reserved or waits in the queue, or work a turn started (a background
+process, a title) still runs. On a session this server has open, each check
+and its change are one step, and a scheduled loop does not fire on an archived
+session. For a session no process of this server has open, an archive holds
+the session's lease while it saves, so no process opens it from the metadata
+before it; a process that already holds the lease runs the session, which
+`requireIdle` refuses as `"busy"` and a plain archive saves over as before (the
+holder can then save its own metadata over the archive). A saved session no
+process holds has an empty queue: a queue lives only in the process that runs
+it.
+
 `initialize` ignores client capabilities the server does not know, so a client
 may declare one ahead of the servers that act on it. The rest of the handshake
 stays strict. Servers released before this rule reject unknown capabilities.
+
+`session/list` takes two optional params: `sessionIds` lists only those
+sessions, reading no other, and `include: ["pullRequests"]` adds
+`pullRequests: {[sessionId]: [artifact]}` for the page's sessions beside
+`items`. An answer that did not ask for them is unchanged. A client sends them
+only to an app server that asks it for `session/peer/*`, which is as recent.
+
+`session/start` takes an optional `startedBySessionId`: the session that started
+this one to hand it `firstTurn`. The session keeps it, `/clear` included, and
+`session/list` items return it as `startedBySessionId`. Other responses leave it
+out, so its absence there says nothing. App servers before it accept the param
+but do not save it, so they list no starter.
 
 ## Product resources and child sessions
 

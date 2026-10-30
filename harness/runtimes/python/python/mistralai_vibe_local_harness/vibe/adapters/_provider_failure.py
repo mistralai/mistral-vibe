@@ -1,7 +1,7 @@
 """One reading of a failed model provider call.
 
 Provider clients report failures in their own exception types. The Mistral SDK
-raises ``MistralError`` for an error response. HTTPX raises ``HTTPStatusError``
+raises ``MistralError`` for an error response. HTTPX2 raises ``HTTPStatusError``
 for one, and its transport errors when the connection fails. A streamed API can
 also report an error as an event after its response has started, which the
 adapters raise as ``ProviderStreamError``, and the stream guard raises
@@ -20,7 +20,7 @@ from http import HTTPStatus
 import json
 import ssl
 
-import httpx
+import httpx2
 from mistralai.client.errors import MistralError
 
 from mistralai_vibe_local_harness.session_protocol import PublicRetryCategory
@@ -43,6 +43,7 @@ def read_provider_failure(error: BaseException) -> ProviderFailure:
         category=_category(error, response),
         label=type(error).__name__ if response is None else f"HTTP {response.status}",
         message=_message(error),
+        explanation=_provider_explanation(error),
         response=response,
     )
 
@@ -77,6 +78,8 @@ class ProviderFailure:
     """A short name for the cause, such as ``HTTP 503`` or ``ConnectError``."""
     message: str
     """A sentence for the user that carries the provider's own explanation."""
+    explanation: str | None
+    """The message the provider put in its error response body, if any."""
     response: ProviderErrorResponse | None
     """The provider's error response, or ``None`` when it never answered."""
 
@@ -84,7 +87,6 @@ class ProviderFailure:
 @dataclass(frozen=True, slots=True)
 class ProviderErrorResponse:
     status: int
-    # Read-only: the Mistral SDK's errors carry httpx2 headers, HTTPX's carry its own.
     headers: Mapping[str, str]
 
 
@@ -151,7 +153,7 @@ class MissingTokenUsage(RuntimeError):
 
 def is_read_timeout(error: BaseException) -> bool:
     """Whether a stream read failed on the transport read timeout."""
-    return isinstance(error, httpx.ReadTimeout)
+    return isinstance(error, httpx2.ReadTimeout)
 
 
 async def until_connection_lost[T](
@@ -170,7 +172,7 @@ async def until_connection_lost[T](
             item = await anext(iterator)
         except StopAsyncIteration:
             return
-        except (httpx.TransportError, ssl.SSLError, StreamStalledError):
+        except (httpx2.TransportError, ssl.SSLError, StreamStalledError):
             if not complete():
                 raise
             return
@@ -179,18 +181,20 @@ async def until_connection_lost[T](
 
 # 520 is the status an edge proxy answers with when the origin returns
 # something it cannot relay; the next attempt usually succeeds.
+# Twin: mistralai.vibe.harness.runtime.completion.providers.utils.RETRYABLE_STATUS_CODES
+# holds the same statuses; a parity test keeps both equal.
 _RETRYABLE_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 520, 529})
-_RETRYABLE_TRANSPORT_ERRORS: tuple[type[httpx.TransportError], ...] = (
-    httpx.TimeoutException,
-    httpx.NetworkError,
-    httpx.RemoteProtocolError,
+_RETRYABLE_TRANSPORT_ERRORS: tuple[type[httpx2.TransportError], ...] = (
+    httpx2.TimeoutException,
+    httpx2.NetworkError,
+    httpx2.RemoteProtocolError,
 )
 
 
 def _error_response(error: BaseException) -> ProviderErrorResponse | None:
     if isinstance(error, MistralError):
         return ProviderErrorResponse(status=error.status_code, headers=error.headers)
-    if isinstance(error, httpx.HTTPStatusError):
+    if isinstance(error, httpx2.HTTPStatusError):
         return ProviderErrorResponse(
             status=error.response.status_code, headers=error.response.headers
         )
@@ -212,7 +216,7 @@ def _is_retryable(error: BaseException, response: ProviderErrorResponse | None) 
     if _rejected_certificate(error):
         return False
     # A TLS fault while the response body streams arrives as a bare
-    # ``ssl.SSLError``, outside the HTTPX transport errors.
+    # ``ssl.SSLError``, outside the HTTPX2 transport errors.
     if isinstance(error, ssl.SSLError):
         return True
     return isinstance(error, _RETRYABLE_TRANSPORT_ERRORS)
@@ -244,7 +248,7 @@ def _category(
 ) -> PublicRetryCategory:
     if response is not None:
         return _status_category(response.status)
-    if isinstance(error, httpx.TimeoutException | StreamStalledError):
+    if isinstance(error, httpx2.TimeoutException | StreamStalledError):
         return "timed_out"
     if isinstance(error, _RETRYABLE_TRANSPORT_ERRORS + (ssl.SSLError,)):
         return "connection"
@@ -278,15 +282,15 @@ def _message(error: BaseException) -> str:
 def _unexplained_message(error: BaseException) -> str:
     """A sentence for an exception that renders as an empty string.
 
-    HTTPX raises its transport timeouts without a message, which would otherwise
+    HTTPX2 raises its transport timeouts without a message, which would otherwise
     reach the user as a blank error.
     """
     name = type(error).__name__
-    if isinstance(error, httpx.ReadTimeout):
+    if isinstance(error, httpx2.ReadTimeout):
         return f"Timed out waiting for the model to send its response ({name})."
-    if isinstance(error, httpx.ConnectTimeout):
+    if isinstance(error, httpx2.ConnectTimeout):
         return f"Timed out connecting to the model provider ({name})."
-    if isinstance(error, httpx.TimeoutException):
+    if isinstance(error, httpx2.TimeoutException):
         return f"The model request timed out ({name})."
     return f"The model request failed ({name})."
 
@@ -320,11 +324,11 @@ def _provider_explanation(error: BaseException) -> str | None:
 def _response_body(error: BaseException) -> str | None:
     if isinstance(error, MistralError):
         return error.body
-    if not isinstance(error, httpx.HTTPStatusError):
+    if not isinstance(error, httpx2.HTTPStatusError):
         return None
     try:
         return error.response.text
-    except httpx.ResponseNotRead:
+    except httpx2.ResponseNotRead:
         # Reading here would block on a connection the failure already abandoned.
         return None
 

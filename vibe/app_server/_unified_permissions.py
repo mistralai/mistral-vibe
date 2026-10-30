@@ -37,6 +37,10 @@ from mistralai_vibe_local_harness.protocol import RustRuntimeBuiltinToolName
 from mistralai_vibe_local_harness.vibe import PathSpace, sandbox_path
 from mistralai_vibe_local_harness.vibe._permissions import PermissionOutcome
 from vibe.app_server._cron import CRON_TOOL_NAME
+from vibe.app_server._session_peers import (
+    LIST_SESSIONS_TOOL_NAME,
+    READ_SESSION_TOOL_NAME,
+)
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.scratchpad import is_scratchpad_path
@@ -66,6 +70,14 @@ from vibe.permissions import OutsideWorkdirPolicy, RequiredPermission
 # a shell denied at the catalogue level takes the process tools down with it.
 _SHELL_TOOL_SOURCES = frozenset({"bash", "powershell", "git_bash"})
 """The shell tools: everything a foreground shell call and a background start do."""
+
+# Cron only schedules this session's own prompts, and listing or reading
+# sessions changes nothing, so none of them asks by default.
+_ALLOWED_BY_DEFAULT = frozenset({
+    CRON_TOOL_NAME,
+    LIST_SESSIONS_TOOL_NAME,
+    READ_SESSION_TOOL_NAME,
+})
 
 RUST_BUILTIN_TOOL_SOURCES: dict[RustRuntimeBuiltinToolName, frozenset[str]] = {
     "file_system.read_file": frozenset({"read_file"}),
@@ -581,7 +593,9 @@ class UnifiedPermissionResolver:
         permission = self._tools.get_tool_config(
             name,
             default_permission=(
-                ToolPermission.ALWAYS if name == CRON_TOOL_NAME else ToolPermission.ASK
+                ToolPermission.ALWAYS
+                if name in _ALLOWED_BY_DEFAULT
+                else ToolPermission.ASK
             ),
         ).permission
         match permission:

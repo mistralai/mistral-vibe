@@ -7,9 +7,8 @@ import json
 import re
 from typing import Any, cast
 
-import httpx
+import httpx2
 from mistralai.client import Mistral
-from mistralai.client.httpclient import AsyncHttpClient
 from mistralai.client.models.chatcompletionstreamrequest import (
     ChatCompletionStreamRequestMessageTypedDict,
 )
@@ -90,13 +89,6 @@ _NO_SDK_RETRIES = RetryConfig(
 )
 
 
-def _sdk_client(client: httpx.AsyncClient) -> AsyncHttpClient:
-    # TODO(httpx2 migration): mistralai 3 is typed against httpx2. Until the
-    # harness moves to httpx2, the SDK runs on this httpx client, which it drives
-    # the same way, and raises the httpx errors _provider_failure reads.
-    return cast("AsyncHttpClient", client)
-
-
 async def execute_mistral_completion(
     messages: list[RustMessage],
     tools: list[RustToolDefinition],
@@ -119,15 +111,16 @@ async def execute_mistral_completion(
     """
     notices = RetryNotices(on_retry)
     read_timeout_s = config.stream_guard().read_timeout_seconds
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(config.timeout_s, read=read_timeout_s),
+    async with httpx2.AsyncClient(
+        timeout=httpx2.Timeout(config.timeout_s, read=read_timeout_s),
         transport=env_proxy_transport(
             verify=build_ssl_context(
                 use_system_trust_store=config.enable_system_trust_store
             ),
             socket_options=keepalive_socket_options(),
         ),
-        follow_redirects=True,
+        follow_redirects=credential.follow_redirects,
+        headers=dict(credential.headers),
         # Capture the provider correlation id at the transport level so both the
         # streaming and non-streaming paths report it; the parsed complete_async
         # response drops headers.
@@ -136,15 +129,11 @@ async def execute_mistral_completion(
         client = Mistral(
             api_key=credential.token,
             server_url=_server_url_from_api_base(config.base_url),
-            async_client=_sdk_client(http_client),
+            async_client=http_client,
             retry_config=_NO_SDK_RETRIES,
             # The SDK applies this one timeout to every phase of a request.
             timeout_ms=int(read_timeout_s * 1000),
         )
-        # TODO(httpx2 migration): the SDK's own tracing, on when
-        # MISTRAL_SDK_TELEMETRY is set, wraps our httpx response in an httpx2
-        # one and breaks every stream. Back on with the migration.
-        client.sdk_configuration.telemetry = False  # pyright: ignore[reportAttributeAccessIssue]
         replay_reasoning = takes_reasoning_input(
             WireFormat.MISTRAL, route.thinking, route.reasoning, route.request_thinking
         )

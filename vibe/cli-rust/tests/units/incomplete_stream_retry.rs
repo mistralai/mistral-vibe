@@ -11,7 +11,9 @@ use vibe_rs::commands::retry::MAX_INCOMPLETE_STREAM_RETRIES;
 use vibe_rs::commands::CommandEvent;
 use vibe_rs::event_handler::apply_notification;
 use vibe_rs::message_queue::QueueItem;
-use vibe_rs::server::{notification, Client, HistoryEntry, MessageContent, Notification};
+use vibe_rs::server::{notification, Client, Notification};
+
+use crate::support::{messages, queued};
 
 const RETRY_HINT: &str =
     "Run /retry [additional instructions] to continue the interrupted response.";
@@ -73,23 +75,10 @@ impl Harness {
     }
 
     fn error_rows(&self) -> Vec<String> {
-        self.app
-            .view
-            .transcript
-            .lines()
-            .filter_map(|line| match line.entry {
-                HistoryEntry::Message(message) if message.role == "command_error" => Some(
-                    message
-                        .content
-                        .iter()
-                        .filter_map(|block| match block {
-                            MessageContent::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect(),
-                ),
-                _ => None,
-            })
+        messages(&self.app)
+            .into_iter()
+            .filter(|(role, _)| role == "command_error")
+            .map(|(_, text)| text)
             .collect()
     }
 }
@@ -128,15 +117,7 @@ async fn a_queued_prompt_is_not_overtaken_by_a_silent_continuation() {
     let mut harness = Harness::new();
     harness.app.queue.items.push(QueueItem {
         queue_item_id: Some("queued-1".into()),
-        message_id: "queued-row".into(),
-        server_message_id: "queued-row".into(),
-        text: "t2".into(),
-        images: Vec::new(),
-        mentions: None,
-        sent: true,
-        ever_sent: true,
-        revision: 0,
-        replacing: false,
+        ..queued("queued-row", "t2")
     });
 
     harness.truncate_stream();

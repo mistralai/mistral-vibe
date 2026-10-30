@@ -1,20 +1,21 @@
 # Twin: mistralai.vibe.harness.runtime.completion.profile.reasoning. Keep both copies identical below this line.
 """Reasoning settings: what the user wrote, sent as written.
 
-The standard settings (off, low, medium, high, xhigh, max) are always accepted. A
-provider's own name goes through its format's alias table. The user's setting goes
-out unchanged, and the provider says whether the model takes it. Only a request of
-the Harness's own is fit to the model's known levels: the lowest setting is off
-where the model can stop and its lowest level where it cannot, and a level the
-model lacks rounds down to the nearest one it has. Each adapter then sends the
-setting through its format's row of `REASONING_WIRE_VALUES`; nothing else maps
+Any word is a setting. A standard one (off, low, medium, high, xhigh, max) or a
+provider's own name for one, which goes through its format's alias table, is read
+as that standard setting; any other word is a level of the model's own, kept as
+written. The user's setting goes out unchanged, and the provider says whether the
+model takes it. Only a request of the Harness's own is fit to the model's known
+levels: the lowest setting is off where the model can stop and its lowest level
+where it cannot, and a standard level the model lacks rounds down to the nearest
+one it has. Each adapter then sends the setting through its format's row of
+`REASONING_WIRE_VALUES`, and a word that row lacks as written; nothing else maps
 reasoning.
 """
 
 import logging
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import cast
 
 from .types import (
     REASONING_LEVELS,
@@ -48,17 +49,16 @@ REASONING_ALIASES: Mapping[WireFormat, Mapping[str, ReasoningSetting]] = (
 
 
 def parse_reasoning(raw: str, wire: WireFormat) -> ReasoningSetting:
-    """Read a standard setting or the format's own name for one."""
-    name = raw.strip().lower()
+    """Read a standard setting or the format's own name for one; keep any other
+    word as written, for the provider to judge.
+    """
+    written = raw.strip()
+    if not written:
+        raise ProfileError("a reasoning setting is a word; leave it unset instead")
+    name = written.lower()
     if name in REASONING_SETTINGS:
-        return cast(ReasoningSetting, name)
-    aliases = REASONING_ALIASES[wire]
-    if name in aliases:
-        return aliases[name]
-    accepted = ", ".join([*REASONING_SETTINGS, *aliases])
-    raise ProfileError(
-        f"unknown reasoning setting {raw!r} for the {wire} format; accepted: {accepted}"
-    )
+        return name
+    return REASONING_ALIASES[wire].get(name, written)
 
 
 def fit_reasoning(
@@ -79,9 +79,13 @@ def fit_reasoning(
             "reasoning cannot be turned off on this model; set one of its levels: "
             + ", ".join(support.levels)
         )
+    if setting in support.levels or setting not in REASONING_LEVELS:
+        return setting
     rank = REASONING_LEVELS.index(setting)
     at_or_below: list[ReasoningLevel] = [
-        level for level in support.levels if REASONING_LEVELS.index(level) <= rank
+        level
+        for level in support.levels
+        if level in REASONING_LEVELS and REASONING_LEVELS.index(level) <= rank
     ]
     return at_or_below[-1] if at_or_below else support.levels[0]
 
@@ -100,7 +104,8 @@ _EFFORT_WIRE: Mapping[ReasoningSetting, ReasoningWireValue] = MappingProxyType(
 )
 
 # The wire value of each standard setting, per format. Anthropic's off means no
-# thinking block; Ollama's `think` takes a boolean or low, medium and high.
+# thinking block; Ollama's `think` takes a boolean or low, medium and high. A
+# level outside a row goes out as written in every format.
 REASONING_WIRE_VALUES: Mapping[
     WireFormat, Mapping[ReasoningSetting, ReasoningWireValue]
 ] = MappingProxyType(
@@ -137,7 +142,8 @@ _OFF_NEEDS_KNOWN_REASONING = frozenset(
     {WireFormat.MISTRAL, WireFormat.OPENAI_CHAT, WireFormat.OPENAI_RESPONSES}
 )
 
-# Thinking budgets of models that take a token budget instead of an effort.
+# Thinking budgets of models that take a token budget instead of an effort. A
+# level outside this table has no budget, so a request at it does not think.
 THINKING_BUDGET_TOKENS: Mapping[ReasoningLevel, int] = MappingProxyType(
     {"low": 4_096, "medium": 16_384, "high": 32_000, "xhigh": 32_000, "max": 32_000}
 )
@@ -226,8 +232,8 @@ def _lowest_reasoning(
 def reasoning_wire_value(
     wire: WireFormat, setting: ReasoningSetting
 ) -> ReasoningWireValue:
-    """The value a format's reasoning field carries for a standard setting."""
-    return REASONING_WIRE_VALUES[wire][setting]
+    """The value a format's reasoning field carries for a setting."""
+    return REASONING_WIRE_VALUES[wire].get(setting, setting)
 
 
 def wire_reasoning(
@@ -238,7 +244,7 @@ def wire_reasoning(
 ) -> ReasoningWireValue | None:
     """The reasoning field value one request sends, or `None` to leave it out."""
     setting = request_reasoning(wire, configured, support, requested)
-    return None if setting is None else REASONING_WIRE_VALUES[wire][setting]
+    return None if setting is None else reasoning_wire_value(wire, setting)
 
 
 def thinking_budget_fits(max_tokens: int) -> bool:
@@ -246,11 +252,14 @@ def thinking_budget_fits(max_tokens: int) -> bool:
     return max_tokens > MIN_THINKING_BUDGET_TOKENS
 
 
-def thinking_budget_tokens(level: ReasoningLevel, max_tokens: int) -> int:
-    """The thinking budget of a level, kept below the request's `max_tokens`."""
-    return max(
-        MIN_THINKING_BUDGET_TOKENS, min(THINKING_BUDGET_TOKENS[level], max_tokens - 1)
-    )
+def thinking_budget_tokens(level: ReasoningLevel, max_tokens: int) -> int | None:
+    """The thinking budget of a level, kept below the request's `max_tokens`;
+    `None` for a level without one.
+    """
+    budget = THINKING_BUDGET_TOKENS.get(level)
+    if budget is None:
+        return None
+    return max(MIN_THINKING_BUDGET_TOKENS, min(budget, max_tokens - 1))
 
 
 def anthropic_thinking_fields(
@@ -264,21 +273,22 @@ def anthropic_thinking_fields(
     is unknown, off sends no field. Models that take a budget get one below
     `max_tokens`; the others think adaptively at the setting's effort, with a
     summary of their thinking. A budget model whose `max_tokens` leaves no room for
-    the smallest budget does not think.
+    the smallest budget, or set to a level without a budget, does not think.
     """
     if setting == REASONING_OFF and support is not None and support.levels:
         return {"thinking": {"type": "disabled"}}
     if setting is None or setting == REASONING_OFF:
         return {}
-    level = cast(ReasoningLevel, setting)
     if uses_budget_tokens(support):
-        if not thinking_budget_fits(max_tokens):
+        budget = thinking_budget_tokens(setting, max_tokens)
+        if budget is None or not thinking_budget_fits(max_tokens):
             return {}
-        budget = thinking_budget_tokens(level, max_tokens)
         return {"thinking": {"type": "enabled", "budget_tokens": budget}}
     return {
         "thinking": {"type": "adaptive", "display": "summarized"},
-        "output_config": {"effort": REASONING_WIRE_VALUES[WireFormat.ANTHROPIC][level]},
+        "output_config": {
+            "effort": reasoning_wire_value(WireFormat.ANTHROPIC, setting)
+        },
     }
 
 

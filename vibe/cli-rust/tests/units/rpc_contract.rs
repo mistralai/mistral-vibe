@@ -137,6 +137,8 @@ fn session_start_params_serialize_history_limit() {
     let params = SessionStartParams {
         agent_config: Default::default(),
         history_limit: HISTORY_LIMIT,
+        model: None,
+        session_only: false,
     };
     let value: Value = serde_json::to_value(&params).unwrap();
     assert_eq!(value["historyLimit"], 200);
@@ -202,8 +204,8 @@ fn history_entries_deserialize_leniently() {
 fn approval_callbacks_default_every_field() {
     let callback: ApprovalCallback =
         serde_json::from_value(json!({"callbackId": "c1", "futureField": 1})).unwrap();
-    assert_eq!(callback.callback_id, "c1");
-    assert_eq!(callback.session_id, "");
+    assert_eq!(callback.address.callback_id, "c1");
+    assert_eq!(callback.address.session_id, None);
     assert_eq!(callback.detail.effect.tool_name, "");
     assert!(callback.detail.required_permissions.is_empty());
 

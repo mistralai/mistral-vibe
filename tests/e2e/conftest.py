@@ -47,6 +47,9 @@ def setup_e2e_env(
     monkeypatch.setenv("VIBE_TEST_DISABLE_KEYRING", "1")
     monkeypatch.setenv("VIBE_TEST_DISABLE_AUTO_TITLE", "1")
     monkeypatch.setenv("VIBE_TEST_DISABLE_MODEL_PROBE", "1")
+    # Tests send keys only once a dialog shows, so they need no stray-key guards.
+    monkeypatch.setenv("VIBE_INPUT_GRACE_PERIOD_MS", "50")
+    monkeypatch.setenv("VIBE_TYPING_GRACE_PERIOD_MS", "50")
     monkeypatch.setenv("TERM", "xterm-256color")
 
 

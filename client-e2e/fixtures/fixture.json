@@ -193,8 +193,7 @@
         }
       ],
       "nextCursor": null,
-      "previousCursor": null,
-      "continueSessionId": "00000000-0000-4000-8000-000000000003"
+      "previousCursor": null
     },
     "session/delete": {},
     "session/read": {
@@ -394,48 +393,37 @@
         "skills": [],
         "tools": [
           {
-            "name": "skill",
-            "isCustom": false
+            "name": "skill"
           },
           {
-            "name": "task",
-            "isCustom": false
+            "name": "task"
           },
           {
-            "name": "web_fetch",
-            "isCustom": false
+            "name": "web_fetch"
           },
           {
-            "name": "bash",
-            "isCustom": false
+            "name": "bash"
           },
           {
-            "name": "edit",
-            "isCustom": false
+            "name": "edit"
           },
           {
-            "name": "grep",
-            "isCustom": false
+            "name": "grep"
           },
           {
-            "name": "ask_user_question",
-            "isCustom": false
+            "name": "ask_user_question"
           },
           {
-            "name": "read_file",
-            "isCustom": false
+            "name": "read_file"
           },
           {
-            "name": "web_search",
-            "isCustom": false
+            "name": "web_search"
           },
           {
-            "name": "todo",
-            "isCustom": false
+            "name": "todo"
           },
           {
-            "name": "write_file",
-            "isCustom": false
+            "name": "write_file"
           }
         ],
         "stats": {
@@ -903,22 +891,6 @@
           ]
         },
         {
-          "name": "tool_paths",
-          "kind": "list",
-          "description": "Additional directories or files to explore for custom tools. Paths may be absolute or relative to the current working directory. Directories are shallow-searched for tool definition files, while files are loaded directly if valid.",
-          "value": [],
-          "path": "/tool_paths",
-          "popular": false,
-          "enumChoices": [],
-          "valueLabels": {},
-          "layerValues": [
-            {
-              "layer": "default",
-              "value": []
-            }
-          ]
-        },
-        {
           "name": "enabled_tools",
           "kind": "list",
           "description": "An explicit list of tool names/patterns to enable. If set, only these tools will be active. Supports glob patterns (e.g., 'serena_*') and regex with 're:' prefix (e.g., 're:^serena_.*').",
@@ -1133,7 +1105,7 @@
         {
           "name": "experimental_enable_registry_skills",
           "kind": "bool",
-          "description": "Experimental: pull workspace skills from the Mistral AI Registry (api.mistral.ai) and make them available alongside local skills. Requires a Mistral provider and API key. Local and builtin skills take precedence on name collision.",
+          "description": "Experimental: pull workspace skills from the Mistral AI Registry (api.mistral.ai) and make them available alongside local skills. Requires a Mistral provider and API key. Local skills take precedence on name collision.",
           "value": false,
           "path": "/experimental_enable_registry_skills",
           "popular": false,
@@ -1937,48 +1909,37 @@
         "skills": [],
         "tools": [
           {
-            "name": "skill",
-            "isCustom": false
+            "name": "skill"
           },
           {
-            "name": "task",
-            "isCustom": false
+            "name": "task"
           },
           {
-            "name": "web_fetch",
-            "isCustom": false
+            "name": "web_fetch"
           },
           {
-            "name": "bash",
-            "isCustom": false
+            "name": "bash"
           },
           {
-            "name": "edit",
-            "isCustom": false
+            "name": "edit"
           },
           {
-            "name": "grep",
-            "isCustom": false
+            "name": "grep"
           },
           {
-            "name": "ask_user_question",
-            "isCustom": false
+            "name": "ask_user_question"
           },
           {
-            "name": "read_file",
-            "isCustom": false
+            "name": "read_file"
           },
           {
-            "name": "web_search",
-            "isCustom": false
+            "name": "web_search"
           },
           {
-            "name": "todo",
-            "isCustom": false
+            "name": "todo"
           },
           {
-            "name": "write_file",
-            "isCustom": false
+            "name": "write_file"
           }
         ],
         "stats": {

@@ -40,6 +40,7 @@ from vibe.utils.url import display_url
 
 __all__ = [
     "SourceProbe",
+    "active_credential_source",
     "build_provider_auth_view",
     "read_provider_auth",
     "sanitize_api_base",
@@ -367,14 +368,9 @@ async def read_provider_auth(config: VibeConfigSchema) -> ProviderAuthView:
     """The ``/status`` snapshot: source inspection off the event loop, no network."""
     model = config.get_active_model()
     provider = config.get_provider_for_model(model)
-    kind = _auth_kind(provider)
-    if kind is not ProviderAuthKind.API_KEY:
+    if _auth_kind(provider) is not ProviderAuthKind.API_KEY:
         return build_provider_auth_view(model, provider, environ=os.environ)
-    env_var = provider.api_key_env_var
-    env_file_probe, keyring_probe = await asyncio.gather(
-        _probe_with_deadline(lambda: probe_env_file(GLOBAL_ENV_FILE.path, env_var)),
-        _probe_with_deadline(lambda: probe_keyring(env_var)),
-    )
+    env_file_probe, keyring_probe = await _probe_sources(provider.api_key_env_var)
     return build_provider_auth_view(
         model,
         provider,
@@ -383,3 +379,29 @@ async def read_provider_auth(config: VibeConfigSchema) -> ProviderAuthView:
         env_file_probe=env_file_probe,
         keyring_probe=keyring_probe,
     )
+
+
+async def active_credential_source(
+    provider: ProviderConfig,
+) -> ProviderCredentialSourceKind | None:
+    """The source ``provider``'s next model call would send, as ``/status`` reports it."""
+    if _auth_kind(provider) is not ProviderAuthKind.API_KEY:
+        return None
+    env_file_probe, keyring_probe = await _probe_sources(provider.api_key_env_var)
+    sources = _api_key_sources(
+        env_var=provider.api_key_env_var,
+        environ=os.environ,
+        origin_of=env_value_origin,
+        env_file_probe=env_file_probe,
+        keyring_probe=keyring_probe,
+    )
+    in_use = (s for s in sources if s.state is ProviderCredentialSourceState.IN_USE)
+    return next((source.kind for source in in_use), None)
+
+
+async def _probe_sources(env_var: str) -> tuple[SourceProbe, SourceProbe]:
+    env_file_probe, keyring_probe = await asyncio.gather(
+        _probe_with_deadline(lambda: probe_env_file(GLOBAL_ENV_FILE.path, env_var)),
+        _probe_with_deadline(lambda: probe_keyring(env_var)),
+    )
+    return env_file_probe, keyring_probe

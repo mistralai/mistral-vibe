@@ -9,11 +9,16 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vibe.core.config import VibeConfigSchema, build_default_orchestrator
-from vibe.core.git.errors import GitError, GitRepositoryNotFoundError
+from vibe.core.git.errors import (
+    GitError,
+    GitRepositoryNotFoundError,
+    GitUnavailableError,
+)
 from vibe.core.git.remote import to_https_url
 from vibe.core.git.repo import GitRepo
 from vibe.core.teleport.errors import ServiceTeleportError
@@ -38,6 +43,7 @@ from vibe.observability.logging import logger
 from vibe.observability.sentry import capture_sentry_exception
 
 if TYPE_CHECKING:
+    from vibe.app_server.protocol import ProjectLinksResolveRootRejectReason
     from vibe.core.teleport.git import GitRepoInfo
 
 
@@ -70,6 +76,25 @@ class ProjectLinksInvalidRequest(ProjectLinksError):
 
 class ProjectLinksInternalError(ProjectLinksError):
     """An unexpected failure already reported to Sentry."""
+
+
+# A ServiceTeleportError so that callers mapping inspection failures to an
+# invalid request keep doing so; only the reject reason tells it apart.
+class _GitUnavailableInCheckout(ServiceTeleportError):
+    pass
+
+
+def _reject_reason(error: ServiceTeleportError) -> ProjectLinksResolveRootRejectReason:
+    if isinstance(error, _GitUnavailableInCheckout):
+        return "git_unavailable"
+    return "nested_unresolvable"
+
+
+def _is_inside_git_checkout(directory: Path) -> bool:
+    return any(
+        os.path.lexists(candidate / ".git")
+        for candidate in (directory, *directory.parents)
+    )
 
 
 def _inspection_dict(inspected: _InspectedDirectory) -> dict[str, Any]:
@@ -107,6 +132,12 @@ def _read_inspected_directory(path: Path) -> _InspectedDirectory:
             github_remote = repository.github_remote()
             has_commits = repository.has_commits()
     except GitRepositoryNotFoundError:
+        return plain_directory
+    except GitUnavailableError as exc:
+        # Git is optional for a directory outside any checkout, which links as
+        # a plain one either way. A checkout's link needs what git reports.
+        if _is_inside_git_checkout(directory_path):
+            raise _GitUnavailableInCheckout(str(exc)) from exc
         return plain_directory
     except GitError as exc:
         raise ServiceTeleportError(str(exc)) from exc
@@ -213,10 +244,10 @@ class ProjectLinksController:
         path = Path(root_path).expanduser()
         try:
             inspected = await self._inspect_directory(path)
-        except ServiceTeleportError:
+        except ServiceTeleportError as exc:
             return {
                 "eligible": False,
-                "rejectReason": "nested_unresolvable",
+                "rejectReason": _reject_reason(exc),
                 "root": None,
             }
 
@@ -230,10 +261,10 @@ class ProjectLinksController:
         path = Path(root_path).expanduser()
         try:
             inspected = await self._inspect_directory(path)
-        except ServiceTeleportError:
+        except ServiceTeleportError as exc:
             return {
                 "eligible": False,
-                "rejectReason": "nested_unresolvable",
+                "rejectReason": _reject_reason(exc),
                 "root": None,
                 "savedLink": None,
                 "staleLinkCleared": False,

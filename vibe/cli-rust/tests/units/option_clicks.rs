@@ -1,8 +1,6 @@
 //! Lists with per-option actions confirm on a click on the highlight; the others on one click.
 
-use std::sync::Arc;
-
-use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use serde_json::json;
 use vibe_rs::app::{App, ModelOption};
@@ -10,15 +8,12 @@ use vibe_rs::mouse::{self, MouseTarget};
 use vibe_rs::server::{PublicChildSession, SessionStatus};
 use vibe_rs::{config, config_edit, config_fields, log_level_picker, resume_picker, subagents};
 
+use crate::support::{mouse, send_mouse};
+
 const AREA: Rect = Rect::new(0, 0, 80, 20);
 
 fn event(kind: MouseEventKind, row: u16) -> MouseEvent {
-    MouseEvent {
-        kind,
-        column: 4,
-        row,
-        modifiers: KeyModifiers::NONE,
-    }
+    mouse(kind, 4, row)
 }
 
 /// Press then release on `row` through the central mouse router.
@@ -28,8 +23,6 @@ fn click(app: &mut App, row: u16) {
 
 /// Press then release on a cell through the central mouse router.
 fn click_at(app: &mut App, column: u16, row: u16) {
-    let client = Arc::new(vibe_rs::server::Client::stub());
-    let (config_tx, _rx) = tokio::sync::mpsc::channel(1);
     for kind in [
         MouseEventKind::Down(MouseButton::Left),
         MouseEventKind::Up(MouseButton::Left),
@@ -38,7 +31,7 @@ fn click_at(app: &mut App, column: u16, row: u16) {
             column,
             ..event(kind, row)
         };
-        mouse::handle(app, &client, &config_tx, event);
+        send_mouse(app, event);
     }
 }
 
@@ -194,7 +187,7 @@ fn a_log_level_row_highlights_and_its_badge_toggles_on_one_click() {
 async fn a_saved_session_resumes_on_the_second_click() {
     let mut app = app_on(MouseTarget::ResumePicker);
     let (tx, _rx) = tokio::sync::mpsc::channel(1);
-    app.resume_picker.tx = Some(tx);
+    app.events = Some(tx);
     app.resume_picker.open = true;
     app.resume_picker.sessions = ["a", "b"]
         .map(|id| resume_picker::Session {

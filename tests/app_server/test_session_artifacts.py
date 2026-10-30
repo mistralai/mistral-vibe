@@ -16,6 +16,7 @@ import pytest
 from tests.conftest import build_test_vibe_config
 from tests.stubs.app_server import FakeSessionBackendServices
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
+from tests.stubs.process_services import fake_process_services
 from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server._mcp_auth import MCPAuthenticationService
 from vibe.app_server._plugin_mcp import PluginMCPCatalog
@@ -1090,6 +1091,7 @@ def _artifact_adapter(
         plugin_mcp=PluginMCPCatalog(MCPRegistry(), MCPAuthenticationService()),
         mcp_cache_root=str(tmp_path / "mcp-descriptors"),
         mcp_enable_system_trust_store=False,
+        org_config_service=fake_process_services().org_config,
     )
     derivation = UnifiedRuntimeDerivation(
         runtime=cast(Any, object()),

@@ -7,9 +7,6 @@ credential that can expire mid-session cannot be a value frozen into a
 derivation: a Google ADC token outlives its session by roughly an hour, and a
 re-exported environment variable or a ``/config`` provider switch has no
 derivation to ride in on.
-
-Credential *schemes* are a behavioural reference to the legacy backends and are
-kept in step with them by the authentication contract test, not by comment.
 """
 
 from __future__ import annotations
@@ -23,11 +20,13 @@ from mistralai_vibe_local_harness.vibe import (
     ProviderCredentialResult,
     ProviderCredentialSnapshot,
 )
+from mistralai_vibe_local_harness.vibe.completion_profile import ANTHROPIC_VERSION
 from vibe.core.config.models import MissingAPIKeyError
 from vibe.core.types import Backend
 from vibe.observability.logging import logger
 from vibe.utils.api_keys import resolve_api_key_with_origin, session_credentials
 from vibe.utils.keyring import keyring_read_failure
+from vibe.utils.oidc_marker import is_oidc_marker
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -39,11 +38,6 @@ if TYPE_CHECKING:
     ProviderSelector = Callable[[VibeConfigSchema], ProviderConfig]
 
 __all__ = ["ProviderCredentialService"]
-
-# Kept identical to ``AnthropicAdapter.API_VERSION``; pinned by the contract
-# test rather than imported, because importing it would pull the whole legacy
-# backend module (and its dependencies) onto the Unified session-open path.
-_ANTHROPIC_VERSION = "2023-06-01"
 
 _BEARER_STYLES = frozenset({"openai", "openai-responses", "reasoning"})
 
@@ -100,9 +94,7 @@ class ProviderCredentialService:
         if not provider.api_key_env_var and not provider.uses_vertex:
             return _snapshot(provider, None, {}, api_key_source=None)
 
-        snapshot = await asyncio.to_thread(
-            _resolve_snapshot, provider, self._credentials
-        )
+        snapshot = await self._current_snapshot(provider)
         if snapshot is None:
             env_var = provider.api_key_env_var or "MISTRAL_API_KEY"
             error = MissingAPIKeyError(
@@ -136,9 +128,11 @@ class ProviderCredentialService:
         except ValueError:
             return
 
-        current = await asyncio.to_thread(
-            _resolve_snapshot, provider, self._credentials
-        )
+        try:
+            current = await self._current_snapshot(provider)
+        except Exception:
+            # Rejection bookkeeping must not hide the original typed HTTP failure.
+            current = None
         if current is not None and current.revision != observed_revision:
             # A refresh already replaced the material this rejection names.
             # Discarding the new credential would force a re-authentication
@@ -149,15 +143,33 @@ class ProviderCredentialService:
         if provider.uses_vertex:
             # Vertex mints its own tokens, so recovery is a fresh mint rather
             # than a new configuration. Clearing the shared credentials makes
-            # the next resolution produce a different revision on its own,
-            # which is the recovery a legacy Vertex user gets from the
-            # per-request refresh — so there is nothing to record.
+            # the next resolution produce a different revision on its own, so
+            # there is nothing to record.
             await asyncio.to_thread(_clear_vertex_credentials)
         else:
             async with self._lock:
                 self._rejected[provider.name] = observed_revision
         logger.info(
             "Provider %s rejected the active credential (%s)", provider.name, reason
+        )
+
+    async def _current_snapshot(
+        self, provider: ProviderConfig
+    ) -> ProviderCredentialSnapshot | None:
+        snapshot = await asyncio.to_thread(
+            _resolve_snapshot, provider, self._credentials
+        )
+        if snapshot is None or not is_oidc_marker(snapshot.token):
+            return snapshot
+        from vibe.setup.auth._oidc_runtime import oidc_headers
+
+        headers = await oidc_headers(provider.api_base)
+        return _snapshot(
+            provider,
+            headers["Authorization"].removeprefix("Bearer "),
+            headers,
+            api_key_source="the CLI OIDC session",
+            follow_redirects=False,
         )
 
     def _provider_name(self) -> str:
@@ -189,9 +201,8 @@ def _resolve_snapshot(
         # refreshed process-wide, so "no key configured" is never the answer
         # here — a failure to mint raises and becomes ``ProviderAuthRequired``.
         #
-        # Bearer alone: ``VertexAnthropicAdapter`` carries the Anthropic version
-        # in the request body, not in a header, so a version header here would
-        # be a credential the legacy path never sends.
+        # Bearer alone: Vertex carries the Anthropic version in the request
+        # body, not in a header.
         token = _vertex_access_token()
         return _snapshot(
             provider, token, {"Authorization": f"Bearer {token}"}, api_key_source=None
@@ -211,16 +222,14 @@ def _resolve_snapshot(
 def _headers(provider: ProviderConfig, token: str) -> Mapping[str, str]:
     """The scheme-correct authorization headers for ``provider``.
 
-    Mirrors the legacy adapter table: ``MistralBackend`` and the bearer styles
-    send ``Authorization``, ``anthropic`` sends ``x-api-key`` alongside the
-    version it pins.
+    Mistral and the bearer styles send ``Authorization``, ``anthropic`` sends
+    ``x-api-key`` alongside the version it pins.
     """
     if provider.backend == Backend.MISTRAL or provider.api_style in _BEARER_STYLES:
         return {"Authorization": f"Bearer {token}"}
     if provider.api_style == "anthropic":
-        return {"x-api-key": token, "anthropic-version": _ANTHROPIC_VERSION}
-    # An unknown style is an OpenAI-compatible endpoint as far as the legacy
-    # adapter registry is concerned; bearer is the shape it would send.
+        return {"x-api-key": token, "anthropic-version": ANTHROPIC_VERSION}
+    # An unknown style is an OpenAI-compatible endpoint, which takes bearer.
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -230,12 +239,14 @@ def _snapshot(
     headers: Mapping[str, str],
     *,
     api_key_source: str | None,
+    follow_redirects: bool = True,
 ) -> ProviderCredentialSnapshot:
     return ProviderCredentialSnapshot(
         token=token,
         headers=headers,
         revision=_revision(provider.name, token),
         api_key_source=api_key_source,
+        follow_redirects=follow_redirects,
     )
 
 
@@ -250,24 +261,19 @@ def _revision(provider_name: str, token: str | None) -> str:
 
 
 def _vertex_access_token() -> str:
-    # Imported lazily, as ``generic.py`` does, so ``google.auth`` stays off the
-    # CLI startup path for the users who have no Vertex provider configured.
-    from vibe.core.llm.backend.vertex import _CREDENTIALS
+    # Imported lazily so ``google.auth`` stays off the CLI startup path for the
+    # users who have no Vertex provider configured. The Harness adapter sends
+    # this same process-wide token, so clearing it here is what it sends next.
+    from mistralai_vibe_local_harness.vibe.adapters.generic._vertex import (
+        VERTEX_CREDENTIALS,
+    )
 
-    return _CREDENTIALS.access_token
+    return VERTEX_CREDENTIALS.access_token
 
 
 def _clear_vertex_credentials() -> None:
-    """Drop the process-wide ADC credential so the next resolution re-mints.
+    from mistralai_vibe_local_harness.vibe.adapters.generic._vertex import (
+        VERTEX_CREDENTIALS,
+    )
 
-    ``VertexCredentials`` refreshes only when its token is invalid, so a token
-    that a provider refused while still unexpired would otherwise be handed
-    back unchanged. Reaching past the attribute is deliberate: giving it a
-    public ``invalidate`` would mean editing a legacy backend to serve the
-    Unified path, which this change does not do.
-    """
-    from vibe.core.llm.backend import vertex
-
-    credentials = vertex._CREDENTIALS
-    with credentials._lock:
-        credentials._credentials = None
+    VERTEX_CREDENTIALS.invalidate()

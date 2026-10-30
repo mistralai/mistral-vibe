@@ -30,6 +30,9 @@ unparseable = "unparseable"
 # macOS pasteboard four-char-code for the PNG flavor — required verbatim
 # by AppleScript syntax (`the clipboard as «class PNGf»`).
 PNGf = "PNGf"
+# Plural of PNG in harness/core/src/core/features/large_output/mod.rs; typos
+# otherwise splits it into "PN" + "Gs".
+PNGs = "PNGs"
 
 [files]
 # SVG snapshot goldens embed rendered pixels as path data; excluded so

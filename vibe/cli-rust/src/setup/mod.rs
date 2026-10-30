@@ -197,6 +197,7 @@ fn adopt_and_retry(
     crash_rx: tokio::sync::watch::Receiver<bool>,
     server_version: String,
 ) {
+    run.app.credential_client = Some(client.clone());
     run.client = client;
     run.child = Some(child);
     run.crash_rx = crash_rx;

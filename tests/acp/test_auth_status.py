@@ -17,7 +17,7 @@ from vibe.core.config import (
 )
 from vibe.core.types import Backend
 from vibe.setup.auth import AuthStateKind
-from vibe.setup.onboarding.context import OnboardingContext
+from vibe.setup.auth.onboarding_context import OnboardingContext
 
 
 @pytest.fixture(autouse=True)

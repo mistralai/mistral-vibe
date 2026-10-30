@@ -29,9 +29,9 @@ Path(_home, "cache.toml").write_text(
 
 env = {
     "VIBE_HOME": _home,
-    # The shipped whats_new.md changes every release; render the frozen fixture
-    # body instead (see startup/whats_new.py).
-    "VIBE_WHATS_NEW_FILE": os.fspath(WHATS_NEW_FIXTURE),
+    # The shipped release notes change every release; render the frozen fixture
+    # history instead (see startup/whats_new.py).
+    "VIBE_WHATS_NEW_DIR": os.fspath(WHATS_NEW_FIXTURE),
 }
 
 # The harness's startup settle lands on the dialog's first frame. Right moves

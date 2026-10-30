@@ -126,7 +126,7 @@ async def test_fetch_and_cache_stores_and_returns_the_catalog(
     monkeypatch.setattr(
         session_module,
         "store_cached_model_catalog",
-        lambda _config, response: stored.append(response),
+        lambda _config, response, **_: stored.append(response),
     )
 
     result = await fetch_and_cache_model_catalog(_config(flag=True))
@@ -143,7 +143,9 @@ async def test_fetch_and_cache_never_raises_on_unexpected_error(
         raise RuntimeError("ssl context blew up")
 
     monkeypatch.setattr(session_module, "refresh_model_catalog", _boom)
-    monkeypatch.setattr(session_module, "store_cached_model_catalog", lambda *_: None)
+    monkeypatch.setattr(
+        session_module, "store_cached_model_catalog", lambda *_, **__: None
+    )
 
     assert await fetch_and_cache_model_catalog(_config(flag=True)) is None
 

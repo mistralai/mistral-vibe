@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from vibe.config_values import THINKING_LEVELS, ThinkingLevel
+from vibe.config_values import ThinkingLevel
 from vibe.core.config.fingerprint import create_dict_fingerprint
 from vibe.core.config.layer import ConfigLayer, RawConfig
 from vibe.core.config.models import ModelConfig
@@ -131,17 +131,17 @@ def _catalog_model_payload(entry: ModelCatalogEntry) -> dict[str, Any] | None:
 
 
 def _thinking_levels(model_id: str, reasoning: list[str]) -> list[ThinkingLevel]:
+    """The catalog's levels, every one kept: a level of the model's own goes to
+    the provider as the catalog wrote it.
+    """
     levels: list[ThinkingLevel] = []
     for value in reasoning:
-        level = "off" if value == _WIRE_NONE else value
-        if level not in THINKING_LEVELS:
+        if not value.strip():
             logger.warning(
-                "Model catalog entry '%s': unknown reasoning value '%s' ignored",
-                model_id,
-                value,
+                "Model catalog entry '%s': blank reasoning value ignored", model_id
             )
             continue
-        levels.append(cast(ThinkingLevel, level))
+        levels.append("off" if value == _WIRE_NONE else value)
     return levels
 
 

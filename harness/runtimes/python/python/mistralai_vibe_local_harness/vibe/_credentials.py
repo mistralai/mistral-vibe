@@ -33,7 +33,8 @@ class ProviderCredentialSnapshot:
     ``token`` and ``headers`` describe the same credential in the two shapes
     provider clients need: an SDK that takes a key reads ``token``, a raw HTTP
     adapter merges ``headers``. Both are always populated when the scheme
-    supports them; neither is ever logged or persisted.
+    supports them; neither is ever logged or persisted. ``follow_redirects``
+    lets the Host keep credentials bound to their authorized endpoint.
     """
 
     token: str | None = field(repr=False)
@@ -45,6 +46,7 @@ class ProviderCredentialSnapshot:
     # token, whose origin says nothing a user could act on. Carried so a
     # rejection can tell the user which of the two to fix.
     api_key_source: str | None = None
+    follow_redirects: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "headers", MappingProxyType(dict(self.headers)))

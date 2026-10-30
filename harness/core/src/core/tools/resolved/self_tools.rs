@@ -34,7 +34,7 @@ pub(crate) fn self_tools(max_sleep_ms: u64) -> Vec<ToolBinding> {
                 namespace: SELF_NAMESPACE.to_string(),
                 name: "sleep".to_string(),
             },
-            description: "Pause this agent execution for a bounded number of seconds while Runtime-owned background work continues.".to_string(),
+            description: "Pause the program execution for a bounded number of seconds. This cannot be interrupted by more input contrary to wait.".to_string(),
             input_schema,
             output_schema: Some(SleepResult::tool_schema()),
             runtime_builtin: Some(RuntimeBuiltinToolName::SelfSleep),

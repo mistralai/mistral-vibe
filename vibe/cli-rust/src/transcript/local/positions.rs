@@ -16,8 +16,14 @@ pub struct PreservedEntry {
 
 pub fn preserve(transcript: &Transcript) -> Vec<PreservedEntry> {
     let mut server_before = 0;
+    let mut after_server = false;
     let mut preserved: Vec<PreservedEntry> = Vec::new();
     for entry in &transcript.entries {
+        // A merged follow-up's text is already in its echoed head's server entry.
+        if entry.local && entry.follows_user && after_server {
+            continue;
+        }
+        after_server = !entry.local;
         if !entry.local {
             server_before += 1;
             for pending in &mut preserved {
@@ -48,7 +54,14 @@ fn restore_entries(
     entries: Vec<PreservedEntry>,
     restore_positions: bool,
 ) {
+    let mut head_in_history = false;
     for entry in entries {
+        // The rebuilt history already merged this follow-up into its head.
+        let follow_up = entry.raw.get("followsUser").and_then(Value::as_bool) == Some(true);
+        if follow_up && head_in_history {
+            continue;
+        }
+        head_in_history = transcript.indices.contains_key(&entry.id);
         let Some(&index) = transcript.indices.get(&entry.id) else {
             transcript.insert(entry.raw, false);
             if restore_positions && entry.followed_by_server {

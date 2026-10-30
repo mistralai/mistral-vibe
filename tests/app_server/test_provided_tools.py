@@ -373,11 +373,19 @@ def test_todo_is_routed_to_the_name_its_permission_is_configured_under() -> None
         f"{VIBE_TOOL_GROUP}.{TODO_TOOL_NAME}": "todo",
         f"{VIBE_TOOL_GROUP}.{CRON_TOOL_NAME}": "cron",
         f"{VIBE_TOOL_GROUP}.{START_SESSION_TOOL_NAME}": "start_session",
+        f"{VIBE_TOOL_GROUP}.list_sessions": "list_sessions",
+        f"{VIBE_TOOL_GROUP}.read_session": "read_session",
+        f"{VIBE_TOOL_GROUP}.send_to_session": "send_to_session",
+        f"{VIBE_TOOL_GROUP}.archive_sessions": "archive_sessions",
     }
     assert VIBE_PROVIDED_TOOL_MODES == {
         TODO_TOOL_NAME: "ask",
         CRON_TOOL_NAME: "ask",
         START_SESSION_TOOL_NAME: "ask",
+        "list_sessions": "ask",
+        "read_session": "ask",
+        "send_to_session": "ask",
+        "archive_sessions": "ask",
         SCRATCHPAD_TOOL_NAME: "allow",
     }
 
@@ -1113,6 +1121,29 @@ async def test_start_session_names_the_session_by_its_title_and_link(
         "url": "/code/p/spawned-1",
         "message": "Started [Review](/code/p/spawned-1)",
     }
+
+
+@pytest.mark.asyncio
+async def test_start_session_names_the_session_by_the_clients_id(
+    tmp_path: Path,
+) -> None:
+    """The id the client's session tools take, which the app server's own id
+    stops matching after a handoff.
+    """
+
+    async def hosted(params: SessionSpawnParams) -> SessionSpawnResponse:
+        return SessionSpawnResponse(
+            session_id="app-server-1", client_session_id="code-session-1"
+        )
+
+    execute = _executor(tmp_path, session_spawner=_FakeSpawner(hosted))
+    started = await execute(
+        _start_session("start", prompt="Fix it", placement="new_worktree")
+    )
+
+    assert isinstance(started, RustToolSucceededEvent)
+    assert isinstance(started.result.structured_content, dict)
+    assert started.result.structured_content["session_id"] == "code-session-1"
 
 
 @pytest.mark.asyncio

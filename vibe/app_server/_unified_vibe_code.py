@@ -17,7 +17,7 @@ from vibe.core.compaction.context import (
     render_teleport_summary_request,
 )
 from vibe.core.config import VibeConfigSchema
-from vibe.core.llm.backend.factory import create_backend
+from vibe.core.llm.completion import CompletionTransport, complete_once
 from vibe.core.telemetry.build_metadata import build_request_metadata
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import LaunchContext, ProjectPickerTelemetryPayload
@@ -29,7 +29,6 @@ from vibe.core.teleport.types import (
     TeleportYieldEvent,
 )
 from vibe.core.types import (
-    Backend,
     FileImageSource as CoreFileImageSource,
     ImageAttachment,
     InlineImageSource as CoreInlineImageSource,
@@ -37,7 +36,6 @@ from vibe.core.types import (
     Role,
 )
 from vibe.utils.api_keys import resolve_api_key
-from vibe.utils.http import get_user_agent
 
 if TYPE_CHECKING:
     from vibe.app_server._unified_harness_backend_adapter import (
@@ -123,7 +121,7 @@ def resolve_last_user_prompt(entries: list[PublicHistoryEntry]) -> str:
 
 
 class UnifiedTeleportContextSummarizer:
-    """TeleportContextSummarizer backed by projected history + create_backend."""
+    """TeleportContextSummarizer backed by projected history + complete_once."""
 
     def __init__(self, adapter: UnifiedHarnessBackendAdapter) -> None:
         self._adapter = adapter
@@ -186,27 +184,16 @@ class UnifiedTeleportContextSummarizer:
             session_id=self._adapter.session_id,
             call_type="secondary_call",
         ).model_dump(exclude_none=True)
-        backend = create_backend(
+        result = await complete_once(
             provider=provider,
-            timeout=config.api_timeout,
-            retry_max_elapsed_time=config.api_retry_max_elapsed_time,
-            connect_timeout=config.api_connect_timeout,
-            write_timeout=config.api_write_timeout,
-            pool_timeout=config.api_pool_timeout,
+            model=compaction_model,
+            messages=summary_messages,
+            max_tokens=None,
+            metadata=metadata,
+            transport=CompletionTransport.from_config(config),
         )
-        async with backend:
-            result = await backend.complete(
-                model=compaction_model,
-                messages=summary_messages,
-                temperature=compaction_model.temperature,
-                tools=None,
-                tool_choice=None,
-                max_tokens=None,
-                extra_headers={"user-agent": get_user_agent(Backend.MISTRAL)},
-                metadata=metadata,
-            )
-        raw_content = (result.message.content or "").strip()
-        if result.message.tool_calls or not raw_content:
+        raw_content = result.text.strip()
+        if not raw_content:
             raise ServiceTeleportError(
                 "Failed to summarize context for teleport.",
                 telemetry_details={"failure_kind": "context_summary_failed"},

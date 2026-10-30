@@ -27,7 +27,7 @@ pub(super) fn render_block(b: &Block, width: u16, frame: Frame, out: &mut Out) {
             let rule = |out: &mut Out| {
                 out.lines.push(Line::from(vec![
                     pad(frame.pad),
-                    Span::styled("─".repeat(inner), Style::default().fg(theme::md_rule())),
+                    Span::styled("─".repeat(inner), theme::md_keyline()),
                 ]));
             };
             // The widget's `padding-top: 1` renders inside the block.
@@ -36,7 +36,7 @@ pub(super) fn render_block(b: &Block, width: u16, frame: Frame, out: &mut Out) {
             }
             rule(out);
         }
-        Block::Code(lines) => render_code(lines, width, frame, out),
+        Block::Code(lang, lines) => render_code(lang, lines, width, frame, out),
         Block::List { start, items } => render_list(*start, items, (0, 0), width, frame, out),
         Block::Table { headers, rows } => {
             super::table::render_table(headers, rows, width, frame.pad, out);
@@ -45,15 +45,11 @@ pub(super) fn render_block(b: &Block, width: u16, frame: Frame, out: &mut Out) {
         Block::Quote(inline) => {
             let inner = (width as usize).saturating_sub(2 * frame.pad + 2);
             let bar = match frame.profile {
-                Profile::Assistant => theme::md_quote_bar(),
-                Profile::Widget => theme::md_widget_quote_bar(),
+                Profile::Assistant => theme::md_keyline(),
+                Profile::Widget => Style::default().fg(theme::md_widget_quote_bar()),
             };
             push_wrapped(out, inline, inner, |_, _| {
-                vec![
-                    pad(frame.pad),
-                    Span::styled("▌", Style::default().fg(bar)),
-                    Span::raw(" "),
-                ]
+                vec![pad(frame.pad), Span::styled("▌", bar), Span::raw(" ")]
             });
         }
     }
@@ -79,11 +75,11 @@ fn push_wrapped(
 /// and washes the label box in the fence background; the chat tcss zeroes it.
 /// A chat fence sits inside a keyline box, like a table: one rule row above
 /// and below, one rail column either side.
-fn render_code(lines: &[Vec<Span<'static>>], width: u16, frame: Frame, out: &mut Out) {
+fn render_code(lang: &str, lines: &[Vec<Span<'static>>], width: u16, frame: Frame, out: &mut Out) {
     let content = (width as usize).saturating_sub(2 * frame.pad);
     // Below five content columns the box cannot fit its rails and text: bare fence.
     if frame.profile == Profile::Assistant && content >= 5 {
-        boxed_code(lines, content, frame, out);
+        boxed_code(lang, lines, content, frame, out);
         return;
     }
     let (wrap, indent, bg) = match frame.profile {
@@ -146,20 +142,25 @@ fn bg_style(bg: Option<ratatui::style::Color>) -> Style {
     }
 }
 
-/// A chat fence's keyline box: `rule, content rows, rule`.
-fn boxed_code(lines: &[Vec<Span<'static>>], content: usize, frame: Frame, out: &mut Out) {
+/// A chat fence's keyline box: `rule (with the language label), content rows, rule`.
+fn boxed_code(
+    lang: &str,
+    lines: &[Vec<Span<'static>>],
+    content: usize,
+    frame: Frame,
+    out: &mut Out,
+) {
     let border = Style::default().fg(theme::md_fence_border());
-    let rule = |left: char, right: char| {
+    let rule = |left: char, label: &str, right: char| {
+        let fill = content.saturating_sub(2 + label.width());
         Line::from(vec![
             pad(frame.pad),
-            Span::styled(left.to_string(), border),
-            Span::styled("─".repeat(content.saturating_sub(2)), border),
-            Span::styled(right.to_string(), border),
+            Span::styled(format!("{left}{label}{}{right}", "─".repeat(fill)), border),
         ])
     };
     let inner = content.saturating_sub(4);
     let hang = (frame.pad + 2) as u16;
-    out.lines.push(rule('┌', '┐'));
+    out.lines.push(rule('┌', &fence_label(lang, content), '┐'));
     for line in lines {
         if line.iter().all(|span| span.content.trim().is_empty()) {
             out.lines.push(Line::from(vec![
@@ -183,7 +184,16 @@ fn boxed_code(lines: &[Vec<Span<'static>>], content: usize, frame: Frame, out: &
                 .push_folded(Line::from(spans), Fold::hung(gap, hang));
         }
     }
-    out.lines.push(rule('└', '┘'));
+    out.lines.push(rule('└', "", '┘'));
+}
+
+/// `─ lang ` after the top-left corner, dropped when it would crowd the rule.
+fn fence_label(lang: &str, content: usize) -> String {
+    let label = format!("─ {lang} ");
+    match lang.is_empty() || label.width() + 4 > content {
+        true => String::new(),
+        false => label,
+    }
 }
 
 /// Render a list at nesting `depth`, its markers offset by `indent` cells.

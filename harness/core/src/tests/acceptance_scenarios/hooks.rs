@@ -1,5 +1,61 @@
 use super::*;
 
+#[test]
+fn rejects_new_turn_when_pre_agent_or_pre_llm_hook_is_pending() {
+    for point in ["pre_agent_turn", "pre_llm_call"] {
+        let turn_id = "turn-hook-busy";
+        let mut config = config();
+        config.capabilities.hook_bindings = serde_json::from_value(json!([{
+            "id": "pending-hook",
+            "point": point,
+            "order": 0,
+            "selector": {"type": "always"},
+        }]))
+        .unwrap();
+        let mut runtime = SynchronousRuntime::new(config);
+        let input = if point == "pre_agent_turn" {
+            json!({"user_content": [{"type": "text", "text": "first request"}]})
+        } else {
+            Value::Null
+        };
+        let mut expected = running(turn_id).dispatch(hook_call(point, &["pending-hook"], input));
+
+        if point == "pre_llm_call" {
+            expected = expected.observe(turn_started(turn_id, "first request"));
+        }
+        let hook = runtime
+            .apply(user_message(turn_id, "first request", "queue"), expected)
+            .only_action();
+
+        runtime.reject(
+            user_message("turn-follow-up", "next request", "queue"),
+            json!({
+                "code": "invalid_state",
+                "command_type": "user_message",
+                "state": "running",
+            }),
+        );
+
+        let mut output = json!({"type": "continue"});
+        let mut expected = running(turn_id).dispatch(llm_call(0));
+
+        if point == "pre_agent_turn" {
+            output["user_content"] = json!([{"type": "text", "text": "first request"}]);
+            expected = expected.observe(turn_started(turn_id, "first request"));
+        }
+        let completion = runtime
+            .apply(hook_completed(&hook, point, output), expected)
+            .only_action();
+
+        runtime.assert_last_model_message_update(
+            &completion,
+            "replace",
+            &[model_system(), model_user_text("first request")],
+        );
+        runtime.finish_turn_with_text(turn_id, &completion, "first answer");
+    }
+}
+
 ///
 /// *Prepare*: One session configures pre-agent, pre-LLM, post-LLM, pre-tool, post-tool, and post-agent hooks.
 /// *Do*: Drive a tool-using turn through every hook and a final model completion.

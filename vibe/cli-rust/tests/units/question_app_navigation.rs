@@ -1,45 +1,14 @@
 //! Row and question navigation in the question app, and what switching questions restores.
 
+use crossterm::event::KeyCode;
 use std::collections::BTreeSet;
-use std::sync::Arc;
-
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use vibe_rs::app::App;
 use vibe_rs::question_app::{is_submit_selected, other_option_idx, submit_option_idx};
-use vibe_rs::question_input::handle_key;
-use vibe_rs::server::{Client, QuestionChoice, UserQuestion};
 
-fn question(labels: &[&str], multi_select: bool) -> UserQuestion {
-    UserQuestion {
-        question: "Pick".into(),
-        header: String::new(),
-        options: labels
-            .iter()
-            .map(|label| QuestionChoice {
-                label: (*label).into(),
-                description: String::new(),
-            })
-            .collect(),
-        multi_select,
-        hide_other: false,
-    }
-}
-
-fn open(questions: Vec<UserQuestion>) -> App {
-    let mut app = App::default();
-    app.question_app.open = true;
-    app.question_app.questions = questions;
-    app
-}
-
-fn press(app: &mut App, code: KeyCode) {
-    let client = Arc::new(Client::stub());
-    handle_key(app, &client, KeyEvent::new(code, KeyModifiers::NONE));
-}
+use crate::support::{press_question as press, question, with_questions};
 
 #[test]
 fn arrows_and_j_k_wrap_over_the_options_and_the_free_text_row() {
-    let mut app = open(vec![question(&["Alpha", "Beta"], false)]);
+    let mut app = with_questions(vec![question("Pick", &["Alpha", "Beta"], false)]);
 
     press(&mut app, KeyCode::Up);
     assert_eq!(
@@ -58,7 +27,7 @@ fn arrows_and_j_k_wrap_over_the_options_and_the_free_text_row() {
 
 #[test]
 fn multi_select_reaches_the_submit_row_and_wraps_past_it() {
-    let mut app = open(vec![question(&["Alpha", "Beta"], true)]);
+    let mut app = with_questions(vec![question("Pick", &["Alpha", "Beta"], true)]);
 
     press(&mut app, KeyCode::Up);
     assert!(is_submit_selected(&app));
@@ -70,7 +39,10 @@ fn multi_select_reaches_the_submit_row_and_wraps_past_it() {
 #[test]
 fn more_than_four_options_are_navigable_and_numbered() {
     let labels = ["One", "Two", "Three", "Four", "Five", "Six"];
-    let mut app = open(vec![question(&labels, false), question(&["Next"], false)]);
+    let mut app = with_questions(vec![
+        question("Pick", &labels, false),
+        question("Pick", &["Next"], false),
+    ]);
 
     press(&mut app, KeyCode::Up);
     assert_eq!(other_option_idx(&app), Some(6));
@@ -86,9 +58,9 @@ fn more_than_four_options_are_navigable_and_numbered() {
 
 #[test]
 fn switching_questions_keeps_each_free_text_answer() {
-    let mut app = open(vec![
-        question(&["Alpha"], false),
-        question(&["Beta"], false),
+    let mut app = with_questions(vec![
+        question("Pick", &["Alpha"], false),
+        question("Pick", &["Beta"], false),
     ]);
     app.question_app.other_texts.insert(0, "first".into());
     app.question_app.other_texts.insert(1, "second".into());
@@ -104,10 +76,10 @@ fn switching_questions_keeps_each_free_text_answer() {
 
 #[test]
 fn left_and_right_wrap_across_questions() {
-    let mut app = open(vec![
-        question(&["Alpha"], false),
-        question(&["Beta"], false),
-        question(&["Gamma"], false),
+    let mut app = with_questions(vec![
+        question("Pick", &["Alpha"], false),
+        question("Pick", &["Beta"], false),
+        question("Pick", &["Gamma"], false),
     ]);
 
     press(&mut app, KeyCode::Left);
@@ -118,9 +90,9 @@ fn left_and_right_wrap_across_questions() {
 
 #[test]
 fn returning_to_an_answered_question_restores_its_option() {
-    let mut app = open(vec![
-        question(&["Alpha", "Beta"], false),
-        question(&["Gamma"], false),
+    let mut app = with_questions(vec![
+        question("Pick", &["Alpha", "Beta"], false),
+        question("Pick", &["Gamma"], false),
     ]);
     press(&mut app, KeyCode::Char('2'));
     assert_eq!(app.question_app.current_question_idx, 1);
@@ -138,9 +110,9 @@ fn returning_to_an_answered_question_restores_its_option() {
 
 #[test]
 fn returning_to_a_free_text_answer_restores_the_free_text_row() {
-    let mut app = open(vec![
-        question(&["Alpha", "Beta"], false),
-        question(&["Gamma"], false),
+    let mut app = with_questions(vec![
+        question("Pick", &["Alpha", "Beta"], false),
+        question("Pick", &["Gamma"], false),
     ]);
     app.question_app.other_texts.insert(0, "custom".into());
     press(&mut app, KeyCode::Char('3'));
@@ -158,9 +130,9 @@ fn returning_to_a_free_text_answer_restores_the_free_text_row() {
 
 #[test]
 fn returning_to_a_multi_select_question_restores_its_first_tick() {
-    let mut app = open(vec![
-        question(&["Alpha", "Beta", "Gamma"], true),
-        question(&["Delta"], false),
+    let mut app = with_questions(vec![
+        question("Pick", &["Alpha", "Beta", "Gamma"], true),
+        question("Pick", &["Delta"], false),
     ]);
     app.question_app
         .multi_selections

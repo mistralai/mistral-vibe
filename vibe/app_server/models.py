@@ -680,7 +680,6 @@ class SkillDetailView(ProtocolModel):
 
 class ToolSummary(ProtocolModel):
     name: str
-    is_custom: bool = False
 
 
 # The closed set the App Server contract declares. Vibe never emits "unknown";
@@ -1194,6 +1193,10 @@ class PublicSession(ProtocolModel):
     id: str
     root_session_id: str | None = None
     parent_session_id: str | None = None
+    # Filled by `session/list` only; absent elsewhere does not mean none.
+    started_by_session_id: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     title: str | None = None
     preview: str = ""
     status: PublicSessionStatus

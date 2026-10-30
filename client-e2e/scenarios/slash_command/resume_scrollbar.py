@@ -28,7 +28,6 @@ handshake = {
         "items": [_session(index) for index in range(1, 25)],
         "nextCursor": None,
         "previousCursor": None,
-        "continueSessionId": "00000000-0000-4000-8000-000000000001",
     }
 }
 timeline: Timeline = ["/resume\r"]

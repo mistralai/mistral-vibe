@@ -15,14 +15,19 @@ import pytest
 from vibe.app_server._connection_protocol import ClientInfo
 from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server._host import HostRequestHandler
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.protocol import ProtocolErrorCode
 from vibe.core.config.harness_files import HarnessFilesManager
 
 _PICKER_READS = ["config/read", "agents/list", "skills/list"]
 
 
-async def _picker_read_error(method: str) -> RequestFailure:
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+async def _picker_read_error(
+    method: str, *, process_services: ProcessServices
+) -> RequestFailure:
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
     with pytest.raises(RequestFailure) as raised:
         await handler.dispatch(
             method, {}, client_info=ClientInfo(name="test", version="0")
@@ -33,7 +38,7 @@ async def _picker_read_error(method: str) -> RequestFailure:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method", _PICKER_READS)
 async def test_a_strict_config_refusal_is_a_configuration_error(
-    config_dir: Path, method: str
+    config_dir: Path, method: str, process_services: ProcessServices
 ) -> None:
     """*Prepare*: A user config with strict_config on and a misspelt setting.
     *Do*: Make a picker read without a session.
@@ -48,7 +53,7 @@ async def test_a_strict_config_refusal_is_a_configuration_error(
     )
 
     # Do
-    error = await _picker_read_error(method)
+    error = await _picker_read_error(method, process_services=process_services)
 
     # Assert
     assert error.code is ProtocolErrorCode.INVALID_PARAMS
@@ -59,7 +64,7 @@ async def test_a_strict_config_refusal_is_a_configuration_error(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method", _PICKER_READS)
 async def test_an_unparsable_config_is_a_configuration_error(
-    config_dir: Path, method: str
+    config_dir: Path, method: str, process_services: ProcessServices
 ) -> None:
     """*Prepare*: A user config that is not valid TOML.
     *Do*: Make a picker read without a session.
@@ -69,7 +74,7 @@ async def test_an_unparsable_config_is_a_configuration_error(
     (config_dir / "config.toml").write_text("active_model = [\n", encoding="utf-8")
 
     # Do
-    error = await _picker_read_error(method)
+    error = await _picker_read_error(method, process_services=process_services)
 
     # Assert
     assert error.code is ProtocolErrorCode.INVALID_PARAMS
@@ -80,7 +85,7 @@ async def test_an_unparsable_config_is_a_configuration_error(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method", _PICKER_READS)
 async def test_a_value_the_schema_refuses_is_a_configuration_error(
-    config_dir: Path, method: str
+    config_dir: Path, method: str, process_services: ProcessServices
 ) -> None:
     """*Prepare*: A user config with a value the Vibe schema refuses.
     *Do*: Make a picker read without a session.
@@ -95,7 +100,7 @@ async def test_a_value_the_schema_refuses_is_a_configuration_error(
     )
 
     # Do
-    error = await _picker_read_error(method)
+    error = await _picker_read_error(method, process_services=process_services)
 
     # Assert
     assert error.code is ProtocolErrorCode.INVALID_PARAMS

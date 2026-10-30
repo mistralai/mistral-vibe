@@ -25,7 +25,7 @@ from vibe.app_server.models import (
     SessionTextContentBlock,
     TextContentBlock,
 )
-from vibe.core.tracing import build_otel_span_exporter_config
+from vibe.core.llm.completion import CompletionTransport
 from vibe.core.types import ImageAttachment as CoreImageAttachment
 from vibe.core.vision import ImageDescriber, complete_vision
 from vibe.utils.images import MAX_IMAGES_PER_MESSAGE
@@ -34,13 +34,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from typing import Any
 
+    from mistralai_vibe_local_harness.vibe import UtilityReply
     from vibe.app_server.models import (
         ContentBlock,
         ImageAttachment,
         SessionContentBlock,
     )
     from vibe.core.config import ModelConfig, VibeConfigSchema
-    from vibe.core.types import LLMChunk, LLMMessage
+    from vibe.core.types import LLMMessage
     from vibe.core.vision import DescribeReport
 
 __all__ = ["SessionImageDescriber"]
@@ -169,30 +170,15 @@ class SessionImageDescriber:
 
     async def _complete(
         self, *, model: ModelConfig, messages: Sequence[LLMMessage]
-    ) -> LLMChunk:
+    ) -> UtilityReply:
         config = self._config()
         return await complete_vision(
             model=model,
             provider=config.get_provider_for_model(model),
             messages=messages,
-            timeout=config.api_timeout,
-            retry_max_elapsed_time=config.api_retry_max_elapsed_time,
+            transport=CompletionTransport.from_config(config),
             session_id=self._session_id(),
-            enable_otel=_otel_enabled(config),
         )
-
-
-def _otel_enabled(config: VibeConfigSchema) -> bool:
-    # The same gate the legacy loop applies to its own completions: without a
-    # resolvable exporter the tracer instruments the call and drops the spans.
-    if not (config.enable_telemetry and config.enable_otel):
-        return False
-    return (
-        build_otel_span_exporter_config(
-            config.otel_endpoint, config.get_mistral_provider()
-        )
-        is not None
-    )
 
 
 def _reject_beyond_limit(count: int) -> None:

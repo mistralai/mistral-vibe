@@ -26,6 +26,7 @@ import respx
 
 from tests.app_server.backend_contract.conftest import connect_backend_contract_host
 from vibe.app_server._model import validate_wire
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._worktree_session import SessionWorktrees, WorktreeResolution
 from vibe.app_server.events import CallbackRequested
 from vibe.app_server.models import (
@@ -82,7 +83,9 @@ def _init_repo(root: Path) -> Repo:
 
 
 @pytest.mark.asyncio
-async def test_a_session_starts_in_the_worktree_it_asked_for(tmp_path: Path) -> None:
+async def test_a_session_starts_in_the_worktree_it_asked_for(
+    tmp_path: Path, process_services: ProcessServices
+) -> None:
     _init_repo(tmp_path)
     connection = await connect_backend_contract_host(
         session_options=SessionOptions(
@@ -91,6 +94,7 @@ async def test_a_session_starts_in_the_worktree_it_asked_for(tmp_path: Path) -> 
             worktree=NewWorktreeInput(branch="jun/contract", name="contract"),
         ),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         session = await connection.host.start_session()
@@ -108,7 +112,11 @@ async def test_a_session_starts_in_the_worktree_it_asked_for(tmp_path: Path) -> 
 @pytest.mark.parametrize("trusted", [False, True])
 @pytest.mark.parametrize("relocate", [False, True])
 async def test_session_git_filters_survive_managed_move_and_live_fork(
-    tmp_path: Path, trusted: bool, relocate: bool, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    trusted: bool,
+    relocate: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
 ) -> None:
     import threading
 
@@ -155,7 +163,8 @@ async def test_session_git_filters_survive_managed_move_and_live_fork(
             trust_workspace=trusted,
         ),
         capabilities=ClientCapabilities(),
-        process=HarnessProcess(harness_files),
+        process_services=process_services,
+        process=HarnessProcess(harness_files, services=process_services),
     )
     try:
         session = await connection.host.start_session()
@@ -199,7 +208,7 @@ def _write_post_checkout_hook(repo: Repo, marker: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_session_starting_a_worktree_does_not_run_repository_hooks(
-    tmp_path: Path,
+    tmp_path: Path, process_services: ProcessServices
 ) -> None:
     # Worktree creation happens before any trust prompt, so a hostile
     # post-checkout hook would run with the user's full privileges. Both
@@ -228,6 +237,7 @@ async def test_a_session_starting_a_worktree_does_not_run_repository_hooks(
             worktree=NewWorktreeInput(branch="jun/hooked", name="hooked"),
         ),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         session = await connection.host.start_session()
@@ -240,7 +250,9 @@ async def test_a_session_starting_a_worktree_does_not_run_repository_hooks(
 
 
 @pytest.mark.asyncio
-async def test_an_auto_worktree_is_still_a_worktree(tmp_path: Path) -> None:
+async def test_an_auto_worktree_is_still_a_worktree(
+    tmp_path: Path, process_services: ProcessServices
+) -> None:
     # The composer's default. The server names it, which is the ordinary case
     # rather than an edge one.
     _init_repo(tmp_path)
@@ -251,6 +263,7 @@ async def test_an_auto_worktree_is_still_a_worktree(tmp_path: Path) -> None:
             worktree=AutoWorktreeInput(),
         ),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         session = await connection.host.start_session()
@@ -264,7 +277,7 @@ async def test_an_auto_worktree_is_still_a_worktree(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_first_turn_response_does_not_wait_for_worktree_creation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
 
     _init_repo(tmp_path)
@@ -278,14 +291,25 @@ async def test_first_turn_response_does_not_wait_for_worktree_creation(
         on_progress: WorktreeProgressCallback | None = None,
         *,
         trust_store: TrustedFoldersManager | None = None,
+        copy_on_write: bool = False,
     ) -> WorktreeResolution:
         if options.worktree is None:
             return await original(
-                worktrees, options, on_progress, trust_store=trust_store
+                worktrees,
+                options,
+                on_progress,
+                trust_store=trust_store,
+                copy_on_write=copy_on_write,
             )
         setup_started.set()
         await release_setup.wait()
-        return await original(worktrees, options, on_progress, trust_store=trust_store)
+        return await original(
+            worktrees,
+            options,
+            on_progress,
+            trust_store=trust_store,
+            copy_on_write=copy_on_write,
+        )
 
     monkeypatch.setattr(SessionWorktrees, "resolve_for_start", blocked_resolve)
     connection = await connect_backend_contract_host(
@@ -295,6 +319,7 @@ async def test_first_turn_response_does_not_wait_for_worktree_creation(
             worktree=NewWorktreeInput(branch="jun/deferred", name="deferred"),
         ),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         session = await connection.host.start_session()
@@ -324,7 +349,7 @@ async def test_first_turn_response_does_not_wait_for_worktree_creation(
 
 @pytest.mark.asyncio
 async def test_an_agent_switch_does_not_wait_for_worktree_creation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     """A client picks the agent before its first message, and that pick must
     not hold the message back for the whole checkout.
@@ -340,14 +365,25 @@ async def test_an_agent_switch_does_not_wait_for_worktree_creation(
         on_progress: WorktreeProgressCallback | None = None,
         *,
         trust_store: TrustedFoldersManager | None = None,
+        copy_on_write: bool = False,
     ) -> WorktreeResolution:
         if options.worktree is None:
             return await original(
-                worktrees, options, on_progress, trust_store=trust_store
+                worktrees,
+                options,
+                on_progress,
+                trust_store=trust_store,
+                copy_on_write=copy_on_write,
             )
         setup_started.set()
         await release_setup.wait()
-        return await original(worktrees, options, on_progress, trust_store=trust_store)
+        return await original(
+            worktrees,
+            options,
+            on_progress,
+            trust_store=trust_store,
+            copy_on_write=copy_on_write,
+        )
 
     monkeypatch.setattr(SessionWorktrees, "resolve_for_start", blocked_resolve)
     connection = await connect_backend_contract_host(
@@ -357,6 +393,7 @@ async def test_an_agent_switch_does_not_wait_for_worktree_creation(
             worktree=NewWorktreeInput(branch="jun/agent", name="agent"),
         ),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         session = await connection.host.start_session()
@@ -384,7 +421,7 @@ async def test_an_agent_switch_does_not_wait_for_worktree_creation(
 
 @pytest.mark.asyncio
 async def test_a_turn_claimed_before_a_failed_worktree_reports_it_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     """A turn claimed while the worktree prepares still learns of a failure once.
 
@@ -402,10 +439,15 @@ async def test_a_turn_claimed_before_a_failed_worktree_reports_it_once(
         on_progress: WorktreeProgressCallback | None = None,
         *,
         trust_store: TrustedFoldersManager | None = None,
+        copy_on_write: bool = False,
     ) -> WorktreeResolution:
         if options.worktree is None:
             return await original(
-                worktrees, options, on_progress, trust_store=trust_store
+                worktrees,
+                options,
+                on_progress,
+                trust_store=trust_store,
+                copy_on_write=copy_on_write,
             )
         setup_started.set()
         await release_setup.wait()
@@ -419,6 +461,7 @@ async def test_a_turn_claimed_before_a_failed_worktree_reports_it_once(
             worktree=NewWorktreeInput(branch="jun/claimfail", name="claimfail"),
         ),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         session = await connection.host.start_session()
@@ -466,7 +509,7 @@ async def test_a_turn_claimed_before_a_failed_worktree_reports_it_once(
 
 @pytest.mark.asyncio
 async def test_a_session_without_a_worktree_runs_where_it_was_told(
-    tmp_path: Path,
+    tmp_path: Path, process_services: ProcessServices
 ) -> None:
     # The other half of the contract: naming no worktree still has to leave the
     # session where the caller put it, on both backends.
@@ -476,6 +519,7 @@ async def test_a_session_without_a_worktree_runs_where_it_was_told(
             cwd=str(tmp_path), workspace_roots=[str(tmp_path)]
         ),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         session = await connection.host.start_session()
@@ -492,6 +536,7 @@ async def test_a_worktree_preserves_extra_roots_but_not_the_original_checkout(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
     file_location: str,
+    process_services: ProcessServices,
 ) -> None:
     checkout = tmp_path / "checkout"
     _init_repo(checkout)
@@ -525,6 +570,7 @@ async def test_a_worktree_preserves_extra_roots_but_not_the_original_checkout(
             enabled_tools=["read_file"],
         ),
         capabilities=ClientCapabilities(callback_kinds=["approval"]),
+        process_services=process_services,
     )
     try:
         session = await connection.host.start_session()
@@ -553,7 +599,7 @@ async def test_a_worktree_preserves_extra_roots_but_not_the_original_checkout(
 
 @pytest.mark.asyncio
 async def test_a_session_holds_its_worktree_and_lets_go_on_close(
-    tmp_path: Path,
+    tmp_path: Path, process_services: ProcessServices
 ) -> None:
     # The hold is what retention pruning reads to avoid deleting a live
     # worktree. A backend that never marks its own can lose its active checkout.
@@ -565,6 +611,7 @@ async def test_a_session_holds_its_worktree_and_lets_go_on_close(
             worktree=NewWorktreeInput(branch="jun/held", name="held"),
         ),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     session = await connection.host.start_session()
     try:
@@ -589,6 +636,7 @@ async def test_the_first_tool_call_runs_inside_the_worktree(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
     tmp_path: Path,
+    process_services: ProcessServices,
 ) -> None:
     _init_repo(tmp_path)
     backend_contract_mistral_api.mock(
@@ -621,6 +669,7 @@ async def test_the_first_tool_call_runs_inside_the_worktree(
             auto_approve=True,
         ),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         session = await connection.host.open_session()
@@ -662,7 +711,7 @@ async def test_the_first_tool_call_runs_inside_the_worktree(
 
 @pytest.mark.asyncio
 async def test_a_worktree_that_cannot_be_raised_refuses_the_turn(
-    tmp_path: Path,
+    tmp_path: Path, process_services: ProcessServices
 ) -> None:
     """A session that asked to be isolated does not quietly run unisolated.
 
@@ -677,6 +726,7 @@ async def test_a_worktree_that_cannot_be_raised_refuses_the_turn(
             worktree=NewWorktreeInput(branch="jun/nowhere", name="nowhere"),
         ),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         session = await connection.host.start_session()
@@ -706,6 +756,7 @@ async def test_smart_approve_does_not_treat_the_worktree_as_agent_config(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
     tmp_path: Path,
+    process_services: ProcessServices,
 ) -> None:
     """Calls naming files inside a managed worktree run when the classifier allows.
 
@@ -773,6 +824,7 @@ async def test_smart_approve_does_not_treat_the_worktree_as_agent_config(
             trust_workspace=True,
         ),
         capabilities=ClientCapabilities(callback_kinds=["approval"]),
+        process_services=process_services,
     )
     approvals: list[CallbackRequested] = []
     try:
@@ -794,7 +846,7 @@ async def test_smart_approve_does_not_treat_the_worktree_as_agent_config(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("trusted", [False, True])
 async def test_live_worktree_removal_uses_session_source_git_trust(
-    tmp_path: Path, trusted: bool
+    tmp_path: Path, trusted: bool, process_services: ProcessServices
 ) -> None:
     from vibe.app_server._runtime import HarnessProcess
     from vibe.core.config.harness_files import HarnessFilesManager
@@ -815,8 +867,10 @@ async def test_live_worktree_removal_uses_session_source_git_trust(
             trust_workspace=trusted,
         ),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
         process=HarnessProcess(
-            HarnessFilesManager(sources=("user", "project"), trust_store=process_store)
+            HarnessFilesManager(sources=("user", "project"), trust_store=process_store),
+            services=process_services,
         ),
     )
     try:

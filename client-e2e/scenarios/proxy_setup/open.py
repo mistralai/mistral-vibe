@@ -8,7 +8,6 @@ from e2e.app_server.scenario import Timeline
 handshake = proxy_handshake()
 request_methods = METHODS
 screen_contains = (
-    "Proxy setup opened...",
     "Proxy Configuration",
     "Path to directory containing SSL certificates",
     "Enter save & exit",

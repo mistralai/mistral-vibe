@@ -70,11 +70,13 @@ def _normalize_request(request: Request, replacement_keys: dict[str, str]) -> Re
             key, f"<replacement-idempotency-key-{len(replacement_keys) + 1}>"
         )
     # `session/start` names the harness's checkout; goldens must not. A
-    # worktree run's `session/resume` names the settled worktree, which is
-    # machine-local the same way.
-    if request.method in {"session/start", "session/resume"} and isinstance(
-        params.get("agentConfig"), dict
-    ):
+    # worktree run's `session/resume` or `session/continue` names the settled
+    # worktree, which is machine-local the same way.
+    if request.method in {
+        "session/start",
+        "session/resume",
+        "session/continue",
+    } and isinstance(params.get("agentConfig"), dict):
         params["agentConfig"]["cwd"] = "<cwd>"
     # `initialize` names the build's version; goldens must survive a bump.
     if (

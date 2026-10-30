@@ -31,32 +31,31 @@ _MANIFEST = _PKG_ROOT / "cli-rust" / "Cargo.toml"
 _RELEASE_BIN = _PKG_ROOT / "cli-rust" / "target" / "release" / _BIN_NAME
 # The Python project root, where `uv run vibe-app-server` resolves.
 _PROJECT_ROOT = _PKG_ROOT.parent
+_APP_SERVER_ENV_KEYS = (
+    "VIBE_APP_SERVER_CMD",
+    "VIBE_APP_SERVER_BIN",
+    "VIBE_APP_SERVER_CWD",
+)
 
 
 def main() -> None:
     exec_rust_cli(sys.argv[1:])
 
 
-def exec_rust_cli(passthrough: list[str]) -> None:
-    """Run the Rust TUI, keeping the caller's cwd."""
-    env = {**os.environ}
-    if _BUNDLED_BIN.exists():
-        binary = _BUNDLED_BIN
-        # Wheel install: point the Rust client at the installed vibe-app-server
-        env["VIBE_APP_SERVER_BIN"] = str(
-            Path(sys.argv[0]).resolve().parent / _APP_SERVER_SCRIPT
-        )
-        env.pop("VIBE_APP_SERVER_CWD", None)
-        # A stale full-command override must not shadow the wheel's binary.
-        env.pop("VIBE_APP_SERVER_CMD", None)
-    else:
-        if not _MANIFEST.exists():
-            sys.exit(f"Rust CLI not bundled and no source checkout at {_MANIFEST}.")
-        if not _RELEASE_BIN.exists():
-            _build_release()
-        binary = _RELEASE_BIN
-        env.pop("VIBE_APP_SERVER_BIN", None)
-        env["VIBE_APP_SERVER_CWD"] = str(_PROJECT_ROOT)
+def exec_rust_cli(
+    passthrough: list[str],
+    *,
+    extra_env: dict[str, str] | None = None,
+    app_server_cmd: list[str] | None = None,
+) -> None:
+    """Run the Rust TUI in the caller's cwd; `app_server_cmd` sets its app-server."""
+    env = {**os.environ, **(extra_env or {})}
+    binary = _rust_cli_binary()
+    selected = _app_server_env(env, app_server_cmd, bundled=binary == _BUNDLED_BIN)
+    # Stale values from the parent env must not shadow the selected app-server.
+    for name in _APP_SERVER_ENV_KEYS:
+        env.pop(name, None)
+    env.update(selected)
     argv = [str(binary), *passthrough]
     if sys.platform == "win32":
         # execvpe does not overlay the process on Windows; run and forward the code.
@@ -64,6 +63,35 @@ def exec_rust_cli(passthrough: list[str]) -> None:
 
         sys.exit(subprocess.run(argv, env=env).returncode)
     os.execvpe(str(binary), argv, env)
+
+
+def _rust_cli_binary() -> Path:
+    if _BUNDLED_BIN.exists():
+        return _BUNDLED_BIN
+    if not _MANIFEST.exists():
+        sys.exit(
+            f"Rust CLI not bundled at {_BUNDLED_BIN} and no source checkout at "
+            f"{_MANIFEST}."
+        )
+    if not _RELEASE_BIN.exists():
+        _build_release()
+    return _RELEASE_BIN
+
+
+def _app_server_env(
+    env: dict[str, str], app_server_cmd: list[str] | None, *, bundled: bool
+) -> dict[str, str]:
+    if app_server_cmd is not None:
+        return {"VIBE_APP_SERVER_CMD": shlex.join(app_server_cmd)}
+    if bundled:
+        # Wheel install: point the Rust client at the installed vibe-app-server.
+        script = Path(sys.argv[0]).resolve().parent / _APP_SERVER_SCRIPT
+        return {"VIBE_APP_SERVER_BIN": str(script)}
+    # Source checkout: the Makefile's command, if any, runs from the project root.
+    selected = {"VIBE_APP_SERVER_CWD": str(_PROJECT_ROOT)}
+    if cmd := env.get("VIBE_APP_SERVER_CMD"):
+        selected["VIBE_APP_SERVER_CMD"] = cmd
+    return selected
 
 
 def _build_release() -> None:

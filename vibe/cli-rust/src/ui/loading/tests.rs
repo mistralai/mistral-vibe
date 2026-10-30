@@ -20,7 +20,7 @@ fn active_id(app: &App) -> Option<&str> {
     app.approval
         .active
         .as_ref()
-        .map(|callback| callback.callback_id.as_str())
+        .map(|callback| callback.address.callback_id.as_str())
 }
 
 #[test]

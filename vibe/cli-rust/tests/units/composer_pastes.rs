@@ -1,37 +1,28 @@
 //! Collapsed pastes and image placeholders across composer round trips:
 //! history and queue drafts, cut, line deletion, undo, and rewind.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vibe_rs::app::App;
-use vibe_rs::config;
-use vibe_rs::input::{handle_key, handle_paste};
+use vibe_rs::input::handle_paste;
 use vibe_rs::long_paste::placeholder;
-use vibe_rs::server::Client;
+
+use crate::support::send_key;
 
 struct Harness {
     app: App,
-    client: Arc<Client>,
-    config_tx: tokio::sync::mpsc::Sender<config::Loaded>,
-    _config_rx: tokio::sync::mpsc::Receiver<config::Loaded>,
 }
 
 impl Harness {
     fn new() -> Self {
-        let (config_tx, _config_rx) = tokio::sync::mpsc::channel(1);
         Self {
             app: App::default(),
-            client: Arc::new(Client::stub()),
-            config_tx,
-            _config_rx,
         }
     }
 
     fn press(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        let key = KeyEvent::new(code, modifiers);
-        handle_key(&mut self.app, &self.client, &self.config_tx, key);
+        send_key(&mut self.app, KeyEvent::new(code, modifiers));
     }
 
     fn pastes(&self) -> Vec<String> {

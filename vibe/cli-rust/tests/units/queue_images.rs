@@ -1,10 +1,10 @@
 //! Queue snapshots retain images and adopt in-flight prompts by message identity.
 
-use std::sync::Arc;
-
 use vibe_rs::app::App;
 use vibe_rs::message_queue::{self, QueueItem, ReplacementOutcome};
-use vibe_rs::server::{Client, ImageAttachment, ImageSource, PreparedPrompt};
+use vibe_rs::server::{ImageAttachment, ImageSource, PreparedPrompt};
+
+use crate::support::{queued, stub};
 
 fn queued_turn() -> serde_json::Value {
     serde_json::json!({
@@ -49,15 +49,8 @@ fn snapshot_adopts_the_matching_in_flight_prompt_without_duplication() {
     let mut app = App::default();
     app.queue.items.push(QueueItem {
         queue_item_id: None,
-        message_id: "message-1".to_owned(),
-        server_message_id: "message-1".to_owned(),
-        text: "inspect".to_owned(),
-        images: Vec::new(),
-        mentions: None,
-        sent: true,
-        ever_sent: true,
         revision: 1,
-        replacing: false,
+        ..queued("message-1", "inspect")
     });
 
     let mut snapshot = queued_turn();
@@ -78,11 +71,10 @@ fn accepted_replacement_commits_the_new_text_and_images() {
     app.queue.items[0].text = "inspect closely".to_owned();
     app.queue.items[0].sent = false;
     app.queue.items[0].replacing = true;
-    let client = Arc::new(Client::stub());
 
     message_queue::apply_event(
         &mut app,
-        &client,
+        &stub(),
         message_queue::QueueEvent::GroupReplaced {
             server_message_id: "message-1".to_owned(),
             revision: 1,
@@ -111,15 +103,12 @@ fn merged_replacement_restores_images_to_their_visible_prompts() {
     ] {
         app.queue.items.push(QueueItem {
             queue_item_id: Some("queue-1".to_owned()),
-            message_id: message_id.to_owned(),
             server_message_id: "message-1".to_owned(),
-            text: format!("@{path} inspect"),
-            images: Vec::new(),
-            mentions: None,
             sent: false,
             ever_sent: false,
             revision: 1,
             replacing: true,
+            ..queued(message_id, &format!("@{path} inspect"))
         });
     }
     let images: Vec<ImageAttachment> = ["first.png", "second.png"]
@@ -132,11 +121,10 @@ fn merged_replacement_restores_images_to_their_visible_prompts() {
             mime_type: "image/png".to_owned(),
         })
         .collect();
-    let client = Arc::new(Client::stub());
 
     message_queue::apply_event(
         &mut app,
-        &client,
+        &stub(),
         message_queue::QueueEvent::GroupReplaced {
             server_message_id: "message-1".to_owned(),
             revision: 1,
@@ -184,11 +172,10 @@ fn a_failed_replacement_allows_the_prompt_to_be_edited_again() {
     message_queue::sync(&mut app, &queued_turn());
     app.queue.selected = Some("message-1".to_owned());
     app.queue.items[0].replacing = true;
-    let client = Arc::new(Client::stub());
 
     message_queue::apply_event(
         &mut app,
-        &client,
+        &stub(),
         message_queue::QueueEvent::GroupReplaced {
             server_message_id: "message-1".to_owned(),
             revision: 1,

@@ -3,13 +3,14 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use serde_json::{json, Value};
+use serde_json::Value;
 
-use super::config::agent_config;
+use super::config::{agent_config, start_params};
 use super::drive::WorkEnd;
 use crate::cli::{HeadlessOptions, HeadlessSession};
 use crate::run_export::RunOutcome;
-use crate::server::{method, Client, RpcError, SessionStartParams};
+use crate::server::{method, Client, RpcError};
+use crate::startup::{continue_params, resume_params};
 
 /// The headless run's session history page, as on `session/start`.
 const HISTORY_LIMIT: u32 = 200;
@@ -26,28 +27,16 @@ pub(super) async fn open_session(
     let infrastructure = |error: anyhow::Error| {
         WorkEnd::Failed(RunOutcome::InfrastructureFailure, format!("{error:#}"))
     };
-    let config = agent_config(options, cwd).map_err(infrastructure)?;
+    let config =
+        agent_config(options, cwd, crate::terminal_key::current()).map_err(infrastructure)?;
     let (lifecycle, params) = match session {
         HeadlessSession::New => {
-            let params = SessionStartParams {
-                agent_config: config,
-                history_limit: HISTORY_LIMIT,
-            };
+            let params = start_params(options, config, HISTORY_LIMIT);
             let params = serde_json::to_value(&params).map_err(|e| infrastructure(e.into()))?;
             (method::SESSION_START, params)
         }
-        HeadlessSession::Continue => (
-            method::SESSION_CONTINUE,
-            json!({ "agentConfig": saved_session_config(&config), "historyLimit": HISTORY_LIMIT }),
-        ),
-        HeadlessSession::Resume(id) => (
-            method::SESSION_RESUME,
-            json!({
-                "sessionId": id,
-                "agentConfig": saved_session_config(&config),
-                "historyLimit": HISTORY_LIMIT,
-            }),
-        ),
+        HeadlessSession::Continue => (method::SESSION_CONTINUE, continue_params(&config)),
+        HeadlessSession::Resume(id) => (method::SESSION_RESUME, resume_params(id, &config)),
     };
     let result = client
         .request_err(lifecycle, params)
@@ -60,16 +49,6 @@ pub(super) async fn open_session(
         .with_context(|| format!("{lifecycle} response missing session id"))
         .map_err(infrastructure)?;
     Ok((id, field("cwd").map(str::to_owned)))
-}
-
-/// The agent config sent to reopen a saved session. The server rejects
-/// `worktree` outside `session/start`.
-fn saved_session_config(config: &crate::server::AgentConfig) -> Value {
-    let mut value = serde_json::to_value(config).unwrap_or_else(|_| json!({}));
-    if let Some(fields) = value.as_object_mut() {
-        fields.remove("worktree");
-    }
-    value
 }
 
 /// The outcome of a session that did not open: a missing API key or a config

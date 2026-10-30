@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import tempfile
 
+from vibe.core.git.errors import GitError
 from vibe.core.git.fetch import fetch_remote
 
 # Re-exported so `teleport.git.GitHubRemoteInfo` keeps resolving. Reading a
@@ -15,6 +16,7 @@ from vibe.core.git.remote import (
     parse_github_url,
     to_https_url,
 )
+from vibe.core.git.repo import GitRepo
 from vibe.core.teleport.errors import (
     ServiceTeleportError,
     ServiceTeleportNotSupportedError,
@@ -101,18 +103,15 @@ class GitRepository:
             )
 
         try:
-            commit = repo.head.commit.hexsha
-        except (ValueError, TypeError) as e:
+            commit = GitRepo(repo).head_commit()
+        except GitError as e:
             raise ServiceTeleportNotSupportedError(
                 "Could not determine current commit"
             ) from e
 
-        if not commit:
-            raise ServiceTeleportNotSupportedError("Could not determine current commit")
-
         owner = parsed.owner
         repo_name = parsed.repo
-        branch = None if repo.head.is_detached else repo.active_branch.name
+        branch = _current_branch(repo)
         default_branch = _remote_ref_branch_name(
             await self._get_remote_default_branch(repo, parsed.name), parsed.name
         )
@@ -146,9 +145,9 @@ class GitRepository:
         self, remote: str = "origin", *, fetch: bool = True
     ) -> bool:
         repo = self._repo_or_raise()
-        if repo.head.is_detached:
+        branch = _current_branch(repo)
+        if branch is None:
             return True  # Detached HEAD doesn't have a branch to check
-        branch = repo.active_branch.name
         if fetch:
             await self._fetch(repo, remote)
         return await self._ref_exists(repo, f"{remote}/{branch}")
@@ -156,11 +155,11 @@ class GitRepository:
     async def get_unpushed_commit_count(self, remote: str = "origin") -> int:
         repo = self._repo_or_raise()
 
-        if repo.head.is_detached:
+        branch = _current_branch(repo)
+        if branch is None:
             raise ServiceTeleportError(
                 "Cannot count unpushed commits: no current branch"
             )
-        branch = repo.active_branch.name
 
         await self._fetch(repo, remote)
 
@@ -179,9 +178,10 @@ class GitRepository:
 
     async def push_current_branch(self, remote: str = "origin") -> bool:
         repo = self._repo_or_raise()
-        if repo.head.is_detached:
+        branch = _current_branch(repo)
+        if branch is None:
             return False
-        return await self._push(repo, repo.active_branch.name, remote)
+        return await self._push(repo, branch, remote)
 
     def _repo_or_raise(self) -> Repo:
         if self._repo is None:
@@ -264,12 +264,9 @@ class GitRepository:
             return False
 
     async def _get_remote_default_branch(self, repo: Repo, remote: str) -> str | None:
-        try:
-            ref = repo.remotes[remote].refs.HEAD.reference.name
-            if await self._ref_exists(repo, ref):
-                return ref
-        except (KeyError, IndexError, TypeError, AttributeError):
-            pass
+        ref = GitRepo(repo).remote_default_branch_ref(remote)
+        if ref is not None and await self._ref_exists(repo, ref):
+            return ref
         return None
 
     async def _push(self, repo: Repo, branch: str, remote: str) -> bool:
@@ -292,6 +289,13 @@ class GitRepository:
     @staticmethod
     def _to_https_url(owner: str, repo: str) -> str:
         return to_https_url(owner, repo)
+
+
+def _current_branch(repo: Repo) -> str | None:
+    try:
+        return GitRepo(repo).branch()
+    except GitError as e:
+        raise ServiceTeleportError(str(e)) from e
 
 
 def _remote_ref_branch_name(ref: str | None, remote: str) -> str | None:

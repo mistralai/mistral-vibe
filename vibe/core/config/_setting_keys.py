@@ -13,7 +13,7 @@ environment layer only ever carries declared fields.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import difflib
 from enum import StrEnum
@@ -76,6 +76,8 @@ _FORMER_DEFAULTS: Mapping[str, Any] = {
     "auto_approve": False,
     "experiment_overrides": {},
     "experimental_bash_tool": False,
+    # The startup migration removes it from the files Vibe writes.
+    "tool_paths": [],
     "vibe_code_api_key_env_var": "MISTRAL_API_KEY",
     "vibe_code_enabled": True,
     "vim_keybindings": False,
@@ -177,16 +179,9 @@ def check_strict_config_env(environ: Mapping[str, str] | None = None) -> None:
 
 
 def find_unused_keys(
-    schema: type[BaseModel],
-    layers: Iterable[tuple[str, Mapping[str, Any]]],
-    *,
-    custom_tools: Collection[str] = (),
+    schema: type[BaseModel], layers: Iterable[tuple[str, Mapping[str, Any]]]
 ) -> list[KeyIssue]:
-    """Every key in a checked layer that the schema does not use, in layer order.
-
-    ``custom_tools`` names the custom tools that may replace a builtin of the
-    same name; their settings are theirs to read, so they are not checked.
-    """
+    """Every key in a checked layer that the schema does not use, in layer order."""
     issues: list[KeyIssue] = []
     for layer, data in layers:
         if layer not in CHECKED_LAYERS:
@@ -203,7 +198,7 @@ def find_unused_keys(
                 if not _is_default(value, [field]):
                     issues.append(KeyIssue(layer, key, KeyIssueKind.RETIRED))
             elif key == "tools":
-                issues.extend(_tool_issues(layer, value, custom_tools))
+                issues.extend(_tool_issues(layer, value))
             else:
                 issues.extend(_nested_issues(layer, key, field.annotation, value))
     return issues
@@ -367,18 +362,15 @@ def _literal_accepts(field: FieldInfo, candidate: Any) -> bool:
     return values is None or candidate in values
 
 
-def _tool_issues(
-    layer: str, tools: Any, custom_tools: Collection[str]
-) -> list[KeyIssue]:
+def _tool_issues(layer: str, tools: Any) -> list[KeyIssue]:
     if not isinstance(tools, Mapping):
         return []
     catalog = builtin_tool_settings()
     issues: list[KeyIssue] = []
     for name, settings in tools.items():
         known = catalog.get(name)
-        # A custom or MCP tool keeps whatever its own config reads, also when it
-        # takes a builtin's name.
-        if known is None or name in custom_tools or not isinstance(settings, Mapping):
+        # An MCP or connector tool keeps whatever its own config reads.
+        if known is None or not isinstance(settings, Mapping):
             continue
         variants = builtin_tool_config_classes()[name]
         no_effect = _no_effect_keys(name, known, variants)
@@ -455,11 +447,10 @@ def builtin_tool_config_classes() -> Mapping[str, tuple[type[BaseModel], ...]]:
     A name can stand for several tools, picked by platform or rollout, so its
     settings are those of all of them.
     """
-    from vibe.core.paths import DEFAULT_TOOL_DIR
-    from vibe.core.tools.manager import ToolManager
+    from vibe.core.tools.manager import builtin_tool_classes
 
     classes: dict[str, list[type[BaseModel]]] = {}
-    for tool_class in ToolManager._iter_tool_classes([DEFAULT_TOOL_DIR.path]):
+    for tool_class in builtin_tool_classes():
         config_class = tool_class._get_tool_config_class()
         variants = classes.setdefault(tool_class.get_name(), [])
         if config_class not in variants:
@@ -478,8 +469,8 @@ def builtin_tool_settings() -> Mapping[str, frozenset[str]]:
 def tool_settings_json_schema() -> dict[str, Any]:
     """A JSON schema for each builtin tool's ``[tools.<name>]`` table.
 
-    Settings without effect are marked ``deprecated``. A name not listed here
-    is a custom or MCP tool, which takes any keys.
+    Settings without effect are marked ``deprecated``. A name not listed
+    here is an MCP or connector tool, which takes any keys.
     """
     schemas: dict[str, Any] = {}
     for name, variants in sorted(builtin_tool_config_classes().items()):
@@ -521,8 +512,8 @@ def config_json_schema(schema: type[BaseModel]) -> dict[str, Any]:
     if isinstance(tools, dict):
         tools["properties"] = tool_settings_json_schema()
         tools["description"] = (
-            "Settings per tool. A builtin tool takes the keys listed here; a"
-            " custom or MCP tool takes any keys."
+            "Settings per tool. A builtin tool takes the keys listed here; an"
+            " MCP or connector tool takes any keys."
         )
     return document
 

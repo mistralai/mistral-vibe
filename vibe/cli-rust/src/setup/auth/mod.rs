@@ -3,6 +3,7 @@
 //! never persists anything itself — the app-server owns every write.
 
 pub mod browser_sign_in;
+pub mod oidc;
 pub mod rpc;
 pub mod sign_in_flow;
 pub mod sign_in_gateway;

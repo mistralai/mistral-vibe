@@ -453,6 +453,26 @@ provider = "mistral"
 
 
 @pytest.mark.asyncio
+async def test_migrate_config_layers_removes_tool_paths(
+    tmp_working_directory: Path,
+) -> None:
+    tools_dir = tmp_working_directory / "my-tools"
+    tools_dir.mkdir()
+    (tools_dir / "weather.py").write_text("")
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text(f'active_model = "devstral-2"\ntool_paths = ["{tools_dir}"]\n')
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert "tool_paths" not in persisted
+    assert persisted["active_model"] == "mistral-medium-3.5"
+    assert (tools_dir / "weather.py").is_file()
+
+
+@pytest.mark.asyncio
 async def test_migrate_config_layers_unsets_the_old_unset_auto_compact_threshold(
     tmp_working_directory: Path,
 ) -> None:

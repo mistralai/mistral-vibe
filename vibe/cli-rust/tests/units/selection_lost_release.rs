@@ -1,55 +1,33 @@
 //! A drag whose release report never arrives still finalizes and copies its selection.
 
-use std::sync::Arc;
-
-use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::backend::TestBackend;
-use ratatui::Terminal;
-use tokio::sync::mpsc;
+use crossterm::event::{MouseButton, MouseEventKind};
 
 use vibe_rs::app::{App, ToastSeverity};
-use vibe_rs::config;
 use vibe_rs::mouse;
-use vibe_rs::server::Client;
+
+use crate::support::{message, redraw, row, send_mouse, up};
 
 const TOAST: &str = "Slash commands cannot be queued";
 
 struct Harness {
     app: App,
-    client: Arc<Client>,
-    config_tx: mpsc::Sender<config::Loaded>,
-    _config_rx: mpsc::Receiver<config::Loaded>,
 }
 
 impl Harness {
     fn new() -> Self {
-        let (config_tx, config_rx) = mpsc::channel(1);
         let mut app = App::default();
         app.show_toast(TOAST.to_owned(), ToastSeverity::Warning, 60);
-        let mut harness = Self {
-            app,
-            client: Arc::new(Client::stub()),
-            config_tx,
-            _config_rx: config_rx,
-        };
+        let mut harness = Self { app };
         harness.redraw();
         harness
     }
 
     fn redraw(&mut self) -> ratatui::buffer::Buffer {
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-        terminal.draw(|frame| self.app.draw(frame)).expect("draw");
-        terminal.backend().buffer().clone()
+        redraw(&mut self.app)
     }
 
     fn mouse(&mut self, kind: MouseEventKind, at: (u16, u16)) {
-        let event = MouseEvent {
-            kind,
-            column: at.0,
-            row: at.1,
-            modifiers: KeyModifiers::NONE,
-        };
-        mouse::handle(&mut self.app, &self.client, &self.config_tx, event);
+        send_mouse(&mut self.app, crate::support::mouse(kind, at.0, at.1));
     }
 
     /// Press on the toast's first cell and drag over its first word, never releasing.
@@ -138,14 +116,11 @@ fn a_press_on_no_target_after_a_lost_release_caches_a_transcript_selection_for_t
         .app
         .view
         .transcript
-        .add(&serde_json::json!({"entry": {
-            "id": "u1", "type": "message", "role": "user",
-            "content": [{"type": "text", "text": WORDS}], "generationStatus": "completed"
-        }}));
+        .add(&serde_json::json!({"entry": message("u1", "user", WORDS)}));
     let buffer = harness.redraw();
     let (column, row) = (0..24)
         .find_map(|y| {
-            let line: String = (0..80).map(|x| buffer[(x, y)].symbol()).collect();
+            let line = row(&buffer, y);
             line.find(WORDS)
                 .map(|at| (line[..at].chars().count() as u16, y))
         })
@@ -194,14 +169,5 @@ fn a_release_after_the_lost_one_is_ignored() {
     harness.drag_first_word();
     harness.mouse(MouseEventKind::Moved, (40, 2));
 
-    assert_eq!(mouse::route(&mut harness.app, up_at((40, 2))), None);
-}
-
-fn up_at(at: (u16, u16)) -> MouseEvent {
-    MouseEvent {
-        kind: MouseEventKind::Up(MouseButton::Left),
-        column: at.0,
-        row: at.1,
-        modifiers: KeyModifiers::NONE,
-    }
+    assert_eq!(mouse::route(&mut harness.app, up(40, 2)), None);
 }

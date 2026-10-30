@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tempfile::Builder;
-use tokio::sync::mpsc::Sender;
 
 use crate::app::{App, Status, ToastSeverity};
 use crate::{chat_input, paste_files, paste_path};
@@ -19,19 +18,18 @@ pub use store::{clipboard_image_path, write_clipboard_image};
 
 pub const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
-pub const CHANNEL_CAP: usize = 8;
+pub const MAX_IN_FLIGHT: usize = 8;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const WARNING_SECS: u64 = 5;
 
 #[derive(Default)]
 pub struct State {
-    pub tx: Option<Sender<Event>>,
     pub in_flight: usize,
 }
 
 impl State {
     pub fn has_slot(&self) -> bool {
-        self.tx.is_some() && self.in_flight < CHANNEL_CAP
+        self.in_flight < MAX_IN_FLIGHT
     }
 }
 

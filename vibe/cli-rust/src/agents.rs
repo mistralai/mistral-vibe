@@ -3,11 +3,14 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::app::{App, Status, ToastSeverity};
 use crate::model_picker::FAILED_TOAST_SECS;
-use crate::server::{method, AgentSafety, AgentSummary, AgentSwitchParams, AgentType, Client};
+use crate::server::{
+    method, AgentSafety, AgentSummary, AgentSwitchParams, AgentType, Client, RuntimeSnapshot,
+};
 use crate::utils::startup_cache::StartupConfig;
 
 /// Delay before the switch spinner replaces the prompt marker.
@@ -55,15 +58,12 @@ pub fn apply_runtime(app: &mut App, response: &Value) {
     let Some(runtime) = response.get("runtime") else {
         return;
     };
-    if let Some(agents) = runtime.get("agents").and_then(Value::as_array) {
-        app.agents.all = agents
-            .iter()
-            .filter_map(|agent| serde_json::from_value(agent.clone()).ok())
-            .collect();
+    if let Some(agents) = RuntimeSnapshot::read(response).and_then(|r| r.agents) {
+        app.agents.all = agents;
     }
     let Some(active) = runtime
         .get("activeAgent")
-        .and_then(|active| serde_json::from_value::<AgentSummary>(active.clone()).ok())
+        .and_then(|active| AgentSummary::deserialize(active).ok())
     else {
         return;
     };
@@ -203,9 +203,7 @@ fn switch(app: &mut App, client: &Arc<Client>, agent_name: String) {
     };
     app.agents.spinner_at = Some(Instant::now() + MODE_SWITCH_SPINNER_DELAY);
     let client = client.clone();
-    let tx = app.agents.tx.clone();
-    let pending = app.commit_started();
-    tokio::spawn(async move {
+    crate::ui_event::spawn(app, async move {
         let params = AgentSwitchParams {
             session_id,
             agent_name: agent_name.clone(),
@@ -215,11 +213,10 @@ fn switch(app: &mut App, client: &Arc<Client>, agent_name: String) {
             .request(method::SESSION_AGENT_UPDATE, params)
             .await
             .map_err(|error| crate::server::request_error::describe(&error));
-        let event = Event {
+        Event {
             target: agent_name,
             runtime,
-        };
-        crate::input::deliver(tx, event, &pending).await;
+        }
     });
 }
 
@@ -251,7 +248,6 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
         }
     }
     send_desired(app, client);
-    app.commit_finished();
 }
 
 /// The armed spinner is due: replace the prompt marker.

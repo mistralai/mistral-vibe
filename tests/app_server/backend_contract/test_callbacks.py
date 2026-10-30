@@ -7,14 +7,20 @@ import httpx
 import pytest
 import respx
 
-from tests.app_server.backend_contract.conftest import connect_backend_contract_client
+from tests.app_server.backend_contract.conftest import (
+    connect_backend_contract_client,
+    connect_backend_contract_host,
+)
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.events import (
     AppServerEvent,
     CallbackRequested,
+    HistoryEntryAdded,
     HistoryEntryUpdated,
     SessionSnapshot,
 )
 from vibe.app_server.models import (
+    AnsweredCallbackState,
     CancelledCallbackState,
     CompletedEffectState,
     PublicCallbackEntry,
@@ -108,6 +114,12 @@ async def test_user_input_callback_round_trips_through_the_backend(
 
     assert callback_id is not None
     assert any(isinstance(event, HistoryEntryUpdated) for event in events)
+    assert [
+        event.entry.id
+        for event in events
+        if isinstance(event, HistoryEntryAdded)
+        and isinstance(event.entry, PublicCallbackEntry)
+    ] == [callback_id]
     effect = next(
         entry
         for entry in backend_contract_session.history
@@ -115,6 +127,82 @@ async def test_user_input_callback_round_trips_through_the_backend(
     )
     assert isinstance(effect.state, CompletedEffectState)
     assert backend_contract_session.state.active_callbacks == []
+
+
+@pytest.mark.asyncio
+async def test_answered_user_input_callback_survives_a_new_host(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_persistent_config: None,
+    process_services: ProcessServices,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            _user_question_response(backend_contract_mistral_response),
+            backend_contract_mistral_response("Done"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(enabled_tools=["ask_user_question"]),
+        capabilities=ClientCapabilities(callback_kinds=["user_input"]),
+        process_services=process_services,
+    )
+    callback_id: str | None = None
+    try:
+        session = await connection.host.open_session()
+        try:
+            async for event in session.act("ask me"):
+                if isinstance(event, CallbackRequested):
+                    callback_id = event.callback.callback_id
+                    await session.respond_to_callback(callback_id, _user_answer("Yes"))
+            session_id = session.session_id
+        finally:
+            await session.close()
+    finally:
+        await connection.host.close()
+
+    callbacks = await _resumed_callbacks(session_id, process_services)
+
+    assert callback_id is not None
+    assert [callback.callback_id for callback in callbacks] == [callback_id]
+    assert callbacks[0].state == AnsweredCallbackState(output=_user_answer("Yes"))
+    assert callbacks[0].generation_status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_interrupted_user_input_callback_survives_a_new_host(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_persistent_config: None,
+    process_services: ProcessServices,
+) -> None:
+    backend_contract_mistral_api.mock(
+        return_value=_user_question_response(backend_contract_mistral_response)
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(enabled_tools=["ask_user_question"]),
+        capabilities=ClientCapabilities(callback_kinds=["user_input"]),
+        process_services=process_services,
+    )
+    callback_id: str | None = None
+    try:
+        session = await connection.host.open_session()
+        try:
+            async for event in session.act("ask me"):
+                if isinstance(event, CallbackRequested):
+                    callback_id = event.callback.callback_id
+                    await session.interrupt()
+            session_id = session.session_id
+        finally:
+            await session.close()
+    finally:
+        await connection.host.close()
+
+    callbacks = await _resumed_callbacks(session_id, process_services)
+
+    assert callback_id is not None
+    assert [callback.callback_id for callback in callbacks] == [callback_id]
+    assert isinstance(callbacks[0].state, CancelledCallbackState)
 
 
 @pytest.mark.asyncio
@@ -257,6 +345,7 @@ async def test_reconnect_redelivers_an_open_callback_before_accepting_its_result
 async def test_rejected_callback_delivery_fails_the_turn_and_closes_the_callback(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
+    process_services: ProcessServices,
 ) -> None:
     backend_contract_mistral_api.mock(
         return_value=_user_question_response(backend_contract_mistral_response)
@@ -264,6 +353,7 @@ async def test_rejected_callback_delivery_fails_the_turn_and_closes_the_callback
     client = await connect_backend_contract_client(
         session_options=SessionOptions(enabled_tools=["ask_user_question"]),
         capabilities=ClientCapabilities(callback_kinds=["user_input"]),
+        process_services=process_services,
     )
     incoming = client.incoming()
     try:
@@ -308,6 +398,28 @@ async def test_rejected_callback_delivery_fails_the_turn_and_closes_the_callback
     assert completed.turn.status is PublicTurnStatus.FAILED
     assert completed.turn.error is not None
     assert state.active_callbacks == []
+
+
+async def _resumed_callbacks(
+    session_id: str, process_services: ProcessServices
+) -> list[PublicCallbackEntry]:
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(callback_kinds=["user_input"]),
+        process_services=process_services,
+    )
+    try:
+        resumed = await connection.host.resume_session(session_id)
+        try:
+            return [
+                entry
+                for entry in resumed.history
+                if isinstance(entry, PublicCallbackEntry)
+            ]
+        finally:
+            await resumed.close()
+    finally:
+        await connection.host.close()
 
 
 async def _next_event[EventT](

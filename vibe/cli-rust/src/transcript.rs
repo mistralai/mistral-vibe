@@ -153,7 +153,7 @@ impl Transcript {
                 if message.role != "assistant" {
                     return None;
                 }
-                let text = message_text(message);
+                let text = message.text("\n");
                 (!text.trim().is_empty()).then_some(text)
             })
     }
@@ -165,7 +165,7 @@ impl Transcript {
 
     /// Rewindable user messages as `(entry index, entry id, text)`, the text
     /// showing its collapsed pastes as their placeholders: server-owned
-    /// user entries only, skipping queued prompts and slash-command echoes.
+    /// user entries only, skipping queued prompts and local command rows.
     /// Prompts a scheduled loop sent are skipped too: the harness refuses to
     /// rewind to them.
     pub fn user_messages(&self) -> Vec<(usize, String, crate::collapsed_pastes::Collapsed)> {
@@ -181,7 +181,7 @@ impl Transcript {
                 };
                 (message.role == "user").then(|| {
                     let text = crate::collapsed_pastes::collapse_marked(
-                        &message_text(message),
+                        &message.text("\n"),
                         message.user_display_content.as_ref(),
                     );
                     (index, stored.id.clone(), text)
@@ -296,17 +296,13 @@ impl Transcript {
         let (typed, follows_user, followed_by_user) = display.unwrap_or_else(|| {
             (
                 server_projection,
-                raw.get("followsUser")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                raw.get("followedByUser")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                raw["followsUser"] == true,
+                raw["followedByUser"] == true,
             )
         });
         if let HistoryEntry::Message(message) = &typed {
             if message.role == "user" {
-                let shown = crate::image_placeholders::highest_number(&message_text(message));
+                let shown = crate::image_placeholders::highest_number(&message.text("\n"));
                 self.highest_image_label = self.highest_image_label.max(shown);
             }
         }
@@ -326,23 +322,13 @@ impl Transcript {
         let stored = StoredEntry {
             id: id.clone(),
             typed,
-            local: raw.get("local").and_then(Value::as_bool).unwrap_or(false),
-            pending: raw.get("pending").and_then(Value::as_bool).unwrap_or(false),
+            local: raw["local"] == true,
+            pending: raw["pending"] == true,
             follows_user,
             followed_by_user,
-            historical: historical
-                || raw
-                    .get("historical")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            pinned_bottom: raw
-                .get("pinnedBottom")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            after_history: raw
-                .get("afterHistory")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            historical: historical || raw["historical"] == true,
+            pinned_bottom: raw["pinnedBottom"] == true,
+            after_history: raw["afterHistory"] == true,
             stream_delta: None,
             attached_output,
             fired_loop,
@@ -477,19 +463,10 @@ impl Transcript {
             return;
         };
         // The continuation's text blocks joined, like `PublicMessageEntry.text`.
-        let appended: Vec<String> = self.entries[src_index]
-            .raw
-            .get("content")
-            .and_then(Value::as_array)
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-                    .filter_map(|block| block.get("text").and_then(Value::as_str))
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let appended = match &self.entries[src_index].typed {
+            HistoryEntry::Message(message) => message.text("\n\n"),
+            _ => String::new(),
+        };
         let status = self.entries[src_index].raw.get("generationStatus").cloned();
         let mut content = base.clone();
         if !content.is_array() {
@@ -499,24 +476,15 @@ impl Transcript {
             let last_text = blocks
                 .iter_mut()
                 .rev()
-                .find(|block| block.get("type").and_then(Value::as_str) == Some("text"));
+                .find(|block| block["type"] == "text");
             match last_text {
                 // Append straight into the existing text: no separator.
                 Some(block) => {
-                    let merged = format!(
-                        "{}{}",
-                        block
-                            .get("text")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default(),
-                        appended.join("\n\n")
-                    );
+                    let merged =
+                        format!("{}{appended}", block["text"].as_str().unwrap_or_default());
                     block["text"] = Value::String(merged);
                 }
-                None => blocks.push(serde_json::json!({
-                    "type": "text",
-                    "text": appended.join("\n\n"),
-                })),
+                None => blocks.push(serde_json::json!({"type": "text", "text": appended})),
             }
         }
         let stored = &mut self.entries[dst_index];
@@ -530,7 +498,7 @@ impl Transcript {
     }
 
     fn bump_event(&mut self, params: &Value) {
-        if let Some(id) = params.get("eventId").and_then(Value::as_u64) {
+        if let Some(id) = params["eventId"].as_u64() {
             self.last_event_id = id;
         }
     }
@@ -806,19 +774,6 @@ impl Transcript {
                 && matches!(&stored.typed, HistoryEntry::Effect(effect) if !effect.is_terminal())
         })
     }
-}
-
-/// The text blocks of a message entry, joined like the renderer joins them.
-fn message_text(message: &crate::server::MessageEntry) -> String {
-    message
-        .content
-        .iter()
-        .filter_map(|content| match content {
-            crate::server::MessageContent::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn entry_id(entry: &Value) -> Option<String> {

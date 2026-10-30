@@ -7,7 +7,6 @@ use serde_json::{json, Value};
 
 use super::{Event, BACKGROUND_REFRESH_INTERVAL};
 use crate::app::App;
-use crate::input::deliver;
 use crate::server::{method, Client};
 
 /// Re-discover sources for the open browser, coalescing
@@ -16,23 +15,19 @@ pub fn refresh(app: &mut App, client: &Arc<Client>) {
     if app.mcp.refreshing {
         return;
     }
-    let (Some(session_id), Some(tx)) = (app.session.session_id.clone(), app.mcp.tx.clone()) else {
+    let Some(session_id) = app.session.session_id.clone() else {
         return;
     };
     app.mcp.refreshing = true;
     let client = client.clone();
-    let pending = app.commit_started();
-    tokio::spawn(async move {
+    crate::ui_event::spawn(app, async move {
         let params = json!({"sessionId": session_id});
         // Refresh failures are dropped, so they never reach the transcript.
-        let response = match rediscover(&client, params).await {
-            Ok(response) => Some(response),
-            Err(error) => {
-                tracing::warn!(%error, "MCP refresh failed");
-                None
-            }
-        };
-        deliver(Some(tx), Event::Refreshed(response), &pending).await;
+        let response = rediscover(&client, params)
+            .await
+            .inspect_err(|error| tracing::warn!(%error, "MCP refresh failed"))
+            .ok();
+        Event::Refreshed(response)
     });
 }
 

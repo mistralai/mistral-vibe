@@ -12,6 +12,7 @@ from vibe.core.platform_auth._credentials_port import (
     PlatformCredentialTarget,
 )
 from vibe.utils.api_keys import resolve_api_key_with_origin
+from vibe.utils.oidc_marker import is_oidc_authorization
 
 
 class ApiKeyPlatformCredentialProvider:
@@ -32,7 +33,9 @@ class ApiKeyPlatformCredentialProvider:
     async def resolve(
         self, target: PlatformCredentialTarget
     ) -> PlatformCredentialResult:
-        snapshot = await asyncio.to_thread(self._resolve_snapshot)
+        snapshot = await self._snapshot_for_target(target)
+        if isinstance(snapshot, PlatformCredentialRequired):
+            return snapshot
         if snapshot is None:
             return PlatformCredentialRequired(reason="missing")
         async with self._lock:
@@ -50,13 +53,40 @@ class ApiKeyPlatformCredentialProvider:
         reason: Literal["http_unauthorized"],
     ) -> PlatformCredentialResult:
         del reason
-        current = await asyncio.to_thread(self._resolve_snapshot)
+        current = await self._snapshot_for_target(target)
+        if isinstance(current, PlatformCredentialRequired):
+            return current
         if current is not None and current.identity != observed:
             return current
         async with self._lock:
             self._rejected[target] = observed
         return PlatformCredentialRequired(
             reason="rejected", observed_revision=observed.revision
+        )
+
+    async def _snapshot_for_target(
+        self, target: PlatformCredentialTarget
+    ) -> PlatformCredentialSnapshot | PlatformCredentialRequired | None:
+        snapshot = await asyncio.to_thread(self._resolve_snapshot)
+        if snapshot is None or not is_oidc_authorization(
+            snapshot.headers.get("Authorization")
+        ):
+            return snapshot
+        from vibe.setup.auth._oidc_config import OidcError
+        from vibe.setup.auth._oidc_runtime import oidc_headers
+
+        try:
+            headers = await oidc_headers(target.base_url)
+        except OidcError:
+            # Expired, refused, or misconfigured sessions need a new sign-in.
+            return PlatformCredentialRequired(reason="reauthentication_required")
+        revision = sha256(repr(sorted(headers.items())).encode()).hexdigest()
+        return PlatformCredentialSnapshot(
+            kind=snapshot.kind,
+            headers=headers,
+            cache_namespace="cli-oidc",
+            revision=revision,
+            source="the CLI OIDC session",
         )
 
     def _resolve_snapshot(self) -> PlatformCredentialSnapshot | None:

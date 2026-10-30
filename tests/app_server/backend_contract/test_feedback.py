@@ -22,6 +22,7 @@ from vibe.app_server._feedback import (
     FEEDBACK_SNOOZED_COOLDOWN_SECONDS,
     MIN_USER_MESSAGES_FOR_FEEDBACK,
 )
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.protocol import (
     ClientCapabilities,
     FeedbackShouldShowParams,
@@ -72,11 +73,13 @@ def telemetry_enabled() -> bool:
 
 @pytest_asyncio.fixture
 async def feedback_connection(
-    config_dir: Path, telemetry_enabled: bool
+    config_dir: Path, telemetry_enabled: bool, process_services: ProcessServices
 ) -> AsyncIterator[BackendContractConnection]:
     _configure(config_dir, telemetry=telemetry_enabled)
     connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         yield connection

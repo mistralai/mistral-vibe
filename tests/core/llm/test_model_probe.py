@@ -7,14 +7,16 @@ import json
 import time
 from typing import Any
 
+import httpx2
 import pytest
 
+from tests.stubs.fake_utility_completion import FakeUtilityCompletion
 from vibe.core.config import ModelConfig, ProviderConfig
 from vibe.core.llm import model_probe
-from vibe.core.llm.exceptions import BackendError, PayloadSummary
 from vibe.core.llm.model_probe import CompletionProbeSource, ModelAvailabilityCache
 from vibe.core.paths import UTILITY_MODEL_CACHE_FILE
 from vibe.core.types import Backend
+from vibe.utils import http
 
 _MODEL = ModelConfig(name="mistral-small-latest", provider="mistral", alias="small")
 _PREFERRED = ModelConfig(name="mistral-vibe-cli-fast", provider="mistral", alias="fast")
@@ -255,21 +257,29 @@ class TestProbeVerdicts:
     async def test_a_completion_means_available(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from tests.mock.utils import mock_llm_chunk
-        from tests.stubs.fake_backend import FakeBackend
-
-        backend = FakeBackend([mock_llm_chunk(content="pong")])
-        monkeypatch.setattr(
-            "vibe.core.llm.backend.factory.create_backend", lambda **_: backend
-        )
+        completion = FakeUtilityCompletion("pong").install(monkeypatch)
 
         assert (
             await _REAL_PROBE(provider=_provider(), model=_MODEL, timeout_seconds=1.0)
             is True
         )
-        metadata = backend._requests_metadata[0]
-        assert metadata is not None
-        assert metadata["call_type"] == "secondary_call"
+        [request] = completion.requests
+        assert request.metadata is not None
+        assert request.metadata["call_type"] == "secondary_call"
+        assert request.config.max_tokens == 1
+        assert request.config.retry_max_elapsed_time_s == 0
+
+    @pytest.mark.asyncio
+    async def test_the_probe_follows_the_process_trust_store(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        completion = FakeUtilityCompletion("pong").install(monkeypatch)
+        monkeypatch.setattr(http, "_use_system_trust_store", True)
+
+        await _REAL_PROBE(provider=_provider(), model=_MODEL, timeout_seconds=1.0)
+
+        [request] = completion.requests
+        assert request.config.enable_system_trust_store is True
 
     @pytest.mark.parametrize(
         ("status", "verdict"),
@@ -292,12 +302,7 @@ class TestProbeVerdicts:
     async def test_only_a_client_error_is_a_refusal(
         self, monkeypatch: pytest.MonkeyPatch, status: int | None, verdict: bool | None
     ) -> None:
-        from tests.stubs.fake_backend import FakeBackend
-
-        monkeypatch.setattr(
-            "vibe.core.llm.backend.factory.create_backend",
-            lambda **_: FakeBackend(exception_to_raise=_backend_error(status)),
-        )
+        FakeUtilityCompletion(error=_provider_error(status)).install(monkeypatch)
 
         assert (
             await _REAL_PROBE(provider=_provider(), model=_MODEL, timeout_seconds=1.0)
@@ -308,12 +313,7 @@ class TestProbeVerdicts:
     async def test_an_unexpected_error_is_no_verdict(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from tests.stubs.fake_backend import FakeBackend
-
-        monkeypatch.setattr(
-            "vibe.core.llm.backend.factory.create_backend",
-            lambda **_: FakeBackend(exception_to_raise=RuntimeError("boom")),
-        )
+        FakeUtilityCompletion(error=RuntimeError("boom")).install(monkeypatch)
 
         assert (
             await _REAL_PROBE(provider=_provider(), model=_MODEL, timeout_seconds=1.0)
@@ -398,27 +398,6 @@ class TestInProcessMemory:
         assert cache.peek(provider=_provider(), model=_MODEL) is True
 
 
-def _backend_error(status: int | None) -> BackendError:
-    return BackendError(
-        provider="mistral",
-        endpoint="https://llm.acme.internal/v1",
-        status=status,
-        reason=None,
-        headers=None,
-        body_text=None,
-        parsed_error=None,
-        model=_MODEL.name,
-        payload_summary=PayloadSummary(
-            model=_MODEL.name,
-            message_count=1,
-            approx_chars=4,
-            temperature=0.0,
-            has_tools=False,
-            tool_choice=None,
-        ),
-    )
-
-
 def _age_entries(*, days: int = 0, hours: int = 0) -> None:
     """Backdate every stored verdict, as elapsed time would."""
     path = UTILITY_MODEL_CACHE_FILE.path
@@ -427,3 +406,12 @@ def _age_entries(*, days: int = 0, hours: int = 0) -> None:
     for entry in entries.values():
         entry["stored_at_timestamp"] = int(time.time()) - shift
     path.write_text(json.dumps(entries), encoding="utf-8")
+
+
+def _provider_error(status: int | None) -> Exception:
+    if status is None:
+        return RuntimeError("connection reset")
+    request = httpx2.Request("POST", "https://api.mistral.ai/v1/chat/completions")
+    return httpx2.HTTPStatusError(
+        "failed", request=request, response=httpx2.Response(status, request=request)
+    )

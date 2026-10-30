@@ -4,6 +4,7 @@ from collections.abc import Iterable, Sequence
 import hashlib
 from typing import Literal
 
+from vibe.app_server._skill_toggles import SkillToggles
 from vibe.app_server.config import (
     AudioProviderView,
     ConfigView,
@@ -44,7 +45,6 @@ from vibe.core.config.layers.user import SuppliedUserConfigLayer, UserConfigLaye
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.log_reader import PaginatedLogs
 from vibe.core.skills.models import SkillInfo, SkillSource
-from vibe.core.utils import name_matches
 
 # Model picker display priority, each layer with the group it lists models
 # under: org-curated sources first, the user's own last. Display only -- which
@@ -120,6 +120,7 @@ def project_config_view(
         experimental_enable_tab_status=config.experimental_enable_tab_status,
         enable_telemetry=config.enable_telemetry,
         experimental_enable_registry_skills=config.experimental_enable_registry_skills,
+        experimental_enable_local_projects=config.experimental_enable_local_projects,
         models=[
             _project_model_config(
                 model,
@@ -333,28 +334,18 @@ def project_installed_skill_summaries(
     Plugin skills are locked: they come from an installed plugin and are managed
     through ``/plugins``, not by this config.
     """
-    allowed = config.enabled_skills
     disabled = config.disabled_skills
-    own = list(disabled if user_disabled is None else user_disabled)
+    toggles = SkillToggles(
+        allowed=config.enabled_skills,
+        disabled=disabled,
+        own=list(disabled if user_disabled is None else user_disabled),
+    )
 
     def _enabled(info: SkillInfo) -> bool:
-        if info.source is SkillSource.PLUGIN:
-            return True
-        if allowed:
-            return name_matches(info.name, allowed)
-        return not (disabled and name_matches(info.name, disabled))
+        return info.source is SkillSource.PLUGIN or toggles.enabled(info.name)
 
     def _locked(info: SkillInfo) -> bool:
-        if info.source is SkillSource.PLUGIN:
-            return True
-        if allowed:
-            return True
-        if not disabled:
-            return False
-        patterns = [pattern for pattern in disabled if pattern != info.name]
-        if name_matches(info.name, patterns):
-            return True
-        return name_matches(info.name, disabled) and info.name not in own
+        return info.source is SkillSource.PLUGIN or toggles.locked(info.name)
 
     return [_skill_summary(info, _enabled(info), _locked(info)) for info in skills]
 

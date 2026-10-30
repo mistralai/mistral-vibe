@@ -16,6 +16,7 @@ import tomli_w
 from tests.app_server._helpers import setup_client
 from tests.conftest import get_base_config
 from vibe.app_server._model import validate_wire
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.protocol import (
     AppServerResponseError,
@@ -65,7 +66,7 @@ def _write_custom_provider_config(config_file: Path, *, api_key_env_var: str) ->
 
 @pytest.mark.asyncio
 async def test_store_credential_completed_writes_keyring_and_process_env(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "placeholder")
     written: list[tuple[str, str, str]] = []
@@ -73,7 +74,9 @@ async def test_store_credential_completed_writes_keyring_and_process_env(
         keyring, "set_password", lambda s, u, p: written.append((s, u, p))
     )
     clear_api_key_keyring_cache()
-    client, client_transport, server_transport = await setup_client()
+    client, client_transport, server_transport = await setup_client(
+        process_services=process_services
+    )
     try:
         response = await _store(client)
     finally:
@@ -90,7 +93,7 @@ async def test_store_credential_completed_writes_keyring_and_process_env(
 
 @pytest.mark.asyncio
 async def test_store_credential_env_var_error_for_invalid_env_var_name(
-    monkeypatch: pytest.MonkeyPatch, config_dir: Path
+    monkeypatch: pytest.MonkeyPatch, config_dir: Path, process_services: ProcessServices
 ) -> None:
     _write_custom_provider_config(
         config_dir / "config.toml", api_key_env_var="BAD=NAME"
@@ -102,7 +105,9 @@ async def test_store_credential_env_var_error_for_invalid_env_var_name(
 
     monkeypatch.setattr(keyring, "set_password", _fail)
     clear_api_key_keyring_cache()
-    client, client_transport, server_transport = await setup_client()
+    client, client_transport, server_transport = await setup_client(
+        process_services=process_services
+    )
     try:
         response = await _store(client, provider="custom")
     finally:
@@ -116,7 +121,7 @@ async def test_store_credential_env_var_error_for_invalid_env_var_name(
 
 @pytest.mark.asyncio
 async def test_store_credential_empty_env_var_falls_back_to_mistral_var(
-    monkeypatch: pytest.MonkeyPatch, config_dir: Path
+    monkeypatch: pytest.MonkeyPatch, config_dir: Path, process_services: ProcessServices
 ) -> None:
     # Python parity (resolve_api_key_provider): the default Mistral env var.
     _write_custom_provider_config(config_dir / "config.toml", api_key_env_var="")
@@ -126,7 +131,9 @@ async def test_store_credential_empty_env_var_falls_back_to_mistral_var(
         keyring, "set_password", lambda s, u, p: written.append((s, u, p))
     )
     clear_api_key_keyring_cache()
-    client, client_transport, server_transport = await setup_client()
+    client, client_transport, server_transport = await setup_client(
+        process_services=process_services
+    )
     try:
         response = await _store(client, provider="custom")
     finally:
@@ -139,7 +146,7 @@ async def test_store_credential_empty_env_var_falls_back_to_mistral_var(
 
 @pytest.mark.asyncio
 async def test_store_credential_save_error_when_keyring_and_env_file_both_fail(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "placeholder")
 
@@ -150,7 +157,9 @@ async def test_store_credential_save_error_when_keyring_and_env_file_both_fail(
     clear_api_key_keyring_cache()
     # A directory where the .env file belongs makes the write fail itself.
     GLOBAL_ENV_FILE.path.mkdir(parents=True, exist_ok=True)
-    client, client_transport, server_transport = await setup_client()
+    client, client_transport, server_transport = await setup_client(
+        process_services=process_services
+    )
     try:
         response = await _store(client)
     finally:
@@ -166,7 +175,7 @@ async def test_store_credential_save_error_when_keyring_and_env_file_both_fail(
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
 async def test_store_credential_env_file_fallback_is_owner_only(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "placeholder")
 
@@ -175,7 +184,9 @@ async def test_store_credential_env_file_fallback_is_owner_only(
 
     monkeypatch.setattr(keyring, "set_password", _unavailable)
     clear_api_key_keyring_cache()
-    client, client_transport, server_transport = await setup_client()
+    client, client_transport, server_transport = await setup_client(
+        process_services=process_services
+    )
     try:
         response = await _store(client)
     finally:
@@ -190,7 +201,7 @@ async def test_store_credential_env_file_fallback_is_owner_only(
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
 async def test_store_credential_tightens_existing_env_file_to_owner_only(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "placeholder")
 
@@ -202,7 +213,9 @@ async def test_store_credential_tightens_existing_env_file_to_owner_only(
     GLOBAL_ENV_FILE.path.parent.mkdir(parents=True, exist_ok=True)
     GLOBAL_ENV_FILE.path.write_text("MISTRAL_API_KEY=stale\n", encoding="utf-8")
     os.chmod(GLOBAL_ENV_FILE.path, 0o644)
-    client, client_transport, server_transport = await setup_client()
+    client, client_transport, server_transport = await setup_client(
+        process_services=process_services
+    )
     try:
         response = await _store(client)
     finally:
@@ -216,10 +229,12 @@ async def test_store_credential_tightens_existing_env_file_to_owner_only(
 
 @pytest.mark.asyncio
 async def test_store_credential_unknown_provider_is_rejected_as_invalid_params(
-    monkeypatch: pytest.MonkeyPatch, config_dir: Path
+    monkeypatch: pytest.MonkeyPatch, config_dir: Path, process_services: ProcessServices
 ) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "placeholder")
-    client, client_transport, server_transport = await setup_client()
+    client, client_transport, server_transport = await setup_client(
+        process_services=process_services
+    )
     try:
         with pytest.raises(AppServerResponseError) as exc_info:
             await _store(client, provider="unknown-provider")
@@ -255,7 +270,7 @@ def _capture_telemetry(monkeypatch: pytest.MonkeyPatch) -> list[_FakeTelemetry]:
 
 @pytest.mark.asyncio
 async def test_store_credential_emits_onboarding_telemetry_once(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     """Python timing: fired at store time, with the wizard's custom-domain
     flag and the launch context built from the handshake.
@@ -263,7 +278,9 @@ async def test_store_credential_emits_onboarding_telemetry_once(
     captured = _capture_telemetry(monkeypatch)
     monkeypatch.setenv("VIBE_ENABLE_TELEMETRY", "true")
     monkeypatch.setenv("MISTRAL_API_KEY", "placeholder")
-    client, client_transport, server_transport = await setup_client(entrypoint="cli")
+    client, client_transport, server_transport = await setup_client(
+        entrypoint="cli", process_services=process_services
+    )
     try:
         response = await _store(client, custom_domain=True)
         # submit-choices never emits: only the credential store does.

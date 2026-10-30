@@ -115,3 +115,8 @@ def save_sync(path: Path, manifest: SkillManifest) -> None:
 
 def project_manifest_paths_sync(roots: Sequence[Path] | None = None) -> list[Path]:
     return _project_manifest_paths(roots)
+
+
+def pinned_names_sync(project_roots: Sequence[Path]) -> set[str]:
+    paths = [global_manifest_path(), *_project_manifest_paths(project_roots)]
+    return {entry.name for path in paths for entry in _load(path).skills}

@@ -1,37 +1,25 @@
 //! Up/Down recall history only from the first or last visual row of a wrapped or multiline draft.
 
-use std::sync::Arc;
-
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyCode;
 use vibe_rs::app::App;
-use vibe_rs::config;
-use vibe_rs::input::handle_key;
-use vibe_rs::server::Client;
+
+use crate::support::press;
 
 const PRESS_LIMIT: usize = 64;
 
 struct Composer {
     app: App,
-    client: Arc<Client>,
-    config_tx: tokio::sync::mpsc::Sender<config::Loaded>,
-    _config_rx: tokio::sync::mpsc::Receiver<config::Loaded>,
 }
 
 impl Composer {
     fn with_history(entries: &[&str]) -> Self {
-        let (config_tx, _config_rx) = tokio::sync::mpsc::channel(1);
         let mut app = App::default();
         app.view.input_area.width = 40;
         app.view.input_area.height = 12;
         for entry in entries {
             app.chat_input.history.add(entry);
         }
-        Self {
-            app,
-            client: Arc::new(Client::stub()),
-            config_tx,
-            _config_rx,
-        }
+        Self { app }
     }
 
     fn draft(entries: &[&str], text: &str) -> Self {
@@ -42,8 +30,7 @@ impl Composer {
     }
 
     fn press(&mut self, code: KeyCode) {
-        let key = KeyEvent::new(code, KeyModifiers::NONE);
-        handle_key(&mut self.app, &self.client, &self.config_tx, key);
+        press(&mut self.app, code);
     }
 
     fn input(&self) -> &str {

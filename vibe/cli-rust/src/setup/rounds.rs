@@ -100,7 +100,10 @@ pub async fn setup_round(
         Some(client)
     };
     tokio::pin!(boot);
-    let mut wizard = OnboardingState::default();
+    let mut wizard = OnboardingState {
+        offers_provider_choice: true,
+        ..OnboardingState::default()
+    };
     let round = run_setup_round(
         terminal,
         app,

@@ -7,7 +7,7 @@ from pathlib import Path
 import types
 from uuid import uuid4
 
-import httpx
+import httpx2
 import zstandard
 
 from vibe.core.teleport.errors import ServiceTeleportError
@@ -59,7 +59,7 @@ class TeleportService:
     async def __aenter__(self) -> TeleportService:
         if self._client is None:
             self._client = VibeAsyncHTTPClient(
-                timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
+                timeout=httpx2.Timeout(self._timeout), verify=build_ssl_context()
             )
         self._nuage_client_instance = NuageClient(
             self._vibe_code_sessions_base_url, self._api_key, client=self._client
@@ -82,7 +82,7 @@ class TeleportService:
     def _http_client(self) -> VibeAsyncHTTPClient:
         if self._client is None:
             self._client = VibeAsyncHTTPClient(
-                timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
+                timeout=httpx2.Timeout(self._timeout), verify=build_ssl_context()
             )
             self._owns_client = True
         return self._client

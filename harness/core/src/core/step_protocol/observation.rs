@@ -6,7 +6,6 @@ use crate::core::features::compaction::CompactionTrigger;
 use crate::core::features::notifications::Notification;
 use crate::core::step_protocol::Action;
 use crate::core::tools::external::ExternalTool;
-use crate::core::turn::TurnOutcome;
 use crate::core::wire::completion::{CompletionCandidate, TokenUsage};
 use crate::core::wire::content::ContentBlock;
 use crate::core::wire::tool::{ProtocolError, ToolResult};
@@ -28,24 +27,10 @@ pub(crate) enum TurnStopReason {
 pub(crate) struct Outcome {
     pub actions: Vec<Action>,
     pub observations: Vec<Observation>,
-    /// Set when this command ended a turn.
-    ///
-    /// Separate from `TurnState::Terminal` because a queued follow-up turn can
-    /// start within the same command: state is `Active` again by the time the
-    /// transition is built, but the Runtime still needs to hear that the
-    /// previous turn finished and with what.
-    pub completed: Option<TurnCompletion>,
-}
-
-/// A turn reaching its end, as reported to the Runtime for one command.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TurnCompletion {
-    pub turn_id: String,
-    pub outcome: TurnOutcome,
 }
 
 impl Outcome {
-    /// The command was accepted and produced no action, e.g. a queued message.
+    /// The command was accepted and produced no action.
     pub(crate) fn quiet() -> Self {
         Self::default()
     }
@@ -68,21 +53,11 @@ impl Outcome {
         self.observations.push(observation);
     }
 
-    /// Records the turn this command ended.
-    pub(crate) fn complete_turn(&mut self, turn_id: String, outcome: TurnOutcome) {
-        self.completed = Some(TurnCompletion { turn_id, outcome });
-    }
-
     /// Folds a callee's outcome into this one, keeping emission order: whatever
     /// this outcome already observed happened before the callee ran.
-    ///
-    /// A callee's completion wins, because the callee ran later: when
-    /// `complete_output` finishes one turn and starts a queued one, the queued
-    /// turn's own path is what decides the final report.
     pub(crate) fn absorb(&mut self, other: Self) {
         self.actions.extend(other.actions);
         self.observations.extend(other.observations);
-        self.completed = other.completed.or(self.completed.take());
     }
 
     /// Same as `absorb`, for the common tail-call shape where the callee's
@@ -106,10 +81,6 @@ pub(crate) struct AcceptedToolResult {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Transition {
     pub effects: Vec<Action>,
-    /// The turn this command ended, if any. Replaces a pair of `output` and
-    /// `rejection_reason` options that could disagree with each other and with
-    /// the phase they sat beside.
-    pub completed: Option<TurnCompletion>,
     pub observations: Vec<Observation>,
 }
 

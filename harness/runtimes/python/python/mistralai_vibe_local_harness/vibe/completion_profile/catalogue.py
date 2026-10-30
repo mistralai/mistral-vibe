@@ -19,8 +19,6 @@ from dataclasses import dataclass, field, replace
 from typing import Protocol
 from urllib.parse import quote
 
-import httpx
-
 from .bounds import MINIMUM_CONTEXT_WINDOW
 from .known_models import KNOWN_MODELS, KnownModelRow, find_known_model
 from .types import (
@@ -43,6 +41,19 @@ _OK = 200
 # Header names that carry a credential; only these enter the fingerprint, so a
 # per-request header such as a correlation id does not defeat the cache.
 _CREDENTIAL_HEADER_PARTS = ("auth", "key", "token", "secret", "cookie")
+
+
+class _Response(Protocol):
+    @property
+    def status_code(self) -> int: ...
+
+    def json(self) -> object: ...
+
+
+class HttpClient(Protocol):
+    """The part of an HTTPX client a fetcher uses, whichever HTTPX it is."""
+
+    async def get(self, url: str, *, headers: dict[str, str]) -> _Response: ...
 
 
 class CatalogueUnavailableError(Exception):
@@ -115,7 +126,7 @@ class NoCatalogueFetcher:
 class MistralCatalogueFetcher:
     """`GET {server}/v1/models/{model}`: the context length and vision support."""
 
-    client: httpx.AsyncClient
+    client: HttpClient
     server_url: str
     api_key: str | None = None
     headers: Mapping[str, str] = field(default_factory=dict)
@@ -147,7 +158,7 @@ class AnthropicCatalogueFetcher:
     entry; that is not a failure.
     """
 
-    client: httpx.AsyncClient
+    client: HttpClient
     server_url: str
     api_key: str | None = None
     headers: Mapping[str, str] = field(default_factory=dict)
@@ -394,7 +405,7 @@ def _anthropic_reasoning(
 
 
 async def _get_json(
-    client: httpx.AsyncClient, url: str, headers: Mapping[str, str]
+    client: HttpClient, url: str, headers: Mapping[str, str]
 ) -> object | None:
     response = await client.get(url, headers=dict(headers))
     if response.status_code == _NOT_FOUND:

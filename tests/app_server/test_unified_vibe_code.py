@@ -6,9 +6,7 @@ from typing import Any, cast
 import pytest
 
 from tests.conftest import build_test_vibe_config
-from tests.mock.utils import mock_llm_chunk
-from tests.stubs.fake_backend import FakeBackend
-from vibe.app_server import _unified_vibe_code as unified_vibe_code
+from tests.stubs.fake_utility_completion import FakeUtilityCompletion
 from vibe.app_server._unified_vibe_code import UnifiedTeleportContextSummarizer
 from vibe.core.types import LLMMessage, Role
 
@@ -18,8 +16,9 @@ async def test_teleport_summary_uses_model_temperature_and_no_token_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = build_test_vibe_config()
-    backend = FakeBackend(mock_llm_chunk(content="<summary>Fix the parser</summary>"))
-    monkeypatch.setattr(unified_vibe_code, "create_backend", lambda **_: backend)
+    completion = FakeUtilityCompletion("<summary>Fix the parser</summary>").install(
+        monkeypatch
+    )
     adapter = SimpleNamespace(config=config, launch_context=None, session_id="s")
     summarizer = UnifiedTeleportContextSummarizer(cast(Any, adapter))
 
@@ -28,5 +27,6 @@ async def test_teleport_summary_uses_model_temperature_and_no_token_cap(
     )
 
     assert summary == "Fix the parser"
-    assert backend.requests_temperatures == [config.get_compaction_model().temperature]
-    assert backend.requests_max_tokens == [None]
+    [request] = completion.requests
+    assert request.route.temperature == config.get_compaction_model().temperature
+    assert request.config.max_tokens is None

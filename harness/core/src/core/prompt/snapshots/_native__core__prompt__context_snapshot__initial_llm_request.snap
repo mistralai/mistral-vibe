@@ -57,7 +57,7 @@ expression: reviewable_snapshot(request)
                   "",
                   "## Agents",
                   "",
-                  "Use the available functions in `tools.agents` through `run_typescript`. Before you delegate work to a child, or when a task needs tools you do not have, call `tools.agents.list_configs`. A named configuration can have instructions and tools that you do not have; when one fits the work, pass its name as `config_name`. Omit `config_name` only when none fits: the child then inherits your configuration. Each child has an independent Session and history. Spawn admits its first message without waiting for the answer. Child names are permanent single path segments below /root and cannot be reused. List shows admitted direct children, not provisional work. Agent operations are external effects.",
+                  "Use the available functions in `tools.agents` through `run_typescript`. Before you delegate work to a child, or when a task needs tools you do not have, call `tools.agents.list_configs`. Specialized agent configs may have tools you don't have. Use what is most relevant. If you omit `config_name`: the child then inherits your configuration. At spawn, the child immediately receives your instruction at its first message: no need to call send_message again, unless you need to follow-up. You can make a child inherit some or all of your context, when relevant. Spawn does not wait for the answer: use wait for that. Each child's result arrives later as a message for you. If you need the answer of a child to perform your task, you must call 'wait' before your final answer. You can for instance perform other tasks, then use wait when you have nothing to do, but wait. Use an appropriate timeout. Do not poll `tools.agents.list`. A result that arrives after your final answer, does not wake you. It will reach you only in your next turn when the user messages you again. Each agent is identified by a path: '/root' is the first ('main') agent, and '/root/researcher' is its child named researcher. These are not files or folders. Child names are permanent and cannot be reused. But a child can be re-used, keeping its context, in later turn. List shows admitted direct children, not provisional work. Agent operations are external effects.",
                   "",
                   "## Available Skills",
                   "",
@@ -65,7 +65,7 @@ expression: reviewable_snapshot(request)
                   "",
                   "Call `skill` only with a name listed in `<available-skills>`. Connector names and unlisted names in skill instructions are not skills.",
                   "",
-                  "Do not read a root `SKILL.md` path with `read_file` after loading a skill. Use `read_file` only for support or reference files mentioned by the loaded skill.",
+                  "Load a skill only with `skill`, never by reading its root `SKILL.md` path with `read_file`. A listed skill's files may not exist until `skill` loads it. After loading, use `read_file` only for support or reference files mentioned by the loaded skill.",
                   "",
                   "## Current time",
                   "",
@@ -90,12 +90,10 @@ expression: reviewable_snapshot(request)
                   "  <skill>",
                   "    <name>code-review</name>",
                   "    <description>Review code for correctness, maintainability, and regressions.</description>",
-                  "    <path>/workspace/.agents/skills/code-review/SKILL.md</path>",
                   "  </skill>",
                   "  <skill>",
                   "    <name>acme_tools:prepare-report</name>",
                   "    <description>Prepare an Acme report using approved data sources.</description>",
-                  "    <path>/plugins/acme.tools/skills/prepare-report/SKILL.md</path>",
                   "  </skill>",
                   "</available-skills>",
                   "",
@@ -157,6 +155,87 @@ expression: reviewable_snapshot(request)
       "type": "replace",
       "revision": 0,
       "tools": [
+        {
+          "name": "askUser",
+          "description": "Ask the user to choose one of a bounded set of options.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "question": {
+                "type": "string",
+                "minLength": 1
+              },
+              "options": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 5,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "label": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "label"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "question",
+              "options"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "name": "createEvent",
+          "description": "Create a calendar event and return its stable identity.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "calendarId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "startsAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "durationMinutes": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "attendees": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "email"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "calendarId",
+              "title",
+              "startsAt",
+              "durationMinutes"
+            ],
+            "additionalProperties": false
+          }
+        },
         {
           "name": "search_tool_functions",
           "description": {
@@ -238,7 +317,7 @@ expression: reviewable_snapshot(request)
               "### Sandbox capabilities and durability model",
               "",
               "- The sandbox is a replayable TypeScript workflow environment, not a general-purpose Node.js runtime. Use it for orchestration, tool-call wiring, and local data transformation.",
-              "- It supports standard JavaScript/TypeScript computation such as async/await, Promises, JSON, Array/Object/Map/Set operations, RegExp, URL parsing, TextEncoder/TextDecoder, and console output for debugging.",
+              "- It supports standard JavaScript/TypeScript computation such as async/await, Promises, JSON, Array/Object/Map/Set operations, RegExp, and console output for debugging.",
               "- It does not provide ambient filesystem access, Node.js packages, browser APIs, DOM APIs, or direct network I/O. Reach external systems only through the provided `tools.<group>.<function>` functions.",
               "- Execution may pause while tool calls are pending and later replay from the beginning. Local code can therefore run more than once; keep it to pure orchestration, pure data transforms, and tool-call wiring.",
               "- Time, randomness, and promise-selection APIs are recorded automatically and replay deterministically. This includes `Date()`, `new Date()`, `Date.now()`, `performance.now()`, `Math.random()`, `crypto.randomUUID()`, `crypto.getRandomValues()`, `Promise.race()`, and `Promise.any()`.",
@@ -442,87 +521,6 @@ expression: reviewable_snapshot(request)
             "required": [
               "name"
             ]
-          }
-        },
-        {
-          "name": "askUser",
-          "description": "Ask the user to choose one of a bounded set of options.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "question": {
-                "type": "string",
-                "minLength": 1
-              },
-              "options": {
-                "type": "array",
-                "minItems": 2,
-                "maxItems": 5,
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "id": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "label": {
-                      "type": "string",
-                      "minLength": 1
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "label"
-                  ],
-                  "additionalProperties": false
-                }
-              }
-            },
-            "required": [
-              "question",
-              "options"
-            ],
-            "additionalProperties": false
-          }
-        },
-        {
-          "name": "createEvent",
-          "description": "Create a calendar event and return its stable identity.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "calendarId": {
-                "type": "string",
-                "minLength": 1
-              },
-              "title": {
-                "type": "string",
-                "minLength": 1
-              },
-              "startsAt": {
-                "type": "string",
-                "format": "date-time"
-              },
-              "durationMinutes": {
-                "type": "integer",
-                "minimum": 1
-              },
-              "attendees": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "format": "email"
-                },
-                "default": []
-              }
-            },
-            "required": [
-              "calendarId",
-              "title",
-              "startsAt",
-              "durationMinutes"
-            ],
-            "additionalProperties": false
           }
         }
       ]

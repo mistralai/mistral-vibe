@@ -43,10 +43,8 @@ pub fn command(app: &mut App, client: &Arc<Client>) {
 
 /// `&<prompt>` and `--teleport`.
 pub fn submit(app: &mut App, client: &Arc<Client>, target: String) {
-    let id = new_message_id();
-    if target.is_empty() {
-        local::add_message(&mut app.view.transcript, &id, "command", "/teleport");
-    } else {
+    if !target.is_empty() {
+        let id = new_message_id();
         local::teleport::add_teleport_prompt(&mut app.view.transcript, &id, &target);
     }
     let prompt = (!target.is_empty()).then_some(target);
@@ -166,7 +164,9 @@ fn ask_push_approval(app: &mut App, client: &Arc<Client>, count: u64, branch_not
         return;
     }
     let request = push_question(count, branch_not_pushed);
-    app.question_app.pending = Some((QuestionSource::TeleportPush, request));
+    app.question_app
+        .pending
+        .push_back((QuestionSource::TeleportPush, request));
     crate::question_app::show_pending(app);
 }
 
@@ -243,7 +243,7 @@ pub fn apply_reply(app: &mut App, client: &Arc<Client>, reply: Reply) {
             view,
         } => match view {
             Some(view) if can_reopen_picker(app, &session_id) => {
-                local::add_command_result(
+                local::add_command_warning(
                     &mut app.view.transcript,
                     &new_message_id(),
                     STALE_PROJECT_MESSAGE,

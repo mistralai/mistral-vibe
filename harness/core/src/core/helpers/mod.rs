@@ -6,8 +6,8 @@ mod schema_errors;
 mod strings;
 
 pub(crate) use agent_message::{
-    AgentMessageContext, AgentMessageKind, AgentMessageSettings, AgentResultError,
-    AgentResultTermination, render_agent_message,
+    AgentMessageContext, AgentMessageSettings, AgentResultError, AgentResultTermination,
+    render_agent_message,
 };
 pub(crate) use prompt_template::{render_template, validate_template};
 pub(crate) use schema_errors::schema_error_detail;

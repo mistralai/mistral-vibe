@@ -23,19 +23,16 @@ pub struct SpeechConfig {
 impl SpeechConfig {
     /// The `speech` projection of a `runtime` value; `None` when the server sends none.
     pub fn from_runtime(runtime: &Value) -> Option<Self> {
-        let speech = runtime.pointer("/runtime/config/speech")?;
-        let field = |pointer: &str| {
-            speech
-                .pointer(pointer)
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        };
+        let speech = crate::server::RuntimeSnapshot::config(runtime)?.speech?;
         Some(Self {
-            name: field("/model/name")?,
-            voice: field("/model/voice")?,
-            response_format: field("/model/responseFormat").unwrap_or_else(|| "wav".to_owned()),
-            api_base: field("/provider/apiBase")?,
-            api_key_env_var: field("/provider/apiKeyEnvVar").unwrap_or_default(),
+            name: speech.model.name?,
+            voice: speech.model.voice?,
+            response_format: speech
+                .model
+                .response_format
+                .unwrap_or_else(|| "wav".to_owned()),
+            api_base: speech.provider.api_base?,
+            api_key_env_var: speech.provider.api_key_env_var,
         })
     }
 
@@ -75,18 +72,25 @@ pub fn audio_request_metadata(session_id: &str) -> Value {
 /// Synthesize `text`: the decoded audio bytes.
 pub async fn speak(
     cfg: &SpeechConfig,
+    credential_client: Option<&crate::server::Client>,
     api_key: &str,
     text: &str,
     metadata: Value,
 ) -> Result<Vec<u8>, AudioError> {
-    let client = build_http_client().map_err(|e| AudioError::new(SDK_ERROR, e))?;
+    let oidc = api_key == crate::credentials::oidc::API_KEY_MARKER;
+    let client = build_http_client(oidc).map_err(|e| AudioError::new(SDK_ERROR, e))?;
     let user_agent = concat!(
         "mistral-client-python/Mistral-Vibe/",
         env!("CARGO_PKG_VERSION")
     );
-    let response = client
-        .post(cfg.url())
-        .bearer_auth(api_key)
+    let headers = crate::credentials::oidc::headers(credential_client, &cfg.url(), api_key)
+        .await
+        .map_err(AudioError::backend)?;
+    let mut request = client.post(cfg.url());
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    let response = request
         .header(reqwest::header::USER_AGENT, user_agent)
         .json(&cfg.request_body(text, metadata))
         .send()
@@ -127,9 +131,13 @@ pub fn status_error_type(status: u16) -> &'static str {
 }
 
 /// ADR 0015: the speech client verifies against the effective trust policy,
-/// with the same proxy handling as the shared builder (redirects stay on).
-pub fn build_http_client() -> Result<reqwest::Client, String> {
-    let builder = crate::utils::system_proxy::apply(reqwest::Client::builder().timeout(TIMEOUT));
+/// with the same proxy handling as the shared builder; OIDC tokens never follow redirects.
+pub fn build_http_client(oidc: bool) -> Result<reqwest::Client, String> {
+    let mut builder =
+        crate::utils::system_proxy::apply(reqwest::Client::builder().timeout(TIMEOUT));
+    if oidc {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
     crate::utils::tls::apply_tls_trust(builder)
         .build()
         .map_err(|e| format!("TTS client failed to build: {e}"))

@@ -31,11 +31,14 @@ TEXT_ONLY: tuple[InputModality, ...] = (InputModality.TEXT,)
 TEXT_AND_IMAGE: tuple[InputModality, ...] = (InputModality.TEXT, InputModality.IMAGE)
 
 
-type ReasoningLevel = Literal["low", "medium", "high", "xhigh", "max"]
-type ReasoningSetting = Literal["off", "low", "medium", "high", "xhigh", "max"]
+# A level is any word the provider takes: a standard one, or a model's own that
+# its config or catalogue lists. Either goes out as written.
+type ReasoningLevel = str
+type ReasoningSetting = str
 
 REASONING_OFF: ReasoningSetting = "off"
-# Ascending: a level the model lacks rounds down along this order.
+# The standard levels, ascending: a level the model lacks rounds down along this
+# order. A level outside it has no rank, so nothing rounds to it.
 REASONING_LEVELS: tuple[ReasoningLevel, ...] = ("low", "medium", "high", "xhigh", "max")
 REASONING_SETTINGS: tuple[ReasoningSetting, ...] = (REASONING_OFF, *REASONING_LEVELS)
 # What one request of the Harness's own (a compaction, say) asks for: a standard
@@ -72,9 +75,11 @@ class ReasoningControl(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ReasoningSupport:
-    """The reasoning levels one model accepts, ascending, and whether it can stop.
+    """The reasoning levels one model accepts, lowest first, and whether it can stop.
 
-    No levels means the model takes no reasoning setting at all, not even off.
+    The levels keep the order their source lists them in, so a level outside the
+    standard ones keeps its place. No levels means the model takes no reasoning
+    setting at all, not even off.
     """
 
     levels: tuple[ReasoningLevel, ...]
@@ -84,11 +89,13 @@ class ReasoningSupport:
     def __post_init__(self) -> None:
         if not self.levels and not self.can_turn_off:
             raise ProfileError("a model that always reasons has at least one level")
-        ranks = [REASONING_LEVELS.index(level) for level in self.levels]
-        if ranks != sorted(set(ranks)):
+        if REASONING_OFF in self.levels or not all(map(str.strip, self.levels)):
             raise ProfileError(
-                f"reasoning levels must be unique and ascending: {list(self.levels)}"
+                "reasoning levels are non-empty words other than off, which "
+                f"`can_turn_off` states: {list(self.levels)}"
             )
+        if len(set(self.levels)) != len(self.levels):
+            raise ProfileError(f"reasoning levels must be unique: {list(self.levels)}")
 
 
 # A model without reasoning: its API rejects every reasoning setting, off included.

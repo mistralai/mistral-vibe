@@ -6,6 +6,10 @@ use serde_json::Value;
 use crate::core::helpers::schema_error_detail;
 use crate::core::tools::external::RuntimeBuiltinToolName;
 
+/// What the model reads before a JSON Schema rejection of a direct call.
+pub(crate) const SCHEMA_REJECTION_PREFIX: &str =
+    "tool arguments do not satisfy the declared input schema: ";
+
 /// Why a tool's arguments were rejected.
 #[derive(Debug)]
 pub(crate) enum ArgumentsRejection<'a> {

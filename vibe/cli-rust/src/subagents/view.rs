@@ -68,34 +68,26 @@ pub fn anchor(app: &mut App) {
 /// Synthesize the parent's spawn task as a `parent-instruction:<child>`
 /// turn-start user message.
 pub fn remember_parent_instruction_from_entry(app: &mut App, entry: &serde_json::Value) {
-    let Some(detail) = entry.get("detail") else {
-        return;
-    };
+    let detail = &entry["detail"];
     // Deprecated: `subagent.spawn` is the pre-rename spelling of `agents.spawn`,
     // kept only so persisted sessions still show the parent instruction.
-    let is_spawn = detail.get("kind").and_then(serde_json::Value::as_str) == Some("subagent")
+    let is_spawn = detail["kind"] == "subagent"
         && matches!(
-            detail.get("toolName").and_then(serde_json::Value::as_str),
+            detail["toolName"].as_str(),
             Some("agents.spawn" | "subagent.spawn")
         );
-    if !is_spawn {
-        return;
-    }
-    let (Some(child_session_id), Some(task)) = (
-        detail
-            .get("childSessionId")
-            .and_then(serde_json::Value::as_str),
-        detail
-            .pointer("/input/task")
-            .and_then(serde_json::Value::as_str),
+    let (true, Some(child_session_id), Some(task)) = (
+        is_spawn,
+        detail["childSessionId"].as_str(),
+        detail["input"]["task"].as_str(),
     ) else {
         return;
     };
     let instruction = serde_json::json!({
         "id": format!("parent-instruction:{child_session_id}"),
         "sessionId": child_session_id,
-        "createdAt": entry.get("createdAt").cloned().unwrap_or(serde_json::Value::Null),
-        "updatedAt": entry.get("updatedAt").cloned().unwrap_or(serde_json::Value::Null),
+        "createdAt": entry["createdAt"],
+        "updatedAt": entry["updatedAt"],
         "generationStatus": "completed",
         "type": "message",
         "role": "user",
@@ -146,7 +138,7 @@ fn spawn_refresh(app: &mut App, client: &std::sync::Arc<crate::server::Client>) 
         return false;
     };
     // No answer channel: skipping keeps the drain from waiting on a lost event.
-    let Some(tx) = app.subagents.tx.clone() else {
+    let Some(tx) = app.events.clone() else {
         return false;
     };
     let (known_ids, cached_complete) = match app.subagents.transcripts.child(&session_id) {
@@ -234,6 +226,12 @@ pub fn reset_views(app: &mut App) {
     // Leave `refresh_in_flight` set so the outstanding answer, not a new read, releases the drain.
     app.subagents.viewed_subagent_id = None;
     app.subagents.transcripts.clear();
+    // Another session: its list shows again only once it has a child, with waiting ones hidden.
+    app.subagents.list.shown = false;
+    app.subagents.list.show_waiting = false;
+    if app.subagents.list.focused {
+        super::list::leave_list(app);
+    }
     anchor(app);
     refresh_context_progress(app);
     update_sessions(app);

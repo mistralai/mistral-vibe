@@ -6,6 +6,7 @@ use crate::app::App;
 pub enum Focus {
     Trust,
     Config,
+    ReleaseNotes,
     Approval,
     Question,
     VoiceApp,
@@ -32,6 +33,7 @@ impl App {
         [
             (self.trust.open, Focus::Trust),
             (self.config_screen.open, Focus::Config),
+            (self.release_notes.open, Focus::ReleaseNotes),
             (self.approval.open, Focus::Approval),
             (self.question_app.open, Focus::Question),
             (self.voice_app.open, Focus::VoiceApp),

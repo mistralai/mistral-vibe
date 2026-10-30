@@ -1,10 +1,9 @@
 //! A late enqueue answer keeps the feedback check on the session the prompt was submitted to.
 
-use std::sync::Arc;
-
 use vibe_rs::app::App;
 use vibe_rs::message_queue::{self, QueueEvent, QueueItem};
-use vibe_rs::server::Client;
+
+use crate::support::{queued, stub};
 
 const SUBMITTED: &str = "00000000-0000-4000-8000-000000000001";
 const COMPACTED: &str = "00000000-0000-4000-8000-000000000002";
@@ -14,17 +13,10 @@ fn a_late_accepted_event_reports_the_submit_session_not_the_current_one() {
     let mut app = App::default();
     app.queue.items.push(QueueItem {
         queue_item_id: None,
-        message_id: "message-1".to_owned(),
-        server_message_id: "message-1".to_owned(),
-        text: "hi".to_owned(),
-        images: Vec::new(),
-        mentions: None,
-        sent: true,
-        ever_sent: true,
         revision: 1,
-        replacing: false,
+        ..queued("message-1", "hi")
     });
-    let client = Arc::new(Client::stub());
+    let client = stub();
 
     // The turn started before the enqueue answer landed, and a mid-turn
     // `session/compacted` handoff has already replaced the current session.

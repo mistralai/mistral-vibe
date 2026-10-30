@@ -1,9 +1,11 @@
 //! Subagent status-list state transitions.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyCode;
 use vibe_rs::app::App;
 use vibe_rs::server::{PublicChildSession, SessionStatus};
 use vibe_rs::subagents;
+
+use crate::support::{key, press};
 
 fn child(id: &str, status: SessionStatus) -> PublicChildSession {
     PublicChildSession {
@@ -19,10 +21,6 @@ fn child(id: &str, status: SessionStatus) -> PublicChildSession {
 
 fn running(id: &str) -> PublicChildSession {
     child(id, SessionStatus::Running)
-}
-
-fn key(code: KeyCode) -> KeyEvent {
-    KeyEvent::new(code, KeyModifiers::NONE)
 }
 
 fn upsert(app: &mut App, session: PublicChildSession) {
@@ -107,14 +105,83 @@ fn disabling_the_list_closes_an_active_view() {
 }
 
 #[test]
-fn a_focused_list_hands_focus_back_when_it_empties() {
+fn a_shown_list_stays_on_screen_until_the_session_changes() {
     let mut app = App::default();
     upsert(&mut app, running("a"));
     subagents::focus_first(&mut app);
     app.subagents.sessions.clear();
     subagents::refresh(&mut app);
     assert!(app.subagents.list.rows.is_empty());
+    assert!(app.subagents.list.shown, "the Main row stays");
+    assert!(app.subagents.list.focused);
+    subagents::reset_views(&mut app);
+    assert!(!app.subagents.list.shown);
+    assert!(
+        !app.subagents.list.focused,
+        "a hidden list hands focus back"
+    );
+}
+
+#[test]
+fn switching_to_a_session_without_children_hides_the_list() {
+    let mut app = App::default();
+    upsert(&mut app, running("a"));
+    upsert(&mut app, child("a", SessionStatus::Idle));
+    subagents::focus_first(&mut app);
+    subagents::handle_list_key(&mut app, key(KeyCode::Char('a')));
+    assert!(app.subagents.list.show_waiting);
+
+    // `/resume` and a context clear seed the new children, then reset the views.
+    app.subagents.seed_snapshot(Vec::new());
+    subagents::reset_views(&mut app);
+    subagents::refresh(&mut app);
+    assert!(
+        !app.subagents.list.shown,
+        "the old session's Main row is gone"
+    );
+    assert!(
+        !app.subagents.list.show_waiting,
+        "waiting children hide again"
+    );
     assert!(!app.subagents.list.focused);
+}
+
+#[test]
+fn switching_to_a_session_with_children_hands_focus_back_to_the_input() {
+    let mut app = App::default();
+    upsert(&mut app, running("a"));
+    subagents::show_subagent_chat(&mut app, "a");
+    assert!(app.subagents.list.focused);
+
+    app.subagents.seed_snapshot(vec![running("b")]);
+    subagents::reset_views(&mut app);
+    subagents::refresh(&mut app);
+    assert!(app.subagents.list.shown, "the new session lists its child");
+    assert_eq!(app.subagents.viewed_subagent_id, None);
+    assert!(
+        !app.subagents.list.focused,
+        "the composer owns the keys again"
+    );
+    assert!(app.view.app_focus);
+    assert_eq!(app.subagents.list.options.selected(), 0, "Main row");
+}
+
+#[test]
+fn a_same_session_snapshot_keeps_the_shown_list() {
+    let mut app = App::default();
+    upsert(&mut app, child("a", SessionStatus::Archived));
+    upsert(&mut app, running("b"));
+    upsert(&mut app, child("b", SessionStatus::Archived));
+    subagents::refresh(&mut app);
+    assert!(app.subagents.list.shown);
+
+    let snapshot = app.subagents.sessions.clone();
+    app.subagents.seed_snapshot(snapshot);
+    subagents::refresh(&mut app);
+    assert!(
+        app.subagents.list.shown,
+        "a live resync is not a session switch"
+    );
 }
 
 #[test]
@@ -325,6 +392,70 @@ fn ids(rows: &[PublicChildSession]) -> Vec<&str> {
 }
 
 #[test]
+fn waiting_children_hide_once_their_batch_ends_and_a_shows_them() {
+    let mut app = App::default();
+    upsert(&mut app, running("a"));
+    upsert(&mut app, running("b"));
+    upsert(&mut app, child("a", SessionStatus::Idle));
+    assert_eq!(
+        ids(&app.subagents.list.rows),
+        ["a", "b"],
+        "the running batch holds it"
+    );
+
+    upsert(&mut app, child("b", SessionStatus::Failed));
+    assert_eq!(
+        ids(&app.subagents.list.rows),
+        ["b"],
+        "failed stays, waiting hides"
+    );
+    assert_eq!(app.subagents.list.waiting_count, 1);
+
+    assert!(subagents::focus_first(&mut app));
+    assert!(subagents::handle_list_key(
+        &mut app,
+        key(KeyCode::Char('a'))
+    ));
+    assert_eq!(ids(&app.subagents.list.rows), ["a", "b"]);
+    assert!(subagents::handle_list_key(
+        &mut app,
+        key(KeyCode::Char('a'))
+    ));
+    assert_eq!(ids(&app.subagents.list.rows), ["b"]);
+}
+
+#[test]
+fn a_list_of_only_hidden_waiting_children_stays_focusable() {
+    let mut app = App::default();
+    upsert(&mut app, running("a"));
+    upsert(&mut app, child("a", SessionStatus::Idle));
+    subagents::refresh(&mut app);
+    assert!(app.subagents.list.rows.is_empty());
+    assert!(
+        subagents::focus_first(&mut app),
+        "Main and the summary remain"
+    );
+    assert!(subagents::handle_list_key(
+        &mut app,
+        key(KeyCode::Char('a'))
+    ));
+    assert_eq!(ids(&app.subagents.list.rows), ["a"]);
+}
+
+#[test]
+fn a_without_waiting_children_changes_nothing() {
+    let mut app = App::default();
+    upsert(&mut app, running("a"));
+    subagents::focus_first(&mut app);
+    assert!(subagents::handle_list_key(
+        &mut app,
+        key(KeyCode::Char('a'))
+    ));
+    assert!(!app.subagents.list.show_waiting);
+    assert_eq!(app.subagents.list.waiting_count, 0);
+}
+
+#[test]
 fn killing_the_viewed_child_keeps_it_listed_until_the_view_closes() {
     let mut app = App::default();
     // The child runs and finishes unviewed: the batch clears but a ready child stays listed.
@@ -342,6 +473,7 @@ fn killing_the_viewed_child_keeps_it_listed_until_the_view_closes() {
     subagents::show_main_chat(&mut app, true);
     subagents::refresh(&mut app);
     assert!(app.subagents.list.rows.is_empty());
+    assert!(app.subagents.list.shown, "the Main row stays");
 }
 
 #[tokio::test]
@@ -350,18 +482,15 @@ async fn submitting_a_recalled_prompt_leaves_the_next_down_free() {
     app.chat_input.history.add("earlier prompt");
     upsert(&mut app, running("a"));
 
-    let client = std::sync::Arc::new(vibe_rs::server::Client::stub());
-    let (config_tx, _config_rx) = tokio::sync::mpsc::channel(1);
-
     // Recall the last prompt with Up, then submit it: the composer clears,
     // but the loaded-entry state must clear with it.
-    vibe_rs::input::handle_key(&mut app, &client, &config_tx, key(KeyCode::Up));
+    press(&mut app, KeyCode::Up);
     assert_eq!(app.chat_input.input, "earlier prompt");
-    vibe_rs::input::handle_key(&mut app, &client, &config_tx, key(KeyCode::Enter));
+    press(&mut app, KeyCode::Enter);
     assert!(app.chat_input.input.is_empty());
 
     // The very next Down focuses the list instead of feeding a stale recall.
-    vibe_rs::input::handle_key(&mut app, &client, &config_tx, key(KeyCode::Down));
+    press(&mut app, KeyCode::Down);
     assert!(
         app.subagents.list.focused,
         "Down focuses the list after a submit"
@@ -407,4 +536,47 @@ fn a_config_write_toggles_the_status_list_live() {
     app.commit_started();
     vibe_rs::model_picker::apply_event(&mut app, written(true));
     assert_eq!(ids(&app.subagents.list.rows), ["a"]);
+}
+
+#[test]
+fn hiding_waiting_children_moves_a_highlight_on_one_back_to_main() {
+    let mut app = App::default();
+    upsert(&mut app, running("a"));
+    upsert(&mut app, child("a", SessionStatus::Idle));
+    subagents::focus_first(&mut app);
+    subagents::handle_list_key(&mut app, key(KeyCode::Char('a')));
+    subagents::handle_list_key(&mut app, key(KeyCode::Down));
+    app.subagents.list.mouse_session_id = Some("a".into());
+    assert_eq!(app.subagents.list.options.selected(), 1);
+
+    subagents::handle_list_key(&mut app, key(KeyCode::Char('a')));
+    assert!(app.subagents.list.rows.is_empty());
+    assert_eq!(app.subagents.list.options.selected(), 0, "back on Main");
+    assert_eq!(app.subagents.list.mouse_session_id, None, "no stale hover");
+}
+
+#[test]
+fn a_page_moves_by_the_rows_left_beside_the_waiting_row() {
+    let mut app = App::default();
+    for id in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+        upsert(&mut app, running(id));
+    }
+    upsert(&mut app, child("w", SessionStatus::Idle));
+    for id in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+        upsert(&mut app, running(id));
+    }
+    assert_eq!(
+        app.subagents.list.waiting_count, 0,
+        "w is in the running batch"
+    );
+    upsert(&mut app, child("w", SessionStatus::Archived));
+    upsert(&mut app, child("x", SessionStatus::Idle));
+    app.subagents.list.batch_session_ids.remove("x");
+    subagents::refresh(&mut app);
+    assert_eq!(app.subagents.list.waiting_count, 1);
+    assert_eq!(subagents::page_rows(&app), 6, "7 rows less the waiting row");
+
+    subagents::focus_first(&mut app);
+    assert!(subagents::handle_list_key(&mut app, key(KeyCode::PageDown)));
+    assert_eq!(app.subagents.list.options.selected(), 6);
 }

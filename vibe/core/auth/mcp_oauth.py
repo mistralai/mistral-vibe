@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Final
 import urllib.parse
 
 import anyio.to_thread
-import httpx
+import httpx2
 import keyring
 import keyring.backends.fail
 import keyring.errors
@@ -30,7 +30,11 @@ from vibe.utils.keyring import (
 # The MCP SDK is imported where used: its package import loads ~230 modules.
 if TYPE_CHECKING:
     from mcp.client.auth import OAuthClientProvider, OAuthFlowError
-    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+    from mcp.shared.auth import (
+        AuthorizationCodeResult,
+        OAuthClientInformationFull,
+        OAuthToken,
+    )
 
 _USERNAME_PREFIX: Final = "mcp-oauth"
 _CLIENT_NAME: Final = "Mistral Vibe"
@@ -494,7 +498,7 @@ class LoopbackCallbackHandler:
         writer: asyncio.StreamWriter,
         msg: str,
         *,
-        future: asyncio.Future[tuple[str, str | None]],
+        future: asyncio.Future[AuthorizationCodeResult],
     ) -> None:
         writer.write(_http_response(b"HTTP/1.1 400 Bad Request\r\n", _ERROR_HTML))
         await writer.drain()
@@ -503,9 +507,11 @@ class LoopbackCallbackHandler:
                 MCPOAuthError(f"OAuth callback for {self._server_alias!r} {msg}")
             )
 
-    async def serve_once(self) -> tuple[str, str | None]:
+    async def serve_once(self) -> AuthorizationCodeResult:
+        from mcp.shared.auth import AuthorizationCodeResult
+
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[tuple[str, str | None]] = loop.create_future()
+        future: asyncio.Future[AuthorizationCodeResult] = loop.create_future()
 
         async def handle(
             reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -527,6 +533,7 @@ class LoopbackCallbackHandler:
                 params = urllib.parse.parse_qs(query)
                 code_values = params.get("code") or []
                 state_values = params.get("state") or []
+                iss_values = params.get("iss") or []
                 if not code_values:
                     await self._fail(
                         writer, "missing 'code' query parameter", future=future
@@ -535,10 +542,13 @@ class LoopbackCallbackHandler:
                 writer.write(_http_response(b"HTTP/1.1 200 OK\r\n", _SUCCESS_HTML))
                 await writer.drain()
                 if not future.done():
-                    future.set_result((
-                        code_values[0],
-                        state_values[0] if state_values else None,
-                    ))
+                    future.set_result(
+                        AuthorizationCodeResult(
+                            code=code_values[0],
+                            state=state_values[0] if state_values else None,
+                            iss=iss_values[0] if iss_values else None,
+                        )
+                    )
             except BaseException as exc:
                 if not future.done():
                     future.set_exception(exc)
@@ -607,7 +617,7 @@ def build_oauth_provider(
     server: MCPHttp | MCPStreamableHttp,
     *,
     redirect_handler: Callable[[str], Awaitable[None]],
-    callback_handler: Callable[[], Awaitable[tuple[str, str | None]]],
+    callback_handler: Callable[[], Awaitable[AuthorizationCodeResult]],
 ) -> OAuthClientProvider:
     auth = server.auth
     if not isinstance(auth, MCPOAuth):
@@ -687,7 +697,7 @@ async def perform_oauth_login(
         raise MCPOAuthLoginFailed(
             server_alias=server.name, reason=f"Transient error: {exc.reason}"
         ) from exc
-    except (OAuthTokenError, OAuthFlowError, httpx.HTTPError, OSError) as exc:
+    except (OAuthTokenError, OAuthFlowError, httpx2.HTTPError, OSError) as exc:
         raise MCPOAuthLoginFailed(server_alias=server.name, reason=str(exc)) from exc
     # A probe the server never challenges leaves no token, so fail loudly rather than save a false-success fingerprint.
     if await KeyringTokenStorage(alias=server.name).get_tokens() is None:

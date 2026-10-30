@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, cast
+from typing import cast
 
-from mcp.client.session import ClientSession
-from mcp.shared.context import RequestContext
+from mcp.client.session import ClientRequestContext
 from mcp.types import (
     CreateMessageRequestParams,
     CreateMessageResult,
@@ -27,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 def build_sampling_callback(completion: MCPSamplingCompletion) -> MCPSamplingCallback:
     async def sample(
-        context: RequestContext[ClientSession, Any], params: CreateMessageRequestParams
+        context: ClientRequestContext, params: CreateMessageRequestParams
     ) -> CreateMessageResult | ErrorData:
         del context
         try:
@@ -38,16 +37,16 @@ def build_sampling_callback(completion: MCPSamplingCompletion) -> MCPSamplingCal
                     )
                     for message in params.messages
                 ),
-                system_prompt=params.systemPrompt,
+                system_prompt=params.system_prompt,
                 temperature=params.temperature,
-                max_tokens=params.maxTokens,
+                max_tokens=params.max_tokens,
             )
             response = await completion(request)
             return CreateMessageResult(
                 role="assistant",
                 content=TextContent(type="text", text=response.text),
                 model=response.model,
-                stopReason="endTurn",
+                stop_reason="endTurn",
             )
         except asyncio.CancelledError:
             raise

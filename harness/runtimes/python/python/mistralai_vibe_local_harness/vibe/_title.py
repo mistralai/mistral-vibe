@@ -11,31 +11,22 @@ import re
 from pydantic import JsonValue
 
 from mistralai_vibe_local_harness.protocol import (
-    RustCompletionResult,
     RustMessage,
     RustSystemMessage,
     RustTextContentBlock,
     RustUserMessage,
 )
 from mistralai_vibe_local_harness.session_protocol import JsonObject
-from mistralai_vibe_local_harness.vibe._completion import (
-    credential_rejection,
-    report_request_sent,
-)
+from mistralai_vibe_local_harness.vibe._completion import report_request_sent
 from mistralai_vibe_local_harness.vibe._credentials import (
     ProviderAuthRequired,
     ProviderCredentialResult,
     ProviderCredentialSnapshot,
 )
 from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
-from mistralai_vibe_local_harness.vibe.adapters._provider_failure import (
-    read_provider_failure,
-)
-from mistralai_vibe_local_harness.vibe.adapters.generic import (
-    execute_generic_completion,
-)
-from mistralai_vibe_local_harness.vibe.adapters.mistral import (
-    execute_mistral_completion,
+from mistralai_vibe_local_harness.vibe._utility_completion import (
+    UtilityCompletionError,
+    execute_utility_completion,
 )
 
 logger = logging.getLogger(__name__)
@@ -217,40 +208,22 @@ async def execute_title_completion(
         else None
     )
     try:
-        result: RustCompletionResult
-        if title_config.backend == "mistral":
-            result = await execute_mistral_completion(
-                messages,
-                tools=[],
-                config=title_config,
-                credential=credential,
-                route=route,
-                metadata=metadata,
-            )
-        elif title_config.backend == "generic":
-            result = await execute_generic_completion(
-                messages,
-                tools=[],
-                config=title_config,
-                credential=credential,
-                route=route,
-                metadata=metadata,
-            )
-        else:
-            raise ValueError(f"Unsupported completion backend: {title_config.backend}")
-    except Exception as exc:
-        rejection = credential_rejection(read_provider_failure(exc))
-        if rejection is not None and config.title_provider is not None:
+        reply = await execute_utility_completion(
+            messages,
+            config=title_config,
+            credential=credential,
+            route=route,
+            metadata=metadata,
+        )
+    except UtilityCompletionError as exc:
+        if exc.rejection is not None and config.title_provider is not None:
             with suppress(Exception):
                 await title_config.credentials.reject(
-                    observed_revision=credential.revision, reason=rejection
+                    observed_revision=credential.revision, reason=exc.rejection
                 )
         logger.warning("Title completion failed", exc_info=True)
         return None
-    text = "".join(
-        part.text for part in result.parts if isinstance(part, RustTextContentBlock)
-    )
-    return text or None
+    return reply.text or None
 
 
 async def generate_session_title(

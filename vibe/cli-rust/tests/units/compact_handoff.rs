@@ -1,14 +1,14 @@
 //! A compaction handoff moves the client onto the replacement session
 //! (`session/compacted`).
 
-use std::sync::Arc;
-
 use serde_json::json;
 use vibe_rs::app::{App, Status};
 use vibe_rs::commands::compact;
 use vibe_rs::event_handler;
 use vibe_rs::message_queue::QueueItem;
-use vibe_rs::server::{notification, Client, Notification, PublicSessionState};
+use vibe_rs::server::{notification, Notification, PublicSessionState};
+
+use crate::support::{message, queued, stub, with_status};
 
 fn compacted(session_id: &str, old_session_id: &str) -> Notification {
     Notification {
@@ -36,15 +36,13 @@ fn compacted_session_id_falls_back_to_the_session_id_field() {
 
 #[test]
 fn the_notification_adopts_the_replacement_session() {
-    let mut app = App::default();
-    app.session.status = Status::Ready;
+    let mut app = with_status(Status::Ready);
     app.session.session_id = Some("old-session".into());
     app.compacting = true;
-    let client = Arc::new(Client::stub());
 
     assert!(event_handler::apply_notification(
         &mut app,
-        &client,
+        &stub(),
         &compacted("new-session", "old-session"),
     ));
 
@@ -54,18 +52,18 @@ fn the_notification_adopts_the_replacement_session() {
 
 #[test]
 fn a_notification_without_a_handoff_settles_but_keeps_the_session() {
-    let mut app = App::default();
-    app.session.status = Status::Ready;
+    let mut app = with_status(Status::Ready);
     app.session.session_id = Some("old-session".into());
     app.compacting = true;
-    let client = Arc::new(Client::stub());
     let orphan = Notification {
         method: notification::SESSION_COMPACTED.to_owned(),
         params: json!({}),
     };
 
     assert!(event_handler::apply_notification(
-        &mut app, &client, &orphan
+        &mut app,
+        &stub(),
+        &orphan
     ));
 
     assert_eq!(app.session.session_id.as_deref(), Some("old-session"));
@@ -80,19 +78,12 @@ fn the_manual_response_adopts_the_replacement_session_and_drops_the_queue() {
     app.session.tokens = (7, 10);
     app.queue.items.push(QueueItem {
         queue_item_id: Some("q1".into()),
-        message_id: "queued-row".into(),
-        server_message_id: "queued-row".into(),
-        text: "queued".into(),
-        images: Vec::new(),
-        mentions: None,
-        sent: true,
-        ever_sent: true,
         revision: 1,
-        replacing: false,
+        ..queued("queued-row", "queued")
     });
     app.view
         .transcript
-        .add(&json!({"entry": {"id": "queued-row", "type": "message", "role": "user", "content": [{"type": "text", "text": "queued"}], "generationStatus": "completed"}}));
+        .add(&json!({"entry": message("queued-row", "user", "queued")}));
     let state = serde_json::from_value::<PublicSessionState>(json!({
         "eventId": 5,
         "session": {"id": "new-session"},

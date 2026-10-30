@@ -1,19 +1,14 @@
 //! Accepted composer mentions: coloring spans, atomic caret moves and deletes.
 
-use std::sync::Arc;
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vibe_rs::app::App;
-use vibe_rs::config;
-use vibe_rs::input::{handle_key, handle_paste};
-use vibe_rs::server::Client;
+use vibe_rs::input::handle_paste;
 use vibe_rs::skill::Skill;
+
+use crate::support::send_key;
 
 struct Harness {
     app: App,
-    client: Arc<Client>,
-    config_tx: tokio::sync::mpsc::Sender<config::Loaded>,
-    _config_rx: tokio::sync::mpsc::Receiver<config::Loaded>,
 }
 
 impl Harness {
@@ -23,18 +18,11 @@ impl Harness {
             Skill::new("lint", "Run the linters."),
             Skill::new("code-review", "Review the change."),
         ];
-        let (config_tx, _config_rx) = tokio::sync::mpsc::channel(1);
-        Self {
-            app,
-            client: Arc::new(Client::stub()),
-            config_tx,
-            _config_rx,
-        }
+        Self { app }
     }
 
     fn press(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        let key = KeyEvent::new(code, modifiers);
-        handle_key(&mut self.app, &self.client, &self.config_tx, key);
+        send_key(&mut self.app, KeyEvent::new(code, modifiers));
     }
 
     fn key(&mut self, code: KeyCode) {

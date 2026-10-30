@@ -32,12 +32,3 @@ pub fn blocked_hint(source: &MCPSourceSummary) -> Row {
         after: " and create a new API key from the link it shows.".to_owned(),
     }
 }
-
-/// Transcript message when `/mcp` has no source to browse.
-pub fn empty_message(state: &MCPState) -> String {
-    if state.private_connectors_hidden {
-        format!("No MCP servers or connectors available. {SHARED_ONLY_WARNING}")
-    } else {
-        "No MCP servers or connectors configured.".to_owned()
-    }
-}

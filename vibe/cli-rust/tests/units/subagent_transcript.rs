@@ -7,6 +7,8 @@ use vibe_rs::server::{PublicChildSession, SessionStatus};
 use vibe_rs::subagents::transcripts::merge_history_tail;
 use vibe_rs::subagents::{SubagentTranscripts, READY_MESSAGE};
 
+use crate::support::{mouse, stub};
+
 fn entry(id: &str, text: &str) -> Value {
     json!({
         "id": id,
@@ -439,19 +441,13 @@ fn toggling_tools_collapses_the_viewed_children_group_cache() {
 #[test]
 fn clicking_the_composer_takes_focus_from_the_subagent_list() {
     let mut app = vibe_rs::app::App::default();
-    let client = std::sync::Arc::new(vibe_rs::server::Client::stub());
     let (config_tx, _rx) = tokio::sync::mpsc::channel(1);
     vibe_rs::mouse::register_region(&mut app, Rect::new(0, 10, 40, 3), MouseTarget::Composer);
     app.subagents.list.focused = true;
-    let click = |kind| crossterm::event::MouseEvent {
-        kind,
-        column: 5,
-        row: 11,
-        modifiers: crossterm::event::KeyModifiers::NONE,
-    };
+    let click = |kind| mouse(kind, 5, 11);
     vibe_rs::mouse::handle(
         &mut app,
-        &client,
+        &stub(),
         &config_tx,
         click(crossterm::event::MouseEventKind::Down(
             crossterm::event::MouseButton::Left,

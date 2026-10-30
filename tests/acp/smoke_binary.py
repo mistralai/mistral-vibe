@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Smoke tests for the built vibe-acp binary.
 
-Usage: python tests/smoke_binary.py <binary-dir>
+Usage: python tests/acp/smoke_binary.py [--quick] <binary-dir>
+
+--quick runs only tests 1-3, which need no pty and no ACP session.
 
 Tests:
   1. --version exits successfully
-  2. The onboarding stylesheet is present in the bundle
-  3. --setup starts far enough to render the Textual onboarding wizard
-  4. ACP initialize handshake returns expected agent info
-  5. (Linux) No ELF binaries require executable stack (GNU_STACK RWE)
+  2. The Rust TUI `--setup` runs is bundled and starts
+  3. --setup-app-server serves the setup RPCs the bundled TUI calls
+  4. --setup renders the Rust onboarding wizard on the bundled app-server
+  5. ACP initialize returns the expected agent info, and a new session
+     offers the bundled built-in plugin skills
+  6. (Linux) No ELF binaries require executable stack (GNU_STACK RWE)
 """
 
 from __future__ import annotations
@@ -16,9 +20,11 @@ from __future__ import annotations
 import asyncio
 import asyncio.subprocess as aio_subprocess
 import contextlib
+import json
 import os
 from pathlib import Path
 import platform
+import re
 import struct
 import subprocess
 import sys
@@ -33,10 +39,16 @@ from acp import (
     RequestError,
     connect_to_agent,
 )
-from acp.schema import ClientCapabilities, Implementation
+from acp.schema import AvailableCommandsUpdate, ClientCapabilities, Implementation
 
 
 class _SmokeClient(Client):
+    def __init__(self) -> None:
+        # The first command list a new session announces.
+        self.commands: asyncio.Future[list[str]] = (
+            asyncio.get_running_loop().create_future()
+        )
+
     def on_connect(self, conn: Any) -> None:
         pass
 
@@ -78,8 +90,13 @@ class _SmokeClient(Client):
     async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
         raise RequestError.method_not_found(method)
 
-    async def session_update(self, *_args: Any, **_kwargs: Any) -> None:
-        pass
+    async def session_update(
+        self, session_id: str, update: Any, **_kwargs: Any
+    ) -> None:
+        if isinstance(update, AvailableCommandsUpdate) and not self.commands.done():
+            self.commands.set_result([
+                command.name for command in update.available_commands
+            ])
 
 
 async def _terminate(proc: asyncio.subprocess.Process) -> None:
@@ -110,20 +127,93 @@ def test_version(binary: Path) -> None:
     print(f"PASS: --version -> {result.stdout.strip()}")
 
 
-def test_bundled_onboarding_assets(binary_dir: Path) -> None:
-    if not any(binary_dir.rglob("setup/onboarding/onboarding.tcss")):
-        _fail("setup/onboarding/onboarding.tcss is missing from the bundle")
-    print("PASS: onboarding stylesheet bundled")
+def test_bundled_rust_tui(binary_dir: Path) -> None:
+    name = "vibe-rs.exe" if platform.system() == "Windows" else "vibe-rs"
+    tui = next(binary_dir.rglob(f"vibe/_bin/{name}"), None)
+    if tui is None:
+        _fail(f"vibe/_bin/{name} is missing from the bundle")
+    result = subprocess.run(
+        [str(tui), "--version"], capture_output=True, text=True, timeout=30
+    )
+    if result.returncode != 0:
+        _fail(f"bundled vibe-rs --version failed\nstderr: {result.stderr}")
+    print(f"PASS: bundled vibe-rs -> {result.stdout.strip()}")
+
+
+async def _app_server_request(
+    proc: asyncio.subprocess.Process, request_id: str, method: str, params: Any
+) -> Any:
+    assert proc.stdin is not None
+    assert proc.stdout is not None
+    message = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+    proc.stdin.write(json.dumps(message).encode() + b"\n")
+    await proc.stdin.drain()
+    while True:
+        line = await asyncio.wait_for(proc.stdout.readline(), timeout=15)
+        if not line:
+            _fail(f"--setup-app-server closed before answering {method}")
+        response = json.loads(line)
+        if not isinstance(response, dict) or response.get("id") != request_id:
+            continue
+        if "error" in response:
+            _fail(f"--setup-app-server {method} failed: {response['error']}")
+        return response.get("result")
+
+
+async def test_setup_app_server_mode(binary: Path) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        env = os.environ.copy()
+        env["VIBE_HOME"] = str(Path(tmp) / ".vibe")
+        env["VIBE_TEST_DISABLE_KEYRING"] = "1"
+        env.pop("MISTRAL_API_KEY", None)
+        proc = await asyncio.create_subprocess_exec(
+            str(binary),
+            "--setup-app-server",
+            stdin=aio_subprocess.PIPE,
+            stdout=aio_subprocess.PIPE,
+            stderr=aio_subprocess.PIPE,
+            env=env,
+            cwd=tmp,
+        )
+        try:
+            client_info = {
+                "name": "smoke-test",
+                "version": "0.0.0",
+                "entrypoint": "acp",
+            }
+            init = await _app_server_request(
+                proc,
+                "initialize",
+                "initialize",
+                {"clientInfo": client_info, "capabilities": {}},
+            )
+            if init.get("serverInfo", {}).get("name") != "vibe-app-server":
+                _fail(f"unexpected --setup-app-server initialize result: {init}")
+            assert proc.stdin is not None
+            proc.stdin.write(b'{"jsonrpc":"2.0","method":"initialized","params":{}}\n')
+            status = await _app_server_request(proc, "status", "setup/status", {})
+            if status.get("hasApiKey") is not False:
+                _fail(f"unexpected --setup-app-server setup/status result: {status}")
+            print("PASS: --setup-app-server answers initialize and setup/status")
+        finally:
+            await _terminate(proc)
+
+
+def _screen_text(output: bytearray) -> str:
+    text = output.decode("utf-8", errors="replace")
+    return re.sub(r"\s+", "", re.sub(r"\x1b\[[0-9;?<>]*[ -/]*[@-~]", "", text))
 
 
 def test_setup_renders_onboarding(binary: Path) -> None:
     if platform.system() == "Windows":
-        # Windows does not provide the Unix pty module used to drive Textual here.
+        # Windows does not provide the Unix pty module used to drive the TUI here.
         print("SKIP: --setup pty smoke test (Windows)")
         return
 
+    import fcntl
     import pty
     import select
+    import termios
 
     with tempfile.TemporaryDirectory() as tmp:
         env = os.environ.copy()
@@ -132,6 +222,8 @@ def test_setup_renders_onboarding(binary: Path) -> None:
         env["TERM"] = env.get("TERM") or "xterm-256color"
         env.pop("MISTRAL_API_KEY", None)
         master_fd, slave_fd = pty.openpty()
+        # A fresh pty is 0x0, where the TUI has nowhere to draw.
+        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 36, 120, 0, 0))
         proc = subprocess.Popen(
             [str(binary), "--setup"],
             stdin=slave_fd,
@@ -143,9 +235,16 @@ def test_setup_renders_onboarding(binary: Path) -> None:
         os.close(slave_fd)
 
         output = bytearray()
-        deadline = time.monotonic() + 30
+        # The frozen app-server boot is slow on loaded CI runners.
+        deadline = time.monotonic() + 60
+        next_enter = None
         try:
             while time.monotonic() < deadline and proc.poll() is None:
+                # The welcome screen paints before the app-server boots; only
+                # the theme screen proves the bundled app-server answered.
+                if next_enter is not None and time.monotonic() >= next_enter:
+                    os.write(master_fd, b"\r")
+                    next_enter = time.monotonic() + 2
                 readable, _, _ = select.select([master_fd], [], [], 0.2)
                 if not readable:
                     continue
@@ -156,9 +255,12 @@ def test_setup_renders_onboarding(binary: Path) -> None:
                 if not chunk:
                     break
                 output.extend(chunk)
-                if b"Traceback" in output or b"StylesheetError" in output:
+                if b"Traceback" in output:
                     _fail(output.decode("utf-8", errors="replace"))
-                if b"Welcome" in output:
+                screen = _screen_text(output)
+                if next_enter is None and "Welcometo" in screen:
+                    next_enter = time.monotonic()
+                if "Selectyourpreferredtheme" in screen:
                     print("PASS: --setup rendered the onboarding wizard")
                     return
         finally:
@@ -177,11 +279,15 @@ def test_setup_renders_onboarding(binary: Path) -> None:
     )
 
 
-async def test_acp_initialize(binary: Path) -> None:
+async def test_acp_session(binary: Path) -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        vibe_home = Path(tmp) / ".vibe"
+        # The session must see the bundled skills only, not the user's.
+        home = Path(tmp) / "home"
+        home.mkdir()
         env = os.environ.copy()
-        env["VIBE_HOME"] = str(vibe_home)
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["VIBE_HOME"] = str(home / ".vibe")
         env["MISTRAL_API_KEY"] = "smoke-test-mock-key"
         env["VIBE_TEST_DISABLE_KEYRING"] = "1"
 
@@ -196,7 +302,8 @@ async def test_acp_initialize(binary: Path) -> None:
             assert proc.stdin is not None
             assert proc.stdout is not None
 
-            conn = connect_to_agent(_SmokeClient(), proc.stdin, proc.stdout)
+            client = _SmokeClient()
+            conn = connect_to_agent(client, proc.stdin, proc.stdout)
             resp = await asyncio.wait_for(
                 conn.initialize(
                     protocol_version=PROTOCOL_VERSION,
@@ -220,6 +327,14 @@ async def test_acp_initialize(binary: Path) -> None:
             print(
                 f"PASS: ACP initialize -> {resp.agent_info.name} v{resp.agent_info.version}"
             )
+
+            await asyncio.wait_for(conn.new_session(cwd=tmp, mcp_servers=[]), 60)
+            commands = await asyncio.wait_for(client.commands, 15)
+            if "vibe:skill-creator" not in commands:
+                _fail(
+                    f"the built-in vibe plugin is missing from the bundle: {commands}"
+                )
+            print("PASS: ACP session offers the built-in plugin skills")
         finally:
             await _terminate(proc)
 
@@ -345,12 +460,15 @@ def test_no_executable_stack(binary_dir: Path) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <binary-dir>")
+    args = sys.argv[1:]
+    quick = "--quick" in args
+    paths = [arg for arg in args if arg != "--quick"]
+    if len(paths) != 1:
+        print(f"Usage: {sys.argv[0]} [--quick] <binary-dir>")
         sys.exit(1)
 
     # Absolute: some checks run the binary from a temporary working directory.
-    binary_dir = Path(sys.argv[1]).resolve()
+    binary_dir = Path(paths[0]).resolve()
     binary_name = "vibe-acp.exe" if platform.system() == "Windows" else "vibe-acp"
     binary = binary_dir / binary_name
 
@@ -363,10 +481,14 @@ def main() -> None:
     print(f"Testing binary: {binary}\n")
 
     test_version(binary)
-    test_bundled_onboarding_assets(binary_dir)
+    test_bundled_rust_tui(binary_dir)
+    asyncio.run(test_setup_app_server_mode(binary))
+    if quick:
+        print("\nQuick smoke tests passed!")
+        return
     test_setup_renders_onboarding(binary)
     test_no_executable_stack(binary_dir)
-    asyncio.run(test_acp_initialize(binary))
+    asyncio.run(test_acp_session(binary))
 
     print("\nAll smoke tests passed!")
 

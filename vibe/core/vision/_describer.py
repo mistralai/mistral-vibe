@@ -7,7 +7,6 @@ import logging
 import time
 from typing import TYPE_CHECKING, Protocol
 
-from vibe.core.llm.exceptions import BackendError
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.types import (
     FileImageSource,
@@ -20,8 +19,9 @@ from vibe.core.types import (
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
+    from mistralai_vibe_local_harness.protocol import RustTokenUsage
+    from mistralai_vibe_local_harness.vibe import UtilityReply
     from vibe.core.config import ModelConfig
-    from vibe.core.types import LLMChunk, LLMUsage
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ MAX_CONCURRENT_DESCRIPTIONS = 4
 class VisionCompleteFn(Protocol):
     async def __call__(
         self, *, model: ModelConfig, messages: Sequence[LLMMessage]
-    ) -> LLMChunk: ...
+    ) -> UtilityReply: ...
 
 
 def _digest(payload: str) -> str:
@@ -63,10 +63,12 @@ class FailedDescription:
 
     @property
     def reason(self) -> str:
-        # BackendError renders as a multi-line diagnostic block; the provider's
-        # own message is the one line that says what to fix.
-        if isinstance(self.error, BackendError) and self.error.parsed_error:
-            return self.error.parsed_error
+        from mistralai_vibe_local_harness.vibe import UtilityCompletionError
+
+        # The status line and URL say a request failed; the provider's own
+        # message says what to fix.
+        if isinstance(self.error, UtilityCompletionError) and self.error.explanation:
+            return self.error.explanation
         lines = str(self.error).strip().splitlines()
         return lines[0] if lines else repr(self.error)
 
@@ -120,7 +122,7 @@ class ImageDescriber:
         steered = _normalize(instruction)
         limit = asyncio.Semaphore(MAX_CONCURRENT_DESCRIPTIONS)
 
-        async def described(att: ImageAttachment) -> tuple[str, LLMUsage | None]:
+        async def described(att: ImageAttachment) -> tuple[str, RustTokenUsage]:
             async with limit:
                 return await self._describe(att, model=model, instruction=steered)
 
@@ -139,9 +141,8 @@ class ImageDescriber:
                 continue
             text, usage = result
             self._cache[key] = text
-            if usage is not None:
-                prompt_tokens += usage.prompt_tokens
-                completion_tokens += usage.completion_tokens
+            prompt_tokens += usage.input_tokens
+            completion_tokens += usage.output_tokens
         return DescribeReport(
             cached=cached,
             described=len(pending) - len(failures),
@@ -153,18 +154,17 @@ class ImageDescriber:
 
     async def _describe(
         self, att: ImageAttachment, *, model: ModelConfig, instruction: str
-    ) -> tuple[str, LLMUsage | None]:
-        result = await self._complete(
+    ) -> tuple[str, RustTokenUsage]:
+        reply = await self._complete(
             model=model, messages=_build_messages(att, instruction)
         )
-        text = (result.message.content or "").strip()
+        text = reply.text.strip()
         if not text:
-            stop = result.stop.reason if result.stop else "unknown"
             raise ValueError(
                 f"Vision model '{model.alias}' returned no description"
-                f" (stop reason: {stop})"
+                f" (stop reason: {reply.finish_reason})"
             )
-        return text, result.usage
+        return text, reply.usage
 
 
 def _normalize(instruction: str) -> str:

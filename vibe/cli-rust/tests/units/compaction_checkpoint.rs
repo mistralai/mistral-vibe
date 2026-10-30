@@ -4,6 +4,8 @@ use serde_json::json;
 use vibe_rs::server::{HistoryEntry, PublicSessionState};
 use vibe_rs::transcript::{HistoryCursor, Transcript};
 
+use crate::support::live;
+
 fn effect(id: &str) -> serde_json::Value {
     json!({
         "id": id,
@@ -23,14 +25,6 @@ fn compaction(id: &str, trigger: &str, status: &str) -> serde_json::Value {
         "message": "Compacting context",
         "details": {"trigger": trigger, "attempt": 1},
     })
-}
-
-fn live(entries: &[serde_json::Value]) -> Transcript {
-    let mut transcript = Transcript::default();
-    for entry in entries {
-        transcript.add(&json!({ "entry": entry }));
-    }
-    transcript
 }
 
 /// The same history mounted by a resume whose state reports `turns`.

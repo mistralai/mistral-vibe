@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::server::{method, notification, server_method, Notification, Request};
+use crate::server::{
+    method, notification, server_method, CallbackAddress, CallbackOutput, Notification, Request,
+};
 
 use super::process::{ActiveSession, Pending};
 
@@ -41,10 +43,8 @@ pub async fn handle_server_request(
         return None;
     }
     let callback = params.as_ref().and_then(|p| p.get("callback"));
-    let (Some(callback_id), Some(kind)) = (
-        callback
-            .and_then(|c| c.get("callbackId"))
-            .and_then(Value::as_str),
+    let (Some(address), Some(kind)) = (
+        callback.and_then(CallbackAddress::parse),
         callback
             .and_then(|c| c.pointer("/detail/kind"))
             .and_then(Value::as_str),
@@ -52,18 +52,13 @@ pub async fn handle_server_request(
         tracing::warn!(?params, "callback/call missing callbackId or kind");
         return None;
     };
-    let session_id = callback
-        .and_then(|c| c.get("sessionId"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let (callback_id, kind) = (callback_id.to_owned(), kind.to_owned());
+    let kind = kind.to_owned();
 
     // Acknowledge delivery (the response the server is blocking on).
     let ack = json!({
         "jsonrpc": "2.0",
         "id": id,
-        "result": {"callbackId": &callback_id, "accepted": true},
+        "result": {"callbackId": &address.callback_id, "accepted": true},
     });
     if let Ok(frame) = serde_json::to_string(&ack) {
         let _ = to_writer.send(Some(frame));
@@ -77,7 +72,7 @@ pub async fn handle_server_request(
             next_request_id,
             active_session,
         };
-        send_deny(wiring, &callback_id, &kind, &session_id).await;
+        send_deny(wiring, &address, &kind).await;
         return None;
     }
 
@@ -94,7 +89,7 @@ pub async fn handle_server_request(
 }
 
 /// Deny a callback with the correct output shape per kind.
-async fn send_deny(wiring: DenyWiring<'_>, callback_id: &str, kind: &str, session_id: &str) {
+async fn send_deny(wiring: DenyWiring<'_>, address: &CallbackAddress, kind: &str) {
     let DenyWiring {
         pending,
         notif_tx,
@@ -102,37 +97,21 @@ async fn send_deny(wiring: DenyWiring<'_>, callback_id: &str, kind: &str, sessio
         next_request_id,
         active_session,
     } = wiring;
-    let output = match kind {
-        "approval" => json!({
-            "type": "approval",
-            "decision": {"type": "deny"},
-            "feedback": null,
-        }),
-        "user_input" => json!({
-            "type": "user_input",
-            "result": {"answers": [], "cancelled": true},
-        }),
-        _ => return,
+    let Some(output) = CallbackOutput::denial(kind) else {
+        return;
     };
-    // The tolerated callback shape omits `sessionId` (ADR 0014); an empty id
-    // would be rejected, so fall back to the active session.
-    let session_id = if session_id.is_empty() {
-        active_session
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .clone()
-            .unwrap_or_default()
-    } else {
-        session_id.to_owned()
+    let active = active_session
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    let Some(params) = address.result_params(active.as_deref(), &output) else {
+        tracing::error!(
+            callback_id = address.callback_id,
+            "callback denial has no session"
+        );
+        return report_failure(notif_tx, "callback has no session".into()).await;
     };
     let result_id = next_request_id.fetch_add(1, Ordering::Relaxed);
-    let params = json!({
-        "sessionId": session_id,
-        "result": {
-            "callbackId": callback_id,
-            "output": output,
-        },
-    });
     // Register the result so a server rejection is delivered, not silently
     // dropped: without an entry the turn would wait forever on `turn/completed`.
     let rx = pending.register(result_id);
@@ -144,7 +123,7 @@ async fn send_deny(wiring: DenyWiring<'_>, callback_id: &str, kind: &str, sessio
             return;
         }
     }
-    let callback_id = callback_id.to_owned();
+    let callback_id = address.callback_id.clone();
     let notif_tx = notif_tx.clone();
     tokio::spawn(async move {
         match rx.await {
@@ -152,15 +131,20 @@ async fn send_deny(wiring: DenyWiring<'_>, callback_id: &str, kind: &str, sessio
             Ok(Err(failure)) => {
                 let message = failure.to_string();
                 tracing::error!(callback_id, message, "callback/result denial rejected");
-                let _ = notif_tx
-                    .send(Notification {
-                        method: notification::CALLBACK_RESULT_FAILED.into(),
-                        params: Value::String(message),
-                    })
-                    .await;
+                report_failure(&notif_tx, message).await;
             }
             // The reader drains pending entries on shutdown; nothing to report.
             Err(_) => {}
         }
     });
+}
+
+/// Fail the headless turn instead of leaving it waiting on an unanswered callback.
+async fn report_failure(notif_tx: &mpsc::Sender<Notification>, message: String) {
+    let _ = notif_tx
+        .send(Notification {
+            method: notification::CALLBACK_RESULT_FAILED.into(),
+            params: Value::String(message),
+        })
+        .await;
 }

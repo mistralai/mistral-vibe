@@ -101,7 +101,7 @@ fn a_summary_queued_before_cancel_is_not_spoken() {
     app.session.startup_config.narrator_enabled = true;
     app.session.session_id = Some("s1".into());
     let (tx, _rx) = tokio::sync::mpsc::channel(2);
-    app.narrator.tx = Some(tx);
+    app.events = Some(tx);
     app.narrator.speech_config = crate::tts::SpeechConfig::from_runtime(&serde_json::json!({
         "runtime": {"config": {"speech": {
             "model": {"name": "tts", "voice": "v"},

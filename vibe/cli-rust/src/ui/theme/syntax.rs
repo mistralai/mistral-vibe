@@ -12,7 +12,6 @@ pub(crate) enum Tok {
     Keyword,
     KeywordConstant,
     KeywordNamespace,
-    KeywordType,
     Number,
     Str,
     StrBacktick,
@@ -32,7 +31,7 @@ pub(crate) enum Tok {
     OperatorWord,
 }
 
-/// The primitive types pygments' rust lexer tags `Keyword.Type`.
+/// Rust primitive types, styled as builtins.
 const RUST_PRIMITIVES: &[&str] = &[
     "bool", "char", "str", "isize", "usize", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "u8",
     "u16", "u32", "u64", "u128",
@@ -106,35 +105,15 @@ pub(crate) fn token(scopes: &[Scope], text: &str) -> Option<Tok> {
     }
     let rust = scope_names.iter().any(|scope| scope == "source.rust");
     if rust {
+        // Whole Rust strings, interpolation included, are one string token (unstyled on ANSI).
+        if scope_names.iter().any(|scope| scope.starts_with("string.")) {
+            return Some(Tok::Str);
+        }
         if text == "&" {
             return Some(Tok::Keyword);
         }
-        if matches!(
-            text,
-            "bool"
-                | "char"
-                | "str"
-                | "i8"
-                | "i16"
-                | "i32"
-                | "i64"
-                | "i128"
-                | "isize"
-                | "u8"
-                | "u16"
-                | "u32"
-                | "u64"
-                | "u128"
-                | "usize"
-                | "f32"
-                | "f64"
-        ) {
+        if RUST_PRIMITIVES.contains(&text) {
             return Some(Tok::NameBuiltin);
-        }
-        // Pygments leaves Rust string contents unstyled in the ANSI
-        // palette, including interpolation punctuation.
-        if scope_names.iter().any(|scope| scope.starts_with("string.")) {
-            return Some(Tok::Name);
         }
     }
     if scope_names
@@ -153,22 +132,6 @@ pub(crate) fn token(scopes: &[Scope], text: &str) -> Option<Tok> {
         .any(|s| s.build_string().starts_with("meta.mapping.key"))
     {
         return Some(Tok::NameTag);
-    }
-    // Rust's grammar and pygments' rust lexer disagree on two shapes: the
-    // reference sigil `&` is a pseudo keyword (Keyword's bold magenta), and
-    // primitive types are `Keyword.Type`, though the grammar scopes them as an
-    // ordinary operator and a storage type.
-    if scopes.iter().any(|s| s.build_string() == "source.rust") {
-        if text == "&" {
-            return Some(Tok::Keyword);
-        }
-        if RUST_PRIMITIVES.contains(&text)
-            && scopes
-                .iter()
-                .any(|s| s.build_string().starts_with("storage.type"))
-        {
-            return Some(Tok::KeywordType);
-        }
     }
     let mut generic_name = false;
     for name in scope_names.iter().rev() {
@@ -193,7 +156,7 @@ pub(crate) fn token(scopes: &[Scope], text: &str) -> Option<Tok> {
     generic_name.then_some(Tok::Name)
 }
 
-/// Unstyled fence text paints with `$text`.
+/// Unstyled fence text paints with the body text color.
 pub(crate) fn plain() -> Style {
     Style::default().fg(theme::code_plain())
 }
@@ -206,18 +169,16 @@ pub(crate) fn style(tok: Tok) -> Style {
     }
 }
 
-/// `ANSIDarkHighlightTheme` / `ANSILightHighlightTheme`. Entries whose color
-/// name is misspelled upstream (`ansi_greenb`, `ansi_yelllow`, `ansi_blow`)
-/// fail to parse and leave the text unstyled, so they map to `Name`.
+/// ANSI token styles; blue reads as `LightBlue` on dark terminals.
 fn ansi(tok: Tok) -> Style {
     let light = !theme::is_dark();
+    let blue = if light { Color::Blue } else { Color::LightBlue };
     match tok {
         Tok::Comment => Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC),
         Tok::NameBuiltinPseudo => plain().add_modifier(Modifier::ITALIC),
         Tok::Keyword => fg(Color::Magenta).add_modifier(Modifier::BOLD),
         Tok::KeywordConstant | Tok::NameBuiltin => fg(Color::Cyan),
         Tok::KeywordNamespace | Tok::OperatorWord => fg(Color::Magenta),
-        Tok::KeywordType => fg(Color::Cyan),
         Tok::Number if light => fg(Color::Blue).add_modifier(Modifier::BOLD),
         Tok::Number => fg(Color::Yellow),
         Tok::StrBacktick => fg(Color::DarkGray),
@@ -226,42 +187,44 @@ fn ansi(tok: Tok) -> Style {
         Tok::NameClass if light => fg(Color::Blue).add_modifier(Modifier::BOLD),
         Tok::NameClass => fg(Color::Yellow),
         Tok::NameConstant => fg(Color::Red),
-        Tok::NameDecorator | Tok::NameTag => fg(Color::Blue).add_modifier(Modifier::BOLD),
-        Tok::NameFunction => fg(Color::Blue),
+        Tok::NameDecorator | Tok::NameTag => fg(blue).add_modifier(Modifier::BOLD),
+        Tok::NameFunction => fg(blue),
         Tok::Str | Tok::Name | Tok::NameAttribute | Tok::NameVariable | Tok::Operator => plain(),
     }
 }
 
-/// `HighlightTheme`, whose `$text-*` variables are tinted from the theme.
+/// Truecolor token styles from the theme's `$text-*` tints; plain identifiers keep the body color.
 fn truecolor(tok: Tok) -> Style {
     match tok {
-        Tok::Comment => fg(theme::blend(
+        Tok::Comment | Tok::StrBacktick => fg(theme::blend(
             theme::background(),
             theme::auto_contrast(),
             0.6,
         )),
-        Tok::Keyword | Tok::NameBuiltin => fg(theme::text_accent()),
+        Tok::Keyword | Tok::NameBuiltin => tint(theme::text_accent()),
         Tok::NameBuiltinPseudo => plain().add_modifier(Modifier::ITALIC),
-        Tok::KeywordConstant => fg(theme::text_success()).add_modifier(Modifier::BOLD),
-        Tok::KeywordNamespace | Tok::NameConstant => fg(theme::text_error()),
-        // `Token.Keyword.Type` is bare `bold` in the base theme.
-        Tok::KeywordType => plain().add_modifier(Modifier::BOLD),
-        Tok::Number | Tok::NameAttribute => fg(theme::text_warning()),
-        Tok::StrBacktick => fg(theme::blend(
-            theme::background(),
-            theme::auto_contrast(),
-            0.6,
-        )),
-        Tok::Str | Tok::StrDouble => fg(theme::text_success()),
-        Tok::StrDoc => fg(theme::text_success()).add_modifier(Modifier::ITALIC),
-        Tok::Name => fg(theme::text_primary()),
-        Tok::NameClass => fg(theme::text_warning()).add_modifier(Modifier::BOLD),
-        Tok::NameDecorator | Tok::NameTag => fg(theme::text_primary()).add_modifier(Modifier::BOLD),
-        Tok::NameFunction => fg(theme::text_warning()).add_modifier(Modifier::UNDERLINED),
-        Tok::NameVariable => fg(theme::text_secondary()),
+        Tok::KeywordConstant => tint(theme::text_success()).add_modifier(Modifier::BOLD),
+        Tok::KeywordNamespace | Tok::NameConstant => tint(theme::text_error()),
+        Tok::Number | Tok::NameAttribute | Tok::NameFunction => tint(theme::text_warning()),
+        Tok::Str | Tok::StrDouble => tint(theme::text_success()),
+        Tok::StrDoc => tint(theme::text_success()).add_modifier(Modifier::ITALIC),
+        Tok::Name => plain(),
+        Tok::NameClass => tint(theme::text_warning()).add_modifier(Modifier::BOLD),
+        Tok::NameDecorator | Tok::NameTag => {
+            tint(theme::text_primary()).add_modifier(Modifier::BOLD)
+        }
+        Tok::NameVariable => tint(theme::text_secondary()),
         Tok::Operator => plain().add_modifier(Modifier::BOLD),
-        Tok::OperatorWord => fg(theme::text_error()).add_modifier(Modifier::BOLD),
+        Tok::OperatorWord => tint(theme::text_error()).add_modifier(Modifier::BOLD),
     }
+}
+
+/// A `$text-*` token color, darkened 20% on light themes to keep 4.5:1 contrast.
+fn tint(color: Color) -> Style {
+    if theme::is_dark() {
+        return fg(color);
+    }
+    fg(theme::blend(color, theme::auto_contrast(), 0.2))
 }
 
 fn fg(color: Color) -> Style {

@@ -34,8 +34,7 @@ from vibe.setup.auth.api_key_persistence import (
     remove_api_key,
     resolve_api_key_provider,
 )
-from vibe.setup.auth.whoami import resolve_tenant_domains
-from vibe.setup.onboarding.context import (
+from vibe.setup.auth.onboarding_context import (
     OnboardingContext,
     browser_auth_account_base,
     browser_auth_requires_origin_rewrite,
@@ -43,6 +42,7 @@ from vibe.setup.onboarding.context import (
     pinned_console_api_base,
     resolve_browser_auth_urls,
 )
+from vibe.setup.auth.whoami import resolve_tenant_domains
 
 SIGN_IN_TARGET_MISTRAL = "mistral"
 SIGN_IN_TARGET_CUSTOM = "custom"

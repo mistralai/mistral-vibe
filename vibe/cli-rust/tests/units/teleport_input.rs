@@ -7,7 +7,8 @@ use vibe_rs::input_modes::{classify, ClassifiedInput, InputMode};
 use vibe_rs::server::proto_teleport::{parse_event, TeleportError, TeleportEvent};
 use vibe_rs::teleport;
 
-use crate::teleport_support::{event, stub};
+use crate::support::send_key;
+use crate::teleport_support::event;
 
 // The target after `&` is trimmed.
 #[test]
@@ -35,8 +36,7 @@ fn ampersand_input_is_a_teleport_with_a_trimmed_prompt() {
 #[test]
 fn typing_ampersand_on_an_empty_prompt_enters_teleport_mode() {
     let mut app = App::default();
-    let (tx, _rx) = tokio::sync::mpsc::channel(1);
-    vibe_rs::input::handle_key(&mut app, &stub(), &tx, KeyCode::Char('&').into());
+    send_key(&mut app, KeyCode::Char('&').into());
     assert_eq!(app.chat_input.mode, InputMode::Teleport);
     assert!(app.chat_input.input.is_empty());
 }

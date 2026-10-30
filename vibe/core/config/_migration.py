@@ -123,6 +123,7 @@ def migrate_config(
     changed |= _migrate_renamed_agents(data)
     changed |= _migrate_seeded_shell_default_timeout(data, seeded_shells)
     changed |= _migrate_unset_auto_compact_threshold(data)
+    changed |= _migrate_removed_tool_paths(data)
     return changed
 
 
@@ -331,6 +332,15 @@ def _drop_unset_threshold(entry: dict[str, Any]) -> bool:
         return False
     del entry["auto_compact_threshold"]
     return True
+
+
+def _migrate_removed_tool_paths(data: dict[str, Any]) -> bool:
+    """Drop ``tool_paths``, which only listed custom Python tools.
+
+    Vibe no longer loads custom Python tools. The folders it listed stay on
+    disk, so their tools can still be migrated to skills.
+    """
+    return data.pop("tool_paths", None) is not None
 
 
 def _migrate_renamed_tools(data: dict[str, Any]) -> bool:

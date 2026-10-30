@@ -242,6 +242,95 @@ def test_measure_importtime_prints_stderr_and_exits_on_failure(
     assert "ImportError: bad wheel" in captured.err
 
 
+def _make_venv(tmp_path: Path) -> Path:
+    venv = tmp_path / "venv"
+    bin_dir = venv / ("Scripts" if mod.sys.platform == "win32" else "bin")
+    bin_dir.mkdir(parents=True)
+    python = bin_dir / ("python.exe" if mod.sys.platform == "win32" else "python")
+    python.write_text("")
+    (venv / "pyvenv.cfg").write_text("")
+    return python
+
+
+def test_existing_venv_python_absolutizes_a_relative_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    python = _make_venv(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    resolved = mod._existing_venv_python(Path("venv/bin/python"))
+
+    assert resolved.is_absolute()
+    assert resolved == python
+
+
+def test_existing_venv_python_does_not_dereference_the_interpreter_symlink(
+    tmp_path: Path,
+) -> None:
+    # `uv venv` symlinks bin/python to the base interpreter; resolving the
+    # symlink would fail the pyvenv.cfg check and run the base interpreter
+    # without the venv.
+    base = tmp_path / "base-python"
+    base.write_text("")
+    python = _make_venv(tmp_path)
+    python.unlink()
+    python.symlink_to(base)
+
+    assert mod._existing_venv_python(python) == python
+
+
+def test_existing_venv_python_requires_pyvenv_cfg(tmp_path: Path) -> None:
+    python = tmp_path / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+
+    with pytest.raises(SystemExit, match="pyvenv.cfg"):
+        mod._existing_venv_python(python)
+
+
+def test_python_mode_measures_the_venv_without_building(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    python = _make_venv(tmp_path)
+    config = _write_config(tmp_path, '[[commands]]\nlabel = "x"\ncode = "import x"\n')
+    # Measurements run with cwd=venv root, so a relative interpreter path would
+    # break: the subprocess must receive the absolute path.
+    monkeypatch.chdir(tmp_path)
+
+    def fail_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("--python mode must not build or install anything")
+
+    monkeypatch.setattr(mod, "_run", fail_run)
+    interpreters: list[str] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        interpreters.append(args[0])
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        mod.sys,
+        "argv",
+        [
+            "check_startup_import_cost.py",
+            "--python",
+            "venv/bin/python",
+            "--config",
+            str(config),
+        ],
+    )
+
+    mod.main()
+
+    assert interpreters == [str(python)]
+    captured = capsys.readouterr()
+    assert "imported modules: 0 (no budget)" in captured.out
+    # The wheel-size report only exists when a wheel was built and installed.
+    assert "installed wheel size" not in captured.out
+
+
 def _write_config(tmp_path: Path, content: str) -> Path:
     target = tmp_path / "config.toml"
     target.write_text(content, encoding="utf-8")

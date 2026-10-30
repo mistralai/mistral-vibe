@@ -1,6 +1,6 @@
 //! Prepared image attachments and their session content-block conversion.
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::types::ContentBlock;
@@ -27,7 +27,7 @@ pub struct PreparedPrompt {
     pub display_text: String,
     #[serde(default)]
     pub prompt_text: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_images")]
+    #[serde(default, deserialize_with = "crate::utils::json::lenient")]
     pub images: Vec<ImageAttachment>,
     /// App-server `MentionStats`, reported as `vibe.at_mention_inserted` when the prompt runs.
     #[serde(default)]
@@ -60,19 +60,6 @@ impl PreparedPrompt {
         content.extend(self.images.iter().map(ImageAttachment::content_block));
         content
     }
-}
-
-fn deserialize_images<'de, D>(deserializer: D) -> Result<Vec<ImageAttachment>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = Value::deserialize(deserializer)?;
-    Ok(value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| serde_json::from_value(item.clone()).ok())
-        .collect())
 }
 
 impl ImageAttachment {

@@ -24,11 +24,6 @@ pub struct VoiceApp {
 }
 
 pub fn open(app: &mut App) {
-    local::add_command_result(
-        &mut app.view.transcript,
-        &new_message_id(),
-        "Voice settings opened...",
-    );
     app.voice_app = VoiceApp {
         open: true,
         values: [
@@ -71,11 +66,6 @@ fn close(app: &mut App, client: &Arc<Client>) {
         .map(|(i, path)| config_write::set_op(path, app.voice_app.values[i]))
         .collect();
     if ops.is_empty() {
-        local::add_command_result(
-            &mut app.view.transcript,
-            &new_message_id(),
-            "Voice settings closed (no changes saved).",
-        );
         return;
     }
     let (Some(session_id), Some(tx)) = (app.session.session_id.clone(), app.command_tx.clone())
@@ -96,9 +86,8 @@ fn close(app: &mut App, client: &Arc<Client>) {
             config_write::write(&client, &session_id, ops, "app-server config update").await;
         let event = match result {
             Ok(runtime) => {
-                if let Some(enabled) = runtime
-                    .pointer("/runtime/config/voiceModeEnabled")
-                    .and_then(Value::as_bool)
+                if let Some(enabled) = crate::server::RuntimeSnapshot::config(&runtime)
+                    .and_then(|c| c.voice_mode_enabled)
                 {
                     if enabled != previous_enabled {
                         tokio::spawn(record_toggle(client.clone(), session_id, enabled));
@@ -140,7 +129,7 @@ pub fn apply_saved(app: &mut App, runtime: &Value, previous_enabled: bool, enabl
         } else {
             "Voice mode disabled."
         };
-        local::add_command_result(&mut app.view.transcript, &new_message_id(), message);
+        local::add_command_status(&mut app.view.transcript, &new_message_id(), message);
     }
     if enabling_audio && !cfg!(feature = "voice") {
         app.show_toast(
@@ -152,9 +141,8 @@ pub fn apply_saved(app: &mut App, runtime: &Value, previous_enabled: bool, enabl
 }
 
 pub fn apply_runtime(app: &mut App, runtime: &Value) {
-    if let Some(enabled) = runtime
-        .pointer("/runtime/config/voiceModeEnabled")
-        .and_then(Value::as_bool)
+    if let Some(enabled) =
+        crate::server::RuntimeSnapshot::config(runtime).and_then(|c| c.voice_mode_enabled)
     {
         app.voice.mode_enabled = enabled;
         if !enabled {

@@ -107,6 +107,7 @@ class SessionWorktrees:
         on_progress: WorktreeProgressCallback | None = None,
         *,
         trust_store: TrustedFoldersManager | None = None,
+        copy_on_write: bool = False,
     ) -> WorktreeResolution:
         """Resolve off the event loop, cleaning up if the start is cancelled."""
         request = _requested(options)
@@ -128,7 +129,11 @@ class SessionWorktrees:
                         pending_hold.release()
                 raise
         resolved = await self._lifecycle.resolve_for_start(
-            request, _base_cwd(options), on_progress, trust_store=trust_store
+            request,
+            _base_cwd(options),
+            on_progress,
+            trust_store=trust_store,
+            copy_on_write=copy_on_write,
         )
         return _rewritten(options, resolved)
 
@@ -137,10 +142,11 @@ class SessionWorktrees:
         options: SessionOptions,
         *,
         trust_store: TrustedFoldersManager | None = None,
+        copy_on_write: bool = False,
     ) -> WorktreeResolution:
         """Isolate a managed source while retaining an unmanaged workspace."""
         resolved = await self._lifecycle.resolve_fork(
-            _base_cwd(options), trust_store=trust_store
+            _base_cwd(options), trust_store=trust_store, copy_on_write=copy_on_write
         )
         if resolved.prepared is None:
             return WorktreeResolution(options=options)
@@ -157,6 +163,7 @@ class SessionWorktrees:
         on_progress: WorktreeProgressCallback | None = None,
         *,
         trust_store: TrustedFoldersManager | None = None,
+        copy_on_write: bool = False,
     ) -> WorktreeResolution:
         """Raise the worktree the session asked for and move it in.
 
@@ -166,7 +173,7 @@ class SessionWorktrees:
         """
         previous = _base_cwd(started_in)
         resolution = await self.resolve_for_start(
-            requested, on_progress, trust_store=trust_store
+            requested, on_progress, trust_store=trust_store, copy_on_write=copy_on_write
         )
         cwd = _base_cwd(resolution.options)
         announced = False

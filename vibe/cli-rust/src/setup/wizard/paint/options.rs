@@ -2,6 +2,8 @@
 //! bordered cards with a badge, an "or" divider, a selection marker, and the
 //! navigation hints.
 
+use std::borrow::Cow;
+
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders};
@@ -10,45 +12,64 @@ use ratatui::Frame;
 use super::panel::{render, Hint, Row, Subtitle};
 use crate::app::App;
 use crate::hints;
+use crate::setup::wizard::ValidationState;
 use crate::ui::theme;
 
 /// Esc goes back one screen everywhere except the welcome screen.
 const OPTION_HINTS: &[hints::Hint] = &[hints::NAVIGATE, hints::SELECT, hints::BACK];
 
+#[derive(Clone)]
 pub(super) struct Opt {
-    pub title: &'static str,
+    pub title: Cow<'static, str>,
     pub badge: &'static str,
     pub desc: &'static str,
 }
 
+/// `--setup`'s choice between Mistral AI and the active model's provider.
+pub(super) fn provider_opts(provider: &str) -> Vec<Opt> {
+    vec![
+        Opt {
+            title: Cow::Borrowed("Set up Mistral AI"),
+            badge: "Recommended",
+            desc: "Connectors, Mistral models and more. Sign in or paste a key.",
+        },
+        Opt {
+            title: Cow::Owned(format!("Set up {provider}")),
+            badge: "",
+            desc: "Paste its API key to keep using your active model.",
+        },
+    ]
+}
+
 pub(super) const AUTH_OPTS: [Opt; 2] = [
     Opt {
-        title: "Launch browser",
+        title: Cow::Borrowed("Launch browser"),
         badge: "Recommended",
         desc: "Sign in to Mistral AI Studio and finish setup automatically.",
     },
     Opt {
-        title: "Use an API key",
+        title: Cow::Borrowed("Use an API key"),
         badge: "",
         desc: "Already have a key? Paste it manually instead.",
     },
 ];
 pub(super) const TARGET_OPTS: [Opt; 2] = [
     Opt {
-        title: "Mistral AI",
+        title: Cow::Borrowed("Mistral AI"),
         badge: "Recommended",
         desc: "Sign in to Mistral AI Studio.",
     },
     Opt {
-        title: "Other",
+        title: Cow::Borrowed("Other"),
         badge: "",
         desc: "Sign in to a Mistral-compatible deployment on your own domain.",
     },
 ];
 
 /// Draw a centered option list with title, subtitle, bordered cards, markers,
-/// and an optional warning line under the cards. The panel only grows when
-/// the warning is armed; without it, both option screens share one rhythm.
+/// and an optional warning under the cards: the armed override confirm wins
+/// over the shell-key notice. The panel only grows when one shows; without
+/// it, both option screens share one rhythm.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw(
     app: &mut App,
@@ -57,20 +78,25 @@ pub(super) fn draw(
     area: Rect,
     selected: usize,
     title: &str,
-    subtitle: &'static str,
-    opts: &'static [Opt],
+    subtitle: &str,
+    opts: Cow<'static, [Opt]>,
     chat_frame: &str,
     warning: Option<&str>,
+    shell_key_override: Option<&str>,
 ) {
     // The wrapped warning sits one blank row under the cards; the hint keeps
     // the two blank rows every panel screen uses after the last content row.
     let mut rows = vec![Row::Blank(2), Row::OptionCards { selected, opts }];
-    match warning.map(|domain| wrapped_warning(domain, 68)) {
-        Some(lines) => {
-            rows.push(Row::Blank(1));
-            rows.push(Row::Warning(lines));
-        }
-        None => rows.push(Row::Blank(2)),
+    if let Some(domain) = warning {
+        rows.push(Row::Blank(1));
+        rows.push(Row::Warning(wrapped_warning(domain, 68)));
+    } else if let Some(env_var) = shell_key_override {
+        rows.push(Row::Blank(1));
+        rows.push(Row::Feedback(ValidationState::Warning(
+            shell_override_notice(env_var),
+        )));
+    } else {
+        rows.push(Row::Blank(2));
     }
     rows.push(Row::Hint(Hint::Keys(OPTION_HINTS)));
     render(
@@ -107,6 +133,13 @@ pub(super) fn draw_warning(f: &mut Frame, x: u16, y: u16, lines: &[String]) {
         }
         f.buffer_mut().set_string(col, row, rest, style);
     }
+}
+
+pub(super) fn shell_override_notice(env_var: &str) -> String {
+    format!(
+        "{env_var} is set in your shell and overrides the key saved by setup. \
+         Unset it (e.g. in your shell rc file) to use the new key."
+    )
 }
 
 fn wrapped_warning(domain: &str, width: u16) -> Vec<String> {
@@ -176,7 +209,7 @@ pub(super) fn draw_option_cards(
         f.buffer_mut().set_string(
             card_area.x + 2,
             card_area.y + 1,
-            option.title,
+            &option.title,
             Style::default()
                 .fg(theme::foreground())
                 .add_modifier(Modifier::BOLD),

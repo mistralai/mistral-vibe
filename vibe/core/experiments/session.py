@@ -138,6 +138,13 @@ async def initialize_experiments(
         clear_cached_eval_responses()
     if not config.enable_telemetry:
         return False, None
+    from vibe.core.telemetry.send import resolve_credential_cache_key
+
+    cache_key = (
+        await resolve_credential_cache_key(config)
+        if config.experiments.enable
+        else None
+    )
     attributes, user_plan = await _fetch_plan_attributes(
         config=config,
         launch_context=launch_context,
@@ -170,7 +177,7 @@ async def initialize_experiments(
         mark_experiments_eval_failed()
     else:
         try:
-            store_cached_eval_response(config, state)
+            store_cached_eval_response(config, state, fetched_for=cache_key)
         except Exception:
             logger.exception("Failed to cache experiment eval response")
     # Persist ONLY the sticky variant assignment. Plan/org attributes and

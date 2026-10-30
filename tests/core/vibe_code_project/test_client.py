@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-import httpx
+import httpx2
 import pytest
 
 from vibe.core.vibe_code_project import VibeCodeProjectApiError, VibeCodeProjectClient
@@ -17,12 +17,12 @@ async def test_context_manager_uses_vibe_http_client_by_default() -> None:
 
 @pytest.mark.asyncio
 async def test_list_projects_fetches_first_page() -> None:
-    seen_request: httpx.Request | None = None
+    seen_request: httpx2.Request | None = None
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal seen_request
         seen_request = request
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "items": [
@@ -45,7 +45,7 @@ async def test_list_projects_fetches_first_page() -> None:
             },
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
         client = VibeCodeProjectClient(
             "https://chat.example.com/", "api-key", client=http
         )
@@ -69,14 +69,14 @@ async def test_list_projects_fetches_first_page() -> None:
 
 @pytest.mark.asyncio
 async def test_list_projects_sends_cursor_and_limit() -> None:
-    seen_request: httpx.Request | None = None
+    seen_request: httpx2.Request | None = None
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal seen_request
         seen_request = request
-        return httpx.Response(200, json={"items": [], "nextCursor": None})
+        return httpx2.Response(200, json={"items": [], "nextCursor": None})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
         client = VibeCodeProjectClient(
             "https://chat.example.com", "api-key", client=http
         )
@@ -89,10 +89,10 @@ async def test_list_projects_sends_cursor_and_limit() -> None:
 
 @pytest.mark.asyncio
 async def test_list_projects_raises_on_http_error() -> None:
-    async def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, text="forbidden")
+    async def handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(403, text="forbidden")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
         client = VibeCodeProjectClient(
             "https://chat.example.com", "api-key", client=http
         )
@@ -102,12 +102,12 @@ async def test_list_projects_raises_on_http_error() -> None:
 
 @pytest.mark.asyncio
 async def test_create_project_posts_repo_linked_project() -> None:
-    seen_request: httpx.Request | None = None
+    seen_request: httpx2.Request | None = None
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal seen_request
         seen_request = request
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "id": "project-1",
@@ -122,7 +122,7 @@ async def test_create_project_posts_repo_linked_project() -> None:
             },
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
         client = VibeCodeProjectClient(
             "https://chat.example.com/", "api-key", client=http
         )
@@ -150,12 +150,12 @@ async def test_create_project_posts_repo_linked_project() -> None:
 
 @pytest.mark.asyncio
 async def test_create_project_posts_project_without_repository() -> None:
-    seen_request: httpx.Request | None = None
+    seen_request: httpx2.Request | None = None
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal seen_request
         seen_request = request
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "id": "project-1",
@@ -165,7 +165,7 @@ async def test_create_project_posts_project_without_repository() -> None:
             },
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
         client = VibeCodeProjectClient(
             "https://chat.example.com", "api-key", client=http
         )
@@ -181,10 +181,10 @@ async def test_create_project_posts_project_without_repository() -> None:
 
 @pytest.mark.asyncio
 async def test_create_project_raises_on_http_error() -> None:
-    async def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(400, text="invalid repo")
+    async def handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(400, text="invalid repo")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
         client = VibeCodeProjectClient(
             "https://chat.example.com", "api-key", client=http
         )
@@ -198,10 +198,10 @@ async def test_create_project_raises_on_http_error() -> None:
 
 @pytest.mark.asyncio
 async def test_list_projects_raises_on_invalid_json() -> None:
-    async def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"not-json")
+    async def handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=b"not-json")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
         client = VibeCodeProjectClient(
             "https://chat.example.com", "api-key", client=http
         )
@@ -211,12 +211,12 @@ async def test_list_projects_raises_on_invalid_json() -> None:
 
 @pytest.mark.asyncio
 async def test_list_projects_raises_on_invalid_schema() -> None:
-    async def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    async def handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200, content=json.dumps({"items": [{"id": "missing-name"}]})
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
         client = VibeCodeProjectClient(
             "https://chat.example.com", "api-key", client=http
         )

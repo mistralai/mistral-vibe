@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::server::PublicTurn;
+
 /// The one taxonomy for how a headless run ended. Each maps to one process exit code:
 /// - 0: `Finished`
 /// - 1: `UsageError`, `ConfigError`
@@ -212,12 +214,11 @@ impl std::fmt::Display for TurnStop {
 
 /// Read a `TurnStop` from a turn-completed notification's turn object.
 /// An interrupted status wins over the stop reason.
-pub fn turn_stop_from_turn(turn: &Value) -> Option<TurnStop> {
-    let status = turn.get("status").and_then(Value::as_str)?;
-    if status == "interrupted" {
+pub fn turn_stop_from_turn(turn: &PublicTurn) -> Option<TurnStop> {
+    if turn.status()? == "interrupted" {
         return Some(TurnStop::Interrupted);
     }
-    match turn.get("stopReason").and_then(Value::as_str) {
+    match turn.stop_reason.as_deref() {
         Some("limit") => Some(TurnStop::Limit),
         Some("length") => Some(TurnStop::Length),
         _ => None,

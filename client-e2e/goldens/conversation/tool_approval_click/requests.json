@@ -31,7 +31,6 @@
   "params": {
    "result": {
     "callbackId": "callback-click",
-    "error": null,
     "output": {
      "decision": {
       "type": "approve_permanently"

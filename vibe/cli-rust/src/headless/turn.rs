@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 
 use super::drive::RunState;
 use super::pre_turn;
-use super::report::compute_session_cost;
 use super::subagents::wait_for_subagents;
 use super::usage::UsageBaseline;
 use crate::cli::OutputFormat;
@@ -16,7 +15,7 @@ use crate::headless_history::read_history;
 use crate::headless_output::Output;
 use crate::headless_run::{StopRequests, TurnCounter};
 use crate::run_export::{turn_stop_from_turn, RunOutcome, TurnStop};
-use crate::server::{notification, Client, Notification};
+use crate::server::{notification, Client, Notification, PublicTurn};
 
 /// How the turn ended, as far as the turn loop can tell.
 pub(super) enum TurnEnd {
@@ -105,38 +104,21 @@ pub(super) async fn run_turn_loop(
             notification::SESSION_STATS_UPDATED => {
                 // Observe usage for budget enforcement.
                 if let Some(stats) = notification.params.get("stats") {
-                    let stats = &usage_baseline.run_stats(stats);
-                    let total_tokens = stats
-                        .get("sessionPromptTokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0)
-                        + stats
-                            .get("sessionCompletionTokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
-                    let cost = compute_session_cost(stats);
-                    stop.observe_usage(total_tokens, cost);
+                    let stats = usage_baseline.run_stats(&crate::utils::json::read(stats));
+                    stop.observe_usage(stats.total_tokens(), stats.cost());
                 }
             }
             notification::TURN_COMPLETED if matches_turn(&notification.params, turn_id) => {
                 // The run ends once its subagents do, so the export sees how each ended.
                 wait_for_subagents(client, notifications, session_id, stop).await;
-                let turn = notification.params.pointer("/turn").unwrap_or(&Value::Null);
-                let status = turn.get("status").and_then(Value::as_str).unwrap_or("");
-                if status == "failed" {
+                let turn = PublicTurn::read(&notification.params);
+                if turn.status() == Some("failed") {
                     return TurnEnd::Failed {
-                        code: turn
-                            .pointer("/error/code")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        message: turn
-                            .pointer("/error/message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Turn failed")
-                            .to_owned(),
+                        code: turn.error_code().map(str::to_owned),
+                        message: turn.error_message().unwrap_or("Turn failed").to_owned(),
                     };
                 }
-                let stop_reason = turn_stop_from_turn(turn);
+                let stop_reason = turn_stop_from_turn(&turn);
                 let final_response =
                     match finalize_output(client, session_id, Some(turn_id), output).await {
                         Ok(response) => response,

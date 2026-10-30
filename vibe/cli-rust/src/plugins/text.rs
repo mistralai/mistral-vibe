@@ -49,7 +49,7 @@ pub fn reload_report(changes: &[Change], state: &PluginCatalogState) -> String {
     if changes.is_empty() {
         return NOTHING_CHANGED.to_owned();
     }
-    let mut lines = vec!["### Plugins reloaded".to_owned(), String::new()];
+    let mut lines = vec!["Plugins reloaded.".to_owned(), String::new()];
     for change in changes {
         let version = state
             .plugins

@@ -1134,3 +1134,26 @@ async def test_orchestrator_deepcopies_and_stays_functional() -> None:
 
     assert forked.config.value == "forked"
     assert orch.config.value == "hello"
+
+
+@pytest.mark.asyncio
+async def test_reload_layer_reports_a_schema_break_as_a_config_error() -> None:
+    """*Prepare*: A loaded config; one layer then breaks the schema.
+    *Do*: Re-read that layer alone.
+    *Assert*: The readable config error, as ``reload`` raises, and the
+    previous snapshot is kept.
+    """
+    from vibe.core.config.builder import InvalidConfigError
+
+    # Prepare
+    layer = FakeLayer(name="admin", data={"value": "original"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    layer._data = {"value": 42}
+
+    # Do / Assert
+    with pytest.raises(InvalidConfigError):
+        await orch.reload_layer("admin")
+
+    assert orch.config.value == "original"

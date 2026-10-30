@@ -37,11 +37,11 @@
 .vibe-r3 { fill: #00cdcd }
 .vibe-r4 { fill: #c5c8c6;font-weight: bold }
 .vibe-r5 { fill: #868887 }
-.vibe-r6 { fill: #5c5cff;text-decoration: underline; }
-.vibe-r7 { fill: #00cd00;font-weight: bold;text-decoration: underline; }
-.vibe-r8 { fill: #0000ee;font-weight: bold;text-decoration: underline; }
+.vibe-r6 { fill: #ff00ff;font-weight: bold }
+.vibe-r7 { fill: #cdcd00;font-weight: bold }
+.vibe-r8 { fill: #5c5cff;font-weight: bold;text-decoration: underline; }
 .vibe-r9 { fill: #c5c8c6;font-style: italic; }
-.vibe-r10 { fill: #00cd00;font-weight: bold;font-style: italic; }
+.vibe-r10 { fill: #cdcd00;font-weight: bold;font-style: italic; }
 .vibe-r11 { fill: #cdcd00 }
 .vibe-r12 { fill: #000000 }
     </style>
@@ -191,7 +191,7 @@
 </text><text class="vibe-r1" x="1464" y="239.6" textLength="12.2" clip-path="url(#vibe-line-9)">
 </text><text class="vibe-r1" x="1464" y="264" textLength="12.2" clip-path="url(#vibe-line-10)">
 </text><text class="vibe-r1" x="1464" y="288.4" textLength="12.2" clip-path="url(#vibe-line-11)">
-</text><text class="vibe-r6" x="24.4 36.6 48.8" y="312.8" clip-path="url(#vibe-line-12)" style="font-variant-ligatures:none;font-kerning:none">The</text><text class="vibe-r6" x="73.2 85.4 97.6 109.8 122 134.2 146.4 158.6 170.8 183 195.2" y="312.8" clip-path="url(#vibe-line-12)" style="font-variant-ligatures:none;font-kerning:none">consequence</text><text class="vibe-r6" x="219.6 231.8 244" y="312.8" clip-path="url(#vibe-line-12)" style="font-variant-ligatures:none;font-kerning:none">for</text><text class="vibe-r7" x="268.4 280.6 292.8 305 317.2 329.4 341.6 353.8 366 378.2" y="312.8" clip-path="url(#vibe-line-12)" style="font-variant-ligatures:none;font-kerning:none">/log-level</text><text class="vibe-r1" x="1464" y="312.8" textLength="12.2" clip-path="url(#vibe-line-12)">
+</text><text class="vibe-r6" x="24.4 36.6 48.8 61 73.2 85.4 97.6 109.8 122 134.2 146.4 158.6 170.8 183 195.2 207.4 219.6 231.8 244 256.2" y="312.8" clip-path="url(#vibe-line-12)" style="font-variant-ligatures:none;font-kerning:none">The consequence for </text><text class="vibe-r7" x="268.4 280.6 292.8 305 317.2 329.4 341.6 353.8 366 378.2" y="312.8" clip-path="url(#vibe-line-12)" style="font-variant-ligatures:none;font-kerning:none">/log-level</text><text class="vibe-r1" x="1464" y="312.8" textLength="12.2" clip-path="url(#vibe-line-12)">
 </text><text class="vibe-r1" x="1464" y="337.2" textLength="12.2" clip-path="url(#vibe-line-13)">
 </text><text class="vibe-r1" x="1464" y="361.6" textLength="12.2" clip-path="url(#vibe-line-14)">
 </text><text class="vibe-r8" x="622.2 634.4 646.6 658.8" y="386" clip-path="url(#vibe-line-15)" style="font-variant-ligatures:none;font-kerning:none">Bold</text><text class="vibe-r8" x="683.2 695.4 707.6 719.8 732 744.2 756.4" y="386" clip-path="url(#vibe-line-15)" style="font-variant-ligatures:none;font-kerning:none">heading</text><text class="vibe-r8" x="780.8 793 805.2 817.4" y="386" clip-path="url(#vibe-line-15)" style="font-variant-ligatures:none;font-kerning:none">link</text><text class="vibe-r1" x="1464" y="386" textLength="12.2" clip-path="url(#vibe-line-15)">

@@ -19,7 +19,7 @@ protocol and the Runtime completion adapter. It never imports ``vibe``/``vibe.co
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum, auto
 import hashlib
@@ -33,34 +33,26 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, Field, JsonValue
 
 from mistralai_vibe_local_harness.protocol import (
-    RustCompletionResult,
     RustExternalToolCall,
     RustMessage,
     RustProvidedToolCall,
     RustRuntimeBuiltinToolCall,
     RustSystemMessage,
     RustTextContentBlock,
-    RustToolDefinition,
     RustToolMessage,
     RustUserMessage,
 )
 from mistralai_vibe_local_harness.session_protocol import JsonObject
 from mistralai_vibe_local_harness.vibe._completion import report_request_sent
-from mistralai_vibe_local_harness.vibe._credentials import (
-    ProviderAuthRequired,
-    ProviderCredentialSnapshot,
-)
+from mistralai_vibe_local_harness.vibe._credentials import ProviderAuthRequired
 from mistralai_vibe_local_harness.vibe._runtime_config import (
-    LocalModelRoute,
     LocalRuntimeAdapterConfig,
     ProviderRetry,
-    ProviderRetryObserver,
 )
-from mistralai_vibe_local_harness.vibe.adapters.generic import (
-    execute_generic_completion,
-)
-from mistralai_vibe_local_harness.vibe.adapters.mistral import (
-    execute_mistral_completion,
+from mistralai_vibe_local_harness.vibe._utility_completion import (
+    CompletionFn,
+    UtilityCompletionError,
+    execute_utility_completion,
 )
 
 logger = logging.getLogger(__name__)
@@ -306,7 +298,8 @@ async def _classify_safely(
         result = await classifier.classify(request)
     except Exception as error:
         latency_ms = (time.perf_counter() - start) * 1000
-        described = describe_classifier_error(error)
+        failure = _provider_failure(error)
+        described = describe_classifier_error(failure)
         logger.warning(
             "smart_approve classifier error tool=%s model=%s latency_ms=%.0f error=%s",
             request.tool_name,
@@ -322,10 +315,17 @@ async def _classify_safely(
             model=model,
             latency_ms=latency_ms,
             error=described,
-            error_type=type(error).__name__,
+            error_type=type(failure).__name__,
         )
 
     return result
+
+
+def _provider_failure(error: BaseException) -> BaseException:
+    # Telemetry tells failures apart by the adapter's error, not its wrapper.
+    if isinstance(error, UtilityCompletionError) and error.__cause__ is not None:
+        return error.__cause__
+    return error
 
 
 def describe_classifier_error(error: BaseException) -> str:
@@ -337,31 +337,6 @@ def describe_classifier_error(error: BaseException) -> str:
 # ---------------------------------------------------------------------------
 # Model classifier
 # ---------------------------------------------------------------------------
-
-
-class CompletionFn(Protocol):
-    """One completion adapter invocation, carrying the call's attribution.
-
-    The leading parameters are positional-only so any callable matching the
-    adapters' shape satisfies the protocol, whatever it names its arguments.
-    ``metadata`` is the Host's request metadata for the call, or ``None`` when
-    the Host provides no source. The generic adapters accept and drop it: their
-    provider APIs have no request-metadata channel, so a classify call on one
-    of them is attributed only through the Host's request-sent telemetry.
-    """
-
-    async def __call__(
-        self,
-        messages: list[RustMessage],
-        tools: list[RustToolDefinition],
-        config: LocalRuntimeAdapterConfig,
-        credential: ProviderCredentialSnapshot,
-        route: LocalModelRoute,
-        /,
-        *,
-        metadata: Mapping[str, str] | None = None,
-        on_retry: ProviderRetryObserver | None = None,
-    ) -> RustCompletionResult: ...
 
 
 class ClassifierTimeout(TimeoutError):
@@ -416,14 +391,6 @@ def _classifier_completion_config(
     )
 
 
-def _completion_for_backend(backend: str) -> CompletionFn:
-    if backend == "mistral":
-        return execute_mistral_completion
-    if backend == "generic":
-        return execute_generic_completion
-    raise ValueError(f"unsupported classifier completion backend: {backend}")
-
-
 class ModelRiskClassifier:
     """Model-based classifier that calls a fast utility model with stripped context.
 
@@ -465,7 +432,6 @@ class ModelRiskClassifier:
             raise RuntimeError(
                 f"classifier credential unavailable: {credential.reason}"
             )
-        complete = self._complete or _completion_for_backend(run_config.backend)
         # The classify completion is attributed and counted like any other: the
         # Host's metadata source names it, and its request shape reaches the
         # Host telemetry sink, so it is never lumped in with the session's own
@@ -487,22 +453,27 @@ class ModelRiskClassifier:
 
         start = time.perf_counter()
         try:
-            completion = await asyncio.wait_for(
-                complete(
+            reply = await asyncio.wait_for(
+                execute_utility_completion(
                     messages,
-                    [],
-                    run_config,
-                    credential,
-                    route,
+                    config=run_config,
+                    credential=credential,
+                    route=route,
                     metadata=metadata,
                     on_retry=record_retry,
+                    complete=self._complete,
                 ),
                 timeout=self._timeout_s,
             )
         except TimeoutError as error:
             raise ClassifierTimeout(self._timeout_s, retries) from error
+        except UtilityCompletionError as error:
+            # A stalled stream is a timeout too, whichever side noticed it.
+            if isinstance(error.__cause__, TimeoutError):
+                raise ClassifierTimeout(self._timeout_s, retries) from error.__cause__
+            raise
         latency_ms = (time.perf_counter() - start) * 1000
-        return _parse_result(completion, model=route.model, latency_ms=latency_ms)
+        return _parse_result(reply.text, model=route.model, latency_ms=latency_ms)
 
 
 def default_tool_risk_classifier(
@@ -512,9 +483,9 @@ def default_tool_risk_classifier(
 
 
 def _parse_result(
-    completion: RustCompletionResult, *, model: str | None, latency_ms: float
+    text: str, *, model: str | None, latency_ms: float
 ) -> RiskClassificationResult:
-    content = _strip_code_fences(_completion_text(completion))
+    content = _strip_code_fences(text)
     parsed = json.loads(content)
     if not isinstance(parsed, dict):
         raise TypeError("classifier response must be a JSON object")
@@ -555,12 +526,6 @@ def _verdict(
     if risk_level == "high" and user_authorization not in _AUTHORIZED_LEVELS:
         return ClassificationVerdict.PROMPT
     return ClassificationVerdict.ALLOW
-
-
-def _completion_text(completion: RustCompletionResult) -> str:
-    return "".join(
-        part.text for part in completion.parts if isinstance(part, RustTextContentBlock)
-    )
 
 
 def _strip_code_fences(content: str) -> str:

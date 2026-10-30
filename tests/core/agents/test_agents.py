@@ -432,8 +432,8 @@ class TestAgentManager:
         build_config: ConfigBuilder,
         load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        """*Prepare*: agents/accept-edits.toml sets only one of the two bash
-        timeouts.
+        """*Prepare*: agents/accept-edits.toml sets only a bash default above
+        Vibe's maximum.
         *Do*: Start in accept-edits, the default mode.
         *Assert*: The session starts on the builtin, and the ignored file is
         logged with its config error.
@@ -441,7 +441,7 @@ class TestAgentManager:
         agents_dir = tmp_path / "agents"
         agents_dir.mkdir()
         path = agents_dir / "accept-edits.toml"
-        path.write_text("[tools.bash]\ndefault_timeout = 30\n", encoding="utf-8")
+        path.write_text("[tools.bash]\ndefault_timeout = 600\n", encoding="utf-8")
         config = build_config(agent_paths=[agents_dir])
 
         with caplog.at_level("WARNING"):

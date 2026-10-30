@@ -117,6 +117,7 @@ class ConfigView(ProtocolModel):
     # Datalake events stay server-gated; clients never decide that.
     enable_telemetry: bool = True
     experimental_enable_registry_skills: bool = False
+    experimental_enable_local_projects: bool = False
     models: list[ModelConfigView]
     transcribe_models: list[str]
     tts_models: list[str]

@@ -45,6 +45,19 @@ pub(crate) fn line(hints: &[Hint]) -> Line<'static> {
     Line::from(spans(hints))
 }
 
+/// Inline status hints: `key to action` pairs joined by ` · `, for loading-like lines.
+pub(crate) fn inline_spans(hints: &[Hint]) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(hints.len() * 3);
+    for (index, &(keys, action)) in hints.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" · ", action_style()));
+        }
+        spans.push(Span::styled(keys, key_style()));
+        spans.push(Span::styled(format!(" to {action}"), action_style()));
+    }
+    spans
+}
+
 /// Draw a hint row at `(x, y)`, clipped two columns before the frame's right edge (a box border and padding).
 pub(crate) fn draw(f: &mut Frame, x: u16, y: u16, hints: &[Hint]) {
     let right = f.area().right().saturating_sub(2);

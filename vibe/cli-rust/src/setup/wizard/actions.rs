@@ -72,22 +72,31 @@ pub async fn handle_onboarding_action(
             if let Some(previous) = sign_in_rx.take() {
                 previous.abort();
             }
-            *sign_in_rx = Some(browser_sign_in::spawn(
-                wizard
+            *sign_in_rx = Some(
+                if wizard
                     .context
-                    .provider
-                    .browser_auth_base_url
-                    .as_deref()
-                    .unwrap_or_default(),
-                wizard
-                    .context
-                    .provider
-                    .browser_auth_api_base_url
-                    .as_deref()
-                    .unwrap_or_default(),
-                wizard.context.provider.browser_auth_allow_origin_rewrite,
-                wizard.context.enable_system_trust_store,
-            ));
+                    .uses_oidc(wizard.sign_in_target_selected == 0)
+                {
+                    crate::setup::auth::oidc::spawn(client.clone())
+                } else {
+                    browser_sign_in::spawn(
+                        wizard
+                            .context
+                            .provider
+                            .browser_auth_base_url
+                            .as_deref()
+                            .unwrap_or_default(),
+                        wizard
+                            .context
+                            .provider
+                            .browser_auth_api_base_url
+                            .as_deref()
+                            .unwrap_or_default(),
+                        wizard.context.provider.browser_auth_allow_origin_rewrite,
+                        wizard.context.enable_system_trust_store,
+                    )
+                },
+            );
             wizard.browser_sign_in = BrowserSignInState {
                 running: true,
                 variant: SignInVariant::Pending,
@@ -115,6 +124,7 @@ pub async fn handle_onboarding_action(
             None
         }
         Action::SubmitApiKey(key) => submit_api_key(wizard, client, &key).await,
+        Action::CompleteOidc => submit_choices(wizard, client, &mut Vec::new()).await,
     }
 }
 
@@ -126,6 +136,13 @@ async fn submit_api_key(
     client: &Arc<Client>,
     api_key: &str,
 ) -> Option<Close> {
+    if wizard.context.oidc_enabled && wizard.context.provider.api_key_env_var == "MISTRAL_API_KEY" {
+        wizard.api_key_input.validation = super::ValidationState::Invalid(
+            "OIDC mode requires browser sign-in; disable VIBE_CLI_OIDC_ENABLED to use an API key"
+                .into(),
+        );
+        return None;
+    }
     // The telemetry `custom_domain` property: the
     // wizard configured a non-default browser auth base.
     let custom_domain = context::configured_custom_domain(&wizard.context.provider).is_some();
@@ -156,7 +173,8 @@ async fn submit_api_key(
         }
         rpc::StoreOutcome::Completed => {}
     }
-    submit_choices(wizard, client, api_key, &mut warnings).await
+    resolve_tenant(wizard, api_key).await;
+    submit_choices(wizard, client, &mut warnings).await
 }
 
 /// The credentials' config half: a non-default console resolves
@@ -164,12 +182,7 @@ async fn submit_api_key(
 /// needs only the API key), then the wizard's choices land through
 /// `setup/submit-choices` — the full choices every time, drift judged
 /// server-side, the theme whenever one was selected.
-async fn submit_choices(
-    wizard: &mut OnboardingState,
-    client: &Arc<Client>,
-    api_key: &str,
-    warnings: &mut Vec<String>,
-) -> Option<Close> {
+async fn resolve_tenant(wizard: &mut OnboardingState, api_key: &str) {
     if wizard.context.console_base_url != context::DEFAULT_CONSOLE_BASE_URL
         // Tenant domains are not re-resolved
         // when provider, console, and vibe URL still equal the config
@@ -188,6 +201,14 @@ async fn submit_choices(
         wizard.context.provider = provider;
         wizard.context.vibe_base_url = vibe;
     }
+}
+
+/// Persist provider, URLs, and theme for either authentication path.
+async fn submit_choices(
+    wizard: &mut OnboardingState,
+    client: &Arc<Client>,
+    warnings: &mut Vec<String>,
+) -> Option<Close> {
     let choices = submit::choices(wizard);
     let outcome = match rpc::submit_choices(client, &choices).await {
         Ok(outcome) => outcome,

@@ -15,7 +15,8 @@ import respx
 import tomli_w
 
 from tests.app_server.backend_contract.conftest import connect_backend_contract_host
-from tests.backend.data.mistral import mistral_completion
+from tests.stubs.mistral_responses import mistral_completion
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.events import ServerWarning
 from vibe.app_server.models import PublicCheckpointEntry, PublicMessageEntry
 from vibe.app_server.protocol import ClientCapabilities, SessionOptions
@@ -61,14 +62,18 @@ def _reply(content: str, *, prompt_tokens: int) -> httpx.Response:
 
 @pytest_asyncio.fixture
 async def small_window_session(
-    config_dir: Path, backend_contract_mistral_api: respx.Route
+    config_dir: Path,
+    backend_contract_mistral_api: respx.Route,
+    process_services: ProcessServices,
 ) -> AsyncIterator[AppServerSession]:
     config_file = config_dir / "config.toml"
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
     config["models"][0]["max_context_length"] = _CONTEXT_WINDOW
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
     connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     session = await connection.host.open_session()
     try:

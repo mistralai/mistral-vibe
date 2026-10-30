@@ -49,30 +49,21 @@ async def test_disabled_answer_with_nothing_loaded_leaves_the_layer_alone() -> N
 
 
 @pytest.mark.parametrize(
-    ("source", "saved", "fetched", "expected"),
+    ("saved", "expected"),
     [
-        # The fetch failed, so the cached copy already failed: local config.
-        ("fetched", "cached", None, "none"),
-        # The answer failed and differs from the cached copy: try that copy.
-        ("fetched", "cached", "answer", "cached"),
-        # ... but not when the answer is the cached copy.
-        ("fetched", "same", "same", "none"),
-        ("fetched", None, "answer", "none"),
-        # "No managed config": nothing applied, never the revoked cached copy.
-        ("fetched", "cached", "", None),
+        # The cached copy failed: local config.
+        ("cached", "none"),
         # Nothing applied (no API key, nothing cached): local config's failure.
-        ("fetched", None, None, None),
-        ("cached", "cached", None, "none"),
-        ("cached", None, None, None),
-        ("none", None, None, None),
+        (None, None),
     ],
 )
+@pytest.mark.parametrize("source", ["ensured", "cached"])
 def test_next_source_never_builds_the_same_org_config_twice(
-    source: str, saved: str | None, fetched: str | None, expected: str | None
+    source: str, saved: str | None, expected: str | None
 ) -> None:
     from vibe.app_server._admin_config import OrgConfigAttempt, OrgConfigSource
 
-    attempt = OrgConfigAttempt(OrgConfigSource(source), saved=saved, fetched=fetched)
+    attempt = OrgConfigAttempt(OrgConfigSource(source), saved=saved)
 
     assert attempt.next_source() == (
         None if expected is None else OrgConfigSource(expected)
@@ -80,28 +71,24 @@ def test_next_source_never_builds_the_same_org_config_twice(
 
 
 @pytest.mark.parametrize(
-    ("source", "fetched", "fetch", "reported"),
+    ("fetch", "reported"),
     [
-        # Nothing replaced the cached copy: its failure is the one to report.
-        ("cached", None, None, True),
-        ("fetched", None, "fetch_failed", True),
-        # A fetched answer replaced it, or "no managed config" revoked it.
-        ("fetched", "answer", "applied", False),
-        ("fetched", "", "disabled", False),
-        # The fetched answer failed too: that failure is the one to report.
-        ("fetched", None, "apply_failed", False),
+        (None, True),
+        # A fetch that failed kept the cached copy: its failure is the one.
+        ("fetch_failed", True),
+        # Any other fetch failure is the one to report.
+        ("parse_failed", False),
     ],
 )
-def test_a_cached_copy_failure_is_reported_only_when_nothing_replaced_it(
-    source: str, fetched: str | None, fetch: str | None, reported: bool
+def test_a_cached_copy_failure_is_reported_unless_the_fetch_has_its_own(
+    fetch: str | None, reported: bool
 ) -> None:
     from vibe.app_server._admin_config import OrgConfigAttempt, OrgConfigSource
     from vibe.core.config.admin_config import AdminConfigOutcome
 
     failure = AdminConfigApplyResult(AdminConfigOutcome.APPLY_FAILED, error="bad")
     attempt = OrgConfigAttempt(
-        OrgConfigSource(source),
-        fetched=fetched,
+        OrgConfigSource.ENSURED,
         fetch_outcome=(
             None
             if fetch is None

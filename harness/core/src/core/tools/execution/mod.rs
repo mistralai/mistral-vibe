@@ -459,14 +459,14 @@ mod tests {
         assert_eq!(
             tools.into_iter().map(|tool| tool.name).collect::<Vec<_>>(),
             [
+                "direct_only",
+                "both",
                 "search_tool_functions",
                 "run_typescript",
                 "read_file",
                 "write_file",
                 "edit",
-                "bash",
-                "direct_only",
-                "both"
+                "bash"
             ]
         );
 

@@ -20,6 +20,7 @@ pub fn handle_key(state: &mut OnboardingState, key: KeyEvent) -> Option<Action> 
     match state.screen {
         Screen::Welcome => handle_welcome(state, key),
         Screen::ThemeSelection => handle_theme(state, key),
+        Screen::ProviderChoice => super::provider_choice::handle_key(state, key),
         Screen::AuthMethod => handle_auth_method(state, key),
         Screen::SignInTarget => handle_sign_in_target(state, key),
         Screen::CustomDomain => handle_custom_domain(state, key),
@@ -46,9 +47,9 @@ fn handle_theme(state: &mut OnboardingState, key: KeyEvent) -> Option<Action> {
             None
         }
         KeyCode::Enter => {
-            // Providers without browser-auth URLs (llama.cpp / local) skip
-            // the auth-method choice entirely.
-            state.screen = if state.context.supports_browser_sign_in {
+            state.screen = if state.provider_choice.is_some() {
+                Screen::ProviderChoice
+            } else if state.context.supports_browser_sign_in || state.context.oidc_enabled {
                 Screen::AuthMethod
             } else {
                 Screen::ApiKey
@@ -112,7 +113,7 @@ fn handle_auth_method(state: &mut OnboardingState, key: KeyEvent) -> Option<Acti
             }
         }
         KeyCode::Esc => {
-            state.screen = Screen::ThemeSelection;
+            state.screen = state.before_auth();
             None
         }
         _ => None,
@@ -130,6 +131,12 @@ fn handle_sign_in_target(state: &mut OnboardingState, key: KeyEvent) -> Option<A
         }
         KeyCode::Enter => {
             if state.sign_in_target_selected == 0 {
+                if state.context.uses_oidc(true) {
+                    state.context = state.config.clone();
+                    state.override_confirm_armed = false;
+                    state.screen = Screen::BrowserSignIn;
+                    return Some(Action::StartBrowserSignIn);
+                }
                 // Switching to the Mistral default overwrites a configured
                 // custom domain, so the first Enter only arms a warning and
                 // the second one proceeds. This reads the immutable launch
@@ -212,10 +219,10 @@ fn handle_browser_sign_in(state: &mut OnboardingState, key: KeyEvent) -> Option<
 fn handle_api_key(state: &mut OnboardingState, key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Esc => {
-            state.screen = if state.context.supports_browser_sign_in {
+            state.screen = if state.context.supports_browser_sign_in || state.context.oidc_enabled {
                 Screen::AuthMethod
             } else {
-                Screen::ThemeSelection
+                state.before_auth()
             };
             None
         }

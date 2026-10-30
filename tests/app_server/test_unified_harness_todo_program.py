@@ -9,6 +9,8 @@ from typing import Any, cast
 
 import pytest
 
+from vibe.app_server._process_services import ProcessServices
+
 pytest.importorskip("mistralai_vibe_local_harness.session_protocol")
 vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
 
@@ -111,7 +113,7 @@ class _ScriptedCompletion:
 
 @pytest.mark.asyncio
 async def test_a_typescript_program_reads_and_writes_the_todo_list(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     """*Prepare*: A Vibe Unified Harness session and a scripted `run_typescript` turn.
     *Do*: Run a program that reads the todos, writes two, and reads them back.
@@ -124,7 +126,7 @@ async def test_a_typescript_program_reads_and_writes_the_todo_list(
     monkeypatch.setattr(
         "mistralai_vibe_local_harness.vibe._local_actions.execute_completion", scripted
     )
-    host = await _todo_host(tmp_path)
+    host = await _todo_host(tmp_path, process_services=process_services)
     session = await host.start(_start_params(tmp_path))
 
     # Do
@@ -143,7 +145,10 @@ async def test_a_typescript_program_reads_and_writes_the_todo_list(
 @pytest.mark.parametrize("tool_name", ["grep", "vibe.grep", "file_system.grep"])
 @pytest.mark.asyncio
 async def test_removed_grep_cannot_return_sensitive_file_content(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool_name: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    process_services: ProcessServices,
 ) -> None:
     """A model's obsolete Grep call fails through the real session, even in Auto Approve."""
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
@@ -160,7 +165,7 @@ async def test_removed_grep_cannot_return_sensitive_file_content(
     monkeypatch.setattr(
         "mistralai_vibe_local_harness.vibe._local_actions.execute_completion", scripted
     )
-    host = await _todo_host(tmp_path)
+    host = await _todo_host(tmp_path, process_services=process_services)
     try:
         session = await host.start(_start_params(tmp_path))
         state = await _run_turn(session.backend, scripted, "search assignments")
@@ -187,7 +192,7 @@ async def test_removed_grep_cannot_return_sensitive_file_content(
 
 @pytest.mark.asyncio
 async def test_a_program_cannot_call_the_removed_grep_tool(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     (tmp_path / ".env").write_text("VALUE=SYNTHETIC_PROGRAM_GREP\n")
@@ -195,7 +200,7 @@ async def test_a_program_cannot_call_the_removed_grep_tool(
     monkeypatch.setattr(
         "mistralai_vibe_local_harness.vibe._local_actions.execute_completion", scripted
     )
-    host = await _todo_host(tmp_path)
+    host = await _todo_host(tmp_path, process_services=process_services)
     try:
         session = await host.start(_start_params(tmp_path))
         program = """
@@ -230,7 +235,10 @@ async function main() {
 @pytest.mark.parametrize("path", ["--help", "--pre=removed-grep-sentinel", "-n"])
 @pytest.mark.asyncio
 async def test_removed_grep_rejects_option_shaped_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    process_services: ProcessServices,
 ) -> None:
     """Obsolete Grep calls never reach a backend, even with Auto Approve."""
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
@@ -243,7 +251,7 @@ async def test_removed_grep_rejects_option_shaped_paths(
     monkeypatch.setattr(
         "mistralai_vibe_local_harness.vibe._local_actions.execute_completion", scripted
     )
-    host = await _todo_host(tmp_path)
+    host = await _todo_host(tmp_path, process_services=process_services)
     try:
         session = await host.start(_start_params(tmp_path))
         await _run_turn(session.backend, scripted, "search the requested path")
@@ -278,8 +286,10 @@ def _settled_todo_contents(state: PublicSessionState) -> list[str]:
     raise AssertionError("no settled todo effect in history")
 
 
-async def _todo_host(tmp_path: Path) -> SessionBackendHost:
-    process = HarnessProcess(HarnessFilesManager(sources=()))
+async def _todo_host(
+    tmp_path: Path, *, process_services: ProcessServices
+) -> SessionBackendHost:
+    process = HarnessProcess(HarnessFilesManager(sources=()), services=process_services)
     options = SessionOptions(cwd=str(tmp_path), auto_approve=True)
     context = await process.build_unified_session_context(options)
     context = replace(context, storage_root=str(tmp_path / "sessions"))

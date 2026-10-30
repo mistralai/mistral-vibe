@@ -12,7 +12,6 @@ use crate::core::wire::content::{ContentBlock, validate_non_empty_content};
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentMessageSettings {
     pub header: String,
-    pub task: String,
     pub current_task: String,
     pub inherited_task: String,
     /// Result text for each tool call still running when a conversation is copied to a new agent.
@@ -27,7 +26,6 @@ impl AgentMessageSettings {
                 &["kind", "sender_agent_path"][..],
                 "settings.prompts.agent_messages.header",
             ),
-            (&self.task, &[][..], "settings.prompts.agent_messages.task"),
             (
                 &self.current_task,
                 &["recipient_agent_path", "sender_agent_path"][..],
@@ -54,11 +52,10 @@ impl AgentMessageSettings {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+/// Every task names its recipient, so the recipient knows which agent it is.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum AgentTaskContext {
-    #[default]
-    Unattributed,
     Current {
         recipient_agent_path: String,
     },
@@ -73,7 +70,6 @@ pub(crate) enum AgentTaskContext {
 pub(crate) enum AgentMessageContext {
     Task {
         sender_agent_path: String,
-        #[serde(default)]
         context: AgentTaskContext,
         content: Vec<ContentBlock>,
     },
@@ -115,33 +111,6 @@ pub(crate) struct AgentResultError {
     pub code: Option<String>,
     #[serde(default)]
     pub details: Value,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AgentMessageKind {
-    Task,
-    Message,
-}
-
-impl AgentMessageContext {
-    pub(crate) fn text(
-        sender_agent_path: String,
-        kind: AgentMessageKind,
-        content: Vec<ContentBlock>,
-    ) -> Self {
-        match kind {
-            AgentMessageKind::Task => Self::Task {
-                sender_agent_path,
-                context: AgentTaskContext::Unattributed,
-                content,
-            },
-            AgentMessageKind::Message => Self::Message {
-                sender_agent_path,
-                content,
-            },
-        }
-    }
 }
 
 /// `continue_hint` says whether a message from this agent resumes an idle child; a result that
@@ -205,9 +174,6 @@ pub(crate) fn render_agent_message(
     )];
     if let Some(context) = task_context {
         let text = match context {
-            AgentTaskContext::Unattributed => {
-                render_template(&settings.task, &[]).map_err(CoreError::invariant)?
-            }
             AgentTaskContext::Current {
                 recipient_agent_path,
             } => {

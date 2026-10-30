@@ -1,14 +1,14 @@
 //! `/plugins` catalogue parsing, reload diff report, rows, and browser key flow.
 
-use std::sync::Arc;
-
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 use serde_json::{json, Value};
 use vibe_rs::app::App;
 use vibe_rs::plugins::rows::{self, Row};
 use vibe_rs::plugins::{self, text, Event};
-use vibe_rs::server::{Client, PluginCatalogState};
+use vibe_rs::server::PluginCatalogState;
+
+use crate::support::{ctrl, key, mouse, stub};
 
 fn entry(name: &str, digest: &str) -> Value {
     json!({
@@ -24,10 +24,6 @@ fn entry(name: &str, digest: &str) -> Value {
 
 fn catalog(value: Value) -> PluginCatalogState {
     serde_json::from_value(value).unwrap()
-}
-
-fn key(code: KeyCode) -> KeyEvent {
-    KeyEvent::new(code, KeyModifiers::NONE)
 }
 
 #[test]
@@ -54,7 +50,7 @@ fn reload_report_lists_added_removed_and_repinned_plugins_by_name() {
     let changes = text::changes(&before, &after);
     assert_eq!(
         text::reload_report(&changes, &after),
-        "### Plugins reloaded\n\n\
+        "Plugins reloaded.\n\n\
          - `~` `beta` bbbbbbbb → dddddddd\n\
          - `+` `delta` 1.0.0\n\
          - `-` `gamma` — no longer installed"
@@ -168,7 +164,7 @@ fn a_dropped_plugin_alone_still_opens_the_browser_to_show_it() {
 
 #[test]
 fn keys_view_a_plugin_go_back_filter_and_close() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = App::default();
     let state = catalog(json!({"plugins": [entry("alpha", "1"), entry("beta", "2")]}));
     plugins::apply_event(&mut app, Event::Read(Ok(Some(state))));
@@ -230,17 +226,12 @@ fn clicking_a_plugin_while_filtering_leaves_the_filter_for_the_detail() {
         MouseEventKind::Down(MouseButton::Left),
         MouseEventKind::Up(MouseButton::Left),
     ] {
-        let event = MouseEvent {
-            kind,
-            column: 4,
-            row: 1,
-            modifiers: KeyModifiers::NONE,
-        };
+        let event = mouse(kind, 4, 1);
         plugins::mouse(&mut app, event);
     }
     assert_eq!(app.plugins.viewing.as_deref(), Some("beta"));
     assert!(!app.plugins.filter.focused);
-    plugins::handle_key(&mut app, &Arc::new(Client::stub()), key(KeyCode::Esc));
+    plugins::handle_key(&mut app, &stub(), key(KeyCode::Esc));
     assert_eq!(
         app.plugins.viewing, None,
         "Esc goes back, not into the query"
@@ -250,7 +241,7 @@ fn clicking_a_plugin_while_filtering_leaves_the_filter_for_the_detail() {
 
 #[tokio::test]
 async fn a_second_reload_waits_for_the_first_to_answer() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = App::default();
     app.session.session_id = Some("session".into());
     plugins::reload(&mut app, &client);
@@ -271,7 +262,7 @@ async fn a_second_reload_waits_for_the_first_to_answer() {
 
 #[test]
 fn list_keys_follow_option_list_navigation() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = App::default();
     let names = ["a", "b", "c", "d"].map(|name| entry(name, name));
     plugins::apply_event(
@@ -301,7 +292,7 @@ fn list_keys_follow_option_list_navigation() {
 
 #[tokio::test]
 async fn shortcuts_ignore_a_held_modifier() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = App::default();
     app.session.session_id = Some("session".into());
     let names = [entry("a", "1"), entry("b", "2")];
@@ -309,15 +300,18 @@ async fn shortcuts_ignore_a_held_modifier() {
         &mut app,
         Event::Read(Ok(Some(catalog(json!({"plugins": names}))))),
     );
-    let ctrl = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
+    let ctrl = |ch| ctrl(ch);
     plugins::handle_key(&mut app, &client, ctrl('j'));
     plugins::handle_key(&mut app, &client, ctrl('r'));
     plugins::handle_key(&mut app, &client, ctrl('/'));
     assert_eq!(app.plugins.list.selected(), 0);
     assert!(!app.plugins.reloading);
     assert!(!app.plugins.filter.focused);
-    let slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::SHIFT);
-    plugins::handle_key(&mut app, &client, slash);
+    plugins::handle_key(
+        &mut app,
+        &client,
+        KeyEvent::new(KeyCode::Char('/'), KeyModifiers::SHIFT),
+    );
     assert!(
         app.plugins.filter.focused,
         "Shift is how some layouts type `/`"

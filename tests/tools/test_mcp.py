@@ -26,6 +26,25 @@ from vibe.core.tools.mcp import (
 )
 
 
+@pytest.mark.parametrize(
+    "config_type, fields",
+    [
+        (MCPHttp, {"transport": "http", "url": "https://example.invalid/mcp"}),
+        (
+            MCPStreamableHttp,
+            {"transport": "streamable-http", "url": "https://example.invalid/mcp"},
+        ),
+        (MCPStdio, {"transport": "stdio", "command": "inert-server"}),
+    ],
+)
+def test_mcp_sampling_requires_explicit_opt_in(config_type, fields):
+    assert config_type(name="server", **fields).sampling_enabled is False
+    assert (
+        config_type(name="server", sampling_enabled=True, **fields).sampling_enabled
+        is True
+    )
+
+
 class TestRemoteTool:
     def test_creates_remote_tool_with_valid_data(self):
         tool = RemoteTool.model_validate({
@@ -134,7 +153,7 @@ class TestMCPHttpClient:
         async def fake_stream(url: str, *, http_client: Any):
             captured["url"] = url
             captured["http_client"] = http_client
-            yield object(), object(), lambda: None
+            yield object(), object()
 
         with (
             patch(
@@ -158,6 +177,7 @@ class TestMCPHttpClient:
         assert captured["url"] == "https://mcp.example.com"
         assert captured["http_client"] is fake_client
         assert [tool.name for tool in tools] == ["remote_tool"]
+        assert tools[0].input_schema == {"type": "object", "properties": {"q": {}}}
 
 
 class _FakeHttpClient:
@@ -187,7 +207,16 @@ class _FakeMCPClientSession:
         pass
 
     async def list_tools(self) -> SimpleNamespace:
-        return SimpleNamespace(tools=[{"name": "remote_tool"}])
+        from mcp.types import Tool
+
+        return SimpleNamespace(
+            tools=[
+                Tool(
+                    name="remote_tool",
+                    input_schema={"type": "object", "properties": {"q": {}}},
+                )
+            ]
+        )
 
     async def call_tool(self, *_: Any, **__: Any) -> SimpleNamespace:
         return SimpleNamespace(structuredContent={"ok": True}, content=None)

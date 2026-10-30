@@ -64,16 +64,33 @@ def shell_probe_command() -> str:
 
 async def smoke_binary(binary: Path) -> None:
     with tempfile.TemporaryDirectory() as tmp:
+        # VIBE_HOME alone leaves ~/.agents and other user folders visible, so
+        # the binary read the developer's skills. Path.home() reads
+        # USERPROFILE on Windows and HOME elsewhere.
+        home = Path(tmp) / "home"
+        home.mkdir()
         env = os.environ.copy()
-        env["VIBE_HOME"] = str(Path(tmp) / ".vibe")
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["VIBE_HOME"] = str(home / ".vibe")
         env["VIBE_TEST_DISABLE_KEYRING"] = "1"
         env["MISTRAL_API_KEY"] = "smoke-test"
+        # A SOCKS proxy the binary must be able to build a transport for: a
+        # bundle without socksio fails session/start here (VIBE-5416), and one
+        # that ships it starts the session, with the catalogue fetch failing
+        # to connect through the dead proxy and degrading as any failed
+        # fetch does.
+        env["all_proxy"] = "socks5h://127.0.0.1:9"
         proc = await asyncio.create_subprocess_exec(
             str(binary),
             stdin=aio_subprocess.PIPE,
             stdout=aio_subprocess.PIPE,
             stderr=aio_subprocess.PIPE,
             env=env,
+            # The bundled skill prompts make runtime/updated longer than the
+            # 64 KiB default. Accept what the Rust TUI accepts (MAX_FRAME);
+            # skills/local/list still catches a leak from the user's home.
+            limit=16 * 1024 * 1024,
         )
         failure: str | None = None
         session_id: str = ""
@@ -109,6 +126,29 @@ async def smoke_binary(binary: Path) -> None:
                 await send_message(
                     proc, {"jsonrpc": "2.0", "method": "initialized", "params": {}}
                 )
+                # The only check that sees a leak from the user's home: the
+                # session would load the user's skills silently.
+                await send_message(
+                    proc,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "skills",
+                        "method": "skills/local/list",
+                        "params": {},
+                    },
+                )
+                response = await read_response(proc, "skills")
+                result = response.get("result")
+                skills = result.get("skills") if isinstance(result, dict) else None
+                if skills != []:
+                    failure = (
+                        "the binary found global skills outside its temporary "
+                        f"home, so it reads the user's files: {skills}"
+                    )
+                else:
+                    print("PASS: app-server is isolated from the user's home")
+
+            if failure is None:
                 await send_message(
                     proc,
                     {
@@ -130,6 +170,31 @@ async def smoke_binary(binary: Path) -> None:
                 else:
                     session_id = raw_session_id
                     print("PASS: Unified Harness session/start")
+
+            if failure is None:
+                await send_message(
+                    proc,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "runtime",
+                        "method": "runtime/read",
+                        "params": {"sessionId": session_id},
+                    },
+                )
+                response = await read_response(proc, "runtime")
+                result = response.get("result")
+                runtime = result.get("runtime") if isinstance(result, dict) else None
+                if not isinstance(runtime, dict):
+                    failure = f"unexpected runtime/read response: {response}"
+                else:
+                    skills = [skill.get("name") for skill in runtime.get("skills", [])]
+                    if "vibe:vibe" not in skills:
+                        failure = (
+                            "the built-in vibe plugin is missing from the bundle: "
+                            f"skills={skills}, issues={runtime.get('issues')}"
+                        )
+                    else:
+                        print("PASS: built-in plugin skills are bundled")
 
             if failure is None:
                 assert proc.stdout is not None

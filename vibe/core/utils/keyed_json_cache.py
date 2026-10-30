@@ -26,6 +26,14 @@ def load_keyed_entry(
     ``parse`` receives the stored payload and returns the typed value or
     None when it cannot be used; a corrupt payload is the caller's to log.
     """
+    record = load_keyed_record(path, key, ttl_seconds=ttl_seconds, parse=parse)
+    return record[0] if record is not None else None
+
+
+def load_keyed_record[T](
+    path: Path, key: str, *, ttl_seconds: int, parse: Callable[[Any], T | None]
+) -> tuple[T, int] | None:
+    """The fresh entry for ``key`` and when it was stored, in Unix seconds."""
     entry = _read_entries(path).get(key)
     if not isinstance(entry, dict):
         return None
@@ -35,13 +43,19 @@ def load_keyed_entry(
         return None
     if stored_at <= int(time.time()) - ttl_seconds:
         return None
-    return parse(payload)
+    value = parse(payload)
+    return (value, stored_at) if value is not None else None
 
 
-def store_keyed_entry(path: Path, key: str, payload: Any) -> None:
+def store_keyed_entry(
+    path: Path, key: str, payload: Any, *, stored_at: int | None = None
+) -> None:
     """Insert or overwrite the entry for ``key``; never raises."""
     entries = _read_entries(path)
-    entries[key] = {"stored_at_timestamp": int(time.time()), "payload": payload}
+    entries[key] = {
+        "stored_at_timestamp": int(time.time()) if stored_at is None else stored_at,
+        "payload": payload,
+    }
     _write_entries(path, entries)
 
 

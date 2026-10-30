@@ -174,3 +174,21 @@ fn render_edit_diff_numbers_rows_from_the_occurrence_offset() {
     // The @@ header is never rendered; the gutter carries the pairing.
     assert!(!joined.contains("@@"));
 }
+
+#[test]
+fn a_diff_row_inside_a_docstring_keeps_the_string_style() {
+    let old = "def f():\n    \"\"\"Doc.\n\n    if x, return early\n    \"\"\"\n";
+    let new = "def f():\n    \"\"\"Doc.\n\n    if x, return None\n    \"\"\"\n";
+    let diff_rows = render_edit_diff(&[occurrence(old, new, Some(1))], "py");
+    let span_style = |needle: &str| {
+        diff_rows
+            .iter()
+            .flat_map(|row| &row.spans)
+            .find(|span| span.content.contains(needle))
+            .unwrap()
+            .style
+    };
+    let doc = span_style("Doc.");
+    assert_eq!(span_style("return early"), doc);
+    assert_eq!(span_style("return None"), doc);
+}

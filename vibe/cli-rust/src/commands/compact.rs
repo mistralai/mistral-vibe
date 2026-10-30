@@ -22,8 +22,7 @@ pub fn start_compact(app: &mut App, client: &Arc<Client>, value: &str) {
         );
         return;
     }
-    // The /compact echo above is local; only server rows count as history
-    // (the server history has no command echo in it).
+    // Only server rows count as history; local rows are client notices.
     if app.view.transcript.lines().all(|entry| entry.local) {
         local::add_command_error(
             &mut app.view.transcript,

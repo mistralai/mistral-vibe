@@ -5,25 +5,26 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 
-use super::{list_cursor, theme};
+use super::{hint_line, list_cursor, scrollbar, theme};
 use crate::app::App;
+use crate::hints::action;
 use crate::mouse;
 use crate::server::PublicChildSession;
 use crate::subagents::{
-    display_name, status_label, status_tone, StatusTone, MAIN_SESSION_ID, MAX_ROWS,
+    display_name, page_rows, status_label, status_tone, StatusTone, MAIN_SESSION_ID, MAX_ROWS,
 };
 
 /// List height cap: the 7 rows count the whole widget, border row included,
 /// so the view title row costs one. The view border exists only while the
 /// viewed child resolves.
 pub fn height(app: &App) -> u16 {
-    let rows = app.subagents.list.rows.len();
-    if rows == 0 {
+    if !app.subagents.list.shown {
         return 0;
     }
+    let rows = app.subagents.list.rows.len();
+    let summary = usize::from(app.subagents.list.waiting_count > 0);
     let viewing = usize::from(app.subagents.viewed_child().is_some());
-    let cap = MAX_ROWS.saturating_sub(viewing);
-    (viewing + (rows + 1).min(cap)) as u16
+    (viewing + summary + (rows + 1).min(page_rows(app))) as u16
 }
 
 /// Row-render inputs snapshotted before the frame mutates the hitmap.
@@ -68,7 +69,11 @@ impl Rows {
 
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let rows = Rows::snapshot(app);
-    if rows.children.is_empty() || area.height == 0 {
+    let (waiting, show_waiting) = (
+        app.subagents.list.waiting_count,
+        app.subagents.list.show_waiting,
+    );
+    if !app.subagents.list.shown || area.height == 0 {
         app.subagents.list.options.layout(&[], Rect::default());
         return;
     }
@@ -100,7 +105,8 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     }
     let marker = rows.marker_id();
     let total = rows.children.len() + 1;
-    let viewport = (area.height.saturating_sub(top - area.y) as usize).min(MAX_ROWS);
+    let summary = u16::from(waiting > 0);
+    let viewport = (area.height.saturating_sub(top - area.y + summary) as usize).min(MAX_ROWS);
     let list_area = Rect {
         y: top,
         height: viewport as u16,
@@ -129,6 +135,48 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         f.render_widget(ratatui::widgets::Paragraph::new(line), padded);
         top += 1;
     }
+    if total > viewport && area.width > 0 {
+        let bar = Rect {
+            x: area.right() - 1,
+            width: 1,
+            ..list_area
+        };
+        let target = mouse::MouseTarget::SubagentList;
+        scrollbar::draw_large(app, f, target, bar, total, viewport, scroll);
+    }
+    if waiting > 0 && top < area.bottom() {
+        let row = Rect {
+            x: area.x + 1,
+            y: top,
+            width: area.width.saturating_sub(2),
+            height: 1,
+        };
+        let line = waiting_summary(waiting, show_waiting, rows.focused);
+        f.render_widget(ratatui::widgets::Paragraph::new(line), row);
+    }
+}
+
+/// The last row: `N subagents waiting`, plus `· a to show`/`· a to hide` while the list owns the keys.
+fn waiting_summary(waiting: usize, show_waiting: bool, focused: bool) -> Line<'static> {
+    let muted = hint_line::action_style();
+    let noun = if waiting == 1 {
+        "subagent"
+    } else {
+        "subagents"
+    };
+    let mut spans = vec![
+        Span::raw(list_cursor::BLANK),
+        Span::styled(format!("{waiting} {noun} waiting"), muted),
+    ];
+    if focused {
+        let action = match show_waiting {
+            true => action::HIDE,
+            false => action::SHOW,
+        };
+        spans.push(Span::styled(" · ", muted));
+        spans.extend(hint_line::inline_spans(&[("a", action)]));
+    }
+    Line::from(spans)
 }
 
 /// The main row: bold `Main conversation`, current while in main chat.

@@ -9,7 +9,7 @@ use vibe_rs::server::Client;
 use vibe_rs::startup::banners;
 use vibe_rs::utils::whats_new_cache;
 
-/// Guards VIBE_HOME, VIBE_WHATS_NEW_FILE and TERM_PROGRAM, which are process-global.
+/// Guards VIBE_HOME, VIBE_WHATS_NEW_DIR and TERM_PROGRAM, which are process-global.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -23,19 +23,20 @@ struct Launch {
 }
 
 impl Launch {
-    /// A launch whose cache holds `cache_toml` and whose what's-new file holds `body`.
-    fn new(cache_toml: &str, body: Option<&str>, vscode: bool) -> Self {
+    /// A launch whose cache holds `cache_toml` and whose history holds `notes`, one `(version, body)` per file.
+    fn new(cache_toml: &str, notes: &[(&str, &str)], vscode: bool) -> Self {
         let guard = ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("VIBE_HOME", home.path());
         std::fs::write(home.path().join("cache.toml"), cache_toml).unwrap();
-        let whats_new = home.path().join("whats_new.md");
-        if let Some(body) = body {
-            std::fs::write(&whats_new, body).unwrap();
+        let history = home.path().join("whats_new");
+        std::fs::create_dir(&history).unwrap();
+        for (version, body) in notes {
+            std::fs::write(history.join(format!("{version}.md")), body).unwrap();
         }
-        std::env::set_var("VIBE_WHATS_NEW_FILE", whats_new);
+        std::env::set_var("VIBE_WHATS_NEW_DIR", history);
         std::env::remove_var("TERM_PROGRAM_VERSION");
         if vscode {
             std::env::set_var("TERM_PROGRAM", "vscode");
@@ -49,7 +50,10 @@ impl Launch {
     }
 
     fn mount(&self) -> App {
-        let mut app = App::default();
+        self.mount_on(App::default())
+    }
+
+    fn mount_on(&self, mut app: App) -> App {
         banners::mount(&mut app, &json!({"runtime": {}}), &Arc::new(Client::stub()));
         app
     }
@@ -77,21 +81,46 @@ fn marked_seen(launch: &Launch) -> bool {
 }
 
 #[test]
-fn an_unseen_version_shows_its_whats_new_and_marks_it_seen() {
-    let launch = Launch::new(UNSEEN, Some("# What's new\n\n- Faster startup\n"), false);
+fn every_release_since_the_last_visit_shows_newest_first_and_marks_the_version_seen() {
+    let notes = [
+        ("0.0.1", "- Too old"),
+        ("0.1.0", "- Faster startup\n"),
+        ("0.2.0", "- Branches"),
+    ];
+    let cache = UNSEEN.replace("\"0.0.0\"", "\"0.0.1\"");
+    let launch = Launch::new(&cache, &notes, false);
     let app = launch.mount();
 
     assert_eq!(
         whats_new(&app).as_deref(),
-        Some("# What's new\n\n- Faster startup")
+        Some(
+            "**v0.2.0**\n\n- Branches\n\n\
+             **v0.1.0**\n\n- Faster startup\n\n\
+             _Browse every release with `/release-notes`._"
+        )
     );
     assert!(app.view.promo.is_none());
     assert!(marked_seen(&launch));
 }
 
 #[test]
-fn an_empty_whats_new_shows_nothing_but_still_marks_the_version_seen() {
-    let launch = Launch::new(UNSEEN, Some("  \n\t\n"), false);
+fn a_cache_without_a_seen_version_shows_only_the_newest_release() {
+    let cache = "[update_cache]\nlatest_version = \"0.0.1\"\nstored_at_timestamp = 1\n";
+    let launch = Launch::new(cache, &[("0.1.0", "- Older"), ("0.2.0", "- Newer")], false);
+    let app = launch.mount();
+
+    let body = whats_new(&app).expect("what's new shows");
+    assert!(body.starts_with("**v0.2.0**\n\n- Newer\n\n_Browse"));
+    assert!(marked_seen(&launch));
+}
+
+#[test]
+fn no_new_release_notes_show_nothing_but_still_mark_the_version_seen() {
+    let launch = Launch::new(
+        UNSEEN,
+        &[("0.0.0", "- Already seen"), ("0.1.0", "  \n\t\n")],
+        false,
+    );
     let app = launch.mount();
 
     assert_eq!(whats_new(&app), None);
@@ -99,17 +128,55 @@ fn an_empty_whats_new_shows_nothing_but_still_marks_the_version_seen() {
 }
 
 #[test]
-fn a_missing_whats_new_shows_nothing_but_still_marks_the_version_seen() {
-    let launch = Launch::new(UNSEEN, None, false);
+fn a_resumed_session_waits_for_a_fresh_one_before_showing_what_s_new() {
+    let launch = Launch::new(UNSEEN, &[("0.1.0", "- Faster startup")], false);
+    let mut resumed = App::default();
+    resumed.view.transcript.add(&json!({
+        "entry": {
+            "id": "saved",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Saved reply"}],
+            "generationStatus": "completed",
+        }
+    }));
+    let app = launch.mount_on(resumed);
+
+    assert_eq!(whats_new(&app), None);
+    assert!(!launch
+        .cache_toml()
+        .contains(&format!("seen_whats_new_version = \"{VERSION}\"")));
+
+    let app = launch.mount();
+    assert!(whats_new(&app).is_some_and(|body| body.contains("- Faster startup")));
+    assert!(marked_seen(&launch));
+}
+
+#[test]
+fn the_startup_resume_picker_defers_what_s_new_to_a_fresh_session() {
+    let launch = Launch::new(UNSEEN, &[("0.1.0", "- Faster startup")], false);
+    let mut picking = App::default();
+    picking.session.resume_picker_shown = true;
+    let app = launch.mount_on(picking);
+
+    assert_eq!(whats_new(&app), None);
+    assert!(!launch
+        .cache_toml()
+        .contains(&format!("seen_whats_new_version = \"{VERSION}\"")));
+}
+
+#[test]
+fn a_fresh_install_shows_nothing_and_stamps_nothing() {
+    let launch = Launch::new("", &[("0.1.0", "- Faster startup")], false);
     let app = launch.mount();
 
     assert_eq!(whats_new(&app), None);
-    assert!(marked_seen(&launch));
+    assert!(!launch.cache_toml().contains("seen_whats_new_version"));
 }
 
 #[test]
 fn the_promo_shows_alone_without_whats_new_and_counts_its_display() {
-    let launch = Launch::new("", None, true);
+    let launch = Launch::new("", &[], true);
     let app = launch.mount();
 
     assert_eq!(whats_new(&app), None);
@@ -125,7 +192,7 @@ fn the_promo_shows_alone_without_whats_new_and_counts_its_display() {
 
 #[test]
 fn the_promo_stops_after_ten_displays() {
-    let launch = Launch::new("[vscode_extension_promo]\nshown_count = 10\n", None, true);
+    let launch = Launch::new("[vscode_extension_promo]\nshown_count = 10\n", &[], true);
     let app = launch.mount();
 
     assert!(app.view.promo.is_none());
@@ -134,11 +201,11 @@ fn the_promo_stops_after_ten_displays() {
 
 #[test]
 fn the_promo_joins_the_whats_new_message_when_both_show() {
-    let launch = Launch::new(UNSEEN, Some("# What's new\n"), true);
+    let launch = Launch::new(UNSEEN, &[("0.1.0", "- New")], true);
     let app = launch.mount();
 
     let body = whats_new(&app).expect("what's new shows");
-    assert!(body.starts_with("# What's new\n\n_Btw, we also have a new "));
+    assert!(body.contains("`/release-notes`._\n\n_Btw, we also have a new "));
     assert!(body.contains(PROMO_LINK));
     assert!(app.view.promo.is_none(), "no separate promo message");
     assert!(launch.cache_toml().contains("shown_count = 1"));

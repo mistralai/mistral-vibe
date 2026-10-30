@@ -171,7 +171,14 @@ Rules:
 
 Place hooks in `ai.mistral.vibe/hooks.toml`. Format is identical to the Vibe
 hooks.toml format, but hooks run in the plugin root directory with
-`PLUGIN_ROOT` and `PLUGIN_DATA` in the environment.
+`PLUGIN_ROOT` and `PLUGIN_DATA` in the environment. The session folder is the
+`cwd` field of the JSON the hook reads on stdin: read it to act on the user's
+project.
+
+As for MCP servers, the plugin root is the session's read-only copy of the
+plugin, so editing the installed plugin does not change a running session, and
+`PLUGIN_DATA` is the session's data directory, shared with the plugin's MCP
+servers. Write state to `PLUGIN_DATA`, never next to the hook script.
 
 ```toml
 [[hooks]]
@@ -184,8 +191,11 @@ strict = true
 [[hooks]]
 name = "post-agent-lint"
 type = "post_agent"
-command = "eslint --quiet ."
+command = "python lint_session.py"   # reads `cwd` from stdin, then lints it
 ```
+
+Plugin hooks run after the project's own `hooks.toml` and before the user's
+`~/.vibe/hooks.toml` (project plugins), or after it (user plugins).
 
 Limits:
 - Maximum 128 hooks per plugin.

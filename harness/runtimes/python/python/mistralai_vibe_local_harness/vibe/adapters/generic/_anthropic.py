@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 from collections.abc import Sequence
 from functools import cache
 import json
@@ -29,6 +31,7 @@ from mistralai_vibe_local_harness.vibe.adapters.generic._model import (
 )
 from mistralai_vibe_local_harness.vibe.adapters.generic._provider import ProviderView
 from mistralai_vibe_local_harness.vibe.completion_profile import (
+    ANTHROPIC_VERSION,
     REQUIRED_MAX_TOKENS_FALLBACK,
     ReasoningSetting,
     ReasoningSupport,
@@ -63,6 +66,70 @@ def _text_blocks(text: str | None) -> list[dict[str, Any]]:
 REASONING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 # With thinking on, the Messages API refuses a lower ``top_p`` than this.
 THINKING_MIN_TOP_P = 0.95
+
+# With adaptive thinking, the Messages API can return the text Claude writes for
+# the user before a tool call as a ``thinking`` block instead of a ``text``
+# block. Only the block's signature tells the two apart: its decoded header
+# names the block kind, ``thinking`` or ``narration``. The encoding is not
+# documented, so a signature that does not carry this marker keeps its block as
+# reasoning.
+_NARRATION_KIND_MARKER = b"\x42\x09narration"
+# The base64 decoded to find the marker: 48 bytes, about twice the offset the
+# marker ends at, so the check survives a few more header fields. A multiple of
+# four decodes without padding.
+_SIGNATURE_HEADER_CHARS = 64
+
+
+def _is_narration(block: dict[str, Any]) -> bool:
+    signature = block.get("signature")
+    if block.get("type") != "thinking" or not isinstance(signature, str):
+        return False
+    try:
+        header = base64.b64decode(signature[:_SIGNATURE_HEADER_CHARS], validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return _NARRATION_KIND_MARKER in header
+
+
+def _thinking_text(
+    blocks: Sequence[dict[str, Any]] | None, *, narration: bool | None = None
+) -> str:
+    """The thinking text of the reply's blocks in stream order.
+
+    ``narration`` keeps only the narration blocks, or only the others; ``None``
+    keeps every block.
+    """
+    return "".join(
+        text
+        for block in blocks or []
+        if (narration is None or _is_narration(block) == narration)
+        and isinstance(text := block.get("thinking"), str)
+    )
+
+
+def _narration_text(blocks: Sequence[dict[str, Any]] | None) -> str:
+    return _thinking_text(blocks, narration=True)
+
+
+def _with_narration_as_text(message: LLMMessage) -> LLMMessage:
+    """Show narration as the reply's text rather than as its reasoning.
+
+    The reasoning is rebuilt from the other thinking blocks only when the
+    blocks account for all of it; otherwise the message is left as it is. The
+    narration block stays in ``reasoning_payloads``, so the next request sends
+    it back unchanged with its signature, and the replay drops the copy this
+    adds to the text.
+    """
+    blocks = message.reasoning_payloads
+    narration = _narration_text(blocks)
+    if not narration or _thinking_text(blocks) != (message.reasoning_content or ""):
+        return message
+    return message.model_copy(
+        update={
+            "content": narration + (message.content or ""),
+            "reasoning_content": _thinking_text(blocks, narration=False) or None,
+        }
+    )
 
 
 def _image_blocks(msg: LLMMessage) -> list[dict[str, Any]]:
@@ -123,7 +190,14 @@ class AnthropicMapper:
             for block in msg.reasoning_payloads or []
             if block.get("type") in REASONING_BLOCK_TYPES
         ]
-        content.extend(_text_blocks(msg.content))
+        # Narration already travels in its own block above.
+        content.extend(
+            _text_blocks(
+                (msg.content or "").removeprefix(
+                    _narration_text(msg.reasoning_payloads)
+                )
+            )
+        )
         if msg.tool_calls:
             for tc in msg.tool_calls:
                 content.append(self._convert_tool_call(tc))
@@ -281,7 +355,7 @@ def _warn_top_p_left_off(top_p: float) -> None:
 
 class AnthropicAdapter(APIAdapter):
     endpoint: ClassVar[str] = "/v1/messages"
-    API_VERSION = "2023-06-01"
+    API_VERSION = ANTHROPIC_VERSION
     BETA_FEATURES = (
         "interleaved-thinking-2025-05-14,"
         "fine-grained-tool-streaming-2025-05-14,"
@@ -443,6 +517,10 @@ class AnthropicAdapter(APIAdapter):
         if event_type in STREAMING_EVENT_TYPES:
             return self._parse_streaming_event(data)
         return self._mapper.parse_response(data)
+
+    def finish_message(self, message: LLMMessage) -> LLMMessage:
+        # A block's kind is known only once its signature has streamed in.
+        return _with_narration_as_text(message)
 
     def _parse_streaming_event(self, data: dict[str, Any]) -> LLMChunk:
         event_type = data.get("type", "")

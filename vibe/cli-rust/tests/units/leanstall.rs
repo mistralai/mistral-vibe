@@ -13,9 +13,10 @@ use vibe_rs::commands::{submission, CommandEvent};
 use vibe_rs::config;
 use vibe_rs::server::request_error::describe;
 use vibe_rs::server::{
-    AgentSummary, AgentType, AgentsListResponse, Client, HistoryEntry, MessageContent,
-    RequestFailure, RpcError,
+    AgentSummary, AgentType, AgentsListResponse, Client, RequestFailure, RpcError,
 };
+
+use crate::support::{messages, stub};
 
 fn agent(name: &str) -> AgentSummary {
     AgentSummary {
@@ -55,27 +56,6 @@ fn app_with(agents: &[&str]) -> App {
     app
 }
 
-fn rows(app: &App) -> Vec<(String, String)> {
-    app.view
-        .transcript
-        .lines()
-        .filter_map(|entry| match entry.entry {
-            HistoryEntry::Message(message) => Some((
-                message.role.clone(),
-                message
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        MessageContent::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect(),
-            )),
-            _ => None,
-        })
-        .collect()
-}
-
 fn row(role: &str, text: &str) -> Vec<(String, String)> {
     vec![(role.to_owned(), text.to_owned())]
 }
@@ -87,10 +67,10 @@ fn pending_commits(app: &App) -> u32 {
 #[test]
 fn install_when_lean_is_present_answers_locally() {
     let mut app = app_with(&["default", "lean"]);
-    leanstall::install_lean(&mut app, &Arc::new(Client::stub()));
+    leanstall::install_lean(&mut app, &stub());
     assert_eq!(
-        rows(&app),
-        row("command_result", "Lean agent is already installed.")
+        messages(&app),
+        row("command_status", "Lean agent is already installed.")
     );
     assert_eq!(pending_commits(&app), 0, "no request is started");
     assert!(!app.agents.installing);
@@ -99,10 +79,10 @@ fn install_when_lean_is_present_answers_locally() {
 #[test]
 fn uninstall_when_lean_is_absent_answers_locally() {
     let mut app = app_with(&["default"]);
-    leanstall::uninstall_lean(&mut app, &Arc::new(Client::stub()));
+    leanstall::uninstall_lean(&mut app, &stub());
     assert_eq!(
-        rows(&app),
-        row("command_result", "Lean agent is not installed.")
+        messages(&app),
+        row("command_status", "Lean agent is not installed.")
     );
     assert_eq!(pending_commits(&app), 0, "no request is started");
     assert!(!app.agents.installing);
@@ -146,13 +126,13 @@ async fn install_and_uninstall_round_trip_their_method_for_lean() {
         leanstall::apply_event(&mut app, *event);
         assert!(!app.agents.installing);
         assert_eq!(app.agents.all.len(), present.len());
-        assert_eq!(rows(&app)[0].0, "command_error");
+        assert_eq!(messages(&app)[0].0, "command_error");
     }
 }
 
 #[tokio::test]
 async fn input_waits_while_an_install_is_in_flight() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
     for value in ["/unleanstall", "hello"] {
         let mut app = app_with(&["default", "lean"]);
@@ -165,18 +145,17 @@ async fn input_waits_while_an_install_is_in_flight() {
             value,
             "{value} stays in the composer"
         );
-        assert!(rows(&app).is_empty());
+        assert!(messages(&app).is_empty());
     }
 }
 
 fn replay_after_startup_switch(command: &str) -> App {
-    let client = Arc::new(Client::stub());
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
     let mut app = app_with(&["default"]);
     app.session.status = Status::Ready;
     app.agents.switch_active = true;
     app.pending_commands.push(command.to_owned());
-    submission::flush_pending(&mut app, &client, &config_tx);
+    submission::flush_pending(&mut app, &stub(), &config_tx);
     app
 }
 
@@ -186,7 +165,7 @@ async fn a_deferred_leanstall_does_not_race_the_startup_switch() {
     assert!(!app.agents.installing);
     assert_eq!(pending_commits(&app), 0, "no request is started");
     assert_eq!(
-        rows(&app).last(),
+        messages(&app).last(),
         Some(&("command_error".to_owned(), leanstall::SWITCHING.to_owned()))
     );
 }
@@ -202,7 +181,7 @@ async fn other_deferred_commands_still_run_after_a_startup_switch() {
 fn shift_tab_waits_while_an_install_is_in_flight() {
     let mut app = app_with(&["default", "lean"]);
     app.agents.installing = true;
-    agents::cycle(&mut app, &Arc::new(Client::stub()));
+    agents::cycle(&mut app, &stub());
     assert_eq!(app.agents.desired, None);
 }
 
@@ -243,7 +222,7 @@ fn an_answer_replaces_the_agents_and_reports_its_direction() {
         );
         assert_eq!(app.agents.all, response.agents);
         assert_eq!(app.agents.active, response.active);
-        assert_eq!(rows(&app), row("command_result", notice));
+        assert_eq!(messages(&app), row("command_status", notice));
     }
 }
 
@@ -259,7 +238,7 @@ fn a_failure_shows_the_bare_server_message_and_keeps_the_agents() {
     );
     assert_eq!(app.agents.all, vec![agent("default")]);
     assert_eq!(app.agents.active, agent("default"));
-    assert_eq!(rows(&app), row("command_error", "Session is busy"));
+    assert_eq!(messages(&app), row("command_error", "Session is busy"));
 }
 
 #[test]

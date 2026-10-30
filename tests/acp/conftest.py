@@ -4,7 +4,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from tests.stubs.fake_client import FakeClient
@@ -34,11 +34,11 @@ def _no_connector_bootstrap_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
     Fail it at once, as offline.
     """
 
-    def refuse(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connector bootstrap is not mocked", request=request)
+    def refuse(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("connector bootstrap is not mocked", request=request)
 
     def offline_client() -> VibeAsyncHTTPClient:
-        return VibeAsyncHTTPClient(transport=httpx.MockTransport(refuse))
+        return VibeAsyncHTTPClient(transport=httpx2.MockTransport(refuse))
 
     monkeypatch.setattr(
         connector_catalog, "_build_bootstrap_http_client", offline_client

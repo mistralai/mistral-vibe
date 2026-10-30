@@ -1,14 +1,13 @@
 //! Toast text selection: its own region, click granularity, and its lifetime.
 
-use ratatui::backend::TestBackend;
-use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::Terminal;
 
 use vibe_rs::app::{App, ToastSeverity};
 use vibe_rs::mouse::{self, MouseTarget};
 use vibe_rs::pointer::{shape, Shape};
 use vibe_rs::selection;
+
+use crate::support::redraw;
 
 const TOAST: &str = "Slash commands cannot be queued";
 const TOAST_SECS: u64 = 60;
@@ -21,12 +20,6 @@ fn drawn() -> App {
     app.show_toast(TOAST.to_owned(), ToastSeverity::Warning, TOAST_SECS);
     redraw(&mut app);
     app
-}
-
-fn redraw(app: &mut App) -> Buffer {
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    terminal.draw(|frame| app.draw(frame)).expect("draw");
-    terminal.backend().buffer().clone()
 }
 
 /// Top-left cell of the newest toast's text, as the last frame painted it.

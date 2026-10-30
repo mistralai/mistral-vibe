@@ -270,14 +270,12 @@ fn validate_stored_notification(notification: &Notification) -> Result<(), CoreE
 
 fn attributed_agent_context(notification: &Notification) -> Option<AgentMessageContext> {
     match &notification.source {
-        NotificationSource::AgentMessage {
-            sender_agent_path,
-            kind,
-        } => Some(AgentMessageContext::text(
-            sender_agent_path.clone(),
-            *kind,
-            notification.content.clone(),
-        )),
+        NotificationSource::AgentMessage { sender_agent_path } => {
+            Some(AgentMessageContext::Message {
+                sender_agent_path: sender_agent_path.clone(),
+                content: notification.content.clone(),
+            })
+        }
         NotificationSource::AgentResult {
             sender_agent_path,
             termination,

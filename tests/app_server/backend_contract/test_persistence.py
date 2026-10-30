@@ -12,6 +12,7 @@ from tests.app_server.backend_contract.conftest import (
     BackendContractConnection,
     connect_backend_contract_host,
 )
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.models import PublicCheckpointEntry, PublicMessageEntry
 from vibe.app_server.protocol import (
     AppServerResponseError,
@@ -56,6 +57,7 @@ async def test_completed_turn_survives_a_new_host(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     backend_contract_mistral_api.mock(
         return_value=backend_contract_mistral_response("stored")
@@ -68,7 +70,9 @@ async def test_completed_turn_survives_a_new_host(
         await session.close()
 
     resumed_connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     resumed = await resumed_connection.host.resume_session(session_id)
     try:
@@ -85,6 +89,7 @@ async def test_completed_turn_survives_a_new_host(
 @pytest.mark.asyncio
 async def test_empty_started_session_is_not_persisted(
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: Open a session backed by persistent session logging.
     *Do*: Close it without ever starting a Turn, then inspect a new Host.
@@ -98,7 +103,9 @@ async def test_empty_started_session_is_not_persisted(
     await session.close()
 
     passive_connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         sessions = await passive_connection.host.list_sessions()
@@ -346,6 +353,7 @@ async def test_compaction_survives_a_new_host_with_the_same_public_identity(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     backend_contract_mistral_api.mock(
         side_effect=[
@@ -364,7 +372,9 @@ async def test_compaction_survives_a_new_host_with_the_same_public_identity(
         await session.close()
 
     resumed_connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     resumed = await resumed_connection.host.resume_session(session_id)
     try:
@@ -390,6 +400,7 @@ async def test_an_agent_change_survives_a_new_host(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     """An agent-mode switch is kept in the persisted session journal."""
     backend_contract_mistral_api.mock(
@@ -404,7 +415,9 @@ async def test_an_agent_change_survives_a_new_host(
         await session.close()
 
     resumed_connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     resumed = await resumed_connection.host.resume_session(session_id)
     try:
@@ -534,6 +547,7 @@ async def test_a_stored_session_preview_pages_back_to_the_first_entry(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     session = await backend_contract_persistent_connection.host.open_session()
     try:
@@ -544,7 +558,9 @@ async def test_a_stored_session_preview_pages_back_to_the_first_entry(
     finally:
         await session.close()
     viewer = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     current = await viewer.host.open_session()
     try:
@@ -565,6 +581,7 @@ async def test_a_bounded_resume_pages_back_to_the_first_entry(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
     session = await backend_contract_persistent_connection.host.open_session()
     try:
@@ -575,7 +592,9 @@ async def test_a_bounded_resume_pages_back_to_the_first_entry(
     finally:
         await session.close()
     resumed = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         response = SessionResumeResponse.model_validate(

@@ -66,6 +66,26 @@ pub fn init(mouse: bool) -> std::io::Result<(Tui, TerminalGuard)> {
     Ok((terminal, guard))
 }
 
+/// Capture the mouse. Crossterm's Windows capture only sets the console mode, so also request SGR
+/// reports there: ConPTY decodes them, while legacy reports some terminals send arrive as typed keys.
+pub fn capture_mouse(out: &mut impl std::io::Write) -> std::io::Result<()> {
+    execute!(out, EnableMouseCapture)?;
+    if cfg!(windows) {
+        execute!(out, Print("\x1b[?1006h"))?;
+    }
+    Ok(())
+}
+
+/// Release the mouse, resetting Windows SGR reports even when restoring the console mode fails.
+pub fn release_mouse(out: &mut impl std::io::Write) -> std::io::Result<()> {
+    let released = execute!(out, DisableMouseCapture);
+    if !cfg!(windows) {
+        return released;
+    }
+    let sgr_reset = execute!(out, Print("\x1b[?1006l"));
+    released.and(sgr_reset)
+}
+
 /// Turn SGR-pixels mouse reports on or off to match the window's cells.
 pub fn sync_pixel_reports() -> std::io::Result<()> {
     match crate::mouse::pixels::sync() {
@@ -117,7 +137,7 @@ impl TerminalGuard {
 
     fn enable_raw_modes(&mut self) -> std::io::Result<()> {
         if self.mouse {
-            execute!(std::io::stdout(), EnableMouseCapture)?;
+            capture_mouse(&mut std::io::stdout())?;
         } else {
             self.window_input = crate::platform::enable_window_input();
         }
@@ -148,14 +168,14 @@ impl TerminalGuard {
             if std::mem::take(&mut self.window_input) {
                 crate::platform::disable_window_input();
             }
-            execute!(std::io::stdout(), EnableMouseCapture)?;
+            capture_mouse(&mut std::io::stdout())?;
             return sync_pixel_reports();
         }
         crate::pointer::emit(crate::pointer::Shape::Default);
         if crate::mouse::pixels::disable() {
             execute!(std::io::stdout(), Print(crate::mouse::pixels::DISABLE))?;
         }
-        execute!(std::io::stdout(), DisableMouseCapture)?;
+        release_mouse(&mut std::io::stdout())?;
         self.window_input = crate::platform::enable_window_input();
         Ok(())
     }
@@ -173,7 +193,7 @@ impl TerminalGuard {
         }
         let _ = execute!(std::io::stdout(), DisableFocusChange, DisableBracketedPaste);
         if self.mouse {
-            let _ = execute!(std::io::stdout(), DisableMouseCapture);
+            let _ = release_mouse(&mut std::io::stdout());
         }
         if std::mem::take(&mut self.window_input) {
             crate::platform::disable_window_input();

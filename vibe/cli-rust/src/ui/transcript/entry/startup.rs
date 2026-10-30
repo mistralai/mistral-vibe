@@ -1,6 +1,5 @@
 //! Client-owned startup banners.
 
-use ratatui::style::Color;
 use ratatui::text::{Line, Span};
 
 use crate::selection::{fold, Fold};
@@ -18,17 +17,13 @@ pub(super) fn push_warning(lines: &mut LinkedLines, text: &str, width: u16) {
     }
 }
 
-/// What's new: the markdown body under a heavy `$mistral_orange`
-/// left border, one blank above it when history widgets existed at mount time.
-pub(super) fn push_whats_new(lines: &mut LinkedLines, text: &str, width: u16, after_history: bool) {
-    if after_history {
-        lines.push_gap();
-    }
-    push_guttered(lines, text, width, theme::ORANGE);
-}
-
-/// A markdown banner under a heavy left border: the promo (`$mistral_orange`),
-/// the what's-new body, and the custom-tools deprecation (`$warning`).
-pub(super) fn push_guttered(lines: &mut LinkedLines, text: &str, width: u16, color: Color) {
-    lines.append(markdown::guttered(text, width, color));
+/// The release notes of a fresh session, in a titled frame, versions in `$primary`.
+pub(super) fn push_whats_new(lines: &mut LinkedLines, text: &str, width: u16) {
+    let is_version = |line: &Line| crate::whats_new::is_version_heading(line.to_string().trim());
+    lines.append(markdown::framed(
+        text,
+        width,
+        crate::whats_new::TITLE,
+        is_version,
+    ));
 }

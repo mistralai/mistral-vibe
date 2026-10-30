@@ -4,10 +4,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::backend::TestBackend;
+use crossterm::event::KeyCode;
 use ratatui::layout::Rect;
-use ratatui::Terminal;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use vibe_rs::agents::{self, Event};
@@ -15,6 +13,9 @@ use vibe_rs::app::{App, Status};
 use vibe_rs::config;
 use vibe_rs::input::handle_key;
 use vibe_rs::server::Client;
+use vibe_rs::ui_event::{self, UiEvent};
+
+use crate::support::{key, render, row};
 
 const PRIMARY: [&str; 3] = ["default", "plan", "accept-edits"];
 
@@ -31,7 +32,7 @@ struct Harness {
     app: App,
     client: Arc<Client>,
     frames: Option<mpsc::UnboundedReceiver<Value>>,
-    events: mpsc::Receiver<Event>,
+    events: mpsc::Receiver<UiEvent>,
     config_tx: mpsc::Sender<config::Loaded>,
     _config_rx: mpsc::Receiver<config::Loaded>,
 }
@@ -44,7 +45,7 @@ impl Harness {
         app.session.session_id = Some("session".to_owned());
         app.set_status(Status::Ready);
         let (tx, events) = mpsc::channel(8);
-        app.agents.tx = Some(tx);
+        app.events = Some(tx);
         let (client, frames) = if answering {
             let (client, frames) = Client::stub_answering();
             (client, Some(frames))
@@ -63,8 +64,7 @@ impl Harness {
     }
 
     fn press(&mut self, code: KeyCode) {
-        let key = KeyEvent::new(code, KeyModifiers::NONE);
-        handle_key(&mut self.app, &self.client, &self.config_tx, key);
+        handle_key(&mut self.app, &self.client, &self.config_tx, key(code));
     }
 
     fn type_text(&mut self, text: &str) {
@@ -85,17 +85,23 @@ impl Harness {
         frame["params"]["agentName"].as_str().unwrap().to_owned()
     }
 
+    /// The oldest switch answer in flight.
+    async fn next_event(&mut self) -> Event {
+        let event = tokio::time::timeout(Duration::from_secs(5), self.events.recv()).await;
+        let Ok(Some(UiEvent::Agents(event))) = event else {
+            panic!("the switch settles");
+        };
+        event
+    }
+
     /// Settle the oldest switch in flight; a successful one lands on its target.
     async fn settle(&mut self) -> String {
-        let mut event = tokio::time::timeout(Duration::from_secs(5), self.events.recv())
-            .await
-            .expect("the switch settles")
-            .expect("the event channel stays open");
+        let mut event = self.next_event().await;
         if event.runtime.is_ok() {
             event.runtime = Ok(runtime(&event.target));
         }
         let target = event.target.clone();
-        agents::apply_event(&mut self.app, &self.client, event);
+        ui_event::apply(&mut self.app, &self.client, event.into());
         target
     }
 
@@ -106,14 +112,10 @@ impl Harness {
     /// The composer's first content row, which starts with the prompt marker.
     fn prompt_row(&self) -> String {
         let width = 40;
-        let mut terminal = Terminal::new(TestBackend::new(width, 4)).expect("terminal");
-        terminal
-            .draw(|frame| {
-                vibe_rs::ui::chat_input::draw(&self.app, frame, Rect::new(0, 0, width, 4));
-            })
-            .expect("draw");
-        let buffer = terminal.backend().buffer();
-        (0..width).map(|x| buffer[(x, 1)].symbol()).collect()
+        let buffer = render(width, 4, |frame| {
+            vibe_rs::ui::chat_input::draw(&self.app, frame, Rect::new(0, 0, width, 4));
+        });
+        row(&buffer, 1)
     }
 }
 
@@ -173,12 +175,9 @@ async fn a_failed_switch_clears_the_in_flight_state_and_restores_the_prompt() {
     agents::show_switch_spinner(&mut harness.app);
     assert!(harness.prompt_row().starts_with("⠋ draft"));
 
-    let event = tokio::time::timeout(std::time::Duration::from_secs(5), harness.events.recv())
-        .await
-        .expect("no hang")
-        .expect("the failure settles");
+    let event = harness.next_event().await;
     assert!(event.runtime.is_err());
-    agents::apply_event(&mut harness.app, &harness.client, event);
+    ui_event::apply(&mut harness.app, &harness.client, event.into());
     let toast = harness
         .app
         .overlays
@@ -203,11 +202,8 @@ async fn a_failed_switch_clears_the_in_flight_state_and_restores_the_prompt() {
 async fn after_a_failed_switch_the_next_cycle_steps_past_the_refused_target() {
     let mut harness = Harness::new(false);
     harness.press(KeyCode::BackTab);
-    let event = tokio::time::timeout(std::time::Duration::from_secs(5), harness.events.recv())
-        .await
-        .expect("no hang")
-        .expect("the failure settles");
-    agents::apply_event(&mut harness.app, &harness.client, event);
+    let event = harness.next_event().await;
+    ui_event::apply(&mut harness.app, &harness.client, event.into());
 
     let (client, frames) = Client::stub_answering();
     harness.client = Arc::new(client);

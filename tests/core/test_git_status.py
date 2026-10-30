@@ -116,6 +116,56 @@ def test_refuses_a_bare_repository_without_stranding_the_open(
     assert closed == [True]
 
 
+@pytest.mark.parametrize(
+    ("git_cli_repo", "block_ref_files"),
+    [("files", True), ("reftable", False)],
+    indirect=["git_cli_repo"],
+)
+def test_reads_head_without_gitpython_ref_files(
+    tmp_path: Path,
+    git_cli_repo: Repo,
+    block_ref_files: bool,
+    request: pytest.FixtureRequest,
+) -> None:
+    # Git leaves "ref: refs/heads/.invalid" in .git/HEAD for older clients;
+    # the real HEAD is in .git/reftable. Reftable needs git 2.45 or later;
+    # blocking GitPython's ref file reads checks the same code on any git.
+    git_cli_repo.git.commit("--allow-empty", "-m", "initial")
+    git_cli_repo.git.checkout("-b", "feature")
+    if block_ref_files:
+        request.getfixturevalue("no_gitpython_ref_files")
+
+    with GitRepo.open(tmp_path) as checkout:
+        assert checkout.status().branch == "feature"
+        assert checkout.has_commits()
+        assert checkout.head_commit() == git_cli_repo.git.rev_parse("HEAD")
+
+
+@pytest.mark.parametrize("git_cli_repo", ["files", "reftable"], indirect=True)
+def test_reports_no_commits_on_an_unborn_branch(
+    tmp_path: Path, git_cli_repo: Repo
+) -> None:
+    with GitRepo.open(tmp_path) as checkout:
+        assert checkout.branch() == "main"
+        assert not checkout.has_commits()
+
+
+def test_a_git_failure_is_not_read_as_an_unborn_or_detached_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only an unborn HEAD means "no commits", and only a detached HEAD means
+    # "no branch". A git error such as dubious ownership (exit 128) raises
+    # GitError instead.
+    _init_repo(tmp_path)
+
+    with GitRepo.open(tmp_path) as checkout:
+        monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+        with pytest.raises(GitError, match="dubious ownership"):
+            checkout.has_commits()
+        with pytest.raises(GitError, match="dubious ownership"):
+            checkout.branch()
+
+
 def test_reports_no_branch_when_head_is_detached(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     repo.git.checkout(repo.head.commit.hexsha)

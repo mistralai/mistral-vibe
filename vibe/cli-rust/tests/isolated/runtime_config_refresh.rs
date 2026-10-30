@@ -58,12 +58,10 @@ fn a_config_screen_write_turning_cursor_blink_off_steadies_the_caret() {
     app.view.cursor_on = false;
     assert!(!app.main_input_cursor_on());
 
-    app.commit_started();
     let written = runtime(json!({"cursorBlink": false}), 600_000);
     model_picker::apply_event(&mut app, model_picker::Event::Written(written));
 
     assert!(app.main_input_cursor_on());
-    app.commit_started();
     let written = runtime(json!({"cursorBlink": true}), 600_000);
     model_picker::apply_event(&mut app, model_picker::Event::Written(written));
     assert!(!app.main_input_cursor_on());
@@ -75,12 +73,10 @@ fn a_config_screen_write_toggles_mouse_capture() {
     let mut app = App::default();
     assert!(app.session.startup_config.enable_mouse_capture);
 
-    app.commit_started();
     let written = runtime(json!({"enableMouseCapture": false}), 600_000);
     model_picker::apply_event(&mut app, model_picker::Event::Written(written));
     assert!(!app.session.startup_config.enable_mouse_capture);
 
-    app.commit_started();
     let written = runtime(json!({"enableMouseCapture": true}), 600_000);
     model_picker::apply_event(&mut app, model_picker::Event::Written(written));
     assert!(app.session.startup_config.enable_mouse_capture);
@@ -92,7 +88,6 @@ fn a_theme_changed_through_config_applies_live() {
     let mut app = App::default();
     theme::set_active("ansi-dark");
 
-    app.commit_started();
     let written = runtime(json!({"theme": "dracula"}), 600_000);
     model_picker::apply_event(&mut app, model_picker::Event::Written(written));
 

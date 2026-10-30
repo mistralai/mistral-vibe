@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-use crate::server::{method, Client, RuntimeReadParams};
+use crate::server::{method, AudioView, Client, ConfigView, RuntimeReadParams, RuntimeSnapshot};
 use crate::voice::TranscriptionConfig;
 
 /// What the UI needs from the one startup `config/read`.
@@ -46,62 +46,36 @@ pub(super) async fn read_config(client: &Arc<Client>, cwd: Option<String>) -> Co
             return ConfigRead::default();
         }
     };
-    let Some(config) = result.pointer("/config") else {
+    let Some(config) = result
+        .get("config")
+        .map(crate::utils::json::read::<ConfigView>)
+    else {
         tracing::warn!("config/read answered without a config; starting with defaults");
         return ConfigRead::default();
     };
-    let enabled = config
-        .get("voiceModeEnabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let show_greeting = config
-        .get("showGreeting")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let transcription = config.get("transcription").map(|t| TranscriptionConfig {
-        name: str_at(t, "/model/name", ""),
-        sample_rate: t
-            .pointer("/model/sampleRate")
-            .and_then(Value::as_u64)
-            .unwrap_or(16000) as u32,
-        encoding: str_at(t, "/model/encoding", "pcm_s16le"),
-        target_streaming_delay_ms: t
-            .pointer("/model/targetStreamingDelayMs")
-            .and_then(Value::as_u64)
-            .unwrap_or(500),
-        api_base: str_at(t, "/provider/apiBase", "wss://api.mistral.ai"),
-        api_key_env_var: str_at(t, "/provider/apiKeyEnvVar", ""),
-    });
     ConfigRead {
-        voice_mode_enabled: enabled,
-        show_greeting,
-        transcription,
-        log_level: config
-            .get("logLevel")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        enable_telemetry: config
-            .get("enableTelemetry")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        enable_update_checks: config
-            .get("enableUpdateChecks")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        enable_system_trust_store: config
-            .get("enableSystemTrustStore")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        voice_mode_enabled: config.voice_mode_enabled.unwrap_or(false),
+        show_greeting: config.show_greeting,
+        transcription: config.transcription.map(transcription),
+        log_level: config.log_level,
+        enable_telemetry: config.enable_telemetry,
+        enable_update_checks: config.enable_update_checks,
+        enable_system_trust_store: config.enable_system_trust_store,
     }
 }
 
-/// A JSON string at `pointer`, or `default` when absent.
-fn str_at(value: &Value, pointer: &str, default: &str) -> String {
-    value
-        .pointer(pointer)
-        .and_then(Value::as_str)
-        .unwrap_or(default)
-        .to_string()
+fn transcription(view: AudioView) -> TranscriptionConfig {
+    TranscriptionConfig {
+        name: view.model.name.unwrap_or_default(),
+        sample_rate: view.model.sample_rate.unwrap_or(16000),
+        encoding: view.model.encoding.unwrap_or_else(|| "pcm_s16le".into()),
+        target_streaming_delay_ms: view.model.target_streaming_delay_ms.unwrap_or(500),
+        api_base: view
+            .provider
+            .api_base
+            .unwrap_or_else(|| "wss://api.mistral.ai".into()),
+        api_key_env_var: view.provider.api_key_env_var,
+    }
 }
 
 /// Read the runtime snapshot once at startup, returning the raw `runtime/read` result.
@@ -116,38 +90,26 @@ pub(super) async fn read_runtime(client: &Arc<Client>, session_id: &str) -> Resu
         .context("runtime/read")
 }
 
+fn config(result: &Value) -> ConfigView {
+    RuntimeSnapshot::config(result).unwrap_or_default()
+}
+
 /// Whether reasoning traces are shown, from a `runtime/read` result.
 pub fn read_show_thinking_nodes(result: &Value) -> bool {
-    result
-        .pointer("/runtime/config/showThinkingNodes")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
+    config(result).show_thinking_nodes
 }
 
 /// Whether the subagent status list is shown (config `show_subagent_status_list`).
 pub fn read_show_subagent_status_list(result: &Value) -> bool {
-    result
-        .pointer("/runtime/config/showSubagentStatusList")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
+    config(result).show_subagent_status_list
 }
 
 /// Whether Ctrl+D asks for a second press (config `ask_confirmation_on_exit`).
 pub fn read_ask_confirmation_on_exit(result: &Value) -> bool {
-    result
-        .pointer("/runtime/config/askConfirmationOnExit")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
+    config(result).ask_confirmation_on_exit
 }
 
 pub fn read_tokens(result: &Value) -> (u64, u64) {
-    let current = result
-        .pointer("/runtime/stats/contextTokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let maximum = result
-        .pointer("/runtime/contextWindow")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    (current, maximum)
+    let runtime = RuntimeSnapshot::read(result).unwrap_or_default();
+    (runtime.stats.context_tokens, runtime.context_window)
 }

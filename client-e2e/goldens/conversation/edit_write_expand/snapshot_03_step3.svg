@@ -41,7 +41,7 @@
 .vibe-r7 { fill: #0000ee;font-weight: bold }
 .vibe-r8 { fill: #cd0000 }
 .vibe-r9 { fill: #cd00cd;font-weight: bold }
-.vibe-r10 { fill: #0000ee }
+.vibe-r10 { fill: #5c5cff }
 .vibe-r11 { fill: #cdcd00 }
 .vibe-r12 { fill: #000000 }
     </style>

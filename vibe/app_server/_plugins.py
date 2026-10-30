@@ -44,6 +44,7 @@ from vibe.core.config import VibeConfigSchema
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.models import MCPHttp, MCPStdio, MCPStreamableHttp
 from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.hooks.models import HookProtocol
 from vibe.core.paths import VIBE_HOME
 from vibe.core.plugins import (
     DetectedPluginFormat,
@@ -347,6 +348,8 @@ class UnifiedPluginProvider:
         # the copies of the skills there.
         self._sandbox_skills = sandbox_skills
         self._bound: dict[str, SessionPlugins] = {}
+        # The set each session started with, which a re-pin does not replace.
+        self._first_bound: dict[str, SessionPlugins] = {}
         self._binding: set[str] = set()
         self._observers: list[Callable[[str, SessionPlugins], Awaitable[None]]] = []
 
@@ -358,6 +361,15 @@ class UnifiedPluginProvider:
     def bound(self, session_id: str) -> SessionPlugins | None:
         """What this session is actually running, or ``None`` before its bind."""
         return self._bound.get(session_id)
+
+    def first_bound(self, session_id: str) -> SessionPlugins | None:
+        """The set this session bound first, or ``None`` before its bind.
+
+        Plugin hooks run against it. Their commands are compiled when the session
+        starts and a re-pin cannot recompile them, so their files must not move to
+        the re-pinned checkout either: a kept command would run the new files.
+        """
+        return self._first_bound.get(session_id)
 
     @property
     def installed_roots(self) -> Mapping[str, Path]:
@@ -491,6 +503,7 @@ class UnifiedPluginProvider:
         for observer in self._observers:
             await observer(session_id, bound)
         self._bound[session_id] = bound
+        self._first_bound.setdefault(session_id, bound)
         self._binding.discard(session_id)
         # Derived, never published: the lock records this resolve, not the
         # ghosts the bound catalogue carries. A restore discards these anyway.
@@ -592,6 +605,7 @@ class UnifiedPluginProvider:
             self._binding.discard(session_id)
             return
         self._bound.pop(session_id, None)
+        self._first_bound.pop(session_id, None)
         try:
             await asyncio.to_thread(self._discard_runtime_files, session_id)
         except Exception:
@@ -827,6 +841,30 @@ def plugin_reload_notices(plugins: SessionPlugins) -> list[str]:
     return notices
 
 
+PLUGIN_HOOKS_RELOAD_NOTICE = (
+    "Plugin hooks changed. They apply to new sessions; this session keeps the "
+    "hooks it started with."
+)
+
+
+def plugin_hook_signature(plugins: SessionPlugins) -> tuple[str, ...]:
+    """What a session's plugin hooks run, to tell whether a reload changed them.
+
+    A session's hooks are bound to its engine when it starts, so a reload cannot swap
+    them; comparing this before and after tells the user when it matters. The whole
+    hook config counts, since a changed ``match``, ``timeout`` or ``strict`` changes
+    what the session enforces, and so does the order: hooks run in it, so it decides
+    who rewrites first and whose deny wins. Hooks written for another tool never run,
+    so they do not count. Where the plugin files sit does not count either: the
+    pinned copy moves whenever any file of the plugin changes.
+    """
+    return tuple(
+        hook.model_dump_json(include={"config", "source", "plugin_name", "order"})
+        for hook in plugins.materialized.resolution.runtime_hooks
+        if hook.protocol is HookProtocol.VIBE
+    )
+
+
 def plugin_components_by_owner(
     plugins: SessionPlugins,
 ) -> Mapping[str, tuple[PluginComponent, ...]]:
@@ -975,10 +1013,11 @@ def core_plugins(plugins: SessionPlugins) -> list[RustPluginContextDefinition]:
     Core is handed real paths rather than the snapshot's portable refs, because
     it reads SKILL.md, knowledge folders and agent files off disk itself.
 
-    Tool groups and hook bindings are withheld: Core calls what it advertises,
-    and neither has an execution adapter yet, so advertising them would fail
-    turns rather than run anything. The tool catalogue still reaches the
-    snapshot and ``plugin/info``.
+    Tool groups are withheld: Core calls what it advertises, and they have no
+    execution adapter yet, so advertising them would fail turns rather than run
+    anything. The tool catalogue still reaches the snapshot and ``plugin/info``.
+    Hook bindings are withheld here too: the session compiles a plugin's hooks
+    with the user's own, so they bind on the session's capability set instead.
     """
     resolution = plugins.materialized.resolution
     return _plugin_contexts(

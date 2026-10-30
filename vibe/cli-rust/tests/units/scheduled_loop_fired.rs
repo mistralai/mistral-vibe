@@ -1,8 +1,9 @@
 //! A fired scheduled loop annotates the user prompt it sent instead of rendering itself.
 
 use serde_json::json;
-use vibe_rs::transcript::Transcript;
 use vibe_rs::utils::datetime::format_utc;
+
+use crate::support::live;
 
 fn user_message(id: &str, turn: &str, text: &str) -> serde_json::Value {
     json!({
@@ -24,14 +25,6 @@ fn fired(id: &str, turn: &str) -> serde_json::Value {
         "message": "Loop `abc` fired",
         "detail": {"kind": "scheduled_loop_fired", "loopId": "abc"},
     })
-}
-
-fn live(entries: &[serde_json::Value]) -> Transcript {
-    let mut transcript = Transcript::default();
-    for entry in entries {
-        transcript.add(&json!({ "entry": entry }));
-    }
-    transcript
 }
 
 #[test]

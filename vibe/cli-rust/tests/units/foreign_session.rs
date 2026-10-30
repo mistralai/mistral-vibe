@@ -1,21 +1,15 @@
 //! Child-session notifications must not rebuild the parent transcript.
 
-use std::sync::Arc;
-
 use serde_json::json;
-use vibe_rs::app::{App, Status};
+use vibe_rs::app::Status;
 use vibe_rs::event_handler;
-use vibe_rs::server::{notification, Client, Notification};
+use vibe_rs::server::{notification, Notification};
+
+use crate::support::{message, stub, with_status};
 
 fn parent_message() -> serde_json::Value {
     json!({
-        "entry": {
-            "id": "parent-msg",
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "text", "text": "hello"}],
-            "generationStatus": "completed",
-        }
+        "entry": message("parent-msg", "user", "hello")
     })
 }
 
@@ -27,13 +21,7 @@ fn snapshot(session_id: &str, entry_id: &str, text: &str) -> Notification {
             "state": {
                 "eventId": 5,
                 "session": {"id": session_id},
-                "history": [{
-                    "id": entry_id,
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "text", "text": text}],
-                    "generationStatus": "completed",
-                }],
+                "history": [message(entry_id, "user", text)],
             },
         }),
     }
@@ -41,15 +29,13 @@ fn snapshot(session_id: &str, entry_id: &str, text: &str) -> Notification {
 
 #[test]
 fn a_child_session_snapshot_does_not_replace_parent_history() {
-    let mut app = App::default();
-    app.session.status = Status::Ready;
+    let mut app = with_status(Status::Ready);
     app.session.session_id = Some("parent".into());
     app.view.transcript.add(&parent_message());
-    let client = Arc::new(Client::stub());
 
     assert!(event_handler::apply_notification(
         &mut app,
-        &client,
+        &stub(),
         &snapshot("child", "child-msg", "child"),
     ));
 
@@ -59,15 +45,13 @@ fn a_child_session_snapshot_does_not_replace_parent_history() {
 
 #[test]
 fn a_same_session_snapshot_still_loads() {
-    let mut app = App::default();
-    app.session.status = Status::Ready;
+    let mut app = with_status(Status::Ready);
     app.session.session_id = Some("parent".into());
     app.view.transcript.add(&parent_message());
-    let client = Arc::new(Client::stub());
 
     assert!(event_handler::apply_notification(
         &mut app,
-        &client,
+        &stub(),
         &snapshot("parent", "parent-next", "next"),
     ));
 

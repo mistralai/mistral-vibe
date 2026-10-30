@@ -1,84 +1,15 @@
 //! Question-box option prefixes are selection chrome: never anchored,
 //! highlighted, or copied, while a press on them still clicks its option.
 
-use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use vibe_rs::app::{App, Selection};
-use vibe_rs::selection::{region, Granularity, Region, RegionId};
-use vibe_rs::server::{QuestionChoice, UserQuestion};
+use vibe_rs::app::Selection;
+use vibe_rs::selection::{region, Granularity, RegionId};
 
-/// Route one mouse event through the question app with a stub app-server client.
-fn handle_mouse(app: &mut App, event: crossterm::event::MouseEvent) {
-    let client = std::sync::Arc::new(vibe_rs::server::Client::stub());
-    vibe_rs::question_input::handle_mouse(app, &client, event);
-}
-
-/// The box-content region the question draw publishes, as the render would.
-fn question_region(x: u16, y: u16, width: u16, height: u16) -> Region {
-    Region {
-        area: Rect {
-            x,
-            y,
-            width,
-            height,
-        },
-        top: i32::from(y),
-        ..Region::default()
-    }
-}
-
-fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
-    MouseEvent {
-        kind,
-        column,
-        row,
-        modifiers: KeyModifiers::NONE,
-    }
-}
-
-fn app_with_question() -> App {
-    let mut app = App::default();
-    app.question_app.questions.push(UserQuestion {
-        question: "Choose".into(),
-        header: String::new(),
-        options: vec![
-            QuestionChoice {
-                label: "First".into(),
-                description: String::new(),
-            },
-            QuestionChoice {
-                label: "Second".into(),
-                description: String::new(),
-            },
-        ],
-        multi_select: false,
-        hide_other: false,
-    });
-    app
-}
-
-fn app_with_multi_select_question() -> App {
-    let mut app = App::default();
-    app.question_app.questions.push(UserQuestion {
-        question: "Pick".into(),
-        header: String::new(),
-        options: vec![
-            QuestionChoice {
-                label: "Alpha".into(),
-                description: "First choice".into(),
-            },
-            QuestionChoice {
-                label: "Beta".into(),
-                description: String::new(),
-            },
-        ],
-        multi_select: true,
-        hide_other: false,
-    });
-    app
-}
+use crate::support::{
+    down, drag, question_mouse, question_region, set_question_rows, up, with_question,
+};
 
 fn question_selection(anchor: (u16, i32), head: (u16, i32)) -> Selection {
     Selection {
@@ -95,54 +26,42 @@ fn question_selection(anchor: (u16, i32), head: (u16, i32)) -> Selection {
 
 #[test]
 fn a_press_on_an_option_prefix_anchors_no_selection() {
-    let mut app = app_with_question();
-    crate::question_app::set_rows(&mut app, &[(7, 0), (8, 1)]);
+    let mut app = with_question(false);
+    set_question_rows(&mut app, &[(7, 0), (8, 1)]);
     app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
     app.view.bottom_app_selection_chrome = vec![(7, 2, 6), (8, 2, 6)];
 
-    handle_mouse(
-        &mut app,
-        mouse(MouseEventKind::Down(MouseButton::Left), 3, 7),
-    );
+    question_mouse(&mut app, down(3, 7));
     assert!(app.selection.region.is_none());
     assert!(app.selection.drag.is_none());
 
-    handle_mouse(
-        &mut app,
-        mouse(MouseEventKind::Drag(MouseButton::Left), 30, 7),
-    );
+    question_mouse(&mut app, drag(30, 7));
     assert!(app.selection.region.is_none());
     assert!(app.selection.drag.is_none());
 }
 
 #[test]
 fn a_same_cell_press_on_a_prefix_still_clicks_its_option() {
-    let mut app = app_with_question();
-    crate::question_app::set_rows(&mut app, &[(7, 0), (8, 1)]);
+    let mut app = with_question(false);
+    set_question_rows(&mut app, &[(7, 0), (8, 1)]);
     app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
     app.view.bottom_app_selection_chrome = vec![(7, 2, 6), (8, 2, 6)];
 
-    handle_mouse(
-        &mut app,
-        mouse(MouseEventKind::Down(MouseButton::Left), 3, 8),
-    );
-    handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 3, 8));
+    question_mouse(&mut app, down(3, 8));
+    question_mouse(&mut app, up(3, 8));
 
     assert_eq!(app.question_app.list.selected(), 1);
 }
 
 #[test]
 fn a_same_cell_press_on_a_multi_select_prefix_still_ticks_its_option() {
-    let mut app = app_with_multi_select_question();
-    crate::question_app::set_rows(&mut app, &[(7, 0), (8, 1)]);
+    let mut app = with_question(true);
+    set_question_rows(&mut app, &[(7, 0), (8, 1)]);
     app.view.bottom_app_selection_region = question_region(2, 6, 60, 10);
     app.view.bottom_app_selection_chrome = vec![(7, 2, 10)];
 
-    handle_mouse(
-        &mut app,
-        mouse(MouseEventKind::Down(MouseButton::Left), 3, 7),
-    );
-    handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 3, 7));
+    question_mouse(&mut app, down(3, 7));
+    question_mouse(&mut app, up(3, 7));
 
     assert_eq!(app.question_app.list.selected(), 0);
     assert!(app.question_app.multi_selections[&0].contains(&0));
@@ -164,7 +83,7 @@ fn a_drag_across_an_option_row_excludes_its_prefix_cells() {
         "│ › 1. Solarized - Warm muted tones",
         Style::default(),
     );
-    let mut app = app_with_question();
+    let mut app = with_question(false);
     app.view.bottom_app_selection_region = question_region(2, 6, 40, 2);
     app.view.bottom_app_selection_chrome = vec![(7, 2, 6)];
     app.selection.region = Some(question_selection((2, 0), (34, 1)));
@@ -186,7 +105,7 @@ fn a_drag_across_a_multi_select_option_excludes_its_checkbox_prefix() {
     let mut buf = Buffer::empty(Rect::new(0, 0, 44, 8));
     buf.set_string(0, 6, "│ Pick one", Style::default());
     buf.set_string(0, 7, "│   1. [ ] Alpha - First choice", Style::default());
-    let mut app = app_with_multi_select_question();
+    let mut app = with_question(true);
     app.view.bottom_app_selection_region = question_region(2, 6, 40, 2);
     app.view.bottom_app_selection_chrome = vec![(7, 2, 10)];
     app.selection.region = Some(question_selection((2, 0), (30, 1)));
@@ -208,7 +127,7 @@ fn a_drag_across_the_free_text_row_excludes_its_prefix() {
     buf.set_string(0, 6, "│ › 1. First", Style::default());
     buf.set_string(0, 7, "│ › 2. Second", Style::default());
     buf.set_string(0, 8, "│ › 3. draft answer", Style::default());
-    let mut app = app_with_question();
+    let mut app = with_question(false);
     app.view.bottom_app_selection_region = question_region(2, 6, 40, 3);
     app.view.bottom_app_selection_chrome = vec![(6, 2, 6), (7, 2, 6), (8, 2, 6)];
     app.selection.region = Some(question_selection((2, 0), (18, 2)));

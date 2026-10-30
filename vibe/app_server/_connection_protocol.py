@@ -46,6 +46,7 @@ class ClientCapabilities(ProtocolModel):
     callback_kinds: list[CallbackKind] = Field(default_factory=list)
     client_tools: list[ClientToolCapability] = Field(default_factory=list)
     session_spawn: bool = False
+    session_peers: bool = False
     disabled_notifications: list[str] = Field(default_factory=list)
     platform_credentials: PlatformCredentialsCapability | None = None
 

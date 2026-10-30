@@ -1,13 +1,12 @@
 //! A model pick opens the thinking picker at once on the picked model's levels, holding the pick.
 
-use std::sync::Arc;
-
 use serde_json::{json, Value};
 use vibe_rs::app::App;
 use vibe_rs::config_write::Scope;
 use vibe_rs::model_picker;
-use vibe_rs::server::Client;
 use vibe_rs::thinking_picker::{self, ModelPick};
+
+use crate::support::stub;
 
 fn runtime() -> Value {
     json!({"runtime": {"config": {
@@ -22,7 +21,7 @@ fn runtime() -> Value {
 }
 
 fn select(app: &mut App, scope: Scope) {
-    model_picker::select(app, &Arc::new(Client::stub()), scope);
+    model_picker::select(app, &stub(), scope);
 }
 
 fn app_on(row: usize) -> App {

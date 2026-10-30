@@ -45,7 +45,7 @@ pub fn attachments(raw: &Value) -> Vec<ImageAttachment> {
         .into_iter()
         .flatten()
         .filter(|block| block.get("type").and_then(Value::as_str) == Some("image"))
-        .filter_map(|block| serde_json::from_value(block.get("attachment")?.clone()).ok())
+        .filter_map(|block| serde::Deserialize::deserialize(block.get("attachment")?).ok())
         .collect()
 }
 

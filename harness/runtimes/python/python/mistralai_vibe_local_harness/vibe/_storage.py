@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+from stat import S_ISREG
 from threading import RLock
 from typing import Annotated, Any, Literal, Self, cast
 
@@ -65,7 +66,12 @@ from mistralai_vibe_local_harness.protocol import (
     RustTextContentBlock,
     parse_apply_result,
 )
-from mistralai_vibe_local_harness.session_protocol import JsonObject, PublicSessionState
+from mistralai_vibe_local_harness.session_protocol import (
+    TURN_QUEUE_MAX_ITEMS,
+    JsonObject,
+    PublicSessionState,
+    TurnQueue,
+)
 from mistralai_vibe_local_harness.vibe._errors import (
     HarnessCommandConflictError,
     HarnessInvalidSessionStoreError,
@@ -134,6 +140,7 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SHA256_HEX_LENGTH = 64
 _JOURNAL_RECORD_DIGEST_FIELD = b',"record_sha256":"'
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+_SWEPT_LEASE_DIRECTORIES: set[Path] = set()
 _TIMESTAMP_PATTERN = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$"
 )
@@ -778,6 +785,11 @@ class SessionMetadataV1(_StoredModel):
     completion_catalogue: str | None = None
     root_session_id: str
     parent_session_id: str | None = None
+    # The separate root session that started this one with a task; not a
+    # subagent or fork parent.
+    started_by_session_id: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     subagent_spawn_key: str | None = None
     subagent_template_digest: str | None = None
     subagent_policy_ceiling_digest: str | None = None
@@ -978,6 +990,14 @@ class RuntimeStateV3(_RuntimeStateBase):
 def _load_stored_public_state(value: object) -> object:
     if isinstance(value, PublicSessionState):
         return value
+    if isinstance(value, dict) and "turnQueue" not in value:
+        # Stores persisted before the turn queue existed have no field to read.
+        value = {
+            **value,
+            "turnQueue": TurnQueue(
+                items=[], paused=False, max_items=TURN_QUEUE_MAX_ITEMS
+            ),
+        }
     return PublicSessionState.model_validate(value, extra="allow")
 
 
@@ -1958,6 +1978,7 @@ class SessionLease:
         _reject_symlink_components(self._path.parents[1], self._path.parent)
         self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with _lease_directory_lock(self._path.parent):
+            _sweep_once(self._path.parent)
             self._path.touch(mode=0o600, exist_ok=True)
             file = self._path.open("a+b")
             try:
@@ -2053,6 +2074,97 @@ def session_is_live(root: Path, session_id: str) -> bool:
         return False
 
 
+def sweep_session_leases(root: Path) -> dict[str, int | None]:
+    """Map each held session to its holder's process ID, deleting unheld lease files."""
+    directory = root / "active"
+    if not directory.is_dir():
+        return {}
+    with _lease_directory_lock(directory):
+        return _sweep_lease_directory(directory)
+
+
+def _sweep_lease_directory(directory: Path) -> dict[str, int | None]:
+    # Callers hold the lock owners acquire under, so an unheld file stays unheld.
+    names = [entry.name for entry in os.scandir(directory)]
+    held = {
+        session_id: _lease_holder_process_id(directory / f"{session_id}.lock.json")
+        for name in names
+        if name.endswith(".lock")
+        and (session_id := _lease_file_session_id(name)) is not None
+        and _lease_is_held(directory / name)
+    }
+    for name in names:
+        session_id = _lease_file_session_id(name)
+        if session_id is None or session_id in held:
+            continue
+        with suppress(OSError):
+            (directory / name).unlink(missing_ok=True)
+    return held
+
+
+def _sweep_once(directory: Path) -> None:
+    # Only sweeps delete killed processes' leases; each process sweeps on first acquire.
+    if directory in _SWEPT_LEASE_DIRECTORIES:
+        return
+    _SWEPT_LEASE_DIRECTORIES.add(directory)
+    with suppress(OSError):
+        _sweep_lease_directory(directory)
+
+
+def _lease_file_session_id(name: str) -> str | None:
+    for suffix in (".lock.json", ".lock"):
+        if not name.endswith(suffix):
+            continue
+        session_id = name.removesuffix(suffix)
+        return session_id if _SESSION_ID_PATTERN.fullmatch(session_id) else None
+    return None
+
+
+def _lease_is_held(path: Path) -> bool:
+    # Errors count as held: deleting a held lease file would allow a second owner.
+    try:
+        file = path.open("r+b")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    with file:
+        try:
+            _acquire_file_lock(file, blocking=False)
+        except OSError:
+            return True
+        with suppress(OSError):
+            _release_file_lock(file)
+    return False
+
+
+def _lease_holder_process_id(diagnostic_path: Path) -> int | None:
+    try:
+        diagnostic = json.loads(diagnostic_path.read_bytes())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(diagnostic, dict):
+        return None
+    process_id = cast(dict[str, object], diagnostic).get("process_id")
+    if isinstance(process_id, bool) or not isinstance(process_id, int):
+        return None
+    return process_id if process_id > 0 else None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionTail:
+    """The newest public history of a stored session, read without a full load.
+
+    ``projection_state`` is the published projection with its history cut to
+    at most the requested number of newest entries.
+    """
+
+    projection_state: ProjectionStateV1
+    session_metadata: SessionMetadataV1
+    before: str | None
+    """Id of the newest entry older than the tail, or None when the tail is all of it."""
+
+
 @dataclass(frozen=True, slots=True)
 class _GenerationCacheKey:
     """On-disk identity of a loaded generation.
@@ -2072,6 +2184,13 @@ class _GenerationCacheKey:
 class _CachedGeneration:
     key: _GenerationCacheKey
     session: StoredSession
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedTail:
+    key: _GenerationCacheKey
+    entries: int
+    tail: ProjectionTail
 
 
 @dataclass(frozen=True, slots=True)
@@ -2169,6 +2288,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
         )
         self._cache_lock = RLock()
         self._cache: _CachedGeneration | None = None
+        self._tail_cache: _CachedTail | None = None
         # Purely an optimization: every reuse it enables is verified against the
         # transcript being published, so a stale or empty plan costs a re-chunk
         # and never correctness.
@@ -2371,12 +2491,9 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
     def load(self) -> StoredSession:
         try:
             with self._cache_lock:
-                cached = self._cache
-                if cached is not None and (
-                    (self._lease is not None and self._lease.held)
-                    or self._read_cache_key(cached.key.journal_path) == cached.key
-                ):
-                    return cached.session
+                cached = self._valid_cached_session()
+                if cached is not None:
+                    return cached
                 self._cache = None
                 session, key, loaded_bytes = self._load_current()
                 self._cache = _CachedGeneration(key=key, session=session)
@@ -2388,6 +2505,131 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             raise HarnessInvalidSessionStoreError(
                 self.session_id, f"Invalid Unified session store: {exc}"
             ) from exc
+
+    def _valid_cached_session(self) -> StoredSession | None:
+        cached = self._cache
+        if cached is not None and (
+            (self._lease is not None and self._lease.held)
+            or self._read_cache_key(cached.key.journal_path) == cached.key
+        ):
+            return cached.session
+        return None
+
+    def read_projection_tail(self, entries: int) -> ProjectionTail | None:
+        """Read the newest ``entries`` history entries without loading the session.
+
+        Reads the pointer, the manifest, the projection and Runtime state
+        envelopes, and only the trailing projection history chunks the page
+        needs; never the checkpoint or any other chunk. Returns None whenever
+        only ``load`` can answer: the recovery journal holds records to replay,
+        or the store is one this read cannot vouch for, which ``load`` reports.
+        """
+        try:
+            with self._cache_lock:
+                cached = self._valid_cached_session()
+                if cached is not None:
+                    return _projection_tail(
+                        cached.projection_state,
+                        cached.projection_state.snapshot.history.entries,
+                        entries,
+                        cached.runtime_state.session_metadata,
+                    )
+                tail = self._tail_cache
+                if (
+                    tail is not None
+                    and tail.entries == entries
+                    and self._read_cache_key(tail.key.journal_path) == tail.key
+                ):
+                    return tail.tail
+                self._tail_cache = None
+                read = self._read_projection_tail(entries)
+                if read is None:
+                    return None
+                self._tail_cache, loaded_bytes = read
+                self.last_load_bytes = loaded_bytes
+                return self._tail_cache.tail
+        except Exception:
+            logger.debug("Projection tail read fell back to a full load", exc_info=True)
+            return None
+
+    def _read_projection_tail(self, entries: int) -> tuple[_CachedTail, int] | None:  # noqa: PLR0914 - one cohesive partial load
+        _reject_symlink_components(self.root, self.session_root)
+        current_value, current_canonical = _read_document_bytes(
+            self.session_root / "CURRENT"
+        )
+        newer_minor = CurrentPointerV1.newer_minor(current_value)
+        if newer_minor is not None:
+            raise HarnessStoreRequiresNewerReaderError(self.session_id, newer_minor)
+        current = CurrentPointerV1.model_validate(current_value)
+        if current.session_id != self.session_id:
+            raise ValueError("CURRENT names another session")
+        generation_dir = self.session_root / "generations" / current.generation
+        _reject_symlink_components(self.session_root, generation_dir)
+        manifest_value, manifest_bytes = _read_document_bytes(
+            generation_dir / "manifest.json"
+        )
+        if _sha256(manifest_bytes) != current.manifest_sha256:
+            raise ValueError("manifest digest mismatch")
+        manifest = GenerationManifestV1.model_validate(manifest_value)
+        if (
+            manifest.session_id != self.session_id
+            or manifest.generation != current.generation
+            or manifest.snapshot_sequence != current.snapshot_sequence
+        ):
+            raise ValueError("CURRENT and manifest disagree")
+
+        journal_path = self.session_root / manifest.recovery_journal_segment.path
+        _reject_symlink_components(self.session_root, journal_path)
+        journal_stat = os.lstat(journal_path)
+        if not S_ISREG(journal_stat.st_mode):
+            raise ValueError("recovery journal must be a regular file")
+        if journal_stat.st_size:
+            return None
+
+        runtime_value, loaded_bytes = _read_referenced_document(
+            generation_dir, manifest.runtime_state
+        )
+        if not isinstance(runtime_value, dict):
+            raise ValueError("runtime state must be an object")
+        if runtime_value.get("runtime_state_version") != _RUNTIME_STATE_VERSION:
+            raise ValueError("unsupported Runtime state version")
+        if runtime_value.get("session_id") != self.session_id:
+            raise ValueError("runtime state belongs to another session")
+        if runtime_value.get("snapshot_sequence") != manifest.snapshot_sequence:
+            raise ValueError("runtime state sequence does not match manifest")
+        session_metadata = SessionMetadataV1.model_validate(
+            runtime_value.get("session_metadata")
+        )
+
+        projection_value, document_bytes = _read_referenced_document(
+            generation_dir, manifest.projection_state
+        )
+        loaded_bytes += document_bytes
+        if manifest.projection_state.chunks is not None:
+            # One entry past the page names the cursor of the history before it.
+            history, chunk_bytes = _read_trailing_chunks(
+                self.session_root / _CHUNKS_DIRNAME,
+                manifest.projection_state.chunks,
+                entries + 1,
+                self._chunk_cache,
+            )
+            _attach_transcript(projection_value, _PROJECTION_HISTORY_PATH, history)
+            loaded_bytes += chunk_bytes
+        projection = ProjectionStateV1.model_validate(projection_value)
+        if projection.session_id != self.session_id:
+            raise ValueError("projection state belongs to another session")
+        if projection.snapshot_sequence != manifest.snapshot_sequence:
+            raise ValueError("projection state sequence does not match manifest")
+        key = _GenerationCacheKey(
+            current=current_canonical + b"\n",
+            journal_path=journal_path,
+            journal_size=journal_stat.st_size,
+            journal_mtime_ns=journal_stat.st_mtime_ns,
+        )
+        tail = _projection_tail(
+            projection, projection.snapshot.history.entries, entries, session_metadata
+        )
+        return _CachedTail(key=key, entries=entries, tail=tail), loaded_bytes
 
     def _load_current(self) -> tuple[StoredSession, _GenerationCacheKey, int]:
         pointer = self._current_bytes()
@@ -2409,6 +2651,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
     def _invalidate_cache(self) -> None:
         with self._cache_lock:
             self._cache = None
+            self._tail_cache = None
 
     def adopt_cached_generation(self, source: UnifiedSessionStore) -> None:
         if source is self or source.session_root != self.session_root:
@@ -4923,6 +5166,52 @@ def _read_chunked_transcript(
     return items, size
 
 
+def _read_trailing_chunks(
+    chunk_root: Path, digests: tuple[str, ...], entries: int, cache: _ChunkCache
+) -> tuple[list[JsonValue], int]:
+    runs: list[list[JsonValue]] = []
+    held = 0
+    size = 0
+    for digest in reversed(digests):
+        if held >= entries:
+            break
+        body = cache.read(chunk_root, digest)
+        size += len(body)
+        chunk = json.loads(body)
+        if not isinstance(chunk, list):
+            raise ValueError(f"stored chunk is not a transcript run: {digest}")
+        runs.append(cast(list[JsonValue], chunk))
+        held += len(chunk)
+    return [item for run in reversed(runs) for item in run], size
+
+
+def _projection_tail(
+    projection: ProjectionStateV1,
+    history: list[JsonObject] | list[JsonValue],
+    entries: int,
+    session_metadata: SessionMetadataV1,
+) -> ProjectionTail:
+    kept = history[-entries:] if entries else []
+    older = history[: len(history) - len(kept)]
+    before = older[-1] if older else None
+    snapshot = projection.snapshot
+    return ProjectionTail(
+        projection_state=projection.model_copy(
+            update={
+                "snapshot": snapshot.model_copy(
+                    update={
+                        "history": snapshot.history.model_copy(
+                            update={"entries": list(kept)}
+                        )
+                    }
+                )
+            }
+        ),
+        session_metadata=session_metadata,
+        before=cast(str, before["id"]) if isinstance(before, dict) else None,
+    )
+
+
 def _collect_chunks(session_root: Path, generation_root: Path) -> None:
     """Remove pooled chunks no retained manifest names.
 
@@ -5204,9 +5493,9 @@ def _next_generation(generation_root: Path, snapshot_sequence: int) -> str:
 
 @contextmanager
 def _lease_directory_lock(directory: Path) -> Iterator[None]:
-    registry = directory / ".registry"
-    registry.touch(mode=0o600, exist_ok=True)
-    file = registry.open("a+b")
+    # Unlike touch, this keeps the registry mtime unchanged for polling readers.
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    file = os.fdopen(os.open(directory / ".registry", flags, 0o600), "r+b")
     try:
         _acquire_file_lock(file, blocking=True)
     except BaseException:
@@ -5353,6 +5642,7 @@ __all__ = [
     "ProjectionDeltaPayloadV1",
     "ProjectionOp",
     "ProjectionStateV1",
+    "ProjectionTail",
     "RemoveEntryOp",
     "ReplaceEntryOp",
     "RuntimeActionV1",

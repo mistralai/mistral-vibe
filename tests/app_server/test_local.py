@@ -14,6 +14,7 @@ from tests.stubs.app_server import FakeSessionBackendServices
 from vibe.app_server import _runtime as runtime
 import vibe.app_server._host as host_module
 from vibe.app_server._host import HostRequestHandler
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._worktree_cleanup import session_finished
 from vibe.app_server._worktree_session import SessionWorktrees
 from vibe.app_server.protocol import (
@@ -517,10 +518,14 @@ def test_worktree_remove_keeps_when_another_session_holds(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_passive_host_lists_linked_worktrees(tmp_path: Path) -> None:
+async def test_passive_host_lists_linked_worktrees(
+    tmp_path: Path, process_services: ProcessServices
+) -> None:
     _init_repo(tmp_path)
     worktree = _prepare("host-listed", tmp_path, branch="feat/host-listed")
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     result = await handler.dispatch(
         "workspace/git/worktrees/list",
@@ -545,10 +550,12 @@ async def test_passive_host_lists_linked_worktrees(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_passive_host_uses_worktree_limit(
-    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     (config_dir / "config.toml").write_text("worktree_limit = 25\n")
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     prune = Mock(return_value=2)
     monkeypatch.setattr(ManagedWorktree, "prune", prune)
@@ -571,8 +578,12 @@ async def test_passive_host_uses_worktree_limit(
 
 
 @pytest.mark.asyncio
-async def test_passive_host_updates_worktree_limit(config_dir: Path) -> None:
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+async def test_passive_host_updates_worktree_limit(
+    config_dir: Path, process_services: ProcessServices
+) -> None:
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     result = await handler.dispatch(
         "workspace/git/worktrees/limit/update",
@@ -588,13 +599,17 @@ async def test_passive_host_updates_worktree_limit(config_dir: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_passive_host_reports_the_repository_counterpart(tmp_path: Path) -> None:
+async def test_passive_host_reports_the_repository_counterpart(
+    tmp_path: Path, process_services: ProcessServices
+) -> None:
     """Where a session listing from a subdirectory would stand in the main checkout."""
     _init_repo(tmp_path)
     worktree = _prepare("counterpart", tmp_path, branch="feat/counterpart")
     (tmp_path / "packages" / "api").mkdir(parents=True)
     (worktree.root / "packages" / "api").mkdir(parents=True)
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     result = await handler.dispatch(
         "workspace/git/worktrees/list",
@@ -611,7 +626,7 @@ async def test_passive_host_reports_the_repository_counterpart(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_passive_host_reports_the_counterpart_of_a_retained_worktree(
-    tmp_path: Path,
+    tmp_path: Path, process_services: ProcessServices
 ) -> None:
     _init_repo(tmp_path)
     worktree = _prepare_auto(tmp_path, prompt="Retain this worktree")
@@ -620,7 +635,9 @@ async def test_passive_host_reports_the_counterpart_of_a_retained_worktree(
     retained_cwd.mkdir(parents=True)
     (retained_cwd / "saved.txt").write_text("saved\n")
     assert ManagedWorktree.prune(limit=0) == 1
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     result = await handler.dispatch(
         "workspace/git/worktrees/list",
@@ -637,7 +654,7 @@ async def test_passive_host_reports_the_counterpart_of_a_retained_worktree(
 
 @pytest.mark.asyncio
 async def test_retained_worktree_listing_ignores_a_repository_above_its_leftover_path(
-    config_dir: Path, tmp_path: Path
+    config_dir: Path, tmp_path: Path, process_services: ProcessServices
 ) -> None:
     repo_root = tmp_path / "project"
     _init_repo(repo_root)
@@ -649,7 +666,9 @@ async def test_retained_worktree_listing_ignores_a_repository_above_its_leftover
     assert ManagedWorktree.prune(limit=0) == 1
     retained_cwd.mkdir(parents=True)
     _init_repo(config_dir.parent)
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     result = await handler.dispatch(
         "workspace/git/worktrees/list",
@@ -666,7 +685,7 @@ async def test_retained_worktree_listing_ignores_a_repository_above_its_leftover
 
 @pytest.mark.asyncio
 async def test_passive_host_reports_no_counterpart_outside_the_main_checkout(
-    tmp_path: Path,
+    tmp_path: Path, process_services: ProcessServices
 ) -> None:
     """A directory that exists only on a feature branch is not a destination.
 
@@ -677,7 +696,9 @@ async def test_passive_host_reports_no_counterpart_outside_the_main_checkout(
     _init_repo(tmp_path)
     worktree = _prepare("only-here", tmp_path, branch="feat/only-here")
     (worktree.root / "packages" / "api").mkdir(parents=True)
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     result = await handler.dispatch(
         "workspace/git/worktrees/list",
@@ -695,7 +716,7 @@ async def test_passive_host_reports_no_counterpart_outside_the_main_checkout(
 
 @pytest.mark.asyncio
 async def test_passive_host_lists_no_worktrees_without_git(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, process_services: ProcessServices
 ) -> None:
     _init_repo(tmp_path)
     _prepare("gitless", tmp_path, branch="feat/gitless")
@@ -704,7 +725,9 @@ async def test_passive_host_lists_no_worktrees_without_git(
         raise GitUnavailableError("Git worktree operations require git.")
 
     monkeypatch.setattr(WorktreeRepository, "linked", missing_git)
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     result = await handler.dispatch(
         "workspace/git/worktrees/list",
@@ -724,10 +747,14 @@ async def test_passive_host_lists_no_worktrees_without_git(
 
 
 @pytest.mark.asyncio
-async def test_passive_host_reads_the_main_checkout(tmp_path: Path) -> None:
+async def test_passive_host_reads_the_main_checkout(
+    tmp_path: Path, process_services: ProcessServices
+) -> None:
     """The main checkout is absent from the worktree listing by design."""
     _init_repo(tmp_path)
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     result = await handler.dispatch(
         "workspace/git/checkouts",
@@ -760,11 +787,13 @@ async def test_passive_host_reads_the_main_checkout(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_passive_host_reads_the_worktree_holding_the_session(
-    tmp_path: Path,
+    tmp_path: Path, process_services: ProcessServices
 ) -> None:
     _init_repo(tmp_path)
     worktree = _prepare("status-listed", tmp_path, branch="feat/status-listed")
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     result = await handler.dispatch(
         "workspace/git/checkouts",
@@ -786,7 +815,7 @@ async def test_passive_host_reads_the_worktree_holding_the_session(
 
 @pytest.mark.asyncio
 async def test_passive_host_keeps_an_unreadable_repository_as_the_holder(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, process_services: ProcessServices
 ) -> None:
     # Containment is a question about paths, so a repository git could not be
     # read from still takes the session from its ancestor. Handing it to the
@@ -807,7 +836,9 @@ async def test_passive_host_keeps_an_unreadable_repository_as_the_holder(
         return listed(repository)
 
     monkeypatch.setattr(WorktreeRepository, "linked", unreadable_inner)
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     result = await handler.dispatch(
         "workspace/git/checkouts",
@@ -827,7 +858,7 @@ async def test_passive_host_keeps_an_unreadable_repository_as_the_holder(
 
 @pytest.mark.asyncio
 async def test_passive_host_reads_the_branch_of_a_worktree_the_listing_skips(
-    tmp_path: Path,
+    tmp_path: Path, process_services: ProcessServices
 ) -> None:
     # A detached worktree is absent from the listing, but the session can still
     # be standing in one. Falling back to the repository would report the main
@@ -835,7 +866,9 @@ async def test_passive_host_reads_the_branch_of_a_worktree_the_listing_skips(
     _init_repo(tmp_path)
     worktree = _prepare("detached-listed", tmp_path, branch="feat/detached-listed")
     Repo(worktree.root).git.checkout("--detach")
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     result = await handler.dispatch(
         "workspace/git/checkouts",
@@ -853,12 +886,14 @@ async def test_passive_host_reads_the_branch_of_a_worktree_the_listing_skips(
 
 @pytest.mark.asyncio
 async def test_passive_host_leaves_out_a_path_git_knows_nothing_about(
-    tmp_path: Path,
+    tmp_path: Path, process_services: ProcessServices
 ) -> None:
     # Not a checkout is not a failure to report. A project may link a directory
     # git knows nothing about, and an entry for it would put a permanent error
     # in the header rather than simply nothing.
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     result = await handler.dispatch(
         "workspace/git/checkouts",
@@ -872,8 +907,12 @@ async def test_passive_host_leaves_out_a_path_git_knows_nothing_about(
 
 
 @pytest.mark.asyncio
-async def test_passive_host_lists_no_worktrees_for_non_git_root(tmp_path: Path) -> None:
-    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+async def test_passive_host_lists_no_worktrees_for_non_git_root(
+    tmp_path: Path, process_services: ProcessServices
+) -> None:
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+    )
 
     result = await handler.dispatch(
         "workspace/git/worktrees/list",
@@ -915,7 +954,7 @@ async def test_config_load_is_bound_to_harness_cwd(
 
 
 def test_experimental_harness_process_selects_the_unified_harness_host(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     """*Prepare*: Experimental Harness construction before client initialization.
     *Do*: Create the selected backend Host while client metadata is unavailable.
@@ -941,7 +980,7 @@ def test_experimental_harness_process_selects_the_unified_harness_host(
     monkeypatch.setattr(services, "client_info", unavailable_client_info)
 
     # Do
-    process = runtime.HarnessProcess()
+    process = runtime.HarnessProcess(services=process_services)
     host = process.create_session_backend_host(services)
 
     # Assert
@@ -952,7 +991,7 @@ def test_experimental_harness_process_selects_the_unified_harness_host(
 
 
 def test_default_process_selects_the_unified_harness_host(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     """Unflagged startup is the hard default: it must construct the Unified
     Runtime Host and hand out the unified adapter, never the legacy backend.
@@ -969,7 +1008,7 @@ def test_default_process_selects_the_unified_harness_host(
         runtime, "create_experimental_harness_host", lambda *_args, **_kwargs: selected
     )
 
-    process = runtime.HarnessProcess()
+    process = runtime.HarnessProcess(services=process_services)
     host = process.create_session_backend_host(FakeSessionBackendServices())
 
     assert isinstance(host, UnifiedHarnessBackendHostAdapter)
@@ -977,7 +1016,7 @@ def test_default_process_selects_the_unified_harness_host(
 
 
 def test_a_host_that_cannot_take_builtin_hooks_fails_startup(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     """A Host created but failing before the builtin-hook registry is
     configured (a harness version without ``configure_hook_handlers``) must
@@ -993,7 +1032,9 @@ def test_a_host_that_cannot_take_builtin_hooks_fails_startup(
     monkeypatch.setattr(runtime, "create_experimental_harness_host", without_registry)
 
     with pytest.raises(ExperimentalHarnessUnavailableError) as excinfo:
-        runtime.HarnessProcess(HarnessFilesManager(sources=()))
+        runtime.HarnessProcess(
+            HarnessFilesManager(sources=()), services=process_services
+        )
 
     message = str(excinfo.value)
     assert "configure_hook_handlers" in message

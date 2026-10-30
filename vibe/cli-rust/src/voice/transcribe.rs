@@ -16,6 +16,7 @@ const EMPTY_RECORDING_MARKER: &str = "before sending any audio bytes";
 /// Stream `chunks` to the realtime endpoint and forward text deltas to the UI.
 pub async fn transcribe(
     cfg: &TranscriptionConfig,
+    credential_client: Option<&crate::server::Client>,
     api_key: &str,
     sample_rate: u32,
     chunks: UnboundedReceiver<Vec<u8>>,
@@ -26,10 +27,16 @@ pub async fn transcribe(
         .as_str()
         .into_client_request()
         .map_err(|e| format!("Bad transcription URL: {e}"))?;
-    let auth = format!("Bearer {api_key}")
-        .parse()
-        .map_err(|_| "Invalid API key".to_string())?;
-    req.headers_mut().insert("authorization", auth);
+    let headers = crate::credentials::oidc::headers(credential_client, &url, api_key).await?;
+    for (name, value) in headers {
+        let name = name
+            .parse::<tokio_tungstenite::tungstenite::http::HeaderName>()
+            .map_err(|_| "Invalid credential header name")?;
+        let value = value
+            .parse()
+            .map_err(|_| "Invalid credential header value")?;
+        req.headers_mut().insert(name, value);
+    }
 
     let (ws, _) = connect_async(req)
         .await

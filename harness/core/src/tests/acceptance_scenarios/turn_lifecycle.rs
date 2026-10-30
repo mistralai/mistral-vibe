@@ -1,39 +1,30 @@
 use super::*;
 
-///
-/// *Prepare*: One turn has a model completion in flight.
-/// *Do*: Queue a second turn, then complete the first turn.
-/// *Assert*: Core keeps the first Action while queuing and starts the second turn only after the first turn completes.
-///
 #[test]
-fn queued_turn_starts_after_current_turn_completes() {
-    // Prepare
+fn rejects_new_turn_when_another_turn_is_active() {
     let first_turn_id = "turn-queue-first";
     let second_turn_id = "turn-queue-second";
     let mut runtime = SynchronousRuntime::new(config());
     let first_completion = runtime.start_turn(first_turn_id, "first request");
 
-    // Do
-    runtime.apply(
+    runtime.reject(
         user_message(second_turn_id, "second request", "queue"),
-        running(first_turn_id).keep(&first_completion),
+        json!({
+            "code": "invalid_state",
+            "command_type": "user_message",
+            "state": "running",
+        }),
     );
+    runtime.finish_turn_with_text(first_turn_id, &first_completion, "first answer");
     let second_completion = runtime
         .apply(
-            text_completion(&first_completion, "first answer"),
+            user_message(second_turn_id, "second request", "queue"),
             running(second_turn_id)
                 .dispatch(llm_call(0))
-                .observe(assistant_text_committed(
-                    first_turn_id,
-                    &first_completion,
-                    "first answer",
-                ))
-                .observe(turn_completed(first_turn_id, "first answer"))
                 .observe(turn_started(second_turn_id, "second request")),
         )
         .only_action();
 
-    // Assert
     runtime.assert_last_model_message_update(
         &second_completion,
         "append",

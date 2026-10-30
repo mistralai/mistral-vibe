@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Generator
+from collections.abc import AsyncIterator, Awaitable, Callable, Generator
 import os
 from pathlib import Path
 import sys
@@ -12,10 +12,14 @@ import keyring
 from keyring.backend import KeyringBackend
 import keyring.errors
 import pytest
+import pytest_asyncio
+import respx.mocks
 import tomli_w
 
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
-from vibe.app_server._missing_layers import reset_org_config_fetch_failed
+from tests.stubs.process_services import FakeOrgConfigServer, fake_process_services
+from tests.stubs.respx_httpx2 import HTTPCore2Mocker
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.connector_catalog import reset_bootstrap_failures
 from vibe.core.config import (
     SessionLoggingConfig,
@@ -32,9 +36,11 @@ from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.experiments.wait import reset_experiments_eval_failed
 from vibe.core.model_catalog.wait import reset_model_catalog_failed
 from vibe.core.utils.concurrency import run_sync
-from vibe.setup.onboarding.theme import resolve_auto_theme
+from vibe.setup.auth._oidc_credentials import clear_oidc_token_cache
 from vibe.utils import keyring as keyring_utils
 from vibe.utils.platform import resolve_windows_shell
+
+respx.mocks.DEFAULT_MOCKER = HTTPCore2Mocker.name
 
 _TESTS_ROOT = Path(__file__).parent
 _HOST_PLATFORM = sys.platform
@@ -54,15 +60,18 @@ _LOCAL_XDIST_GROUPS = {
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     local_run = not os.environ.get("BUILDKITE") and not os.environ.get("GITHUB_ACTIONS")
-    for item in items:
-        try:
-            relative_path = Path(item.path).relative_to(_TESTS_ROOT)
-        except ValueError:
+    relative_paths = [_relative_test_path(item) for item in items]
+    # Serialize e2e CLI trees only beside the unit suite, where they would overload the machine.
+    serialize_e2e = any(
+        path is not None and path.parts[0] != "e2e" for path in relative_paths
+    )
+    for item, relative_path in zip(items, relative_paths, strict=True):
+        if relative_path is None:
             continue
         if local_run and (group := _LOCAL_XDIST_GROUPS.get(relative_path)):
             item.add_marker(pytest.mark.xdist_group(name=group))
             continue
-        if relative_path.parts[0] != "e2e":
+        if relative_path.parts[0] != "e2e" or not serialize_e2e:
             continue
         if relative_path.name == "test_mock_server.py":
             continue
@@ -72,6 +81,13 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             else "subprocess_cli"
         )
         item.add_marker(pytest.mark.xdist_group(name=group))
+
+
+def _relative_test_path(item: pytest.Item) -> Path | None:
+    try:
+        return Path(item.path).relative_to(_TESTS_ROOT)
+    except ValueError:
+        return None
 
 
 class _EmptyKeyring(KeyringBackend):
@@ -124,11 +140,6 @@ def _reset_experiments_eval_failed() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_org_config_fetch_failed() -> None:
-    reset_org_config_fetch_failed()
-
-
-@pytest.fixture(autouse=True)
 def _reset_connector_bootstrap_failures() -> None:
     reset_bootstrap_failures()
 
@@ -168,29 +179,13 @@ def _disable_os_keyring(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     monkeypatch.setattr(keyring_utils, "_should_use_macos_security", lambda: False)
     keyring.set_keyring(_EmptyKeyring())
     keyring_utils.clear_api_key_keyring_cache()
+    clear_oidc_token_cache()
     try:
         yield
     finally:
         keyring_utils.clear_api_key_keyring_cache()
+        clear_oidc_token_cache()
         keyring.set_keyring(original)
-
-
-@pytest.fixture(autouse=True)
-def _stub_clipboard_sinks(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the suite off the host clipboard.
-
-    ``pyperclip`` writes through the OS clipboard tool, ``_copy_osc52`` writes
-    to ``/dev/tty``, and Textual's ``App.copy_to_clipboard`` emits OSC 52 via
-    the driver; each is a real clipboard write outside the headless test
-    driver. Stub all three so no test can clobber the developer's clipboard;
-    tests that exercise them patch on top of these stubs.
-    """
-    monkeypatch.setattr("pyperclip.copy", lambda text: None)
-    monkeypatch.setattr("pyperclip.paste", lambda: "")
-    monkeypatch.setattr(
-        "vibe.setup.onboarding.clipboard._copy_osc52", lambda text: None
-    )
-    monkeypatch.setattr("textual.app.App.copy_to_clipboard", lambda self, text: None)
 
 
 def get_base_config() -> dict[str, Any]:
@@ -322,18 +317,34 @@ def _no_connector_warm_up(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _no_managed_config_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every session start fetches the org config; with the mock key above that
-    would be a real request. Fail it at once, as offline. Tests that serve an
-    org config patch the same name and take precedence.
+def _offline_production_services(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Services an entry point builds itself (``LocalHarnessHost``, stdio) fetch
+    from an offline endpoint: with the mock key above, a real request.
     """
-    from vibe.app_server import _admin_config
-    from vibe.core.config.admin_config import ManagedConfigResult
+    offline = FakeOrgConfigServer()
+    monkeypatch.setattr(
+        ProcessServices,
+        "create",
+        classmethod(lambda _cls: fake_process_services(offline)),
+    )
 
-    async def offline(_base_url: str, _api_key: str) -> ManagedConfigResult:
-        return ManagedConfigResult(error="managed config fetch is not mocked")
 
-    monkeypatch.setattr(_admin_config, "fetch_managed_config", offline)
+@pytest.fixture
+def org_server() -> FakeOrgConfigServer:
+    """The managed-config endpoint ``process_services`` fetch from: offline unless
+    the test serves an answer.
+    """
+    return FakeOrgConfigServer()
+
+
+@pytest_asyncio.fixture
+async def process_services(
+    org_server: FakeOrgConfigServer,
+) -> AsyncIterator[ProcessServices]:
+    """This test's process services, as an entry point would build them."""
+    services = fake_process_services(org_server)
+    yield services
+    await services.close()
 
 
 @pytest.fixture(autouse=True)
@@ -344,14 +355,6 @@ def _mock_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     Linux CI runners and macOS dev machines. On Windows the real platform
     stays, so the suite exercises the Windows branches there (DSK-1495).
     """
-    resolve_auto_theme.cache_clear()
-    monkeypatch.setattr(
-        "vibe.setup.onboarding.theme_detection.detect_terminal_dark", lambda: None
-    )
-    monkeypatch.setattr(
-        "vibe.setup.onboarding.theme_detection.detect_system_preferred_dark",
-        lambda: None,
-    )
     if _HOST_PLATFORM == "win32":
         return
     monkeypatch.setattr(sys, "platform", "linux")

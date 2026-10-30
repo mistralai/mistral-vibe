@@ -5,17 +5,17 @@ use std::sync::Arc;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::bordered::{inset_body_width, inset_prefix};
 use super::startup;
-use super::status::{push_compact_status, push_teleport_status};
+use super::status::{
+    push_command_error, push_command_status, push_compact_status, push_teleport_status,
+};
 use super::user::{push_user, UserView};
 use super::{QueueView, RenderedEntry};
 use crate::selection::{fold, Fold};
-use crate::server::{MessageContent, MessageEntry};
+use crate::server::MessageEntry;
 use crate::transcript::TranscriptEntry;
 use crate::ui::markdown::{self, LinkedLines};
 use crate::ui::theme;
-use crate::utils::clean;
 
 pub(super) fn render(
     entry: &TranscriptEntry<'_>,
@@ -42,9 +42,22 @@ pub(super) fn render(
             entry.entry.in_progress(),
             pulse_frame,
         ),
-        "command" => push_command(&mut lines, &message_text(message)),
         "command_result" => push_command_result(&mut lines, &message_text(message), width, false),
         "agent_statistics" => push_command_result(&mut lines, &message_text(message), width, true),
+        "command_status" => push_command_status(
+            &mut lines,
+            &message_text(message),
+            width,
+            "✓",
+            theme::status_ready(),
+        ),
+        "command_warning" => push_command_status(
+            &mut lines,
+            &message_text(message),
+            width,
+            "⚠",
+            theme::warning(),
+        ),
         "command_error" => push_command_error(&mut lines, &message_text(message), width),
         "warning" => startup::push_warning(&mut lines, &message_text(message), width),
         "subagent_info" => {
@@ -53,16 +66,8 @@ pub(super) fn render(
         "subagent_error" => {
             push_subagent_severity(&mut lines, &message_text(message), width, theme::error())
         }
-        "whats_new" => startup::push_whats_new(
-            &mut lines,
-            &message_text(message),
-            width,
-            entry.after_history,
-        ),
-        "custom_tools_deprecation" => {
-            startup::push_guttered(&mut lines, &message_text(message), width, theme::warning())
-        }
-        "compact_status" => push_compact_status(
+        "whats_new" => startup::push_whats_new(&mut lines, &message_text(message), width),
+        "progress_status" => push_compact_status(
             &mut lines,
             &message_text(message),
             entry.entry.in_progress(),
@@ -85,86 +90,30 @@ pub(super) fn render(
 }
 
 pub(super) fn message_text(message: &MessageEntry) -> String {
-    message
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            MessageContent::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    message.text("\n")
 }
 
-fn push_command(lines: &mut LinkedLines, text: &str) {
-    let style = theme::text(theme::ORANGE).add_modifier(Modifier::BOLD);
-    lines.push_gap();
-    lines.push_gap();
-    lines.push(Line::from(Span::styled(
-        format!("/ {}", text.trim_start_matches('/')),
-        style,
-    )));
-}
-
+/// A content command's markdown, indented like an assistant reply with tight heading margins.
 pub(super) fn push_command_result(
     lines: &mut LinkedLines,
     text: &str,
     width: u16,
     muted_emphasis: bool,
 ) {
-    // The command renderer already carries the `.user-command-content` tcss:
-    // first/last block margins zeroed and every heading tight against its
-    // content, so only the leading blank rows the plain renderer inserts
-    // still need dropping.
-    let body = markdown::command_result_linked(text, width.saturating_sub(2));
-    let folds = body.folds().to_vec();
-    let mut body: Vec<_> = body.into_lines().into_iter().zip(folds).collect();
-    while body
-        .first()
-        .is_some_and(|(line, _)| markdown::is_blank_line(line))
-    {
-        body.remove(0);
+    let mut body = markdown::command_result_linked(text, width);
+    if muted_emphasis {
+        body.restyle(mute_emphasis);
     }
-    let last = body.len().saturating_sub(1);
-    for (index, (mut line, fold)) in body.into_iter().enumerate() {
-        let trimmed = trim_left_padding(&mut line);
-        if muted_emphasis {
-            mute_emphasis(&mut line);
-        }
-        let border = inset_prefix(index == last, Style::default());
-        let hang = border.width() as u16;
-        line.spans.insert(0, border);
-        let fold = fold.map(|fold| Fold {
-            hang: (fold.hang + hang).saturating_sub(trimmed),
-            ..fold
-        });
-        lines.push_folded(line, fold);
-    }
+    lines.append(body);
 }
 
 /// Statistics text: emphasis is secondary text, muted instead of italic.
-fn mute_emphasis(line: &mut Line<'static>) {
-    for span in &mut line.spans {
-        if span.style.add_modifier.contains(Modifier::ITALIC) {
-            span.style = span
-                .style
-                .remove_modifier(Modifier::ITALIC)
-                .patch(theme::muted_style());
-        }
-    }
-}
-
-fn push_command_error(lines: &mut LinkedLines, text: &str, width: u16) {
-    let style = theme::text(theme::error()).add_modifier(Modifier::BOLD);
-    // Sanitize, prefix, wrap the whole content.
-    let content = format!("Error: {}", clean::clean_output(text));
-    let rows = fold::wrap_hard(&content, inset_body_width(width) as usize);
-    let last = rows.len().saturating_sub(1);
-    for (index, (row, gap)) in rows.into_iter().enumerate() {
-        let border = inset_prefix(index == last, Style::default());
-        let hang = border.width() as u16;
-        let line = Line::from(vec![border, Span::styled(row, style)]);
-        lines.push_folded(line, Fold::hung(gap, hang));
+fn mute_emphasis(span: &mut Span<'static>) {
+    if span.style.add_modifier.contains(Modifier::ITALIC) {
+        span.style = span
+            .style
+            .remove_modifier(Modifier::ITALIC)
+            .patch(theme::muted_style());
     }
 }
 
@@ -189,25 +138,6 @@ fn push_subagent_severity(
         ]);
         lines.push_folded(line, Fold::hung(gap, 2));
     }
-}
-
-/// Drop up to two leading pad cells, returning how many it dropped.
-fn trim_left_padding(line: &mut Line<'static>) -> u16 {
-    let mut remaining = 2;
-    for span in &mut line.spans {
-        if remaining == 0 || !span.content.starts_with(' ') {
-            break;
-        }
-        let trim = span
-            .content
-            .chars()
-            .take_while(|character| *character == ' ')
-            .count()
-            .min(remaining);
-        span.content = span.content.chars().skip(trim).collect();
-        remaining -= trim;
-    }
-    (2 - remaining) as u16
 }
 
 #[cfg(test)]

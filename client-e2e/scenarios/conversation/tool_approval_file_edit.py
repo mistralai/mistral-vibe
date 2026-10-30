@@ -16,7 +16,7 @@ capture_startup = False
 capture_steps = {1}
 
 _INPUT = {
-    "filePath": "client-e2e/fixtures/tool_approval_context.fixture",
+    "filePath": "tool_approval_context.fixture",
     "changes": [
         {"oldString": "beta", "newString": "BETA", "replaceAll": True},
         {"oldString": "gamma", "newString": "GAMMA", "replaceAll": False},

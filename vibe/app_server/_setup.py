@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from vibe import __version__
 from vibe.app_server._dispatch import RequestFailure, method_not_found
 from vibe.app_server._model import ProtocolModel, validate_wire
+from vibe.app_server._provider_auth import active_credential_source
 from vibe.app_server.protocol import (
     ProtocolErrorCode,
     SetupProviderView,
@@ -34,6 +35,7 @@ from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.telemetry.types import LaunchContext
 from vibe.observability.logging import logger
+from vibe.setup.auth._oidc_config import oidc_enabled
 from vibe.setup.auth.api_key_persistence import (
     ProviderCredentialsPersistRequest,
     ProviderCredentialsPersistResult,
@@ -46,7 +48,7 @@ from vibe.utils.api_keys import resolve_api_key
 if TYPE_CHECKING:
     from vibe.app_server._connection_protocol import ClientInfo
 
-# Only written by the wizard path (run_onboarding does the same post-exit).
+# Only written by the wizard path.
 _THEME_FIELD = "/theme"
 
 
@@ -88,6 +90,7 @@ class SetupRequestHandler:
         else:
             provider = _named_provider(config, params.provider)
         env_var = provider.api_key_env_var
+        offered = _offered_mistral_provider(config, provider)
         return SetupStatusResponse(
             provider=_provider_view(provider),
             console_base_url=config.console_base_url,
@@ -100,6 +103,12 @@ class SetupRequestHandler:
             has_api_key=not env_var or resolve_api_key(env_var) is not None,
             enable_system_trust_store=config.enable_system_trust_store,
             pinned_console_url=_pinned_console_url(),
+            mistral_provider=_provider_view(offered) if offered is not None else None,
+            oidc_enabled=oidc_enabled(),
+            active_credential_source=await active_credential_source(provider),
+            mistral_active_credential_source=(
+                await active_credential_source(offered) if offered is not None else None
+            ),
         )
 
     async def _store_credential(
@@ -107,6 +116,11 @@ class SetupRequestHandler:
     ) -> SetupStoreCredentialResponse:
         orchestrator = await self._orchestrator()
         provider = _named_provider(orchestrator.config, params.provider)
+        if oidc_enabled() and provider.api_key_env_var == "MISTRAL_API_KEY":
+            raise RequestFailure(
+                ProtocolErrorCode.INVALID_PARAMS,
+                "OIDC mode requires browser sign-in; disable VIBE_CLI_OIDC_ENABLED to use an API key",
+            )
         # Blocking persistence runs inline (not in a thread): the telemetry it
         # emits needs the running loop. The orchestrator built above is reused
         # for that telemetry instead of paying a second config build.
@@ -197,6 +211,16 @@ def _provider_view(provider: ProviderConfig) -> SetupProviderView:
     )
 
 
+def _offered_mistral_provider(
+    config: VibeConfigSchema, seeded: ProviderConfig
+) -> ProviderConfig | None:
+    """The Mistral provider to offer next to a seeded one without browser sign-in."""
+    if seeded.supports_browser_sign_in:
+        return None
+    mistral = config.get_mistral_provider() or DEFAULT_PROVIDERS[0]
+    return mistral if mistral.supports_browser_sign_in else None
+
+
 def _active_model(config: VibeConfigSchema) -> str:
     try:
         return config.get_active_model().alias
@@ -214,9 +238,9 @@ def _named_provider(config: VibeConfigSchema, name: str) -> ProviderConfig:
 
 
 def _pinned_console_url() -> str | None:
-    # Lazy import: the onboarding package would push
+    # Lazy import: the onboarding context would push
     # `import vibe.app_server.stdio` over its startup import budget.
-    from vibe.setup.onboarding.context import pinned_console_url_from_env
+    from vibe.setup.auth.onboarding_context import pinned_console_url_from_env
 
     return pinned_console_url_from_env()
 
@@ -228,7 +252,7 @@ def _pin_provider_to_console_url(provider: ProviderConfig, pin: str) -> Provider
     otherwise the API base is the pin's own `/api` (single host, no origin
     rewrite).
     """
-    from vibe.setup.onboarding.context import (
+    from vibe.setup.auth.onboarding_context import (
         browser_auth_requires_origin_rewrite,
         pinned_console_api_base,
         resolve_browser_auth_urls,
@@ -251,10 +275,9 @@ def _pin_provider_to_console_url(provider: ProviderConfig, pin: str) -> Provider
 def _pinned_console_account_base(provider: ProviderConfig, pin: str) -> str:
     """The console URL to persist under a pin: the CLI-reachable account base
     of the pinned provider — the pin itself for a single-host console, the
-    preserved split API base's origin otherwise (mirrors
-    OnboardingApp.apply_custom_domain).
+    preserved split API base's origin otherwise.
     """
-    from vibe.setup.onboarding.context import browser_auth_account_base
+    from vibe.setup.auth.onboarding_context import browser_auth_account_base
 
     return browser_auth_account_base(
         provider.browser_auth_base_url or pin, provider.browser_auth_api_base_url
@@ -271,6 +294,11 @@ def _merged_provider(
     survive; an unknown name starts a fresh provider. Without a view the
     active provider is passed through untouched, mirroring the wizard's
     always-include-the-provider request.
+
+    A provider with ``preserve_api_base = true`` keeps its configured
+    ``api_base``: the wizard view may carry a whoami-overwritten base from
+    the client's tenant resolution, and the operator pinned the configured
+    one.
     """
     if view is None:
         return _seed_provider(config), False
@@ -286,6 +314,8 @@ def _merged_provider(
     )
     if current is None:
         return ProviderConfig(name=view.name, **fields), True
+    if current.preserve_api_base:
+        fields.pop("api_base", None)
     merged = current.model_copy(update=fields)
     return merged, merged != current
 

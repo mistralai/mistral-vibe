@@ -1,16 +1,14 @@
 //! Quit confirmation state, and Ctrl+C clearing a draft before it arms quitting.
 
-use std::sync::Arc;
-
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vibe_rs::app::App;
 use vibe_rs::input::handle_priority_key;
 use vibe_rs::quit_manager::{quit_warning_extra, QuitConfirmKey, QuitManager};
-use vibe_rs::server::Client;
+
+use crate::support::{ctrl, stub};
 
 fn ctrl_c(app: &mut App) -> Option<bool> {
-    let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    handle_priority_key(app, &Arc::new(Client::stub()), event)
+    let event = ctrl('c');
+    handle_priority_key(app, &stub(), event)
 }
 
 #[test]

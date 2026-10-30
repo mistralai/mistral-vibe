@@ -241,7 +241,7 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
     );
 
     // A callback is waiting for the user to stop typing.
-    if app.question_app.pending.is_some()
+    if crate::question_app::waiting(app)
         || (app.approval.active.is_none() && app.approval.has_pending())
     {
         spans.push(Span::styled(

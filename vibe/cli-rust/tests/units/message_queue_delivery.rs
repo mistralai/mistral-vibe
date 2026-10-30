@@ -1,24 +1,18 @@
 //! Delivered prompt identity across copy-on-write queue edits.
 
-use std::sync::Arc;
-
 use serde_json::json;
 use vibe_rs::app::App;
 use vibe_rs::message_queue::{self, QueueEvent, QueueItem, ReplacementOutcome};
-use vibe_rs::server::{Client, HistoryEntry, MessageContent};
+use vibe_rs::server::{HistoryEntry, MessageContent};
+
+use crate::support::stub;
 
 fn queued(message_id: &str, text: &str) -> QueueItem {
     QueueItem {
-        queue_item_id: Some("queue-1".to_string()),
-        message_id: message_id.to_string(),
-        server_message_id: "message-1".to_string(),
-        text: text.to_string(),
-        images: Vec::new(),
-        mentions: None,
-        sent: true,
-        ever_sent: true,
+        queue_item_id: Some("queue-1".into()),
+        server_message_id: "message-1".into(),
         revision: 1,
-        replacing: false,
+        ..crate::support::queued(message_id, text)
     }
 }
 
@@ -65,7 +59,7 @@ fn prompt_text(app: &App, message_id: &str) -> String {
 #[test]
 fn consumed_edit_keeps_the_delivered_prompt_and_copies_the_new_text() {
     let mut app = App::default();
-    let client = Arc::new(Client::stub());
+    let client = stub();
     app.queue.items.push(queued("message-1", "original"));
     app.queue.selected = Some("message-1".to_string());
     add_pending_prompt(&mut app, "message-1", "original");
@@ -84,7 +78,7 @@ fn consumed_edit_keeps_the_delivered_prompt_and_copies_the_new_text() {
 #[test]
 fn consumed_edit_before_enqueue_answer_keeps_the_original_transcript() {
     let mut app = App::default();
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut item = queued("message-1", "original");
     item.queue_item_id = None;
     app.queue.items.push(item);
@@ -116,7 +110,7 @@ fn consumed_edit_before_enqueue_answer_keeps_the_original_transcript() {
 #[test]
 fn consumed_edit_preserves_the_delivered_group_order() {
     let mut app = App::default();
-    let client = Arc::new(Client::stub());
+    let client = stub();
     for (message_id, text) in [
         ("message-1", "first"),
         ("message-2", "original"),

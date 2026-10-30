@@ -86,7 +86,6 @@ async def build_default_orchestrator(
         schema=VibeConfigSchema,
         layers=layers,
         default_layer_resolver=default_layer_resolver,
-        harness_files=manager,
     )
     await asyncio.to_thread(
         configure_ssl_context,
@@ -106,8 +105,8 @@ async def build_user_config_orchestrator() -> ConfigOrchestrator[VibeConfigSchem
 
     Includes the admin layer so managed-config flags like ``enable_mcp`` are
     visible to sessionless CLI commands (``vibe mcp add`` / ``vibe mcp remove``).
-    The layer starts empty; callers must call ``refresh_admin_layer`` to
-    populate it from the server before relying on the enforced values.
+    The layer starts empty; callers must load the org config into it
+    (``apply_held_admin_config``) before relying on the enforced values.
     """
     manager = get_harness_files_manager()
     user_layer = UserConfigLayer(path=manager.user_config_file)

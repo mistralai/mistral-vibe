@@ -79,7 +79,7 @@ class ResolvedMCPServerConfig:
     prompt: str | None = None
     startup_timeout_s: float = 30.0
     tool_timeout_s: float = 300.0
-    sampling_enabled: bool = True
+    sampling_enabled: bool = False
     disabled: bool = False
     disabled_tools: frozenset[str] = frozenset()
 

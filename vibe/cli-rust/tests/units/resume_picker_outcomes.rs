@@ -3,35 +3,18 @@
 use std::time::Instant;
 
 use crossterm::event::KeyCode;
-use serde_json::{json, Value};
+use serde_json::json;
 use vibe_rs::app::{App, Status};
 use vibe_rs::resume_picker::{self, Event, Session};
 use vibe_rs::server::PublicSessionState;
 
-use crate::teleport_support::{rows, stub};
+use crate::support::{message, messages, session_state, stub};
 
 pub const CURRENT: &str = "current-session";
 pub const SAVED: &str = "saved-session-1";
 
-pub fn message(id: &str, role: &str, text: &str) -> Value {
-    json!({"id": id, "type": "message", "role": role, "generationStatus": "completed",
-        "content": [{"type": "text", "text": text}]})
-}
-
-pub fn state(id: &str, history: Vec<Value>) -> PublicSessionState {
-    serde_json::from_value(json!({"eventId": 1, "session": {"id": id}, "history": history}))
-        .unwrap()
-}
-
 pub fn saved_state() -> PublicSessionState {
-    state(SAVED, vec![message("saved-user", "user", "Saved question")])
-}
-
-pub fn texts(app: &App) -> Vec<(String, String)> {
-    rows(app)
-        .into_iter()
-        .map(|(role, text, _)| (role, text))
-        .collect()
+    session_state(SAVED, vec![message("saved-user", "user", "Saved question")])
 }
 
 pub fn row(role: &str, text: &str) -> (String, String) {
@@ -43,7 +26,7 @@ pub fn ready() -> App {
     let mut app = App::default();
     app.set_session_id(CURRENT.to_owned());
     app.set_status(Status::Ready);
-    app.view.transcript.load_snapshot(&state(
+    app.view.transcript.load_snapshot(&session_state(
         CURRENT,
         vec![message("current-user", "user", "Current question")],
     ));
@@ -91,7 +74,7 @@ pub fn preview(app: &mut App) {
             state: saved_state(),
         },
     );
-    assert!(texts(app).contains(&row("user", "Saved question")));
+    assert!(messages(app).contains(&row("user", "Saved question")));
 }
 
 #[tokio::test]
@@ -112,10 +95,10 @@ async fn a_successful_resume_retires_the_running_turn() {
     assert!(!app.resume_picker.resuming);
     assert_eq!(app.session.session_id.as_deref(), Some(SAVED));
     assert_eq!(
-        texts(&app),
+        messages(&app),
         [
             row("user", "Saved question"),
-            row("command_result", "Resumed session `saved-se`")
+            row("command_status", "Resumed session `saved-se`")
         ]
     );
 }
@@ -138,7 +121,7 @@ async fn a_failed_resume_keeps_the_running_turn() {
     assert_eq!(app.session.session_id.as_deref(), Some(CURRENT));
     assert!(!app.resume_picker.open);
     assert_eq!(
-        texts(&app).last(),
+        messages(&app).last(),
         Some(&row("command_error", "Failed to resume session."))
     );
 }
@@ -155,13 +138,10 @@ async fn a_cancelled_resume_drops_its_late_answer_quietly() {
         let mut app = picking();
         resuming(&mut app);
         resume_picker::handle_key(&mut app, &stub(), KeyCode::Esc.into());
-        let cancelled = texts(&app);
-        assert_eq!(
-            cancelled.last(),
-            Some(&row("command_result", "Resume cancelled."))
-        );
+        assert!(!app.resume_picker.open);
+        let cancelled = messages(&app);
         resume_picker::apply_event(&mut app, &stub(), late);
-        assert_eq!(texts(&app), cancelled);
+        assert_eq!(messages(&app), cancelled);
         assert_eq!(app.session.session_id.as_deref(), Some(CURRENT));
         assert!(app.overlays.toasts.is_empty());
     }
@@ -175,7 +155,7 @@ async fn a_picker_resume_never_shows_the_post_init_notices_again() {
     vibe_rs::mcp::show_post_init_notices(&mut app, &runtime);
     app.session.runtime = runtime;
     let notices = |app: &App| {
-        texts(app)
+        messages(app)
             .iter()
             .filter(|(_, text)| text.contains("needs OAuth authentication"))
             .count()
@@ -206,7 +186,7 @@ async fn a_failed_resume_over_a_preview_restores_the_current_transcript() {
         Event::Error("Failed to resume session.".into()),
     );
     assert_eq!(
-        texts(&app),
+        messages(&app),
         [
             row("user", "Current question"),
             row("command_error", "Failed to resume session.")
@@ -229,7 +209,7 @@ async fn a_failed_resume_without_a_preview_keeps_the_notices_shown_meanwhile() {
         Event::Error("Failed to resume session.".into()),
     );
     assert_eq!(
-        texts(&app),
+        messages(&app),
         [
             row("user", "Current question"),
             row("command_result", "Shown while picking"),
@@ -266,11 +246,12 @@ async fn a_picker_resume_adopts_the_resumed_sessions_paused_queue() {
     let mut app = picking();
     resuming(&mut app);
     let mut resumed = saved_state();
-    resumed.turn_queue = Some(
+    resumed.turn_queue = serde_json::from_value(
         json!({"paused": true, "items": [{"id": "queue-1", "createdAt": 1,
         "entries": [{"entryId": "queued-1", "role": "user", "annotations": {},
             "content": [{"type": "text", "text": "Queued in the saved session"}]}]}]}),
-    );
+    )
+    .unwrap();
     resume_picker::apply_event(
         &mut app,
         &stub(),
@@ -281,7 +262,7 @@ async fn a_picker_resume_adopts_the_resumed_sessions_paused_queue() {
     );
     assert_eq!(app.queue.len(), 1);
     assert!(app.queue.paused);
-    let texts: Vec<String> = texts(&app).into_iter().map(|(_, text)| text).collect();
+    let texts: Vec<String> = messages(&app).into_iter().map(|(_, text)| text).collect();
     let saved = texts.iter().position(|text| text == "Saved question");
     let queued = texts
         .iter()

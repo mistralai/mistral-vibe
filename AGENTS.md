@@ -2,7 +2,7 @@
 
 Conventions for AI agents and humans contributing to **Mistral Vibe** — a CLI coding assistant: a Rust terminal UI over a Python 3.12+ app server managed with `uv`.
 
-Layout: Unified Harness Core and Runtime are external dependencies that execute and persist sessions; `vibe/app_server` hosts sessions and exposes product features and RPCs to every client, including Vibe Desktop; `vibe/core` retains shared config, tool, permission and other utilities; `vibe/cli-rust` is the terminal UI (Rust, Ratatui), a thin client over `vibe-app-server`; `vibe/cli` holds the `vibe` launcher that execs it and the audio helpers `vibe/acp` uses; `vibe/acp` bridges to the Agent Client Protocol; `vibe/setup` holds auth and the Textual onboarding wizard behind `vibe-acp --setup`. Tests live in `tests/` with autouse fixtures in `conftest.py` and test doubles in `tests/stubs/`.
+Layout: Unified Harness Core and Runtime are external dependencies that execute and persist sessions; `vibe/app_server` hosts sessions and exposes product features and RPCs to every client, including Vibe Desktop; `vibe/core` retains shared config, tool, permission and other utilities; `vibe/cli-rust` is the terminal UI (Rust, Ratatui), a thin client over `vibe-app-server`; `vibe/cli` holds the `vibe` launcher that execs it and the audio helpers `vibe/acp` uses; `vibe/acp` bridges to the Agent Client Protocol; `vibe/setup` holds auth and onboarding config shared by the app server and `vibe-acp`. Tests live in `tests/` with autouse fixtures in `conftest.py` and test doubles in `tests/stubs/`.
 
 ## Architecture Decisions
 
@@ -18,7 +18,6 @@ Before architecture-affecting changes, read [0002 Ownership Boundaries](docs/adr
 | Skills, agents, subagents, hooks, MCP, connectors, custom tools, or discovery | [0007 Extension Mechanisms](docs/adr/0007-extension-mechanisms.md) |
 | Adding or changing analytics instrumentation, telemetry events, or event properties | [0008 Feature Instrumentation](docs/adr/0008-feature-instrumentation.md) |
 | Client protocol, streaming, cancellation, projections, ordering, callbacks, or transports | [0009 App Server Client Boundary](docs/adr/0009-app-server-boundary.md) |
-| Textual `Content` rendering, styled text, markup parsing, or theme variables in the `vibe-acp --setup` onboarding wizard | [0010 Textual Content Rendering](docs/adr/0010-textual-content-rendering.md) |
 | Slash commands running while busy, side-channel commands, or idle-only settings persistence | [0012 Slash Commands While Busy](docs/adr/0012-two-phase-slash-command-execution.md) |
 | Queued-prompt selection/edit mode, copy-on-write consumed edits, or promotion-race widget-identity tracking | [0013 Queue Selection and Edit Mode](docs/adr/0013-queue-edit-mode.md) |
 | Parsing backend responses, connector/MCP bootstrap fields, or any client/backend wire-contract change that must tolerate self-hosted version skew | [0014 Backend Contract Compatibility](docs/adr/0014-backend-contract-compatibility.md) |
@@ -26,6 +25,7 @@ Before architecture-affecting changes, read [0002 Ownership Boundaries](docs/adr
 | Rust CLI delivery surface, thin-client boundary, unidirectional state, or bounded-resource rules | [0016 Rust CLI Delivery Surface](docs/adr/0016-rust-cli-delivery-surface.md) |
 | Narration playback, TTS, audio output device following, or the `AudioPlayer`/`DeviceFollower`/`NarrationController` classes | [0017 Narration Playback in the ACP Subprocess](docs/adr/0017-narration-playback-in-subprocess.md) |
 | Adding agent behavior, custom tools, built-in plugins/skills, RPC families, or feature-module dependencies | [0018 Modular App-Server Capabilities](docs/adr/0018-modular-app-server-capabilities.md) |
+| Adding state shared by every channel or session of the process, a remote value refreshed for all sessions, or an app-server entry point | [0019 Process Services](docs/adr/0019-process-services.md) |
 
 Superseded records: [0003](docs/adr/0003-event-driven-agent-loop.md) → 0009; [0011](docs/adr/0011-unified-harness-backend.md) → 0002. Their paths remain for existing links.
 
@@ -38,7 +38,7 @@ Vibe CLI and Vibe Desktop share the app server. When a CLI feature may also belo
 The terminal UI is `vibe/cli-rust`. Follow `vibe/cli-rust/AGENTS.md` and the `vibe-rust-tui` skill, and cover every user-visible change with a `client-e2e` scenario and golden (see `client-e2e/AGENTS.md`).
 
 - Put server-owned behavior (session, config and persistence, tools, network; see the ownership table in ADR 0002) behind an app-server method or notification so the TUI, Vibe Desktop, and `vibe-acp` only render it. Keep presentation state (widgets, layout, focus, selection, editing) in the client.
-- The Textual onboarding wizard in `vibe/setup/onboarding` only serves `vibe-acp --setup`; do not add terminal UI features there.
+- `vibe-acp --setup` runs the Rust onboarding wizard (`vibe-rs --setup` with `VIBE_SETUP_ENTRYPOINT=acp`); change onboarding UI there only.
 
 ## Commands
 
@@ -50,6 +50,8 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 - `uv run ruff check --fix .` and `uv run ruff format .` — run both after every code change and report the files modified.
 - `uv run pre-commit run --all-files` — full lint pass. Install once with `uv tool install pre-commit && uv run pre-commit install`.
 - Useful uv basics: `uv sync --all-extras`, `uv add <pkg>`, `uv remove <pkg>`.
+
+Never stop processes by name or pattern (`pkill`, `killall`, `pgrep | xargs kill`): names and patterns such as `vibe`, `vibe-rs`, `vibe-app-server`, `vibe-acp` or `client-e2e` match every Vibe session, IDE integration and test run on the machine, including the user's own. Stop only processes you started, by the PID or process group you recorded when you started them; if you do not have it, ask the user instead of guessing.
 
 ## Project layout & module conventions
 

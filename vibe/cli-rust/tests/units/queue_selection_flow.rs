@@ -1,13 +1,13 @@
 //! Queue selection and edit mode driven by real keys while a turn runs (ADR 0013).
 
-use std::sync::Arc;
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyCode;
 use ratatui::layout::Rect;
 use vibe_rs::app::{App, Status};
-use vibe_rs::message_queue::{self as mq, QueueItem};
-use vibe_rs::server::Client;
+use vibe_rs::message_queue::{self as mq};
+
+use crate::support::{press, queued, queued_texts, stub, type_text};
 
 fn busy_app(texts: &[&str]) -> App {
     let mut app = App::default();
@@ -16,41 +16,10 @@ fn busy_app(texts: &[&str]) -> App {
     app.session.status = Status::Generating {
         since: Instant::now(),
     };
-    app.queue.items = texts
-        .iter()
-        .map(|text| QueueItem {
-            queue_item_id: Some(format!("q-{text}")),
-            message_id: (*text).into(),
-            server_message_id: (*text).into(),
-            text: (*text).into(),
-            images: Vec::new(),
-            mentions: None,
-            sent: true,
-            ever_sent: true,
-            revision: 0,
-            replacing: false,
-        })
-        .collect();
+    app.queue.items = texts.iter().map(|text| queued(text, text)).collect();
     // The renderer records the composer area; Up reads its width to find the first row.
     app.view.input_area = Rect::new(0, 0, 80, 3);
     app
-}
-
-fn press(app: &mut App, code: KeyCode) {
-    let client = Arc::new(Client::stub());
-    let (config_tx, _config_rx) = tokio::sync::mpsc::channel(1);
-    vibe_rs::input::handle_key(
-        app,
-        &client,
-        &config_tx,
-        KeyEvent::new(code, KeyModifiers::NONE),
-    );
-}
-
-fn type_text(app: &mut App, text: &str) {
-    for char in text.chars() {
-        press(app, KeyCode::Char(char));
-    }
 }
 
 /// Over a typed draft the first Up parks the caret at its start; the second opens queue mode.
@@ -58,14 +27,6 @@ fn open_queue_mode_over_draft(app: &mut App) {
     press(app, KeyCode::Up);
     assert!(app.queue.selected.is_none(), "the draft is protected first");
     press(app, KeyCode::Up);
-}
-
-fn texts(app: &App) -> Vec<&str> {
-    app.queue
-        .items
-        .iter()
-        .map(|item| item.text.as_str())
-        .collect()
 }
 
 #[tokio::test]
@@ -85,7 +46,7 @@ async fn escape_while_editing_discards_the_edit_and_returns_to_a_locked_selectio
         Some("edit me"),
         "still selected"
     );
-    assert_eq!(texts(&app), ["edit me"], "the edit is discarded");
+    assert_eq!(queued_texts(&app), ["edit me"], "the edit is discarded");
     let locked = app.chat_input.full_text();
     type_text(&mut app, "x");
     assert_eq!(
@@ -98,20 +59,19 @@ async fn escape_while_editing_discards_the_edit_and_returns_to_a_locked_selectio
 
 #[tokio::test]
 async fn an_edit_keeps_its_target_when_an_older_prompt_leaves_the_queue() {
-    let client = Arc::new(Client::stub());
     let mut app = busy_app(&["oldest", "target", "newest"]);
     press(&mut app, KeyCode::Up);
     press(&mut app, KeyCode::Up);
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.chat_input.full_text(), "target");
 
-    assert!(mq::turn_started(&mut app, &client, "q-oldest"));
-    assert_eq!(texts(&app), ["target", "newest"]);
+    assert!(mq::turn_started(&mut app, &stub(), "q-oldest"));
+    assert_eq!(queued_texts(&app), ["target", "newest"]);
 
     type_text(&mut app, " edited");
     press(&mut app, KeyCode::Enter);
 
-    assert_eq!(texts(&app), ["target edited", "newest"]);
+    assert_eq!(queued_texts(&app), ["target edited", "newest"]);
     assert_eq!(app.queue.selected, None, "saving leaves queue mode");
 }
 
@@ -147,7 +107,7 @@ fn selection_mode_locks_the_input() {
         "draft",
         "typing changes nothing"
     );
-    assert_eq!(texts(&app), ["queued"]);
+    assert_eq!(queued_texts(&app), ["queued"]);
 
     press(&mut app, KeyCode::Esc);
     assert_eq!(app.queue.selected, None);
@@ -155,13 +115,12 @@ fn selection_mode_locks_the_input() {
 
 #[tokio::test]
 async fn selection_exits_once_the_queue_drains_through_promotion() {
-    let client = Arc::new(Client::stub());
     let mut app = busy_app(&["queued"]);
     app.chat_input.load_full_text("draft".to_owned());
     open_queue_mode_over_draft(&mut app);
     assert!(app.queue.selected.is_some());
 
-    assert!(mq::turn_started(&mut app, &client, "q-queued"));
+    assert!(mq::turn_started(&mut app, &stub(), "q-queued"));
 
     assert!(app.queue.is_empty());
     assert_eq!(

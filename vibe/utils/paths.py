@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from nturl2path import url2pathname as windows_url2pathname
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 import re
@@ -81,6 +81,25 @@ def normalize_windows_input_path(raw: str) -> str:
         raise UnanchoredWindowsPathError(raw)
 
     return normalized
+
+
+def resolves_within(path: Path, roots: Sequence[Path]) -> bool:
+    """Is ``path`` inside one of ``roots`` once symlinks are resolved?
+
+    A link inside a folder a write targets could otherwise redirect the write
+    anywhere on the machine.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    for root in roots:
+        try:
+            if resolved.is_relative_to(root.resolve()):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 class GlobalPath:

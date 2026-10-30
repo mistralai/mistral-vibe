@@ -4,6 +4,8 @@ from e2e.app_server.scenario import Timeline
 
 timeline: Timeline = ["/whoami\r"]
 
+request_methods = {"providerAuth/read"}
+
 handshake = {
     "identity/read": {
         "identity": {

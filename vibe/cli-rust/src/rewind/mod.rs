@@ -54,6 +54,15 @@ pub enum Event {
     Failed(String),
 }
 
+/// `/rewind`: like [`start`], but says so when there is no message to rewind to.
+pub fn command(app: &mut App, client: &Arc<Client>) {
+    if app.view.transcript.user_messages().is_empty() {
+        let text = "No message to rewind to.";
+        return local::add_command_warning(&mut app.view.transcript, &new_message_id(), text);
+    }
+    start(app, client);
+}
+
 /// `/rewind`, or Escape twice on an empty input: highlight the last user message.
 pub fn start(app: &mut App, client: &Arc<Client>) {
     prev(app, client);
@@ -212,7 +221,6 @@ pub fn apply_event(app: &mut App, event: Event) {
             }
         }
     }
-    app.commit_finished();
 }
 
 fn apply_done(

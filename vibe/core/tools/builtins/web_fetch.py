@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import httpx
+import httpx2
 from pydantic import BaseModel, Field
 
 from vibe.core.tools.base import (
@@ -19,8 +19,8 @@ from vibe.core.tools.permissions import (
 
 def _url_origin(url: str) -> str:
     try:
-        parsed = httpx.URL(url)
-    except httpx.InvalidURL as error:
+        parsed = httpx2.URL(url)
+    except httpx2.InvalidURL as error:
         raise ToolError(f"Invalid redirect URL: {url}") from error
 
     if parsed.scheme not in {"http", "https"} or not parsed.raw_host:

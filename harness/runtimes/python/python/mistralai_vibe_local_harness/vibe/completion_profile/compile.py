@@ -18,6 +18,7 @@ from .bounds import (
 from .known_models import KNOWN_MODELS, KnownModelRow, find_known_model
 from .reasoning import (
     MIN_THINKING_BUDGET_TOKENS,
+    THINKING_BUDGET_TOKENS,
     parse_reasoning,
     thinking_budget_fits,
     uses_budget_tokens,
@@ -107,17 +108,27 @@ def compile_profile(
         known.reasoning,
         default=None,
     )
-    setting = _reasoning_setting(explicit.reasoning, adapter)
+    setting = _reasoning_setting(explicit.reasoning, explicit.reasoning_levels, adapter)
 
     wire_max_tokens = (
         (explicit.max_tokens or max_output or REQUIRED_MAX_TOKENS_FALLBACK)
         if adapter.max_tokens_required
         else None
     )
-    if (
-        wire_max_tokens is not None
-        and setting not in (None, REASONING_OFF)
-        and uses_budget_tokens(support)
+    budgeted = setting not in (None, REASONING_OFF) and uses_budget_tokens(support)
+    if budgeted and setting not in THINKING_BUDGET_TOKENS:
+        warnings.append(
+            CompletionWarning(
+                WarningCode.REASONING_BUDGET_UNAVAILABLE,
+                model,
+                f"{model} takes a thinking budget, and {setting!r} has none; its "
+                "requests go without reasoning. Pick one of "
+                f"{', '.join(THINKING_BUDGET_TOKENS)}.",
+            )
+        )
+    elif (
+        budgeted
+        and wire_max_tokens is not None
         and not thinking_budget_fits(wire_max_tokens)
     ):
         warnings.append(
@@ -260,9 +271,14 @@ def _positive_or_none(value: int | None) -> int | None:
 
 
 def _reasoning_setting(
-    raw: str | None, adapter: AdapterCapabilities
+    raw: str | None, listed: ReasoningSupport | None, adapter: AdapterCapabilities
 ) -> ReasoningSetting | None:
-    """Parse the user's setting; it goes out as written, and the provider judges it."""
+    """Parse the user's setting, whatever the word; it goes out as written, and the
+    provider judges it. A level the config lists wins over the format's own names,
+    so a listed `minimal` is not sent as `low`.
+    """
     if raw is None:
         return None
+    if listed is not None and (written := raw.strip()) in listed.levels:
+        return written
     return parse_reasoning(raw, adapter.wire)

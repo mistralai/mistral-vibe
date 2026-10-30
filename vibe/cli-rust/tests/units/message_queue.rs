@@ -1,12 +1,12 @@
 //! Prompt-queue requests and the ADR-0013 selection state machine.
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
 use vibe_rs::app::{App, Status};
 use vibe_rs::message_queue::{self as mq, QueueController, QueueItem};
-use vibe_rs::server::Client;
+
+use crate::support::{queued, stub, with_status};
 
 fn generating_app() -> App {
     let mut app = App::default();
@@ -20,15 +20,9 @@ fn generating_app() -> App {
 fn item(id: &str, text: &str, queue_item_id: Option<&str>) -> QueueItem {
     QueueItem {
         queue_item_id: queue_item_id.map(str::to_owned),
-        message_id: id.into(),
-        server_message_id: id.into(),
-        text: text.into(),
-        images: Vec::new(),
-        mentions: None,
         sent: queue_item_id.is_some(),
         ever_sent: queue_item_id.is_some(),
-        revision: 0,
-        replacing: false,
+        ..queued(id, text)
     }
 }
 
@@ -49,8 +43,7 @@ fn mount(app: &mut App, id: &str, text: &str, pending: bool) {
 #[tokio::test]
 async fn enqueue_when_busy_mounts_a_pending_prompt() {
     let mut app = generating_app();
-    let client = Arc::new(Client::stub());
-    mq::enqueue_prompt(&mut app, &client, "run tests".into());
+    mq::enqueue_prompt(&mut app, &stub(), "run tests".into());
 
     assert_eq!(app.queue.len(), 1);
     assert_eq!(app.queue.items[0].text, "run tests");
@@ -61,7 +54,7 @@ async fn enqueue_when_busy_mounts_a_pending_prompt() {
 #[tokio::test]
 async fn busy_time_prompts_merge_into_the_first_server_group() {
     let mut app = generating_app();
-    let client = Arc::new(Client::stub());
+    let client = stub();
     mq::enqueue_prompt(&mut app, &client, "one".into());
     mq::enqueue_prompt(&mut app, &client, "two".into());
 
@@ -76,8 +69,7 @@ async fn enqueue_when_ready_starts_optimistically() {
     let mut app = App::default();
     app.session.session_id = Some("sess".into());
     app.session.status = Status::Ready;
-    let client = Arc::new(Client::stub());
-    mq::enqueue_prompt(&mut app, &client, "hello".into());
+    mq::enqueue_prompt(&mut app, &stub(), "hello".into());
 
     let entry = app.view.transcript.entry(0).expect("mounted");
     assert!(!entry.pending);
@@ -90,7 +82,7 @@ async fn flush_pending_sends_prompts_held_during_startup() {
     let mut app = App::default();
     app.session.session_id = Some("sess".into());
     app.session.status = Status::Starting;
-    let client = Arc::new(Client::stub());
+    let client = stub();
     mq::enqueue_prompt(&mut app, &client, "held".into());
     assert!(!app.queue.items[0].sent, "dispatch holds on Starting");
 
@@ -106,16 +98,13 @@ fn pop_last_removes_the_newest_prompt() {
     mount(&mut app, "a", "first", true);
     mount(&mut app, "b", "second", true);
 
-    assert!(mq::pop_last(&mut app, &Arc::new(Client::stub())));
+    assert!(mq::pop_last(&mut app, &stub()));
     assert_eq!(app.queue.len(), 1);
     assert_eq!(app.queue.items[0].message_id, "a");
     assert!(!app.view.transcript.contains("b"), "b left the transcript");
 
-    assert!(
-        mq::pop_last(&mut app, &Arc::new(Client::stub())),
-        "a pops too"
-    );
-    assert!(!mq::pop_last(&mut app, &Arc::new(Client::stub())));
+    assert!(mq::pop_last(&mut app, &stub()), "a pops too");
+    assert!(!mq::pop_last(&mut app, &stub()));
     assert!(app.queue.is_empty());
 }
 
@@ -128,13 +117,13 @@ fn pop_last_leaves_a_first_prompt_shown_as_sent() {
     app.queue.items[0].replacing = true;
 
     assert!(!mq::has_removable(&app));
-    assert!(!mq::pop_last(&mut app, &Arc::new(Client::stub())));
+    assert!(!mq::pop_last(&mut app, &stub()));
     assert_eq!(app.queue.len(), 1);
 }
 
 #[test]
 fn interrupting_an_unstarted_turn_waits_for_it_unless_its_prompt_is_rejected() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = generating_app();
     app.queue.items = vec![item("a", "first", None)];
     mount(&mut app, "a", "first", false);
@@ -159,7 +148,6 @@ fn interrupting_an_unstarted_turn_waits_for_it_unless_its_prompt_is_rejected() {
 
 #[test]
 fn a_rejected_interrupted_prompt_leaves_the_prompts_queued_after_it_alone() {
-    let client = Arc::new(Client::stub());
     let mut app = generating_app();
     app.queue.items = vec![item("a", "first", None), item("b", "second", Some("qb"))];
     app.queue.interrupt_on_start = Some(Instant::now());
@@ -168,7 +156,7 @@ fn a_rejected_interrupted_prompt_leaves_the_prompts_queued_after_it_alone() {
         message_id: "a".into(),
         error: None,
     };
-    mq::apply_event(&mut app, &client, rejected);
+    mq::apply_event(&mut app, &stub(), rejected);
 
     assert_eq!(app.queue.len(), 1);
     assert!(
@@ -179,7 +167,7 @@ fn a_rejected_interrupted_prompt_leaves_the_prompts_queued_after_it_alone() {
 
 #[test]
 fn an_unqueued_turn_like_retry_is_interrupted_once_it_starts_and_marked_once() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let mut app = generating_app();
     let submission = vibe_rs::commands::submission::interrupt_turn;
 
@@ -212,13 +200,12 @@ fn a_pending_interrupt_stops_waiting_after_its_bound() {
 
 #[tokio::test]
 async fn a_prompt_never_merges_into_an_interrupted_turn() {
-    let client = Arc::new(Client::stub());
     let mut app = generating_app();
     app.queue.items = vec![item("a", "first", Some("qa"))];
     mount(&mut app, "a", "first", false);
     app.queue.interrupt_on_start = Some(Instant::now());
 
-    mq::enqueue_prompt(&mut app, &client, "second".into());
+    mq::enqueue_prompt(&mut app, &stub(), "second".into());
 
     assert_eq!(app.queue.len(), 2);
     assert_ne!(app.queue.items[1].server_message_id, "a");
@@ -231,7 +218,7 @@ fn pop_last_swallows_ctrl_c_while_a_queued_prompt_is_saving() {
     mount(&mut app, "a", "first", true);
     app.queue.items[0].replacing = true;
 
-    assert!(mq::pop_last(&mut app, &Arc::new(Client::stub())));
+    assert!(mq::pop_last(&mut app, &stub()));
     assert_eq!(app.queue.len(), 1);
 }
 
@@ -241,7 +228,7 @@ fn remove_selected_drops_the_highlighted_prompt() {
     app.queue.items = vec![item("a", "first", None), item("b", "second", None)];
     app.queue.selected = Some("b".into());
 
-    mq::remove_selected(&mut app, &Arc::new(Client::stub()));
+    mq::remove_selected(&mut app, &stub());
     assert_eq!(app.queue.len(), 1);
     assert_eq!(app.queue.items[0].message_id, "a");
 }
@@ -255,7 +242,7 @@ fn replace_selected_rewrites_an_unsent_prompt_in_place() {
     app.queue.items.push(unsent);
     app.queue.selected = Some("b".into());
 
-    mq::replace_selected(&mut app, &Arc::new(Client::stub()), "edited".into());
+    mq::replace_selected(&mut app, &stub(), "edited".into());
     assert_eq!(app.queue.len(), 2, "no new prompt is created");
     assert_eq!(app.queue.items[1].text, "edited");
     assert_eq!(app.queue.items[1].message_id, "b");
@@ -267,7 +254,7 @@ fn replace_selected_copies_when_the_prompt_already_left() {
     app.queue.items = vec![item("a", "first", None)];
     app.queue.selected = Some("consumed".into());
 
-    mq::replace_selected(&mut app, &Arc::new(Client::stub()), "edited".into());
+    mq::replace_selected(&mut app, &stub(), "edited".into());
     assert_eq!(app.queue.len(), 2, "the edit is copied into a new prompt");
     assert_eq!(app.queue.items[0].text, "first");
     assert_eq!(app.queue.items[1].text, "edited");
@@ -277,16 +264,14 @@ fn replace_selected_copies_when_the_prompt_already_left() {
 async fn resume_releases_a_paused_queue() {
     let mut app = generating_app();
     app.queue.paused = true;
-    let client = Arc::new(Client::stub());
 
-    mq::resume(&mut app, &client);
+    mq::resume(&mut app, &stub());
     assert!(!app.queue.paused);
 }
 
 #[test]
 fn is_available_gates_on_status_and_a_non_empty_queue() {
-    let mut app = App::default();
-    app.session.status = Status::Ready;
+    let mut app = with_status(Status::Ready);
     app.queue.items = vec![item("a", "first", None)];
     assert!(!mq::is_available(&app), "Ready never opens queue mode");
     app.session.status = Status::Generating {
@@ -390,7 +375,7 @@ fn exit_after_editing_clears_the_input() {
 #[tokio::test]
 async fn saving_an_edit_exits_selection_and_restores_the_draft() {
     let mut app = generating_app();
-    let client = Arc::new(Client::stub());
+    let client = stub();
     app.chat_input.input = "draft text".into();
     mq::enqueue_prompt(&mut app, &client, "second".into());
     assert!(mq::enter(&mut app));
@@ -412,7 +397,7 @@ fn finish_consumed_edit_exits_selection_mode() {
     assert!(mq::enter(&mut app));
     mq::edit_selected(&mut app);
 
-    mq::remove_selected(&mut app, &Arc::new(Client::stub()));
+    mq::remove_selected(&mut app, &stub());
     assert!(mq::confirm_consumed_edit(&mut app));
     assert!(mq::finish_consumed_edit(&mut app));
     assert_eq!(app.queue.selected, None);
@@ -424,7 +409,7 @@ fn finish_consumed_edit_exits_selection_mode() {
 fn turn_started_drops_promoted_prompts() {
     let mut app = generating_app();
     app.queue.items = vec![item("a", "first", Some("q1"))];
-    let client = Arc::new(Client::stub());
+    let client = stub();
 
     assert!(mq::turn_started(&mut app, &client, "q1"));
     assert!(app.queue.is_empty());

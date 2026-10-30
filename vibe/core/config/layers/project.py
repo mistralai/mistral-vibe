@@ -75,16 +75,25 @@ class ProjectConfigLayer(BaseTomlConfigLayer):
             if self._is_set:
                 return
             self._config_file_path = await asyncio.to_thread(
-                _discover_config_file, self._root, VIBE_HOME.path.parent
+                _discover_config_file, self._root
             )
             self._is_set = True
 
 
-def _discover_config_file(root: Path, stop: Path) -> Path | None:
+def project_config_candidates(root: Path) -> list[Path]:
+    """The files discovery tries for *root*, nearest first; the first that is a
+    file is the project config.
+    """
+    stop = VIBE_HOME.path.parent
+    candidates: list[Path] = []
     for directory in [root, *root.parents]:
         if directory == stop:
             break
-        candidate = directory / ".vibe" / "config.toml"
-        if candidate.is_file():
-            return candidate
-    return None
+        candidates.append(directory / ".vibe" / "config.toml")
+    return candidates
+
+
+def _discover_config_file(root: Path) -> Path | None:
+    return next(
+        (path for path in project_config_candidates(root) if path.is_file()), None
+    )

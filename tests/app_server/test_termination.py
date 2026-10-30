@@ -12,6 +12,8 @@ from typing import Any, cast
 import pytest
 
 from vibe.app_server import _termination, stdio
+from vibe.app_server._host import HostRequestHandler
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._session_backend_port import SessionBackendHost
 from vibe.app_server._termination import (
     TERMINATED_EXIT_CODE,
@@ -20,6 +22,7 @@ from vibe.app_server._termination import (
 )
 from vibe.app_server.server import AppServer
 from vibe.app_server.transport import JsonRpcTransport, memory_transport_pair
+from vibe.core.config.harness_files import HarnessFilesManager
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 
@@ -94,7 +97,9 @@ async def test_cancelling_the_serving_mid_read_ends_its_messages_cancelled() -> 
 
 
 @pytest.mark.asyncio
-async def test_a_server_closing_itself_mid_read_ends_its_serving_cleanly() -> None:
+async def test_a_server_closing_itself_mid_read_ends_its_serving_cleanly(
+    process_services: ProcessServices,
+) -> None:
     class Host:
         async def shutdown(self) -> None:
             pass
@@ -103,6 +108,10 @@ async def test_a_server_closing_itself_mid_read_ends_its_serving_cleanly() -> No
     server = AppServer(
         InputEndingTransport(transport),
         session_backend_host_factory=lambda _: cast(SessionBackendHost, Host()),
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+        ),
     )
     serving = asyncio.create_task(server.serve())
     await asyncio.sleep(0)

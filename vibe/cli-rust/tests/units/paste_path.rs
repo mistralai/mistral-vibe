@@ -3,7 +3,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
 use vibe_rs::app::App;
 use vibe_rs::input;
@@ -11,6 +10,8 @@ use vibe_rs::paste_path::{
     contains_image_path_mention, has_supported_path_root, image_path_mention_on, pasted_image_path,
     pasted_image_path_on, rewrite_bare_image_paths_in_text, rewrite_bare_image_paths_in_text_on,
 };
+
+use crate::support::type_text;
 
 /// The `@` mention a lone pasted image path stands for, or the paste unchanged.
 fn maybe_prepend_at_for_image_path(pasted: &str) -> String {
@@ -146,12 +147,7 @@ fn inserts_numbered_image_placeholders_with_token_boundaries() {
 
 fn typed(text: &str) -> String {
     let mut app = App::default();
-    let client = std::sync::Arc::new(vibe_rs::server::Client::stub());
-    let (config_tx, _config_rx) = tokio::sync::mpsc::channel(1);
-    for character in text.chars() {
-        let key = KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE);
-        input::handle_key(&mut app, &client, &config_tx, key);
-    }
+    type_text(&mut app, text);
     app.chat_input.input
 }
 

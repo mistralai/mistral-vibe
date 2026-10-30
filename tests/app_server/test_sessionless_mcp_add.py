@@ -10,6 +10,7 @@ import pytest_asyncio
 
 from vibe.app_server._mcp_auth import MCPAuthenticationService
 from vibe.app_server._model import validate_wire
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.mcp_catalog import MCPCatalogService
@@ -25,7 +26,9 @@ from vibe.core.config import MCPStaticAuth, MCPStdio, build_user_config_orchestr
 
 
 @pytest_asyncio.fixture
-async def mcp_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AppServerClient]:
+async def mcp_client(
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
+) -> AsyncIterator[AppServerClient]:
     async def build_session_context(*args: object, **kwargs: object) -> Never:
         raise AssertionError("MCP add must not create a session")
 
@@ -34,7 +37,7 @@ async def mcp_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AppServer
 
     monkeypatch.setattr("vibe.app_server._mcp_auth.perform_oauth_login", login)
     client_transport, server_transport = memory_transport_pair()
-    process = HarnessProcess()
+    process = HarnessProcess(services=process_services)
     monkeypatch.setattr(process, "build_unified_session_context", build_session_context)
     process.mcp_catalog = MCPCatalogService(
         MCPAuthenticationService(),

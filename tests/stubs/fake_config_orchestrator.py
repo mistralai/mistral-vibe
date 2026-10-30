@@ -226,6 +226,11 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
         if preflight is not None:
             await preflight(self._config)
 
+    async def reload_layer(
+        self, name: str, *, preflight: Callable[[C], Awaitable[None]] | None = None
+    ) -> None:
+        await self.reload(preflight=preflight)
+
     async def _persistence_orchestrator(self) -> ConfigOrchestrator[C]:
         layer = UserConfigLayer()
         return await ConfigOrchestrator.create(

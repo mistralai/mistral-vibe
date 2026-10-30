@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.protocol import (
@@ -53,9 +54,9 @@ def write_config(
 
 
 @pytest_asyncio.fixture
-async def client() -> AsyncIterator[AppServerClient]:
+async def client(process_services: ProcessServices) -> AsyncIterator[AppServerClient]:
     client_transport, server_transport = memory_transport_pair()
-    process = HarnessProcess()
+    process = HarnessProcess(services=process_services)
     server = await create_harness_server(
         server_transport, transport_kind="in_process", process=process
     )

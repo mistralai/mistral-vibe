@@ -4,7 +4,7 @@ import asyncio
 import types
 from typing import Literal
 
-import httpx
+import httpx2
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vibe.core.telemetry.types import TeleportFailureDetails
@@ -13,12 +13,12 @@ from vibe.core.teleport.types import TeleportMessageContext
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 _AMBIGUOUS_CREATE_STATUS_CODES = frozenset({504})
-_AMBIGUOUS_REQUEST_ERRORS: tuple[type[httpx.RequestError], ...] = (
-    httpx.TimeoutException,
-    httpx.ConnectError,
-    httpx.ReadError,
-    httpx.WriteError,
-    httpx.RemoteProtocolError,
+_AMBIGUOUS_REQUEST_ERRORS: tuple[type[httpx2.RequestError], ...] = (
+    httpx2.TimeoutException,
+    httpx2.ConnectError,
+    httpx2.ReadError,
+    httpx2.WriteError,
+    httpx2.RemoteProtocolError,
 )
 
 
@@ -108,7 +108,7 @@ class NuageClient:
     async def __aenter__(self) -> NuageClient:
         if self._client is None:
             self._client = VibeAsyncHTTPClient(
-                timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
+                timeout=httpx2.Timeout(self._timeout), verify=build_ssl_context()
             )
         return self
 
@@ -126,7 +126,7 @@ class NuageClient:
     def _http_client(self) -> VibeAsyncHTTPClient:
         if self._client is None:
             self._client = VibeAsyncHTTPClient(
-                timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
+                timeout=httpx2.Timeout(self._timeout), verify=build_ssl_context()
             )
             self._owns_client = True
         return self._client
@@ -138,7 +138,7 @@ class NuageClient:
         }
 
     async def start(self, request: NuageRequest) -> NuageResponse:
-        response: httpx.Response | None = None
+        response: httpx2.Response | None = None
         request_content = await asyncio.to_thread(_request_json_content, request)
         for attempt in range(self._max_start_attempts):
             try:

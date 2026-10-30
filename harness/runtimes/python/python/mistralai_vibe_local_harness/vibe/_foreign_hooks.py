@@ -2,8 +2,9 @@
 
 A *foreign* hook is a user command declared in ``hooks.toml``. This module builds
 the per-point handler that the Runtime registers: it assembles the point's JSON
-event, spawns the command in the session cwd, enforces a timeout, and maps the
-command's stdout to the point's typed result.
+event, spawns the command in the session cwd (or the directory its
+:class:`HookProcess` names), enforces a timeout, and maps the command's stdout to
+the point's typed result.
 
 A handler **never raises for an execution failure**. Any spawn error, timeout,
 non-zero exit, or invalid JSON is mapped to the point's fail action, never to an
@@ -26,9 +27,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
+from pathlib import Path
 import sys
 from typing import Any
 
@@ -80,10 +82,37 @@ _POST_TOOL_DENY_REASON = "The tool result was blocked by a post_tool hook."
 _POST_AGENT_DENY_REASON = "A post_agent hook asked the agent to revise its response."
 
 __all__ = [
+    "HookProcess",
+    "HookProcessResolver",
     "build_post_agent_turn_handler",
     "build_post_tool_call_handler",
     "build_pre_tool_call_handler",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class HookProcess:
+    """Where a hook command runs and what it adds to the inherited environment.
+
+    ``cwd`` defaults to the session's workspace. A hook shipped by a plugin runs in the
+    plugin's own directory instead, with variables naming its files.
+    """
+
+    cwd: Path | None = None
+    env: Mapping[str, str] = field(default_factory=dict[str, str])
+
+
+# Picks the process for one run, from the session the hook runs in. A plugin hook needs
+# it: the plugin files and data directory it runs against belong to that session.
+type HookProcessResolver = Callable[[HookContext], HookProcess]
+
+_SESSION_HOOK_PROCESS = HookProcess()
+
+
+def _hook_process(
+    process: HookProcess | HookProcessResolver, context: HookContext
+) -> HookProcess:
+    return process if isinstance(process, HookProcess) else process(context)
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,9 +390,15 @@ async def _feed_stdin_and_wait(
 
 
 async def _run_command(
-    command: str, config: LocalRuntimeAdapterConfig, timeout_s: float, stdin: bytes
+    command: str,
+    config: LocalRuntimeAdapterConfig,
+    timeout_s: float,
+    stdin: bytes,
+    hook_process: HookProcess,
 ) -> str:
-    """Spawn ``command`` in the session cwd with ``stdin``; return stdout text.
+    """Spawn ``command`` with ``stdin``; return stdout text.
+
+    The command runs in ``hook_process.cwd``, or the session cwd when unset.
 
     Raises on any failure (spawn error, timeout, non-zero exit); the caller maps that to
     the point's fail action.
@@ -380,7 +415,7 @@ async def _run_command(
     if not command.strip():
         raise _HookCommandError("hook command is empty")
     try:
-        process = await _spawn_hook_command(command, config)
+        process = await _spawn_hook_command(command, config, hook_process)
     except (OSError, TerminalBackendError) as error:
         raise _HookCommandError(f"failed to start: {error}") from None
     try:
@@ -411,12 +446,14 @@ async def _run_command(
 
 
 async def _spawn_hook_command(
-    command: str, config: LocalRuntimeAdapterConfig
+    command: str, config: LocalRuntimeAdapterConfig, hook_process: HookProcess
 ) -> asyncio.subprocess.Process:
     # On native Windows a hook runs in the session's shell, as the bash tool does;
     # the platform shell there is cmd.exe, which runs neither POSIX nor PowerShell.
     pipe = asyncio.subprocess.PIPE
-    cwd = str(config.workspace.cwd)
+    cwd = str(hook_process.cwd or config.workspace.cwd)
+    # ``None`` inherits this process's environment unchanged, as hooks always have.
+    env = {**os.environ, **hook_process.env} if hook_process.env else None
     match config.command_environment:
         case "git_bash" | "powershell" if sys.platform == "win32":
             backend = WindowsTerminalBackend(config.command_environment)
@@ -427,6 +464,7 @@ async def _spawn_hook_command(
                 stdout=pipe,
                 stderr=pipe,
                 cwd=cwd,
+                env=env,
             )
         case _:
             return await asyncio.create_subprocess_shell(
@@ -435,6 +473,7 @@ async def _spawn_hook_command(
                 stdout=pipe,
                 stderr=pipe,
                 cwd=cwd,
+                env=env,
                 start_new_session=True,
             )
 
@@ -446,6 +485,7 @@ def build_pre_tool_call_handler(
     match: str | None = None,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
     strict: bool = False,
+    process: HookProcess | HookProcessResolver = _SESSION_HOOK_PROCESS,
 ) -> ToolScopedHook[RustPreToolCallHookInput, RustPreToolCallHookResult]:
     async def handler(
         hook_input: RustPreToolCallHookInput, context: HookContext
@@ -457,7 +497,13 @@ def build_pre_tool_call_handler(
         try:
             payload = _stdin_payload(hook_input, context)
             stdin = json.dumps(payload).encode("utf-8")
-            stdout = await _run_command(command, context.config, timeout_s, stdin)
+            stdout = await _run_command(
+                command,
+                context.config,
+                timeout_s,
+                stdin,
+                _hook_process(process, context),
+            )
         except Exception as error:
             # Any execution failure maps to the point's fail action, never an exception.
             result, notice = _fail(
@@ -642,6 +688,7 @@ def build_post_tool_call_handler(
     match: str | None = None,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
     strict: bool = False,
+    process: HookProcess | HookProcessResolver = _SESSION_HOOK_PROCESS,
 ) -> ToolScopedHook[RustPostToolCallHookInput, RustPostToolCallHookResult]:
     async def handler(
         hook_input: RustPostToolCallHookInput, context: HookContext
@@ -650,7 +697,13 @@ def build_post_tool_call_handler(
         try:
             payload = _post_tool_payload(hook_input, context)
             stdin = json.dumps(payload).encode("utf-8")
-            stdout = await _run_command(command, context.config, timeout_s, stdin)
+            stdout = await _run_command(
+                command,
+                context.config,
+                timeout_s,
+                stdin,
+                _hook_process(process, context),
+            )
         except Exception as error:
             # Any execution failure maps to the point's fail action, never an exception.
             new_result, notice = _post_tool_fail(
@@ -745,6 +798,7 @@ def build_post_agent_turn_handler(
     match: str | None = None,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
     strict: bool = False,
+    process: HookProcess | HookProcessResolver = _SESSION_HOOK_PROCESS,
 ) -> AcceptOrRetryPostAgentHandler:
     async def handler(
         _hook_input: RustCompletionHookInput, context: HookContext
@@ -752,7 +806,13 @@ def build_post_agent_turn_handler(
         try:
             payload = _post_agent_payload(context)
             stdin = json.dumps(payload).encode("utf-8")
-            stdout = await _run_command(command, context.config, timeout_s, stdin)
+            stdout = await _run_command(
+                command,
+                context.config,
+                timeout_s,
+                stdin,
+                _hook_process(process, context),
+            )
         except Exception as error:
             # A failed review hook always accepts the turn, but the reason still
             # reaches the notice line so a broken hook is visible.

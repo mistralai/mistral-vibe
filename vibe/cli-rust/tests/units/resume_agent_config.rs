@@ -23,7 +23,7 @@ fn resume_carries_interactive_flags() {
         "web_search",
     ]);
     let config = cli
-        .interactive_agent_config(Some("/work".into()), None)
+        .interactive_agent_config(Some("/work".into()), None, None)
         .unwrap();
     let params = resume_params("session-1", &config);
 
@@ -52,7 +52,7 @@ fn resume_carries_interactive_flags() {
 fn resume_defaults_stay_slim() {
     let cli = Cli::parse_from(["vibe-rs", "--resume", "session-1"]);
     let config = cli
-        .interactive_agent_config(Some("/work".into()), None)
+        .interactive_agent_config(Some("/work".into()), None, None)
         .unwrap();
     let params = resume_params("session-1", &config);
 

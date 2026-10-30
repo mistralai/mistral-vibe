@@ -249,12 +249,10 @@ pub fn updated_title(params: &serde_json::Value) -> Option<&str> {
 }
 
 pub fn configure(app: &mut crate::app::App, runtime: &serde_json::Value) {
-    let config = &runtime["runtime"]["config"];
+    let config = crate::server::RuntimeSnapshot::config(runtime).unwrap_or_default();
     app.terminal_notifier.configure(
-        config["enableNotifications"].as_bool().unwrap_or(true),
-        config["experimentalEnableTabStatus"]
-            .as_bool()
-            .unwrap_or(true),
+        config.enable_notifications,
+        config.experimental_enable_tab_status,
     );
 }
 

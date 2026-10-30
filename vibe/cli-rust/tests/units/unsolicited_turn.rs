@@ -3,13 +3,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyCode;
 use serde_json::json;
 use tokio::sync::mpsc;
 use vibe_rs::app::{App, Status};
 use vibe_rs::event_handler::apply_notification;
 use vibe_rs::input::handle_key;
 use vibe_rs::server::{notification, Client, Notification};
+
+use crate::support::key;
 
 #[tokio::test]
 async fn escape_interrupts_a_turn_the_client_never_submitted() {
@@ -33,8 +35,12 @@ async fn escape_interrupts_a_turn_the_client_never_submitted() {
         "nothing was submitted by the client"
     );
 
-    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-    assert!(!handle_key(&mut app, &client, &config_tx, esc));
+    assert!(!handle_key(
+        &mut app,
+        &client,
+        &config_tx,
+        key(KeyCode::Esc)
+    ));
     assert!(matches!(app.session.status, Status::Ready));
     let frame = tokio::time::timeout(Duration::from_secs(5), frames.recv())
         .await

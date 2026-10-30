@@ -6,7 +6,7 @@ mod launch;
 mod reads;
 mod trust;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -34,8 +34,30 @@ pub type WorktreeNotifications = (mpsc::Receiver<Notification>, mpsc::Sender<Not
 /// `ClientInfo.name`, the server's telemetry `client_name`.
 pub const CLIENT_NAME: &str = "vibe_rs";
 
+/// Set by `vibe-acp --setup`; an env var so older binaries ignore it.
+pub const SETUP_ENTRYPOINT_ENV: &str = "VIBE_SETUP_ENTRYPOINT";
+
+static ENTRYPOINT: OnceLock<&'static str> = OnceLock::new();
+
+/// Whether `SETUP_ENTRYPOINT_ENV`'s `value` makes a `--setup` run `vibe-acp --setup`.
+pub fn is_acp_setup(setup: bool, value: Option<&str>) -> bool {
+    setup && value == Some("acp")
+}
+
+/// Reads `SETUP_ENTRYPOINT_ENV` once; returns whether this is `vibe-acp --setup`.
+pub fn init_entrypoint(setup: bool) -> bool {
+    let acp = is_acp_setup(setup, std::env::var(SETUP_ENTRYPOINT_ENV).ok().as_deref());
+    let _ = ENTRYPOINT.set(if acp { "acp" } else { "cli" });
+    acp
+}
+
+/// The `ClientInfo.entrypoint` sent on initialize.
+fn entrypoint() -> &'static str {
+    ENTRYPOINT.get().copied().unwrap_or("cli")
+}
+
 pub use crate::utils::startup_cache::read_skills;
-pub use attach::resume_params;
+pub use attach::{continue_params, nothing_to_continue, resume_params};
 pub use launch::{
     agent_ready_duration_ms, first_frame_duration_ms, launch_from_env, mark_first_draw,
     resolve_launch, resolve_launch_cwd, StartupRecorder,
@@ -130,7 +152,7 @@ pub async fn initialize_connection(client: &Client) -> Result<String> {
     let init = InitializeParams {
         client_info: ClientInfo {
             name: CLIENT_NAME.into(),
-            entrypoint: Some("cli".into()),
+            entrypoint: Some(entrypoint().into()),
             version: env!("CARGO_PKG_VERSION").into(),
             title: Some("Vibe Rust".into()),
             terminal_emulator: crate::terminal_detect::detect().into(),
@@ -217,29 +239,23 @@ async fn handshake_inner(
 
     // The saved sessions are read before the session is attached: the server
     // answers in order, so afterwards this cheap read would queue behind the
-    // whole engine bring-up. The picker paints from it, `--continue` resolves
-    // its target from it, and nothing else needs it. A worktree run cannot
-    // scope its list yet — the worktree does not exist until the app-server
-    // prepares it — so the list moves after the settle, scoped to the
-    // worktree directory (the settled cwd).
+    // whole engine bring-up. Only the picker paints from it. A worktree run
+    // cannot scope its list yet — the worktree does not exist until the
+    // app-server prepares it — so the list moves after the settle, scoped to
+    // the worktree directory (the settled cwd).
     let mut sessions = None;
     let mut list_error = None;
-    if !worktree && matches!(resume, StartupResume::Picker | StartupResume::Continue) {
+    if !worktree && matches!(resume, StartupResume::Picker) {
         match client
             .request(method::SESSION_LIST, json!({"cwd": cwd}))
             .await
         {
             Ok(value) => sessions = Some(value),
-            // Without the list neither intent can be honoured, so the notice
+            // Without the list the picker cannot be honoured, so the notice
             // says that rather than claiming there was nothing to resume.
             Err(error) => list_error = Some(format!("Failed to list sessions: {error}")),
         }
     }
-    let continue_target = sessions
-        .as_ref()
-        .and_then(|value| value.get("continueSessionId"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
     if let (StartupResume::Picker, Some(value)) = (&resume, sessions) {
         event_tx
             .send(StartupEvent::Sessions(Box::new(value)))
@@ -261,7 +277,6 @@ async fn handshake_inner(
             &client,
             resume.clone(),
             agent_config.clone(),
-            continue_target.clone(),
             list_error.clone(),
         )
         .await
@@ -284,7 +299,6 @@ async fn handshake_inner(
             notifications.take(),
             &resume,
             &agent_config,
-            continue_target,
             list_error,
             state,
         )

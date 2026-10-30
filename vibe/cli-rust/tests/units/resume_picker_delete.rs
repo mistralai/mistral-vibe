@@ -7,9 +7,9 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use vibe_rs::app::App;
 use vibe_rs::resume_picker::{self, Event, Session};
-use vibe_rs::server::{
-    request_error, Client, HistoryEntry, Incoming, MessageContent, RequestFailure,
-};
+use vibe_rs::server::{request_error, Client, Incoming, RequestFailure};
+
+use crate::support::{message, messages, settle};
 
 const CURRENT: &str = "11111111-current";
 const SAVED: &str = "22222222-saved";
@@ -18,7 +18,7 @@ struct Picker {
     app: App,
     client: Arc<Client>,
     frames: mpsc::UnboundedReceiver<Value>,
-    _events: mpsc::Receiver<Event>,
+    _events: mpsc::Receiver<vibe_rs::ui_event::UiEvent>,
 }
 
 impl Picker {
@@ -26,13 +26,11 @@ impl Picker {
     fn open(listed: &[&str]) -> Self {
         let mut app = App::default();
         app.session.session_id = Some(CURRENT.into());
-        app.view.transcript.add(&json!({"entry": {
-            "id": "current-row", "type": "message", "role": "user",
-            "content": [{"type": "text", "text": "Current question"}],
-            "generationStatus": "completed",
-        }}));
+        app.view
+            .transcript
+            .add(&json!({"entry": message("current-row", "user", "Current question")}));
         let (tx, events) = mpsc::channel(8);
-        app.resume_picker.tx = Some(tx);
+        app.events = Some(tx);
         let (client, frames) = Client::stub_answering();
         let client = Arc::new(client);
         resume_picker::open(&mut app, &client);
@@ -67,39 +65,10 @@ impl Picker {
             .map(|frame| frame["params"]["sessionId"].clone())
             .collect()
     }
-
-    fn texts(&self) -> Vec<(String, String)> {
-        self.app
-            .view
-            .transcript
-            .lines()
-            .filter_map(|line| match line.entry {
-                HistoryEntry::Message(message) => Some((
-                    message.role.clone(),
-                    message
-                        .content
-                        .iter()
-                        .filter_map(|block| match block {
-                            MessageContent::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect(),
-                )),
-                _ => None,
-            })
-            .collect()
-    }
 }
 
 fn row(role: &str, text: &str) -> (String, String) {
     (role.to_owned(), text.to_owned())
-}
-
-/// Lets spawned requests reach the stub writer; deterministic on the current-thread test runtime.
-async fn settle() {
-    for _ in 0..32 {
-        tokio::task::yield_now().await;
-    }
 }
 
 #[tokio::test]
@@ -148,7 +117,7 @@ async fn a_failed_delete_keeps_the_row_and_toasts_the_error() {
     });
     picker.press(KeyCode::Esc);
     assert!(!picker.app.resume_picker.open);
-    let texts = picker.texts();
+    let texts = messages(&picker.app);
     assert!(!texts.iter().any(|(role, text)| {
         role == "command_error" && text.starts_with("Failed to delete session")
     }));
@@ -169,14 +138,14 @@ async fn deleting_the_last_listed_session_reports_it_and_closes_the_picker() {
 
     assert!(!picker.app.resume_picker.open);
     assert!(picker.app.resume_picker.sessions.is_empty());
-    let texts = picker.texts();
+    let texts = messages(&picker.app);
     let tail = &texts[texts.len() - 2..];
     assert_eq!(
         tail,
         [
-            row("command_result", "Deleted session `22222222`."),
+            row("command_status", "Deleted session `22222222`."),
             row(
-                "command_result",
+                "command_status",
                 "No saved sessions left for this directory."
             ),
         ]

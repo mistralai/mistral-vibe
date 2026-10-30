@@ -146,10 +146,19 @@ fn prompt_content(text: &str, images: &[ImageAttachment]) -> Value {
     Value::Array(content)
 }
 
-/// Mount a client-owned command result, the
-/// bordered block a slash command prints under its echo.
+/// Mount a content command's markdown body, rendered like an assistant reply.
 pub fn add_command_result(transcript: &mut Transcript, id: &str, text: &str) {
     add_message(transcript, id, "command_result", text);
+}
+
+/// Mount an action outcome: a `✓` row with a markdown body.
+pub fn add_command_status(transcript: &mut Transcript, id: &str, text: &str) {
+    add_message(transcript, id, "command_status", text);
+}
+
+/// Mount an outcome that needs the user's attention: a `⚠` status row.
+pub fn add_command_warning(transcript: &mut Transcript, id: &str, text: &str) {
+    add_message(transcript, id, "command_warning", text);
 }
 
 /// Mount a settled one-line status.
@@ -165,8 +174,7 @@ pub fn add_status(transcript: &mut Transcript, id: &str, text: &str) {
     }));
 }
 
-/// Insert the bordered error result used by failed slash commands; the body
-/// is sanitized and prefixed at render time.
+/// Mount a `✕` error row; the body is sanitized and prefixed at render time.
 pub fn add_command_error(transcript: &mut Transcript, id: &str, text: &str) {
     add_message(transcript, id, "command_error", text);
 }
@@ -204,10 +212,9 @@ pub fn add_warning(transcript: &mut Transcript, id: &str, text: &str) {
     add_message(transcript, id, "warning", text);
 }
 
-/// Mount the what's-new body, pinned below every message the transcript
-/// will ever hold, with its `after-history`
-/// top margin decided by the history that exists at mount time.
-pub fn add_whats_new(transcript: &mut Transcript, id: &str, text: &str, after_history: bool) {
+/// Mount the what's-new body of a fresh session, pinned below every message
+/// the transcript will ever hold.
+pub fn add_whats_new(transcript: &mut Transcript, id: &str, text: &str) {
     transcript.add(&serde_json::json!({
         "entry": {
             "id": id,
@@ -217,42 +224,25 @@ pub fn add_whats_new(transcript: &mut Transcript, id: &str, text: &str, after_hi
             "generationStatus": "completed",
             "local": true,
             "pinnedBottom": true,
-            "afterHistory": after_history,
+            "afterHistory": false,
         }
     }));
-}
-
-/// Mount the custom-tools deprecation banner, composing its markdown from the
-/// sorted custom tool names and the replacement noun their count picks.
-pub fn add_custom_tools_deprecation(transcript: &mut Transcript, id: &str, names: &[String]) {
-    let sorted = {
-        let mut sorted = names.to_vec();
-        sorted.sort();
-        sorted
-    };
-    let backticked: Vec<String> = sorted.iter().map(|name| format!("`{name}`")).collect();
-    let replacement = if names.len() == 1 {
-        "a skill"
-    } else {
-        "skills"
-    };
-    let text = format!(
-        "**Support for custom tools will be deprecated soon.** Ask Vibe to help replace yours ({}) with {}.",
-        backticked.join(", "),
-        replacement
-    );
-    add_message(transcript, id, "custom_tools_deprecation", &text);
 }
 
 /// Mount the compact status indicator: a single
 /// status row that starts spinning and settles to ✓/✕ in place.
 pub fn add_compact_status(transcript: &mut Transcript, id: &str) {
+    add_progress_status(transcript, id, "Compacting conversation history...");
+}
+
+/// Mount a status row that spins until [`settle_status`] resolves it.
+pub fn add_progress_status(transcript: &mut Transcript, id: &str, text: &str) {
     transcript.add(&serde_json::json!({
         "entry": {
             "id": id,
             "type": "message",
-            "role": "compact_status",
-            "content": [{"type": "text", "text": "Compacting conversation history..."}],
+            "role": "progress_status",
+            "content": [{"type": "text", "text": text}],
             "generationStatus": "in_progress",
             "local": true,
         }
@@ -261,12 +251,19 @@ pub fn add_compact_status(transcript: &mut Transcript, id: &str) {
 
 /// Settle the compact status indicator: ✓ on success, ✕ on error.
 pub fn settle_compact_status(transcript: &mut Transcript, id: &str, error: Option<&str>) {
-    let text = match error {
-        Some(msg) => format!("Error: {msg}"),
-        None => "Compaction completed.".to_owned(),
-    };
+    match error {
+        Some(msg) => settle_status(transcript, id, &format!("Error: {msg}")),
+        None => settle_status(transcript, id, "Compaction completed."),
+    }
+}
+
+/// Settle a progress status row in place: ✕ for an `Error:` text, ✓ otherwise.
+pub fn settle_status(transcript: &mut Transcript, id: &str, text: &str) {
     transcript.patch_local(id, |entry| {
         entry["content"] = serde_json::json!([{"type": "text", "text": text}]);
         entry["generationStatus"] = serde_json::json!("completed");
     });
 }
+
+#[cfg(test)]
+mod tests;

@@ -22,6 +22,7 @@ from tests.stubs.local_sandbox import (
     RecordingSandbox,
     build_trusted_project,
 )
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._runtime import HarnessProcess
 from vibe.app_server._sandbox_workspace import sandbox_git_status
 from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
@@ -42,7 +43,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.mark.asyncio
 async def test_a_sandboxed_session_reads_the_same_workspace_context_through_its_adapter(
-    project: Path, monkeypatch: pytest.MonkeyPatch
+    project: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     """*Prepare*: A trusted host session and a sandboxed session over the same
     repository, the sandboxed one configured to offer background processes.
@@ -53,9 +54,11 @@ async def test_a_sandboxed_session_reads_the_same_workspace_context_through_its_
     """
     # Prepare
     sandbox = RecordingSandbox(project)
-    host_process = HarnessProcess(HarnessFilesManager(sources=("user", "project")))
+    host_process = HarnessProcess(
+        HarnessFilesManager(sources=("user", "project")), services=process_services
+    )
     monkeypatch.setenv("VIBE_ENABLE_BACKGROUND_PROCESSES", "true")
-    sandbox_process = HarnessProcess(sandbox=sandbox)
+    sandbox_process = HarnessProcess(sandbox=sandbox, services=process_services)
 
     # Do
     host = (
@@ -96,7 +99,7 @@ async def test_a_sandboxed_session_reads_the_same_workspace_context_through_its_
 
 @pytest.mark.asyncio
 async def test_a_sandboxed_session_in_a_subdirectory_reads_docs_up_to_its_workspace(
-    project: Path, monkeypatch: pytest.MonkeyPatch
+    project: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     """*Prepare*: A host session started in a subdirectory of a trusted repository,
     and a sandboxed one started in the same subdirectory of its workspace.
@@ -107,8 +110,10 @@ async def test_a_sandboxed_session_in_a_subdirectory_reads_docs_up_to_its_worksp
     # Prepare
     monkeypatch.setattr(trusted_folders_manager, "find_trust_root", lambda _: project)
     sandbox = RecordingSandbox(project)
-    host_process = HarnessProcess(HarnessFilesManager(sources=("user", "project")))
-    sandbox_process = HarnessProcess(sandbox=sandbox)
+    host_process = HarnessProcess(
+        HarnessFilesManager(sources=("user", "project")), services=process_services
+    )
+    sandbox_process = HarnessProcess(sandbox=sandbox, services=process_services)
     subdirectory = str(project / "sub")
 
     # Do
@@ -135,7 +140,7 @@ async def test_a_sandboxed_session_in_a_subdirectory_reads_docs_up_to_its_worksp
 
 @pytest.mark.asyncio
 async def test_a_sandboxed_session_without_git_says_so_like_the_host(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     """*Prepare*: A sandbox workspace that is not a git repository.
     *Do*: Derive the session's system instructions.
@@ -144,7 +149,9 @@ async def test_a_sandboxed_session_without_git_says_so_like_the_host(
     # Prepare
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
-    process = HarnessProcess(sandbox=RecordingSandbox(tmp_path))
+    process = HarnessProcess(
+        sandbox=RecordingSandbox(tmp_path), services=process_services
+    )
 
     # Do
     derived = (await process.build_unified_session_context(SessionOptions())).derive(

@@ -15,6 +15,22 @@ else
   uv sync --no-dev --group build
 fi
 
+# vibe-acp.spec bundles vibe-rs for `vibe-acp --setup`. A wheel install
+# already carries it; a source install builds it here. The wizard needs no
+# voice, so the build drops it unless CARGO_BUILD_FLAGS says otherwise.
+if [[ " $* " == *" vibe-acp.spec "* ]] && [ "${VIBE_NO_INSTALL_PROJECT:-0}" != "1" ] \
+  && [ -z "${VIBE_SKIP_RUST_TUI:-}" ] && [ -z "${VIBE_ACP_RUST_TUI:-}" ]; then
+  tui_target="$PWD/.native-build/vibe-rs-target"
+  read -r -a tui_flags <<< "${CARGO_BUILD_FLAGS:---no-default-features}"
+  CARGO_TARGET_DIR="$tui_target" cargo build --release --locked \
+    --manifest-path vibe/cli-rust/Cargo.toml --bin vibe-rs "${tui_flags[@]}"
+  tui_name=vibe-rs
+  if [ "${OS:-}" = "Windows_NT" ]; then
+    tui_name=vibe-rs.exe
+  fi
+  export VIBE_ACP_RUST_TUI="$tui_target/release/$tui_name"
+fi
+
 if [ -n "${VIBE_PYINSTALLER_WITH:-}" ]; then
   uv_run_args+=(--with "$VIBE_PYINSTALLER_WITH")
 fi

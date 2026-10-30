@@ -303,8 +303,13 @@ def _repository_filter_overrides(repo: Repo, *, cwd: Path | None = None) -> list
     return overrides
 
 
-class GitRepo:
-    """The one place GitPython is called and its failures become GitError."""
+class GitRepo:  # noqa: PLR0904 - every git operation goes through here
+    """The one place GitPython is called and its failures become GitError.
+
+    HEAD and refs are read with git commands, not GitPython's ref objects:
+    those read .git/HEAD and the loose ref files, and a reftable repository
+    keeps only the placeholder "ref: refs/heads/.invalid" there.
+    """
 
     def __init__(
         self,
@@ -320,6 +325,37 @@ class GitRepo:
     @property
     def _trust_root(self) -> Path:
         return self._source_trust_root or self.paths.repo_root
+
+    def run(
+        self,
+        subcommand: str,
+        *args: str,
+        cwd: Path | None = None,
+        missing_ok: bool = False,
+    ) -> str | None:
+        """Run one git command, guarded as `sanitized_git` says, in `cwd` if given.
+
+        Never prompts: a partial clone can fetch missing objects during a
+        checkout, and these commands may run with nobody to answer. An
+        untrusted repository keeps LFS pointers, as `_check_out` does.
+
+        `missing_ok` answers None for exit status 1, which `git config --get`
+        uses for a key that is not set.
+        """
+        command = getattr(self._sanitized_git(cwd=cwd), subcommand.replace("-", "_"))
+        env = (
+            _NON_INTERACTIVE_GIT_ENV
+            if repository_is_trusted(
+                self._repo, self.trust_store, trust_root=self._trust_root
+            )
+            else {**_NON_INTERACTIVE_GIT_ENV, "GIT_LFS_SKIP_SMUDGE": "1"}
+        )
+        try:
+            return command(*args, env=env)
+        except self._gitpy.git_command_error as e:
+            if missing_ok and e.status == _GIT_CONFIG_NO_MATCH_STATUS:
+                return None
+            raise GitError(f"git {subcommand} failed: {e}") from e
 
     def _sanitized_git(self, *extra_config: str, cwd: Path | None = None) -> Git:
         return sanitized_git(
@@ -358,14 +394,10 @@ class GitRepo:
         _require_git_executable(target)
         git = _git_python()
         try:
-            return cls(git.repo(target)).head_commit()
-        except (
-            git.invalid_git_repository_error,
-            git.no_such_path_error,
-            git.git_command_error,
-            ValueError,
-        ) as e:
+            repo = git.repo(target)
+        except (git.invalid_git_repository_error, git.no_such_path_error) as e:
             raise GitError(f"Failed to inspect HEAD for {target.name!r}: {e}") from e
+        return cls(repo).head_commit()
 
     @cached_property
     def _gitpy(self) -> _GitPython:
@@ -432,7 +464,14 @@ class GitRepo:
 
     def has_commits(self) -> bool:
         """Whether HEAD resolves to a commit."""
-        return self._repo.head.is_valid()
+        try:
+            self._repo.git.rev_parse("--quiet", "--verify", "HEAD^{commit}")
+        except self._gitpy.git_command_error as e:
+            # An unborn HEAD names no commit; other failures are git's own.
+            if e.status == 1:
+                return False
+            raise GitError(f"Failed to read the HEAD commit: {e}") from e
+        return True
 
     def branch_changes(self) -> BranchChanges | None:
         """Committed lines added and removed on this branch, against its base.
@@ -496,10 +535,13 @@ class GitRepo:
 
     def branch(self) -> str | None:
         try:
-            return self._repo.active_branch.name
-        except TypeError:
+            ref = self._repo.git.symbolic_ref("--quiet", "HEAD")
+        except self._gitpy.git_command_error as e:
             # Detached HEAD is checked out at a commit and has no branch name.
-            return None
+            if e.status == 1:
+                return None
+            raise GitError(f"Failed to read the current branch: {e}") from e
+        return ref.removeprefix("refs/heads/")
 
     def base_branch(self) -> str | None:
         """Best-effort guess at the branch this work will merge back into.
@@ -555,7 +597,10 @@ class GitRepo:
         return True
 
     def head_commit(self) -> str:
-        return self._repo.head.commit.hexsha
+        try:
+            return self._repo.git.rev_parse("--verify", "HEAD^{commit}")
+        except self._gitpy.git_command_error as e:
+            raise GitError(f"Failed to read the HEAD commit: {e}") from e
 
     # Derived on first use, not in __init__: reading the repository layout can
     # fail on a linked worktree with a separate git directory, and a caller that
@@ -669,7 +714,7 @@ class GitRepo:
                 f"Failed to fetch {remote}/{branch}: {(stderr or '').strip()}"
             )
 
-    def add_worktree(
+    def add_worktree[T](
         self,
         target: Path,
         branch: str,
@@ -677,7 +722,8 @@ class GitRepo:
         branch_created: bool,
         start_point: str | None = None,
         on_checkout_progress: Callable[[int, int], None] | None = None,
-    ) -> None:
+        populate: Callable[[Path], T] | None = None,
+    ) -> T | None:
         """Create the worktree, then check its files out.
 
         Two commands rather than one, because `worktree add` runs its checkout
@@ -685,6 +731,10 @@ class GitRepo:
         separately with --progress reports it on a pipe too, as
         `on_checkout_progress(completed_files, total_files)`, called on this
         thread. It costs nothing measurable over the single command.
+
+        `populate` runs between the two, on the registered but empty worktree,
+        and its result is returned. Files it puts there that already match the
+        index it leaves are not written again by the checkout.
         """
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -704,6 +754,7 @@ class GitRepo:
                 f"Failed to create worktree {target.name!r} for branch {branch!r}: {e}"
             ) from e
         try:
+            populated = None if populate is None else populate(target)
             self._check_out(target, on_checkout_progress)
         except Exception as e:
             # The worktree is registered by now, and git only cleans up after a
@@ -715,6 +766,7 @@ class GitRepo:
             raise GitError(
                 f"Failed to create worktree {target.name!r} for branch {branch!r}: {e}"
             ) from e
+        return populated
 
     def _check_out(
         self, target: Path, on_progress: Callable[[int, int], None] | None

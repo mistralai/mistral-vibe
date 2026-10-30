@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass
 import types
 
-import httpx
+import httpx2
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vibe.core.vibe_code_project.selection import ProjectRepository, VibeCodeProject
@@ -71,7 +71,7 @@ class VibeCodeProjectClient:
         base_url: str,
         api_key: str,
         *,
-        client: httpx.AsyncClient | None = None,
+        client: httpx2.AsyncClient | None = None,
         timeout: float = 60.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
@@ -83,7 +83,7 @@ class VibeCodeProjectClient:
     async def __aenter__(self) -> VibeCodeProjectClient:
         if self._client is None:
             self._client = VibeAsyncHTTPClient(
-                timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
+                timeout=httpx2.Timeout(self._timeout), verify=build_ssl_context()
             )
         return self
 
@@ -98,10 +98,10 @@ class VibeCodeProjectClient:
             self._client = None
 
     @property
-    def _http_client(self) -> httpx.AsyncClient:
+    def _http_client(self) -> httpx2.AsyncClient:
         if self._client is None:
             self._client = VibeAsyncHTTPClient(
-                timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
+                timeout=httpx2.Timeout(self._timeout), verify=build_ssl_context()
             )
             self._owns_client = True
         return self._client
@@ -126,7 +126,7 @@ class VibeCodeProjectClient:
                 headers=self._headers(),
                 params=params or None,
             )
-        except httpx.RequestError as e:
+        except httpx2.RequestError as e:
             raise VibeCodeProjectApiError(
                 "Failed to fetch Vibe Code Web projects."
             ) from e
@@ -168,7 +168,7 @@ class VibeCodeProjectClient:
                 headers=self._headers(),
                 json={"name": name, "repositories": repositories},
             )
-        except httpx.RequestError as e:
+        except httpx2.RequestError as e:
             raise VibeCodeProjectApiError(
                 "Failed to create Vibe Code Web project."
             ) from e
@@ -191,9 +191,9 @@ class VibeCodeProjectClient:
             ) from e
 
 
-def _parse_project_list_response(response: httpx.Response) -> VibeCodeProjectPage:
+def _parse_project_list_response(response: httpx2.Response) -> VibeCodeProjectPage:
     return _ProjectListResponse.model_validate(response.json()).to_domain()
 
 
-def _parse_project_response(response: httpx.Response) -> VibeCodeProject:
+def _parse_project_response(response: httpx2.Response) -> VibeCodeProject:
     return _ProjectResponse.model_validate(response.json()).to_domain()

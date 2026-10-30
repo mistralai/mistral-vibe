@@ -1,27 +1,26 @@
 //! Slash commands submitted during `Status::Starting` are deferred and replayed
 //! once `apply_ready` settles.
 
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use tokio::sync::mpsc;
 
 use vibe_rs::app::{App, Status};
 use vibe_rs::commands::submission;
 use vibe_rs::commands::CommandEvent;
-use vibe_rs::server::Client;
 use vibe_rs::{completion_manager, config};
+
+use crate::support::{stub, with_status};
 
 /// A `/whoami` submitted while the session is still starting is stored in
 /// `pending_commands` instead of firing RPCs against an unready session.
 #[tokio::test]
 async fn slash_command_during_starting_is_deferred() {
-    let mut app = App::default();
-    app.session.status = Status::Starting;
+    let mut app = with_status(Status::Starting);
     app.chat_input.load_full_text("/whoami".to_owned());
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
 
-    submission::submit(&mut app, &client, &config_tx);
+    submission::submit(&mut app, &stub(), &config_tx);
 
     assert_eq!(app.pending_commands.len(), 1);
     assert_eq!(app.pending_commands[0], "/whoami");
@@ -31,10 +30,9 @@ async fn slash_command_during_starting_is_deferred() {
 /// Multiple commands during `Starting` are deferred in order.
 #[tokio::test]
 async fn multiple_commands_during_starting_are_deferred_in_order() {
-    let mut app = App::default();
-    app.session.status = Status::Starting;
+    let mut app = with_status(Status::Starting);
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
+    let client = stub();
 
     app.chat_input.load_full_text("/help".to_owned());
     submission::submit(&mut app, &client, &config_tx);
@@ -50,13 +48,11 @@ async fn multiple_commands_during_starting_are_deferred_in_order() {
 /// message queue, not the pending-commands list.
 #[tokio::test]
 async fn regular_prompt_during_starting_is_not_deferred() {
-    let mut app = App::default();
-    app.session.status = Status::Starting;
+    let mut app = with_status(Status::Starting);
     app.chat_input.input = "hello world".to_owned();
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
 
-    submission::submit(&mut app, &client, &config_tx);
+    submission::submit(&mut app, &stub(), &config_tx);
 
     assert!(app.pending_commands.is_empty(), "prompts are not deferred");
     assert!(!app.queue.is_empty(), "prompt should be queued");
@@ -65,13 +61,11 @@ async fn regular_prompt_during_starting_is_not_deferred() {
 /// Commands are not deferred when the session is already `Ready`.
 #[tokio::test]
 async fn command_during_ready_is_not_deferred() {
-    let mut app = App::default();
-    app.session.status = Status::Ready;
+    let mut app = with_status(Status::Ready);
     app.chat_input.load_full_text("/help".to_owned());
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
 
-    submission::submit(&mut app, &client, &config_tx);
+    submission::submit(&mut app, &stub(), &config_tx);
 
     assert!(
         app.pending_commands.is_empty(),
@@ -83,14 +77,12 @@ async fn command_during_ready_is_not_deferred() {
 /// output to the transcript, proving the replay path works end-to-end.
 #[tokio::test]
 async fn flush_pending_executes_deferred_help() {
-    let mut app = App::default();
-    app.session.status = Status::Ready;
+    let mut app = with_status(Status::Ready);
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
 
     app.pending_commands.push("/help".to_owned());
     let before = app.view.transcript.revision();
-    submission::flush_pending(&mut app, &client, &config_tx);
+    submission::flush_pending(&mut app, &stub(), &config_tx);
 
     assert!(
         app.pending_commands.is_empty(),
@@ -107,13 +99,11 @@ async fn flush_pending_executes_deferred_help() {
 /// and holds them before classification.
 #[tokio::test]
 async fn side_channel_command_during_starting_is_deferred() {
-    let mut app = App::default();
-    app.session.status = Status::Starting;
+    let mut app = with_status(Status::Starting);
     app.chat_input.load_full_text("/help".to_owned());
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
 
-    submission::submit(&mut app, &client, &config_tx);
+    submission::submit(&mut app, &stub(), &config_tx);
 
     assert_eq!(app.pending_commands.len(), 1);
     assert_eq!(app.pending_commands[0], "/help");
@@ -121,31 +111,26 @@ async fn side_channel_command_during_starting_is_deferred() {
 }
 
 /// A deferred RPC command replayed against a stub client fails gracefully: the
-/// background read returns `None` and the transcript records the user's command
-/// line, with no panic and no spinner imbalance left behind.
+/// background read is dispatched and returns `None`, with no panic left behind.
 #[tokio::test]
 async fn flush_pending_replay_against_stub_does_not_panic() {
-    let mut app = App::default();
-    app.session.status = Status::Ready;
+    let mut app = with_status(Status::Ready);
     app.session.session_id = Some("rs-test".to_owned());
     let (command_tx, _command_rx) = mpsc::channel::<CommandEvent>(8);
     app.command_tx = Some(command_tx);
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
 
     app.pending_commands.push("/whoami".to_owned());
-    let before = app.view.transcript.revision();
-    submission::flush_pending(&mut app, &client, &config_tx);
+    submission::flush_pending(&mut app, &stub(), &config_tx);
 
     assert!(
         app.pending_commands.is_empty(),
         "pending commands should be flushed"
     );
-    // The user's command line is recorded synchronously by `run_command`, even
-    // though the background identity read will fail against the stub.
-    assert!(
-        app.view.transcript.revision() > before,
-        "the deferred /whoami command line should be recorded"
+    assert_eq!(
+        app.pending_commits.load(Ordering::Relaxed),
+        1,
+        "the deferred /whoami should dispatch its background identity read"
     );
 }
 
@@ -153,13 +138,11 @@ async fn flush_pending_replay_against_stub_does_not_panic() {
 /// the event loop quits (Bugbot: deferred exit command never quits).
 #[tokio::test]
 async fn flush_pending_propagates_deferred_exit() {
-    let mut app = App::default();
-    app.session.status = Status::Ready;
+    let mut app = with_status(Status::Ready);
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
 
     app.pending_commands.push("/exit".to_owned());
-    let exit = submission::flush_pending(&mut app, &client, &config_tx);
+    let exit = submission::flush_pending(&mut app, &stub(), &config_tx);
 
     assert!(exit, "deferred /exit should signal quit");
     assert!(app.pending_commands.is_empty());
@@ -173,13 +156,12 @@ async fn flush_pending_preserves_in_progress_input() {
         since: std::time::Instant::now(),
     };
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
 
     app.pending_commands.push("/clear".to_owned());
     app.pending_commands.push("/help".to_owned());
     app.chat_input.input = "unfinished thought".to_owned();
     let before = app.view.transcript.revision();
-    let exit = submission::flush_pending(&mut app, &client, &config_tx);
+    let exit = submission::flush_pending(&mut app, &stub(), &config_tx);
 
     assert!(!exit);
     assert_eq!(app.chat_input.input, "unfinished thought");
@@ -194,12 +176,11 @@ async fn flush_pending_rejects_non_side_channel_while_generating() {
         since: std::time::Instant::now(),
     };
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
 
     app.pending_commands.push("/clear".to_owned());
     app.pending_commands.push("/help".to_owned());
     let before = app.view.transcript.revision();
-    let exit = submission::flush_pending(&mut app, &client, &config_tx);
+    let exit = submission::flush_pending(&mut app, &stub(), &config_tx);
 
     assert!(!exit);
     assert_eq!(app.chat_input.full_text(), "/clear");
@@ -216,10 +197,9 @@ async fn flush_pending_restores_a_rejected_teleport() {
         since: std::time::Instant::now(),
     };
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
 
     app.pending_commands.push("&ship it".to_owned());
-    let exit = submission::flush_pending(&mut app, &client, &config_tx);
+    let exit = submission::flush_pending(&mut app, &stub(), &config_tx);
 
     assert!(!exit);
     assert_eq!(app.chat_input.full_text(), "&ship it");
@@ -232,10 +212,8 @@ async fn flush_pending_restores_a_rejected_teleport() {
 /// (Bugbot: ready resets open completions).
 #[tokio::test]
 async fn flush_pending_without_commands_preserves_dismissed_completions() {
-    let mut app = App::default();
-    app.session.status = Status::Ready;
+    let mut app = with_status(Status::Ready);
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let client = Arc::new(Client::stub());
 
     app.chat_input.load_full_text("/he".to_owned());
     completion_manager::input_changed(&mut app);
@@ -246,7 +224,7 @@ async fn flush_pending_without_commands_preserves_dismissed_completions() {
         "popup should be dismissed"
     );
 
-    submission::flush_pending(&mut app, &client, &config_tx);
+    submission::flush_pending(&mut app, &stub(), &config_tx);
 
     assert!(
         !completion_manager::is_open(&app),

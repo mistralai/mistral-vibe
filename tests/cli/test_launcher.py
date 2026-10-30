@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
 import subprocess
 
 import pytest
@@ -56,6 +57,48 @@ def test_bundled_binary_execs_with_app_server_bin(
     )
     assert "VIBE_APP_SERVER_CWD" not in env
     assert "VIBE_APP_SERVER_CMD" not in env
+
+
+def test_app_server_cmd_runs_the_bundled_binary_against_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bundled = tmp_path / "_internal" / "vibe" / "_bin" / "vibe-rs"
+    bundled.parent.mkdir(parents=True)
+    bundled.touch()
+    app_server_cmd = [str(tmp_path / "dir with space" / "vibe-acp"), "--serve"]
+
+    monkeypatch.setattr(launcher, "_BUNDLED_BIN", bundled)
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setenv("VIBE_APP_SERVER_BIN", "/stale/vibe-app-server")
+    monkeypatch.setenv("VIBE_APP_SERVER_CWD", "/stale")
+    calls = _capture_execvpe(monkeypatch)
+
+    launcher.exec_rust_cli(
+        ["--setup"], extra_env={"EXTRA": "1"}, app_server_cmd=app_server_cmd
+    )
+
+    (call,) = calls
+    assert call["argv"] == [str(bundled), "--setup"]
+    env = call["env"]
+    assert isinstance(env, dict)
+    assert shlex.split(env["VIBE_APP_SERVER_CMD"]) == app_server_cmd
+    assert env["EXTRA"] == "1"
+    assert "VIBE_APP_SERVER_BIN" not in env
+    assert "VIBE_APP_SERVER_CWD" not in env
+
+
+def test_app_server_cmd_without_bundled_rust_cli_exits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    missing = tmp_path / "_bin" / "vibe-rs"
+    monkeypatch.setattr(launcher, "_BUNDLED_BIN", missing)
+    monkeypatch.setattr(launcher, "_MANIFEST", tmp_path / "cli-rust" / "Cargo.toml")
+    _forbid_execvpe(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        launcher.exec_rust_cli(["--setup"], app_server_cmd=["vibe-acp"])
+
+    assert str(missing) in str(excinfo.value)
 
 
 def test_source_checkout_execs_release_binary(

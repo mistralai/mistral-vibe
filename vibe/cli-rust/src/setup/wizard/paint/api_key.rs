@@ -6,7 +6,7 @@ use ratatui::Frame;
 
 use super::panel::{render, Row, Subtitle};
 use crate::app::App;
-use crate::setup::wizard::{InputCard, OnboardingState};
+use crate::setup::wizard::{InputCard, OnboardingState, ValidationState};
 
 /// The configuration docs the "Learn more" footer opens.
 const DOCS_LINK: &str =
@@ -62,6 +62,12 @@ pub(super) fn draw(
     });
     rows.push(Row::Blank(1));
     rows.push(feedback);
+    if let Some(env_var) = &wizard.context.shell_key_override {
+        rows.push(Row::Blank(1));
+        rows.push(Row::Feedback(ValidationState::Warning(
+            super::options::shell_override_notice(env_var),
+        )));
+    }
     rows.push(Row::Blank(2));
     rows.push(Row::Text("Learn more about Vibe configurations".into()));
     rows.push(Row::Link(DOCS_LINK.to_string()));

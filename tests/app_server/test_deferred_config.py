@@ -165,6 +165,48 @@ async def test_a_cancelled_apply_leaves_the_write_parked() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_commit_cancelled_while_installing_stays_parked() -> None:
+    """*Prepare*: A commit Core took, whose install is cancelled.
+    *Do*: Cancel it while it installs.
+    *Assert*: Parked, so the next boundary pushes what the shared config
+    holds, and nothing adopted.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._deferred_config import DeferredConfiguration
+
+    installing = asyncio.Event()
+
+    async def derive() -> str:
+        return "shared"
+
+    async def push(value: str) -> None:
+        return None
+
+    async def build() -> str:
+        return "candidate"
+
+    async def install() -> bool:
+        installing.set()
+        await asyncio.Event().wait()
+        return True
+
+    deferred = DeferredConfiguration(
+        derive=derive,
+        push=push,
+        adopt=lambda value: pytest.fail("A cancelled install must not be adopted"),
+        turn_running=lambda: False,
+    )
+
+    committing = asyncio.create_task(deferred.commit(build, install=install))
+    await installing.wait()
+    committing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await committing
+
+    assert deferred.parked is True
+
+
+@pytest.mark.asyncio
 async def test_settle_waits_for_an_apply_already_in_flight() -> None:
     """*Prepare*: An apply that has cleared the parked flag and is mid-derive.
     *Do*: Settle again, as the next turn opening does.

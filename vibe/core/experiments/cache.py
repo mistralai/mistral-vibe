@@ -38,10 +38,13 @@ def load_cached_eval_response(config: VibeConfigSchema) -> EvalResponse | None:
 
 
 def store_cached_eval_response(
-    config: VibeConfigSchema, response: EvalResponse
+    config: VibeConfigSchema, response: EvalResponse, *, fetched_for: str | None = None
 ) -> None:
+    """Cache ``response`` for the user it was fetched for (see ``may_cache_under``)."""
+    from vibe.core.telemetry.send import may_cache_under
+
     key = _cache_key(config)
-    if key is None:
+    if key is None or not may_cache_under(key, fetched_for=fetched_for):
         return
     store_keyed_entry(
         EXPERIMENT_EVAL_CACHE_FILE.path, key, response.model_dump(mode="json")

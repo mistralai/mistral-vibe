@@ -59,6 +59,13 @@ impl Mode {
     pub(crate) fn supports(&self, operation: ToolName) -> bool {
         matches!(self, Self::Enabled { operations, .. } if operations.contains(&operation))
     }
+    /// Whether the agent can create children, so its guidance may name child operations.
+    pub(crate) fn can_spawn(&self) -> bool {
+        self.supports(ToolName::Spawn)
+    }
+    pub(crate) fn can_list_configs(&self) -> bool {
+        self.supports(ToolName::ListConfigs)
+    }
     pub(crate) fn supports_conversation_forking(&self) -> bool {
         matches!(
             self,

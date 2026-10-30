@@ -1,14 +1,13 @@
 //! The picker's app-server calls, each answering with one `Event`.
 
 use std::collections::HashSet;
-use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
+use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::mpsc::Sender;
 
 use super::{Event, Session};
-use crate::input::deliver;
+use crate::app::App;
 use crate::server::{
     method,
     request_error::{describe, resume_failure_message},
@@ -18,14 +17,8 @@ use crate::server::{
 /// How much history a preview reads.
 const PREVIEW_LIMIT: u64 = 200;
 
-pub(super) struct Call {
-    pub client: Arc<Client>,
-    pub tx: Sender<Event>,
-    pub pending: Arc<AtomicU32>,
-}
-
-pub(super) fn list(call: Call, cwd: Option<String>) {
-    spawn(call, |client| async move {
+pub(super) fn list(app: &App, client: &Arc<Client>, cwd: Option<String>) {
+    spawn(app, client, |client| async move {
         match client
             .request(method::SESSION_LIST, json!({"cwd": cwd}))
             .await
@@ -36,18 +29,17 @@ pub(super) fn list(call: Call, cwd: Option<String>) {
     });
 }
 
-pub(super) fn preview(client: Arc<Client>, tx: Sender<Event>, id: String, request: u64) {
-    tokio::spawn(async move {
+pub(super) fn preview(app: &App, client: &Arc<Client>, id: String, request: u64) {
+    spawn(app, client, move |client| async move {
         let params = json!({"sessionId": id, "history": {"limit": PREVIEW_LIMIT}, "turns": null});
-        let event = state(client.request(method::SESSION_READ, params).await)
+        state(client.request(method::SESSION_READ, params).await)
             .map(|state| Event::Preview { request, state })
-            .unwrap_or(Event::PreviewFailed { request });
-        let _ = tx.send(event).await;
+            .unwrap_or(Event::PreviewFailed { request })
     });
 }
 
-pub(super) fn resume(call: Call, id: String, params: Value) {
-    spawn(call, |client| async move {
+pub(super) fn resume(app: &App, client: &Arc<Client>, id: String, params: Value) {
+    spawn(app, client, |client| async move {
         match client.request(method::SESSION_RESUME, params).await {
             Ok(value) => match parse_state(&value) {
                 Some(state) => Event::Resumed { id, state },
@@ -58,8 +50,8 @@ pub(super) fn resume(call: Call, id: String, params: Value) {
     });
 }
 
-pub(super) fn delete(call: Call, id: String) {
-    spawn(call, |client| async move {
+pub(super) fn delete(app: &App, client: &Arc<Client>, id: String) {
+    spawn(app, client, |client| async move {
         let error = client
             .request(method::SESSION_DELETE, json!({"sessionId": id}))
             .await
@@ -70,9 +62,9 @@ pub(super) fn delete(call: Call, id: String) {
 }
 
 /// Subscribe to the session-lease watch, answering with the locked set.
-pub(super) fn leases(call: Call, current: Option<String>) {
-    let own_pid = call.client.server_pid();
-    spawn(call, move |client| async move {
+pub(super) fn leases(app: &App, client: &Arc<Client>, current: Option<String>) {
+    let own_pid = client.server_pid();
+    spawn(app, client, move |client| async move {
         match client
             .request(method::SESSION_LEASE_SUBSCRIBE, json!({}))
             .await
@@ -114,19 +106,14 @@ pub fn lease_locked(holder: Option<&Value>, own_pid: Option<u32>, is_current: bo
         .is_some_and(|pid| Some(pid) != own_pid && !is_current)
 }
 
-fn spawn<F>(call: Call, request: impl FnOnce(Arc<Client>) -> F + Send + 'static)
+/// Spawn one call; skipped once the answer channel is gone.
+fn spawn<F>(app: &App, client: &Arc<Client>, request: impl FnOnce(Arc<Client>) -> F)
 where
-    F: std::future::Future<Output = Event> + Send,
+    F: std::future::Future<Output = Event> + Send + 'static,
 {
-    let Call {
-        client,
-        tx,
-        pending,
-    } = call;
-    tokio::spawn(async move {
-        let event = request(client).await;
-        deliver(Some(tx), event, &pending).await;
-    });
+    if app.events.is_some() {
+        crate::ui_event::spawn(app, request(client.clone()));
+    }
 }
 
 fn state<E: std::fmt::Display>(
@@ -141,8 +128,7 @@ fn state<E: std::fmt::Display>(
 /// The `state` payload of a session lifecycle answer; a present-but-broken
 /// state is logged, since only a contract break produces it.
 fn parse_state(value: &Value) -> Option<crate::server::PublicSessionState> {
-    let state = value.get("state").cloned()?;
-    match serde_json::from_value(state) {
+    match crate::server::PublicSessionState::deserialize(value.get("state")?) {
         Ok(parsed) => Some(parsed),
         Err(error) => {
             tracing::warn!(%error, "session state failed to parse");
@@ -153,31 +139,7 @@ fn parse_state(value: &Value) -> Option<crate::server::PublicSessionState> {
 
 /// The saved sessions of a `session/list` answer, newest first.
 pub(super) fn sessions(value: &Value) -> Vec<Session> {
-    let mut items: Vec<_> = value
-        .get("items")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| {
-            Some(Session {
-                id: item.get("id")?.as_str()?.to_owned(),
-                title: text(item, "title"),
-                preview: text(item, "preview"),
-                updated_at: item
-                    .get("updatedAt")
-                    .and_then(Value::as_u64)
-                    .unwrap_or_default(),
-                cwd: item.get("cwd").and_then(Value::as_str).map(str::to_owned),
-            })
-        })
-        .collect();
+    let mut items: Vec<Session> = crate::utils::json::lenient(&value["items"]).unwrap_or_default();
     items.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
     items
-}
-
-fn text(item: &Value, key: &str) -> String {
-    item.get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
 }

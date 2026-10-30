@@ -9,8 +9,8 @@ use tokio::sync::mpsc;
 use super::Attach;
 use crate::cli::StartupResume;
 use crate::server::{
-    method, request_error::resume_failure_message, AgentConfig, Client, Notification, RpcError,
-    SessionStartParams, HISTORY_LIMIT,
+    method, request_error::resume_failure_message, AgentConfig, Client, Notification,
+    RequestFailure, RpcError, SessionStartParams, HISTORY_LIMIT,
 };
 use crate::startup::StartupEvent;
 use crate::worktree::WorktreeInfo;
@@ -32,12 +32,10 @@ pub(super) async fn attach_session(
     client: &Arc<Client>,
     resume: StartupResume,
     agent_config: AgentConfig,
-    continue_target: Option<String>,
     list_error: Option<String>,
 ) -> Result<(Value, Attach), StartError> {
     let started = start_session(client, agent_config.clone()).await?;
-    let target = resume.target(continue_target);
-    rebind(client, started, resume, &agent_config, target, list_error)
+    rebind(client, started, resume, &agent_config, list_error)
         .await
         .map_err(StartError::Other)
 }
@@ -50,6 +48,8 @@ pub(super) async fn start_session(
     let start = SessionStartParams {
         agent_config,
         history_limit: HISTORY_LIMIT,
+        model: None,
+        session_only: false,
     };
     let params = serde_json::to_value(&start).map_err(|e| StartError::Other(e.into()))?;
     let result = client
@@ -82,40 +82,71 @@ pub(super) async fn rebind(
     started: Value,
     resume: StartupResume,
     agent_config: &AgentConfig,
-    target: Option<String>,
     list_error: Option<String>,
 ) -> Result<(Value, Attach)> {
-    let Some(id) = target else {
-        // `--continue` with nothing to continue keeps the fresh session.
-        let attach = match (resume, list_error) {
-            (_, Some(error)) => Attach::Failed(error),
-            (StartupResume::Continue, None) => Attach::NoPrevious,
-            _ => Attach::Started,
-        };
-        return Ok((started, attach));
+    let (method, params) = match (resume, list_error) {
+        (_, Some(error)) => return Ok((started, Attach::Failed(error))),
+        (StartupResume::ById(id), None) => {
+            (method::SESSION_RESUME, resume_params(&id, agent_config))
+        }
+        // The server picks the session: this terminal's last one in the folder, else the latest.
+        (StartupResume::Continue, None) => {
+            (method::SESSION_CONTINUE, continue_params(agent_config))
+        }
+        _ => return Ok((started, Attach::Started)),
     };
     // The full agent config rides on resume too, so flags survive the rebind.
-    let params = resume_params(&id, agent_config);
-    match state_of(client, method::SESSION_RESUME, params).await {
-        Ok(state) => Ok((state, Attach::Resumed(id))),
+    match state_of(client, method, params).await {
+        Ok(state) => {
+            let id = state
+                .pointer("/session/id")
+                .and_then(Value::as_str)
+                .context("reopened session state missing session id")?
+                .to_owned();
+            Ok((state, Attach::Resumed(id)))
+        }
+        // `--continue` with nothing to continue keeps the fresh session.
+        Err(error) if nothing_to_continue(&error) => Ok((started, Attach::NoPrevious)),
         // The fresh session is already attached, so a failed resume keeps it.
         Err(error) => Ok((started, Attach::Failed(resume_failure_message(&error)))),
     }
 }
 
+/// The `harnessCode` of the `session/continue` error when no session matches.
+const NOTHING_TO_CONTINUE: &str = "nothing_to_continue";
+
+/// Whether `session/continue` found no session, as opposed to failing.
+pub fn nothing_to_continue(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<RequestFailure>(),
+        Some(RequestFailure::Rpc(rpc)) if rpc.harness_code() == Some(NOTHING_TO_CONTINUE)
+    )
+}
+
 /// `session/resume` params; the flags ride along.
-/// The server rejects `worktree` outside `session/start` (the worktree already
-/// exists by then), so the rebind never re-requests it.
 pub fn resume_params(id: &str, agent_config: &AgentConfig) -> Value {
+    json!({
+        "sessionId": id,
+        "agentConfig": saved_session_config(agent_config),
+        "historyLimit": HISTORY_LIMIT,
+    })
+}
+
+/// `session/continue` params; the flags ride along.
+pub fn continue_params(agent_config: &AgentConfig) -> Value {
+    json!({
+        "agentConfig": saved_session_config(agent_config),
+        "historyLimit": HISTORY_LIMIT,
+    })
+}
+
+/// The agent config without `worktree`, which the server only takes on `session/start`.
+fn saved_session_config(agent_config: &AgentConfig) -> Value {
     let mut config = serde_json::to_value(agent_config).expect("serialize agent config");
     if let Some(fields) = config.as_object_mut() {
         fields.remove("worktree");
     }
-    json!({
-        "sessionId": id,
-        "agentConfig": config,
-        "historyLimit": HISTORY_LIMIT,
-    })
+    config
 }
 
 /// The `state` of a session lifecycle answer.
@@ -140,7 +171,6 @@ pub(super) async fn settle_worktree_session(
     notifications: Option<(mpsc::Receiver<Notification>, mpsc::Sender<Notification>)>,
     resume: &StartupResume,
     agent_config: &AgentConfig,
-    mut continue_target: Option<String>,
     mut list_error: Option<String>,
     state: Value,
 ) -> Result<(
@@ -167,41 +197,25 @@ pub(super) async fn settle_worktree_session(
             }
         }
     });
-    if matches!(resume, StartupResume::Picker | StartupResume::Continue) {
+    if matches!(resume, StartupResume::Picker) {
         match client
             .request(method::SESSION_LIST, json!({ "cwd": settled }))
             .await
         {
-            Ok(value) => {
-                continue_target = value
-                    .get("continueSessionId")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                if matches!(resume, StartupResume::Picker) {
-                    event_tx
-                        .send(StartupEvent::Sessions(Box::new(value)))
-                        .await
-                        .context("startup event receiver closed")?;
-                }
-            }
+            Ok(value) => event_tx
+                .send(StartupEvent::Sessions(Box::new(value)))
+                .await
+                .context("startup event receiver closed")?,
             Err(error) => list_error = Some(format!("Failed to list sessions: {error}")),
         }
     }
-    let target = resume.target(continue_target);
     // The rebind's agentConfig names the worktree directory, not the checkout
     // the run started in; the settled cwd is that directory.
     let mut rebound_config = agent_config.clone();
     if let Some(settled) = settled.as_ref() {
         rebound_config.cwd = Some(settled.clone());
     }
-    let (state, attach) = rebind(
-        client,
-        state,
-        resume.clone(),
-        &rebound_config,
-        target,
-        list_error,
-    )
-    .await?;
+    let (state, attach) =
+        rebind(client, state, resume.clone(), &rebound_config, list_error).await?;
     Ok((state, attach, settled, prepared, absorbed))
 }

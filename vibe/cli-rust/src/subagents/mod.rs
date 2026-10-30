@@ -6,6 +6,7 @@ pub mod fetch;
 pub mod list;
 pub mod transcripts;
 mod view;
+mod waiting;
 
 pub use child::{
     Event, FetchState, Severity, HISTORY_PAGE_LIMIT, HISTORY_RESUME_TAIL_MESSAGES,
@@ -14,8 +15,8 @@ pub use child::{
 pub use display::StatusTone;
 pub use display::{display_name, is_active, status_label, status_tone, subagent_loading_status};
 pub use list::{
-    active_batch, focus_first, focus_input, handle_list_key, refresh, select, show_main_chat,
-    show_subagent_chat, ListState, MAIN_SESSION_ID, MAX_ROWS,
+    active_batch, focus_first, focus_input, handle_list_key, leave_list, page_rows, refresh,
+    select, show_main_chat, show_subagent_chat, ListState, MAIN_SESSION_ID, MAX_ROWS,
 };
 pub use transcripts::{merge_history_tail, SubagentTranscripts};
 
@@ -25,8 +26,6 @@ pub use view::{
 };
 
 use std::time::Instant;
-
-use tokio::sync::mpsc;
 
 use crate::server::PublicChildSession;
 
@@ -50,8 +49,6 @@ pub struct Subagents {
     pub refresh_at: Option<Instant>,
     /// One history read at a time; a second read waits for it to land.
     pub refresh_in_flight: bool,
-    /// Fetch answers, applied on the main thread.
-    pub tx: Option<mpsc::Sender<Event>>,
 }
 
 impl Subagents {
@@ -87,12 +84,22 @@ impl Subagents {
         } else {
             Vec::new()
         };
-        list::active_batch(
+        let rows = list::active_batch(
             &mut self.list.known_session_ids,
             &mut self.list.batch_session_ids,
             &sessions,
             self.viewed_subagent_id.as_deref(),
-        )
+        );
+        let (rows, waiting) = waiting::hide(
+            rows,
+            &self.list.batch_session_ids,
+            self.viewed_subagent_id.as_deref(),
+            self.list.show_waiting,
+        );
+        self.list.waiting_count = waiting;
+        self.list.shown =
+            self.status_list_enabled && (self.list.shown || !rows.is_empty() || waiting > 0);
+        rows
     }
 }
 
@@ -109,7 +116,6 @@ impl Default for Subagents {
             refresh_requested: false,
             refresh_at: None,
             refresh_in_flight: false,
-            tx: None,
         }
     }
 }

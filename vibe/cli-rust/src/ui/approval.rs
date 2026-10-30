@@ -140,7 +140,7 @@ fn rows(app: &mut App, width: u16, max_rows: u16) -> ApprovalRows {
     title_rows.truncate(title_limit);
     let detail_capacity = (max_rows as usize).saturating_sub(title_rows.len() + reserved);
     let same_detail = app.approval.detail_callback_id.as_deref()
-        == Some(callback.callback_id.as_str())
+        == Some(callback.address.callback_id.as_str())
         && app.approval.detail_width == width;
     if !same_detail {
         app.approval.detail_scroll = 0;
@@ -176,7 +176,7 @@ fn rows(app: &mut App, width: u16, max_rows: u16) -> ApprovalRows {
     app.approval.detail_scroll = detail_scroll;
     app.approval.detail_rows = detail_rows.total;
     app.approval.detail_viewport = detail_viewport;
-    app.approval.detail_callback_id = Some(callback.callback_id.clone());
+    app.approval.detail_callback_id = Some(callback.address.callback_id.clone());
     app.approval.detail_width = width;
     let detail_start = title_rows.len() as u16;
     title_rows.extend(detail_rows.lines);

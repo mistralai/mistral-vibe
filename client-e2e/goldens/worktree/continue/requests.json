@@ -1,19 +1,13 @@
 [
  {
-  "method": "session/list",
-  "params": {
-   "cwd": "/home/user/worktrees/feature"
-  }
- },
- {
-  "method": "session/resume",
+  "method": "session/continue",
   "params": {
    "agentConfig": {
     "cwd": "<cwd>",
+    "terminalKey": "e2e-terminal",
     "trustWorkspace": true
    },
-   "historyLimit": 200,
-   "sessionId": "00000000-0000-4000-8000-000000000003"
+   "historyLimit": 200
   }
  },
  {

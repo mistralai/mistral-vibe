@@ -492,8 +492,9 @@ fn a_summary_request_refused_at_every_size_fails_at_its_smallest() {
     let mut correction = 1.0_f64;
     let mut refused_estimate =
         summary_request_estimate(&runtime.checkpoint_value(), config.clone());
-    // One in-context refusal, then six standalone refits before the smallest.
-    for attempt in 1..8 {
+    // One in-context refusal, then seven standalone refits before the smallest.
+    // The count grows with the system prompt, which sets the in-context estimate.
+    for attempt in 1..9 {
         correction = grown_correction(correction, window, refused_estimate);
         action = runtime
             .apply(

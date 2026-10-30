@@ -1116,6 +1116,21 @@ class SubagentController:
                         )
                     target = SendIntentTarget(child_session_id=child.child_session_id)
                     state = self._subagents()
+                    binding = self._bindings.get(child.agent_type)
+                    if (
+                        binding is not None
+                        and not _binding_matches(binding, child)
+                        and not isinstance(child.state, RunningChild)
+                    ):
+                        # A child that is not running adopts the current binding
+                        # before it takes a message. One that restore settled from
+                        # running resumes its stored Turn under it.
+                        await self._adopt_bindings(
+                            state,
+                            self._bindings,
+                            [request.agent_name],
+                            tolerate_host_errors=True,
+                        )
                     _add_receipt(state, action, request.agent_name, target)
                     await self._commit(state)
                 receipt_state: ActiveSubagentReceiptState = PreparedReceipt(

@@ -91,7 +91,7 @@ impl MCPSourceSummary {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MCPState {
-    #[serde(default, deserialize_with = "deserialize_sources")]
+    #[serde(default, deserialize_with = "crate::utils::json::lenient")]
     pub sources: Vec<MCPSourceSummary>,
     #[serde(default)]
     pub discovery_errors: BTreeMap<String, String>,
@@ -102,18 +102,6 @@ pub struct MCPState {
     /// The API key is `shared_only`, so private connectors are missing from the list.
     #[serde(default)]
     pub private_connectors_hidden: bool,
-}
-
-/// Skip a malformed source instead of failing the whole state (ADR 0014).
-fn deserialize_sources<'de, D>(deserializer: D) -> Result<Vec<MCPSourceSummary>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let values = Vec::<serde_json::Value>::deserialize(deserializer)?;
-    Ok(values
-        .into_iter()
-        .filter_map(|value| serde_json::from_value(value).ok())
-        .collect())
 }
 
 impl MCPState {

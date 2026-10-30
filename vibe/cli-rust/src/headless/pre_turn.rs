@@ -12,7 +12,9 @@ use crate::cli::{HeadlessOptions, HeadlessSession, OutputFormat};
 use crate::headless_run::StopRequests;
 use crate::headless_trust::untrusted_warning;
 use crate::run_export::{RunOutcome, RunWarning};
-use crate::server::{method, notification, Client, ConfigEffectiveReadParams, Notification};
+use crate::server::{
+    method, notification, Client, ConfigEffectiveReadParams, Notification, RuntimeSnapshot,
+};
 
 /// The `warning` code of a connector or MCP server that failed to load.
 const INTEGRATIONS_UNAVAILABLE: &str = "integrations_unavailable";
@@ -95,34 +97,16 @@ pub(super) async fn config_warnings(
 /// The runtime snapshot's config validation warnings, and its config issues as
 /// `file: message` lines.
 fn startup_config_notices(runtime: &Value) -> (Vec<String>, Vec<String>) {
-    let warnings = runtime
-        .pointer("/runtime/config/validationWarnings")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
+    let runtime = RuntimeSnapshot::read(runtime).unwrap_or_default();
     let issues = runtime
-        .pointer("/runtime/issues")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|issue| {
-                    let message = issue.get("message")?.as_str()?;
-                    Some(match issue.get("file").and_then(Value::as_str) {
-                        Some(file) if !file.is_empty() => format!("{file}: {message}"),
-                        _ => message.to_owned(),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    (warnings, issues)
+        .issues
+        .into_iter()
+        .map(|issue| match issue.file.is_empty() {
+            true => issue.message,
+            false => format!("{}: {}", issue.file, issue.message),
+        });
+    let warnings = runtime.config.unwrap_or_default().validation_warnings;
+    (warnings, issues.collect())
 }
 
 /// A warning the run goes on despite: in the log, and on stderr unless the run is silent.

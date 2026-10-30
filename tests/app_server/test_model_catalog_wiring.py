@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 import tomli_w
 
+from vibe.app_server._process_services import ProcessServices
 import vibe.app_server._runtime as runtime_module
 from vibe.app_server.protocol import SessionOptions
 from vibe.core.config.default_orchestrator import build_default_orchestrator
@@ -195,7 +196,10 @@ async def test_a_field_write_to_an_admin_model_keeps_its_identity() -> None:
 
 @pytest.mark.asyncio
 async def test_every_session_config_starts_with_the_cached_catalog(
-    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
 ) -> None:
     # The Unified harness builds every session config here.
     _enable_model_catalog(config_dir)
@@ -204,16 +208,19 @@ async def test_every_session_config_starts_with_the_cached_catalog(
         lambda _config: _runnable_catalog("cached-model"),
     )
 
-    session_config = await runtime_module.HarnessProcess()._build_session_config(
-        SessionOptions(cwd=str(tmp_path))
-    )
+    session_config = await runtime_module.HarnessProcess(
+        services=process_services
+    )._build_session_config(SessionOptions(cwd=str(tmp_path)))
 
     assert "cached-model" in session_config.config_orchestrator.config.models
 
 
 @pytest.mark.asyncio
 async def test_a_cached_catalog_applies_a_sparse_override_from_the_first_build(
-    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
 ) -> None:
     # The fixture pins a model whose entry this write replaces; unpinned, or
     # the pin's fallback warning would fail the assertion for another reason.
@@ -228,9 +235,9 @@ async def test_a_cached_catalog_applies_a_sparse_override_from_the_first_build(
         lambda _config: _runnable_catalog("cached-model"),
     )
 
-    session_config = await runtime_module.HarnessProcess()._build_session_config(
-        SessionOptions(cwd=str(tmp_path))
-    )
+    session_config = await runtime_module.HarnessProcess(
+        services=process_services
+    )._build_session_config(SessionOptions(cwd=str(tmp_path)))
     effective = session_config.config_orchestrator.config
 
     assert effective.models["cached-model"].temperature == 0.5

@@ -37,6 +37,7 @@ mod question_layout;
 pub(crate) mod question_other;
 mod question_rows;
 pub mod recording_indicator;
+pub mod release_notes;
 pub mod resume_picker;
 pub mod rewind;
 pub mod rng;
@@ -117,7 +118,7 @@ fn draw_active_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect)
 }
 
 fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
-    // Bottom apps replace the input box; `/config` is the only overlay over the base.
+    // Bottom apps replace the input box; `/config` and `/release-notes` overlay the base.
     match app.focus() {
         Focus::Approval => approval::draw(app, f, area),
         Focus::Question => question_app::draw(app, f, area),
@@ -138,6 +139,10 @@ fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect
         Focus::Config => {
             draw_base(app, f, area);
             config::draw(app, f, area);
+        }
+        Focus::ReleaseNotes => {
+            draw_base(app, f, area);
+            release_notes::draw(app, f, area);
         }
         Focus::Trust | Focus::SubagentList | Focus::Composer => draw_base(app, f, area),
     }

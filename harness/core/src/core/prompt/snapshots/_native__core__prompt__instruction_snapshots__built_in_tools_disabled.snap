@@ -85,7 +85,7 @@ expression: reviewable(snapshot)
           "### Sandbox capabilities and durability model",
           "",
           "- The sandbox is a replayable TypeScript workflow environment, not a general-purpose Node.js runtime. Use it for orchestration, tool-call wiring, and local data transformation.",
-          "- It supports standard JavaScript/TypeScript computation such as async/await, Promises, JSON, Array/Object/Map/Set operations, RegExp, URL parsing, TextEncoder/TextDecoder, and console output for debugging.",
+          "- It supports standard JavaScript/TypeScript computation such as async/await, Promises, JSON, Array/Object/Map/Set operations, RegExp, and console output for debugging.",
           "- It does not provide ambient filesystem access, Node.js packages, browser APIs, DOM APIs, or direct network I/O. Reach external systems only through the provided `tools.<group>.<function>` functions.",
           "- Execution may pause while tool calls are pending and later replay from the beginning. Local code can therefore run more than once; keep it to pure orchestration, pure data transforms, and tool-call wiring.",
           "- Time, randomness, and promise-selection APIs are recorded automatically and replay deterministically. This includes `Date()`, `new Date()`, `Date.now()`, `performance.now()`, `Math.random()`, `crypto.randomUUID()`, `crypto.getRandomValues()`, `Promise.race()`, and `Promise.any()`.",
@@ -155,7 +155,7 @@ expression: reviewable(snapshot)
     },
     {
       "name": "wait",
-      "description": "Wait for new input or the requested timeout. Call wait alone. Incoming messages arrive in normal model context, not in the result.",
+      "description": "Wait until new input arrives, such as a result from a child you started, a background task, a user follow up or until the timeout ends. wait returns as soon as input arrives, so use a timeout relevant to expected timeframe. Call wait alone. The input arrives in normal model context, not in the result.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -483,7 +483,7 @@ expression: reviewable(snapshot)
         "namespace": "self",
         "name": "sleep"
       },
-      "description": "Pause this agent execution for a bounded number of seconds while Runtime-owned background work continues.",
+      "description": "Pause the program execution for a bounded number of seconds. This cannot be interrupted by more input contrary to wait.",
       "input_schema": {
         "type": "object",
         "additionalProperties": false,
@@ -517,7 +517,7 @@ expression: reviewable(snapshot)
         "namespace": "agents",
         "name": "list_configs"
       },
-      "description": "List available named configurations, sorted by name. Omit config_name when spawning a generic child that inherits this agent's configuration.",
+      "description": "List available named agent configurations, sorted by name. Omit config_name when spawning a generic child that inherits your own configuration.",
       "input_schema": {
         "type": "object",
         "additionalProperties": false,
@@ -557,7 +557,7 @@ expression: reviewable(snapshot)
         "namespace": "agents",
         "name": "list"
       },
-      "description": "List admitted direct children in creation order. Provisional spawns are not listed.",
+      "description": "List your direct children in creation order.",
       "input_schema": {
         "type": "object",
         "additionalProperties": false,
@@ -668,14 +668,14 @@ expression: reviewable(snapshot)
         "namespace": "agents",
         "name": "spawn"
       },
-      "description": "Create an independent child with fresh conversation and admit its first message, without waiting for completion. name is a single path segment unique for the lifetime of this parent Session and cannot be reused. Omit config_name to inherit this agent's configuration.",
+      "description": "Create an independent child with fresh conversation and send its first message. This does not block or wait for the agent to complete its instruction. name is a single path segment unique for the lifetime of this Session.",
       "input_schema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "name": {
             "type": "string",
-            "description": "The child's name: one path segment, without `/`, other than `.` or `..`. The child's agent path is this agent's path followed by `/name`.",
+            "description": "The child's name: one path segment, without `/`, other than `.` or `..`. The child's agent path is your path followed by `/name`.",
             "minLength": 1,
             "pattern": "^(?!\\.{1,2}$)[^/]+$"
           },
@@ -719,14 +719,14 @@ expression: reviewable(snapshot)
         "namespace": "agents",
         "name": "send_message"
       },
-      "description": "Send a message to another agent by agent_path: absolute, such as /root/researcher, or relative to this agent, such as researcher for a direct child. Admission does not imply consumption or a reply.",
+      "description": "Send a message to another agent by agent_path: absolute, such as /root/researcher, or relative to you, such as researcher for a direct child.",
       "input_schema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "agent_path": {
             "type": "string",
-            "description": "The recipient's agent path: absolute, such as `/root/researcher`, or relative to this agent, such as `researcher` for a direct child.",
+            "description": "The recipient's agent path: absolute, such as `/root/researcher`, or relative to you, such as `researcher` for a direct child.",
             "minLength": 1
           },
           "message": {
@@ -762,7 +762,7 @@ expression: reviewable(snapshot)
         "namespace": "agents",
         "name": "interrupt"
       },
-      "description": "Interrupt a direct child's exact current Turn without closing its Session. agent_path is the child's name or absolute path. reason, when given, is recorded on the interrupted Turn.",
+      "description": "Interrupt a direct child's exact current Turn. This does not terminate its Session. The agent remains available for follow-ups. agent_path is the child's name or absolute path.",
       "input_schema": {
         "type": "object",
         "additionalProperties": false,

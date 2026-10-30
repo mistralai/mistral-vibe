@@ -33,6 +33,12 @@ pub struct ListState {
     pub focused: bool,
     /// Rows the list renders, recomputed on every state change (Python options).
     pub rows: Vec<PublicChildSession>,
+    /// Whether waiting children outside the running batch stay listed (`a` toggles it).
+    pub show_waiting: bool,
+    /// Waiting children `show_waiting` controls, listed or not.
+    pub waiting_count: usize,
+    /// The list has had a child: Main stays on screen until the session changes.
+    pub shown: bool,
     /// Painted widget area, used to anchor toasts while the input box is hidden.
     pub area: ratatui::layout::Rect,
 }
@@ -85,7 +91,7 @@ pub(super) fn update_sessions(app: &mut App) {
     let rows = subagents.list_rows();
     let list = &mut subagents.list;
     let current_ids: HashSet<&str> = rows.iter().map(|row| row.id.as_str()).collect();
-    if rows.is_empty() {
+    if !list.shown {
         let was_focused = list.focused;
         list.mouse_session_id = None;
         // Python `clear_options` resets `scroll_y` with the emptied list.
@@ -207,7 +213,7 @@ pub fn show_subagent_chat(app: &mut App, session_id: &str) {
 
 /// Take focus on the Main row.
 pub fn focus_first(app: &mut App) -> bool {
-    if app.subagents.list.rows.is_empty() {
+    if !app.subagents.list.shown {
         return false;
     }
     app.subagents.list.mouse_session_id = None;
@@ -263,7 +269,7 @@ pub fn handle_list_key(app: &mut App, key: KeyEvent) -> bool {
         // about one visible page of options.
         KeyCode::PageUp | KeyCode::PageDown => {
             let total = app.subagents.list.rows.len() + 1;
-            let page = MAX_ROWS.min(total);
+            let page = page_rows(app).min(total);
             app.subagents.list.mouse_session_id = None;
             let options = &mut app.subagents.list.options;
             options.select(if key.code == KeyCode::PageDown {
@@ -276,6 +282,10 @@ pub fn handle_list_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Enter => {
             let session_id = session_id_at(app, app.subagents.list.options.selected());
             select(app, session_id);
+            return true;
+        }
+        KeyCode::Char('a') => {
+            super::waiting::toggle(app);
             return true;
         }
         _ => return false,
@@ -292,6 +302,20 @@ pub fn handle_list_key(app: &mut App, key: KeyEvent) -> bool {
         focus_input(app);
     }
     true
+}
+
+/// Rows one page shows: the cap less the view title and the waiting row.
+pub fn page_rows(app: &App) -> usize {
+    let viewing = usize::from(app.subagents.viewed_child().is_some());
+    let summary = usize::from(app.subagents.list.waiting_count > 0);
+    MAX_ROWS.saturating_sub(viewing + summary).max(1)
+}
+
+/// Leave the focused list for the composer, back on the Main row.
+pub fn leave_list(app: &mut App) {
+    app.subagents.list.mouse_session_id = None;
+    app.subagents.list.options.select(0);
+    focus_input(app);
 }
 
 /// Give the composer back focus.

@@ -76,7 +76,7 @@ fn a_boxed_fence_renders_rails_and_rules() {
         .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
     // The message opens with a blank row, the fence with its own top margin.
-    assert!(rows[2].starts_with("  ┌") && rows[2].ends_with('┐'));
+    assert!(rows[2].starts_with("  ┌─ rust ─") && rows[2].ends_with('┐'));
     assert!(rows[3].starts_with("  │ fn main() {") && rows[3].ends_with('│'));
     assert!(rows[5].starts_with("  │  ") && rows[5].ends_with('│'));
     assert!(rows.last().unwrap().starts_with("  └"));
@@ -137,6 +137,16 @@ fn copying_keeps_rail_colored_content_inside_a_fence() {
     // The content rail copies; the box's rails do not.
     assert_eq!(copied.matches('│').count(), 1);
     assert!(copied.contains("fn main() {"));
+}
+
+#[test]
+fn a_bare_or_cramped_fence_drops_the_language_label() {
+    let top = |text: &str, width: u16| -> String {
+        let rows = markdown::render(text, width);
+        rows[2].spans.iter().map(|s| s.content.as_ref()).collect()
+    };
+    assert!(top("```\nx\n```", WIDTH).starts_with("  ┌──"));
+    assert!(top("```typescript\nx\n```", 16).starts_with("  ┌──"));
 }
 
 #[test]

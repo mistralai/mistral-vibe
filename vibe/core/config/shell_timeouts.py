@@ -14,6 +14,9 @@ LONGEST_SHELL_TIMEOUT_SECONDS: Final = 2**53 - 1
 safe integers, at most 2**53 - 1, so a longer one would fail session start without
 naming the setting."""
 
+VIBE_MAX_SHELL_TIMEOUT_SECONDS: Final = 300
+"""Vibe's own shell maximum, used when only a `default_timeout` at or below it is set."""
+
 
 def shell_timeout_seconds(name: str, key: str, value: object) -> int:
     """A shell timeout setting as whole seconds: a whole number, or quoted text of
@@ -57,10 +60,18 @@ def shell_timeout_seconds(name: str, key: str, value: object) -> int:
     return int(number)
 
 
+def shell_max_timeout(default: int | None, maximum: int | None) -> int | None:
+    """The maximum a shell runs under: the one set, else Vibe's own for a default within it."""
+    if maximum is not None or default is None:
+        return maximum
+    if default > VIBE_MAX_SHELL_TIMEOUT_SECONDS:
+        return None
+    return VIBE_MAX_SHELL_TIMEOUT_SECONDS
+
+
 def check_shell_timeout_pair(name: str, settings: Mapping[str, object]) -> None:
-    """Refuse a shell tool's ``default_timeout`` and ``max_timeout_seconds`` unless
-    both or neither are set, and the default is not above the maximum. One is never
-    worked out from the other, and a default above the maximum is not lowered.
+    """Refuse a shell tool's ``max_timeout_seconds`` set alone, a ``default_timeout``
+    set alone above Vibe's own maximum, or a default above the maximum.
     """
     seconds: dict[str, int] = {}
     for key in ("default_timeout", "max_timeout_seconds"):
@@ -69,7 +80,7 @@ def check_shell_timeout_pair(name: str, settings: Mapping[str, object]) -> None:
             continue
         seconds[key] = shell_timeout_seconds(name, key, value)
     default = seconds.get("default_timeout")
-    maximum = seconds.get("max_timeout_seconds")
+    maximum = shell_max_timeout(default, seconds.get("max_timeout_seconds"))
     if (default is None) != (maximum is None):
         set_alone, missing = (
             ("default_timeout", "max_timeout_seconds")

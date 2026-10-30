@@ -3,10 +3,12 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use vibe_rs::app::{App, Status};
+use vibe_rs::app::Status;
 use vibe_rs::event_handler;
 use vibe_rs::server::{notification, Client, Notification};
 use vibe_rs::telemetry::{self, TelemetryEvent};
+
+use crate::support::with_status;
 
 fn drained(request_id: u64) -> Notification {
     Notification {
@@ -17,8 +19,7 @@ fn drained(request_id: u64) -> Notification {
 
 #[tokio::test]
 async fn a_request_owes_frames_until_its_drain_sentinel_lands() {
-    let mut app = App::default();
-    app.session.status = Status::Starting;
+    let mut app = with_status(Status::Starting);
     let (client, _frames) = Client::stub_answering();
     let client = Arc::new(client);
     assert!(!client.owes_replay_frames());

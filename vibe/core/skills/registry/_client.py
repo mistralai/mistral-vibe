@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import TracebackType
 from typing import Any
 
-import httpx
+import httpx2
 from pydantic import BaseModel, ValidationError
 
 from vibe.core.skills.registry.models import (
@@ -117,14 +117,14 @@ class RegistrySkillsClient:
             raise RegistrySkillsError("client used outside of an async context")
         try:
             response = await self._client.get(url, params=params)
-        except httpx.RequestError as exc:
+        except httpx2.RequestError as exc:
             raise RegistrySkillsError(f"request failed: {exc}") from exc
 
-        if response.status_code in {httpx.codes.UNAUTHORIZED, httpx.codes.FORBIDDEN}:
+        if response.status_code in {httpx2.codes.UNAUTHORIZED, httpx2.codes.FORBIDDEN}:
             raise RegistrySkillsError(
                 f"unauthorized ({response.status_code})", status=response.status_code
             )
-        if response.status_code == httpx.codes.NOT_FOUND:
+        if response.status_code == httpx2.codes.NOT_FOUND:
             raise RegistrySkillsError("not found (404)", status=response.status_code)
         if not response.is_success:
             raise RegistrySkillsError(

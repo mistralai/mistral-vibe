@@ -214,7 +214,7 @@ pub struct Session {
     /// The session's PR/MR artifacts, latest first; the footer shows the
     /// latest as a link, or a modal listing them all when there are several.
     pub artifacts: Vec<crate::server::PublicSessionArtifact>,
-    pub stats: AgentStats,
+    pub stats: crate::server::SessionStats,
     pub startup_config: StartupConfig,
     pub startup_error: Option<String>,
     /// The `--continue`/`--resume` intent, consumed once after `ready`.
@@ -245,28 +245,13 @@ pub struct Session {
     pub retry_continuation: Option<crate::commands::retry::RetryContinuation>,
     /// Silent incomplete_stream continuations spent.
     pub incomplete_stream_retries: u32,
-    /// The mounted custom-tools deprecation entry's id, so it shows once.
-    pub custom_tools_deprecation_id: Option<String>,
     /// The mounted what's-new entry, dropped on the first submit.
     pub whats_new: Option<crate::startup::banners::WhatsNew>,
     /// Token usage snapshot at attach; the exit summary reports the delta
     /// against it.
     pub usage_baseline: Option<crate::server::TokenUsage>,
-    /// The latest `runtime` value, so a transcript rebuild can re-run the
-    /// checks that read it (the rebuild re-shows the deprecation).
+    /// The latest `runtime` value, for views that read it after the event.
     pub runtime: Value,
-}
-
-/// Runtime token and cost totals rendered by `/status`.
-#[derive(Default)]
-pub struct AgentStats {
-    pub steps: u64,
-    pub session_prompt_tokens: u64,
-    pub session_completion_tokens: u64,
-    pub session_cached_tokens: u64,
-    pub last_turn_total_tokens: u64,
-    pub last_turn_cached_tokens: u64,
-    pub session_cost: f64,
 }
 
 /// Transcript rendering state: content, scroll, per-entry caches, and chrome.
@@ -510,9 +495,6 @@ pub struct ThemePicker {
     pub original: usize,
     /// Deadline of the pending debounced preview.
     pub preview_at: Option<Instant>,
-    /// Sender carrying the theme returned by a `config/write` response, so the
-    /// commit re-applies the server's config.
-    pub tx: Option<Sender<crate::theme_picker::Event>>,
 }
 
 /// Agent modes: the runtime snapshot plus the Shift+Tab switch in flight.
@@ -541,8 +523,6 @@ pub struct Agents {
     pub switching_indicator: bool,
     /// Spinner frame, advanced on the shared 100 ms tick.
     pub frame: usize,
-    /// Sender carrying `session/agent/update` answers to the main thread.
-    pub tx: Option<Sender<crate::agents::Event>>,
 }
 
 /// A selectable model: `alias` is persisted, `display_name` is shown.
@@ -572,9 +552,6 @@ pub struct ModelPicker {
     pub default_display_name: String,
     /// Alias the Default row resolves to (`defaultModelAlias`).
     pub default_alias: String,
-    /// Sender carrying the `config/write` and `config/reload` answers, so the
-    /// commit re-applies the server's config.
-    pub tx: Option<Sender<crate::model_picker::Event>>,
 }
 
 /// The artifacts modal state (a bottom-app): the session's PR/MR links.
@@ -603,8 +580,6 @@ pub struct LogLevelPicker {
     pub badges: Vec<(Rect, &'static str)>,
     /// The chain as it stood when the picker opened, for the diff on apply.
     pub chain: crate::observability::level::LogLevelChain,
-    /// Sender carrying the `config/write` answer.
-    pub tx: Option<Sender<crate::log_level_picker::Event>>,
 }
 
 /// `/thinking` picker state (a bottom-app).
@@ -619,8 +594,6 @@ pub struct ThinkingPicker {
     pub levels: Vec<String>,
     /// A `/model` pick held until its chained thinking level is chosen or skipped.
     pub model_pick: Option<crate::thinking_picker::ModelPick>,
-    /// Sender carrying the `config/write` and `config/reload` answers.
-    pub tx: Option<Sender<crate::thinking_picker::Event>>,
 }
 
 /// `/resume` picker state.
@@ -651,7 +624,6 @@ pub struct ResumePicker {
     /// Whether the lease watch subscription already fired this process.
     pub subscribed: bool,
     pub transcript: Option<crate::transcript::Snapshot>,
-    pub tx: Option<Sender<crate::resume_picker::Event>>,
 }
 
 /// Rewind bottom-app state, including whether rewind mode is on.
@@ -671,8 +643,6 @@ pub struct Rewind {
     pub restore_files: bool,
     /// Highlighted option in the current step.
     pub list: crate::option_list::OptionList<crate::option_list::SingleAction>,
-    /// Sender carrying server answers, applied on the main thread.
-    pub tx: Option<Sender<crate::rewind::Event>>,
 }
 
 /// `ask_user_question` bottom-app state.
@@ -680,9 +650,9 @@ pub struct Rewind {
 pub struct QuestionApp {
     /// While set the app replaces the input box and owns every key.
     pub open: bool,
-    /// A delivered question still waiting for a pause in the user's typing,
-    /// as `(source, request)`.
-    pub pending: Option<(crate::question_app::QuestionSource, UserQuestionRequest)>,
+    /// Delivered questions waiting for the open one to close or for a pause in
+    /// the user's typing, oldest first, as `(source, request)`.
+    pub pending: VecDeque<(crate::question_app::QuestionSource, UserQuestionRequest)>,
     /// Who the open app answers: a `user_input` callback or a local question.
     pub source: Option<crate::question_app::QuestionSource>,
     pub questions: Vec<UserQuestion>,
@@ -726,8 +696,6 @@ pub struct MCPApp {
     pub viewing_kind: Option<crate::server::MCPSourceKind>,
     /// Highlighted row index; headers and notes are skipped when navigating.
     pub list: crate::option_list::OptionList<crate::option_list::MultiAction>,
-    /// Sender carrying server answers, applied on the main thread.
-    pub tx: Option<Sender<crate::mcp::Event>>,
     /// The connector whose `connector_catalog/connect` is in flight, if any.
     pub connecting: Option<String>,
 }
@@ -779,8 +747,6 @@ pub struct MCPOAuthApp {
     pub list: crate::option_list::OptionList<crate::option_list::SingleAction>,
     /// Login attempt counter, so a stale answer cannot settle a retry.
     pub generation: u64,
-    /// Sender carrying the `mcp/login` answer, applied on the main thread.
-    pub tx: Option<Sender<crate::mcp_oauth::Event>>,
 }
 
 /// Connector auth bottom-app state.
@@ -802,12 +768,11 @@ pub struct ConnectorAuthApp {
     pub list: crate::option_list::OptionList<crate::option_list::SingleAction>,
     /// Open-attempt counter, so a stale worker answer cannot land.
     pub generation: u64,
-    /// Sender carrying the auth-read and refresh answers, applied on the main thread.
-    pub tx: Option<Sender<crate::connector_auth::Event>>,
 }
 
 #[derive(Default)]
 pub struct App {
+    pub credential_client: Option<Arc<crate::server::Client>>,
     pub terminal_notifier: crate::terminal_notifier::TerminalNotifier,
     pub chat_input: ChatInput,
     pub session: Session,
@@ -821,6 +786,7 @@ pub struct App {
     pub voice_app: crate::voice_app::VoiceApp,
     pub proxy_setup: crate::proxy_setup::ProxySetupApp,
     pub config_screen: ConfigScreen,
+    pub release_notes: crate::release_notes::State,
     pub theme_picker: ThemePicker,
     pub model_picker: ModelPicker,
     pub log_level_picker: LogLevelPicker,
@@ -850,6 +816,8 @@ pub struct App {
     pub queue: QueueController,
     /// Ctrl+C / Ctrl+D double-press quit confirmation.
     pub quit: crate::quit_manager::QuitManager,
+    /// Widget answers to async requests, applied by the main event loop.
+    pub events: Option<crate::ui_event::Sender>,
     /// Async slash-command results, reduced by the main event loop.
     pub command_tx: Option<tokio::sync::mpsc::Sender<CommandEvent>>,
     /// Analytics events queued by the reducer, sent by the main event loop.
@@ -1113,7 +1081,12 @@ impl App {
         else {
             return;
         };
-        match crate::voice::start(&cfg, self.voice.peak.clone(), tx) {
+        match crate::voice::start(
+            &cfg,
+            self.credential_client.clone(),
+            self.voice.peak.clone(),
+            tx,
+        ) {
             Ok(rec) => {
                 self.voice.recording = Some(rec);
                 self.voice.transcribe_state = TranscribeState::Recording;

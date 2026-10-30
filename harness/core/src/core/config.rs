@@ -272,7 +272,7 @@ pub(crate) struct ToolSettings {
     pub large_output: large_output::Policy,
     pub subagents: subagents::Mode,
     pub background_processes: background_processes::Mode,
-    #[serde(default, skip_serializing_if = "file_system::Mode::is_enabled")]
+    #[serde(default, skip_serializing_if = "file_system::Mode::is_default")]
     pub file_system: file_system::Mode,
     pub command_environment: CommandEnvironment,
     #[serde(default, skip_serializing_if = "skills::Mode::is_when_configured")]
@@ -436,6 +436,42 @@ mod tests {
         assert!(error.to_string().contains("unknown field `unexpected`"));
     }
 
+    ///
+    /// *Prepare*: File system settings whose `read_file` declaration misspells a member, and
+    /// settings that declare an unknown image value.
+    /// *Do*: Read each configuration.
+    /// *Assert*: Both are rejected, naming the unknown member or value.
+    ///
+    #[test]
+    fn read_file_support_rejects_unknown_members_and_values() {
+        // Prepare
+        let with_read_file = |read_file: Value| {
+            let mut value = serde_json::to_value(config()).unwrap();
+            value["settings"]["tools"]["file_system"] =
+                json!({"mode": "enabled", "read_file": read_file});
+            value
+        };
+        let misspelled = with_read_file(json!({"image": "native"}));
+        let unknown_value = with_read_file(json!({"images": "pixels"}));
+
+        // Do
+        let misspelled_error = serde_json::from_value::<HarnessConfig>(misspelled).unwrap_err();
+        let unknown_value_error =
+            serde_json::from_value::<HarnessConfig>(unknown_value).unwrap_err();
+
+        // Assert
+        assert!(
+            misspelled_error
+                .to_string()
+                .contains("unknown field `image`")
+        );
+        assert!(
+            unknown_value_error
+                .to_string()
+                .contains("unknown variant `pixels`")
+        );
+    }
+
     #[test]
     fn omitted_command_environment_is_rejected() {
         // Prepare
@@ -491,6 +527,41 @@ mod tests {
             error.detail(),
             "background processes require an enabled command environment"
         );
+    }
+
+    ///
+    /// *Prepare*: The default configuration, and a copy that declares extracted document text.
+    /// *Do*: Serialize both and read the declared one back.
+    /// *Assert*: Only the declared support is written, without its unsupported image member,
+    /// and it reads back unchanged.
+    ///
+    #[test]
+    fn read_file_support_is_serialized_only_when_declared() {
+        // Prepare
+        let mut declared = config();
+        declared.settings.tools.file_system = file_system::Mode::Enabled {
+            read_file: file_system::ReadFileSupport {
+                documents: file_system::ReadFileDocuments::ExtractedText,
+                images: file_system::ReadFileImages::Unsupported,
+            },
+        };
+
+        // Do
+        let default_value = serde_json::to_value(config()).unwrap();
+        let declared_value = serde_json::to_value(&declared).unwrap();
+        let read_back = serde_json::from_value::<HarnessConfig>(declared_value.clone()).unwrap();
+
+        // Assert
+        assert!(
+            default_value["settings"]["tools"]
+                .get("file_system")
+                .is_none()
+        );
+        assert_eq!(
+            declared_value["settings"]["tools"]["file_system"],
+            json!({"mode": "enabled", "read_file": {"documents": "extracted_text"}})
+        );
+        assert_eq!(read_back, declared);
     }
 
     #[test]

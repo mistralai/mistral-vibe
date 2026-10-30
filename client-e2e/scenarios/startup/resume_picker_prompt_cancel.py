@@ -18,5 +18,5 @@ timeline: Timeline = [
     turn_completed(),
 ]
 
-screen_contains = ("Resume cancelled.", "Reply to the typed prompt.")
-screen_excludes = ("continue the work",)
+screen_contains = ("Reply to the typed prompt.",)
+screen_excludes = ("continue the work", "Resume cancelled.")

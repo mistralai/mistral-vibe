@@ -72,6 +72,7 @@ impl Recording {
 #[cfg(feature = "voice")]
 pub fn start(
     cfg: &TranscriptionConfig,
+    credential_client: Option<Arc<crate::server::Client>>,
     peak: Arc<AtomicU32>,
     events: Sender<VoiceEvent>,
 ) -> Result<Recording, String> {
@@ -97,7 +98,15 @@ pub fn start(
     let task_stop = stop.clone();
     let task_signal = signal.clone();
     let task = tokio::spawn(async move {
-        let result = transcribe::transcribe(&cfg, &api_key, sample_rate, chunks_rx, &events).await;
+        let result = transcribe::transcribe(
+            &cfg,
+            credential_client.as_deref(),
+            &api_key,
+            sample_rate,
+            chunks_rx,
+            &events,
+        )
+        .await;
         if task_cancel.load(Ordering::Relaxed) {
             return;
         }
@@ -138,6 +147,7 @@ pub fn start(
 #[cfg(not(feature = "voice"))]
 pub fn start(
     _cfg: &TranscriptionConfig,
+    _credential_client: Option<Arc<crate::server::Client>>,
     _peak: Arc<AtomicU32>,
     _events: Sender<VoiceEvent>,
 ) -> Result<Recording, String> {

@@ -2,14 +2,16 @@
 
 use std::sync::Arc;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyCode;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use vibe_rs::app::{App, Status};
 use vibe_rs::commands::{is_side_channel, submission, CommandEvent};
 use vibe_rs::config;
 use vibe_rs::post_ready::AccountReads;
-use vibe_rs::server::Client;
+use vibe_rs::server::{Client, HistoryEntry, MessageContent};
+
+use crate::support::{key, settle};
 
 struct Harness {
     app: App,
@@ -58,13 +60,6 @@ impl Harness {
     }
 }
 
-/// Lets spawned requests reach the stub writer; deterministic on the current-thread test runtime.
-async fn settle() {
-    for _ in 0..32 {
-        tokio::task::yield_now().await;
-    }
-}
-
 #[tokio::test]
 async fn every_exit_alias_exits_without_starting_a_turn() {
     for alias in ["/exit", "exit", "quit", ":q", ":quit"] {
@@ -97,6 +92,29 @@ async fn branch_during_a_turn_is_refused_kept_and_never_forks() {
         .sent_methods()
         .await
         .contains(&"session/fork".to_owned()));
+}
+
+#[tokio::test]
+async fn the_fork_alias_branches_the_session_like_branch() {
+    let mut harness = Harness::ready();
+
+    assert!(!harness.submit("/fork"));
+
+    let sent = harness.sent_methods().await;
+    assert!(sent.contains(&"session/fork".to_owned()), "{sent:?}");
+    let echoed = harness
+        .app
+        .view
+        .transcript
+        .lines()
+        .any(|line| match line.entry {
+            HistoryEntry::Message(message) => message.content.iter().any(|block| match block {
+                MessageContent::Text { text } => text.contains("/fork"),
+                _ => false,
+            }),
+            _ => false,
+        });
+    assert!(!echoed, "slash commands are not echoed");
 }
 
 #[tokio::test]
@@ -208,9 +226,10 @@ async fn whoami_shows_a_loading_line_only_while_it_reads_the_identity() {
     );
     let methods = harness.sent_methods().await;
     assert!(methods.contains(&"identity/read".to_owned()));
+    assert!(methods.contains(&"providerAuth/read".to_owned()));
     assert!(matches!(
         harness.commands.try_recv(),
-        Ok(CommandEvent::Whoami(_))
+        Ok(CommandEvent::Whoami { .. })
     ));
 
     let mut cached = Harness::ready();
@@ -221,10 +240,12 @@ async fn whoami_shows_a_loading_line_only_while_it_reads_the_identity() {
         !cached.app.view.command_loading,
         "a cached answer shows at once"
     );
-    assert!(!cached
-        .sent_methods()
-        .await
-        .contains(&"identity/read".to_owned()));
+    let methods = cached.sent_methods().await;
+    assert!(!methods.contains(&"identity/read".to_owned()));
+    assert!(
+        methods.contains(&"providerAuth/read".to_owned()),
+        "the credential source is always read fresh"
+    );
 }
 
 #[tokio::test]
@@ -239,8 +260,12 @@ async fn escape_on_a_running_shell_command_interrupts_that_command_only() {
     assert!(!harness.submit("!echo done"));
     assert_eq!(harness.app.chat_input.full_text(), "!echo done");
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let escape = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-    vibe_rs::input::handle_key(&mut harness.app, &harness.client, &config_tx, escape);
+    vibe_rs::input::handle_key(
+        &mut harness.app,
+        &harness.client,
+        &config_tx,
+        key(KeyCode::Esc),
+    );
 
     settle().await;
     let frames: Vec<Value> = std::iter::from_fn(|| harness.frames.try_recv().ok()).collect();

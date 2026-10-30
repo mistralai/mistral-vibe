@@ -30,12 +30,15 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
         CommandEvent::Result(text) => {
             local::add_command_result(&mut app.view.transcript, &id, &text)
         }
+        CommandEvent::Status(text) => {
+            local::add_command_status(&mut app.view.transcript, &id, &text)
+        }
         CommandEvent::AgentStatistics(text) => {
             crate::commands::provider_auth::add_agent_statistics(app, &id, &text)
         }
         CommandEvent::Renamed(title) => {
             app.terminal_notifier.set_default_title(&title);
-            local::add_command_result(
+            local::add_command_status(
                 &mut app.view.transcript,
                 &id,
                 &format!("Session renamed to \"{title}\"."),
@@ -89,8 +92,9 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
             seed,
         } => {
             clear::apply_cleared(app, session_id.clone(), usage, child_sessions);
-            simple::add_text(
-                app,
+            local::add_command_status(
+                &mut app.view.transcript,
+                &id,
                 &clear::new_conversation_text(previous_session_id.as_deref()),
             );
             if let Some(seed) = seed {
@@ -124,8 +128,11 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
             app.terminal_notifier
                 .remember_completion(crate::program_status::ProgramState::Error);
         }
-        CommandEvent::Whoami(reads) => {
-            let text = simple::whoami_text(reads.as_ref().unwrap_or(&AccountReads::default()));
+        CommandEvent::Whoami { reads, auth } => {
+            let text = simple::whoami_text(
+                reads.as_ref().unwrap_or(&AccountReads::default()),
+                auth.as_ref(),
+            );
             cache_reads(app, reads);
             local::add_command_result(&mut app.view.transcript, &id, &text);
         }

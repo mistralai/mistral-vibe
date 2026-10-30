@@ -10,7 +10,7 @@ Design: ``vibe/docs/design/unified-harness-todo-and-scratchpad.md``.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Container, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Container, Mapping, Sequence
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -48,6 +48,27 @@ from vibe.app_server._cron import (
     cron_input_schema,
     run_cron,
 )
+from vibe.app_server._session_peers import (
+    ARCHIVE_SESSIONS_TOOL_DESCRIPTION,
+    ARCHIVE_SESSIONS_TOOL_NAME,
+    LIST_SESSIONS_TOOL_DESCRIPTION,
+    LIST_SESSIONS_TOOL_NAME,
+    READ_SESSION_TOOL_DESCRIPTION,
+    READ_SESSION_TOOL_NAME,
+    SEND_TO_SESSION_TOOL_DESCRIPTION,
+    SEND_TO_SESSION_TOOL_NAME,
+    ArchiveSessionsArgs,
+    AwaitsUser,
+    ListSessionsArgs,
+    ReadSessionArgs,
+    SendToSessionArgs,
+    SessionPeerError,
+    SessionPeers,
+    run_archive_sessions,
+    run_list_sessions,
+    run_read_session,
+    run_send_to_session,
+)
 from vibe.app_server._session_spawn import (
     START_SESSION_TOOL_DESCRIPTION,
     START_SESSION_TOOL_NAME,
@@ -72,6 +93,12 @@ from vibe.app_server._unified_scratchpad import (
     run_scratchpad,
     scratchpad_dir,
 )
+from vibe.app_server.protocol import (
+    SessionPeerArchiveResponse,
+    SessionPeerListResponse,
+    SessionPeerReadResponse,
+    SessionPeerSendResponse,
+)
 from vibe.core.loop import LoopError
 from vibe.core.tools.builtins.todo import (
     Todo,
@@ -94,16 +121,25 @@ VIBE_PROVIDED_TOOL_NAMES = {
     f"{VIBE_TOOL_GROUP}.{TODO_TOOL_NAME}": TODO_TOOL_NAME,
     f"{VIBE_TOOL_GROUP}.{CRON_TOOL_NAME}": CRON_TOOL_NAME,
     f"{VIBE_TOOL_GROUP}.{START_SESSION_TOOL_NAME}": START_SESSION_TOOL_NAME,
+    f"{VIBE_TOOL_GROUP}.{LIST_SESSIONS_TOOL_NAME}": LIST_SESSIONS_TOOL_NAME,
+    f"{VIBE_TOOL_GROUP}.{READ_SESSION_TOOL_NAME}": READ_SESSION_TOOL_NAME,
+    f"{VIBE_TOOL_GROUP}.{SEND_TO_SESSION_TOOL_NAME}": SEND_TO_SESSION_TOOL_NAME,
+    f"{VIBE_TOOL_GROUP}.{ARCHIVE_SESSIONS_TOOL_NAME}": ARCHIVE_SESSIONS_TOOL_NAME,
 }
 
 # "ask" routes through Vibe's permission resolver. Cron defaults to allowed there,
 # while explicit config and session permission overrides still take precedence.
-# Starting a session kicks off real work, so it keeps the resolver's default: ask.
+# Starting, messaging or archiving sessions acts on real work, so they keep the
+# resolver's default: ask. Listing and reading sessions default to allowed there.
 # Scratchpad writes only inside the session's own storage and is pinned allowed.
 VIBE_PROVIDED_TOOL_MODES: dict[str, ToolApprovalMode] = {
     TODO_TOOL_NAME: "ask",
     CRON_TOOL_NAME: "ask",
     START_SESSION_TOOL_NAME: "ask",
+    LIST_SESSIONS_TOOL_NAME: "ask",
+    READ_SESSION_TOOL_NAME: "ask",
+    SEND_TO_SESSION_TOOL_NAME: "ask",
+    ARCHIVE_SESSIONS_TOOL_NAME: "ask",
     SCRATCHPAD_TOOL_NAME: "allow",
 }
 
@@ -114,6 +150,7 @@ def vibe_tool_groups(
     enabled_tools: Sequence[str] = (),
     disabled_tools: Sequence[str] = (),
     session_spawn: Sequence[SpawnModel] | None = None,
+    session_peers: bool = False,
 ) -> list[RustToolGroupDefinition]:
     # Todo follows the legacy roster, so a tool switched off in config stays off here
     # too. The scratchpad has no catalogue entry to be filtered out of, so it reads
@@ -167,6 +204,49 @@ def vibe_tool_groups(
                 exposure="direct",
             )
         )
+    if session_peers:
+        for name, description, args, result in (
+            (
+                LIST_SESSIONS_TOOL_NAME,
+                LIST_SESSIONS_TOOL_DESCRIPTION,
+                ListSessionsArgs,
+                SessionPeerListResponse,
+            ),
+            (
+                READ_SESSION_TOOL_NAME,
+                READ_SESSION_TOOL_DESCRIPTION,
+                ReadSessionArgs,
+                SessionPeerReadResponse,
+            ),
+            (
+                SEND_TO_SESSION_TOOL_NAME,
+                SEND_TO_SESSION_TOOL_DESCRIPTION,
+                SendToSessionArgs,
+                SessionPeerSendResponse,
+            ),
+            (
+                ARCHIVE_SESSIONS_TOOL_NAME,
+                ARCHIVE_SESSIONS_TOOL_DESCRIPTION,
+                ArchiveSessionsArgs,
+                SessionPeerArchiveResponse,
+            ),
+        ):
+            if _passes_tool_filters(
+                name, enabled=enabled_tools, disabled=disabled_tools
+            ):
+                tools.append(
+                    RustProvidedToolDefinition(
+                        name=name,
+                        description=description,
+                        input_schema=args.model_json_schema(),
+                        output_schema=result.model_json_schema(by_alias=False),
+                        # A program can filter sessions on any field; what acts
+                        # on them stays a direct call, so each is asked about.
+                        exposure="direct_and_programmatic"
+                        if name in _PEER_READ_TOOL_NAMES
+                        else "direct",
+                    )
+                )
     if not tools:
         return []
 
@@ -200,6 +280,8 @@ class VibeProvidedTools:
         scheduled_loops: Callable[[str], UnifiedScheduledLoops] | None = None,
         session_spawner: SessionSpawner | None = None,
         session_origin: SessionOriginResolver | None = None,
+        session_peers: SessionPeers | None = None,
+        awaits_user: AwaitsUser | None = None,
     ) -> ProvidedToolExecutorFactory:
         root = Path(storage_root).expanduser().resolve()
 
@@ -232,6 +314,14 @@ class VibeProvidedTools:
                             origin_of=session_origin,
                             spawner=session_spawner,
                         )
+                    elif peer_tool := _PEER_TOOLS.get(action.call.tool_name):
+                        if session_peers is None or awaits_user is None:
+                            raise ValueError(
+                                "Other sessions are not reachable from this session"
+                            )
+                        result = await peer_tool(
+                            action, session_id, session_peers, awaits_user
+                        )
                     else:
                         result = await _run(
                             action.call,
@@ -248,6 +338,7 @@ class VibeProvidedTools:
                     LoopError,
                     ScheduledLoopStoreError,
                     SessionSpawnError,
+                    SessionPeerError,
                 ) as error:
                     return _failed(action, error)
                 return _succeeded(action, result)
@@ -281,6 +372,42 @@ async def _run(
     raise ValueError(f"Unsupported {VIBE_TOOL_GROUP} tool: {call.tool_name}")
 
 
+type _PeerToolRunner = Callable[
+    [RustProvidedToolCallAction, str, SessionPeers, AwaitsUser], Awaitable[BaseModel]
+]
+
+_PEER_TOOLS: dict[str, _PeerToolRunner] = {
+    LIST_SESSIONS_TOOL_NAME: lambda action, _session_id, peers, _awaits_user: (
+        run_list_sessions(
+            ListSessionsArgs.model_validate(action.call.arguments), peers=peers
+        )
+    ),
+    READ_SESSION_TOOL_NAME: lambda action, _session_id, peers, _awaits_user: (
+        run_read_session(
+            ReadSessionArgs.model_validate(action.call.arguments), peers=peers
+        )
+    ),
+    SEND_TO_SESSION_TOOL_NAME: lambda action, session_id, peers, awaits_user: (
+        run_send_to_session(
+            SendToSessionArgs.model_validate(action.call.arguments),
+            session_id=session_id,
+            invocation_id=action.action_id,
+            peers=peers,
+            awaits_user=awaits_user,
+        )
+    ),
+    ARCHIVE_SESSIONS_TOOL_NAME: lambda action, session_id, peers, awaits_user: (
+        run_archive_sessions(
+            ArchiveSessionsArgs.model_validate(action.call.arguments),
+            session_id=session_id,
+            peers=peers,
+            awaits_user=awaits_user,
+        )
+    ),
+}
+_PEER_READ_TOOL_NAMES = frozenset({LIST_SESSIONS_TOOL_NAME, READ_SESSION_TOOL_NAME})
+
+
 def _run_todo(
     arguments: object, todos: list[TodoItem], *, max_todos: int
 ) -> TodoResult:
@@ -304,7 +431,8 @@ def resolved_max_todos(overrides: Mapping[str, Any] | None) -> int:
 def _succeeded(
     action: RustProvidedToolCallAction, result: BaseModel
 ) -> RustToolSucceededEvent:
-    payload = result.model_dump(mode="json")
+    # Snake case, like the arguments the model passes back.
+    payload = result.model_dump(mode="json", by_alias=False)
     return RustToolSucceededEvent(
         action_id=action.action_id,
         call_id=action.call_id,

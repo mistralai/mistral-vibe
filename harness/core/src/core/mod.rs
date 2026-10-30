@@ -64,12 +64,12 @@ pub(crate) use testing::{
     NotificationLevel, NotificationSource, PendingActionInspection, PendingCompletionPurpose,
     PendingLifecycleHook, PreAgentTurnOutput, PreToolCallOutput, ProcessTerminalStatus,
     ProgramExecution, ProgrammaticToolSettings, ProtocolError, ProvidedToolCall,
-    ProvidedToolDefinition, ProvidedToolExposure, QueuedTurn, ReasoningContent,
-    RuntimeBuiltinToolCall, RuntimeBuiltinToolName, SessionStatus, SkillDefinition,
-    StateInspection, StoredMessageSource, StructuredContent, SubagentMode, TokenUsage,
-    ToolArguments, ToolBatch, ToolCall, ToolContext, ToolDefinition, ToolExecution,
-    ToolExecutionState, ToolGroupDefinition, ToolGroupMetadata, ToolOrigin, ToolOutcome,
-    ToolResult, ToolSettings, ToolTarget, Turn, TurnOutcome, TurnSettings, UserMessageMode,
+    ProvidedToolDefinition, ProvidedToolExposure, ReasoningContent, RuntimeBuiltinToolCall,
+    RuntimeBuiltinToolName, SessionStatus, SkillDefinition, StateInspection, StoredMessageSource,
+    StructuredContent, SubagentMode, TokenUsage, ToolArguments, ToolBatch, ToolCall, ToolContext,
+    ToolDefinition, ToolExecution, ToolExecutionState, ToolGroupDefinition, ToolGroupMetadata,
+    ToolOrigin, ToolOutcome, ToolResult, ToolSettings, ToolTarget, Turn, TurnOutcome, TurnSettings,
+    UserMessageMode,
 };
 
 use crate::core::config::HarnessConfigUpdate;
@@ -88,7 +88,7 @@ use crate::core::router::reduce;
 use crate::core::state::{HarnessState, TurnState};
 use crate::core::step_protocol::DeterminismContext;
 use crate::core::step_protocol::HarnessCommand;
-use crate::core::step_protocol::{Outcome, Transition, TurnCompletion};
+use crate::core::step_protocol::{Outcome, Transition};
 use crate::core::tools::resolved::ResolvedTools;
 use crate::core::wire::message::StoredMessage;
 
@@ -445,7 +445,7 @@ fn validate_builtin_reconfiguration(
     let unchanged = [
         (
             "settings.tools.file_system",
-            current.file_system == next.file_system,
+            current.file_system.is_enabled() == next.file_system.is_enabled(),
         ),
         ("settings.tools.skills", current.skills == next.skills),
         (
@@ -509,31 +509,12 @@ pub(crate) fn advance_in_place(
     let Outcome {
         actions,
         observations,
-        completed,
     } = reduce(state, command, determinism)?;
     state.commit_model_input_changes()?;
-    // A completion produced by this command wins over the one recorded in
-    // state: `complete_output` can finish a turn and immediately start a queued
-    // one, leaving state active while the transition still reports the turn
-    // that just ended.
-    let completed = completed.or_else(|| terminal_completion(&state.turn));
     Ok(Transition {
-        completed,
         effects: actions,
         observations,
     })
-}
-
-/// The terminal result already recorded in state, for commands that did not end
-/// a turn themselves but are reported while a finished turn is still current.
-fn terminal_completion(turn: &TurnState) -> Option<TurnCompletion> {
-    match turn {
-        TurnState::Terminal { turn_id, outcome } => Some(TurnCompletion {
-            turn_id: turn_id.clone(),
-            outcome: outcome.clone(),
-        }),
-        TurnState::Idle | TurnState::Compacting { .. } | TurnState::Active(_) => None,
-    }
 }
 
 pub(crate) fn require_action_id(expected: &str, actual: &str) -> Result<(), CoreError> {

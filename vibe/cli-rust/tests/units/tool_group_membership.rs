@@ -3,6 +3,8 @@
 use serde_json::{json, Value};
 use vibe_rs::transcript::Transcript;
 
+use crate::support::live;
+
 fn effect(id: &str, state: &str) -> Value {
     effect_of_kind(id, state, Some("shell"))
 }
@@ -26,14 +28,6 @@ fn assistant_text(id: &str, text: &str) -> Value {
 
 fn reasoning(id: &str) -> Value {
     json!({"id": id, "type": "reasoning", "text": "thinking"})
-}
-
-fn live(entries: &[Value]) -> Transcript {
-    let mut transcript = Transcript::default();
-    for entry in entries {
-        transcript.add(&json!({ "entry": entry }));
-    }
-    transcript
 }
 
 #[test]

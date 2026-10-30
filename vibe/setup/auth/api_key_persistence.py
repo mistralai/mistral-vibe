@@ -70,7 +70,7 @@ def _get_mistral_provider() -> ProviderConfig:
 
 
 def _load_onboarding_provider() -> ProviderConfig:
-    from vibe.setup.onboarding.context import OnboardingContext
+    from vibe.setup.auth.onboarding_context import OnboardingContext
 
     return OnboardingContext.load().provider
 

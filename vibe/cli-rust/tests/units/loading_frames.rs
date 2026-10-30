@@ -1,31 +1,22 @@
 //! Frames painted before the session is ready or while the saved sessions load.
 
-use std::sync::Arc;
-
-use ratatui::backend::TestBackend;
-use ratatui::Terminal;
 use tokio::sync::mpsc;
 use vibe_rs::app::{App, Status};
 use vibe_rs::commands::submission;
 use vibe_rs::config;
 use vibe_rs::event_handler::apply_startup_event;
 use vibe_rs::resume_picker::Session;
-use vibe_rs::server::Client;
 use vibe_rs::startup::StartupEvent;
 use vibe_rs::ui;
 
 use crate::resume_picker_outcomes::{picking, SAVED};
+use crate::support::{render, rows, stub};
 
 const WIDTH: u16 = 120;
 const HEIGHT: u16 = 30;
 
 fn screen(app: &mut App) -> Vec<String> {
-    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
-    terminal.draw(|frame| ui::draw(app, frame)).unwrap();
-    let buffer = terminal.backend().buffer();
-    (0..HEIGHT)
-        .map(|y| (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect())
-        .collect()
+    rows(&render(WIDTH, HEIGHT, |frame| ui::draw(app, frame)))
 }
 
 #[test]
@@ -45,7 +36,7 @@ fn an_open_picker_shows_a_loading_line_until_its_sessions_arrive() {
 
 #[test]
 fn a_failed_session_start_shows_the_error_and_sends_nothing() {
-    let client = Arc::new(Client::stub());
+    let client = stub();
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
     let mut app = App::default();
     let failed = StartupEvent::Failed("session/start failed: session start failed".into());

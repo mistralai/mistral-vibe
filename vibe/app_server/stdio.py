@@ -9,6 +9,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from vibe._experimental_harness import ExperimentalHarnessUnavailableError
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server.multiplex import ChannelOpen, ChannelServer, serve_multiplexed
 from vibe.app_server.transport import (
@@ -66,6 +67,27 @@ async def _serve(
     additional_builtin_plugin_roots: Sequence[Path],
     agent_socket: AgentSocketMount | None,
 ) -> None:
+    services = ProcessServices.create()
+    try:
+        await _serve_with(
+            transport,
+            services,
+            multiplex=multiplex,
+            additional_builtin_plugin_roots=additional_builtin_plugin_roots,
+            agent_socket=agent_socket,
+        )
+    finally:
+        await services.close()
+
+
+async def _serve_with(
+    transport: JsonRpcTransport,
+    services: ProcessServices,
+    *,
+    multiplex: bool,
+    additional_builtin_plugin_roots: Sequence[Path],
+    agent_socket: AgentSocketMount | None,
+) -> None:
     if multiplex:
 
         async def create_channel(
@@ -77,6 +99,7 @@ async def _serve(
                 return RunChannelServer(
                     channel,
                     options,
+                    services=services,
                     additional_builtin_plugin_roots=additional_builtin_plugin_roots,
                 )
             harness_files = HarnessFilesManager(
@@ -85,6 +108,7 @@ async def _serve(
             )
             process = HarnessProcess(
                 harness_files,
+                services=services,
                 additional_builtin_plugin_roots=additional_builtin_plugin_roots,
             )
             process.start_connector_warm_up()
@@ -96,7 +120,8 @@ async def _serve(
         return
     if agent_socket is None:
         process = HarnessProcess(
-            additional_builtin_plugin_roots=additional_builtin_plugin_roots
+            services=services,
+            additional_builtin_plugin_roots=additional_builtin_plugin_roots,
         )
         process.start_connector_warm_up()
         harness = await create_harness_server(
@@ -107,6 +132,7 @@ async def _serve(
             transport,
             transport_kind="stdio",
             process=HarnessProcess(
+                services=services,
                 additional_builtin_plugin_roots=additional_builtin_plugin_roots,
                 agent_socket=agent_socket,
             ),
@@ -114,7 +140,7 @@ async def _serve(
     await harness.serve()
 
 
-def parse_arguments() -> argparse.Namespace:
+def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Mistral Vibe app server")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
@@ -139,7 +165,7 @@ def parse_arguments() -> argparse.Namespace:
             "ones shipped inside the package. May be given more than once."
         ),
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 _PROCESS_TITLE = "vibe-app-server"
@@ -156,7 +182,7 @@ def _set_process_title() -> None:
         pass
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     _set_process_title()
     from vibe.core.config import load_dotenv_values
     from vibe.core.utils.windows_asyncio import (
@@ -168,7 +194,7 @@ def main() -> None:
     # their mkdir(parents=True) calls are otherwise the first to materialize
     # ~/.vibe, at permissive modes.
     bootstrap_vibe_home()
-    args = parse_arguments()
+    args = parse_arguments(argv)
     init_file_logging(LOG_FILE.path)
     load_dotenv_values()
     agent_socket = (

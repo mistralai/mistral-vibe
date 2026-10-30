@@ -72,7 +72,7 @@ pub fn settle_worktree(params: &Value) -> Option<crate::worktree::WorktreeInfo> 
             continue;
         }
         let worktree: crate::server::PublicSessionWorktree =
-            serde_json::from_value(value.clone()).ok()?;
+            serde::Deserialize::deserialize(value).ok()?;
         return Some(crate::worktree::WorktreeInfo {
             name: worktree.name,
             branch: worktree.branch,

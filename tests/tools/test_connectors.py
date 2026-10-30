@@ -5,6 +5,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import httpx
+import httpx2
 import pytest
 import respx
 
@@ -175,11 +176,11 @@ class TestToolManagerConnectorIntegration:
 # ---------------------------------------------------------------------------
 
 
-def _make_http_status_error(status: int, body: str = "") -> httpx.HTTPStatusError:
-    response = httpx.Response(
-        status, text=body, request=httpx.Request("POST", "http://example.com")
+def _make_http_status_error(status: int, body: str = "") -> httpx2.HTTPStatusError:
+    response = httpx2.Response(
+        status, text=body, request=httpx2.Request("POST", "http://example.com")
     )
-    return httpx.HTTPStatusError("error", request=response.request, response=response)
+    return httpx2.HTTPStatusError("error", request=response.request, response=response)
 
 
 class TestUnwrapHttpStatusError:

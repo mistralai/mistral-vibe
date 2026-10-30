@@ -9,12 +9,12 @@ import tomllib
 from typing import Literal, TypedDict, Unpack
 from unittest.mock import MagicMock, patch
 
-from pydantic import ValidationError
 import pytest
 import tomli_w
 
 from tests.conftest import ConfigBuilder, build_test_vibe_config
 from tests.stubs.fake_raw_layer import FakeRawLayer
+from vibe.config_values import THINKING_LEVELS
 from vibe.core.config import (
     DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
     DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
@@ -37,7 +37,7 @@ from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.paths import VIBE_HOME
 from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.types import Backend
-from vibe.setup.onboarding.context import OnboardingContext
+from vibe.setup.auth.onboarding_context import OnboardingContext
 from vibe.utils.http import build_ssl_context, configure_ssl_context
 
 
@@ -557,13 +557,84 @@ class TestThinkingOutsideItsLevelsThroughLayers:
         # Assert
         assert config.get_active_model().thinking == "medium"
 
+    @pytest.mark.parametrize(
+        ("thinking", "levels", "warned"),
+        [
+            ("turbo", ["low", "turbo"], False),
+            ("xhigh", ["low", "turbo"], False),
+            ("High", ["low", "turbo"], False),
+            ("Turbo", ["low", "turbo"], True),
+            ("wat", ["off", "turbo", "high"], True),
+        ],
+        ids=[
+            "listed-own-level",
+            "standard-level",
+            "standard-other-case",
+            "own-level-other-case",
+            "neither",
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_an_unknown_thinking_word_is_dropped_with_a_warning(self) -> None:
-        """*Prepare*: A model whose thinking is "none" and whose levels list a
-        word Vibe has no level for.
+    async def test_a_thinking_level_is_kept_and_warned_only_when_unlisted(
+        self, thinking: str, levels: list[str], warned: bool
+    ) -> None:
+        """*Prepare*: A model listing levels of its own, set to one of them, to a
+        standard level it does not list, and to a word that is neither.
         *Do*: Build the config from its layers.
-        *Assert*: It loads: the unknown words are dropped, each with a warning
-        naming it, so the pickers can still fix the model.
+        *Assert*: It loads, with the level and the list kept as written; only the
+        word that is neither warns, naming it and the way to fix it.
+        """
+        # Prepare
+        builder = _LayeredConfigBuilder(VibeConfigSchema)
+        builder.add_layer(
+            FakeRawLayer(
+                name="user",
+                data={
+                    "active_model": "my-model",
+                    "providers": [_custom_provider_payload(backend="generic")],
+                    "models": [
+                        _custom_model_payload(
+                            name="my-model",
+                            alias="my-model",
+                            thinking=thinking,
+                            thinking_levels=levels,
+                        )
+                    ],
+                },
+            )
+        )
+
+        # Do
+        config = await builder.build()
+
+        # Assert
+        model = config.get_active_model()
+        assert model.thinking == (
+            thinking.lower() if thinking.lower() in THINKING_LEVELS else thinking
+        )
+        assert model.thinking_levels == levels
+        if warned:
+            assert len(config.validation_warnings) == 1
+            warning = config.validation_warnings[0]
+            assert f"thinking {thinking!r} is neither a standard level" in warning
+            assert "Pick another thinking level" in warning
+        else:
+            assert config.validation_warnings == ()
+
+    @pytest.mark.parametrize(
+        ("thinking", "warned"),
+        [("turbo", True), ("minimal", False), ("high", False)],
+        ids=["level-the-sdk-drops", "sdk-own-word", "standard-level"],
+    )
+    @pytest.mark.asyncio
+    async def test_a_mistral_model_warns_for_a_level_its_sdk_cannot_send(
+        self, thinking: str, warned: bool
+    ) -> None:
+        """*Prepare*: A model on the Mistral backend that lists its thinking level,
+        set to a word the Mistral SDK drops, to one it lists, and to a standard one.
+        *Do*: Build the config from its layers.
+        *Assert*: It loads with the level kept; only the word the SDK drops warns,
+        once, naming it and the efforts the SDK sends.
         """
         # Prepare
         builder = _LayeredConfigBuilder(VibeConfigSchema)
@@ -577,8 +648,8 @@ class TestThinkingOutsideItsLevelsThroughLayers:
                             "name": "my-model",
                             "provider": "mistral",
                             "alias": "my-model",
-                            "thinking": "none",
-                            "thinking_levels": ["off", "wat", "high"],
+                            "thinking": thinking,
+                            "thinking_levels": ["low", thinking],
                         }
                     ],
                 },
@@ -589,14 +660,15 @@ class TestThinkingOutsideItsLevelsThroughLayers:
         config = await builder.build()
 
         # Assert
-        model = config.get_active_model()
-        assert not model.thinking_is_set
-        assert model.thinking_levels == ["off", "high"]
-        assert len(config.validation_warnings) == 2
-        assert (
-            "thinking 'none' is not a thinking level" in config.validation_warnings[0]
-        )
-        assert "thinking_levels 'wat' ignored" in config.validation_warnings[1]
+        assert config.get_active_model().thinking == thinking
+        if warned:
+            assert len(config.validation_warnings) == 1
+            warning = config.validation_warnings[0]
+            assert f"the Mistral client cannot send thinking {thinking!r}" in warning
+            assert "minimal" in warning
+            assert "Pick another thinking level" in warning
+        else:
+            assert config.validation_warnings == ()
 
 
 class TestMigrateLeavesFindInBashAllowlist:
@@ -1724,7 +1796,6 @@ class TestOnboardingContextResolution:
             active_model="orphan",
             vibe_base_url="https://merged-vibe.example.com",
             console_base_url="https://merged-console.example.com",
-            theme="merged-theme",
         )
 
         context = OnboardingContext.from_config(config)
@@ -1732,7 +1803,6 @@ class TestOnboardingContextResolution:
         assert context.provider.name == DEFAULT_PROVIDERS[0].name
         assert context.vibe_base_url == "https://merged-vibe.example.com"
         assert context.console_base_url == "https://merged-console.example.com"
-        assert context.theme == "merged-theme"
 
 
 class TestCompactionModel:
@@ -2207,17 +2277,92 @@ class TestThinkingLevels:
         active = cfg.get_active_model()
         assert active.thinking_levels == ["off"]
 
-    def test_unknown_level_is_a_config_error(self) -> None:
-        # The same strictness as `thinking`: values outside the five canonical
-        # levels are rejected at parse, not silently dropped. Validated from a
-        # payload because the typed constructor cannot carry an invalid level.
-        with pytest.raises(ValidationError):
-            ModelConfig.model_validate({
-                "name": "m",
-                "provider": "p",
-                "alias": "m",
-                "thinking_levels": ["off", "turbo"],
-            })
+    def test_a_level_of_the_models_own_is_kept_in_its_place(self) -> None:
+        model = ModelConfig.model_validate({
+            "name": "m",
+            "provider": "p",
+            "alias": "m",
+            "thinking_levels": ["off", "turbo", "high"],
+        })
+
+        assert model.thinking_levels == ["off", "turbo", "high"]
+
+    def test_a_standard_level_in_another_case_is_the_standard_one(self) -> None:
+        model = ModelConfig.model_validate({
+            "name": "m",
+            "provider": "p",
+            "alias": "m",
+            "thinking_levels": ["Off", " High ", "Turbo", "high"],
+            "thinking": "High",
+        })
+
+        assert model.thinking_levels == ["off", "high", "Turbo"]
+        assert model.thinking == "high"
+
+    def test_a_models_own_level_loses_its_padding(self) -> None:
+        model = ModelConfig.model_validate({
+            "name": "m",
+            "provider": "p",
+            "alias": "m",
+            "thinking_levels": [" turbo ", "turbo"],
+            "thinking": " turbo",
+        })
+
+        assert model.thinking_levels == ["turbo"]
+        assert model.thinking == "turbo"
+
+    @pytest.mark.parametrize(
+        ("field", "value", "kept"),
+        [
+            ("thinking", " ", None),
+            ("thinking", 5, None),
+            ("thinking_levels", ["off", "", 3, "turbo"], ["off", "turbo"]),
+            ("thinking_levels", [""], None),
+        ],
+        ids=["blank-thinking", "number-thinking", "mixed-levels", "only-blank"],
+    )
+    @pytest.mark.asyncio
+    async def test_a_value_that_is_not_a_word_is_dropped_with_a_warning(
+        self, field: str, value: object, kept: list[str] | None
+    ) -> None:
+        """*Prepare*: A model whose thinking or thinking_levels holds a blank or a
+        number.
+        *Do*: Build the config from its layers.
+        *Assert*: It loads: the value is dropped with a warning naming it, so the
+        pickers can still fix the model.
+        """
+        # Prepare
+        builder = _LayeredConfigBuilder(VibeConfigSchema)
+        builder.add_layer(
+            FakeRawLayer(
+                name="user",
+                data={
+                    "active_model": "my-model",
+                    "models": [
+                        {
+                            "name": "my-model",
+                            "provider": "mistral",
+                            "alias": "my-model",
+                            field: value,
+                        }
+                    ],
+                },
+            )
+        )
+
+        # Do
+        config = await builder.build()
+
+        # Assert
+        model = config.get_active_model()
+        if field == "thinking":
+            assert not model.thinking_is_set
+        elif kept is not None:
+            assert model.thinking_levels == kept
+        else:
+            assert not model.thinking_levels_curated
+        assert len(config.validation_warnings) == 1
+        assert f"Model 'my-model': {field}" in config.validation_warnings[0]
 
     def test_duplicate_levels_offer_one_picker_row(self) -> None:
         model = ModelConfig(

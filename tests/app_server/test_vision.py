@@ -6,8 +6,9 @@ from typing import Any
 
 import pytest
 
+from mistralai_vibe_local_harness.vibe import UtilityReply
 from tests.conftest import build_test_vibe_config
-from tests.mock.utils import mock_llm_chunk
+from tests.mock.utils import utility_reply
 from vibe.app_server import _vision
 from vibe.app_server._vision import FALLBACK_EVENT, SessionImageDescriber
 from vibe.app_server._workspace import PromptPreparationError
@@ -22,7 +23,7 @@ from vibe.app_server.models import (
     TextContentBlock,
 )
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
-from vibe.core.types import Backend, LLMChunk, LLMMessage
+from vibe.core.types import Backend, LLMMessage
 from vibe.utils.images import MAX_IMAGES_PER_MESSAGE
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
@@ -74,10 +75,10 @@ class RecordingComplete:
 
     async def __call__(
         self, *, model: ModelConfig, messages: Sequence[LLMMessage], **_: object
-    ) -> LLMChunk:
+    ) -> UtilityReply:
         self.calls.append(messages)
-        return mock_llm_chunk(
-            content=self._replies[min(len(self.calls) - 1, len(self._replies) - 1)]
+        return utility_reply(
+            self._replies[min(len(self.calls) - 1, len(self._replies) - 1)]
         )
 
 
@@ -221,7 +222,7 @@ class TestDescribedBlocks:
     async def test_a_failed_description_degrades_to_a_placeholder(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def boom(**_: object) -> LLMChunk:
+        async def boom(**_: object) -> UtilityReply:
             raise RuntimeError("vision provider is down")
 
         monkeypatch.setattr(_vision, "complete_vision", boom)
@@ -386,7 +387,7 @@ class TestTelemetry:
     async def test_a_failure_is_recorded_as_such(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def boom(**_: object) -> LLMChunk:
+        async def boom(**_: object) -> UtilityReply:
             raise RuntimeError("vision provider is down")
 
         monkeypatch.setattr(_vision, "complete_vision", boom)

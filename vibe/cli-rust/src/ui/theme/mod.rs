@@ -4,10 +4,16 @@ use ratatui::style::{Color, Modifier, Style};
 
 pub mod color_system;
 pub mod fixed;
+mod markdown;
 mod registry;
 pub(crate) mod syntax;
 
 pub use fixed::{LOADING_GRADIENT, ORANGE};
+pub use markdown::{
+    code_plain, md_accent, md_code_inline, md_fence_border, md_heading, md_keyline, md_link,
+    md_table_header, md_widget_code_inline, md_widget_fence_bg, md_widget_marker,
+    md_widget_quote_bar,
+};
 
 pub use registry::{
     active, active_index, ansi_background, resolve, selection_fg, set_active_index,
@@ -189,109 +195,6 @@ pub fn scrollbar() -> Color {
 }
 pub fn scrollbar_bg() -> Color {
     active().scrollbar_bg
-}
-
-// Markdown constructs in assistant messages.
-
-/// Heading text. Truecolor themes use $primary for every level; ANSI themes map
-/// each level to a raw terminal color.
-pub fn md_heading(level: u8) -> Color {
-    if !is_ansi() {
-        return active().primary;
-    }
-    match level {
-        1 => Color::Magenta,
-        2 => Color::LightBlue,
-        3 => Color::Blue,
-        _ => Color::Cyan,
-    }
-}
-/// Inline code (`x`) — vibe overrides the widget default to $success.
-pub fn md_code_inline() -> Color {
-    active().success
-}
-/// Unstyled highlighted text inherits `$text`: terminal default or theme contrast.
-pub fn code_plain() -> Color {
-    if is_ansi() {
-        foreground()
-    } else {
-        auto_contrast()
-    }
-}
-/// Blockquote bar `▌` — $foreground-muted (60% foreground over background).
-pub fn md_quote_bar() -> Color {
-    active().popup_border
-}
-/// Link label — the dimmed foreground link text paints with.
-pub fn md_link() -> Color {
-    if is_ansi() {
-        return primary();
-    }
-    blend(background(), auto_contrast(), 0.87)
-}
-/// Table keyline border — $foreground 20% over background.
-pub fn md_table_border() -> Color {
-    blend(background(), foreground(), 0.2)
-}
-/// Fenced code block box — $foreground 50% over background, the truecolor
-/// reading of ANSI bright black; ANSI themes dim it to bright black itself.
-pub fn md_fence_border() -> Color {
-    if is_ansi() {
-        return Color::DarkGray;
-    }
-    blend(background(), foreground(), 0.5)
-}
-/// Horizontal rule — a `$secondary` border.
-pub fn md_rule() -> Color {
-    secondary()
-}
-
-// Colors of a standalone markdown body (default styles, no chat overrides).
-
-/// MarkdownBullet — $text-primary (dark) / $text-secondary (light).
-pub fn md_widget_marker() -> Color {
-    if is_dark() {
-        text_primary()
-    } else {
-        text_secondary()
-    }
-}
-/// MarkdownBlockQuote border-left — $text-primary 50% (dark) / $text-secondary (light).
-pub fn md_widget_quote_bar() -> Color {
-    if is_ansi() || !is_dark() {
-        return md_widget_marker();
-    }
-    blend(background(), text_primary(), 0.5)
-}
-/// Standalone `.code_inline` — $text-warning 95% over $warning 10% (dark),
-/// $text-error 95% over $error 5% (light); ANSI keeps the raw tint, no bg.
-pub fn md_widget_code_inline() -> (Color, Color) {
-    if is_ansi() {
-        let fg = if is_dark() { warning() } else { error() };
-        return (fg, background());
-    }
-    let dark = is_dark();
-    let wash = if dark { warning() } else { error() };
-    let tint = if dark { text_warning() } else { text_error() };
-    let alpha = if dark { 0.10 } else { 0.05 };
-    let bg = blend(background(), wash, alpha);
-    (blend(bg, tint, 0.95), bg)
-}
-/// Standalone MarkdownFence background — black 10% (dark) / white 30% (light).
-pub fn md_widget_fence_bg() -> Option<Color> {
-    if is_ansi() {
-        return None;
-    }
-    let wash = if is_dark() {
-        Color::Rgb(0, 0, 0)
-    } else {
-        Color::Rgb(255, 255, 255)
-    };
-    Some(blend(
-        background(),
-        wash,
-        if is_dark() { 0.10 } else { 0.30 },
-    ))
 }
 
 // Blends computed at render time rather than stored in the theme table.

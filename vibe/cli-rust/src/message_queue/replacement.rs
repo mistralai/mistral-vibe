@@ -49,11 +49,9 @@ pub(super) fn replace_group(app: &mut App, client: &Arc<Client>, server_message_
         .map(|item| (item.message_id.clone(), item.ever_sent))
         .collect::<Vec<_>>();
     let server_message_id = server_message_id.to_owned();
-    let tx = app.queue.tx.clone();
-    let pending = app.commit_started();
     let client = client.clone();
     let pastes = app.chat_input.collapsed_pastes.clone();
-    tokio::spawn(async move {
+    crate::ui_event::spawn(app, async move {
         let prepared = async {
             let mut prompts = Vec::with_capacity(items.len());
             for (message_id, text, existing_images, sent) in items {
@@ -102,14 +100,13 @@ pub(super) fn replace_group(app: &mut App, client: &Arc<Client>, server_message_
             .filter(|(_, ever_sent)| *ever_sent || matches!(outcome, ReplacementOutcome::Replaced))
             .map(|(message_id, _)| message_id)
             .collect();
-        let event = QueueEvent::GroupReplaced {
+        QueueEvent::GroupReplaced {
             server_message_id,
             revision,
             covered,
             delivered,
             outcome,
-        };
-        crate::input::deliver(tx, event, &pending).await;
+        }
     });
 }
 

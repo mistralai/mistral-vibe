@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import httpx
+import httpx2
 
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
 
@@ -42,7 +42,7 @@ def test_non_streaming_completion_merges_split_tool_call_deltas() -> None:
     server = StreamingMockServer(chunk_factory=_split_tool_call_factory)
     server.start()
     try:
-        response = httpx.post(
+        response = httpx2.post(
             f"{server.api_base}/chat/completions",
             json={"model": "mock-model", "messages": [], "stream": False},
             timeout=5,

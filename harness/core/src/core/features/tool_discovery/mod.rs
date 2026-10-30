@@ -5,16 +5,23 @@ mod format;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
-use crate::core::error::CoreError;
+use crate::core::helpers::schema_error_detail;
 use crate::core::step_protocol::{ToolDefinition, ToolDiscoveryKind, ToolDiscoverySummary};
-use crate::core::tools::result::invalid_tool_call_result;
+use crate::core::tools::arguments::{
+    ArgumentsRejection, SCHEMA_REJECTION_PREFIX, validate_json_schema,
+};
+use crate::core::tools::result::{
+    invalid_tool_call_result, tool_arguments_contract_mismatch_result,
+};
 use crate::core::tools::schema::ToolSchema;
 use crate::core::wire::content::text_content;
 use crate::core::wire::tool::{StructuredContent, ToolCall, ToolResult};
 pub(crate) use declaration::is_identifier;
 use declaration::{declaration, to_safe_identifier};
 use format::*;
+use jsonschema::error::ValidationErrorKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -37,8 +44,22 @@ pub(crate) enum SearchMode {
     AllConnectorCapabilities,
 }
 
+impl SearchMode {
+    /// The argument this mode needs, as it appears in a call.
+    fn input_example(self) -> &'static str {
+        match self {
+            Self::BestMatch => r#""query": "<keywords>""#,
+            Self::Details => r#""functions": ["<connector>.<function>"]"#,
+            Self::AllConnectorCapabilities => r#""connectors": ["<connector>"]"#,
+        }
+    }
+}
+
+/// The schema the model sees and the one its arguments are checked against.
+static SEARCH_REQUEST_SCHEMA: LazyLock<Value> = LazyLock::new(SearchRequest::tool_schema);
+
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
-#[schemars(deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SearchRequest {
     #[serde(default)]
     #[schemars(
@@ -52,14 +73,14 @@ pub(crate) struct SearchRequest {
     pub(crate) query: Option<String>,
     #[serde(default)]
     #[schemars(
-        length(max = 10),
+        length(max = MAX_DETAIL_FUNCTION_COUNT),
         inner(length(min = 1)),
         description = "Exact {connector}.{function} names for details; required in details mode."
     )]
     pub(crate) functions: Vec<String>,
     #[serde(default, rename = "functionNames")]
     #[schemars(
-        length(max = 10),
+        length(max = MAX_DETAIL_FUNCTION_COUNT),
         inner(length(min = 1)),
         description = "Deprecated alias for functions.",
         extend("x-harness-no-default" = true)
@@ -67,23 +88,11 @@ pub(crate) struct SearchRequest {
     pub(crate) function_names: Vec<String>,
     #[serde(default)]
     #[schemars(
-        length(max = 10),
+        length(max = MAX_CONNECTOR_COUNT),
         inner(length(min = 1)),
         description = "Exact connector names; required in all_connector_capabilities mode, optional filter in best_match, unused in details."
     )]
     pub(crate) connectors: Vec<String>,
-}
-
-impl SearchRequest {
-    pub(crate) fn validate(&self) -> Result<(), String> {
-        validate_search_names("functions", &self.functions, MAX_DETAIL_FUNCTION_COUNT)?;
-        validate_search_names(
-            "functionNames",
-            &self.function_names,
-            MAX_DETAIL_FUNCTION_COUNT,
-        )?;
-        validate_search_names("connectors", &self.connectors, MAX_CONNECTOR_COUNT)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,16 +105,6 @@ pub(crate) struct ToolDiscoveryResult {
 pub(crate) struct ToolDiscoveryExecution {
     pub(crate) result: ToolResult,
     pub(crate) summary: Option<ToolDiscoverySummary>,
-}
-
-fn validate_search_names(field: &str, values: &[String], max_items: usize) -> Result<(), String> {
-    if values.len() > max_items {
-        return Err(format!("{field} must contain at most {max_items} items"));
-    }
-    if values.iter().any(String::is_empty) {
-        return Err(format!("{field} values must not be empty"));
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -181,7 +180,7 @@ pub(crate) fn direct_tool(description: &str) -> ToolDefinition {
     ToolDefinition {
         name: SEARCH_TOOL_FUNCTIONS_NAME.to_string(),
         description: description.to_owned(),
-        parameters: SearchRequest::tool_schema(),
+        parameters: SEARCH_REQUEST_SCHEMA.clone(),
     }
 }
 
@@ -192,40 +191,114 @@ pub(crate) fn is_direct_name(name: &str) -> bool {
 pub(crate) fn dispatch(
     call: &ToolCall,
     search: impl FnOnce(SearchRequest) -> ToolDiscoveryResult,
-) -> Option<Result<ToolDiscoveryExecution, CoreError>> {
+) -> Option<ToolDiscoveryExecution> {
     if !is_direct_name(&call.name) {
         return None;
     }
-    let result = search_tool_message(call, search);
-    Some(match result {
-        Ok(message) => Ok(message),
-        Err(error) => Ok(ToolDiscoveryExecution {
-            result: invalid_tool_call_result(error.detail().to_string()),
+    let schema = &*SEARCH_REQUEST_SCHEMA;
+    if let Err(rejection) = validate_search_arguments(schema, &call.arguments) {
+        return Some(ToolDiscoveryExecution {
+            result: invalid_tool_call_result(format!(
+                "{SCHEMA_REJECTION_PREFIX}{}",
+                rejection.detail(schema)
+            )),
             summary: None,
-        }),
+        });
+    }
+    Some(search_tool_message(call, search))
+}
+
+/// The schema check every direct tool runs, with this tool's own sentence
+/// attached to a schema error when it has one.
+fn validate_search_arguments<'a>(
+    schema: &Value,
+    arguments: &'a Value,
+) -> Result<(), ArgumentsRejection<'a>> {
+    validate_json_schema(schema, arguments).map_err(|rejection| match rejection {
+        ArgumentsRejection::Schema { error, .. } => ArgumentsRejection::Schema {
+            explained: explain_schema_error(schema, &error),
+            error,
+        },
+        rejection => rejection,
     })
 }
 
+/// Runs a search whose arguments the schema already accepted. A parse
+/// failure here means the schema and `SearchRequest` disagree: the call
+/// followed the published contract, so the turn goes on and the failure
+/// carries its own code instead of the model-mistake one.
 fn search_tool_message(
     call: &ToolCall,
     search: impl FnOnce(SearchRequest) -> ToolDiscoveryResult,
-) -> Result<ToolDiscoveryExecution, CoreError> {
-    let request: SearchRequest =
-        serde_json::from_value(call.arguments.clone()).map_err(|error| {
-            CoreError::invalid_command(format!("invalid search_tool_functions arguments: {error}"))
-        })?;
-    request.validate().map_err(|error| {
-        CoreError::invalid_command(format!("invalid search_tool_functions arguments: {error}"))
-    })?;
+) -> ToolDiscoveryExecution {
+    let request: SearchRequest = match serde_json::from_value(call.arguments.clone()) {
+        Ok(request) => request,
+        Err(error) => {
+            return ToolDiscoveryExecution {
+                result: tool_arguments_contract_mismatch_result(format!(
+                    "search_tool_functions arguments match the declared input schema but could not be read: {error}"
+                )),
+                summary: None,
+            };
+        }
+    };
     let result = search(request);
-    Ok(ToolDiscoveryExecution {
+    ToolDiscoveryExecution {
         result: ToolResult::Success {
             content: text_content(result.content),
             structured_content: StructuredContent::Absent,
             meta: None,
         },
         summary: Some(result.summary),
-    })
+    }
+}
+
+/// Models sometimes send a mode name as an argument name, as in
+/// `{"best_match": "list issues"}` or `{"details": {"functions": [...]}}`.
+/// The unknown-field error lists the allowed fields but does not say that the
+/// rejected field is a value of `mode`, so this adds the call shape for the
+/// mode the error names. It names every mode, since a model that sends one
+/// mode as an argument name tends to do the same with the next mode it uses.
+/// `None` keeps the schema's text.
+///
+/// Only top-level fields name a mode. The schema has no nested objects today,
+/// so the path check only keeps a future nested field from getting this hint.
+fn explain_schema_error(schema: &Value, error: &jsonschema::ValidationError<'_>) -> Option<String> {
+    if !error.instance_path().as_str().is_empty() {
+        return None;
+    }
+    let ValidationErrorKind::AdditionalProperties { unexpected } = error.kind() else {
+        return None;
+    };
+    let (field, mode) = unexpected.iter().find_map(|field| {
+        serde_json::from_value::<SearchMode>(Value::String(field.clone()))
+            .ok()
+            .map(|mode| (field, mode))
+    })?;
+    Some(format!(
+        r#"{} {} are values of "mode", not argument names. Call search_tool_functions with {{"mode": "{field}", {}}}."#,
+        schema_error_detail(schema, error),
+        mode_names(schema),
+        mode.input_example(),
+    ))
+}
+
+/// The values of `mode` as the schema lists them, quoted and joined for a
+/// sentence: `"a", "b" and "c"`.
+fn mode_names(schema: &Value) -> String {
+    let names: Vec<String> = schema
+        .pointer("/properties/mode/enum")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|name| format!("\"{name}\""))
+        .collect();
+    match names.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        Some((last, _)) => last.clone(),
+        None => String::new(),
+    }
 }
 
 pub(crate) fn search_documents(
@@ -805,32 +878,75 @@ mod tests {
     use super::*;
     use crate::core::tools::resolved::testing::*;
 
+    /// Arguments the schema accepts must parse, or a valid call would fail
+    /// as a Core invariant instead of running.
     #[test]
-    fn search_request_validation_enforces_connector_and_function_limits() {
+    fn arguments_the_schema_accepts_parse_as_a_search_request() {
+        let modes = [
+            SearchMode::BestMatch,
+            SearchMode::Details,
+            SearchMode::AllConnectorCapabilities,
+        ];
+        let mut calls: Vec<Value> = modes
+            .into_iter()
+            .map(|mode| {
+                let mode_name = serde_json::to_value(mode).unwrap();
+                serde_json::from_str(&format!(
+                    "{{\"mode\": {mode_name}, {}}}",
+                    mode.input_example()
+                ))
+                .unwrap()
+            })
+            .collect();
+        calls.push(serde_json::json!({
+            "mode": "details",
+            "query": "q",
+            "functions": vec!["a.b"; MAX_DETAIL_FUNCTION_COUNT],
+            "functionNames": ["a.c"],
+            "connectors": vec!["a"; MAX_CONNECTOR_COUNT],
+        }));
+
+        for call in calls {
+            assert!(
+                validate_search_arguments(&SEARCH_REQUEST_SCHEMA, &call).is_ok(),
+                "schema rejects {call}"
+            );
+            assert!(
+                serde_json::from_value::<SearchRequest>(call.clone()).is_ok(),
+                "serde rejects {call}"
+            );
+        }
+    }
+
+    /// The schema and `SearchRequest` agree today, so this calls the parse
+    /// step directly with arguments `SearchRequest` cannot read, as it would
+    /// see them if the two drifted apart.
+    #[test]
+    fn arguments_the_schema_accepts_but_cannot_be_read_fail_as_a_contract_mismatch() {
+        let call = ToolCall {
+            id: "drifted".to_string(),
+            name: SEARCH_TOOL_FUNCTIONS_NAME.to_string(),
+            arguments: serde_json::json!({"mode": "best_match", "query": 7}),
+            argument_error: None,
+        };
+
+        let execution = search_tool_message(&call, |_| {
+            panic!("a call that cannot be read must not search")
+        });
+
+        let ToolResult::Failure { content, error, .. } = execution.result else {
+            panic!("expected a failure");
+        };
+        assert_eq!(error.code, "tool_arguments_contract_mismatch");
+        assert!(error.message.starts_with(
+            "search_tool_functions arguments match the declared input schema but could not be read: "
+        ));
         assert!(
-            SearchRequest {
-                connectors: vec!["connector".to_string(); MAX_CONNECTOR_COUNT + 1],
-                ..SearchRequest::default()
-            }
-            .validate()
-            .is_err()
+            serde_json::to_string(&content)
+                .unwrap()
+                .contains("InvalidToolCall")
         );
-        assert!(
-            SearchRequest {
-                functions: vec![String::new()],
-                ..SearchRequest::default()
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            SearchRequest {
-                functions: vec![" ".to_string()],
-                ..SearchRequest::default()
-            }
-            .validate()
-            .is_ok()
-        );
+        assert!(execution.summary.is_none());
     }
 
     #[test]

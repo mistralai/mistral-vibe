@@ -14,6 +14,7 @@ import respx
 import tomli_w
 
 from tests.app_server.backend_contract.conftest import connect_backend_contract_host
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.events import ServerWarning, TurnCompleted
 from vibe.app_server.models import FileImageSource, ImageAttachment
 from vibe.app_server.protocol import (
@@ -147,6 +148,7 @@ async def test_active_model_is_pinned_on_first_turn_and_restored_on_resume(
     tmp_path: Path,
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
+    process_services: ProcessServices,
 ) -> None:
     config_file = config_dir / "config.toml"
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
@@ -164,7 +166,9 @@ async def test_active_model_is_pinned_on_first_turn_and_restored_on_resume(
     )
 
     connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     session = await connection.host.open_session()
     try:
@@ -202,7 +206,9 @@ async def test_active_model_is_pinned_on_first_turn_and_restored_on_resume(
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
 
     resumed_connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     resumed = await resumed_connection.host.resume_session(session_id)
     try:
@@ -226,6 +232,7 @@ async def test_explicit_active_model_target_controls_session_pin_update(
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     target_layer: str,
     updates_session_pin: bool,
+    process_services: ProcessServices,
 ) -> None:
     config_file = config_dir / "config.toml"
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
@@ -243,7 +250,9 @@ async def test_explicit_active_model_target_controls_session_pin_update(
     )
 
     connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     session = await connection.host.open_session()
     try:
@@ -278,6 +287,7 @@ async def test_removed_session_active_model_falls_back_to_default(
     tmp_path: Path,
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
+    process_services: ProcessServices,
 ) -> None:
     config_file = config_dir / "config.toml"
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
@@ -301,7 +311,9 @@ async def test_removed_session_active_model_falls_back_to_default(
     )
 
     connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     session = await connection.host.open_session()
     try:
@@ -319,7 +331,9 @@ async def test_removed_session_active_model_falls_back_to_default(
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
 
     resumed_connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     resumed = await resumed_connection.host.resume_session(session_id)
     try:
@@ -563,6 +577,7 @@ async def test_a_refused_model_pick_leaves_the_session_and_config_on_the_old_mod
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     pick: str,
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A session whose newest message holds an image and more text
     than a small model's compaction threshold. A message with an image cannot
@@ -610,6 +625,7 @@ async def test_a_refused_model_pick_leaves_the_session_and_config_on_the_old_mod
     connection = await connect_backend_contract_host(
         session_options=SessionOptions(cwd=str(tmp_path)),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     session = await connection.host.open_session()
     try:
@@ -654,6 +670,7 @@ async def test_a_mid_turn_pick_core_refuses_at_the_boundary_is_shown_and_the_ses
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    process_services: ProcessServices,
 ) -> None:
     """*Prepare*: A session on a roomy model, mid-turn, whose context still
     fits a small model.
@@ -706,6 +723,7 @@ async def test_a_mid_turn_pick_core_refuses_at_the_boundary_is_shown_and_the_ses
     connection = await connect_backend_contract_host(
         session_options=SessionOptions(cwd=str(tmp_path)),
         capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     session = await connection.host.open_session()
     try:
@@ -759,7 +777,7 @@ async def _next_turn_completed(session: AppServerSession) -> None:
 
 @pytest.mark.asyncio
 async def test_a_config_the_schema_refuses_fails_session_start_with_its_reason(
-    config_dir: Path,
+    config_dir: Path, process_services: ProcessServices
 ) -> None:
     """*Prepare*: A saved config with ``auto_compact_threshold = 0``.
     *Do*: Open a session.
@@ -772,7 +790,9 @@ async def test_a_config_the_schema_refuses_fails_session_start_with_its_reason(
     config["auto_compact_threshold"] = 0
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
     connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
 
     # Do
@@ -795,14 +815,15 @@ async def test_a_config_write_the_schema_refuses_is_rejected_with_its_reason(
     backend_contract_session: AppServerSession,
 ) -> None:
     """*Prepare*: A running session.
-    *Do*: Write only the bash default timeout, which needs its maximum too.
+    *Do*: Write only a bash default timeout above Vibe's maximum, which needs
+    its maximum too.
     *Assert*: The write is refused with the schema's reason, so clients show
     what to fix rather than a bare "Invalid configuration edit".
     """
     # Do
     with pytest.raises(AppServerResponseError) as refused:
         await backend_contract_session.resources.config.update({
-            "tools": {"bash": {"default_timeout": 30}}
+            "tools": {"bash": {"default_timeout": 600}}
         })
 
     # Assert

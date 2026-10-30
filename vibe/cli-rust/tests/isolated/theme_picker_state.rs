@@ -21,7 +21,6 @@ fn auto_uses_detection_and_failed_writes_restore_the_configured_theme() {
 
     app.session.startup_config.theme = "atom-one-light".into();
     theme::set_active("dracula");
-    app.commit_started();
     theme_picker::apply_event(&mut app, theme_picker::Event::Failed);
 
     assert_eq!(theme::active().name, "atom-one-light");

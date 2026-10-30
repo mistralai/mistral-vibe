@@ -14,14 +14,15 @@ import pytest_asyncio
 import respx
 import tomli_w
 
-from tests.backend.data.mistral import mistral_completion
 from tests.constants import (
     CHAT_COMPLETIONS_PATH,
     CONNECTORS_BOOTSTRAP_PATH,
     MISTRAL_BASE_URL,
 )
+from tests.stubs.mistral_responses import mistral_completion
 from vibe.app_server._account import AccountGateway
 from vibe.app_server._identity import IdentityGateway
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.host import AppServerHost
@@ -83,6 +84,7 @@ async def connect_backend_contract_host(
     capabilities: ClientCapabilities,
     account_gateway: AccountGateway | None = None,
     identity_gateway: IdentityGateway | None = None,
+    process_services: ProcessServices,
     process: HarnessProcess | None = None,
 ) -> BackendContractConnection:
     client_transport, server_transport = memory_transport_pair()
@@ -91,7 +93,7 @@ async def connect_backend_contract_host(
         transport_kind="in_process",
         account_gateway=account_gateway,
         identity_gateway=identity_gateway,
-        process=process,
+        process=process or HarnessProcess(services=process_services),
     )
     client = AppServerClient(client_transport, run_peer=harness.serve)
     host = await AppServerHost.connect(
@@ -105,10 +107,17 @@ async def connect_backend_contract_host(
 
 
 async def connect_backend_contract_client(
-    *, session_options: SessionOptions, capabilities: ClientCapabilities
+    *,
+    session_options: SessionOptions,
+    capabilities: ClientCapabilities,
+    process_services: ProcessServices,
 ) -> AppServerClient:
     client_transport, server_transport = memory_transport_pair()
-    harness = await create_harness_server(server_transport, transport_kind="in_process")
+    harness = await create_harness_server(
+        server_transport,
+        transport_kind="in_process",
+        process=HarnessProcess(services=process_services),
+    )
     client = AppServerClient(client_transport, run_peer=harness.serve)
     try:
         await client.start()
@@ -282,10 +291,12 @@ def _mistral_sse_payload(
 async def backend_contract_host(
     backend_contract_session_options: SessionOptions,
     backend_contract_capabilities: ClientCapabilities,
+    process_services: ProcessServices,
 ) -> AsyncIterator[AppServerHost]:
     connection = await connect_backend_contract_host(
         session_options=backend_contract_session_options,
         capabilities=backend_contract_capabilities,
+        process_services=process_services,
     )
     try:
         yield connection.host
@@ -297,10 +308,12 @@ async def backend_contract_host(
 async def backend_contract_connection(
     backend_contract_session_options: SessionOptions,
     backend_contract_capabilities: ClientCapabilities,
+    process_services: ProcessServices,
 ) -> AsyncIterator[BackendContractConnection]:
     connection = await connect_backend_contract_host(
         session_options=backend_contract_session_options,
         capabilities=backend_contract_capabilities,
+        process_services=process_services,
     )
     try:
         yield connection
@@ -320,10 +333,8 @@ async def backend_contract_session(
         await session.close()
 
 
-@pytest_asyncio.fixture
-async def backend_contract_persistent_connection(
-    config_dir: Path, tmp_path: Path
-) -> AsyncIterator[BackendContractConnection]:
+@pytest.fixture
+def backend_contract_persistent_config(config_dir: Path, tmp_path: Path) -> None:
     config_file = config_dir / "config.toml"
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
     config["session_logging"] = {
@@ -331,8 +342,16 @@ async def backend_contract_persistent_connection(
         "save_dir": str(tmp_path / "sessions"),
     }
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+
+
+@pytest_asyncio.fixture
+async def backend_contract_persistent_connection(
+    backend_contract_persistent_config: None, process_services: ProcessServices
+) -> AsyncIterator[BackendContractConnection]:
     connection = await connect_backend_contract_host(
-        session_options=SessionOptions(), capabilities=ClientCapabilities()
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
     )
     try:
         yield connection

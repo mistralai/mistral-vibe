@@ -7,6 +7,9 @@ from e2e.app_server.scenario import Timeline
 
 handshake = proxy_handshake()
 request_methods = METHODS
-screen_contains = ("Proxy setup cancelled.",)
-screen_excludes = ("Proxy settings saved.", "Proxy Configuration")
+screen_excludes = (
+    "Proxy setup cancelled.",
+    "Proxy settings saved.",
+    "Proxy Configuration",
+)
 timeline: Timeline = ["/proxy-setup\r", "http://should-not-save:8080", "\x1b"]
