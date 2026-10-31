@@ -551,7 +551,12 @@ class UnifiedPluginProvider:
         # description and getting the other's behaviour. It loses the name
         # here on every half at once.
         resolved = (
-            resolve_agent_types(workspace, tools, reserved=plugin_agent_names(agents)),
+            resolve_agent_types(
+                workspace,
+                tools,
+                reserved=plugin_agent_names(agents),
+                harness_files=self._harness_files,
+            ),
             declared_agent_types(agents, tools),
         )
         return SessionPluginProjection(

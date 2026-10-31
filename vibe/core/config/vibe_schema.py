@@ -17,6 +17,7 @@ from pydantic import (
     Field,
     PrivateAttr,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -42,7 +43,10 @@ from vibe.core.config._defaults import (
 # (vibe_schema.py imports from vibe.observability.logging). The constant
 # lives in vibe.config_values.
 from vibe.core.config._model_aliases import build_alias_index, warn_ignored_alias
-from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.config.harness_files import (
+    HarnessFilesManager,
+    get_harness_files_manager,
+)
 from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.models import (
     ACTIVE_MODEL_SELECTOR,
@@ -102,6 +106,13 @@ def _strip_session_pattern_wildcard(pattern: str) -> str:
     if pattern.endswith(" *"):
         return pattern[:-2]
     return pattern
+
+
+def _harness_files_from_context(context: Any) -> HarnessFilesManager | None:
+    if not isinstance(context, Mapping):
+        return None
+    harness_files = context.get("harness_files")
+    return harness_files if isinstance(harness_files, HarnessFilesManager) else None
 
 
 class EnvValueOrigin(StrEnum):
@@ -466,6 +477,7 @@ class VibeConfigSchema(ConfigSchema):
     })
 
     _validation_warnings: list[str] = PrivateAttr(default_factory=list)
+    _harness_files: HarnessFilesManager | None = PrivateAttr(default=None)
     # The pin the fallback replaced, so validate_merged can skip the orphan
     # notice for the same alias.
     _missing_pin: str = PrivateAttr(default="")
@@ -505,12 +517,14 @@ class VibeConfigSchema(ConfigSchema):
         *,
         origins: dict[str, str],
         defined_entries: dict[str, dict[str, tuple[str, ...]]],
+        context: Mapping[str, Any] | None = None,
     ) -> Self:
         data, orphans = _without_orphan_model_overrides(data)
         data, thinking_warnings = _without_blank_thinking_levels(data)
         config = super().validate_merged(
-            data, origins=origins, defined_entries=defined_entries
+            data, origins=origins, defined_entries=defined_entries, context=context
         )
+        config._harness_files = _harness_files_from_context(context)
         for message in thinking_warnings:
             logger.warning("%s", message)
             config._validation_warnings.append(message)
@@ -1320,7 +1334,9 @@ class VibeConfigSchema(ConfigSchema):
 
     @property
     def system_prompt(self) -> str:
-        return load_system_prompt(self.system_prompt_id)
+        return load_system_prompt(
+            self.system_prompt_id, harness_files=self._harness_files
+        )
 
     @property
     def compaction_prompt(self) -> str:
@@ -1328,6 +1344,7 @@ class VibeConfigSchema(ConfigSchema):
             self.compaction_prompt_id,
             setting_name="compaction_prompt_id",
             builtins={"compact": UtilityPrompt.COMPACT.path},
+            harness_files=self._harness_files,
         )
 
     @property
@@ -1336,6 +1353,7 @@ class VibeConfigSchema(ConfigSchema):
             self.title_prompt_id,
             setting_name="title_prompt_id",
             builtins={"session_title": UtilityPrompt.SESSION_TITLE.path},
+            harness_files=self._harness_files,
         )
 
     @model_validator(mode="after")
@@ -1607,18 +1625,31 @@ class VibeConfigSchema(ConfigSchema):
         return self
 
     @model_validator(mode="after")
-    def _check_system_prompt(self) -> VibeConfigSchema:
-        _ = self.system_prompt
+    def _check_system_prompt(self, info: ValidationInfo) -> VibeConfigSchema:
+        _ = load_system_prompt(
+            self.system_prompt_id,
+            harness_files=_harness_files_from_context(info.context),
+        )
         return self
 
     @model_validator(mode="after")
-    def _check_compaction_prompt(self) -> VibeConfigSchema:
-        _ = self.compaction_prompt
+    def _check_compaction_prompt(self, info: ValidationInfo) -> VibeConfigSchema:
+        _ = load_prompt(
+            self.compaction_prompt_id,
+            setting_name="compaction_prompt_id",
+            builtins={"compact": UtilityPrompt.COMPACT.path},
+            harness_files=_harness_files_from_context(info.context),
+        )
         return self
 
     @model_validator(mode="after")
-    def _check_title_prompt(self) -> VibeConfigSchema:
-        _ = self.title_prompt
+    def _check_title_prompt(self, info: ValidationInfo) -> VibeConfigSchema:
+        _ = load_prompt(
+            self.title_prompt_id,
+            setting_name="title_prompt_id",
+            builtins={"session_title": UtilityPrompt.SESSION_TITLE.path},
+            harness_files=_harness_files_from_context(info.context),
+        )
         return self
 
 

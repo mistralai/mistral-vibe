@@ -12,6 +12,7 @@ from vibe.app_server._agent_types import (
     AgentToolCatalogue,
     AgentTypeRejection,
     AgentTypeSource,
+    agent_instructions,
     resolve_agent_types,
     workspace_agent_rejections,
     workspace_agent_types,
@@ -171,6 +172,36 @@ def test_a_named_prompt_becomes_the_prompt_the_child_runs_on(
     )
 
     assert resolved.profiles[0].instructions == "Report, never repair."
+
+
+def test_a_subagent_prompt_uses_the_session_project_directory(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """Subagent bindings load project prompts relative to the session workdir."""
+    project_prompts = tmp_path / ".vibe" / "prompts"
+    project_prompts.mkdir(parents=True)
+    (project_prompts / "reviewing.md").write_text(
+        "Project instructions.", encoding="utf-8"
+    )
+    _write_prompt(config_dir, "reviewing", "User instructions.")
+
+    trusted_folders_manager.trust_for_session(tmp_path)
+    harness_files = HarnessFilesManager(sources=("user", "project")).for_session(
+        tmp_path
+    )
+    profile = AgentProfile(
+        name="reviewer",
+        display_name="Reviewer",
+        description="Reviews a diff",
+        safety=AgentSafety.SAFE,
+        agent_type=AgentType.SUBAGENT,
+        overrides={"system_prompt_id": "reviewing"},
+        source_path=tmp_path / ".vibe" / "agents" / "reviewer.toml",
+    )
+
+    assert agent_instructions(profile, harness_files=harness_files) == (
+        "Project instructions."
+    )
 
 
 def test_explicit_instructions_win_over_a_named_prompt(

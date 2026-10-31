@@ -267,7 +267,7 @@ def _extra_root_line(root: Path) -> str:
 
 
 def _agent_profile_prompt(
-    profile: AgentProfile,
+    profile: AgentProfile, *, harness_files: HarnessFilesManager | None = None
 ) -> tuple[str | None, ConfigIssue | None]:
     """The prompt text an agent profile asks for, or why it cannot have it.
 
@@ -282,7 +282,7 @@ def _agent_profile_prompt(
     if not isinstance(prompt_id, str) or not prompt_id:
         return None, None
     try:
-        return load_system_prompt(prompt_id), None
+        return load_system_prompt(prompt_id, harness_files=harness_files), None
     except (MissingPromptFileError, ValueError) as error:
         logger.warning("Agent %r: %s", profile.name, error)
         return None, ConfigIssue(
@@ -1596,8 +1596,11 @@ class HarnessProcess:
                 reserved=plugin_agent_names(
                     session_plugins.materialized.resolution.agents
                 ),
+                harness_files=harness_files,
             )
-            profile_prompt, prompt_issue = _agent_profile_prompt(active_profile)
+            profile_prompt, prompt_issue = _agent_profile_prompt(
+                active_profile, harness_files=harness_files
+            )
             return UnifiedRuntimeDerivation(
                 runtime=build_unified_runtime_snapshot(
                     orchestrator,
