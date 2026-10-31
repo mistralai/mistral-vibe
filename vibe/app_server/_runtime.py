@@ -143,6 +143,7 @@ from vibe.core.telemetry.types import LaunchContext
 from vibe.core.tools.manager import ToolManager
 from vibe.core.tools.models import ToolPermission
 from vibe.core.tools.permissions import PermissionStore
+from vibe.core.tracing import setup_tracing
 from vibe.core.utils import get_windows_bash_path, is_windows
 from vibe.core.utils.matching import name_matches
 from vibe.observability.logging import logger
@@ -170,6 +171,20 @@ def _command_environment_mode() -> _CommandEnvironmentMode:
     if get_windows_bash_path() is not None:
         return "git_bash"
     return "powershell"
+
+
+def _otel_enabled(config: VibeConfigSchema) -> bool:
+    """Return whether this config can install the process-wide OTEL provider."""
+    if not (config.enable_telemetry and config.enable_otel):
+        return False
+    from vibe.core.tracing import build_otel_span_exporter_config
+
+    return (
+        build_otel_span_exporter_config(
+            config.otel_endpoint, config.get_mistral_provider()
+        )
+        is not None
+    )
 
 
 def _command_tool_name(mode: _CommandEnvironmentMode) -> str:
@@ -860,6 +875,7 @@ class HarnessProcess:
         self._project_instructions = project_instructions
         self._close_lock = asyncio.Lock()
         self._closed = False
+        self._tracing_configured = False
         self._shared = shared
         self._experimental_harness_host: object | None = None
         self._throwaway_storage_root = ThrowawayStorageRoot()
@@ -1164,6 +1180,7 @@ class HarnessProcess:
             HelperCrashCount,
             LocalModelRoute,
             LocalRuntimeAdapterConfig,
+            OtelTracingHooks,
             SessionWorkspace,
             compile_foreign_hooks,
             rust_model_facts,
@@ -1201,6 +1218,70 @@ class HarnessProcess:
             ProvidedToolNames,
             UnifiedPermissionResolver,
         )
+        from vibe.core.tracing import agent_span, model_call_span, tool_span
+
+        route_type: Any = LocalModelRoute
+        route_fields = getattr(LocalModelRoute, "__dataclass_fields__", {})
+        context_settings_type: Any = RustContextSettings
+        context_settings_fields = getattr(RustContextSettings, "model_fields", {})
+
+        def local_model_route(
+            *,
+            model: str,
+            temperature: float,
+            thinking: str,
+            supports_images: bool,
+            top_p: float | None = None,
+            max_output_tokens: int | None = None,
+            context_window: int | None = None,
+        ) -> LocalModelRoute:
+            route_kwargs: dict[str, object] = {
+                "model": model,
+                "temperature": temperature,
+                "thinking": thinking,
+            }
+            # The released runtime may lag behind Vibe while a new Harness field
+            # is being prepared. Pass each field only when that runtime accepts
+            # it; the editable frontier job exercises the new field immediately.
+            optional_fields = {
+                "supports_images": supports_images,
+                "top_p": top_p,
+                "max_output_tokens": max_output_tokens,
+                "context_window": context_window,
+            }
+            for name, value in optional_fields.items():
+                if name in route_fields:
+                    route_kwargs[name] = value
+            return route_type(**route_kwargs)
+
+        def core_context_settings(
+            *,
+            compaction: object,
+            agent_supports_images: bool,
+            compaction_supports_images: bool,
+        ) -> RustContextSettings:
+            context_kwargs: dict[str, object] = {"compaction": compaction}
+            # The local Runtime shapes the standalone compaction request, so
+            # Core may fall back to it after a failed in-context attempt.
+            if "compaction_fallback" in context_settings_fields:
+                context_kwargs["compaction_fallback"] = "standalone"
+            if "image_delivery" in context_settings_fields:
+                context_kwargs["image_delivery"] = {
+                    "agent": "native" if agent_supports_images else "resource_link",
+                    "compaction": "native"
+                    if compaction_supports_images
+                    else "resource_link",
+                }
+            if "image_token_cost" in context_settings_fields:
+                context_kwargs["image_token_cost"] = "fixed"
+            if "input_modalities" in context_settings_fields:
+                # One shared list for both completion purposes; the compaction
+                # model's own image support only steers image delivery.
+                context_kwargs["input_modalities"] = (
+                    ["text", "image"] if agent_supports_images else ["text"]
+                )
+            return context_settings_type(**context_kwargs)
+
         from vibe.questions import UserQuestionRequest, UserQuestionResult
 
         config_orchestrator = session_config.config_orchestrator
@@ -1505,6 +1586,7 @@ class HarnessProcess:
             settings: UnifiedSessionSettings,
             candidate: UnifiedConfigCandidate | None = None,
         ) -> UnifiedRuntimeDerivation:
+            otel_enabled = _otel_enabled(config)
             # A candidate not installed yet derives from itself throughout.
             orchestrator = (
                 config_orchestrator if candidate is None else candidate.orchestrator
@@ -1831,6 +1913,16 @@ class HarnessProcess:
                     # A budget of 0 turns retries off, the stall retry included.
                     retry_max_elapsed_time_s=config.api_retry_max_elapsed_time,
                     enable_system_trust_store=config.enable_system_trust_store,
+                    enable_otel=otel_enabled,
+                    tracing=(
+                        OtelTracingHooks(
+                            agent_span=agent_span,
+                            model_call_span=model_call_span,
+                            tool_span=tool_span,
+                        )
+                        if otel_enabled
+                        else None
+                    ),
                     workspace=workspace,
                     # The library environment goes on top: a plugin that declares a
                     # Python or Node library is only usable if the search paths
@@ -1984,6 +2076,12 @@ class HarnessProcess:
             return sandbox_path(options.cwd or workspace, cwd=workspace)
         return Path(options.cwd or Path.cwd()).expanduser().resolve()
 
+    def _configure_tracing(self, config: VibeConfigSchema) -> None:
+        if self._tracing_configured or not _otel_enabled(config):
+            return
+        setup_tracing(config)
+        self._tracing_configured = True
+
     async def _build_session_config(
         self,
         options: SessionOptions,
@@ -2081,6 +2179,7 @@ class HarnessProcess:
         tried = built.org_config_tried
         saved_failure = built.org_config_failure
         # After the org config: it can set the process-wide trust store too.
+        self._configure_tracing(config_orchestrator.config)
         if check_process_settings and self._process_settings is not None:
             self._process_settings.check(config_orchestrator.config)
         # Every session crosses this config build, and the unified harness

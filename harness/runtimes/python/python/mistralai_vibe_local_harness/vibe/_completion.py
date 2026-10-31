@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from dataclasses import replace
 from http import HTTPStatus
 import json
@@ -210,7 +210,7 @@ class _ProvisionalDeltaEmitter:
             )
 
 
-async def execute_completion(
+async def execute_completion(  # noqa: PLR0915 - one completion lifecycle
     action: RustLLMCallAction,
     messages: list[RustMessage],
     tools: list[RustToolDefinition],
@@ -290,39 +290,62 @@ async def execute_completion(
     malformed = MalformedToolCalls()
     succeeded = False
     try:
-        if config.backend == "mistral":
-            # Compaction streams too, although nothing is published from it: a
-            # long summary sent as one plain response transfers no bytes until
-            # it is complete, and proxies that close idle connections cut it.
-            result = await execute_mistral_completion(
-                messages,
-                tools,
-                request_config,
-                credential,
-                route,
-                stream=True,
-                metadata=(
-                    config.completion_metadata(action.purpose, action.iteration)
-                    if config.completion_metadata is not None
-                    else None
-                ),
-                on_retry=retry_observer,
-                on_delta=on_delta,
-                malformed=malformed,
-            )
-        elif config.backend == "generic":
-            result = await execute_generic_completion(
-                messages,
-                tools,
-                request_config,
-                credential,
-                route=route,
-                on_retry=retry_observer,
-                on_delta=on_delta,
-                malformed=malformed,
-            )
-        else:
-            raise ValueError(f"Unsupported completion backend: {config.backend}")
+        async with AsyncExitStack() as spans:
+            if config.tracing is not None:
+                if action.purpose == "agent":
+                    await spans.enter_async_context(
+                        config.tracing.agent_span(model=route.model)
+                    )
+                await spans.enter_async_context(
+                    config.tracing.model_call_span(
+                        provider_name=config.provider,
+                        provider_api_style=config.api_style,
+                        model=route.model,
+                        streaming=config.backend == "mistral"
+                        or action.purpose == "agent"
+                        or reasoning_watch is not None,
+                        temperature=route.temperature,
+                        max_tokens=config.output_token_cap(route),
+                        metadata={
+                            "call_type": action.purpose,
+                            "message_id": action.action_id,
+                        },
+                    )
+                )
+            if config.backend == "mistral":
+                result = await execute_mistral_completion(
+                    messages,
+                    tools,
+                    request_config,
+                    credential,
+                    route,
+                    # Compaction streams too, although nothing is published from it: a
+                    # long summary sent as one plain response transfers no bytes until
+                    # it is complete, and proxies that close idle connections cut it.
+                    stream=True,
+                    metadata=(
+                        config.completion_metadata(action.purpose, action.iteration)
+                        if config.completion_metadata is not None
+                        else None
+                    ),
+                    on_retry=retry_observer,
+                    on_delta=on_delta,
+                    malformed=malformed,
+                )
+            elif config.backend == "generic":
+                result = await execute_generic_completion(
+                    messages,
+                    tools,
+                    request_config,
+                    credential,
+                    route=route,
+                    on_retry=retry_observer,
+                    on_delta=on_delta,
+                    malformed=malformed,
+                )
+            else:
+                raise ValueError(f"Unsupported completion backend: {config.backend}")
+
         succeeded = True
     except CompactionReasoningLimitExceeded as stopped:
         succeeded = True
