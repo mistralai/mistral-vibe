@@ -686,8 +686,14 @@ def git_repository_identity(cwd: Path) -> str | None:
         return str(config_paths[-1].parent.absolute())
 
 
-def _git_config_entries(cwd: Path) -> tuple[tuple[str, str, str], ...]:
-    entries: list[tuple[str, str, str]] = []
+def _git_config_entries(cwd: Path) -> tuple[tuple[str, str, str] | None, ...]:
+    """Parse repository-owned Git config into (section, key, value) entries.
+
+    ``None`` marks a line this parser cannot confidently interpret. Callers
+    must fail closed on it: Git may still honor the line, so an unknown line
+    can hide an executable helper.
+    """
+    entries: list[tuple[str, str, str] | None] = []
     for config_path in _git_config_paths(cwd):
         try:
             lines = config_path.read_text(encoding="utf-8").splitlines()
@@ -698,20 +704,30 @@ def _git_config_entries(cwd: Path) -> tuple[tuple[str, str, str], ...]:
             line = raw_line.strip().lstrip("\ufeff")
             if not line or line.startswith(("#", ";")):
                 continue
-            if line.startswith("[") and "]" in line:
+            if line.startswith("["):
+                close = line.find("]")
+                if close == -1:
+                    entries.append(None)
+                    continue
                 section = (
-                    line[1 : line.index("]")]
+                    line[1:close]
                     .split(maxsplit=1)[0]
                     .split(".", maxsplit=1)[0]
                     .casefold()
                 )
-                continue
+                # Git accepts the documented single-line form
+                # "[section] key = value"; parse whatever follows the "]".
+                line = line[close + 1 :].strip()
+                if not line:
+                    continue
             if match := _GIT_CONFIG_ENTRY.match(line):
                 entries.append((
                     section,
                     match.group("key").casefold(),
                     (match.group("value") or "true").strip().strip('"'),
                 ))
+            else:
+                entries.append(None)
     return tuple(entries)
 
 
@@ -726,9 +742,11 @@ def git_repository_requires_approval(tokens: list[str], *, cwd: Path) -> bool:
         return False
 
     subcommand = tokens[_GIT_SUBCOMMAND_INDEX].casefold()
-    entries = _git_config_entries(cwd)
-    if any(
-        # Includes can hide any of the executable settings checked below.
+    parsed_entries = _git_config_entries(cwd)
+    entries = [entry for entry in parsed_entries if entry is not None]
+    if len(entries) != len(parsed_entries) or any(
+        # Fail closed on lines the parser cannot model, and includes can hide
+        # any of the executable settings checked below.
         section in {"include", "includeif"}
         or (section == "core" and key == "pager" and _git_value_is_active(value))
         or (section == "pager" and key == subcommand and _git_value_is_active(value))

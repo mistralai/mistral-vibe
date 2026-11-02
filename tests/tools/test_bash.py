@@ -8,7 +8,9 @@ import pytest
 from vibe.core.tools.base import BaseToolState, ToolPermission
 from vibe.core.tools.builtins._shell_command_policy import (
     _COMMAND_POLICIES,
+    _git_config_entries,
     analyze_shell_command_policy,
+    git_repository_requires_approval,
     has_option_guardrails,
 )
 from vibe.core.tools.builtins._shell_permission_analysis import (
@@ -1524,6 +1526,23 @@ def test_git_readers_remain_allowed_for_an_ordinary_repository(
         ("git log", "[gpg]\n\tprogram = ./fake-gpg\n"),
         ("git log", '[gpg "ssh"]\n\tprogram = ./fake-gpg\n'),
         ("git log", '[merge "unsafe"]\n\tdriver = ./merge-driver\n'),
+        # Git accepts "[section] key = value" on a single line; the guard must
+        # honor the same forms.
+        ("git status", "[core] fsmonitor = ./monitor\n"),
+        ("git status", "[core]fsmonitor=./monitor\n"),
+        ("git status", '[core] fsmonitor = "./monitor"\n'),
+        ("git status", '[filter "unsafe"] clean = ./clean\n'),
+        ("git diff", '[filter "unsafe"] process = ./filter\n'),
+        ("git diff", "[diff] external = ./external-diff\n"),
+        ("git diff", "[diff.unsafe] textconv = ./textconv\n"),
+        ("git diff", "[core] pager = ./pager\n"),
+        ("git log", "[pager] log = ./pager\n"),
+        ("git status", "[pager] status = ./pager\n"),
+        ("git status", "[include] path = ./included-config\n"),
+        ("git log", '[includeIf "gitdir:/x/"] path = ./included-config\n'),
+        ("git log", "[gpg] program = ./fake-gpg\n"),
+        ("git log", '[gpg "ssh"] program = ./fake-gpg\n'),
+        ("git log", '[merge "unsafe"] driver = ./merge-driver\n'),
     ],
     ids=[
         "fsmonitor",
@@ -1540,6 +1559,21 @@ def test_git_readers_remain_allowed_for_an_ordinary_repository(
         "signature-program",
         "ssh-signature-program",
         "merge-driver",
+        "fsmonitor-single-line",
+        "fsmonitor-single-line-nospace",
+        "fsmonitor-single-line-quoted",
+        "clean-filter-single-line",
+        "process-filter-single-line",
+        "external-diff-single-line",
+        "textconv-single-line-dotted-subsection",
+        "core-pager-single-line",
+        "log-pager-single-line",
+        "status-pager-single-line",
+        "include-single-line",
+        "includeif-single-line",
+        "signature-program-single-line",
+        "ssh-signature-program-single-line",
+        "merge-driver-single-line",
     ],
 )
 def test_git_readers_require_approval_for_executable_repository_config(
@@ -1559,6 +1593,77 @@ def test_git_readers_require_approval_for_executable_repository_config(
 
     assert isinstance(result, PermissionContext)
     assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "config",
+    [
+        "[core] repositoryformatversion = 0\n",
+        "[core]\n\trepositoryformatversion = 0\n",
+        "[core] fsmonitor = false\n",
+        "",
+    ],
+    ids=["single-line-benign", "multi-line-benign", "single-line-inactive", "empty"],
+)
+def test_git_readers_remain_allowed_for_inert_repository_config(
+    shell_kind, config, tmp_path, monkeypatch
+):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text(config)
+    monkeypatch.chdir(tmp_path)
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command="git status"))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command="git status"))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "config",
+    [
+        "[core\n\tfsmonitor = ./monitor\n",
+        "not a config line\n",
+        "[core] ] fsmonitor = ./monitor\n",
+    ],
+    ids=["unterminated-section", "garbage-line", "junk-after-section"],
+)
+def test_git_readers_fail_closed_on_unparseable_repository_config(
+    shell_kind, config, tmp_path, monkeypatch
+):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text(config)
+    monkeypatch.chdir(tmp_path)
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command="git status"))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command="git status"))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+
+
+def test_git_config_entries_parse_single_line_section_form(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text(
+        '[core] fsmonitor = ./monitor\n[diff "x"] textconv = ./textconv\n'
+    )
+    entries = _git_config_entries(tmp_path)
+    assert ("core", "fsmonitor", "./monitor") in entries
+    assert ("diff", "textconv", "./textconv") in entries
+    assert git_repository_requires_approval(["git", "status"], cwd=tmp_path)
+    assert git_repository_requires_approval(["git", "diff"], cwd=tmp_path)
 
 
 @pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
