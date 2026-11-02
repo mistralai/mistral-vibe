@@ -1632,8 +1632,9 @@ def test_git_readers_remain_allowed_for_inert_repository_config(
         "[core\n\tfsmonitor = ./monitor\n",
         "not a config line\n",
         "[core] ] fsmonitor = ./monitor\n",
+        "[] fsmonitor = ./monitor\n",
     ],
-    ids=["unterminated-section", "garbage-line", "junk-after-section"],
+    ids=["unterminated-section", "garbage-line", "junk-after-section", "empty-section"],
 )
 def test_git_readers_fail_closed_on_unparseable_repository_config(
     shell_kind, config, tmp_path, monkeypatch

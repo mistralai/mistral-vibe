@@ -706,15 +706,12 @@ def _git_config_entries(cwd: Path) -> tuple[tuple[str, str, str] | None, ...]:
                 continue
             if line.startswith("["):
                 close = line.find("]")
-                if close == -1:
+                header_parts = line[1:close].split(maxsplit=1) if close != -1 else []
+                header = header_parts[0] if header_parts else ""
+                if not header:
                     entries.append(None)
                     continue
-                section = (
-                    line[1:close]
-                    .split(maxsplit=1)[0]
-                    .split(".", maxsplit=1)[0]
-                    .casefold()
-                )
+                section = header.split(".", maxsplit=1)[0].casefold()
                 # Git accepts the documented single-line form
                 # "[section] key = value"; parse whatever follows the "]".
                 line = line[close + 1 :].strip()
