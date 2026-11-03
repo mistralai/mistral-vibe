@@ -21,11 +21,14 @@ from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
+    from vibe.core.platform_auth import PlatformCredentialFactory
 
 
-def load_cached_model_catalog(config: VibeConfigSchema) -> ModelCatalogResponse | None:
+def load_cached_model_catalog(
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
+) -> ModelCatalogResponse | None:
     """Return the cached catalog for this user's credential, if fresh enough."""
-    key = _cache_key(config)
+    key = _cache_key(config, credentials)
     if key is None:
         return None
     return load_keyed_entry(
@@ -41,6 +44,7 @@ def store_cached_model_catalog(
     response: ModelCatalogResponse,
     *,
     fetched_for: str | None = None,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> None:
     """Overwrite the cached catalog for this user's credential.
 
@@ -48,9 +52,9 @@ def store_cached_model_catalog(
     response is authoritative. Only for the user it was fetched for (see
     ``may_cache_under``).
     """
-    from vibe.core.telemetry.send import may_cache_under
+    from vibe.core.platform_auth._mistral import may_cache_under
 
-    key = _cache_key(config)
+    key = _cache_key(config, credentials)
     if key is None or not may_cache_under(key, fetched_for=fetched_for):
         return
     store_keyed_entry(
@@ -65,7 +69,9 @@ def _parse_catalog_payload(payload: Any) -> ModelCatalogResponse | None:
     return catalog
 
 
-def _cache_key(config: VibeConfigSchema) -> str | None:
+def _cache_key(
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
+) -> str | None:
     from vibe.core.telemetry.send import mistral_credential_cache_key
 
-    return mistral_credential_cache_key(config)
+    return mistral_credential_cache_key(config, credentials)

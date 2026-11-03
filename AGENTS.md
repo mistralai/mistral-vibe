@@ -26,6 +26,7 @@ Before architecture-affecting changes, read [0002 Ownership Boundaries](docs/adr
 | Narration playback, TTS, audio output device following, or the `AudioPlayer`/`DeviceFollower`/`NarrationController` classes | [0017 Narration Playback in the ACP Subprocess](docs/adr/0017-narration-playback-in-subprocess.md) |
 | Adding agent behavior, custom tools, built-in plugins/skills, RPC families, or feature-module dependencies | [0018 Modular App-Server Capabilities](docs/adr/0018-modular-app-server-capabilities.md) |
 | Adding state shared by every channel or session of the process, a remote value refreshed for all sessions, or an app-server entry point | [0019 Process Services](docs/adr/0019-process-services.md) |
+| Calling the runtime from the app server, adding a direct runtime call or a `vibe.*` extension item, the Session API path flag, or moving work between the app server and the runtime | [0020 Runtime Access Through the Session API](docs/adr/0020-runtime-access-through-the-session-api.md) |
 
 Superseded records: [0003](docs/adr/0003-event-driven-agent-loop.md) → 0009; [0011](docs/adr/0011-unified-harness-backend.md) → 0002. Their paths remain for existing links.
 

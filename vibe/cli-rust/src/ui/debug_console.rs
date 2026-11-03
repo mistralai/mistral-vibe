@@ -57,7 +57,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     // Solid left border in `$foreground-muted`, one column of padding each side.
     let block = Block::default()
         .borders(Borders::LEFT)
-        .border_style(theme::text(theme::popup_border()))
+        .border_style(theme::border_style())
         .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     f.render_widget(block, area);

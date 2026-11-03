@@ -27,6 +27,7 @@ pub enum Kind {
     Rewind,
     Mcp,
     Plugins,
+    Context,
     McpOAuth,
     ConnectorAuth,
     RemoteProject,

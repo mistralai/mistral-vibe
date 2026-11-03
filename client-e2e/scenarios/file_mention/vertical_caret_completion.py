@@ -10,7 +10,6 @@ _SECOND_LINE = "x" * len(_QUERY)
 
 capture_startup = False
 capture_steps = {2, 3, 6, 7}
-settle_per_key = True
 expected_clipboard = f"@data/fixture.json !\n{_SECOND_LINE}"
 
 timeline: Timeline = [

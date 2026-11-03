@@ -1,7 +1,7 @@
 //! `/theme` picker state: an option list of the theme names with live
 //! preview on highlight and persist on select.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::app::App;
 use crate::ui::theme;
@@ -38,7 +38,7 @@ pub fn navigate(app: &mut App, down: bool) {
     app.theme_picker
         .list
         .step(down, options().len(), true, |_| true);
-    app.theme_picker.preview_at = Some(Instant::now() + PREVIEW_DEBOUNCE);
+    app.theme_picker.preview_at = Some(crate::clock::real_now() + PREVIEW_DEBOUNCE);
 }
 
 /// Apply the highlighted option's theme so the whole UI repaints in it.
@@ -62,7 +62,7 @@ pub enum Event {
     Failed,
 }
 
-/// Apply the server's answer and release the commit that was in flight.
+/// Apply the server's answer.
 pub fn apply_event(app: &mut App, event: Event) {
     match event {
         Event::Applied(name) => {

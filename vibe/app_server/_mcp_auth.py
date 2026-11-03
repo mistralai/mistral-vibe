@@ -408,6 +408,7 @@ class MCPAuthenticationService(MCPAuthorizationProvider):
                 timeout=server.startup_timeout_sec,
                 verify=build_ssl_context(),
             ) as client:
+                await provider.discover_authorization_server(client)
                 await client.get(server.url)
         except Exception as exc:
             classified = unwrap_oauth_refresh_error(exc)

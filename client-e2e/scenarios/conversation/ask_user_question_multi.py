@@ -11,14 +11,9 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-env = {
-    "VIBE_INPUT_GRACE_PERIOD_MS": "0",
-    "VIBE_REPLAY_SETTLE_BUSY": "1",
-    "VIBE_TYPING_GRACE_PERIOD_MS": "0",
-}
+env = {"VIBE_INPUT_GRACE_PERIOD_MS": "0", "VIBE_TYPING_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
-# The prompt frame races the handshake under `SETTLE_BUSY`; capture from the
-# released callback onward.
+# Capture from the released callback onward.
 capture_startup = False
 capture_steps = {1, 2, 3, 4}
 
@@ -76,6 +71,3 @@ timeline: Timeline = [
     _CLICK_CACHING,
     _LEFT,
 ]
-
-# Each key must land on a settled UI: batching changes the outcome here.
-settle_per_key = True

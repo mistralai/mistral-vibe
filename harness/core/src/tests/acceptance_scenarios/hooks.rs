@@ -674,6 +674,102 @@ fn pre_agent_skip_completes_the_turn_and_the_next_turn_runs() {
     runtime.finish_turn_with_text(next_turn_id, &next_completion, "done");
 }
 
+///
+/// *Prepare*: A pre-LLM hook is bound. The turn's first model call answers with text and a tool
+/// call, the tool succeeds, and the pre-LLM hook of the second model call is pending.
+/// *Do*: Skip the second model call from the hook with a reason.
+/// *Assert*: The held completion is discarded as skipped and the turn completes on the stop reason
+/// `skipped` with the reason as its output, not the first call's text, with no further Action.
+///
+#[test]
+fn pre_llm_skip_after_a_tool_call_completes_the_turn_with_the_reason() {
+    // Prepare
+    let turn_id = "turn-pre-llm-skip-later";
+    let mut config = config();
+    config.capabilities.hook_bindings = serde_json::from_value(json!([{
+        "id": "skip-pre-llm",
+        "point": "pre_llm_call",
+        "order": 0,
+        "selector": {"type": "always"},
+    }]))
+    .expect("pre-LLM hook config deserializes");
+    let mut runtime = SynchronousRuntime::new(config);
+    let first_hook = runtime
+        .apply(
+            user_message(turn_id, "read the notes", "queue"),
+            running(turn_id)
+                .dispatch(hook_call("pre_llm_call", &["skip-pre-llm"], Value::Null))
+                .observe(turn_started(turn_id, "read the notes")),
+        )
+        .only_action();
+    let first_completion = runtime
+        .apply(
+            hook_completed(&first_hook, "pre_llm_call", json!({"type": "continue"})),
+            running(turn_id).dispatch(llm_call(0)),
+        )
+        .only_action();
+    let calls = vec![tool_call(
+        "call-read",
+        "read_file",
+        json!({"path": "notes.txt"}),
+    )];
+    let first_text = json!({"type": "text", "text": "Let me read the notes first."});
+    let mut parts = vec![first_text.clone()];
+    parts.extend(calls.iter().cloned());
+    let mut committed = assistant_tool_calls_committed(turn_id, &first_completion, &calls);
+    committed["candidate"]["message"]["content"]
+        .as_array_mut()
+        .expect("candidate content is an array")
+        .insert(0, first_text);
+    let tool_action = runtime
+        .apply(
+            tool_call_completion(action_id(&first_completion), parts),
+            running(turn_id)
+                .dispatch(runtime_tool(
+                    "file_system.read_file",
+                    json!({"path": "notes.txt"}),
+                ))
+                .observe(committed)
+                .observe(tool_execution_started(turn_id, "call-read")),
+        )
+        .only_action();
+    let tool_result = text_tool_success(&tool_action, "file contents");
+    let second_hook = runtime
+        .apply(
+            tool_result.clone(),
+            running(turn_id)
+                .dispatch(hook_call("pre_llm_call", &["skip-pre-llm"], Value::Null))
+                .observe_completed_tool_result(&tool_action, &tool_result),
+        )
+        .only_action();
+    let reason = vec![json!({"type": "text", "text": "model budget spent"})];
+    let skip = hook_completed(
+        &second_hook,
+        "pre_llm_call",
+        json!({"type": "skip", "reason": reason.clone()}),
+    );
+    // The held completion's ID is never dispatched, so the scenario reads it from Core.
+    let held_completion = json!({
+        "action_id": runtime.preview_observations(skip.clone())[0]["action_id"],
+    });
+
+    // Do
+    let skipped = runtime.apply(
+        skip,
+        completed(turn_id, reason.clone())
+            .observe(agent_completion_candidate_discarded(
+                turn_id,
+                &held_completion,
+                "skipped",
+            ))
+            .observe(turn_completed_skipped(turn_id, reason)),
+    );
+
+    // Assert
+    assert!(skipped.actions().is_empty());
+    assert_ne!(action_id(&held_completion), action_id(&first_completion));
+}
+
 fn pre_agent_hook_call(binding_id: &str, text: &str) -> Value {
     hook_call(
         "pre_agent_turn",

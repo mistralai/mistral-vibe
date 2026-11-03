@@ -163,7 +163,7 @@ impl Step {
     pub(crate) fn output(&self) -> Option<Vec<ContentBlock>> {
         match turn_outcome(&self.state)? {
             TurnOutcome::Completed { output } => Some(output.clone()),
-            TurnOutcome::Rejected { .. } => Some(Vec::new()),
+            TurnOutcome::Rejected { reason } => Some(vec![ContentBlock::text(reason.clone())]),
             TurnOutcome::Failed { .. } | TurnOutcome::Interrupted { .. } => None,
         }
     }

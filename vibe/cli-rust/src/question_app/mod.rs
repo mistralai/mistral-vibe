@@ -7,7 +7,9 @@ pub use answers::{apply_event, cancel, dismiss, select, submit_other, toggle_foc
 pub use other::{handle_other_key, other_caret_at, paste_other, OtherField};
 
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::UiInstant;
 
 use crate::server::{CallbackAddress, UserQuestion, UserQuestionRequest};
 use serde_json::Value;
@@ -72,7 +74,7 @@ fn typing_debounce() -> Duration {
 }
 
 /// When the next question may open, or `None` when none is waiting.
-pub fn typing_pause_deadline(app: &App) -> Option<Instant> {
+pub fn typing_pause_deadline(app: &App) -> Option<UiInstant> {
     let last = app.chat_input.last_keystroke?;
     waiting(app).then(|| last + typing_debounce())
 }
@@ -80,7 +82,7 @@ pub fn typing_pause_deadline(app: &App) -> Option<Instant> {
 /// Take the input box with the oldest delivered question once the user has paused.
 pub fn show_pending(app: &mut App) {
     if app.question_app.open
-        || typing_pause_deadline(app).is_some_and(|deadline| Instant::now() < deadline)
+        || typing_pause_deadline(app).is_some_and(|deadline| crate::clock::now() < deadline)
     {
         return;
     }
@@ -100,7 +102,7 @@ pub fn show_pending(app: &mut App) {
     state.other_cursor = 0;
     state.other_scroll = 0;
     state.other_field = None;
-    state.mount_time = Some(Instant::now());
+    state.mount_time = Some(crate::clock::now());
     crate::terminal_notifier::action_required(app);
 }
 
@@ -177,7 +179,7 @@ pub fn is_submit_selected(app: &App) -> bool {
 pub fn is_within_grace_period(app: &App) -> bool {
     app.question_app
         .mount_time
-        .is_some_and(|at| at.elapsed() < input_grace_period())
+        .is_some_and(|at| crate::clock::since(at) < input_grace_period())
 }
 
 /// `INPUT_GRACE_PERIOD`, overridable so replayed keys can answer at once.

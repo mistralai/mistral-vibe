@@ -7,6 +7,11 @@ from typing import Literal
 import httpx2
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from vibe.core.platform_auth import (
+    PlatformCredentialProvider,
+    PlatformCredentialUnavailable,
+)
+from vibe.core.platform_auth._mistral import credential_request
 from vibe.core.telemetry.types import TeleportFailureDetails
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.types import TeleportMessageContext
@@ -90,7 +95,7 @@ class NuageClient:
     def __init__(
         self,
         base_url: str,
-        api_key: str,
+        credentials: PlatformCredentialProvider,
         *,
         client: VibeAsyncHTTPClient | None = None,
         timeout: float = 60.0,
@@ -98,7 +103,7 @@ class NuageClient:
         retry_delay_seconds: float = 0.5,
     ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._api_key = api_key
+        self._credentials = credentials
         self._client = client
         self._owns_client = client is None
         self._timeout = timeout
@@ -131,22 +136,26 @@ class NuageClient:
             self._owns_client = True
         return self._client
 
-    def _headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-
     async def start(self, request: NuageRequest) -> NuageResponse:
         response: httpx2.Response | None = None
         request_content = await asyncio.to_thread(_request_json_content, request)
         for attempt in range(self._max_start_attempts):
             try:
-                response = await self._http_client.post(
+                response = await credential_request(
+                    self._credentials,
+                    "POST",
                     f"{self._base_url}/api/v1/code/sessions",
-                    headers=self._headers(),
+                    client=self._http_client,
+                    headers={"Content-Type": "application/json"},
                     content=request_content,
                 )
+            except PlatformCredentialUnavailable as e:
+                raise ServiceTeleportError(
+                    "Sign in to Mistral to use Vibe Code Web.",
+                    telemetry_details=TeleportFailureDetails(
+                        failure_kind="credential_unavailable"
+                    ),
+                ) from e
             except _AMBIGUOUS_REQUEST_ERRORS as e:
                 if attempt < self._max_start_attempts - 1:
                     await asyncio.sleep(self._retry_delay_seconds)

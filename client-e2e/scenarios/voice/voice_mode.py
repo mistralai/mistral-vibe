@@ -11,5 +11,5 @@ handshake = {
     "runtime/read": {"runtime": {"config": _NO_KEY_PROVIDER}},
 }
 
-# Ctrl+R (0x12) toggles recording; with no resolvable key it errors before any audio.
-timeline: Timeline = ["\x12"]
+# Ctrl+T (0x14) toggles recording; with no resolvable key it errors before any audio.
+timeline: Timeline = ["\x14"]

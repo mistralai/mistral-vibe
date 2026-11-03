@@ -215,6 +215,5 @@ fn an_admin_enforced_setting_opens_no_editor_and_resets_nothing() {
 
     assert!(app.config_screen.edit.is_none());
     assert!(app.config_screen.open);
-    let in_flight = app.commit_started();
-    assert_eq!(in_flight.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert!(vibe_rs::work::idle(), "no write is started");
 }

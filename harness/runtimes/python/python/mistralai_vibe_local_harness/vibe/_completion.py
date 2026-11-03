@@ -37,6 +37,7 @@ from mistralai_vibe_local_harness.vibe._runtime_config import (
     LocalModelRoute,
     LocalRuntimeAdapterConfig,
     MalformedToolCallsTelemetry,
+    ModelRequest,
     ProviderRetry,
     ProviderStreamDelta,
     RequestSentTelemetry,
@@ -349,6 +350,10 @@ async def execute_completion(
         _report_malformed_tool_calls(
             action, config, route, malformed, succeeded=succeeded
         )
+    # Reported once the call succeeded, so the input a Host holds always pairs
+    # with the usage this result reports; outside the try so a sink error is not
+    # misclassified as a provider stream failure.
+    _emit_model_request(action, messages, tools, config)
     return RustCompletionSucceededEvent(action_id=action.action_id, result=result)
 
 
@@ -610,6 +615,27 @@ def _emit_request_sent(
         purpose=action.purpose,
         iteration=action.iteration,
         turn_id=action.turn_id,
+    )
+
+
+def _emit_model_request(
+    action: RustLLMCallAction,
+    messages: list[RustMessage],
+    tools: list[RustToolDefinition],
+    config: LocalRuntimeAdapterConfig,
+) -> None:
+    """Report an agent call's model input to the Host's model request sink.
+
+    Only agent calls are reported: a compaction request carries a summary
+    prompt, not the context the agent works in.
+    """
+    sink = config.model_request_sink
+    if sink is None or action.purpose != "agent" or action.turn_id is None:
+        return
+    sink(
+        ModelRequest(
+            turn_id=action.turn_id, messages=tuple(messages), tools=tuple(tools)
+        )
     )
 
 

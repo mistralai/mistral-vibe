@@ -2,11 +2,22 @@ use super::*;
 use crate::core::HarnessSettings;
 
 mod direct;
+mod direct_names;
 mod orchestration;
 mod programmatic;
 
 const PERMISSION_DENIED_REASON: &str = "Tool call denied by permission policy.";
 const APPROVAL_REJECTED_REASON: &str = "Tool call was rejected during approval.";
+
+fn model_permission_failure(call_id: &str, name: &str, reason: &str) -> Value {
+    json!({
+        "role": "tool",
+        "tool_call_id": call_id,
+        "name": name,
+        "outcome": "failure",
+        "content": [{"type": "text", "text": reason}],
+    })
+}
 
 fn permission_denied_failure() -> Value {
     permission_failure(PERMISSION_DENIED_REASON)

@@ -3,8 +3,6 @@
 Todo semantics come from the legacy tool's own module so the two harnesses cannot
 drift; only the storage differs, and the list is deliberately not carried across
 compaction -- durable notes belong in the scratchpad, which the agent reads back.
-
-Design: ``vibe/docs/design/unified-harness-todo-and-scratchpad.md``.
 """
 
 from __future__ import annotations
@@ -55,18 +53,22 @@ from vibe.app_server._session_peers import (
     LIST_SESSIONS_TOOL_NAME,
     READ_SESSION_TOOL_DESCRIPTION,
     READ_SESSION_TOOL_NAME,
+    RESTORE_SESSIONS_TOOL_DESCRIPTION,
+    RESTORE_SESSIONS_TOOL_NAME,
     SEND_TO_SESSION_TOOL_DESCRIPTION,
     SEND_TO_SESSION_TOOL_NAME,
     ArchiveSessionsArgs,
     AwaitsUser,
     ListSessionsArgs,
     ReadSessionArgs,
+    RestoreSessionsArgs,
     SendToSessionArgs,
     SessionPeerError,
     SessionPeers,
     run_archive_sessions,
     run_list_sessions,
     run_read_session,
+    run_restore_sessions,
     run_send_to_session,
 )
 from vibe.app_server._session_spawn import (
@@ -97,6 +99,7 @@ from vibe.app_server.protocol import (
     SessionPeerArchiveResponse,
     SessionPeerListResponse,
     SessionPeerReadResponse,
+    SessionPeerRestoreResponse,
     SessionPeerSendResponse,
 )
 from vibe.core.loop import LoopError
@@ -125,12 +128,13 @@ VIBE_PROVIDED_TOOL_NAMES = {
     f"{VIBE_TOOL_GROUP}.{READ_SESSION_TOOL_NAME}": READ_SESSION_TOOL_NAME,
     f"{VIBE_TOOL_GROUP}.{SEND_TO_SESSION_TOOL_NAME}": SEND_TO_SESSION_TOOL_NAME,
     f"{VIBE_TOOL_GROUP}.{ARCHIVE_SESSIONS_TOOL_NAME}": ARCHIVE_SESSIONS_TOOL_NAME,
+    f"{VIBE_TOOL_GROUP}.{RESTORE_SESSIONS_TOOL_NAME}": RESTORE_SESSIONS_TOOL_NAME,
 }
 
 # "ask" routes through Vibe's permission resolver. Cron defaults to allowed there,
 # while explicit config and session permission overrides still take precedence.
-# Starting, messaging or archiving sessions acts on real work, so they keep the
-# resolver's default: ask. Listing and reading sessions default to allowed there.
+# Starting, messaging, archiving or restoring sessions acts on real work, so they
+# keep the resolver's default: ask. Listing and reading sessions default to allowed there.
 # Scratchpad writes only inside the session's own storage and is pinned allowed.
 VIBE_PROVIDED_TOOL_MODES: dict[str, ToolApprovalMode] = {
     TODO_TOOL_NAME: "ask",
@@ -140,6 +144,7 @@ VIBE_PROVIDED_TOOL_MODES: dict[str, ToolApprovalMode] = {
     READ_SESSION_TOOL_NAME: "ask",
     SEND_TO_SESSION_TOOL_NAME: "ask",
     ARCHIVE_SESSIONS_TOOL_NAME: "ask",
+    RESTORE_SESSIONS_TOOL_NAME: "ask",
     SCRATCHPAD_TOOL_NAME: "allow",
 }
 
@@ -151,6 +156,7 @@ def vibe_tool_groups(
     disabled_tools: Sequence[str] = (),
     session_spawn: Sequence[SpawnModel] | None = None,
     session_peers: bool = False,
+    session_peer_restore: bool = False,
 ) -> list[RustToolGroupDefinition]:
     # Todo follows the legacy roster, so a tool switched off in config stays off here
     # too. The scratchpad has no catalogue entry to be filtered out of, so it reads
@@ -230,7 +236,15 @@ def vibe_tool_groups(
                 ArchiveSessionsArgs,
                 SessionPeerArchiveResponse,
             ),
+            (
+                RESTORE_SESSIONS_TOOL_NAME,
+                RESTORE_SESSIONS_TOOL_DESCRIPTION,
+                RestoreSessionsArgs,
+                SessionPeerRestoreResponse,
+            ),
         ):
+            if name == RESTORE_SESSIONS_TOOL_NAME and not session_peer_restore:
+                continue
             if _passes_tool_filters(
                 name, enabled=enabled_tools, disabled=disabled_tools
             ):
@@ -399,6 +413,14 @@ _PEER_TOOLS: dict[str, _PeerToolRunner] = {
     ARCHIVE_SESSIONS_TOOL_NAME: lambda action, session_id, peers, awaits_user: (
         run_archive_sessions(
             ArchiveSessionsArgs.model_validate(action.call.arguments),
+            session_id=session_id,
+            peers=peers,
+            awaits_user=awaits_user,
+        )
+    ),
+    RESTORE_SESSIONS_TOOL_NAME: lambda action, session_id, peers, awaits_user: (
+        run_restore_sessions(
+            RestoreSessionsArgs.model_validate(action.call.arguments),
             session_id=session_id,
             peers=peers,
             awaits_user=awaits_user,

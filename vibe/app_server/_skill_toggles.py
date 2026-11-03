@@ -55,9 +55,10 @@ async def set_skill_enabled(
             return [entry for entry in names if entry != name]
         return names if name in names else [*names, name]
 
-    failures = await orchestrator.mutate_field(
+    mutation = await orchestrator.mutate_field(
         "/disabled_skills", toggle, reason=reason, default=[]
     )
+    failures = mutation.failures
     if failures:
         raise RequestFailure(
             ProtocolErrorCode.INTERNAL_ERROR,

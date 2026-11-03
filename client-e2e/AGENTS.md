@@ -39,6 +39,20 @@ It is hard to do tests like this for uis, here's why:
 - Never commit checkout-specific paths in goldens; normalize rendered fixture paths to a stable placeholder.
 - Goldens must be environment-independent: reproducible on any machine, checkout, and client version. Any value that varies across environments (version strings, absolute paths, home or temp dirs) must be masked in `e2e/app_server/normalize.py` or pinned by the scenario (frozen fixture, env var, seeded cache) — never stored or hand-bumped per release. `test_golden.py` fails if any golden contains the current `cli-rust/Cargo.toml` version, the checkout path, the home directory, or a harness-generated `e2e_*` temp home; a scenario-pinned path under the shared temp dir is deterministic and passes.
 
+## Synchronization
+
+The harness never waits on time. Every stimulus carries a numbered fence on the stream that delivers it, and the harness waits for the client's `OSC 5379;vibe-idle;<n>` ack of exactly that fence:
+
+- Keys: the F24 fence key follows each key batch on the PTY.
+- Released replay events: the replay server writes `replay/fence` after each gated event.
+- Resizes: the client's resize event is its own fence, so a resize step must change the size.
+
+Startup is fence 0. The client acks only once its frame has settled (`replay_ack` in `cli-rust/src/event_loop/helpers.rs`), and never acks on its own. Settled means no tracked task is in flight (`cli-rust/src/work.rs`) and every event-loop channel is empty, so every result has been applied.
+
+Time is scripted too: under replay the client's UI clock (`cli-rust/src/clock.rs`) stands still, so debounces, grace periods, double clicks, notice expiries and animations never depend on load (animation randomness is seeded too). A scenario lets time pass with `advance(ms)` from `e2e.app_server.scenario` (a multiple of 100 ms; the F23 key), e.g. `scenarios/text_selection/copied_notice_expires.py`.
+
+To hunt sync races, set `VIBE_REPLAY_JITTER=<seed>`: the replay server sleeps a seeded 0-20 ms before each frame it writes. Goldens must not change under any seed; a scenario that fails only under jitter acks before its work has landed.
+
 ## Adding scenarios
 
 Add a declarative `scenarios/<name>.py` with a `timeline`; it is auto-discovered

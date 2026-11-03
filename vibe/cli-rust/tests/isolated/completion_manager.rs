@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use vibe_rs::app::App;
 use vibe_rs::completion_manager::{self, CompletionEntry};
 use vibe_rs::input_modes::InputMode;
-use vibe_rs::utils::file_index::FileIndex;
+use vibe_rs::utils::file_index::FileIndexHandle;
 
 fn composer(before: &str, after: &str) -> App {
     let mut app = App::default();
@@ -110,26 +110,30 @@ fn accept_without_an_active_token_leaves_input_unchanged() {
 
 #[test]
 fn sync_files_applies_an_index_update_that_landed_after_the_keys() {
-    let root = std::env::temp_dir().join(format!("vibe-rs-sync-files-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "vibe-rs-sync-files-{}-{}",
+        std::process::id(),
+        line!()
+    ));
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("Cargo.toml"), "").unwrap();
-    let (files, mut changes) = FileIndex::start(Some(root.clone()));
     let mut app = composer("@Cargo", "");
-    app.completion.files = files;
+    app.completion.files = FileIndexHandle::start(root.clone(), true);
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !changes.has_changed().unwrap() {
+    while !app.completion.files.changes.has_changed().unwrap() {
         assert!(Instant::now() < deadline, "file index never became ready");
         std::thread::sleep(Duration::from_millis(5));
     }
 
-    completion_manager::sync_files(&mut app, &mut changes);
+    completion_manager::sync_files(&mut app);
 
     assert!(app
         .completion
         .entries
         .iter()
         .any(|entry| entry.label == "@Cargo.toml"));
-    assert!(!changes.has_changed().unwrap());
+    assert!(!app.completion.files.changes.has_changed().unwrap());
+    app.completion.files.stop();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -145,18 +149,21 @@ fn a_query_typed_before_the_index_is_ready_accepts_nothing() {
 
 #[test]
 fn each_keystroke_refilters_so_tab_never_accepts_a_suggestion_for_an_older_query() {
-    let root = std::env::temp_dir().join(format!("vibe-rs-refilter-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "vibe-rs-refilter-{}-{}",
+        std::process::id(),
+        line!()
+    ));
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("README.md"), "").unwrap();
     std::fs::write(root.join("src/main.py"), "").unwrap();
-    let (files, changes) = FileIndex::start(Some(root.clone()));
+    let mut app = composer("@", "");
+    app.completion.files = FileIndexHandle::start(root.clone(), true);
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !changes.has_changed().unwrap() {
+    while !app.completion.files.changes.has_changed().unwrap() {
         assert!(Instant::now() < deadline, "file index never became ready");
         std::thread::sleep(Duration::from_millis(5));
     }
-    let mut app = composer("@", "");
-    app.completion.files = files;
     completion_manager::input_changed(&mut app);
     assert_eq!(app.completion.entries[0].label, "@README.md");
 
@@ -166,6 +173,7 @@ fn each_keystroke_refilters_so_tab_never_accepts_a_suggestion_for_an_older_query
     completion_manager::tab(&mut app);
 
     assert_eq!(app.chat_input.input, "@src/");
+    app.completion.files.stop();
     let _ = std::fs::remove_dir_all(&root);
 }
 

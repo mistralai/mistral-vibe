@@ -89,6 +89,8 @@ pub mod method {
     pub const SETUP_STORE_CREDENTIAL: &str = "setup/store-credential";
     pub const SETUP_SUBMIT_CHOICES: &str = "setup/submit-choices";
     pub const SESSION_LOG_READ: &str = "session/log/read";
+    /// The `/context` breakdown of what fills the context window.
+    pub const SESSION_CONTEXT_READ: &str = "session/context/read";
     /// Live session logs paged into the `/debug` console.
     pub const DIAGNOSTICS_LOGS_READ: &str = "diagnostics/logs/read";
     pub const SESSION_RENAME: &str = "session/rename";
@@ -156,6 +158,8 @@ pub mod notification {
     pub const CALLBACK_RESULT_FAILED: &str = "__callback_result_failed";
     /// Replay-server only: every frame a request released has been written.
     pub const REPLAY_DRAINED: &str = "replay/drained";
+    /// Replay-server only: a harness fence, written after the gated event it follows.
+    pub const REPLAY_FENCE: &str = "replay/fence";
     pub const RUNTIME_UPDATED: &str = "runtime/updated";
     pub const SESSION_SNAPSHOT: &str = "session/snapshot";
     pub const SESSION_UPDATED: &str = "session/updated";

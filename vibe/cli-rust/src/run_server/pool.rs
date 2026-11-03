@@ -71,6 +71,8 @@ impl Pool {
         self.servers.push(server.clone());
         while self.retirements.try_join_next().is_some() {}
         let closing = self.closing.as_ref().map(watch::Sender::subscribe);
+        // Headless runs have no replay ack: a retirement is never client work.
+        #[allow(clippy::disallowed_methods)]
         self.retirements
             .spawn(retire_when_idle(server.clone(), closing));
         Ok(server)

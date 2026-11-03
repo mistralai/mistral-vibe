@@ -2,12 +2,15 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
+mod result_consistency;
 mod tool_identity;
 
+pub(crate) use result_consistency::post_tool_call_warning;
 pub(crate) use tool_identity::{HookToolKey, HookToolTarget};
 
 use crate::core::error::CoreError;
 use crate::core::tools::external::HookToolCall;
+use crate::core::tools::result::model_visible_content_block;
 use crate::core::wire::completion::{AgentCompletionAcceptance, CompletionCandidate};
 use crate::core::wire::content::{ContentBlock, text_content, validate_non_empty_content};
 use crate::core::wire::tool::{ProtocolError, StructuredContent, ToolResult};
@@ -138,19 +141,37 @@ pub(crate) fn hook_action_id(subject_action_id: &str, point: HookPoint) -> Strin
     crate::core::action_id::hook(subject_action_id, suffix)
 }
 
+/// The reason is the result's content and, when it has model-visible text,
+/// also the error message: a program calling the tool sees only the message
+/// of the error it catches, and the reason must reach the model on both paths.
 pub(crate) fn skipped_tool_result(reason: Vec<ContentBlock>) -> Result<ToolResult, CoreError> {
     validate_non_empty_content(&reason, "pre-tool hook skip reason")?;
+    let message = skip_reason_text(&reason)
+        .unwrap_or_else(|| "Tool execution was skipped by Runtime policy.".to_string());
     Ok(ToolResult::Failure {
         content: reason,
         structured_content: StructuredContent::Absent,
         meta: None,
         error: ProtocolError {
             code: "tool_skipped".to_string(),
-            message: "Tool execution was skipped by Runtime policy.".to_string(),
+            message,
             retryable: false,
             details: Value::Null,
         },
     })
+}
+
+fn skip_reason_text(reason: &[ContentBlock]) -> Option<String> {
+    let text = reason
+        .iter()
+        .filter(|block| matches!(block, ContentBlock::Text(_)))
+        .filter_map(|block| match model_visible_content_block(block.clone()) {
+            Some(ContentBlock::Text(content)) => Some(content.text),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then_some(text)
 }
 
 pub(crate) fn hook_failure_tool_result(error: ProtocolError) -> ToolResult {

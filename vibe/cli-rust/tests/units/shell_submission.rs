@@ -3,6 +3,7 @@ use vibe_rs::app::{App, Status};
 use vibe_rs::commands::submission;
 use vibe_rs::config;
 
+use crate::feedback_support::notice_text;
 use crate::support::{stub, with_status};
 
 #[tokio::test]
@@ -19,11 +20,7 @@ async fn a_second_shell_command_during_startup_is_rejected_and_preserved() {
     assert!(app.session.pending_shell.is_some());
     assert_eq!(app.chat_input.full_text(), "!second");
     assert_eq!(app.chat_input.cursor, 0);
-    assert!(app
-        .overlays
-        .toasts
-        .back()
-        .is_some_and(|toast| toast.text.contains("pending or running")));
+    assert!(notice_text(&app).is_some_and(|text| text.contains("pending or running")));
 }
 
 fn shell_running_app() -> App {
@@ -40,10 +37,6 @@ fn submit_text(app: &mut App, text: &str) -> bool {
     submission::submit(app, &stub(), &config_tx)
 }
 
-fn last_toast(app: &App) -> Option<&str> {
-    app.overlays.toasts.back().map(|toast| toast.text.as_str())
-}
-
 #[tokio::test]
 async fn a_prompt_submitted_while_a_shell_command_runs_is_rejected_and_kept() {
     let mut app = shell_running_app();
@@ -53,7 +46,7 @@ async fn a_prompt_submitted_while_a_shell_command_runs_is_rejected_and_kept() {
     assert_eq!(app.chat_input.full_text(), "after shell");
     assert!(app.queue.is_empty(), "nothing reaches the turn queue");
     assert!(matches!(app.session.status, Status::Ready));
-    assert!(last_toast(&app).is_some_and(|text| text.contains("pending or running")));
+    assert!(notice_text(&app).is_some_and(|text| text.contains("pending or running")));
 }
 
 #[tokio::test]
@@ -66,7 +59,7 @@ async fn exit_still_exits_while_a_shell_command_runs() {
     );
 
     assert!(
-        last_toast(&app).is_none(),
+        notice_text(&app).is_none(),
         "no cannot-be-queued rejection is shown"
     );
 }

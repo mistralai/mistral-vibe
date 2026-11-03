@@ -12,6 +12,10 @@ from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from vibe import __version__
 from vibe.app_server._account import AccountGateway
+from vibe.app_server._credential_selection import (
+    ConnectionCredentialSelection,
+    select_platform_credentials,
+)
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
 from vibe.app_server._execution import cancel_tasks
 from vibe.app_server._host import HostRequestHandler
@@ -45,6 +49,7 @@ from vibe.app_server._session_backend_port import (
     SessionBackendQueuedTurnSteering,
     SessionBackendResult,
     SessionBackendRewindForkHost,
+    SessionBackendRunningTurnAnnouncement,
     SessionBackendRuntimeView,
     SessionBackendWorktreeTrust,
     SessionEventSubscription,
@@ -66,12 +71,14 @@ from vibe.app_server.protocol import (
     SESSION_PEER_ARCHIVE_METHOD,
     SESSION_PEER_LIST_METHOD,
     SESSION_PEER_READ_METHOD,
+    SESSION_PEER_RESTORE_METHOD,
     SESSION_PEER_SEND_METHOD,
     SESSION_SPAWN_METHOD,
     AgentInstallParams,
     AgentSwitchParams,
     ArtifactsListParams,
     ArtifactsMarkViewedParams,
+    ArtifactsSyncParams,
     CallbackCallParams,
     CallbackCallResponse,
     CallbackResultError,
@@ -82,6 +89,7 @@ from vibe.app_server.protocol import (
     ConfigReloadParams,
     ConfigWriteParams,
     ContextInjectParams,
+    EmptyResponse,
     EventBatch,
     EventNotificationParams,
     EventsReadParams,
@@ -125,6 +133,8 @@ from vibe.app_server.protocol import (
     SessionPeerListResponse,
     SessionPeerReadParams,
     SessionPeerReadResponse,
+    SessionPeerRestoreParams,
+    SessionPeerRestoreResponse,
     SessionPeerSendParams,
     SessionPeerSendResponse,
     SessionPinParams,
@@ -161,11 +171,9 @@ from vibe.app_server.protocol import (
     validate_json_rpc_envelope,
 )
 from vibe.app_server.transport import JsonRpcTransport
-from vibe.core.platform_auth import (
-    ApiKeyPlatformCredentialProvider,
-    PlatformCredentialProvider,
-)
+from vibe.core.platform_auth import PlatformCredentialProvider
 from vibe.observability.logging import logger
+from vibe.setup.auth._oidc_tenant import OidcTenantResolver
 
 if TYPE_CHECKING:
     from vibe.app_server.mcp_catalog import MCPCatalogService
@@ -193,6 +201,13 @@ _SESSION_ATTACHMENT_CANDIDATES = frozenset({
     "session/rewind",
     "session/history/clear",
 })
+
+# Requests that reopen a session another connection or process may have left
+# mid-turn. The client never saw that turn's `turn/started`, so it is announced
+# again, before that turn's live events are forwarded. A new session's first
+# turn announces itself, and announcing it twice would reset what the client
+# tracks for it.
+_RUNNING_TURN_ANNOUNCEMENT_METHODS = frozenset({"session/resume", "session/continue"})
 
 _SESSION_BACKEND_HOST_LIFECYCLE_METHODS = frozenset({
     "session/start",
@@ -255,12 +270,13 @@ class _ErrorDispatch:
 
 
 class AppServer:
-    def __init__(
+    def __init__(  # noqa: PLR0913 - one collaborator per concern, all keyword-only
         self,
         transport: JsonRpcTransport,
         *,
         session_backend_host_factory: SessionBackendHostFactory,
         host_handler: HostRequestHandler,
+        oidc_tenants: OidcTenantResolver,
         transport_kind: TransportKind = "in_process",
         account_gateway: AccountGateway | None = None,
         identity_gateway: IdentityGateway | None = None,
@@ -288,6 +304,8 @@ class AppServer:
         self._unanswered_client_requests: dict[int, str] = {}
         self._request_tasks: set[asyncio.Task[None]] = set()
         self._leases = SessionLeaseSubscription(self._send_notification)
+        # The connection's artifacts/subscribe, until it ends.
+        self._unsubscribe_artifacts: Callable[[], None] | None = None
         self._backend_event_task: asyncio.Task[None] | None = None
         self._backend_event_backend: SessionBackend | None = None
         self._serve_task: asyncio.Task[None] | None = None
@@ -305,10 +323,14 @@ class AppServer:
         self._account_gateway = account_gateway
         self._identity_gateway = identity_gateway
         self._platform_credentials: ConnectionPlatformCredentialProvider | None = None
+        # This connection's providers, built at ``initialize`` once the client
+        # is known, and kept for the connection's lifetime.
+        self._credential_selection: ConnectionCredentialSelection | None = None
         self._mcp_catalog_service = mcp_catalog_service
         self._connector_catalog_service = connector_catalog_service
         self._plugin_catalog_service = plugin_catalog_service
         self._imports_service = imports_service
+        self._oidc_tenants = oidc_tenants
         self._session_backend_host = session_backend_host_factory(self)
         if self._session_backend_host is None:
             raise TypeError(
@@ -328,7 +350,11 @@ class AppServer:
         return self._imports_service
 
     async def _activate_backend(
-        self, backend: SessionBackend, history_limit: int
+        self,
+        backend: SessionBackend,
+        history_limit: int,
+        *,
+        announce_running_turn: bool = False,
     ) -> SessionReadResponse:
         params = SessionReadParams(
             session_id=backend.session_id, history=PageRequest(limit=history_limit)
@@ -338,6 +364,11 @@ class AppServer:
         subscription = await backend.subscribe(params)
         previous = self._root
         self._root = backend
+        # The client treats a turn as running only after `turn/started`. Queue
+        # that announcement before the forwarder, so recovered history updates
+        # and token deltas cannot reach the client first and be discarded.
+        if announce_running_turn:
+            await self._announce_running_turn()
         await self._replace_backend_event_task(backend, subscription)
         if previous is not None and previous is not backend:
             try:
@@ -492,6 +523,7 @@ class AppServer:
             self._client_info = None
             self._client_capabilities = ClientCapabilities()
             self._platform_credentials = None
+            self._credential_selection = None
             self._connection_attached = False
             self._attaching = False
             self._pending_notifications.clear()
@@ -601,6 +633,7 @@ class AppServer:
         self._client_info = None
         self._client_capabilities = ClientCapabilities()
         self._platform_credentials = None
+        self._credential_selection = None
         try:
             await transport.close()
         except BaseException as exc:
@@ -615,6 +648,7 @@ class AppServer:
     ) -> list[BaseException]:
         tasks = [task for task in self._request_tasks if task is not current]
         tasks.extend(self._leases.take())
+        self._stop_artifact_subscription()
         backend_events = self._backend_event_task
         self._backend_event_task = None
         self._backend_event_backend = None
@@ -632,6 +666,7 @@ class AppServer:
     ) -> list[BaseException]:
         tasks = [task for task in self._request_tasks if task is not current]
         tasks.extend(self._leases.take())
+        self._stop_artifact_subscription()
         backend_events = self._backend_event_task
         self._backend_event_task = None
         self._backend_event_backend = None
@@ -799,6 +834,19 @@ class AppServer:
                     method, raw_params, client_info=self._initialized_client_info()
                 )
             )
+        if method == "platformCredentials/headers":
+            from vibe.app_server._platform_credential_headers import (
+                platform_credential_headers,
+            )
+
+            return DispatchResult(
+                await platform_credential_headers(
+                    raw_params,
+                    client=self._client_info,
+                    desktop_credentials=self._platform_credentials is not None,
+                    credentials=self.platform_credentials,
+                )
+            )
         if method == "events/read":
             return self._events_read(raw_params)
         if method == "imports/discover":
@@ -875,11 +923,8 @@ class AppServer:
             )
         if method == "session/delete":
             return await self._delete_session(raw_params)
-        if method == "session/lease/subscribe":
-            host = self._session_backend_host
-            if not isinstance(host, SessionBackendHostLeaseWatch):
-                raise method_not_found(method)
-            return await self._leases.subscribe(host)
+        if method in {"session/lease/subscribe", "artifacts/subscribe"}:
+            return await self._subscribe(method)
         if _omits_session_id(method, raw_params):
             # The attached session, if any, tells the config reads the
             # connection's own session is already fetching what they would.
@@ -1028,7 +1073,7 @@ class AppServer:
         if method in {"session/list", "session/read", "config/read"}:
             return await self._dispatch_backend_host_read(method, raw_params)
         # The artifacts namespace is session-scoped but answers without a
-        # runtime: a stored session reads (and marks viewed) its persisted
+        # runtime: a stored session reads, marks viewed and syncs its persisted
         # metadata, so a connection with no session attached — Desktop's
         # catalogue channel — can serve it.
         host = self._session_backend_host
@@ -1044,6 +1089,12 @@ class AppServer:
             return DispatchResult(
                 await host.mark_artifacts_viewed(
                     validate_wire(ArtifactsMarkViewedParams, raw_params)
+                )
+            )
+        if method == "artifacts/sync" and isinstance(host, SessionBackendHostArtifacts):
+            return DispatchResult(
+                await host.sync_artifacts(
+                    validate_wire(ArtifactsSyncParams, raw_params)
                 )
             )
         if method in {"session/rename", "session/relocate"}:
@@ -1237,8 +1288,8 @@ class AppServer:
                 await self._discard_started(lifecycle.backend)
                 raise
             self._record_session_created(lifecycle.backend)
-            response = await self._activate_backend(
-                lifecycle.backend, params.history_limit
+            response = await self._activate_lifecycle_backend(
+                method, lifecycle.backend, params.history_limit
             )
             return DispatchResult(
                 SessionStartResponse(
@@ -1256,8 +1307,8 @@ class AppServer:
         if method == "session/resume":
             params = validate_wire(SessionResumeParams, raw_params)
             lifecycle = await self._session_backend_host.resume(params)
-            response = await self._activate_backend(
-                lifecycle.backend, params.history_limit
+            response = await self._activate_lifecycle_backend(
+                method, lifecycle.backend, params.history_limit
             )
             return DispatchResult(
                 SessionResumeResponse(
@@ -1270,8 +1321,8 @@ class AppServer:
         if method == "session/continue":
             params = validate_wire(SessionContinueParams, raw_params)
             lifecycle = await self._session_backend_host.continue_latest(params)
-            response = await self._activate_backend(
-                lifecycle.backend, params.history_limit
+            response = await self._activate_lifecycle_backend(
+                method, lifecycle.backend, params.history_limit
             )
             return DispatchResult(
                 SessionContinueResponse(
@@ -1571,8 +1622,15 @@ class AppServer:
         self._client_capabilities = params.capabilities
         if params.capabilities.platform_credentials is not None:
             self._platform_credentials = ConnectionPlatformCredentialProvider(
-                self._resolve_platform_credentials
+                self._resolve_platform_credentials,
+                kind=params.capabilities.platform_credentials.kind,
+                tenants=self._oidc_tenants,
             )
+        self._credential_selection = ConnectionCredentialSelection(
+            client=self._client_info,
+            connection=self._platform_credentials,
+            tenants=self._oidc_tenants,
+        )
         self._initialization = InitializationState.INITIALIZE_RECEIVED
         return InitializeResponse(
             server_info=ServerInfo(name="vibe-app-server", version=__version__),
@@ -1677,6 +1735,34 @@ class AppServer:
             return
         await self._send_notification(method, params)
 
+    async def _subscribe(self, method: str) -> DispatchResult:
+        """The connection's subscriptions to changes of stored sessions."""
+        host = self._session_backend_host
+        if method == "session/lease/subscribe" and isinstance(
+            host, SessionBackendHostLeaseWatch
+        ):
+            return await self._leases.subscribe(host)
+        if method == "artifacts/subscribe" and isinstance(
+            host, SessionBackendHostArtifacts
+        ):
+            self._stop_artifact_subscription()
+            self._unsubscribe_artifacts = host.subscribe_artifacts(
+                self._send_artifact_update
+            )
+            return DispatchResult(EmptyResponse())
+        raise method_not_found(method)
+
+    def _stop_artifact_subscription(self) -> None:
+        unsubscribe = self._unsubscribe_artifacts
+        self._unsubscribe_artifacts = None
+        if unsubscribe is not None:
+            unsubscribe()
+
+    def _send_artifact_update(self, method: str, params: ProtocolModel) -> None:
+        task = asyncio.create_task(self._send_notification(method, params))
+        self._request_tasks.add(task)
+        task.add_done_callback(self._request_tasks.discard)
+
     async def _send_notification(self, method: str, params: ProtocolModel) -> None:
         transport = self._transport
         if transport is None:
@@ -1726,6 +1812,22 @@ class AppServer:
             if delivery.callback_id == callback_id:
                 delivery.answered = True
 
+    async def _activate_lifecycle_backend(
+        self, method: str, backend: SessionBackend, history_limit: int
+    ) -> SessionReadResponse:
+        return await self._activate_backend(
+            backend,
+            history_limit,
+            announce_running_turn=method in _RUNNING_TURN_ANNOUNCEMENT_METHODS,
+        )
+
+    async def _announce_running_turn(self) -> None:
+        root = self._root
+        if not isinstance(root, SessionBackendRunningTurnAnnouncement):
+            return
+        await root.announce_running_turn()
+        await self._flush_backend_events(root)
+
     async def _redeliver_open_callbacks(self) -> None:
         root = self._root
         if not isinstance(root, SessionBackendOpenCallbacks):
@@ -1769,9 +1871,15 @@ class AppServer:
         return self._identity_gateway
 
     def platform_credentials(self, api_key_env_var: str) -> PlatformCredentialProvider:
-        if self._platform_credentials is not None:
-            return self._platform_credentials
-        return ApiKeyPlatformCredentialProvider(api_key_env_var)
+        if self._credential_selection is not None:
+            return self._credential_selection(api_key_env_var)
+        # Before ``initialize``: no client yet, so nothing to keep.
+        return select_platform_credentials(
+            client=self._client_info,
+            connection=self._platform_credentials,
+            tenants=self._oidc_tenants,
+            api_key_env_var=api_key_env_var,
+        )
 
     def task_finished(self, task: asyncio.Task[None]) -> None:
         self._request_finished(task)
@@ -1839,6 +1947,21 @@ class AppServer:
             lost=(
                 "before confirming, so some sessions may have been archived. "
                 "List them before archiving again."
+            ),
+        )
+
+    async def restore_peer_sessions(
+        self, params: SessionPeerRestoreParams
+    ) -> SessionPeerRestoreResponse:
+        if not self._client_capabilities.session_peer_restore:
+            raise SessionPeerError("The attached client cannot restore sessions")
+        return await self._request_peers(
+            SESSION_PEER_RESTORE_METHOD,
+            params,
+            SessionPeerRestoreResponse,
+            lost=(
+                "before confirming, so some sessions may have been restored. "
+                "List them before restoring again."
             ),
         )
 

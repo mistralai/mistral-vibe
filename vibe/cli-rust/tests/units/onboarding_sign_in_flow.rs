@@ -133,11 +133,7 @@ fn error_state(message: &str) -> BrowserSignInState {
         step: SignInStep::Open,
         message: message.to_owned(),
         variant: SignInVariant::Error,
-        running: false,
-        sign_in_url: None,
-        show_url_help: false,
-        reveal_sign_in_url: false,
-        sign_in_started_at: None,
+        ..Default::default()
     }
 }
 

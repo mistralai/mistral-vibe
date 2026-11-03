@@ -9,9 +9,7 @@ handshake = {
     "feedback/record": {},
     "feedback/shouldShow": {"show": True, "snoozeDurationSeconds": 604800},
 }
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 capture_steps = {1, 2, 3}
-settle_per_key = True
 
 timeline: Timeline = [
     "hi\r",

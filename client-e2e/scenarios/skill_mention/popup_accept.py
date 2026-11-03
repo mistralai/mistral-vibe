@@ -22,7 +22,6 @@ handshake = {"runtime/read": {"runtime": {"skills": _SKILLS}}}
 
 capture_startup = False
 capture_steps = {1, 2, 3, 4}
-settle_per_key = True
 expected_clipboard = "run /lint then"
 
 timeline: Timeline = ["run ", "/", "li", "\t", "then\x1b[18~\x19"]

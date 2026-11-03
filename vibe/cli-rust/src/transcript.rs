@@ -6,6 +6,7 @@ mod older;
 pub(crate) mod patch;
 mod scheduled_loop;
 mod settle;
+mod shown;
 mod subagent;
 
 use std::collections::{HashMap, HashSet};
@@ -24,8 +25,10 @@ pub use scheduled_loop::FiredLoop;
 pub struct Transcript {
     entries: Vec<StoredEntry>,
     indices: HashMap<String, usize>,
-    /// Entries kept in store but not rendered: retry-continuation sources.
+    /// Entries kept in store but not rendered: attached subagent notifications.
     hidden: HashSet<String>,
+    /// Server rows a successful `/retry` replaced; a live snapshot keeps them hidden.
+    dismissed: HashSet<String>,
     next_rev: u64,
     pub last_event_id: u64,
     /// Whether reasoning entries are shown (`show_thinking_nodes` config).
@@ -43,6 +46,7 @@ pub struct Transcript {
 pub struct Snapshot {
     entries: Vec<Value>,
     hidden: HashSet<String>,
+    dismissed: HashSet<String>,
     last_event_id: u64,
     history_before_cursor: Option<HistoryCursor>,
 }
@@ -103,6 +107,7 @@ impl Transcript {
         Snapshot {
             entries: self.entries.iter().map(|entry| entry.raw.clone()).collect(),
             hidden: self.hidden.clone(),
+            dismissed: self.dismissed.clone(),
             last_event_id: self.last_event_id,
             history_before_cursor: self.history_before_cursor.clone(),
         }
@@ -112,6 +117,7 @@ impl Transcript {
         self.entries.clear();
         self.indices.clear();
         self.hidden = snapshot.hidden;
+        self.dismissed = snapshot.dismissed;
         self.next_rev += 1;
         self.last_event_id = snapshot.last_event_id;
         self.history_before_cursor = snapshot.history_before_cursor;
@@ -124,6 +130,7 @@ impl Transcript {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.indices.clear();
+        self.dismissed.clear();
         self.next_rev += 1;
         self.live_tail_open = false;
         self.history_before_cursor = None;
@@ -135,9 +142,7 @@ impl Transcript {
         self.live_tail_open = false;
     }
 
-    /// Most recent non-empty assistant text, for `/copy`. Skips hidden entries
-    /// (an active retry continuation's source row would otherwise be copied
-    /// instead of the merged answer it feeds).
+    /// Most recent non-empty assistant text, for `/copy`, skipping hidden entries.
     pub fn last_assistant_message(&self) -> Option<String> {
         self.entries
             .iter()
@@ -197,6 +202,7 @@ impl Transcript {
         self.entries.clear();
         self.indices.clear();
         self.hidden.clear();
+        self.dismissed.clear();
         self.next_rev += 1;
         self.live_tail_open = false;
         self.last_event_id = state.event_id;
@@ -435,13 +441,33 @@ impl Transcript {
         self.next_rev += 1;
     }
 
-    /// Keep an entry in store but out of the render (retry-continuation source).
-    pub fn hide(&mut self, id: &str) {
-        self.hidden.insert(id.to_owned());
+    /// Hide a row for good: a client row is dropped, a server row stays stored but hidden.
+    pub fn dismiss(&mut self, id: &str) {
+        let Some(&index) = self.indices.get(id) else {
+            return;
+        };
+        if self.entries[index].local {
+            self.remove(id);
+            return;
+        }
+        self.dismissed.insert(id.to_owned());
         self.next_rev += 1;
     }
 
-    /// The raw `content` array of an entry; the retry merge freezes it as its base.
+    /// The `turn_id` rows the server settled as output the model never kept.
+    pub fn discarded_ids(&self, turn_id: &str) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|stored| {
+                stored.raw["turnId"].as_str() == Some(turn_id)
+                    && stored.raw.pointer("/outcome/type").and_then(Value::as_str)
+                        == Some("discarded")
+            })
+            .map(|stored| stored.id.clone())
+            .collect()
+    }
+
+    /// The raw `content` array of an entry.
     pub fn entry_content(&self, id: &str) -> Option<Value> {
         let index = *self.indices.get(id)?;
         Some(self.entries[index].raw.get("content")?.clone())
@@ -451,50 +477,6 @@ impl Transcript {
     pub fn entry_raw(&self, id: &str) -> Option<&Value> {
         let index = *self.indices.get(id)?;
         Some(&self.entries[index].raw)
-    }
-
-    /// Merge the hidden retried entry into the interrupted assistant row:
-    /// recompute the row as its frozen base with the continuation's text spliced
-    /// into the last text block, with no separator, and the continuation's
-    /// status applied.
-    pub fn merge_continuation(&mut self, dst: &str, src: &str, base: &Value) {
-        let (Some(&src_index), Some(&dst_index)) = (self.indices.get(src), self.indices.get(dst))
-        else {
-            return;
-        };
-        // The continuation's text blocks joined, like `PublicMessageEntry.text`.
-        let appended = match &self.entries[src_index].typed {
-            HistoryEntry::Message(message) => message.text("\n\n"),
-            _ => String::new(),
-        };
-        let status = self.entries[src_index].raw.get("generationStatus").cloned();
-        let mut content = base.clone();
-        if !content.is_array() {
-            content = Value::Array(Vec::new());
-        }
-        if let Some(blocks) = content.as_array_mut() {
-            let last_text = blocks
-                .iter_mut()
-                .rev()
-                .find(|block| block["type"] == "text");
-            match last_text {
-                // Append straight into the existing text: no separator.
-                Some(block) => {
-                    let merged =
-                        format!("{}{appended}", block["text"].as_str().unwrap_or_default());
-                    block["text"] = Value::String(merged);
-                }
-                None => blocks.push(serde_json::json!({"type": "text", "text": appended})),
-            }
-        }
-        let stored = &mut self.entries[dst_index];
-        stored.raw["content"] = content;
-        if let Some(status) = status {
-            stored.raw["generationStatus"] = status;
-        }
-        stored.typed = HistoryEntry::from_value(&stored.raw);
-        self.next_rev += 1;
-        stored.rev = self.next_rev;
     }
 
     fn bump_event(&mut self, params: &Value) {
@@ -518,7 +500,10 @@ impl Transcript {
         if is_hidden_hook_notice(&stored.typed, &self.entries[..index]) {
             return true;
         }
-        if self.hidden.contains(&stored.id) || scheduled_loop::is_fired(&stored.typed) {
+        if self.hidden.contains(&stored.id)
+            || self.dismissed.contains(&stored.id)
+            || scheduled_loop::is_fired(&stored.typed)
+        {
             return true;
         }
         !self.show_reasoning && matches!(stored.typed, HistoryEntry::Reasoning(_))

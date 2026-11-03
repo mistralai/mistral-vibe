@@ -1,4 +1,4 @@
-"""A startup skill config issue surfaces as a toast (VIBE-4622)."""
+"""A startup skill config issue lands in the startup warnings box (VIBE-4099)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ handshake = {
     }
 }
 
-# A lone keystroke yields a settled frame; the startup toast is still up (10s).
+# A lone keystroke yields a settled frame.
 timeline: Timeline = ["a"]
 
 screen_contains = ("Failed to load: bad frontmatter",)

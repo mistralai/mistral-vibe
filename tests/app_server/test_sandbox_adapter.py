@@ -72,7 +72,7 @@ async function main() {{
   }} catch (error) {{
     processes = "failed: " + error.message;
   }}
-  await tools.agents.spawn({{name: "reader", message: {json.dumps(_CHILD_TASK)}}});
+  await tools.agents.spawn({{name: "reader", instructions: "Follow the message.", message: {json.dumps(_CHILD_TASK)}}});
   // Spawn does not wait. Keep this Turn open until the child's Turn ends, so
   // the child runs before the headless run finishes.
   let child;
@@ -110,7 +110,7 @@ _SLOW_CHILD_TASK = "SLOW_CHILD_TASK"
 
 _SPAWN_PROGRAM = f"""
 async function main() {{
-  return await tools.agents.spawn({{name: "reader", message: {json.dumps(_SLOW_CHILD_TASK)}}});
+  return await tools.agents.spawn({{name: "reader", instructions: "Follow the message.", message: {json.dumps(_SLOW_CHILD_TASK)}}});
 }}
 """
 

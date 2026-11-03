@@ -1,4 +1,4 @@
-"""Two server warnings in one turn stack as separate toasts (VIBE-4622)."""
+"""Two server warnings after a turn mount as two rows (VIBE-4622, VIBE-4099)."""
 
 from __future__ import annotations
 
@@ -21,4 +21,4 @@ timeline: Timeline = [
     server_warning("second warning"),
 ]
 
-screen_contains = ("first warning", "second warning")
+screen_contains = ("⚠ first warning", "⚠ second warning")

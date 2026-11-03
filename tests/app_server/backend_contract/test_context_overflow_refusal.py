@@ -22,6 +22,8 @@ from vibe.app_server.models import PublicCheckpointEntry, PublicMessageEntry
 from vibe.app_server.protocol import ClientCapabilities, SessionOptions
 from vibe.app_server.session import AppServerSession
 
+pytestmark = pytest.mark.both_paths
+
 # A first turn of about 18,000 tokens, on top of Vibe's system prompt and tools,
 # in a 64,000-token window that compacts at 32,000: the second turn's request is
 # under the threshold by Core's estimate, so only the provider's refusal shows it

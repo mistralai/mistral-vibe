@@ -148,8 +148,8 @@ fn self_sleep_is_programmatic_only_and_uses_the_runtime_route() {
 
 ///
 /// *Prepare*: A programmatic filesystem read is stopped by a pre-tool hook before any Runtime tool action is dispatched.
-/// *Do*: Complete the hook with a non-empty skip reason through the serialized Core interface.
-/// *Assert*: Core commits one skipped external result, resumes the private program, and asks the model to continue without dispatching the filesystem call.
+/// *Do*: Complete the hook with a skip reason that has model-visible and user-only text through the serialized Core interface.
+/// *Assert*: Core commits one skipped external result, resumes the private program, and asks the model to continue with the visible reason, without the user-only text and without dispatching the filesystem call.
 ///
 #[test]
 fn programmatic_pre_tool_skip_commits_the_normalized_result() {
@@ -176,6 +176,15 @@ fn programmatic_pre_tool_skip_commits_the_normalized_result() {
     let tool_action_id = hook_action["input"]["tool_call"]["action_id"].clone();
     let tool_call_id = hook_action["input"]["tool_call"]["call_id"].clone();
 
+    let reason = json!([
+        {"type": "text", "text": "workspace policy denied the read"},
+        {
+            "type": "text",
+            "text": "operator note: the file holds credentials",
+            "annotations": {"audience": ["user"]},
+        },
+    ]);
+
     // Do
     let skipped = accepted_value(session.apply(input(
         3,
@@ -186,7 +195,7 @@ fn programmatic_pre_tool_skip_commits_the_normalized_result() {
                 "hook": "pre_tool_call",
                 "output": {
                     "type": "skip",
-                    "reason": [{"type": "text", "text": "workspace policy denied the read"}],
+                    "reason": reason.clone(),
                 },
             },
         }),
@@ -207,9 +216,10 @@ fn programmatic_pre_tool_skip_commits_the_normalized_result() {
     );
     assert_eq!(observations[0]["result"]["type"], "failure");
     assert_eq!(observations[0]["result"]["error"]["code"], "tool_skipped");
+    assert_eq!(observations[0]["result"]["content"], reason);
     assert_eq!(
-        observations[0]["result"]["content"],
-        json!([{"type": "text", "text": "workspace policy denied the read"}])
+        observations[0]["result"]["error"]["message"],
+        "workspace policy denied the read"
     );
     assert_eq!(observations[1]["type"], "tool_execution_finished");
     assert_eq!(observations[1]["call_id"], "program-pre-skip");
@@ -228,9 +238,97 @@ fn programmatic_pre_tool_skip_commits_the_normalized_result() {
             .iter()
             .all(|directive| directive["action"]["type"] != "runtime_builtin_tool_call")
     );
+    let program_result = parent_tool_message(&skipped, "program-pre-skip");
+    assert_eq!(program_result["outcome"], "failure");
+    let program_text = program_result["content"][0]["text"]
+        .as_str()
+        .expect("the program result is text");
+    assert!(
+        program_text.contains(r#""message":"workspace policy denied the read""#),
+        "the model sees the hook's skip reason: {program_text}"
+    );
+    assert!(
+        !program_text.contains("operator note"),
+        "the model does not see user-only reason text: {program_text}"
+    );
+}
+
+///
+/// *Prepare*: A programmatic filesystem read is stopped by a pre-tool hook before any Runtime tool action is dispatched.
+/// *Do*: Complete the hook with a skip reason that has only user-only text through the serialized Core interface.
+/// *Assert*: The skipped result keeps the reason as its content, its error message stays the generic one, and the model sees that message without the user-only text.
+///
+#[test]
+fn programmatic_pre_tool_skip_without_visible_reason_keeps_the_generic_message() {
+    // Prepare
+    let mut config = config();
+    crate::core::testing::add_always_hook(&mut config, HookPoint::PreToolCall);
+    let mut session = HarnessSession::create(config).expect("session creates");
+    let started = accepted_value(session.apply(input(
+        1,
+        user_message(
+            "turn-program-hidden-skip",
+            "read the protected file",
+            "queue",
+        ),
+    )));
+    let completion_action_id = dispatched_action_id(&started).to_string();
+    let source =
+        "async function main() { return tools.file_system.read_file({ path: 'protected.txt' }); }";
+    let hook_pending = accepted_value(session.apply(input(
+        2,
+        run_typescript_completion(&completion_action_id, &[("program-hidden-skip", source)]),
+    )));
+    let hook_action_id = hook_pending["transition"]["next"]["directives"][0]["action"]["action_id"]
+        .as_str()
+        .expect("pre-tool hook has an action ID")
+        .to_string();
+    let reason = json!([
+        {
+            "type": "text",
+            "text": "operator note: the file holds credentials",
+            "annotations": {"audience": ["user"]},
+        },
+    ]);
+
+    // Do
+    let skipped = accepted_value(session.apply(input(
+        3,
+        json!({
+            "type": "hook_completed",
+            "action_id": hook_action_id,
+            "result": {
+                "hook": "pre_tool_call",
+                "output": {
+                    "type": "skip",
+                    "reason": reason.clone(),
+                },
+            },
+        }),
+    )));
+
+    // Assert
+    let observations = skipped["transition"]["observations"]
+        .as_array()
+        .expect("observations are an array");
+    assert_eq!(observations[0]["type"], "tool_result_committed");
+    assert_eq!(observations[0]["result"]["error"]["code"], "tool_skipped");
+    assert_eq!(observations[0]["result"]["content"], reason);
     assert_eq!(
-        parent_tool_message(&skipped, "program-pre-skip")["outcome"],
-        "failure"
+        observations[0]["result"]["error"]["message"],
+        "Tool execution was skipped by Runtime policy."
+    );
+    let program_text = parent_tool_message(&skipped, "program-hidden-skip")["content"][0]["text"]
+        .as_str()
+        .expect("the program result is text")
+        .to_string();
+    assert!(
+        program_text.contains(r#""message":"Tool execution was skipped by Runtime policy.""#),
+        "the model sees the generic skip message: {program_text}"
+    );
+    assert!(
+        !program_text.contains("operator note"),
+        "the model does not see user-only reason text: {program_text}"
     );
 }
 
@@ -464,6 +562,7 @@ fn parallel_programmatic_tools_survive_checkpoint_restore() {
             "type": "tool_execution_started",
             "turn_id": "turn-program",
             "call_id": "program-call",
+            "executed_by_core": true,
         }])
     );
     assert_eq!(first_action["type"], "runtime_builtin_tool_call");
@@ -826,6 +925,7 @@ fn local_program_success_and_failure_stay_inside_core() {
                 "type": "tool_execution_started",
                 "turn_id": turn_id,
                 "call_id": call_id,
+                "executed_by_core": true,
             })
         );
         assert_eq!(

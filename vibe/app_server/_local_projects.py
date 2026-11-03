@@ -16,6 +16,7 @@ import tomli_w
 from vibe.app_server._time import now_ms
 from vibe.app_server.protocol import LocalProjectCloudState
 from vibe.core.paths import LOCAL_PROJECTS_FILE
+from vibe.core.types import SessionProject
 from vibe.core.vibe_code_project import ProjectLink, project_link_path
 from vibe.utils.file_lock import exclusive_file_lock
 
@@ -26,6 +27,7 @@ __all__ = [
     "LocalProjectNotFound",
     "LocalProjectStore",
     "LocalProjectStoreUnreadable",
+    "session_project",
 ]
 
 _VERSION = 1
@@ -58,6 +60,22 @@ class LocalProject:
     created_at: int
     updated_at: int
     cloud: CloudBacking | None = None
+
+
+def session_project(
+    projects: Sequence[LocalProject], project_id: str
+) -> SessionProject:
+    """Mirrors the runner's ``sessionProject``: a backed project goes by its cloud id."""
+    for project in projects:
+        cloud = project.cloud
+        known_as = (
+            cloud.project_id
+            if cloud is not None and cloud.state == "backed"
+            else project.id
+        )
+        if known_as == project_id:
+            return SessionProject(kind="local", id=project.id)
+    return SessionProject(kind="cloud", id=project_id)
 
 
 class _CloudEntry(BaseModel):
@@ -139,16 +157,18 @@ class LocalProjectStore:
             self._write(data, entries)
         return _ProjectEntry.model_validate(entry).to_project()
 
-    def import_links(self, links: Sequence[ProjectLink]) -> None:
+    def import_links(self, links: Sequence[ProjectLink], *, complete: bool) -> None:
         """Gives each linked folder a local project backed by the link's cloud project."""
         # A first pass without the lock keeps the usual nothing-to-import case read-only.
         data = self._read()
-        if not _is_supported(data) or not _import_links(_entries(data), links):
+        if not _is_supported(data) or not _import_links(
+            _entries(data), links, complete
+        ):
             return
         with exclusive_file_lock(self._path):
             data = self._read()
             entries = _entries(data)
-            if _is_supported(data) and _import_links(entries, links):
+            if _is_supported(data) and _import_links(entries, links, complete):
                 self._write(data, entries)
 
     def _read(self) -> dict[str, object]:
@@ -197,7 +217,8 @@ def _is_supported(data: dict[str, object]) -> bool:
 
 def _new_entry(name: str, root_path: Path, now: int) -> dict[str, object]:
     return {
-        "id": f"lp_{uuid4().hex}",
+        # A plain UUID: the code-server contract validates project ids as UUIDs.
+        "id": str(uuid4()),
         "name": name,
         "root_paths": [str(root_path)],
         "created_at": now,
@@ -211,9 +232,12 @@ def _set_cloud(entry: dict[str, object], cloud: CloudBacking, now: int) -> None:
 
 
 def _import_links(
-    entries: list[dict[str, object]], links: Sequence[ProjectLink]
+    entries: list[dict[str, object]], links: Sequence[ProjectLink], complete: bool
 ) -> bool:
-    """Applies the missing links to ``entries`` in place; returns whether anything changed."""
+    """Applies the links to ``entries`` in place; returns whether anything changed."""
+    now = now_ms()
+    # Only the whole set of links can tell that a folder was unlinked.
+    changed = complete and _follow_links(entries, links, now)
     # Read raw so an entry this server can't parse still counts as imported.
     linked: set[tuple[Path, str]] = set()
     backed_roots: set[Path] = set()
@@ -230,12 +254,9 @@ def _import_links(
             backed_roots.add(roots[0])
         elif _parse(entry) is not None:
             unbacked.setdefault(roots[0], entry)
-    now = now_ms()
-    changed = False
     for link in links:
         root = project_link_path(link)
         key = (root, link.project_id)
-        # A folder whose project has a live backing is imported, even if relinked since.
         if (
             not link.project_id.strip()
             or key in linked
@@ -252,6 +273,34 @@ def _import_links(
         _set_cloud(entry, CloudBacking(project_id=link.project_id, state="backed"), now)
         linked.add(key)
         backed_roots.add(root)
+        changed = True
+    return changed
+
+
+def _follow_links(
+    entries: list[dict[str, object]], links: Sequence[ProjectLink], now: int
+) -> bool:
+    """Points each backing at its folder's current link, or drops it once unlinked."""
+    project_ids = {
+        project_link_path(link): link.project_id
+        for link in links
+        if link.project_id.strip()
+    }
+    changed = False
+    for entry in entries:
+        project = _parse(entry)
+        if project is None or project.cloud is None or project.cloud.state != "backed":
+            continue
+        linked_ids = {project_ids.get(root) for root in project.root_paths}
+        if project.cloud.project_id in linked_ids:
+            continue
+        project_id = project_ids.get(project.root_paths[0])
+        if project_id is None:
+            # The local project stays, under its local id.
+            del entry["cloud"]
+            entry["updated_at"] = now
+        else:
+            _set_cloud(entry, CloudBacking(project_id=project_id, state="backed"), now)
         changed = True
     return changed
 

@@ -24,7 +24,7 @@ handshake = {
 }
 
 capture_startup = False
-# From textual-dark, thirteen rows up is ansi-dark.
+# From textual-dark, fourteen rows up is ansi-dark.
 timeline: Timeline = [
     f"{_PROMPT}\r",
     turn_started(),
@@ -35,6 +35,6 @@ timeline: Timeline = [
     _EXPAND_EDIT,
     "/theme",
     "\r",
-    "\x1b[A" * 13,
+    "\x1b[A" * 14,
     "\r",
 ]

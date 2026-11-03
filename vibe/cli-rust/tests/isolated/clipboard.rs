@@ -23,6 +23,7 @@ fn copied_output(text: &str, ssh_variable: &str, tmux: bool) -> String {
         .env_remove("SSH_CONNECTION")
         .env_remove("SSH_TTY")
         .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
         .env(ssh_variable, "test-ssh-session");
     if tmux {
         command.env("TMUX", "test-tmux-session");

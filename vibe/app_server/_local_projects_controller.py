@@ -31,7 +31,7 @@ from vibe.core.vibe_code_project import VibeProjectsStore
 from vibe.observability.logging import logger
 from vibe.observability.sentry import capture_sentry_exception
 
-__all__ = ["LOCAL_PROJECT_METHODS", "LocalProjectsController"]
+__all__ = ["LOCAL_PROJECT_METHODS", "LocalProjectsController", "list_local_projects"]
 
 LOCAL_PROJECT_METHODS = frozenset({
     "projects/create",
@@ -52,7 +52,7 @@ class LocalProjectsController:
             match method:
                 case "projects/list":
                     validate_wire(ProjectsListParams, raw_params)
-                    projects = await asyncio.to_thread(_list_with_links, store)
+                    projects = await asyncio.to_thread(list_local_projects, store)
                     return ProjectsListResponse(projects=[_view(p) for p in projects])
                 case "projects/create":
                     params = validate_wire(ProjectsCreateParams, raw_params)
@@ -84,11 +84,12 @@ class LocalProjectsController:
             raise RequestFailure(ProtocolErrorCode.INTERNAL_ERROR, str(exc)) from exc
 
 
-def _list_with_links(store: LocalProjectStore) -> list[LocalProject]:
+def list_local_projects(store: LocalProjectStore) -> list[LocalProject]:
     # Runs on every list so links made with the local projects flag off show up too.
     # Best effort: a failed import must not hide the projects already stored.
     try:
-        store.import_links(VibeProjectsStore().list_project_links())
+        links, complete = VibeProjectsStore().read_project_links()
+        store.import_links(links, complete=complete)
     except LocalProjectStoreUnreadable:
         raise
     except Exception as exc:

@@ -415,3 +415,35 @@ class TestTelemetry:
         ).described_blocks([_image_block(tmp_path)])
 
         assert events == []
+
+
+class TestCredentials:
+    @pytest.mark.asyncio
+    async def test_the_session_credential_of_the_vision_provider_is_sent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[object] = []
+        session_credential = object()
+        requested: list[str] = []
+
+        def credentials(provider_name: str) -> Any:
+            requested.append(provider_name)
+            return session_credential
+
+        async def complete(**kwargs: Any) -> UtilityReply:
+            sent.append(kwargs["credentials"])
+            return utility_reply("a red error dialog")
+
+        monkeypatch.setattr(_vision, "complete_vision", complete)
+        describer = SessionImageDescriber(
+            lambda: _config(active_sees_images=False, vision_model=True),
+            notice=lambda _: None,
+            session_id=lambda: "session-1",
+            record_event=lambda *_: None,
+            credentials=credentials,
+        )
+
+        await describer.described_blocks([_image_block(tmp_path)])
+
+        assert requested == ["mistral"]
+        assert sent == [session_credential]

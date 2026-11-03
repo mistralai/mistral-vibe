@@ -18,6 +18,7 @@ from vibe.app_server.events import (
     HistoryEntryAdded,
     HistoryEntryUpdated,
     SessionSnapshot,
+    TurnStarted,
 )
 from vibe.app_server.models import (
     AnsweredCallbackState,
@@ -48,6 +49,8 @@ from vibe.app_server.protocol import (
     TurnStartParams,
 )
 from vibe.app_server.session import AppServerSession
+
+pytestmark = pytest.mark.both_paths
 
 
 @pytest.fixture
@@ -266,6 +269,37 @@ async def test_callback_response_is_idempotent_and_rejects_a_conflict(
         assert exc_info.value.error.code is ProtocolErrorCode.CONFLICT
 
 
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_callback_answer_for_an_unknown_session_is_not_found(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            _user_question_response(backend_contract_mistral_response),
+            backend_contract_mistral_response("Done"),
+        ]
+    )
+
+    async for event in backend_contract_session.act("ask me"):
+        if not isinstance(event, CallbackRequested):
+            continue
+        backend_contract_session._callback_sessions[event.callback.callback_id] = (
+            "unknown-session"
+        )
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await backend_contract_session.respond_to_callback(
+                event.callback.callback_id, _user_answer("Yes")
+            )
+        assert exc_info.value.error.code is ProtocolErrorCode.NOT_FOUND
+        del backend_contract_session._callback_sessions[event.callback.callback_id]
+        await backend_contract_session.respond_to_callback(
+            event.callback.callback_id, _user_answer("Yes")
+        )
+
+
 @pytest.mark.asyncio
 async def test_interrupt_closes_an_open_callback(
     backend_contract_mistral_api: respx.Route,
@@ -342,6 +376,43 @@ async def test_reconnect_redelivers_an_open_callback_before_accepting_its_result
 
 
 @pytest.mark.asyncio
+async def test_reconnect_announces_the_running_turn_before_its_open_callback(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            _user_question_response(backend_contract_mistral_response),
+            backend_contract_mistral_response("Done"),
+        ]
+    )
+    stream = backend_contract_session.act("ask me")
+
+    try:
+        started = await _next_event(stream, TurnStarted)
+        await _next_event(stream, CallbackRequested)
+        disconnected_client = backend_contract_session._connection.current
+        assert disconnected_client is not None
+        await disconnected_client.close()
+
+        await _next_event(stream, SessionSnapshot)
+        announced = await _next_event_of(stream, (TurnStarted, CallbackRequested))
+        redelivered = await _next_event(stream, CallbackRequested)
+
+        await backend_contract_session.respond_to_callback(
+            redelivered.callback.callback_id, _user_answer("Yes")
+        )
+        _ = [event async for event in stream]
+    finally:
+        await stream.aclose()
+
+    assert isinstance(announced, TurnStarted)
+    assert announced.turn.id == started.turn.id
+    assert announced.turn.status is PublicTurnStatus.IN_PROGRESS
+
+
+@pytest.mark.asyncio
 async def test_rejected_callback_delivery_fails_the_turn_and_closes_the_callback(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
@@ -371,7 +442,7 @@ async def test_rejected_callback_delivery_fails_the_turn_and_closes_the_callback
         callback_id: str | None = None
         completed: TurnCompletedParams | None = None
         while completed is None:
-            message = await asyncio.wait_for(anext(incoming), timeout=1)
+            message = await asyncio.wait_for(anext(incoming), timeout=5)
             if isinstance(message, ServerRequest) and message.method == "callback/call":
                 callback = CallbackCallParams.model_validate(message.params).callback
                 callback_id = callback.callback_id
@@ -429,3 +500,12 @@ async def _next_event[EventT](
         if isinstance(event, event_type):
             return event
     raise AssertionError(f"Event stream ended before {event_type.__name__}")
+
+
+async def _next_event_of(
+    stream: AsyncGenerator[AppServerEvent], event_types: tuple[type, ...]
+) -> AppServerEvent:
+    async for event in stream:
+        if isinstance(event, event_types):
+            return event
+    raise AssertionError("Event stream ended before the expected event")

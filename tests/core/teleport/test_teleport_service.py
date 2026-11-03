@@ -12,6 +12,7 @@ import pytest
 import zstandard
 
 from tests.constants import TELEPORT_COMPLETE_URL, TELEPORT_SESSIONS_PATH
+from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
 from vibe.core.teleport.errors import (
     ServiceTeleportError,
     ServiceTeleportNotSupportedError,
@@ -37,7 +38,9 @@ def _make_service(tmp_path: Path, **kwargs: Any) -> TeleportService:
         vibe_code_sessions_base_url=kwargs.pop(
             "vibe_code_sessions_base_url", "https://api.example.com"
         ),
-        api_key=kwargs.pop("api_key", "api-key"),
+        credentials=kwargs.pop(
+            "credentials", ApiKeyPlatformCredentialProvider.from_api_key("api-key")
+        ),
         workdir=tmp_path,
         **kwargs,
     )
@@ -94,12 +97,12 @@ class TestTeleportServiceCompressDiff:
 
 class TestTeleportServiceValidateConfig:
     def test_raises_when_no_api_key(self, tmp_path: Path) -> None:
-        service = _make_service(tmp_path, api_key="")
+        service = _make_service(tmp_path, credentials=None)
         with pytest.raises(ServiceTeleportError, match="Mistral API key not set"):
             service._validate_config()
 
     def test_passes_when_api_key_set(self, tmp_path: Path) -> None:
-        service = _make_service(tmp_path, api_key="valid-key")
+        service = _make_service(tmp_path)
         service._validate_config()
 
 

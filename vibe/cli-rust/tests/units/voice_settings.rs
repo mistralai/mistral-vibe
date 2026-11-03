@@ -65,9 +65,4 @@ fn escape_without_changes_writes_nothing() {
 
     assert!(!app.voice_app.open);
     assert!(rx.try_recv().is_err());
-    assert_eq!(
-        app.pending_commits
-            .load(std::sync::atomic::Ordering::Relaxed),
-        0
-    );
 }

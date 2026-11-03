@@ -1060,6 +1060,10 @@ class RustRuntimeBuiltinToolCallAction(RustProtocolModel):
     turn_id: str
     call_id: str
     call: RustRuntimeBuiltinToolCall
+    # The `run_typescript` call whose program made this call; None for a direct call.
+    parent_call_id: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class RustProvidedToolCallAction(RustProtocolModel):
@@ -1068,6 +1072,10 @@ class RustProvidedToolCallAction(RustProtocolModel):
     turn_id: str
     call_id: str
     call: RustProvidedToolCall
+    # The `run_typescript` call whose program made this call; None for a direct call.
+    parent_call_id: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class RustFilesystemWriteOperation(RustProtocolModel):
@@ -1183,6 +1191,8 @@ class RustToolExecutionStartedObservation(RustProtocolModel):
     type: Literal["tool_execution_started"] = "tool_execution_started"
     turn_id: str
     call_id: str
+    # Core runs this tool itself: no tool call Action reaches the Runtime for it.
+    executed_by_core: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class RustToolExecutionFinishedObservation(RustProtocolModel):
@@ -1217,7 +1227,7 @@ class RustAgentResultError(RustProtocolModel):
     details: JsonValue = None
 
 
-type RustTurnStopReason = Literal["iteration_limit", "skipped"]
+type RustTurnStopReason = Literal["iteration_limit", "skipped", "rejected"]
 
 
 class RustCompletedAgentResult(RustProtocolModel):
@@ -1411,7 +1421,10 @@ class RustContextCompactionFailedObservation(RustProtocolModel):
 
 
 type RustWarningCode = Literal[
-    "request_too_long", "compaction_summary_cut_off", "compaction_inputs_reduced"
+    "request_too_long",
+    "compaction_summary_cut_off",
+    "compaction_inputs_reduced",
+    "post_tool_call_result_inconsistent",
 ]
 
 

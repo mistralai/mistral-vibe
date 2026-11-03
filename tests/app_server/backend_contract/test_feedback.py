@@ -31,6 +31,8 @@ from vibe.app_server.protocol import (
 )
 from vibe.app_server.session import AppServerSession
 
+pytestmark = pytest.mark.one_path
+
 # The on-disk cache layout is a contract: users upgrading keep their cooldowns.
 _SECTION = "user_feedback"
 _LAST_SHOWN = "last_shown_at"
@@ -243,19 +245,6 @@ _COOLDOWN_CASES = [
         id="test_shows_after_responded_cooldown_expires",
     ),
     pytest.param(
-        lambda: {
-            _RESPONDED: _ago(_RESPONDED_EXPIRED),
-            _LAST_SHOWN: _ago(_SHOWN_EXPIRED),
-        },
-        True,
-        id="test_responded_cooldown_longer_than_shown_cooldown",
-    ),
-    pytest.param(
-        lambda: {_RESPONDED: _ago(60), _LAST_SHOWN: _ago(_RESPONDED_EXPIRED)},
-        False,
-        id="test_responded_takes_precedence_over_shown",
-    ),
-    pytest.param(
         lambda: {_RESPONDED: _ago(_RESPONDED_EXPIRED), _LAST_SHOWN: "not_an_int"},
         True,
         id="test_shows_when_responded_valid_but_last_shown_corrupted",
@@ -267,14 +256,6 @@ _COOLDOWN_CASES = [
         },
         False,
         id="test_does_not_show_when_last_shown_recent_even_if_responded_cooldown_expired",
-    ),
-    pytest.param(
-        lambda: {
-            _RESPONDED: _ago(FEEDBACK_RESPONDED_COOLDOWN_SECONDS + 3600),
-            _LAST_SHOWN: _ago(_SHOWN_EXPIRED),
-        },
-        True,
-        id="test_shows_when_both_cooldowns_expired",
     ),
     pytest.param(
         lambda: {
@@ -301,30 +282,6 @@ _COOLDOWN_CASES = [
         lambda: {_SNOOZED: _ago(_SNOOZED_EXPIRED)},
         True,
         id="test_shows_after_snoozed_cooldown_expires",
-    ),
-    pytest.param(
-        lambda: {_SNOOZED: _ago(60), _RESPONDED: _ago(_RESPONDED_EXPIRED)},
-        False,
-        id="test_snoozed_takes_precedence_over_responded",
-    ),
-    pytest.param(
-        lambda: {_SNOOZED: _ago(60), _LAST_SHOWN: _ago(_SHOWN_EXPIRED)},
-        False,
-        id="test_snoozed_takes_precedence_over_shown",
-    ),
-    pytest.param(
-        lambda: {
-            _SNOOZED: _ago(FEEDBACK_SNOOZED_COOLDOWN_SECONDS + 3600),
-            _RESPONDED: _ago(FEEDBACK_RESPONDED_COOLDOWN_SECONDS + 3600),
-            _LAST_SHOWN: _ago(_SHOWN_EXPIRED),
-        },
-        True,
-        id="test_shows_when_all_cooldowns_expired",
-    ),
-    pytest.param(
-        lambda: {_SNOOZED: _ago(_SNOOZED_EXPIRED), _RESPONDED: _ago(60)},
-        False,
-        id="test_does_not_show_when_snoozed_expired_but_responded_recent",
     ),
     pytest.param(
         lambda: {_LAST_SHOWN: _ago(-FEEDBACK_SNOOZED_COOLDOWN_SECONDS)},

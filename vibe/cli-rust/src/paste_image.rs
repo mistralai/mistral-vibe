@@ -4,12 +4,13 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tempfile::Builder;
 
-use crate::app::{App, Status, ToastSeverity};
+use crate::app::{App, Severity, Status};
+use crate::ui::notice;
 use crate::{chat_input, paste_files, paste_path};
 
 mod store;
@@ -20,7 +21,6 @@ pub const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_IN_FLIGHT: usize = 8;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
-const WARNING_SECS: u64 = 5;
 
 #[derive(Default)]
 pub struct State {
@@ -72,25 +72,19 @@ pub fn apply_event(app: &mut App, event: Event) {
     app.paste_image.in_flight = app.paste_image.in_flight.saturating_sub(1);
     match event {
         Event::Empty { notify: false } => {}
-        Event::Empty { notify: true } => app.show_toast(
-            "No image found on the clipboard.".to_owned(),
-            ToastSeverity::Warning,
-            3,
-        ),
-        Event::TooLarge(size) => app.show_toast(
-            format!(
+        Event::Empty { notify: true } => {
+            notice::show_sticky(app, Severity::Warning, "No image found on the clipboard.");
+        }
+        Event::TooLarge(size) => notice::show_sticky(
+            app,
+            Severity::Warning,
+            &format!(
                 "Clipboard image is {}; max is {}.",
                 natural_size(size),
                 natural_size(MAX_IMAGE_BYTES)
             ),
-            ToastSeverity::Warning,
-            WARNING_SECS,
         ),
-        Event::Failed => app.show_toast(
-            "Failed to save pasted image to disk.".to_owned(),
-            ToastSeverity::Warning,
-            WARNING_SECS,
-        ),
+        Event::Failed => crate::notices::failed(app, "Failed to save pasted image to disk."),
         Event::Pasted { path } => paste_files::apply_image_files(app, vec![path]),
         Event::ImageFiles(paths) => paste_files::apply_image_files(app, paths),
         Event::Probed { start, raw, paths } => paste_files::apply_probed(app, start, &raw, paths),
@@ -104,13 +98,10 @@ pub(crate) fn rejects_images(app: &mut App) -> bool {
         return false;
     }
     let name = &app.session.startup_config.active_model_display_name;
-    app.show_toast(
-        format!(
-            "Model `{name}` does not support images. Switch with /model or ask me to enable image support for this model."
-        ),
-        ToastSeverity::Warning,
-        WARNING_SECS,
+    let message = format!(
+        "Model `{name}` does not support images. Switch with /model or ask me to enable image support for this model."
     );
+    notice::show_sticky(app, Severity::Warning, &message);
     true
 }
 
@@ -197,11 +188,13 @@ pub(crate) fn run_with_timeout(command: &mut Command, stdout: Stdio) -> bool {
     let Ok(mut child) = command.stdout(stdout).stderr(Stdio::null()).spawn() else {
         return false;
     };
-    let deadline = Instant::now() + READ_TIMEOUT;
+    let deadline = crate::clock::real_now() + READ_TIMEOUT;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) if crate::clock::real_now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();

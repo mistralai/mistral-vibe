@@ -23,6 +23,7 @@ from vibe.utils.repository import normalize_repo_url
 VIBE_CODE_PROJECT_PICKER_PAGE_LIMIT = 100
 
 if TYPE_CHECKING:
+    from vibe.core.platform_auth import PlatformCredentialProvider
     from vibe.core.teleport.git import GitRepoInfo
 
 
@@ -95,14 +96,14 @@ class VibeCodeProjectPickerService:
         self,
         *,
         base_url: str,
-        api_key: str,
+        credentials: PlatformCredentialProvider | None,
         repo_root: Path,
         page_fetcher: VibeCodeProjectPageFetcher | None = None,
         project_store: VibeProjectsStore | None = None,
         timeout: float = 60.0,
     ) -> None:
         self._base_url = base_url
-        self._api_key = api_key
+        self._credentials = credentials
         self._repo_root = repo_root
         self._page_fetcher = page_fetcher
         self._project_store = project_store or VibeProjectsStore()
@@ -332,14 +333,14 @@ class VibeCodeProjectPickerService:
     async def _with_client[T](
         self, operation: Callable[[VibeCodeProjectPageFetcher], Awaitable[T]]
     ) -> T:
-        if not self._api_key:
-            raise VibeCodeProjectApiError("Vibe Code Web API key not set.")
-
         if self._page_fetcher is not None:
             return await operation(self._page_fetcher)
 
+        if self._credentials is None:
+            raise VibeCodeProjectApiError("Vibe Code Web API key not set.")
+
         async with VibeCodeProjectClient(
-            self._base_url, self._api_key, timeout=self._timeout
+            self._base_url, self._credentials, timeout=self._timeout
         ) as client:
             return await operation(client)
 

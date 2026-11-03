@@ -1,6 +1,6 @@
 //! Prompt-queue requests and the ADR-0013 selection state machine.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::json;
 use vibe_rs::app::{App, Status};
@@ -12,7 +12,7 @@ fn generating_app() -> App {
     let mut app = App::default();
     app.session.session_id = Some("sess".into());
     app.session.status = Status::Generating {
-        since: Instant::now(),
+        since: vibe_rs::clock::now(),
     };
     app
 }
@@ -150,7 +150,7 @@ fn interrupting_an_unstarted_turn_waits_for_it_unless_its_prompt_is_rejected() {
 fn a_rejected_interrupted_prompt_leaves_the_prompts_queued_after_it_alone() {
     let mut app = generating_app();
     app.queue.items = vec![item("a", "first", None), item("b", "second", Some("qb"))];
-    app.queue.interrupt_on_start = Some(Instant::now());
+    app.queue.interrupt_on_start = Some(vibe_rs::clock::now());
 
     let rejected = mq::QueueEvent::Rejected {
         message_id: "a".into(),
@@ -179,7 +179,7 @@ fn an_unqueued_turn_like_retry_is_interrupted_once_it_starts_and_marked_once() {
     );
 
     app.session.status = Status::Generating {
-        since: Instant::now(),
+        since: vibe_rs::clock::now(),
     };
     submission(&mut app, &client);
     assert_eq!(app.view.transcript.revision(), marked, "no second marker");
@@ -189,11 +189,11 @@ fn an_unqueued_turn_like_retry_is_interrupted_once_it_starts_and_marked_once() {
 #[test]
 fn a_pending_interrupt_stops_waiting_after_its_bound() {
     let mut app = generating_app();
-    app.queue.interrupt_on_start = Instant::now().checked_sub(Duration::from_secs(31));
+    app.queue.interrupt_on_start = vibe_rs::clock::now().checked_sub(Duration::from_secs(31));
     assert!(!mq::take_interrupt_on_start(&mut app), "stale interrupt");
     assert!(app.queue.interrupt_on_start.is_none());
 
-    app.queue.interrupt_on_start = Some(Instant::now());
+    app.queue.interrupt_on_start = Some(vibe_rs::clock::now());
     assert!(mq::take_interrupt_on_start(&mut app));
     assert!(!mq::take_interrupt_on_start(&mut app), "taken once");
 }
@@ -203,7 +203,7 @@ async fn a_prompt_never_merges_into_an_interrupted_turn() {
     let mut app = generating_app();
     app.queue.items = vec![item("a", "first", Some("qa"))];
     mount(&mut app, "a", "first", false);
-    app.queue.interrupt_on_start = Some(Instant::now());
+    app.queue.interrupt_on_start = Some(vibe_rs::clock::now());
 
     mq::enqueue_prompt(&mut app, &stub(), "second".into());
 
@@ -275,7 +275,7 @@ fn is_available_gates_on_status_and_a_non_empty_queue() {
     app.queue.items = vec![item("a", "first", None)];
     assert!(!mq::is_available(&app), "Ready never opens queue mode");
     app.session.status = Status::Generating {
-        since: Instant::now(),
+        since: vibe_rs::clock::now(),
     };
     assert!(mq::is_available(&app));
     app.queue.clear();

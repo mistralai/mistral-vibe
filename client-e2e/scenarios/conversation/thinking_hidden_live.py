@@ -17,8 +17,6 @@ handshake = {
     "runtime/read": {"runtime": {"config": {"showThinkingNodes": True}}},
 }
 
-# The prompt step leaves the turn running, so settle on the busy frame.
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 capture_steps = {1, 2}
 
 # The update carries the fixture runtime, where `showThinkingNodes` is false.

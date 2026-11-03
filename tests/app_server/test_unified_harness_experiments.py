@@ -20,6 +20,8 @@ from vibe.core.experiments.manager import ExperimentManager
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
 from vibe.core.experiments.wait import experiments_eval_failed
 from vibe.core.identity import IdentityResult
+from vibe.core.platform_auth._api_key import api_key_principal
+import vibe.core.platform_auth._mistral as platform_mistral
 from vibe.core.telemetry.types import LaunchContext
 from vibe.setup.auth.whoami import WhoAmIResult
 
@@ -69,6 +71,7 @@ class _StubEvalClient(RemoteEvalClient):
 
 class _RecordingSession:
     session_id = "session-1"
+    started_by_session_id: str | None = None
     cwd: str | None = None
 
     def __init__(self, *, active_turn_id: str | None = None) -> None:
@@ -130,7 +133,7 @@ def _stub_identity_and_whoami(
     )
     context.whoami_cache.populate(
         base_url=context.config_orchestrator.config.console_base_url,
-        api_key="mock",
+        principal=api_key_principal("mock"),
         result=WhoAmIResult(
             plan_type=AccountPlanKind.CHAT,
             plan_name="INDIVIDUAL",
@@ -698,7 +701,7 @@ async def test_unified_readiness_waits_for_the_catalog_an_unpinned_session_needs
     _write_user_config(config_dir, active_model="")
     released = asyncio.Event()
 
-    async def _slow_fetch(_config: object) -> object:
+    async def _slow_fetch(_config: object, _credentials: object = None) -> object:
         await released.wait()
         return _runnable_catalog("fetched-model")
 
@@ -741,7 +744,7 @@ async def test_unified_readiness_skips_the_catalog_for_a_locally_defined_pin(
     _write_user_config(config_dir)  # the test config pins a built-in model
     released = asyncio.Event()
 
-    async def _slow_fetch(_config: object) -> object:
+    async def _slow_fetch(_config: object, _credentials: object = None) -> object:
         await released.wait()
         return None
 
@@ -854,7 +857,7 @@ async def test_unified_a_restored_pin_only_the_catalog_defines_runs_once_ready(
     _write_user_config(config_dir)  # pinned to a built-in model: no wait alone
     released = asyncio.Event()
 
-    async def _slow_fetch(_config: object) -> object:
+    async def _slow_fetch(_config: object, _credentials: object = None) -> object:
         await released.wait()
         return _runnable_catalog("fetched-model")
 
@@ -900,7 +903,7 @@ async def test_unified_sessions_stop_waiting_once_a_fetch_outlasts_the_cap(
     _write_user_config(config_dir, active_model="")
     released = asyncio.Event()
 
-    async def _stuck_fetch(_config: object) -> None:
+    async def _stuck_fetch(_config: object, _credentials: object = None) -> None:
         await released.wait()
 
     monkeypatch.setattr(adapter_module, "fetch_and_cache_model_catalog", _stuck_fetch)
@@ -946,11 +949,10 @@ async def test_unified_no_mistral_credential_means_no_wait(
     process_services: ProcessServices,
 ) -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    import vibe.core.telemetry.send as telemetry_send
 
     _write_user_config(config_dir, active_model="")
     monkeypatch.setattr(
-        telemetry_send, "get_mistral_provider_and_api_key", lambda _config: None
+        platform_mistral, "mistral_credentials", lambda _config, _credentials=None: None
     )
     adapter, _client = await _build_adapter(
         tmp_path,

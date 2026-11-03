@@ -56,6 +56,7 @@ from vibe.app_server.protocol import (
 )
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.platform_auth import PlatformCredentialFactory
 from vibe.core.skills.models import SkillScope
 from vibe.core.skills.registry import (
     RegistrySkillsError,
@@ -95,6 +96,11 @@ class SkillsHost(Protocol):
     @property
     def config_orchestrator(self) -> ConfigOrchestrator[VibeConfigSchema]:
         """The orchestrator a skill toggle persists ``disabled_skills`` through."""
+        ...
+
+    @property
+    def credentials(self) -> PlatformCredentialFactory | None:
+        """The connection's platform credential the registry calls carry."""
         ...
 
     @property
@@ -215,7 +221,8 @@ class SkillsController:
         config = self._host.config
         roots = self._host.skill_roots
         project_available = project_scope_available(roots)
-        authenticated = await has_registry_endpoint(config)
+        credentials = self._host.credentials
+        authenticated = await has_registry_endpoint(config, credentials=credentials)
         if not authenticated:
             return SkillsCatalogResponse(
                 skills=[],
@@ -225,9 +232,10 @@ class SkillsController:
                 authenticated=False,
             )
         try:
-            catalog = await list_catalog(config)
+            catalog = await list_catalog(config, credentials=credentials)
             updates = {
-                u.name: u.latest_version for u in await check_updates(config, roots)
+                u.name: u.latest_version
+                for u in await check_updates(config, roots, credentials=credentials)
             }
         except Exception:
             return SkillsCatalogResponse(
@@ -251,7 +259,9 @@ class SkillsController:
 
     async def _versions(self, params: SkillsVersionsParams) -> SkillsVersionsResponse:
         self._host.require_session(params.session_id)
-        versions = await list_skill_versions(self._host.config, params.skill_id)
+        versions = await list_skill_versions(
+            self._host.config, params.skill_id, credentials=self._host.credentials
+        )
         return SkillsVersionsResponse(
             versions=[
                 SkillVersionView(version=v.version, aliases=list(v.aliases))
@@ -261,7 +271,11 @@ class SkillsController:
 
     async def _updates(self, params: SkillsUpdatesParams) -> SkillsUpdatesResponse:
         self._host.require_session(params.session_id)
-        updates = await check_new_versions(self._host.config, self._host.skill_roots)
+        updates = await check_new_versions(
+            self._host.config,
+            self._host.skill_roots,
+            credentials=self._host.credentials,
+        )
         return SkillsUpdatesResponse(
             updates=[
                 SkillUpdateView(
@@ -276,15 +290,18 @@ class SkillsController:
     async def _detail(self, params: SkillsDetailParams) -> SkillsDetailResponse:
         self._host.require_session(params.session_id)
         config = self._host.config
+        credentials = self._host.credentials
         detail = await get_skill_details(
-            config, params.skill_id, version=params.version
+            config, params.skill_id, version=params.version, credentials=credentials
         )
         if detail is not None:
             return SkillsDetailResponse(
                 detail=SkillDetailView.model_validate(detail.model_dump())
             )
         try:
-            body = await get_skill_body(config, params.skill_id, version=params.version)
+            body = await get_skill_body(
+                config, params.skill_id, version=params.version, credentials=credentials
+            )
         except RegistrySkillsError:
             body = None
         return SkillsDetailResponse(detail=None, body=body)
@@ -299,6 +316,7 @@ class SkillsController:
                 alias=params.alias,
                 scope=self._scope(params.scope),
                 roots=self._host.skill_roots,
+                credentials=self._host.credentials,
             )
         except RegistrySkillsError as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, exc.reason) from exc
@@ -315,6 +333,7 @@ class SkillsController:
                 params.version,
                 self._scope(params.scope),
                 self._host.skill_roots,
+                credentials=self._host.credentials,
             )
         except RegistrySkillsError as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, exc.reason) from exc
@@ -330,6 +349,7 @@ class SkillsController:
                 params.name,
                 self._scope(params.scope),
                 self._host.skill_roots,
+                credentials=self._host.credentials,
             )
         except RegistrySkillsError as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, exc.reason) from exc
@@ -344,6 +364,7 @@ class SkillsController:
                 params.alias,
                 self._scope(params.scope),
                 self._host.skill_roots,
+                credentials=self._host.credentials,
             )
         except RegistrySkillsError as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, exc.reason) from exc

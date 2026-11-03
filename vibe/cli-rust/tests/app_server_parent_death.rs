@@ -4,6 +4,7 @@
 //! reads its stdin to see the client gone. Both spawns are covered: `vibe -p`
 //! and the TUI's, and the run server's multiplexed one.
 #![cfg(target_os = "linux")]
+#![allow(clippy::disallowed_methods)] // Tests drive real time directly; replay acks never run here.
 
 use std::any::Any;
 use std::fs::File;

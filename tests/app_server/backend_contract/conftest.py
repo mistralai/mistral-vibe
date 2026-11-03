@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -133,23 +133,93 @@ async def connect_backend_contract_client(
 
 _opened_backends: list[Any] = []
 
+SESSION_API_SWITCH = "VIBE_EXPERIMENTAL_LOCAL_RUNTIME_SESSION_API"
+
+# The adapter takes a different path to the runtime for these commands when the
+# Session API switch is on. A test that drives one of them must say on which
+# positions it runs: ``both_paths`` when what it asserts comes from the command
+# (turn events, callback state, compaction, ...), ``one_path`` when the command
+# is only setup for a behavior both paths share. Reads, subscriptions and host
+# routes (rename, catalogs, feedback, ...) need no marker.
+_PATH_DEPENDENT_COMMANDS = (
+    "start_turn",
+    "steer_turn",
+    "interrupt_turn",
+    "respond_to_callback",
+    "compact",
+    "write_config",
+    "write_model_config",
+    "reload_config",
+)
+
+
+def _path_marker(item: pytest.Item) -> str | None:
+    """The closest of ``both_paths`` and ``one_path``, a test's over its module's."""
+    for marker in item.iter_markers():
+        if marker.name in {"both_paths", "one_path"}:
+            return marker.name
+    return None
+
+
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    """Run ``both_paths`` tests with the switch off and on, the others with it off."""
+    if "session_api_path" not in metafunc.fixturenames:
+        return
+    if _path_marker(metafunc.definition) == "both_paths":
+        metafunc.parametrize(
+            "session_api_path", [False, True], ids=["direct", "session_api"]
+        )
+        return
+    metafunc.parametrize("session_api_path", [False], ids=["direct"])
+
 
 @pytest.fixture(autouse=True)
-def _record_opened_backends(monkeypatch: pytest.MonkeyPatch) -> None:
+def _record_opened_backends(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    session_api_path: bool,
+) -> Iterator[None]:
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedHarnessBackendAdapter,
     )
 
+    monkeypatch.setenv(SESSION_API_SWITCH, "true" if session_api_path else "false")
     _opened_backends.clear()
     initialize = UnifiedHarnessBackendAdapter.initialize_integrations
 
     async def recording(self: UnifiedHarnessBackendAdapter) -> None:
+        # The switch decides the path: a mismatch means the test ran the wrong one.
+        assert (self._api_path is not None) is session_api_path
         _opened_backends.append(self)
         await initialize(self)
 
     monkeypatch.setattr(
         UnifiedHarnessBackendAdapter, "initialize_integrations", recording
     )
+    driven: set[str] = set()
+    if _path_marker(request.node) is None:
+        for name in _PATH_DEPENDENT_COMMANDS:
+            monkeypatch.setattr(
+                UnifiedHarnessBackendAdapter,
+                name,
+                _recording_command(getattr(UnifiedHarnessBackendAdapter, name), driven),
+            )
+    yield
+    if driven:
+        pytest.fail(
+            f"{request.node.name} drives {', '.join(sorted(driven))}, whose path "
+            "depends on the Session API switch: mark it both_paths or one_path"
+        )
+
+
+def _recording_command(
+    command: Callable[..., Awaitable[Any]], driven: set[str]
+) -> Callable[..., Awaitable[Any]]:
+    async def recorded(*args: Any, **kwargs: Any) -> Any:
+        driven.add(command.__name__)
+        return await command(*args, **kwargs)
+
+    return recorded
 
 
 async def wait_for_background_integrations() -> None:

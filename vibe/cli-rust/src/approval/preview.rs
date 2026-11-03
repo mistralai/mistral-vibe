@@ -24,7 +24,7 @@ pub(super) fn load(app: &App) {
     let input = callback.detail.effect.input.clone();
     let cwd = app.session.cwd.clone();
     crate::ui_event::spawn(app, async move {
-        let output = tokio::task::spawn_blocking(move || build(&input, cwd.as_deref()))
+        let output = crate::work::spawn_blocking(move || build(&input, cwd.as_deref()))
             .await
             .ok()
             .flatten();

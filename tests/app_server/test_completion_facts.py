@@ -319,8 +319,8 @@ def test_a_level_of_the_models_own_runs_as_written_over_a_known_model(
     expected_offered: tuple[str, ...],
 ) -> None:
     """*Prepare*: A known model, served on an OpenAI-compatible route, whose table
-    row stops at high, while its config lists a level of its own, and sets it or a
-    word it does not list.
+    row lists low, high and max, while its config lists a level of its own, and sets
+    it or a word it does not list.
     *Do*: Compile the session's facts and the picker's levels.
     *Assert*: The config's levels are the model's, lowest first with the own level
     kept in its place; the session runs the level as written, and the picker
@@ -392,8 +392,8 @@ def test_the_configs_own_levels_win_over_the_catalogues(
 
 
 def test_a_level_outside_the_known_levels_runs_when_the_config_lists_none() -> None:
-    """*Prepare*: Mistral Large 4, whose known levels are low, high and max, set to xhigh
-    with no level set in its config.
+    """*Prepare*: Mistral Large 4, whose known levels are low, high and max, set to
+    xhigh with no level set in its config.
     *Do*: Compile the session's facts.
     *Assert*: The session runs at xhigh: with no listed levels, Vibe sends the level
     and the provider says whether the model takes it.
@@ -795,16 +795,17 @@ def test_a_reopen_with_a_saved_answer_asks_only_for_another_compaction_model(
     [
         (_provider(), "zai-glm-5-3", "low"),
         (_provider(backend=Backend.GENERIC), "gpt-6-astra", "low"),
+        (_provider(), "mistral-large-4", "low"),
         (_provider(), "mistral-medium-3.5", "off"),
         (_provider(), "custom-model", "off"),
     ],
-    ids=["glm-5.3", "gpt-6-astra", "can-turn-off", "unknown-model"],
+    ids=["glm-5.3", "gpt-6-astra", "mistral-large-4", "can-turn-off", "unknown-model"],
 )
 def test_an_unset_thinking_takes_the_models_lowest_setting(
     provider: ProviderConfig, name: str, lowest: str
 ) -> None:
-    """*Prepare*: A model entry without `thinking`, on models that always reason,
-    one that can stop and one nobody knows.
+    """*Prepare*: A model entry without `thinking`, on models that always reason
+    (Mistral Large 4 among them), one that can stop and one nobody knows.
     *Do*: Compile the session's facts.
     *Assert*: Both routes think at the model's lowest setting: off where it can
     stop, else its lowest level. Nothing is refused.

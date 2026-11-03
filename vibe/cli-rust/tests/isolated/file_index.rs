@@ -81,7 +81,7 @@ fn git_index_lists_visible_files_and_synthesizes_parent_dirs() {
     fs::write(root.join("wrapper/target/out.txt"), "o").unwrap();
     git(&root, &["add", "tracked.txt", "src/lib.rs"]);
 
-    let (entries, git_backed) = rebuild_index(&root);
+    let (entries, git_backed) = rebuild_index(&root, None);
 
     assert!(git_backed);
     assert_eq!(entries.get("tracked.txt"), Some(&false));
@@ -105,7 +105,7 @@ fn git_index_skips_stale_index_entries() {
     git(&root, &["add", "stale.txt"]);
     fs::remove_file(root.join("stale.txt")).unwrap();
 
-    let entries = git_ls_files(&root).unwrap();
+    let entries = git_ls_files(&root, None).unwrap();
 
     // Tracked on disk-in-the-index only: the path check drops it.
     assert!(entries.is_empty());
@@ -124,7 +124,7 @@ fn git_index_never_runs_the_repository_fsmonitor() {
     let hook = format!("touch '{}'", marker.display());
     git(&root, &["config", "core.fsmonitor", &hook]);
 
-    let entries = git_ls_files(&root).unwrap();
+    let entries = git_ls_files(&root, None).unwrap();
 
     assert!(!marker.exists(), "the repository's fsmonitor command ran");
     assert_eq!(entries.get("tracked.txt"), Some(&false));
@@ -138,7 +138,7 @@ fn non_git_roots_fall_back_to_the_filesystem_walk() {
     fs::write(root.join("nested/target/out.txt"), "o").unwrap();
     fs::write(root.join("plain.md"), "p").unwrap();
 
-    let (entries, git_backed) = rebuild_index(&root);
+    let (entries, git_backed) = rebuild_index(&root, None);
 
     // Without a repo the walk drives the index and keeps ignored-content dirs.
     assert!(!git_backed);
@@ -146,6 +146,24 @@ fn non_git_roots_fall_back_to_the_filesystem_walk() {
     assert_eq!(entries.get("nested"), Some(&true));
     assert_eq!(entries.get("nested/target"), Some(&true));
     assert_eq!(entries.get("nested/target/out.txt"), Some(&false));
+    cleanup(&root);
+}
+
+#[test]
+fn a_stopped_rebuild_enumerates_nothing() {
+    use std::sync::atomic::AtomicBool;
+    let root = temp_root();
+    git(&root, &["init", "--quiet"]);
+    fs::write(root.join("plain.md"), "p").unwrap();
+
+    let stop = AtomicBool::new(true);
+    let (entries, git_backed) = rebuild_index(&root, Some(&stop));
+    assert!(entries.is_empty(), "a stopped rebuild must not enumerate");
+    assert!(!git_backed);
+
+    let (entries, git_backed) = rebuild_index(&root, None);
+    assert!(git_backed);
+    assert_eq!(entries.get("plain.md"), Some(&false));
     cleanup(&root);
 }
 
@@ -315,4 +333,398 @@ fn rescan_notice_rebuilds_the_whole_index() {
     assert!(paths.read().unwrap().contains_key("unseen.txt"));
     assert_eq!(*version_rx.borrow_and_update(), 1);
     cleanup(&root);
+}
+
+#[test]
+fn watcher_off_mode_builds_the_index_once_and_exits() {
+    use vibe_rs::utils::file_index::FileIndexHandle;
+    let root = temp_root();
+    fs::write(root.join("plain.md"), "p").unwrap();
+    let mut handle = FileIndexHandle::start(root.clone(), false);
+    let mut waited = 0;
+    while !handle.changes.has_changed().unwrap_or(true) && waited < 2000 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        waited += 5;
+    }
+    assert_eq!(*handle.changes.borrow(), 1, "index never built");
+    handle.changes.borrow_and_update();
+    // A file added after the single build is never picked up.
+    fs::write(root.join("late.txt"), "l").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!handle.changes.has_changed().unwrap_or(false));
+    assert_eq!(handle.index.matching("plain", 10).len(), 1);
+    handle.stop();
+    cleanup(&root);
+}
+
+#[test]
+fn the_initial_build_is_tracked_work_and_its_version_waits_to_be_applied() {
+    use vibe_rs::utils::file_index::FileIndexHandle;
+    use vibe_rs::work;
+    let root = temp_root();
+    fs::write(root.join("plain.md"), "p").unwrap();
+    let mut handle = FileIndexHandle::start(root.clone(), false);
+    let mut waited = 0;
+    while !work::idle() && waited < 2000 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        waited += 5;
+    }
+    assert!(work::idle(), "the build never ended");
+    // Idle work must imply a published build, so the ack never beats the index.
+    assert!(
+        handle.has_update(),
+        "a published build is pending until applied"
+    );
+    assert!(handle.take_update());
+    assert!(!handle.has_update());
+    handle.stop();
+    cleanup(&root);
+}
+
+#[test]
+fn stop_ends_the_watch_thread() {
+    use vibe_rs::utils::file_index::{apply, FileIndexAction, FileIndexHandle};
+    let root = temp_root();
+    fs::write(root.join("watched.md"), "w").unwrap();
+    let mut handle = FileIndexHandle::start(root.clone(), true);
+    let mut waited = 0;
+    while !handle.changes.has_changed().unwrap_or(true) && waited < 2000 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        waited += 5;
+    }
+    assert_eq!(*handle.changes.borrow(), 1, "index never built");
+    handle.changes.borrow_and_update();
+
+    apply(&mut handle, &FileIndexAction::Stop);
+    assert!(!handle.running());
+    // The stop flag observable: a fresh file lands no version bump.
+    fs::write(root.join("after_stop.txt"), "a").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    assert!(!handle.changes.has_changed().unwrap_or(false));
+
+    // The plan restarts it at the session cwd when re-enabled.
+    let action = vibe_rs::utils::file_index::FileIndexAction::plan(
+        &handle,
+        &plan_config(true, true),
+        Some(root.to_str().unwrap()),
+    );
+    assert!(matches!(
+        action,
+        Some(FileIndexAction::Start { watcher: true, .. })
+    ));
+    if let Some(action) = action {
+        apply(&mut handle, &action);
+        assert!(handle.running());
+    }
+    let mut waited = 0;
+    while *handle.changes.borrow() == 0 && waited < 2000 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        waited += 5;
+    }
+    assert_eq!(handle.index.matching("after_stop", 10).len(), 1);
+    handle.stop();
+    cleanup(&root);
+}
+
+fn plan_config(enabled: bool, watcher: bool) -> vibe_rs::utils::startup_cache::StartupConfig {
+    vibe_rs::utils::startup_cache::StartupConfig {
+        enable_file_autocomplete: enabled,
+        file_watcher_for_autocomplete: watcher,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn watch_mode_reindexes_a_file_created_after_the_initial_build() {
+    use std::time::{Duration, Instant};
+    use vibe_rs::utils::file_index::FileIndexHandle;
+    let root = temp_root();
+    fs::write(root.join("initial.md"), "i").unwrap();
+    let mut handle = FileIndexHandle::start(root.clone(), true);
+    wait_for_version(&mut handle, 1);
+
+    // Quiet for longer than the drain window: a loop that mistakes a quiet
+    // timeout for its end dies here and never sees the new file.
+    std::thread::sleep(Duration::from_millis(600));
+    fs::write(root.join("late.txt"), "l").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while *handle.changes.borrow() < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    handle.changes.borrow_and_update();
+    assert_eq!(handle.index.matching("late", 10).len(), 1);
+    handle.stop();
+    cleanup(&root);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn symlinked_dirs_reaching_the_same_tree_do_not_stall_the_watched_index() {
+    use std::os::unix::fs::symlink;
+    use vibe_rs::utils::file_index::FileIndexHandle;
+    let root = temp_root();
+    let levels = 25;
+    fs::create_dir(root.join(format!("l{levels}"))).unwrap();
+    fs::write(root.join(format!("l{levels}/leaf.txt")), "l").unwrap();
+    for level in 0..levels {
+        let dir = root.join(format!("l{level}"));
+        fs::create_dir(&dir).unwrap();
+        let next = format!("../l{}", level + 1);
+        symlink(&next, dir.join("a")).unwrap();
+        symlink(&next, dir.join("b")).unwrap();
+    }
+    let mut handle = FileIndexHandle::start(root.clone(), true);
+    wait_for_version(&mut handle, 1);
+    assert_eq!(handle.index.matching("leaf", 10).len(), 1);
+    handle.stop();
+    cleanup(&root);
+}
+
+fn wait_for_version(handle: &mut vibe_rs::utils::file_index::FileIndexHandle, version: u64) {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while *handle.changes.borrow() < version && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        *handle.changes.borrow() >= version,
+        "file index never reached version {version}"
+    );
+    handle.changes.borrow_and_update();
+}
+
+#[test]
+fn a_config_write_runtime_restarts_the_index_in_the_new_watch_mode() {
+    use vibe_rs::app::App;
+    use vibe_rs::event_handler;
+    use vibe_rs::utils::file_index::{FileIndexAction, FileIndexHandle};
+    let root = temp_root();
+    fs::write(root.join("plain.md"), "p").unwrap();
+    std::env::set_var("VIBE_HOME", root.join("home"));
+    let mut app = App::default();
+    app.completion.files = FileIndexHandle::start(root.clone(), true);
+    app.session.cwd = Some(root.to_string_lossy().into_owned());
+    let runtime = serde_json::json!({
+        "runtime": {
+            "config": {
+                "theme": "ansi-dark",
+                "defaultAgent": "accept-edits",
+                "activeModel": {"displayName": "m", "thinking": "off"},
+                "enableFileAutocomplete": true,
+                "fileWatcherForAutocomplete": false,
+            }
+        }
+    });
+    // The watcher-flag flip reconciles inline: the restarted watcher-off
+    // handle builds the index once and publishes.
+    event_handler::apply_runtime_value(&mut app, &runtime);
+    wait_for_version(&mut app.completion.files, 1);
+    assert_eq!(app.completion.files.index.matching("plain", 10).len(), 1);
+    assert!(app.completion.files.running());
+    // The new mode is now current: the same runtime plans nothing further.
+    let config = vibe_rs::utils::startup_cache::StartupConfig {
+        enable_file_autocomplete: true,
+        file_watcher_for_autocomplete: false,
+        ..Default::default()
+    };
+    assert!(
+        FileIndexAction::plan(&app.completion.files, &config, app.session.cwd.as_deref()).is_none()
+    );
+    // Watcher-off means one build: a file created after it is not indexed.
+    fs::write(root.join("late.txt"), "l").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(app.completion.files.index.matching("late", 10).is_empty());
+    app.completion.files.stop();
+    cleanup(&root);
+}
+
+#[test]
+fn a_rapid_burst_of_creates_settles_into_few_rebuilds() {
+    use std::time::{Duration, Instant};
+    use vibe_rs::utils::file_index::FileIndexHandle;
+    let root = temp_root();
+    // A git-backed tree keeps one version bump per drained burst: the plain
+    // incremental path bumps per changed event instead.
+    let git = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["init", "--quiet"])
+        .status()
+        .unwrap();
+    assert!(git.success());
+    let mut handle = FileIndexHandle::start(root.clone(), true);
+    wait_for_version(&mut handle, 1);
+
+    // One rapid burst: ten files, faster than any filesystem would deliver
+    // them as separate change sets.
+    for index in 0..10 {
+        fs::write(root.join(format!("burst{index}.txt")), "b").unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while *handle.changes.borrow() < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    handle.changes.borrow_and_update();
+    std::thread::sleep(Duration::from_millis(500));
+    handle.changes.borrow_and_update();
+
+    // Every file is indexed, and the whole burst cost few rebuilds - one
+    // per settled cluster, never one per event.
+    let rebuilt = (*handle.changes.borrow()).saturating_sub(1);
+    assert!(rebuilt <= 3, "a rapid burst rebuilt {rebuilt} times");
+    for index in 0..10 {
+        let needle = format!("burst{index}");
+        assert_eq!(handle.index.matching(&needle, 10).len(), 1);
+    }
+    handle.stop();
+    cleanup(&root);
+}
+
+#[test]
+fn stop_drops_the_built_index() {
+    use vibe_rs::utils::file_index::{FileIndexAction, FileIndexHandle};
+    let root = temp_root();
+    fs::write(root.join("initial.md"), "i").unwrap();
+    let mut handle = FileIndexHandle::start(root.clone(), true);
+    wait_for_version(&mut handle, 1);
+    assert_eq!(handle.index.matching("initial", 10).len(), 1);
+
+    vibe_rs::utils::file_index::apply(&mut handle, &FileIndexAction::Stop);
+    assert!(handle.index.matching("initial", 10).is_empty());
+    handle.stop();
+    cleanup(&root);
+}
+
+#[test]
+fn a_watch_flip_restarts_at_the_running_root_not_a_stale_cwd() {
+    use vibe_rs::utils::file_index::{FileIndexAction, FileIndexHandle};
+    use vibe_rs::utils::startup_cache::StartupConfig;
+    let root = temp_root();
+    fs::write(root.join("indexed.md"), "i").unwrap();
+    let checkout = temp_root();
+    let handle = FileIndexHandle::start(root.clone(), true);
+    // The session cwd still names the pre-settle checkout when the flip plans.
+    let config = StartupConfig {
+        enable_file_autocomplete: true,
+        file_watcher_for_autocomplete: false,
+        ..Default::default()
+    };
+    let action = FileIndexAction::plan(&handle, &config, Some(checkout.to_str().unwrap()));
+    let Some(FileIndexAction::Start {
+        root: planned,
+        watcher,
+    }) = action
+    else {
+        panic!("a watcher flip plans a restart");
+    };
+    assert_eq!(planned, root);
+    assert!(!watcher);
+    handle.stop();
+    cleanup(&root);
+    cleanup(&checkout);
+}
+
+#[test]
+fn a_failed_watch_install_keeps_a_one_shot_build_until_the_mode_changes() {
+    use vibe_rs::utils::file_index::{FileIndexAction, FileIndexHandle};
+    let root = temp_root();
+    // A recursive watch cannot install on a missing root: the thread falls
+    // back to one publish and exits.
+    let missing = root.join("missing");
+    let mut handle = FileIndexHandle::start(missing.clone(), true);
+    wait_for_version(&mut handle, 1);
+    // Later runtime updates with the same config plan nothing: a retry in
+    // the same session would hit the same exhausted kernel resources.
+    assert!(FileIndexAction::plan(&handle, &plan_config(true, true), None).is_none());
+    // A watcher-mode change still plans a restart by mismatch.
+    assert!(matches!(
+        FileIndexAction::plan(&handle, &plan_config(true, false), None),
+        Some(FileIndexAction::Start { watcher: false, .. })
+    ));
+    handle.stop();
+    cleanup(&root);
+}
+
+#[test]
+fn a_stopped_burst_applies_nothing() {
+    use std::sync::atomic::AtomicBool;
+    use vibe_rs::utils::file_index::{apply_events_tracked, ignore_matcher};
+    let root = temp_root();
+    git(&root, &["init", "--quiet"]);
+    fs::write(root.join("tracked.txt"), "t").unwrap();
+    git(&root, &["add", "tracked.txt"]);
+    let paths = RwLock::new(BTreeMap::new());
+    let (version_tx, mut version_rx) = watch::channel(0u64);
+    version_rx.borrow_and_update();
+    let mut ignore = ignore_matcher(&root);
+
+    let stop = AtomicBool::new(true);
+    let rescan = Event::new(EventKind::Other).set_flag(Flag::Rescan);
+    let (_, stats) = apply_events_tracked(
+        &root,
+        &paths,
+        vec![rescan],
+        &version_tx,
+        &mut ignore,
+        false,
+        Some(&stop),
+    );
+    assert!(!stats.rebuilt, "a stopped rescan must not rebuild");
+    assert!(paths.read().unwrap().is_empty());
+    assert_eq!(*version_rx.borrow(), 0, "a stopped burst must not publish");
+
+    let (_, stats) = apply_events_tracked(
+        &root,
+        &paths,
+        vec![ev(
+            EventKind::Create(CreateKind::Any),
+            &[root.join("tracked.txt")],
+        )],
+        &version_tx,
+        &mut ignore,
+        false,
+        Some(&stop),
+    );
+    assert_eq!(stats.walks, 0, "a stopped event must not walk");
+    assert!(paths.read().unwrap().is_empty());
+    cleanup(&root);
+}
+
+#[test]
+fn stop_keeps_the_tree_for_a_later_reenable() {
+    use vibe_rs::utils::file_index::{apply, FileIndexAction, FileIndexHandle};
+    let root = temp_root();
+    fs::write(root.join("kept.md"), "k").unwrap();
+    // The session cwd still names the pre-settle checkout after a worktree
+    // run started; the re-enable must not rebuild there.
+    let stale = temp_root();
+    let mut handle = FileIndexHandle::start(root.clone(), true);
+    wait_for_version(&mut handle, 1);
+    apply(&mut handle, &FileIndexAction::Stop);
+    let action = FileIndexAction::plan(
+        &handle,
+        &plan_config(true, true),
+        Some(stale.to_str().unwrap()),
+    );
+    assert!(
+        matches!(action, Some(FileIndexAction::Start { root: planned, watcher: true }) if planned == root),
+        "a re-enable must rebuild at the opted-out tree, not the session cwd"
+    );
+    handle.stop();
+    cleanup(&root);
+    cleanup(&stale);
+}
+
+#[test]
+fn env_opt_out_matches_the_servers_false_values() {
+    use vibe_rs::utils::file_index::env_opt_out;
+    for value in ["0", "false", "no", "off", "n", "f", "N", "Off"] {
+        std::env::set_var("VIBE_ENABLE_FILE_AUTOCOMPLETE", value);
+        assert!(env_opt_out(), "{value:?} must opt out like the server does");
+    }
+    std::env::set_var("VIBE_ENABLE_FILE_AUTOCOMPLETE", "1");
+    assert!(!env_opt_out());
+    std::env::remove_var("VIBE_ENABLE_FILE_AUTOCOMPLETE");
+    assert!(!env_opt_out());
 }

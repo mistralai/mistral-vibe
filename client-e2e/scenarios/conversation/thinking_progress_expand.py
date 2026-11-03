@@ -8,9 +8,7 @@ handshake = {
     "runtime/read": {"runtime": {"config": {"showThinkingNodes": True}}},
 }
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 capture_steps = {1, 2, 3}
-settle_per_key = True
 
 # The in-progress reasoning header lands on SGR row 11 after the gated events.
 _ROW, _COL = 11, 1

@@ -71,7 +71,9 @@ class _FakeController:
 def _install(
     agent: VibeAcpAgent, monkeypatch: pytest.MonkeyPatch, fake: _FakeController
 ):
-    monkeypatch.setattr(agent_module, "ProjectLinksController", lambda: fake)
+    monkeypatch.setattr(
+        agent_module, "ProjectLinksController", lambda _credentials: fake
+    )
 
 
 @pytest.mark.asyncio

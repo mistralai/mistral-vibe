@@ -45,9 +45,6 @@ handshake = {
 
 request_methods = frozenset({"session/read"})
 
-# The viewed child stays Running after the parent turn: freeze the loading
-# gradient so the idle capture cannot catch it mid-wipe on a slow host.
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 
 screen_contains = ("Main conversation", "Explore (Explore 1) [running] · 0 tokens")
 screen_excludes = ("Loading subagent transcript…",)
@@ -59,8 +56,7 @@ timeline: Timeline = [
     subagent(_TASK),
     child_session_updated(),
     turn_completed(),
-    # Gate the batch behind settles (5 events plus the injected queue drain):
-    # ungated, its events race the idle marker that follows the submit.
+    # Release the batch one fenced event at a time (5 events plus the injected queue drain).
     {"release_after": 6},
     "\x1b[B",  # Down — focus the list on the Main row
     "\x1b[B",  # Down — highlight the child row

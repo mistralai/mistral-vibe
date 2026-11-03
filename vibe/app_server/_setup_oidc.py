@@ -33,14 +33,6 @@ class OidcProbeResponse(ProtocolModel):
     subject: str
 
 
-class OidcHeadersParams(ProtocolModel):
-    url: str
-
-
-class OidcHeadersResponse(ProtocolModel):
-    headers: dict[str, str]
-
-
 class SetupOidcHandler:
     """Connection-owned OIDC setup and best-effort onboarding analytics."""
 
@@ -134,11 +126,6 @@ class SetupOidcHandler:
     ) -> ProtocolModel:
         try:
             require_oidc_enabled()
-            if method == "setup/oidc-headers":
-                params = validate_wire(OidcHeadersParams, raw_params)
-                from vibe.setup.auth._oidc_runtime import oidc_headers
-
-                return OidcHeadersResponse(headers=await oidc_headers(params.url))
             # Keep Authlib and JOSE out of the unflagged startup/import path.
             from vibe.setup.auth._oidc_service import OidcService
 

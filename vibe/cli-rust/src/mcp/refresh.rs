@@ -1,7 +1,6 @@
 //! Background and manual re-discovery of the open `/mcp` browser's sources.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -46,16 +45,8 @@ pub(super) async fn rediscover(client: &Client, params: Value) -> anyhow::Result
     client.request(method::MCP_REFRESH, params).await
 }
 
-/// When the background refresh fires; far away while none is scheduled.
-pub fn refresh_deadline(app: &App) -> tokio::time::Instant {
-    app.mcp
-        .refresh_at
-        .map(tokio::time::Instant::from_std)
-        .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600))
-}
-
 /// The background tick: refresh and schedule the next one.
 pub fn background_refresh(app: &mut App, client: &Arc<Client>) {
-    app.mcp.refresh_at = Some(Instant::now() + BACKGROUND_REFRESH_INTERVAL);
+    app.mcp.refresh_at = Some(crate::clock::now() + BACKGROUND_REFRESH_INTERVAL);
     refresh(app, client);
 }

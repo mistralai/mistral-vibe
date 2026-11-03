@@ -14,7 +14,7 @@ use crate::core::features::programmatic_tool_calling::time_budget::{
     ProgramClock, is_shortened_sleep, shortened_sleep_result, sleep_seconds,
 };
 use crate::core::hooks::{HookPoint, hook_action_id};
-use crate::core::step_protocol::Action;
+use crate::core::step_protocol::{Action, Observation};
 use crate::core::tools::execution::external_call::{
     ApprovalName, ExternalCallStage, HookSide, PendingExternalCall,
 };
@@ -370,6 +370,21 @@ impl ProgramExecution {
             .iter()
             .find(|operation| operation.external.awaits_tool(action_id))
             .map(|operation| &operation.external.call)
+    }
+
+    /// The warning for the result that the post-tool-call hook `action_id`
+    /// returned, if that hook left the result's two views disagreeing.
+    pub(crate) fn post_hook_warning(
+        &self,
+        action_id: &str,
+        hooked: &ToolResult,
+        turn_id: &str,
+    ) -> Option<Observation> {
+        self.pending_operations
+            .iter()
+            .find(|operation| operation.external.awaited_hook(action_id) == Some(HookSide::Post))?
+            .external
+            .post_hook_warning(hooked, turn_id)
     }
 
     pub(super) fn pending_hook(&self, action_id: &str) -> Option<(HookSide, &ExternalToolCall)> {

@@ -47,7 +47,6 @@ impl Client {
             deny_callbacks,
             active_session,
             replay_drained: AtomicU64::new(0),
-            unsent_telemetry: AtomicU64::new(0),
             server_pid: AtomicU32::new(0),
         };
         (client, notif_rx, crash_rx)
@@ -61,7 +60,7 @@ pub(crate) fn write_lines<W>(output: W, mut frames: mpsc::UnboundedReceiver<Opti
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    tokio::spawn(async move {
+    crate::work::spawn_daemon(async move {
         let mut output = output;
         while let Some(Some(line)) = frames.recv().await {
             if output.write_all(line.as_bytes()).await.is_err() {

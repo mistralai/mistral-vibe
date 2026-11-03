@@ -10,6 +10,18 @@ import httpx2
 from vibe import __version__
 from vibe.core.config import ProviderConfig, VibeConfigSchema
 from vibe.core.config.admin_config import AdminConfigOutcome
+from vibe.core.platform_auth import (
+    PlatformCredentialFactory,
+    PlatformCredentialRequired,
+    PlatformCredentialTarget,
+)
+from vibe.core.platform_auth._mistral import (
+    MistralCredentials,
+    is_user_principal,
+    mistral_credentials,
+    resolve_principal,
+    resolve_snapshot,
+)
 from vibe.core.telemetry.build_metadata import build_base_metadata
 from vibe.core.telemetry.types import (
     AttachmentKind,
@@ -30,7 +42,6 @@ from vibe.utils.http import (
     get_server_url_from_api_base,
     get_user_agent,
 )
-from vibe.utils.oidc_marker import OIDC_CACHE_KEY_PREFIX, is_oidc_marker, oidc_enabled
 
 if TYPE_CHECKING:
     from vibe.core.experiments.active import ExperimentSurface
@@ -38,7 +49,6 @@ if TYPE_CHECKING:
 
 _DEFAULT_TELEMETRY_BASE_URL = "https://api.mistral.ai"
 _DATALAKE_EVENTS_PATH = "/v1/datalake/events"
-_OIDC_TENANT_TIMEOUT_SECONDS = 5.0
 
 type SubagentOperation = Literal[
     "list", "list_configs", "spawn", "wait", "send_message", "interrupt", "close"
@@ -71,73 +81,50 @@ def get_mistral_provider_and_api_key(
     return provider, api_key
 
 
-def mistral_credential_cache_key(config: VibeConfigSchema) -> str | None:
+def mistral_credential_cache_key(
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
+) -> str | None:
     """Stable, anonymous cache key for the Mistral credential and tenant.
 
-    The shared key for managed config, experiment eval, and model catalog.
-    None means no credential or no resolved OIDC tenant, so the caller has
-    no entry to read or write.
+    The shared key for managed config, experiment eval, and model catalog:
+    the credential's principal (the hashed API key, or the user and tenant).
+    None means no credential or no known principal, so the caller has no
+    entry to read or write. Never refreshes nor reaches the network.
     """
-    from vibe.core.experiments.manager import hash_api_key
-
-    provider_and_key = get_mistral_provider_and_api_key(config)
-    if provider_and_key is None:
+    mistral = mistral_credentials(config, credentials)
+    if mistral is None:
         return None
-    _provider, api_key = provider_and_key
-    if is_oidc_marker(api_key):
-        from vibe.setup.auth._oidc_runtime import stored_oidc_cache_key
-
-        return stored_oidc_cache_key()
-    return hash_api_key(api_key)
+    return mistral.cached_principal()
 
 
-async def resolve_credential_cache_key(config: VibeConfigSchema) -> str | None:
-    """The CLI OIDC identity a fetch starts under, discovering its tenant.
+async def resolve_credential_cache_key(
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
+) -> str | None:
+    """The principal a fetch starts under, resolving the credential when it is
+    not known yet (a token refresh, a tenant discovery).
 
-    Pass it to the store as ``fetched_for``: an OIDC key, unlike an API key,
-    does not name the material a request carried, so the store keeps only a
-    response fetched for the account still signed in. ``None`` without the
-    flag (nothing to resolve), or when the tenant is not found in time
-    (fetch, but cache nothing).
+    Pass it to the store as ``fetched_for``: a user token's principal, unlike
+    an API key's, does not name the material a request carried, so the store
+    keeps only a response fetched for the account still signed in. ``None``
+    when it cannot be resolved in time (fetch, but cache nothing).
     """
-    if not oidc_enabled():
+    mistral = mistral_credentials(config, credentials)
+    if mistral is None:
         return None
-    key = mistral_credential_cache_key(config)
-    if key is not None:
-        return key
-    provider_and_key = get_mistral_provider_and_api_key(config)
-    if provider_and_key is None or not is_oidc_marker(provider_and_key[1]):
-        return None
-    from vibe.setup.auth._oidc_runtime import oidc_headers
-
-    try:
-        async with asyncio.timeout(_OIDC_TENANT_TIMEOUT_SECONDS):
-            await oidc_headers(provider_and_key[0].api_base)
-    except Exception:
-        return None
-    return mistral_credential_cache_key(config)
+    return await resolve_principal(mistral)
 
 
-def may_cache_under(key: str | None, *, fetched_for: str | None) -> bool:
-    """Whether a response fetched under ``fetched_for`` may be stored under
-    ``key``, the current user's cache key.
-
-    An API-key key names the material the request carried. An OIDC key does
-    not: the marker resolves the signed-in account per request, so a sign-in
-    during the fetch makes the response another account's.
-    """
-    if key is None:
-        return False
-    return not key.startswith(OIDC_CACHE_KEY_PREFIX) or key == fetched_for
-
-
-def credential_cache_key_is_current(fetched_for: str) -> bool:
+def credential_cache_key_is_current(
+    fetched_for: str,
+    config: VibeConfigSchema | None = None,
+    credentials: PlatformCredentialFactory | None = None,
+) -> bool:
     """``may_cache_under`` for a key computed when the fetch started."""
-    if not fetched_for.startswith(OIDC_CACHE_KEY_PREFIX):
+    if not is_user_principal(fetched_for):
         return True
-    from vibe.setup.auth._oidc_runtime import stored_oidc_cache_key
-
-    return stored_oidc_cache_key() == fetched_for
+    if config is None:
+        return False
+    return mistral_credential_cache_key(config, credentials) == fetched_for
 
 
 def _subagent_depth(caller_agent_path: str) -> int:
@@ -248,8 +235,10 @@ class TelemetryClient:
             Callable[[], ExperimentAttributes | None] | None
         ) = None,
         harness_backend: ExperimentSurface | None = None,
+        credentials: PlatformCredentialFactory | None = None,
     ) -> None:
         self._config_getter = config_getter
+        self._credentials = credentials
         self._session_id_getter = session_id_getter
         self._parent_session_id_getter = parent_session_id_getter
         self._launch_context = launch_context
@@ -265,12 +254,8 @@ class TelemetryClient:
         base = get_server_url_from_api_base(api_base) or _DEFAULT_TELEMETRY_BASE_URL
         return urljoin(base.rstrip("/"), _DATALAKE_EVENTS_PATH)
 
-    def _get_mistral_api_key(self) -> str | None:
-        provider_and_api_key = get_mistral_provider_and_api_key(self._config_getter())
-        if provider_and_api_key is None:
-            return None
-        _, api_key = provider_and_api_key
-        return api_key
+    def _mistral(self) -> MistralCredentials | None:
+        return mistral_credentials(self._config_getter(), self._credentials)
 
     def _is_enabled(self) -> bool:
         try:
@@ -279,7 +264,7 @@ class TelemetryClient:
             return False
 
     def is_active(self) -> bool:
-        return self._is_enabled() and self._get_mistral_api_key() is not None
+        return self._is_enabled() and self._mistral() is not None
 
     @property
     def client(self) -> VibeAsyncHTTPClient:
@@ -344,12 +329,12 @@ class TelemetryClient:
     ) -> None:
         if not self._is_enabled():
             return
-        provider_and_api_key = get_mistral_provider_and_api_key(self._config_getter())
-        if provider_and_api_key is None:
+        mistral = self._mistral()
+        if mistral is None:
             return
-        provider, mistral_api_key = provider_and_api_key
-        telemetry_url = self._get_telemetry_url(provider.api_base)
-        user_agent = get_user_agent(provider.backend)
+        credentials = mistral.credentials
+        telemetry_url = self._get_telemetry_url(mistral.provider.api_base)
+        user_agent = get_user_agent(mistral.provider.backend)
         properties = self.build_client_event_metadata() | properties
         logger.debug(
             "telemetry event=%s properties=%s correlation_id=%s",
@@ -364,17 +349,32 @@ class TelemetryClient:
 
         async def _send() -> None:
             try:
-                # Bound credential resolution (OIDC swaps in the client) too.
+                # Bound credential resolution (a token refresh) too.
                 async with asyncio.timeout(5):
-                    await self.client.post(
+                    snapshot = await resolve_snapshot(credentials, telemetry_url)
+                    if isinstance(snapshot, PlatformCredentialRequired):
+                        return
+                    extra: dict[str, Any] = (
+                        {}
+                        if snapshot.follows_redirects
+                        else {"follow_redirects": False}
+                    )
+                    response = await self.client.post(
                         telemetry_url,
                         json=payload,
                         headers={
                             "Content-Type": "application/json",
-                            "Authorization": f"Bearer {mistral_api_key}",
+                            **snapshot.headers,
                             "User-Agent": user_agent,
                         },
+                        **extra,
                     )
+                    if response.status_code == httpx2.codes.UNAUTHORIZED:
+                        await credentials.reject(
+                            PlatformCredentialTarget(telemetry_url),
+                            observed=snapshot.identity,
+                            reason="http_unauthorized",
+                        )
             except Exception:
                 pass  # Silently swallow all exceptions for fire-and-forget telemetry
 

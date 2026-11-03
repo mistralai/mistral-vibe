@@ -34,6 +34,7 @@ from vibe.core.config.harness_files import (
 )
 from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.config.vibe_schema import stored_tool_allowlist_patterns
 from vibe.core.paths import VIBE_HOME
 from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.types import Backend
@@ -2033,97 +2034,28 @@ class TestConnectorsByName:
         assert build_config().connectors_by_name() == {}
 
 
-class TestAddToolAllowlistPatterns:
-    @pytest.mark.asyncio
-    async def test_strips_bash_wildcard(
-        self,
-        config_dir: Path,
-        make_orchestrator: Callable[
-            [], Awaitable[ConfigOrchestrator[VibeConfigSchema]]
-        ],
-    ) -> None:
-        orch = await make_orchestrator()
-        payload = orch.config.build_tool_allowlist_update("bash", ["ls *"])
-        assert payload is not None
-        await orch.set_field(
-            "/tools/bash/allowlist", payload["tools"]["bash"]["allowlist"]
-        )
-
-        with (config_dir / "config.toml").open("rb") as f:
-            result = tomllib.load(f)
-        assert result["tools"]["bash"]["allowlist"] == ["ls"]
+class TestStoredToolAllowlistPatterns:
+    def test_strips_bash_wildcard(self) -> None:
+        assert stored_tool_allowlist_patterns("bash", ["ls *"]) == ["ls"]
 
     @pytest.mark.parametrize("shell", ["git_bash", "powershell"])
-    def test_strips_the_wildcard_for_every_shell(
-        self, shell: str, build_config: ConfigBuilder
-    ) -> None:
+    def test_strips_the_wildcard_for_every_shell(self, shell: str) -> None:
         """Windows spells the shell ``git_bash`` or ``powershell``, and their
         allowlists match by prefix just as bash's does: a stored ``ls *`` matches no
         command at all, so a permanent approval would quietly never take.
         """
-        cfg = build_config()
+        assert stored_tool_allowlist_patterns(shell, ["ls *"]) == ["ls"]
 
-        assert cfg.build_tool_allowlist_update(shell, ["ls *"]) == {
-            "tools": {shell: {"allowlist": ["ls"]}}
-        }
-
-    def test_keeps_the_wildcard_for_a_tool_that_is_not_a_shell(
-        self, build_config: ConfigBuilder
-    ) -> None:
+    def test_keeps_the_wildcard_for_a_tool_that_is_not_a_shell(self) -> None:
         """Only the shells append " *" to mean "any arguments" -- anywhere else a
         trailing wildcard is part of the pattern itself.
         """
-        cfg = build_config()
+        assert stored_tool_allowlist_patterns("edit", ["src/lib *"]) == ["src/lib *"]
 
-        assert cfg.build_tool_allowlist_update("edit", ["src/lib *"]) == {
-            "tools": {"edit": {"allowlist": ["src/lib *"]}}
-        }
-
-    @pytest.mark.asyncio
-    async def test_merges_and_sorts_with_existing(
-        self,
-        config_dir: Path,
-        make_orchestrator: Callable[
-            [], Awaitable[ConfigOrchestrator[VibeConfigSchema]]
-        ],
-    ) -> None:
-        config_file = config_dir / "config.toml"
-        with config_file.open("rb") as f:
-            data = tomllib.load(f)
-        data.setdefault("tools", {})["edit"] = {"allowlist": ["c"]}
-        with config_file.open("wb") as f:
-            tomli_w.dump(data, f)
-
-        orch = await make_orchestrator()
-        payload = orch.config.build_tool_allowlist_update("edit", ["b", "a"])
-        assert payload is not None
-        await orch.set_field(
-            "/tools/edit/allowlist", payload["tools"]["edit"]["allowlist"]
-        )
-
-        with config_file.open("rb") as f:
-            result = tomllib.load(f)
-        assert result["tools"]["edit"]["allowlist"] == ["a", "b", "c"]
-
-    def test_noop_when_nothing_new(
-        self, config_dir: Path, build_config: ConfigBuilder
-    ) -> None:
-        cfg = build_config(tools={"edit": {"allowlist": ["a"]}})
-
-        assert cfg.build_tool_allowlist_update("edit", ["a"]) is None
-        with (config_dir / "config.toml").open("rb") as f:
-            persisted = tomllib.load(f)
-        assert "edit" not in persisted.get("tools", {})
-
-    def test_keeps_in_memory_config_current(self, build_config: ConfigBuilder) -> None:
-        cfg = build_config(tools={"edit": {"allowlist": ["a"]}})
-
-        first = cfg.build_tool_allowlist_update("edit", ["b"])
-        assert first == {"tools": {"edit": {"allowlist": ["a", "b"]}}}
-        assert cfg.tools["edit"]["allowlist"] == ["a", "b"]
-
-        second = cfg.build_tool_allowlist_update("edit", ["c"])
-        assert second == {"tools": {"edit": {"allowlist": ["a", "b", "c"]}}}
+    def test_drops_duplicates(self) -> None:
+        assert stored_tool_allowlist_patterns(
+            "bash", ["ls *", "ls", "cat *", "cat *"]
+        ) == ["ls", "cat"]
 
 
 class TestMigrateRenamedTools:

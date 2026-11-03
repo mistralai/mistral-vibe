@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import os
 from pathlib import Path
+import shutil
+import tempfile
 import tomllib
 from typing import Literal
 
@@ -88,6 +91,25 @@ class VibeProjectsStore:
                 links.append(link)
         return links
 
+    def read_project_links(self) -> tuple[list[ProjectLink], bool]:
+        """The links, and whether that is all of them: false when part of the file can't be read."""
+        try:
+            data = self._load_raw_document()
+        except (OSError, tomllib.TOMLDecodeError):
+            logger.debug(
+                "Failed to read Vibe projects file %s", self._path, exc_info=True
+            )
+            return [], False
+        entries = data.get("projects")
+        if not isinstance(entries, list):
+            return [], False
+        links = [
+            link
+            for entry in entries
+            if isinstance(entry, dict) and (link := _parse_project_link(dict(entry)))
+        ]
+        return links, len(links) == len(entries)
+
     def get_remote_project(self, *, repo_root: Path) -> RemoteProjectLink | None:
         link = self.get_project_link(repo_root=repo_root)
         return link if isinstance(link, RemoteProjectLink) else None
@@ -120,28 +142,42 @@ class VibeProjectsStore:
 
     def _read_raw_document(self) -> dict[str, object]:
         try:
-            with self._path.open("rb") as file:
-                data = tomllib.load(file)
-        except FileNotFoundError:
-            return {"version": 1, "projects": []}
+            return self._load_raw_document()
         except (OSError, tomllib.TOMLDecodeError):
             logger.debug(
                 "Failed to read Vibe projects file %s", self._path, exc_info=True
             )
             return {"version": 1, "projects": []}
-        return dict(data)
+
+    def _load_raw_document(self) -> dict[str, object]:
+        try:
+            with self._path.open("rb") as file:
+                return dict(tomllib.load(file))
+        except FileNotFoundError:
+            return {"version": 1, "projects": []}
 
     def _write_entries(
         self, data: dict[str, object], entries: Sequence[dict[str, object]]
     ) -> None:
         data["version"] = data.get("version", 1)
         data["projects"] = list(entries)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        # The project registry names every local project, so it is created
-        # owner-only; an existing file keeps its current mode.
-        self._path.touch(mode=0o600, exist_ok=True)
-        with self._path.open("wb") as file:
-            tomli_w.dump(data, file)
+        # Replaced whole so a reader never sees half a file; a symlink keeps its target.
+        target = self._path.resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # mkstemp creates the registry owner-only, as it names every local project.
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as file:
+                tomli_w.dump(data, file)
+            if target.exists():
+                shutil.copymode(target, temporary)
+            os.replace(temporary, target)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
 
 
 def _normalize_path(path: Path) -> str:

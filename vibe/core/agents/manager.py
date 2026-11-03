@@ -23,7 +23,8 @@ from vibe.core.config.harness_files import (
     HarnessFilesManager,
     get_harness_files_manager,
 )
-from vibe.core.config.layers.admin import admin_layer, enforced_keys
+from vibe.core.config.layers.admin import AdminConfigLayer, admin_layer
+from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.utils import name_matches
 from vibe.observability.logging import logger
@@ -35,24 +36,6 @@ if TYPE_CHECKING:
 FALLBACK_AGENTS: Final = (BuiltinAgentName.ACCEPT_EDITS, BuiltinAgentName.ASK)
 
 
-def resolve_default_agent(orchestrator: ConfigOrchestrator[VibeConfigSchema]) -> str:
-    """The agent a session starts in when none is asked for.
-
-    An org-enforced ``default_agent`` wins; otherwise the smart-approve
-    experiment's cohort default, then ``default_agent``.
-    ``smart_approve_default`` stays the experiment's rollout knob: an org can
-    still enforce it to opt a cohort in or out, but it never beats an enforced
-    ``default_agent`` -- an org that wants smart-approve as the default
-    enforces ``default_agent = "smart-approve"``.
-    """
-    config = orchestrator.config
-    if "default_agent" in enforced_keys(orchestrator):
-        return config.default_agent
-    if config.smart_approve_default:
-        return BuiltinAgentName.SMART_APPROVE
-    return config.default_agent
-
-
 class AgentManager:
     def __init__(
         self,
@@ -61,9 +44,7 @@ class AgentManager:
         allow_subagent: bool = False,
         harness_files: HarnessFilesManager | None = None,
     ) -> None:
-        """``initial_agent=None`` starts the session's default
-        (``resolve_default_agent``).
-        """
+        """``initial_agent=None`` starts the session's ``default_agent``."""
         self._orchestrator = orchestrator
         self._registry = AgentRegistry(
             orchestrator, harness_files or get_harness_files_manager()
@@ -94,38 +75,49 @@ class AgentManager:
     ) -> AgentProfile:
         """The profile to start in; the org config's agent rules never stop it.
 
-        The org config is data the user cannot fix, so a mode it makes
-        unavailable starts another one instead: the session's default (the
-        org's, when it sets one) when it can, else a builtin. That covers an
-        enforced default this checkout cannot resolve (a custom agent that
-        exists only in another checkout), and a default or requested mode the
-        org excludes (``org_excludes``). Any other failure keeps its loud error: a
+        The org config and the default-agent rollout are data the user cannot
+        fix, so a mode they make unavailable starts another one instead: the
+        session's default (the org's, when it sets one) when it can, else a
+        builtin. That covers a server-chosen default this checkout cannot start
+        (a custom agent that exists only in another checkout, or a mode the
+        local config disables), and a default or requested mode the org
+        excludes (``org_excludes``). Any other failure keeps its loud error: a
         typo, or a subagent, asked for or saved as the default.
         """
-        default = resolve_default_agent(self._orchestrator)
+        default = self.config.default_agent
+        default_origin = self.config.origin_of("default_agent")
+        chosen_default = default_origin != GrowthbookLayer.NAME
         desired = requested if requested is not None else default
         starting = self._replace_removed_default_agent(desired)
         try:
-            return self._profile_for(starting, allow_subagent=allow_subagent)
-        except ValueError as exc:
-            enforced_default = requested is None and "default_agent" in enforced_keys(
-                self._orchestrator
+            return self._profile_for(
+                starting,
+                allow_subagent=allow_subagent,
+                opt_in=requested is not None or chosen_default,
             )
+        except ValueError as exc:
+            server_default = requested is None and default_origin in {
+                AdminConfigLayer.NAME,
+                GrowthbookLayer.NAME,
+            }
             excluded_mode = self._is_primary(starting) and self.org_excludes(starting)
-            if not (enforced_default or excluded_mode):
+            if not (server_default or excluded_mode):
                 raise
             error = exc
         for candidate in (default, *FALLBACK_AGENTS):
             if candidate in {desired, starting}:
                 continue
             try:
-                profile = self._profile_for(candidate, allow_subagent=False)
+                profile = self._profile_for(
+                    candidate, allow_subagent=False, opt_in=chosen_default
+                )
             except ValueError as exc:
                 error = exc
                 continue
             logger.info(
-                "Agent '%s' is unavailable under the org config; starting '%s'",
+                "Agent '%s' (%s) is unavailable; starting '%s'",
                 desired,
+                "requested" if requested is not None else default_origin,
                 profile.name,
             )
             self.excluded_agent = requested
@@ -133,18 +125,22 @@ class AgentManager:
         # Every fallback excluded too: a broken configuration, kept loud.
         raise error
 
-    def _profile_for(self, initial_agent: str, *, allow_subagent: bool) -> AgentProfile:
+    def _profile_for(
+        self, initial_agent: str, *, allow_subagent: bool, opt_in: bool
+    ) -> AgentProfile:
         initial_agent = self._replace_removed_default_agent(initial_agent)
         profile = self.available_agents.get(initial_agent)
         if (
             profile is None
+            and opt_in
             and initial_agent == BuiltinAgentName.SMART_APPROVE
             and not self.org_excludes(initial_agent)
         ):
-            # Explicitly asking for smart-approve (--smart-approve / --agent) is a
-            # deliberate opt-in that bypasses the picker rollout gate, though not
-            # the org's agent lists. Remember the opt-in so it keeps offering the
-            # mode for the rest of the session.
+            # Asking for smart-approve (--smart-approve / --agent, or a
+            # default_agent a person or org set) is a deliberate opt-in that
+            # bypasses the picker rollout gate, though not the org's agent
+            # lists. A default the experiment set is no opt-in. Remember the
+            # opt-in so it keeps offering the mode for the rest of the session.
             profile = self._discovered.get(initial_agent)
             if profile is not None:
                 self._forced_agents.add(initial_agent)
@@ -229,7 +225,7 @@ class AgentManager:
             return True
         if (
             name == BuiltinAgentName.SMART_APPROVE
-            and not self.config.smart_approve_offered()
+            and not self.config.smart_approve_available
         ):
             # Smart approve ships dark: it enters the picker/cycle only for a cohort
             # the experiment (or config) has opted in. Explicit selection bypasses this

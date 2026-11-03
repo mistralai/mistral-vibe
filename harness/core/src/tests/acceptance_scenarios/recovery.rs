@@ -39,7 +39,7 @@ fn unsafe_recovery_fails_the_expected_active_turn_after_restore() {
     let turn_id = "turn-unsafe-recovery";
     let mut runtime = SynchronousRuntime::new(config());
     let first_completion = runtime.start_turn(turn_id, "delegate two unsafe operations");
-    let source = "async function main() { return Promise.all([tools.agents.spawn({ name: 'alpha', message: 'Investigate alpha' }), tools.agents.spawn({ name: 'beta', message: 'Investigate beta' })]); }";
+    let source = "async function main() { return Promise.all([tools.agents.spawn({ name: 'alpha', message: 'Investigate alpha', instructions: 'Work.' }), tools.agents.spawn({ name: 'beta', message: 'Investigate beta', instructions: 'Work.' })]); }";
     let actions = runtime
         .complete_with_typescript_program(
             turn_id,
@@ -49,11 +49,11 @@ fn unsafe_recovery_fails_the_expected_active_turn_after_restore() {
             [
                 runtime_tool(
                     "agents.spawn",
-                    json!({"name": "alpha", "message": "Investigate alpha"}),
+                    json!({"name": "alpha", "message": "Investigate alpha", "instructions": "Work."}),
                 ),
                 runtime_tool(
                     "agents.spawn",
-                    json!({"name": "beta", "message": "Investigate beta"}),
+                    json!({"name": "beta", "message": "Investigate beta", "instructions": "Work."}),
                 ),
             ],
         )

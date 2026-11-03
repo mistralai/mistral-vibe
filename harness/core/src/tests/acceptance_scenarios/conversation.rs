@@ -3,7 +3,8 @@ use crate::core::Message;
 
 /// *Prepare*: Hosts explicitly declare whether they can import parent conversation.
 /// *Do*: Call spawn through real program execution with valid and invalid contexts.
-/// *Assert*: Unsupported and malformed contexts dispatch no child creation effect.
+/// *Assert*: Unsupported and malformed contexts dispatch no child creation effect, and
+/// the rejected call is committed with its argument error.
 #[test]
 fn conversation_spawn_schema_matches_host_support_and_rejects_invalid_contexts() {
     let valid_contexts = [
@@ -52,7 +53,7 @@ fn conversation_spawn_schema_matches_host_support_and_rejects_invalid_contexts()
             .unwrap();
             let mut runtime = SynchronousRuntime::new(settings);
             let first = runtime.start_turn("parent", "delegate");
-            let mut args = json!({"name":"child", "message":"work"});
+            let mut args = json!({"name":"child", "message":"work", "instructions":"Work."});
             if let Some(value) = context {
                 args["context"] = value.clone();
             }
@@ -74,11 +75,39 @@ fn conversation_spawn_schema_matches_host_support_and_rejects_invalid_contexts()
                     .only_action();
                 assert_eq!(spawn["call"]["arguments"], args);
             } else {
+                let completion = run_typescript_completion(action_id(&first), "spawn", &source);
+                let rejected = runtime.preview_observations(completion.clone())[1].clone();
+                assert_eq!(rejected["type"], "tool_result_committed");
+                // The arguments come back from the program, where numbers are floats.
+                let call = &rejected["call"];
+                assert_eq!(
+                    (&call["type"], &call["name"]),
+                    (&json!("runtime_builtin"), &json!("agents.spawn"))
+                );
+                assert_eq!(
+                    (&call["arguments"]["name"], &call["arguments"]["message"]),
+                    (&args["name"], &args["message"])
+                );
+                let error = &rejected["result"]["error"];
+                assert_eq!(rejected["result"]["type"], "failure");
+                assert_eq!(error["code"], "invalid_arguments");
+                assert_eq!(error["retryable"], false);
+                assert!(
+                    error["message"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Invalid arguments for tools.agents.spawn")
+                );
+                assert_eq!(
+                    rejected["result"]["content"],
+                    json!([{"type": "text", "text": error["message"]}])
+                );
                 runtime.apply(
-                    run_typescript_completion(action_id(&first), "spawn", &source),
+                    completion,
                     running("parent")
                         .dispatch(llm_call(1))
-                        .observe(tool_execution_started("parent", "spawn"))
+                        .observe(core_tool_execution_started("parent", "spawn"))
+                        .observe(rejected)
                         .observe_tool_execution_finished(
                             "spawn",
                             run_typescript_success(json!("rejected")),

@@ -5,41 +5,31 @@ use anyhow::Result;
 use crate::app::Status;
 use crate::{completion_manager, event_handler, turn_summary, ui};
 
-use super::deadlines::{
-    approval_pause_deadline, feedback_deadline, preview_deadline, spinner_deadline,
-    subagent_refresh_deadline, typing_pause_deadline,
-};
+use super::deadlines::{approval_pause_deadline, typing_pause_deadline};
 use super::external_editor::open_external_editor;
 use super::handoff::TerminalHandoff;
-use super::helpers::{apply_command, redraw_frame, replay_marker};
+use super::helpers::{apply_command, frame_settled, redraw_frame};
 use super::keys::{handle_input_batch, next_input, LoopState};
 use super::notifications::{absorb_notification, surface_server_close};
 use super::suspend::suspend_once;
 use super::{EventLoop, LoopExit, REDRAW_INTERVAL};
+use crate::clock;
 
 impl EventLoop {
     pub(super) async fn steady(&mut self) -> Result<LoopExit> {
         let sources = &mut self.sources;
         let input = &mut self.input;
         let shutdown = &mut self.shutdown;
-        let mut frame = tokio::time::interval(ui::banner::petit_chat::FRAME_INTERVAL);
-        frame.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let replaying = std::env::var_os("VIBE_REPLAY_FIXTURE").is_some();
-        let settle_busy = std::env::var_os("VIBE_REPLAY_SETTLE_BUSY").is_some();
-        let mut blink = tokio::time::interval(std::time::Duration::from_millis(500));
-        blink.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut spin = tokio::time::interval(ui::pulse::TICK_INTERVAL);
-        spin.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut narrator_anim = tokio::time::interval(ui::narrator::ANIMATION_INTERVAL);
-        narrator_anim.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut voice_tick = tokio::time::interval(std::time::Duration::from_millis(50));
-        voice_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut selection_scroll = tokio::time::interval(std::time::Duration::from_millis(50));
-        selection_scroll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut redraw_tick = tokio::time::interval(REDRAW_INTERVAL);
-        redraw_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let replaying = crate::utils::is_replaying();
+        // Animations run on UI time; their arms precede the input's, so a tick an advance made due lands before the next fence.
+        let mut frame = clock::interval(ui::banner::petit_chat::FRAME_INTERVAL);
+        let mut blink = clock::interval(std::time::Duration::from_millis(500));
+        let mut spin = clock::interval(ui::pulse::TICK_INTERVAL);
+        let mut narrator_anim = clock::interval(ui::narrator::ANIMATION_INTERVAL);
+        let mut voice_tick = clock::interval_real(std::time::Duration::from_millis(50));
+        let mut selection_scroll = clock::interval_real(std::time::Duration::from_millis(50));
+        let mut redraw_tick = clock::interval_real(REDRAW_INTERVAL);
         let mut state = LoopState::new();
-        let mut file_watch_open = true;
         let mut deferred_notification = None;
 
         loop {
@@ -67,9 +57,7 @@ impl EventLoop {
                 if quit {
                     return Ok(LoopExit::Quit);
                 }
-                state.idle_marker_emitted = false;
                 state.redraw_pending = true;
-                state.real_event_pending = true;
                 continue;
             }
             if self.app.approval.has_capacity() && crate::question_app::has_capacity(&self.app) {
@@ -82,7 +70,6 @@ impl EventLoop {
                         deferred_notification = Some(notification);
                     }
                     state.redraw_pending = true;
-                    state.real_event_pending = true;
                 }
             }
             tokio::select! {
@@ -98,9 +85,7 @@ impl EventLoop {
                         crate::selection::auto_scroll(&mut self.app);
                     }
                     crate::mouse::repeat_track_page(&mut self.app);
-                    state.idle_marker_emitted = false;
                     state.redraw_pending = true;
-                    state.real_event_pending = true;
                 }
                 // A drawn frame is always behind the loop: the keyed launch
                 // painted the unready frame, the replay fold drew its
@@ -109,10 +94,9 @@ impl EventLoop {
                 _ = redraw_tick.tick(), if state.redraw_pending => {
                     let mouse = self.app.session.startup_config.enable_mouse_capture;
                     self.terminal_guard.set_mouse_capture(mouse)?;
-                    let (animating, mounting, indexing) = redraw_frame(
+                    let (animating, mounting) = redraw_frame(
                         &mut self.app,
                         &self.client,
-                        &mut sources.files,
                         &mut self.terminal,
                         replaying,
                     )?;
@@ -120,31 +104,27 @@ impl EventLoop {
                         // Slow draws must leave time for input and newer session replies.
                         redraw_tick.reset();
                     }
-                    // The draw records telemetry too (selection autocopy), still queued here.
-                    let telemetry_queued = self.app.session.session_id.is_some()
-                        && !sources.telemetry.is_empty();
-                    replay_marker(
-                        &self.app,
-                        &self.client,
-                        &mut state,
-                        replaying,
-                        settle_busy,
-                        animating,
-                        mounting,
-                        indexing,
-                        telemetry_queued,
-                    );
+                    // Read idle first: tracked work ends only after it queues its result or publishes an index version.
+                    crate::replay_fence::ack_if(|| {
+                        crate::work::idle()
+                            && sources.is_drained(deferred_notification.is_some())
+                            && !self.app.completion.files.has_update()
+                            && state.deferred_input.is_none()
+                            && frame_settled(&self.app, &self.client, animating, mounting)
+                    });
                     state.redraw_pending = animating || mounting;
-                    state.real_event_pending &= mounting || animating;
                     continue;
+                }
+                // The last tracked task may end without sending anything: re-check the ack.
+                _ = crate::work::finished(), if replaying => {
+                    state.redraw_pending = true;
                 }
                 _ = frame.tick() => {
                     if self.app.terminal_notifier.presentation_changed() {
                         crate::terminal_notifier::flush(&mut self.app);
                     }
-                    let changed = !replaying
-                        && !self.app.session.startup_config.disable_welcome_banner_animation
-                        && self.app.view.banner.tick(std::time::Instant::now());
+                    let changed = !self.app.session.startup_config.disable_welcome_banner_animation
+                        && self.app.view.banner.tick(crate::clock::now());
                     state.redraw_pending |= changed;
                 }
                 _ = spin.tick() => {
@@ -153,13 +133,12 @@ impl EventLoop {
                         .subagents
                         .viewed_child()
                         .is_some_and(|child| crate::subagents::is_active(child.status));
-                    let active = !settle_busy
-                        && (self.app.view.command_loading
-                            || self.app.compacting
-                            || subagent_loading
-                            || crate::teleport::busy(&self.app)
-                            || crate::commands::stress::running(&self.app)
-                            || matches!(self.app.session.status, Status::Starting | Status::Generating { .. }));
+                    let active = self.app.view.command_loading
+                        || self.app.compacting
+                        || subagent_loading
+                        || crate::teleport::busy(&self.app)
+                        || crate::commands::stress::running(&self.app)
+                        || matches!(self.app.session.status, Status::Starting | Status::Generating { .. });
                     if active {
                         self.app.view.pulse_frame = self.app.view.pulse_frame.wrapping_add(1);
                         self.app.view.loading.tick();
@@ -168,11 +147,15 @@ impl EventLoop {
                     if switching {
                         self.app.agents.frame = self.app.agents.frame.wrapping_add(1);
                     }
+                    // The index thread has no dedicated source: its version
+                    // feed is polled here, so a fresh index repaints an open
+                    // `@` popup within one tick.
+                    if completion_manager::sync_files(&mut self.app) {
+                        state.redraw_pending = true;
+                    }
                     state.redraw_pending |= active || switching;
                 }
-                _ = blink.tick(), if !replaying
-                    && self.app.view.app_focus =>
-                {
+                _ = blink.tick(), if self.app.view.app_focus => {
                     self.app.view.cursor_on = !self.app.view.cursor_on;
                     state.redraw_pending = true;
                 }
@@ -182,17 +165,13 @@ impl EventLoop {
                         state.redraw_pending = true;
                     }
                 }
-                // Replay freezes the frame so a settled capture never catches the row mid-animation.
-                _ = narrator_anim.tick(), if !replaying
-                    && self.app.narrator.state != turn_summary::NarratorState::Idle =>
-                {
+                _ = narrator_anim.tick(), if self.app.narrator.state != turn_summary::NarratorState::Idle => {
                     self.app.narrator.frame = self.app.narrator.frame.wrapping_add(1);
                     state.redraw_pending = true;
                 }
                 Some(ev) = sources.voice.recv() => {
                     self.app.apply_voice_event(ev);
                     state.redraw_pending = true;
-                    state.real_event_pending = true;
                 }
                 // Draws nothing and settles nothing: analytics never alter the UI.
                 // Pre-session events are held until `set_session_id` flushes them.
@@ -202,6 +181,8 @@ impl EventLoop {
                     } else {
                         self.app.session.held_telemetry.push(event);
                     }
+                    // Draws nothing, but an emptied channel may be the last thing an ack waits for.
+                    state.redraw_pending |= replaying;
                 }
                 Some(event) = sources.ready.recv() => {
                     // The missing-key verdict is a typed loop exit (the
@@ -224,66 +205,47 @@ impl EventLoop {
                     }
                     if self.app.trust.open {
                         // Keys typed at the chat frame must not answer a gate
-                        // the user has not seen yet.
-                        while input.try_recv().is_ok() {}
+                        // the user has not seen yet; replay fences still count.
+                        while let Ok(event) = input.try_recv() {
+                            crate::replay_fence::observe(&event);
+                        }
                         state.deferred_input = None;
                         // The drain may have dropped a resize.
                         let _ = crate::terminal::sync_pixel_reports();
                     }
                     state.redraw_pending = true;
-                    state.real_event_pending = true;
-                }
-                changed = sources.files.changed(), if file_watch_open => {
-                    if changed.is_ok() {
-                        completion_manager::refresh(&mut self.app);
-                        state.redraw_pending = true;
-                        state.real_event_pending = true;
-                    } else {
-                        file_watch_open = false;
-                    }
                 }
                 Some(notification) = sources.notifications.recv(), if deferred_notification.is_none() => {
-                    let real = absorb_notification(
+                    absorb_notification(
                         &mut self.app,
                         &self.client,
                         sources,
                         notification,
                         &mut deferred_notification,
                     );
-                    // A drain sentinel only wakes the marker check; re-arming it would emit a stale marker.
-                    if settle_busy && real {
-                        state.idle_marker_emitted = false;
-                    }
                     state.redraw_pending = true;
-                    state.real_event_pending = true;
                 }
                 Some(loaded) = sources.config.recv() => {
                     crate::config::apply_loaded(&mut self.app, loaded);
                     state.redraw_pending = true;
-                    state.real_event_pending = true;
                 }
-                _ = tokio::time::sleep_until(preview_deadline(&self.app)), if self.app.theme_picker.preview_at.is_some() => {
+                _ = clock::sleep_until_real(self.app.theme_picker.preview_at) => {
                     crate::theme_picker::preview(&mut self.app);
-                    // The gate held the marker for the armed preview, so this
-                    // counts as a real event that owes the marker a re-emit.
                     state.redraw_pending = true;
-                    state.real_event_pending = true;
                 }
-                _ = tokio::time::sleep_until(typing_pause_deadline(&self.app)), if crate::question_app::waiting(&self.app) => {
+                _ = clock::sleep_until(typing_pause_deadline(&self.app)), if crate::question_app::waiting(&self.app) => {
                     crate::question_app::show_pending(&mut self.app);
                     state.redraw_pending = true;
-                    state.real_event_pending = true;
                 }
-                _ = tokio::time::sleep_until(approval_pause_deadline(&self.app)), if crate::approval::can_wake(&self.app) => {
+                _ = clock::sleep_until(approval_pause_deadline(&self.app)), if crate::approval::can_wake(&self.app) => {
                     crate::approval::show_pending(&mut self.app);
                     state.redraw_pending = true;
-                    state.real_event_pending = true;
                 }
-                _ = tokio::time::sleep_until(feedback_deadline(&self.app)), if self.app.feedback.hide_at.is_some() => {
+                _ = clock::sleep_until(self.app.feedback.hide_at) => {
                     crate::feedback::hide_expired(&mut self.app);
                     state.redraw_pending = true;
                 }
-                _ = tokio::time::sleep_until(subagent_refresh_deadline(&self.app)), if self.app.subagents.refresh_at.is_some() => {
+                _ = clock::sleep_until_real(self.app.subagents.refresh_at) => {
                     // One fetch per 50ms window, even while updates stream.
                     crate::subagents::start_refresh(&mut self.app, &self.client);
                     state.redraw_pending = true;
@@ -291,19 +253,17 @@ impl EventLoop {
                 Some(event) = sources.events.recv() => {
                     crate::ui_event::apply(&mut self.app, &self.client, event);
                     state.redraw_pending = true;
-                    state.real_event_pending = true;
                 }
-                _ = tokio::time::sleep_until(spinner_deadline(&self.app)), if self.app.agents.spinner_at.is_some() => {
+                _ = clock::sleep_until(self.app.agents.spinner_at) => {
                     crate::agents::show_switch_spinner(&mut self.app);
                     state.redraw_pending = true;
                 }
-                _ = tokio::time::sleep_until(crate::mcp::refresh_deadline(&self.app)), if self.app.mcp.open => {
+                _ = clock::sleep_until(self.app.mcp.refresh_at), if self.app.mcp.open => {
                     crate::mcp::background_refresh(&mut self.app, &self.client);
                 }
                 Some(command) = sources.commands.recv() => {
                     apply_command(&mut self.app, &self.client, command);
                     state.redraw_pending = true;
-                    state.real_event_pending = true;
                 }
                 event = next_input(input, &mut state.deferred_input) => match handle_input_batch(
                     &mut self.app,
@@ -311,7 +271,6 @@ impl EventLoop {
                     &self.config_tx,
                     input,
                     event,
-                    replaying,
                     &mut state,
                 ) {
                     None => return Ok(LoopExit::Quit),
@@ -324,7 +283,6 @@ impl EventLoop {
                 changed = self.crash_rx.changed(), if !self.app.server_closed => {
                     if surface_server_close(&mut self.app, changed.is_ok() && *self.crash_rx.borrow()) {
                         state.redraw_pending = true;
-                        state.real_event_pending = true;
                     }
                 }
             }

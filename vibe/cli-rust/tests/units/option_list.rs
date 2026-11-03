@@ -257,3 +257,22 @@ fn mcp_search_keeps_the_viewport_on_the_highlight() {
     mcp::search::handle_key(&mut app, key(KeyCode::Char('b')));
     assert!(!app.mcp.list.free_scroll());
 }
+
+#[test]
+fn a_page_moves_the_highlight_and_clamps_at_both_ends() {
+    let mut list = OptionList::<SingleAction>::new(2);
+    list.wheel(true, 5);
+
+    list.page(true, 10, 4);
+    assert_eq!(list.selected(), 6);
+    assert!(!list.free_scroll(), "a page reattaches the viewport");
+    list.page(true, 10, 4);
+    assert_eq!(list.selected(), 9);
+    list.page(false, 10, 4);
+    assert_eq!(list.selected(), 5);
+    list.page(false, 10, 40);
+    assert_eq!(list.selected(), 0);
+
+    list.page(true, 0, 4);
+    assert_eq!(list.selected(), 0, "an empty list keeps the highlight");
+}

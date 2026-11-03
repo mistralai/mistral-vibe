@@ -61,10 +61,7 @@ pub(super) fn request_action(app: &mut App) {
     let Some(tx) = app.events.clone() else {
         return;
     };
-    app.commit_started();
-    if tx.try_send(Event::ActionRequested.into()).is_err() {
-        app.commit_finished();
-    }
+    let _ = tx.try_send(Event::ActionRequested.into());
 }
 
 /// Start the viewed source's pending action, unless the user left that view meanwhile.

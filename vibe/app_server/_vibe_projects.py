@@ -41,6 +41,7 @@ class VibeProjectService:
                 directory_path = link.get("directoryPath")
                 if not isinstance(directory_path, str) or not directory_path:
                     raise ValueError("Import project response has no directory path")
+                project_id = link.get("projectId")
             except Exception as exc:
                 logger.warning(
                     "import_project_provisioning_failed",
@@ -56,6 +57,7 @@ class VibeProjectService:
                     project,
                     cwd=Path(directory_path),
                     source_cwd=project.source_cwd or project.cwd,
+                    project_id=project_id if isinstance(project_id, str) else None,
                 )
             )
         return provisioned

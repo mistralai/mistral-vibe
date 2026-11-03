@@ -139,9 +139,7 @@ fn draw_box(f: &mut Frame, area: Rect, view: &View, detail: &[Vec<Span>]) -> (Re
     f.render_widget(Clear, area);
     f.buffer_mut()
         .set_style(area, Style::default().bg(theme::background()));
-    let border = Style::default()
-        .fg(theme::popup_border())
-        .bg(theme::background());
+    let border = theme::border_style().bg(theme::background());
     f.render_widget(
         Block::default().borders(Borders::ALL).border_style(border),
         area,

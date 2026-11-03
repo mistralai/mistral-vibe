@@ -614,18 +614,17 @@ fn apply_completion_finish(
 ) -> Result<Outcome, CoreError> {
     let mut outcome = Outcome::quiet();
     match finish {
-        CompletionFinish::Skipped { action_id } => {
+        CompletionFinish::Skipped { action_id, reason } => {
             outcome.observe(Observation::AgentCompletionCandidateDiscarded {
                 turn_id: active_turn_id(state)?.to_string(),
                 action_id,
                 cause: CandidateDiscardCause::Skipped,
             });
-            let turn_id = state.finish_turn(TurnOutcome::Completed { output: Vec::new() })?;
-            outcome.observe(Observation::TurnCompleted {
-                turn_id,
-                output: Vec::new(),
-                stop_reason: None,
-            });
+            outcome = outcome.after(finish_completed_turn(
+                state,
+                reason,
+                Some(TurnStopReason::Skipped),
+            )?);
         }
         CompletionFinish::Rejected {
             action_id,
@@ -638,11 +637,12 @@ fn apply_completion_finish(
                 cause: CandidateDiscardCause::Rejected,
             });
             state.require_active_mut()?.iterations = next_iteration;
+            let output = vec![ContentBlock::text(reason.clone())];
             let turn_id = state.finish_turn(TurnOutcome::Rejected { reason })?;
             outcome.observe(Observation::TurnCompleted {
                 turn_id,
-                output: Vec::new(),
-                stop_reason: None,
+                output,
+                stop_reason: Some(TurnStopReason::Rejected),
             });
         }
         CompletionFinish::Failed { action_id, error } => {

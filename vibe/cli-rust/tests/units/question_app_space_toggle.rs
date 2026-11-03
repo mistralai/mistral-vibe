@@ -1,7 +1,6 @@
 //! Space ticks the focused multi-select checkbox and never answers the question.
 
 use std::collections::BTreeSet;
-use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vibe_rs::app::App;
@@ -81,7 +80,7 @@ fn space_is_ignored_in_single_select() {
 #[test]
 fn space_is_ignored_within_the_grace_period() {
     let mut app = with_question(true);
-    app.question_app.mount_time = Some(Instant::now());
+    app.question_app.mount_time = Some(vibe_rs::clock::now());
 
     press(&mut app, KeyCode::Char(' '));
     assert!(ticked(&app).is_empty());

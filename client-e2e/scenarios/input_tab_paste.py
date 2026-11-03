@@ -12,5 +12,3 @@ timeline: Timeline = [
     _BACKSPACE * 2,
     "x",
 ]
-
-settle_per_key = True

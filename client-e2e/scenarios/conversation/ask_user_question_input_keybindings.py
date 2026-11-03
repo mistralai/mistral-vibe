@@ -12,9 +12,9 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-# The turn stays open while the callback blocks, and the typing grace period
-# is zeroed so the app takes typed keys in the frame they are delivered in.
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1", "VIBE_TYPING_GRACE_PERIOD_MS": "0"}
+# The typing grace period is zeroed so the app takes typed keys in the frame
+# they are delivered in.
+env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
 capture_startup = False
 # Frames that show the caret moves and the two submitted answers.
@@ -84,6 +84,3 @@ timeline: Timeline = [
     "final",
     "\r",
 ]
-
-# Each key must land on a settled UI: batching changes the outcome here.
-settle_per_key = True

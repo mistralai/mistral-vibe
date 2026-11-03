@@ -5,8 +5,6 @@ from __future__ import annotations
 from e2e.app_server.events import assistant_msg, turn_started, user_msg
 from e2e.app_server.scenario import Timeline
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
-
 _UP = "\x1b[A"
 _DELETE = "\x1b[3~"
 _CTRL_C = "\x03"
@@ -14,7 +12,6 @@ _CTRL_C = "\x03"
 # The older `second` goes, not the newest `third`; the draft stays for Esc to restore.
 screen_contains = ("third", "draft", "Backspace/Ctrl+C to remove")
 screen_excludes = ("second", "cancel last queued message")
-settle_per_key = True
 capture_steps = {3, 4, 6, 7, 8, 9}
 
 timeline: Timeline = [

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-PLAN = "[Subscription] Pro"
+PLAN = "Team"
 
 
 def identity_handshake(first_name: str) -> dict[str, Any]:

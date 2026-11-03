@@ -1,7 +1,5 @@
 //! Queue key hints stay in step with what the queue keys actually do.
 
-use std::time::Instant;
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vibe_rs::app::{App, Status};
 use vibe_rs::message_queue::{self as mq};
@@ -13,7 +11,7 @@ fn busy_app(ids: &[&str]) -> App {
     app.session.session_id = Some("sess".into());
     app.session.active_turn_id = Some("turn".into());
     app.session.status = Status::Generating {
-        since: Instant::now(),
+        since: vibe_rs::clock::now(),
     };
     app.queue.items = ids.iter().map(|id| queued(id, id)).collect();
     app

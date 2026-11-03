@@ -119,6 +119,7 @@ async def test_renaming_an_unsaved_session_titles_it_without_persisting_it(
     assert await _list_on_a_new_host(process_services=process_services) == []
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_a_renamed_saved_session_is_listed_under_its_new_title(
     backend_contract_mistral_api: respx.Route,
@@ -145,6 +146,7 @@ async def test_a_renamed_saved_session_is_listed_under_its_new_title(
     assert await _list_on_a_new_host(process_services=process_services) == ["New title"]
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_passive_host_lists_and_reads_a_persisted_public_session(
     backend_contract_mistral_api: respx.Route,
@@ -178,6 +180,7 @@ async def test_passive_host_lists_and_reads_a_persisted_public_session(
     assert snapshot.history is not None
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_host_catalog_paginates_persisted_sessions_and_selects_the_latest(
     backend_contract_mistral_api: respx.Route,

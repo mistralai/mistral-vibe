@@ -1,7 +1,6 @@
 //! Child history fetch pipeline.
 
 use std::collections::HashSet;
-use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -18,9 +17,8 @@ pub fn fetch_history(
     tx: Option<crate::ui_event::Sender>,
     known_ids: HashSet<String>,
     cached_complete: bool,
-    pending: Arc<AtomicU32>,
 ) {
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let event = match fetch(&client, &session_id, &known_ids, cached_complete).await {
             Ok((history, complete)) => Event::Fetched {
                 session_id,
@@ -29,7 +27,7 @@ pub fn fetch_history(
             },
             Err(_) => Event::Failed { session_id },
         };
-        crate::input::deliver(tx, event, &pending).await;
+        crate::input::deliver(tx, event).await;
     });
 }
 

@@ -150,6 +150,15 @@ def test_reports_no_commits_on_an_unborn_branch(
         assert not checkout.has_commits()
 
 
+def test_reports_commits_without_reading_the_head_commit(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    head = repo.head.commit.hexsha
+    (tmp_path / ".git" / "objects" / head[:2] / head[2:]).unlink()
+
+    with GitRepo.open(tmp_path) as checkout:
+        assert checkout.has_commits()
+
+
 def test_a_git_failure_is_not_read_as_an_unborn_or_detached_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

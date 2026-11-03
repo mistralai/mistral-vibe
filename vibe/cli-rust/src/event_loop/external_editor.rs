@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::app::{App, ToastSeverity};
+use crate::app::App;
 use crate::external_editor;
 use crate::server::signal::ShutdownSignal;
 use crate::server::{Client, Notification};
@@ -14,7 +14,6 @@ use super::handoff::TerminalHandoff;
 use super::notifications::absorb_notification;
 use super::EventSources;
 
-const FAILURE_TOAST_SECS: u64 = 6;
 const EDITOR_EXIT_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 enum Outcome {
@@ -136,5 +135,5 @@ async fn stop(child: &mut tokio::process::Child) {
 }
 
 fn show_error(app: &mut App, message: String) {
-    app.show_toast(message, ToastSeverity::Error, FAILURE_TOAST_SECS);
+    crate::notices::failed(app, &message);
 }

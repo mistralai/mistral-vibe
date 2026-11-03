@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::app::App;
+use crate::app::{App, Severity};
 use crate::observability::level::{self, LogLevelChain, DEFAULT_LOG_LEVEL, LOG_LEVELS};
 use crate::server::Client;
 
@@ -117,7 +117,7 @@ pub fn apply_event(app: &mut App, event: Event) {
         // Nothing else reconciles this tier -- `config/read` only runs at
         // startup -- so an unpersisted level must not stay in the chain.
         level::set_config_log_level(restore.as_deref());
-        crate::ui::notice::show(app, &format!("Failed to persist log level: {error}"), 4);
+        crate::notices::failed(app, &format!("Failed to persist log level: {error}"));
     }
 }
 
@@ -144,7 +144,12 @@ pub fn apply(app: &mut App, client: &Arc<Client>) {
         );
     }
     let chain = level::get_log_level_chain();
-    crate::ui::notice::show(app, &feedback(&previous, &chain, config_cleared), 4);
+    crate::ui::notice::show(
+        app,
+        Severity::Information,
+        &feedback(&previous, &chain, config_cleared),
+        4,
+    );
 }
 
 /// Only report what actually moved.

@@ -25,6 +25,7 @@ use vibe_rs::mouse;
 use vibe_rs::server::Client;
 use vibe_rs::ui::theme;
 
+use crate::feedback_support::notice_text;
 use crate::support::{ctrl, key, mouse, press, send_mouse, stub};
 
 fn entry(id: &str, level: &str, message: &str) -> LogEntry {
@@ -1028,12 +1029,7 @@ fn a_wheel_over_the_console_header_or_border_does_not_scroll_the_log() {
 fn a_click_released_off_the_log_body_does_not_copy() {
     let (mut app, _terminal) = drawn_console_app();
     let click = |kind: MouseEventKind, column: u16, row: u16| mouse(kind, column, row);
-    let copied = |app: &App| {
-        app.overlays
-            .toasts
-            .iter()
-            .any(|toast| toast.text == "Copied to clipboard")
-    };
+    let copied = |app: &App| notice_text(app).is_some_and(|text| text.starts_with("Copied"));
     // A click on a log line copies it.
     send_mouse(
         &mut app,
@@ -1044,7 +1040,7 @@ fn a_click_released_off_the_log_body_does_not_copy() {
         click(MouseEventKind::Up(MouseButton::Left), 80, 3),
     );
     assert!(copied(&app));
-    app.overlays.toasts.clear();
+    vibe_rs::ui::notice::clear(&mut app);
     // The router keeps the pressed target wherever the pointer is released,
     // but a release off the body (the border, or outside the panel) copies
     // nothing.

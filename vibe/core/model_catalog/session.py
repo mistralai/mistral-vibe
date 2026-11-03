@@ -10,10 +10,11 @@ from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
+    from vibe.core.platform_auth import PlatformCredentialFactory
 
 
 async def refresh_model_catalog(
-    config: VibeConfigSchema,
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
 ) -> ModelCatalogResponse | None:
     """Fetch the catalog once, gated on the experimental flag and a Mistral
     credential — never on the active model's provider.
@@ -26,16 +27,15 @@ async def refresh_model_catalog(
     if not config.experimental_enable_model_catalog:
         logger.debug("Model catalog fetch skipped: experimental flag off")
         return None
-    from vibe.core.telemetry.send import get_mistral_provider_and_api_key
+    from vibe.core.platform_auth._mistral import mistral_credentials
 
-    provider_and_key = get_mistral_provider_and_api_key(config)
-    if provider_and_key is None:
+    mistral = mistral_credentials(config, credentials)
+    if mistral is None:
         logger.debug("Model catalog fetch skipped: no Mistral credential")
         return None
-    provider, api_key = provider_and_key
-    client = ModelCatalogClient.from_provider(provider)
+    client = ModelCatalogClient.from_provider(mistral.provider)
     try:
-        response = await client.fetch(api_key)
+        response = await client.fetch(mistral.credentials)
     except Exception:
         mark_model_catalog_failed()
         raise
@@ -49,7 +49,7 @@ async def refresh_model_catalog(
 
 
 async def fetch_and_cache_model_catalog(
-    config: VibeConfigSchema,
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
 ) -> ModelCatalogResponse | None:
     """Fetch the catalog and persist it; the single session-start step both
     harnesses run. Fail-open: never raises, returns None on skip or failure.
@@ -61,9 +61,9 @@ async def fetch_and_cache_model_catalog(
 
     if not config.experimental_enable_model_catalog:
         return None
-    cache_key = await resolve_credential_cache_key(config)
+    cache_key = await resolve_credential_cache_key(config, credentials)
     try:
-        response = await refresh_model_catalog(config)
+        response = await refresh_model_catalog(config, credentials)
     except Exception:
         logger.exception("Model catalog fetch failed unexpectedly")
         return None
@@ -75,7 +75,9 @@ async def fetch_and_cache_model_catalog(
         next((entry.id for entry in response.models if entry.recommended), "none"),
     )
     try:
-        store_cached_model_catalog(config, response, fetched_for=cache_key)
+        store_cached_model_catalog(
+            config, response, fetched_for=cache_key, credentials=credentials
+        )
     except Exception:
         logger.exception("Failed to cache the model catalog")
     return response

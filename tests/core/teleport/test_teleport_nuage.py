@@ -6,6 +6,12 @@ import httpx2
 import pytest
 
 from tests.constants import TELEPORT_SESSIONS_PATH
+from vibe.core.platform_auth import (
+    ApiKeyPlatformCredentialProvider,
+    PlatformCredentialRequired,
+    PlatformCredentialResult,
+    PlatformCredentialTarget,
+)
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.nuage import (
     NuageClient,
@@ -17,6 +23,10 @@ from vibe.core.teleport.nuage import (
     NuageTextPart,
 )
 from vibe.utils.http import VibeAsyncHTTPClient
+
+
+def _key() -> ApiKeyPlatformCredentialProvider:
+    return ApiKeyPlatformCredentialProvider.from_api_key("api-key")
 
 
 def _request() -> NuageRequest:
@@ -52,7 +62,7 @@ async def test_start_posts_nuage_request() -> None:
         )
 
     async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
-        nuage = NuageClient("https://chat.example.com/", "api-key", client=client)
+        nuage = NuageClient("https://chat.example.com/", _key(), client=client)
         response = await nuage.start(_request())
 
     assert seen_request is not None
@@ -108,7 +118,7 @@ async def test_start_omits_empty_branch() -> None:
         ),
     )
     async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
-        nuage = NuageClient("https://chat.example.com", "api-key", client=client)
+        nuage = NuageClient("https://chat.example.com", _key(), client=client)
         await nuage.start(request)
 
     assert seen_body == {
@@ -159,7 +169,7 @@ async def test_start_serializes_commit_sha_and_diff() -> None:
         ),
     )
     async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
-        nuage = NuageClient("https://chat.example.com", "api-key", client=client)
+        nuage = NuageClient("https://chat.example.com", _key(), client=client)
         await nuage.start(request)
 
     assert seen_body is not None
@@ -180,7 +190,7 @@ async def test_start_raises_for_unsuccessful_response() -> None:
         return httpx2.Response(401, text="Unauthorized")
 
     async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
-        nuage = NuageClient("https://chat.example.com", "api-key", client=client)
+        nuage = NuageClient("https://chat.example.com", _key(), client=client)
         with pytest.raises(ServiceTeleportError, match="status 401") as exc_info:
             await nuage.start(_request())
 
@@ -196,7 +206,7 @@ async def test_start_raises_for_invalid_response() -> None:
         return httpx2.Response(200, json={"url": "https://chat.example.com/code/1/2"})
 
     async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
-        nuage = NuageClient("https://chat.example.com", "api-key", client=client)
+        nuage = NuageClient("https://chat.example.com", _key(), client=client)
         with pytest.raises(
             ServiceTeleportError, match="response was invalid"
         ) as exc_info:
@@ -216,7 +226,7 @@ async def test_start_raises_for_invalid_json_response() -> None:
         )
 
     async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
-        nuage = NuageClient("https://chat.example.com", "api-key", client=client)
+        nuage = NuageClient("https://chat.example.com", _key(), client=client)
         with pytest.raises(ServiceTeleportError, match="not valid JSON") as exc_info:
             await nuage.start(_request())
 
@@ -247,10 +257,7 @@ async def test_start_retries_ambiguous_gateway_timeout_with_same_request() -> No
 
     async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
         nuage = NuageClient(
-            "https://chat.example.com",
-            "api-key",
-            client=client,
-            retry_delay_seconds=0.0,
+            "https://chat.example.com", _key(), client=client, retry_delay_seconds=0.0
         )
         response = await nuage.start(_request())
 
@@ -279,10 +286,7 @@ async def test_start_retries_timeout_with_same_request() -> None:
 
     async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
         nuage = NuageClient(
-            "https://chat.example.com",
-            "api-key",
-            client=client,
-            retry_delay_seconds=0.0,
+            "https://chat.example.com", _key(), client=client, retry_delay_seconds=0.0
         )
         response = await nuage.start(_request())
 
@@ -302,7 +306,7 @@ async def test_start_raises_retry_guidance_after_ambiguous_create_exhausted() ->
     async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
         nuage = NuageClient(
             "https://chat.example.com",
-            "api-key",
+            _key(),
             client=client,
             max_start_attempts=2,
             retry_delay_seconds=0.0,
@@ -316,4 +320,36 @@ async def test_start_raises_retry_guidance_after_ambiguous_create_exhausted() ->
     assert exc_info.value.telemetry_details == {
         "failure_kind": "ambiguous_create",
         "http_status_code": 504,
+    }
+
+
+class _SignedOut:
+    async def resolve(
+        self, target: PlatformCredentialTarget
+    ) -> PlatformCredentialResult:
+        del target
+        return PlatformCredentialRequired(reason="reauthentication_required")
+
+    async def reject(
+        self, *_args: object, **_kwargs: object
+    ) -> PlatformCredentialResult:
+        return PlatformCredentialRequired(reason="reauthentication_required")
+
+
+@pytest.mark.asyncio
+async def test_start_without_a_credential_never_creates_a_session() -> None:
+    seen: list[httpx2.Request] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(500)
+
+    async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
+        nuage = NuageClient("https://chat.example.com", _SignedOut(), client=client)
+        with pytest.raises(ServiceTeleportError) as exc_info:
+            await nuage.start(_request())
+
+    assert seen == []
+    assert exc_info.value.telemetry_details == {
+        "failure_kind": "credential_unavailable"
     }

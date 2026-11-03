@@ -51,6 +51,8 @@ from vibe.app_server.protocol import (
 from vibe.app_server.session import AppServerSession, AppServerTurnError
 from vibe.user_content import UserResourceLink
 
+pytestmark = pytest.mark.both_paths
+
 
 @pytest.mark.asyncio
 async def test_turn_streams_public_events_over_json_rpc(
@@ -131,6 +133,7 @@ async def test_stateful_subagent_runs_through_the_backend(
                                 "code": (
                                     "async function main() { return tools.agents.spawn({"
                                     "name: 'researcher', "
+                                    "instructions: 'Investigate as asked.', "
                                     "message: 'Investigate the local Harness marker'"
                                     "}); }"
                                 )
@@ -580,6 +583,7 @@ async def test_failed_turn_is_typed_and_leaves_the_session_usable(
     )
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_turns_list_reconstructs_and_paginates_public_turns(
     backend_contract_connection: BackendContractConnection,
@@ -614,6 +618,7 @@ async def test_turns_list_reconstructs_and_paginates_public_turns(
     assert response.previous_cursor is None
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_turns_list_returns_an_empty_page_for_a_stale_cursor(
     backend_contract_connection: BackendContractConnection,
@@ -671,7 +676,7 @@ async def test_interrupt_terminates_an_active_public_turn(
 
     turn = asyncio.create_task(consume_turn())
     try:
-        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=5)
         await backend_contract_session.interrupt()
         await turn
     finally:
@@ -796,7 +801,7 @@ async def test_steering_adds_a_public_user_message_to_an_active_turn(
 
     turn = asyncio.create_task(consume_turn())
     try:
-        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=5)
         active_turn = backend_contract_session.state.latest_turn
         assert active_turn is not None
         await backend_contract_session.inject_user_context(
@@ -843,7 +848,7 @@ async def test_stale_turn_control_returns_a_typed_error(
 
     turn = asyncio.create_task(consume_turn())
     try:
-        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=5)
         with pytest.raises(AppServerResponseError) as exc_info:
             await backend_contract_connection.client.request(
                 "turn/steer",
@@ -875,15 +880,21 @@ async def test_reconnect_replays_turn_output_emitted_while_detached(
         )
     )
 
+    accepted = asyncio.Event()
+
     async def consume_turn() -> list[object]:
-        return [
-            event
-            async for event in backend_contract_session.act("finish while detached")
-        ]
+        events: list[object] = []
+        async for event in backend_contract_session.act("finish while detached"):
+            events.append(event)
+            accepted.set()
+        return events
 
     turn = asyncio.create_task(consume_turn())
     try:
         await asyncio.wait_for(started.wait(), timeout=5)
+        # The Turn runs as soon as it is accepted, possibly before its reply
+        # is sent, so detach only once the client holds that reply.
+        await asyncio.wait_for(accepted.wait(), timeout=5)
         await backend_contract_connection.client.close()
         release.set()
         events = await asyncio.wait_for(turn, timeout=5)

@@ -25,7 +25,9 @@ from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.layers.project import project_config_candidates
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.paths import EXPERIMENT_EVAL_CACHE_FILE, MODEL_CATALOG_CACHE_FILE
+from vibe.core.platform_auth import PlatformCredentialFactory
 from vibe.core.telemetry.send import mistral_credential_cache_key
+from vibe.utils.io import file_signature
 
 # A backstop for what the inputs cannot see change: the cached variants and
 # catalog expire after days, which no file signature shows.
@@ -89,14 +91,17 @@ class SessionConfigCache:
         harness_files: HarnessFilesManager,
         org_config: OrgConfigService | None,
         build: Callable[[], Awaitable[BuiltSessionConfig]],
+        credentials: PlatformCredentialFactory | None = None,
     ) -> BuiltSessionConfig:
         # Taken before the build, so a change landing during it rebuilds next
         # time rather than being taken as built.
         inputs = session_config_inputs(harness_files)
         now = self._clock()
         entry = self._entries.get(key)
-        if entry is None or not await self._is_current(entry, inputs, now, org_config):
-            entry = await self._join_or_build(key, inputs, now, build)
+        if entry is None or not await self._is_current(
+            entry, inputs, now, org_config, credentials
+        ):
+            entry = await self._join_or_build(key, inputs, now, build, credentials)
         if key in self._entries:
             self._entries.move_to_end(key)
         return replace(
@@ -109,11 +114,14 @@ class SessionConfigCache:
         inputs: Hashable,
         now: float,
         build: Callable[[], Awaitable[BuiltSessionConfig]],
+        credentials: PlatformCredentialFactory | None = None,
     ) -> _Entry:
         flight = self._flights.get(key)
         # A build that started before an input changed is not this one's.
         if flight is None or flight.inputs != inputs:
-            task = asyncio.create_task(self._build(key, inputs, now, build))
+            task = asyncio.create_task(
+                self._build(key, inputs, now, build, credentials)
+            )
             # Retrieved here too, for when every caller stopped waiting.
             task.add_done_callback(lambda done: done.cancelled() or done.exception())
             flight = _Flight(inputs, task)
@@ -127,12 +135,16 @@ class SessionConfigCache:
         inputs: Hashable,
         now: float,
         build: Callable[[], Awaitable[BuiltSessionConfig]],
+        credentials: PlatformCredentialFactory | None = None,
     ) -> _Entry:
         this = asyncio.current_task()
         try:
             built = await build()
             entry = _Entry(
-                inputs=inputs, credential=_credential(built), built=built, built_at=now
+                inputs=inputs,
+                credential=_credential(built, credentials),
+                built=built,
+                built_at=now,
             )
             # A newer build for changed inputs supersedes this one.
             if (flight := self._flights.get(key)) is not None and flight.task is this:
@@ -151,6 +163,7 @@ class SessionConfigCache:
         inputs: Hashable,
         now: float,
         org_config: OrgConfigService | None,
+        credentials: PlatformCredentialFactory | None = None,
     ) -> bool:
         if (
             entry.inputs != inputs
@@ -158,13 +171,13 @@ class SessionConfigCache:
             # The variants and catalog are keyed by the Mistral credential,
             # which can come from the keyring or the running session's
             # credentials as well as the environment.
-            or _credential(entry.built) != entry.credential
+            or _credential(entry.built, credentials) != entry.credential
         ):
             return False
         built = entry.built
         # The org config key is made of the same credential, before the org
         # config applied, and of the endpoint.
-        key = OrgConfigService.key_for_config(built.pre_org_config)
+        key = OrgConfigService.key_for_config(built.pre_org_config, credentials)
         if key != built.org_config_key:
             return False
         # The process refreshes the org config it holds in the background.
@@ -190,19 +203,13 @@ def session_config_inputs(harness_files: HarnessFilesManager) -> Hashable:
         if project_file is not None:
             project_trust = harness_files.trust_store.is_trusted(project_file.parent)
     return (
-        tuple((str(path), _signature(path)) for path in files),
+        tuple((str(path), file_signature(path)) for path in files),
         project_trust,
         frozenset(os.environ.items()),
     )
 
 
-def _signature(path: Path) -> tuple[int, int, int, int, int] | None:
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    return (stat.st_dev, stat.st_ino, stat.st_mode, stat.st_mtime_ns, stat.st_size)
-
-
-def _credential(built: BuiltSessionConfig) -> str | None:
-    return mistral_credential_cache_key(built.config_orchestrator.config)
+def _credential(
+    built: BuiltSessionConfig, credentials: PlatformCredentialFactory | None
+) -> str | None:
+    return mistral_credential_cache_key(built.config_orchestrator.config, credentials)

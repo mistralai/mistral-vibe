@@ -9,6 +9,8 @@ from tests.stubs.fake_account_gateway import FakeAccountGateway
 from vibe.app_server.models import AccountPlanKind
 from vibe.core.config import DEFAULT_PROVIDERS, ProviderConfig
 from vibe.core.paths import WHOAMI_CACHE_FILE
+from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
+from vibe.core.platform_auth._api_key import api_key_principal
 from vibe.setup.auth.whoami import (
     _WHOAMI_CACHE_TTL_SECONDS,
     AccountGatewayUnauthorized,
@@ -21,6 +23,10 @@ from vibe.setup.auth.whoami import (
     resolve_tenant_domains,
     store_cached_whoami,
 )
+
+
+def _key(api_key: str) -> ApiKeyPlatformCredentialProvider:
+    return ApiKeyPlatformCredentialProvider.from_api_key(api_key)
 
 
 def _mistral_provider() -> ProviderConfig:
@@ -41,7 +47,7 @@ async def test_fetch_whoami_returns_result_on_success(respx_mock) -> None:
         )
     )
 
-    result = await fetch_whoami("https://console.test", "secret")
+    result = await fetch_whoami("https://console.test", _key("secret"))
 
     assert result == WhoAmIResult(
         plan_type=AccountPlanKind.API,
@@ -72,7 +78,7 @@ async def test_fetch_whoami_maps_primitive_access_scope(
         )
     )
 
-    result = await fetch_whoami("https://console.test", "secret")
+    result = await fetch_whoami("https://console.test", _key("secret"))
 
     assert result is not None
     assert result.can_access_private_resources is expected
@@ -91,7 +97,7 @@ async def test_fetch_whoami_ignores_account_context_field_on_whoami(respx_mock) 
         )
     )
 
-    result = await fetch_whoami("https://console.test", "secret")
+    result = await fetch_whoami("https://console.test", _key("secret"))
 
     assert result is not None
     assert result.can_access_private_resources is None
@@ -106,7 +112,7 @@ async def test_fetch_whoami_returns_none_on_unauthorized(
         return_value=httpx.Response(status_code)
     )
 
-    assert await fetch_whoami("https://console.test", "bad") is None
+    assert await fetch_whoami("https://console.test", _key("bad")) is None
 
 
 @pytest.mark.asyncio
@@ -115,7 +121,7 @@ async def test_fetch_whoami_returns_none_on_server_error(respx_mock) -> None:
         return_value=httpx.Response(500)
     )
 
-    assert await fetch_whoami("https://console.test", "secret") is None
+    assert await fetch_whoami("https://console.test", _key("secret")) is None
 
 
 @pytest.mark.asyncio
@@ -124,7 +130,7 @@ async def test_fetch_whoami_returns_none_on_invalid_json(respx_mock) -> None:
         return_value=httpx.Response(200, text="not-json")
     )
 
-    assert await fetch_whoami("https://console.test", "secret") is None
+    assert await fetch_whoami("https://console.test", _key("secret")) is None
 
 
 @pytest.mark.asyncio
@@ -133,7 +139,7 @@ async def test_fetch_whoami_returns_none_on_network_error(respx_mock) -> None:
         side_effect=httpx.ConnectError("boom")
     )
 
-    assert await fetch_whoami("https://console.test", "secret") is None
+    assert await fetch_whoami("https://console.test", _key("secret")) is None
 
 
 @pytest.mark.asyncio
@@ -144,7 +150,7 @@ async def test_http_account_gateway_maps_network_error(respx_mock) -> None:
 
     with pytest.raises(AccountGatewayUnavailable):
         await HttpAccountGateway().read(
-            base_url="https://console.test", api_key="secret"
+            base_url="https://console.test", credentials=_key("secret")
         )
 
 
@@ -156,7 +162,7 @@ async def test_http_account_gateway_raises_unauthorized_for_401(respx_mock) -> N
 
     with pytest.raises(AccountGatewayUnauthorized):
         await HttpAccountGateway().read(
-            base_url="https://console.test", api_key="secret"
+            base_url="https://console.test", credentials=_key("secret")
         )
 
 
@@ -518,32 +524,26 @@ def test_load_cached_whoami_is_keyed_by_api_key() -> None:
 
 
 def test_load_cached_whoami_returns_none_when_stale() -> None:
-    from vibe.setup.auth.whoami import _whoami_cache_key
-
     store_cached_whoami(
         "secret", WhoAmIResult(plan_type=AccountPlanKind.CHAT, plan_name="TEAM")
     )
 
     path = WHOAMI_CACHE_FILE.path
     entries = json.loads(path.read_text())
-    entries[_whoami_cache_key("secret")]["stored_at_timestamp"] -= (
-        _WHOAMI_CACHE_TTL_SECONDS + 1
-    )
+    entries["secret"]["stored_at_timestamp"] -= _WHOAMI_CACHE_TTL_SECONDS + 1
     path.write_text(json.dumps(entries))
 
     assert load_cached_whoami("secret") is None
 
 
 def test_load_cached_whoami_ignores_entries_from_an_older_format() -> None:
-    from vibe.setup.auth.whoami import _whoami_cache_key
-
     store_cached_whoami(
         "secret", WhoAmIResult(plan_type=AccountPlanKind.CHAT, plan_name="TEAM")
     )
 
     path = WHOAMI_CACHE_FILE.path
     entries = json.loads(path.read_text())
-    del entries[_whoami_cache_key("secret")]["format"]
+    del entries["secret"]["format"]
     path.write_text(json.dumps(entries))
 
     assert load_cached_whoami("secret") is None
@@ -564,14 +564,18 @@ async def test_whoami_cache_resolve_reads_through_disk() -> None:
     result = WhoAmIResult(plan_type=AccountPlanKind.CHAT, plan_name="INDIVIDUAL")
     warm_gateway = FakeAccountGateway(result)
     first = await WhoAmICache().resolve(
-        base_url="https://console.test", api_key="secret", gateway=warm_gateway
+        base_url="https://console.test",
+        credentials=_key("secret"),
+        gateway=warm_gateway,
     )
     assert first == result
     assert len(warm_gateway.calls) == 1
 
     cold_gateway = FakeAccountGateway(result)
     second = await WhoAmICache().resolve(
-        base_url="https://console.test", api_key="secret", gateway=cold_gateway
+        base_url="https://console.test",
+        credentials=_key("secret"),
+        gateway=cold_gateway,
     )
     assert second == result
     assert cold_gateway.calls == []
@@ -583,23 +587,23 @@ async def test_whoami_cache_resolve_persists_to_disk() -> None:
 
     await WhoAmICache().resolve(
         base_url="https://console.test",
-        api_key="secret",
+        credentials=_key("secret"),
         gateway=FakeAccountGateway(result),
     )
 
-    assert load_cached_whoami("secret") == result
+    assert load_cached_whoami(api_key_principal("secret")) == result
 
 
 @pytest.mark.asyncio
 async def test_whoami_cache_resolve_does_not_persist_failures() -> None:
     resolved = await WhoAmICache().resolve(
         base_url="https://console.test",
-        api_key="secret",
+        credentials=_key("secret"),
         gateway=FakeAccountGateway(unavailable=True),
     )
 
     assert resolved is None
-    assert load_cached_whoami("secret") is None
+    assert load_cached_whoami(api_key_principal("secret")) is None
 
 
 @pytest.mark.parametrize(

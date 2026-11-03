@@ -8,6 +8,7 @@ import stat
 import tomllib
 from typing import Any, cast
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 import tomli_w
@@ -22,8 +23,10 @@ from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._local_projects import (
     CloudBacking,
+    LocalProject,
     LocalProjectNotFound,
     LocalProjectStore,
+    session_project,
 )
 from vibe.app_server._session_backend_port import SessionBackendHost
 from vibe.app_server.protocol import (
@@ -37,6 +40,7 @@ from vibe.app_server.protocol import (
 from vibe.app_server.server import AppServer
 from vibe.app_server.transport import memory_transport_pair
 from vibe.core.config.harness_files import HarnessFilesManager
+from vibe.core.types import SessionProject
 from vibe.core.vibe_code_project import (
     LocalProjectLink,
     ProjectLink,
@@ -164,7 +168,7 @@ async def test_create_writes_the_project_and_lists_it(
         "projects/create", {"rootPath": str(root), "name": "Textual"}
     )
 
-    assert created.id.startswith("lp_")
+    assert str(UUID(created.id)) == created.id
     assert created.name == "Textual"
     assert created.root_paths == [str(root.resolve())]
     assert created.cloud is None
@@ -367,6 +371,7 @@ async def test_the_server_routes_project_calls_while_a_session_is_attached(
     _, server_transport = memory_transport_pair()
     server = AppServer(
         server_transport,
+        oidc_tenants=fake_process_services().oidc_tenants,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
         host_handler=_handler(),
     )
@@ -407,7 +412,7 @@ async def test_list_imports_project_links_as_backed_projects(
         ("Repo", [str(repo.resolve())], _backed("cloud-repo")),
         ("Folder", [str(folder.resolve())], _backed("cloud-folder")),
     ]
-    assert all(p.id.startswith("lp_") for p in projects)
+    assert all(str(UUID(p.id)) == p.id for p in projects)
     assert all(p.created_at == p.updated_at for p in projects)
     assert _read_store(config_dir)["projects"][0] == {
         "id": projects[0].id,
@@ -527,9 +532,6 @@ async def test_a_link_never_backs_a_project_holding_its_folder_as_a_secondary_ro
             id="secondary-root",
         ),
         pytest.param(
-            [""], {"project_id": "cloud-old", "state": "backed"}, id="relinked"
-        ),
-        pytest.param(
             [""], {"project_id": "cloud-old", "state": "deleting"}, id="unknown-state"
         ),
     ],
@@ -548,6 +550,77 @@ async def test_an_imported_folder_is_left_alone(
 
     assert _store_file(config_dir).read_bytes() == before
     assert not config_dir.joinpath(".local_projects.toml.lock").exists()
+
+
+@pytest.mark.asyncio
+async def test_unlinking_a_folder_keeps_its_project_without_the_backing(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    _link(config_dir, _local_link(root))
+    [imported] = await _list()
+
+    VibeProjectsStore(config_dir / "projects.toml").delete_project_link(repo_root=root)
+    [unlinked] = await _list()
+    _link(config_dir, _local_link(root))
+    [relinked] = await _list()
+
+    assert (unlinked.id, unlinked.cloud) == (imported.id, None)
+    assert (relinked.id, relinked.cloud) == (imported.id, _backed("cloud-1"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param("not = [valid", id="corrupt"),
+        pytest.param("", id="mid-write"),
+        pytest.param(
+            'version = 1\n[[projects]]\nkind = "future"\n', id="unknown-entry"
+        ),
+    ],
+)
+async def test_a_partly_read_links_file_unlinks_nothing(
+    config_dir: Path, tmp_path: Path, content: str
+) -> None:
+    root = tmp_path.resolve()
+    _link(config_dir, _local_link(root))
+    [imported] = await _list()
+
+    (config_dir / "projects.toml").write_text(content, encoding="utf-8")
+
+    assert await _list() == [imported]
+
+
+@pytest.mark.asyncio
+async def test_relinking_a_folder_moves_its_backing(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    _link(config_dir, _local_link(root, "cloud-old"))
+    [imported] = await _list()
+
+    _link(config_dir, _local_link(root, "cloud-new"))
+
+    assert [(p.id, p.cloud) for p in await _list()] == [
+        (imported.id, _backed("cloud-new"))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_backing_is_never_dropped_from_a_project_in_another_state(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    cloud = {"project_id": "cloud-1", "state": "creating"}
+    _write_store(
+        config_dir, {"version": 1, "projects": [_entry("lp_1", root, cloud=cloud)]}
+    )
+    before = _store_file(config_dir).read_bytes()
+
+    await _list()
+
+    assert _store_file(config_dir).read_bytes() == before
 
 
 @pytest.mark.asyncio
@@ -687,11 +760,11 @@ async def test_list_still_answers_when_links_cannot_be_read(
 ) -> None:
     created = await _mutate("projects/create", {"rootPath": str(tmp_path)})
 
-    def symlink_loop(_: VibeProjectsStore) -> list[ProjectLink]:
+    def symlink_loop(_: VibeProjectsStore) -> tuple[list[ProjectLink], bool]:
         raise RuntimeError("Symlink loop")
 
     captured: list[str] = []
-    monkeypatch.setattr(VibeProjectsStore, "list_project_links", symlink_loop)
+    monkeypatch.setattr(VibeProjectsStore, "read_project_links", symlink_loop)
     monkeypatch.setattr(
         local_projects_controller_module,
         "capture_sentry_exception",
@@ -727,3 +800,31 @@ def test_set_cloud_on_an_unknown_project_is_not_found(config_dir: Path) -> None:
     with pytest.raises(LocalProjectNotFound):
         store.set_cloud("lp_missing", CloudBacking(project_id="c", state="backed"))
     assert not _store_file(config_dir).exists()
+
+
+def test_session_project_resolves_ids_like_the_runner(tmp_path: Path) -> None:
+    def project(project_id: str, cloud: CloudBacking | None) -> LocalProject:
+        return LocalProject(
+            id=project_id,
+            name=project_id,
+            root_paths=(tmp_path,),
+            created_at=1,
+            updated_at=1,
+            cloud=cloud,
+        )
+
+    projects = [
+        project("lp_backed", CloudBacking(project_id="cloud-1", state="backed")),
+        project("lp_requested", CloudBacking(project_id="cloud-2", state="requested")),
+    ]
+
+    assert session_project(projects, "cloud-1") == SessionProject(
+        kind="local", id="lp_backed"
+    )
+    assert session_project(projects, "lp_requested") == SessionProject(
+        kind="local", id="lp_requested"
+    )
+    # Not backed yet, the project does not go by its cloud id.
+    assert session_project(projects, "cloud-2") == SessionProject(
+        kind="cloud", id="cloud-2"
+    )

@@ -9,6 +9,7 @@ import pytest
 import respx
 
 from tests.skills.registry.conftest import make_item
+from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
 from vibe.core.skills.registry import _ledger, _manifest, _resolved, _service, _store
 from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
 from vibe.core.skills.registry._service import (
@@ -23,8 +24,11 @@ def _config(**kwargs: Any) -> Any:
     return SimpleNamespace(**kwargs)
 
 
-def _endpoint(_config: Any) -> _service._Endpoint:
-    return _service._Endpoint("https://api.mistral.ai/v1", "key")
+def _endpoint(_config: Any, _credentials: Any = None) -> _service._Endpoint:
+    return _service._Endpoint(
+        "https://api.mistral.ai/v1",
+        ApiKeyPlatformCredentialProvider.from_api_key("key"),
+    )
 
 
 def _catalog_page(

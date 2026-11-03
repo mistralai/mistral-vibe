@@ -25,9 +25,7 @@ _SKILLS = [
     }
 ]
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 handshake = {"runtime/read": {"runtime": {"skills": _SKILLS}}}
-settle_per_key = True
 capture_steps = {3, 5, 7}
 screen_contains = (
     _SKILL_PROMPT,

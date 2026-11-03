@@ -1,12 +1,14 @@
 //! `/plugins` catalogue parsing, reload diff report, rows, and browser key flow.
 
+use std::sync::Arc;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 use serde_json::{json, Value};
 use vibe_rs::app::App;
 use vibe_rs::plugins::rows::{self, Row};
 use vibe_rs::plugins::{self, text, Event};
-use vibe_rs::server::PluginCatalogState;
+use vibe_rs::server::{Client, PluginCatalogState};
 
 use crate::support::{ctrl, key, mouse, stub};
 
@@ -241,21 +243,27 @@ fn clicking_a_plugin_while_filtering_leaves_the_filter_for_the_detail() {
 
 #[tokio::test]
 async fn a_second_reload_waits_for_the_first_to_answer() {
-    let client = stub();
+    let (client, mut frames) = Client::stub_answering();
+    let client = Arc::new(client);
     let mut app = App::default();
     app.session.session_id = Some("session".into());
     plugins::reload(&mut app, &client);
     assert!(app.plugins.reloading);
-    let pending = app
-        .pending_commits
-        .load(std::sync::atomic::Ordering::Relaxed);
     plugins::reload(&mut app, &client);
+    let mut methods = Vec::new();
+    for _ in 0..3 {
+        methods.push(frames.recv().await.unwrap()["method"].clone());
+    }
     assert_eq!(
-        app.pending_commits
-            .load(std::sync::atomic::Ordering::Relaxed),
-        pending,
-        "the second reload never starts"
+        methods,
+        [
+            "plugin_catalog/read",
+            "plugin/reload",
+            "plugin_catalog/read"
+        ]
     );
+    tokio::task::yield_now().await;
+    assert!(frames.try_recv().is_err(), "the second reload sent nothing");
     plugins::apply_event(&mut app, Event::Reloaded(Err("boom".into())));
     assert!(!app.plugins.reloading);
 }

@@ -1,4 +1,4 @@
-//! Regression: a long cwd clipped the bottom bar's token counter.
+//! Regression: a long cwd clipped the bottom bar's context gauge; it now keeps its end.
 
 use vibe_rs::app::App;
 
@@ -7,18 +7,17 @@ use crate::support::bottom_bar_row;
 const WIDTH: u16 = 120;
 
 #[test]
-fn a_long_cwd_is_ellipsized_and_keeps_the_token_counter() {
-    let cwd = format!("/tmp/{}", "x".repeat(100));
+fn a_long_cwd_keeps_its_end_and_the_context_gauge() {
+    let cwd = format!("/tmp/{}", "x".repeat(110));
     let mut app = App::default();
     app.session.cwd = Some(cwd);
     app.session.tokens = (0, 600_000);
 
     let row = bottom_bar_row(&mut app, WIDTH);
 
-    let counter = "0/600k tokens (0%)";
-    let path_width = WIDTH as usize - 1 - counter.len();
-    let head = format!("/tmp/{}", "x".repeat(path_width - "/tmp/…".chars().count()));
-    assert_eq!(row, format!("{head}… {counter}"));
+    let tail = " ⧉ ctx   0%";
+    let kept = WIDTH as usize - 1 - tail.chars().count();
+    assert_eq!(row, format!("…{}{tail}", "x".repeat(kept)));
 }
 
 #[test]
@@ -30,5 +29,5 @@ fn a_short_cwd_is_left_untouched() {
     let row = bottom_bar_row(&mut app, WIDTH);
 
     assert!(row.starts_with("/tmp/project "));
-    assert!(row.ends_with("0/600k tokens (0%)"));
+    assert!(row.ends_with("ctx        0/600k"));
 }

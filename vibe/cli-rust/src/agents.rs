@@ -1,13 +1,12 @@
 //! Agent modes: Shift+Tab cycles the primary agents and switches the session.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::app::{App, Status, ToastSeverity};
-use crate::model_picker::FAILED_TOAST_SECS;
+use crate::app::{App, Status};
 use crate::server::{
     method, AgentSafety, AgentSummary, AgentSwitchParams, AgentType, Client, RuntimeSnapshot,
 };
@@ -117,7 +116,7 @@ pub fn indicator_agent_name(agent: &AgentSummary, bypass_tool_permissions: bool)
     name
 }
 
-/// Safety driving the chat input border.
+/// Safety driving the chat input's mode label color.
 pub fn indicator_safety(agent: &AgentSummary, bypass_tool_permissions: bool) -> AgentSafety {
     if bypass_tool_permissions {
         AgentSafety::Yolo
@@ -201,7 +200,7 @@ fn switch(app: &mut App, client: &Arc<Client>, agent_name: String) {
         app.agents.switch_active = false;
         return;
     };
-    app.agents.spinner_at = Some(Instant::now() + MODE_SWITCH_SPINNER_DELAY);
+    app.agents.spinner_at = Some(crate::clock::now() + MODE_SWITCH_SPINNER_DELAY);
     let client = client.clone();
     crate::ui_event::spawn(app, async move {
         let params = AgentSwitchParams {
@@ -243,8 +242,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
         // target so the next Shift+Tab steps past it instead of asking again.
         Err(error) => {
             app.agents.refused = Some(event.target.clone());
-            let message = format!("Failed to switch agent: {error}");
-            app.show_toast(message, ToastSeverity::Error, FAILED_TOAST_SECS);
+            crate::notices::failed(app, &format!("Failed to switch agent: {error}"));
         }
     }
     send_desired(app, client);

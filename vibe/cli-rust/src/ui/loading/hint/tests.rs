@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use serde_json::json;
 
 use super::{push, running, starting, CANCEL_LAST_QUEUED};
@@ -40,7 +38,7 @@ fn busy_app(status: Status) -> App {
 #[test]
 fn composer_queue_hints_need_the_composer_to_own_the_keys() {
     let mut app = busy_app(Status::Generating {
-        since: Instant::now(),
+        since: crate::clock::now(),
     });
     assert_eq!(
         running(&app),
@@ -60,7 +58,7 @@ fn composer_queue_hints_need_the_composer_to_own_the_keys() {
 #[test]
 fn the_focused_list_advertises_only_the_ctrl_c_step_that_runs() {
     let mut app = busy_app(Status::Generating {
-        since: Instant::now(),
+        since: crate::clock::now(),
     });
     app.subagents.list.focused = true;
     app.chat_input.input = "draft".into();
@@ -85,7 +83,7 @@ fn the_focused_list_advertises_only_the_ctrl_c_step_that_runs() {
 #[test]
 fn a_picker_opened_during_a_turn_hides_the_interrupt_hints() {
     let mut app = busy_app(Status::Generating {
-        since: Instant::now(),
+        since: crate::clock::now(),
     });
     app.vibe_code_project.pending = true;
     assert!(running(&app).is_empty(), "Esc cancels the opening picker");

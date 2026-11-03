@@ -140,11 +140,11 @@ impl Server {
         let (live, stop, hard_stop) = run::start(&spec);
         let run_id = spec.run_id.clone();
         let span = tracing::info_span!("run", run = %run_id);
-        let task = tokio::spawn(
+        let task = crate::work::spawn_daemon(
             run::serve(spec, channel, self.cwd.clone(), stop, hard_stop).instrument(span),
         );
         let ended = self.ended.clone();
-        tokio::spawn(async move {
+        crate::work::spawn_daemon(async move {
             let report = match task.await {
                 Ok(report) => report,
                 Err(join) => run::crashed(run_id, &join.to_string()),
@@ -164,7 +164,7 @@ impl Server {
 /// One task writes stdout, a line per message, until every sender is gone.
 fn stdout_writer() -> (mpsc::UnboundedSender<String>, tokio::task::JoinHandle<()>) {
     let (out, mut messages) = mpsc::unbounded_channel::<String>();
-    let writer = tokio::spawn(async move {
+    let writer = crate::work::spawn_daemon(async move {
         let mut stdout = tokio::io::stdout();
         while let Some(mut message) = messages.recv().await {
             message.push('\n');

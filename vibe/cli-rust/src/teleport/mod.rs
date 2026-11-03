@@ -2,8 +2,8 @@
 
 mod request;
 
+use crate::clock::UiInstant;
 use std::sync::Arc;
-use std::time::Instant;
 
 use serde_json::Value;
 
@@ -31,7 +31,7 @@ pub struct Operation {
     pub picker_id: String,
     pub prompt: Option<String>,
     pub message_id: String,
-    pub started_at: Instant,
+    pub started_at: UiInstant,
     pub awaiting_push: bool,
     pub cancelling: bool,
 }
@@ -72,7 +72,7 @@ pub fn begin(
         picker_id,
         prompt,
         message_id,
-        started_at: Instant::now(),
+        started_at: crate::clock::now(),
         awaiting_push: false,
         cancelling: false,
     });
@@ -85,7 +85,7 @@ pub fn busy(app: &App) -> bool {
 }
 
 /// When the loading spinner's timer started, while it is shown.
-pub fn loading_since(app: &App) -> Option<Instant> {
+pub fn loading_since(app: &App) -> Option<UiInstant> {
     app.teleport
         .as_ref()
         .filter(|op| !op.awaiting_push)

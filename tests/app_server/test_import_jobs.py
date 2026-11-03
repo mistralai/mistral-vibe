@@ -22,6 +22,7 @@ from vibe.app_server._import_jobs import (
     ImportJobSnapshot,
 )
 from vibe.app_server._imports import ImportsService
+from vibe.app_server._local_projects import LocalProjectStore
 from vibe.app_server._model import validate_wire
 from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._runtime import HarnessProcess, create_harness_server
@@ -53,6 +54,7 @@ from vibe.core.imports.adapters.claude_session import (
     ClaudeSessionSummary,
     ClaudeTranscript,
 )
+from vibe.core.vibe_code_project import LocalProjectLink, VibeProjectsStore
 
 
 class BlockingImportRunner:
@@ -590,6 +592,98 @@ async def test_claude_runner_skips_an_invalid_transcript_and_continues(
 
 
 @pytest.mark.asyncio
+async def test_claude_runner_stamps_imported_sessions_with_their_project(
+    tmp_path: Path,
+) -> None:
+    await _claude_importer(tmp_path, local_projects=None).run()
+
+    metadata = json.loads(_imported_meta(tmp_path).read_text(encoding="utf-8"))
+    assert metadata["project"] == {"kind": "cloud", "id": "project-id"}
+    assert metadata["environment"]["working_directory"] == str(tmp_path / "workspace")
+
+
+@pytest.mark.asyncio
+async def test_claude_runner_stamps_the_local_project_backed_by_the_import_project(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    # The link provisioning saves; the store imports it as a backed local project.
+    (tmp_path / "workspace").mkdir()
+    VibeProjectsStore(config_dir / "projects.toml").upsert_project_link(
+        LocalProjectLink(
+            directory_path=tmp_path / "workspace",
+            project_id="project-id",
+            project_name="Workspace",
+        )
+    )
+    store = LocalProjectStore(config_dir / "local_projects.toml")
+
+    await _claude_importer(tmp_path, local_projects=store).run()
+
+    [local] = store.list_projects()
+    metadata = json.loads(_imported_meta(tmp_path).read_text(encoding="utf-8"))
+    assert metadata["project"] == {"kind": "local", "id": local.id}
+
+
+@pytest.mark.asyncio
+async def test_claude_runner_rerun_leaves_an_imported_sessions_metadata_alone(
+    tmp_path: Path,
+) -> None:
+    importer = _claude_importer(tmp_path, local_projects=None)
+    await importer.run()
+    meta_path = _imported_meta(tmp_path)
+    # As if Desktop opened and pinned the session since.
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    metadata["pinned_at"] = "2026-01-01T00:00:00+00:00"
+    meta_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    await importer.run()
+
+    assert json.loads(meta_path.read_text(encoding="utf-8")) == metadata
+
+
+def _claude_importer(
+    tmp_path: Path, *, local_projects: LocalProjectStore | None
+) -> ClaudeImportService:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    config_path = tmp_path / ".claude.json"
+    config_path.write_text(
+        json.dumps({"projects": {str(workspace): {}}}), encoding="utf-8"
+    )
+    projects_path = tmp_path / ".claude" / "projects" / "workspace"
+    projects_path.mkdir(parents=True)
+    (projects_path / "11111111-1111-1111-1111-111111111111.jsonl").write_text(
+        json.dumps({
+            "type": "user",
+            "cwd": str(workspace),
+            "message": {"role": "user", "content": "inspect"},
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+
+    async def build_writer() -> UnifiedSessionImportWriter:
+        return UnifiedSessionImportWriter(
+            SessionLoggingConfig(enabled=True, save_dir=str(tmp_path / "sessions")),
+            local_projects,
+        )
+
+    return ClaudeImportService(
+        ClaudeProjectSource(config_path),
+        ClaudeSessionSource(projects_path.parent),
+        VibeProjectService(RecordingProjectLinks()),
+        build_writer,
+    )
+
+
+def _imported_meta(tmp_path: Path) -> Path:
+    [session_dir] = [
+        path for path in (tmp_path / "sessions" / "unified").iterdir() if path.is_dir()
+    ]
+    return session_dir / "meta.json"
+
+
+@pytest.mark.asyncio
 async def test_app_server_discovers_claude_projects_and_their_sessions(
     tmp_path: Path, process_services: ProcessServices
 ) -> None:
@@ -617,6 +711,7 @@ async def test_app_server_discovers_claude_projects_and_their_sessions(
     _, transport = memory_transport_pair()
     server = AppServer(
         transport,
+        oidc_tenants=process_services.oidc_tenants,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
         imports_service=ImportsService({
             ImportHarness.CLAUDE: ClaudeImportService(
@@ -663,10 +758,16 @@ async def test_vibe_project_service_provisions_every_import_project() -> None:
     assert project_links.calls == [("/workspace/one", "One"), ("/workspace/two", "Two")]
     assert provisioned == [
         ImportProject(
-            name="One", cwd=Path("/repos/one"), source_cwd=Path("/workspace/one")
+            name="One",
+            cwd=Path("/repos/one"),
+            source_cwd=Path("/workspace/one"),
+            project_id="project-id",
         ),
         ImportProject(
-            name="Two", cwd=Path("/repos/two"), source_cwd=Path("/workspace/two")
+            name="Two",
+            cwd=Path("/repos/two"),
+            source_cwd=Path("/workspace/two"),
+            project_id="project-id",
         ),
     ]
 
@@ -692,6 +793,9 @@ async def test_vibe_project_service_skips_failed_projects_and_continues() -> Non
     assert project_links.calls == [("/workspace/one", "One"), ("/workspace/two", "Two")]
     assert provisioned == [
         ImportProject(
-            name="Two", cwd=Path("/workspace/two"), source_cwd=Path("/workspace/two")
+            name="Two",
+            cwd=Path("/workspace/two"),
+            source_cwd=Path("/workspace/two"),
+            project_id="project-id",
         )
     ]

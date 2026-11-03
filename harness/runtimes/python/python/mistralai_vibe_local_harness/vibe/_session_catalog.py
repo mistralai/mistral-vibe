@@ -7,7 +7,7 @@ stores remain authoritative and are loaded only for new or changed entries.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 import hashlib
 import logging
@@ -23,8 +23,10 @@ from mistralai_vibe_local_harness.vibe._projection import with_session_preview
 from mistralai_vibe_local_harness.vibe._storage import (
     STORE_FORMAT_MINOR,
     CurrentPointerV1,
+    HeldGeneration,
     ImportProvenanceV1,
     SessionMetadataV1,
+    StoredSession,
     UnifiedSessionStore,
     _read_document_bytes,
     _reject_symlink_components,
@@ -35,6 +37,8 @@ from mistralai_vibe_local_harness.vibe._subagents._models import SessionIdentity
 _CATALOG_FILENAME = ".session-index.json"
 
 logger = logging.getLogger(__name__)
+
+type LiveStoredSession = Callable[[], HeldGeneration | None]
 
 # Writers replace a document by renaming a new file over it and never rewrite
 # one in place, so an unchanged inode, size, and timestamps mean unchanged bytes.
@@ -72,7 +76,7 @@ class SessionCatalogKeyV1(_CatalogModel):
     current_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     journal_path: str = Field(pattern=r"^journal/[0-9]{16}\.jsonl$")
     journal_size: int = Field(ge=0)
-    # Nanosecond timestamps exceed RFC 8785's interoperable integer range, so
+    # Nanosecond timestamps exceed the integer range a double holds exactly, so
     # preserve the exact filesystem value as decimal text.
     journal_mtime_ns: str = Field(pattern=r"^[0-9]+$")
 
@@ -120,7 +124,13 @@ class UnifiedSessionCatalog:
         self._path = self._unified_root / _CATALOG_FILENAME
         self._cache = cache if cache is not None else SessionCatalogCache()
 
-    def entries(self) -> tuple[SessionCatalogEntryV1, ...]:
+    def entries(
+        self, live: Mapping[str, LiveStoredSession] | None = None
+    ) -> tuple[SessionCatalogEntryV1, ...]:
+        """Every loadable stored session except the ``live`` ones, whose
+        entries are refreshed from their owner's memory, never from disk.
+        """
+        live = live or {}
         if not self._unified_root.exists():
             return ()
         cached = self._read()
@@ -130,6 +140,8 @@ class UnifiedSessionCatalog:
             else {}
         )
         reconciled: list[SessionCatalogEntryV1] = []
+        found: list[SessionCatalogEntryV1] = []
+        changed = cached is None
         seen: set[str] = set()
         for session_root in sorted(
             self._unified_root.iterdir(), key=lambda path: path.name
@@ -138,19 +150,29 @@ class UnifiedSessionCatalog:
                 continue
             session_id = session_root.name
             seen.add(session_id)
+            prior = cached_by_id.get(session_id)
+            if (read_live := live.get(session_id)) is not None:
+                entry = self._live_entry(session_id, read_live, prior)
+                changed = changed or entry is not prior
+                if entry is not None:
+                    reconciled.append(entry)
+                continue
             try:
                 key = self._read_key(session_id)
-                prior = cached_by_id.get(session_id)
                 if prior is not None and prior.key == key:
                     reconciled.append(prior)
+                    found.append(prior)
                     continue
                 entry = self._load_entry(session_id, key)
             except Exception:
                 logger.warning(
                     "Skipping unloadable session %s", session_id, exc_info=True
                 )
+                changed = changed or prior is not None
                 continue
+            changed = True
             reconciled.append(entry)
+            found.append(entry)
 
         # Concurrent sweeps share the cache and insert while this one prunes, so
         # iterate this sweep's own set and only look the shared mapping up.
@@ -160,9 +182,9 @@ class UnifiedSessionCatalog:
             for session_id in seen
             if (digest := pointers.get(session_id)) is not None
         }
-        document = _SessionCatalogV1(entries=reconciled)
-        self._write_if_changed(cached, document)
-        return tuple(document.entries)
+        if changed or not seen.issuperset(cached_by_id):
+            self._write(_SessionCatalogV1(entries=reconciled))
+        return tuple(found)
 
     def entry(
         self, session_id: str, store: UnifiedSessionStore | None = None
@@ -172,12 +194,20 @@ class UnifiedSessionCatalog:
         return found[0] if found else None
 
     def entries_for(
-        self, session_ids: Iterable[str]
+        self, session_ids: Iterable[str], live: Collection[str] = frozenset()
     ) -> tuple[SessionCatalogEntryV1, ...]:
         """Read these entries, in this order, without reconciling every
-        unrelated session; an id with no loadable store is left out.
+        unrelated session; an id with no loadable store, or a ``live`` one
+        (see ``entries``), is left out.
         """
-        return self._entries_for(dict.fromkeys(session_ids), None)
+        return self._entries_for(
+            (
+                session_id
+                for session_id in dict.fromkeys(session_ids)
+                if session_id not in live
+            ),
+            None,
+        )
 
     def _entries_for(
         self, session_ids: Iterable[str], store: UnifiedSessionStore | None
@@ -191,6 +221,9 @@ class UnifiedSessionCatalog:
             else {}
         )
         found: list[SessionCatalogEntryV1] = []
+        # A lookup that loaded nothing must not replace an unreadable document;
+        # the next full reconciliation rebuilds it.
+        changed = False
         for session_id in session_ids:
             prior = by_id.get(session_id)
             try:
@@ -201,13 +234,16 @@ class UnifiedSessionCatalog:
                 entry = self._load_entry(session_id, key, store)
             except Exception:
                 continue
+            changed = True
             by_id[session_id] = entry
             found.append(entry)
 
-        document = _SessionCatalogV1(
-            entries=sorted(by_id.values(), key=lambda item: item.session_id)
-        )
-        self._write_if_changed(cached, document)
+        if changed:
+            self._write(
+                _SessionCatalogV1(
+                    entries=sorted(by_id.values(), key=lambda item: item.session_id)
+                )
+            )
         return tuple(found)
 
     def _read(self) -> _SessionCatalogV1 | None:
@@ -224,11 +260,7 @@ class UnifiedSessionCatalog:
         self._cache.document = (signature, document)
         return document
 
-    def _write_if_changed(
-        self, cached: _SessionCatalogV1 | None, document: _SessionCatalogV1
-    ) -> None:
-        if cached == document:
-            return
+    def _write(self, document: _SessionCatalogV1) -> None:
         try:
             _replace_document(
                 self._path, document.model_dump(mode="json", by_alias=True)
@@ -242,6 +274,31 @@ class UnifiedSessionCatalog:
             # concurrent cache writers must not make session discovery fail.
             return
 
+    def _live_entry(
+        self,
+        session_id: str,
+        read_live: LiveStoredSession,
+        prior: SessionCatalogEntryV1 | None,
+    ) -> SessionCatalogEntryV1 | None:
+        try:
+            held = read_live()
+            if held is None:
+                return prior
+            key = SessionCatalogKeyV1(
+                current_sha256=held.current_sha256,
+                journal_path=held.journal_path,
+                journal_size=held.journal_size,
+                journal_mtime_ns=str(held.journal_mtime_ns),
+            )
+            if prior is not None and prior.key == key:
+                return prior
+            return _entry(session_id, key, held.session)
+        except Exception:
+            logger.warning(
+                "Skipping unrecordable live session %s", session_id, exc_info=True
+            )
+            return prior
+
     def _load_entry(
         self,
         session_id: str,
@@ -249,21 +306,7 @@ class UnifiedSessionCatalog:
         store: UnifiedSessionStore | None = None,
     ) -> SessionCatalogEntryV1:
         store = store or UnifiedSessionStore(self._storage_root, session_id)
-        stored = store.load()
-        # Cache the raw preview; liveness is dynamic, so ``list`` settles a
-        # mid-turn row per query against the lease rather than baking it in here.
-        snapshot = with_session_preview(stored.projection_state.snapshot)
-        # Keep the key sampled before the load. If the store advances during
-        # this read, the next reconciliation sees a mismatch and refreshes the
-        # entry; retrying here could spin for the lifetime of an active turn.
-        return SessionCatalogEntryV1(
-            session_id=session_id,
-            key=key,
-            session=snapshot.session,
-            metadata=stored.runtime_state.session_metadata,
-            identity=stored.runtime_state.identity,
-            import_provenance=stored.runtime_state.import_provenance,
-        )
+        return _entry(session_id, key, store.load())
 
     def _read_key(self, session_id: str) -> SessionCatalogKeyV1:
         store = UnifiedSessionStore(self._storage_root, session_id)
@@ -303,7 +346,27 @@ class UnifiedSessionCatalog:
         return digest
 
 
+def _entry(
+    session_id: str, key: SessionCatalogKeyV1, stored: StoredSession
+) -> SessionCatalogEntryV1:
+    # Cache the raw preview; liveness is dynamic, so ``list`` settles a
+    # mid-turn row per query against the lease rather than baking it in here.
+    snapshot = with_session_preview(stored.projection_state.snapshot)
+    # Keep the key sampled before the load. If the store advances during
+    # this read, the next reconciliation sees a mismatch and refreshes the
+    # entry; retrying here could spin for the lifetime of an active turn.
+    return SessionCatalogEntryV1(
+        session_id=session_id,
+        key=key,
+        session=snapshot.session,
+        metadata=stored.runtime_state.session_metadata,
+        identity=stored.runtime_state.identity,
+        import_provenance=stored.runtime_state.import_provenance,
+    )
+
+
 __all__ = [
+    "LiveStoredSession",
     "SessionCatalogCache",
     "SessionCatalogEntryV1",
     "SessionCatalogKeyV1",

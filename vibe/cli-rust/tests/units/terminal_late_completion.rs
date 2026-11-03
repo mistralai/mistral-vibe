@@ -66,7 +66,10 @@ fn enqueue_answer_after_completion_finalizes_title_and_bell_once() {
             assert_eq!(vibe_rs::terminal_notifier::title(&app), ">> Current task");
             assert!(!app.terminal_notifier.take_bell());
             accepted(&mut app);
-            assert!(app.queue.is_empty() && app.is_idle());
+            assert!(
+                app.queue.is_empty()
+                    && matches!(app.session.status, Status::Ready | Status::Failed)
+            );
             let rings = !focused && status != "interrupted";
             let title = if rings {
                 "Current task - Task Complete"

@@ -58,7 +58,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, rows: ApprovalRows) {
         .set_style(area, Style::default().bg(background));
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::popup_border()).bg(background));
+        .border_style(theme::border_style().bg(background));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let content = Rect {

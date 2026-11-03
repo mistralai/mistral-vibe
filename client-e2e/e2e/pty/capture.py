@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 from collections.abc import Callable, Mapping, Set
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import fcntl
 import os
 import pty
@@ -28,12 +28,15 @@ class CaptureSpec:
     env: Mapping[str, str]
     rows: int
     columns: int
-    idle_marker: bytes
+    ack_prefix: bytes
+    """Start of the client's fence ack; the acked fence count and BEL follow."""
+    fence_key: str
+    """Input sent after each key batch, on the same stream, for the client to ack."""
     steps: tuple[str, ...]
     resizes: tuple[tuple[int, int] | None, ...] = ()
     failsafe: float = 30.0
-    batch_keys: tuple[str, str] | None = None
-    """Hold and release keys bracketing a step, or None to settle per keypress."""
+    settle_per_key: bool = False
+    """Fence every keypress instead of each batch of plain keys."""
     exit_after_last_step: bool = False
     terminal_responses: tuple[tuple[bytes, bytes], ...] = ()
     """Terminal output queries and the input replies they trigger."""
@@ -46,7 +49,7 @@ class CaptureSpec:
 # the keys that produced that state.
 _COMMIT_KEYS = frozenset({"\r", "\n", "\t", "\x1b"})
 
-# A raw Escape read together with the release key parses as `ESC ESC`, eating the release, so a batched Escape uses its CSI u form.
+# A raw Escape read together with the fence key parses as `ESC ESC`, eating the fence, so a lone Escape uses its CSI u form.
 _CSI_U_ESCAPE = "\x1b[27u"
 _OSC52 = b"\x1b]52;c;"
 
@@ -97,63 +100,98 @@ def capture(
 ) -> list[Snapshot]:
     """Capture startup and one settled frame after each input step."""
     pid, fd = launch(spec)
-    terminal = Terminal(spec.rows, spec.columns)
-    clipboard = _ClipboardCapture()
+    client = _Client(
+        fd, spec, Terminal(spec.rows, spec.columns), (spec.rows, spec.columns)
+    )
     try:
-        buffered = _settle(fd, terminal, clipboard, bytearray(), spec)
-        snapshots = (
-            [terminal.snapshot("startup", clipboard.text)] if capture_startup else []
-        )
+        client.settle()
+        snapshots = [client.snapshot("startup")] if capture_startup else []
         for index, step in enumerate(spec.steps):
-            for _ in range(releases[index] if index < len(releases) else 0):
-                if step_fd is None:
-                    raise RuntimeError("replay release has no step FIFO")
-                os.write(step_fd, b"\0")
-                buffered = _settle(fd, terminal, clipboard, buffered, spec)
+            client.release(step_fd, releases[index] if index < len(releases) else 0)
             if spec.exit_after_last_step and index == len(spec.steps) - 1:
                 _write_all(fd, step.encode())
                 _wait_for_exit(pid, fd, spec.failsafe, spec.exit_responses)
                 continue
             resize = spec.resizes[index] if index < len(spec.resizes) else None
             if resize is None:
-                buffered = _send_step(fd, terminal, clipboard, buffered, spec, step)
+                client.send_step(step)
             else:
-                rows, columns = resize
-                _set_window_size(fd, rows, columns)
-                terminal.resize(rows, columns)
-                buffered = _settle(fd, terminal, clipboard, buffered, spec)
-            for _ in range(releases_after[index] if index < len(releases_after) else 0):
-                if step_fd is None:
-                    raise RuntimeError("replay release has no step FIFO")
-                os.write(step_fd, b"\0")
-                buffered = _settle(fd, terminal, clipboard, buffered, spec)
+                client.resize(*resize)
+            after = releases_after[index] if index < len(releases_after) else 0
+            client.release(step_fd, after)
             if capture_steps is None or index in capture_steps:
-                snapshots.append(terminal.snapshot(f"step{index}", clipboard.text))
+                snapshots.append(client.snapshot(f"step{index}"))
         return snapshots
     finally:
         _terminate(pid, fd)
 
 
-def _send_step(
-    fd: int,
-    terminal: Terminal,
-    clipboard: _ClipboardCapture,
-    buffered: bytearray,
-    spec: CaptureSpec,
-    step: str,
-) -> bytearray:
-    """Send one input step and settle, batching its keys when the client allows."""
-    if spec.batch_keys is None:
-        for key in split_keys(step):
-            _write_all(fd, key.encode())
-            buffered = _settle(fd, terminal, clipboard, buffered, spec)
-        return buffered
-    hold, release = spec.batch_keys
-    for batch in _batches(step):
-        keys = _CSI_U_ESCAPE if batch == "\x1b" else batch
-        _write_all(fd, f"{hold}{keys}{release}".encode())
-        buffered = _settle(fd, terminal, clipboard, buffered, spec)
-    return buffered
+@dataclass
+class _Client:
+    """One driven client: each stimulus carries a fence, and a settle waits for its ack."""
+
+    fd: int
+    spec: CaptureSpec
+    terminal: Terminal
+    size: tuple[int, int]
+    clipboard: _ClipboardCapture = field(default_factory=_ClipboardCapture)
+    buffered: bytearray = field(default_factory=bytearray)
+    fences: int = 0
+    """Fences sent so far; startup is fence 0."""
+
+    def snapshot(self, label: str) -> Snapshot:
+        return self.terminal.snapshot(label, self.clipboard.text)
+
+    def send_step(self, step: str) -> None:
+        """Send one input step, fencing each batch (or each key) of it."""
+        keys = split_keys(step) if self.spec.settle_per_key else _batches(step)
+        for batch in keys:
+            batch = _CSI_U_ESCAPE if batch == "\x1b" else batch
+            _write_all(self.fd, f"{batch}{self.spec.fence_key}".encode())
+            self._fenced()
+
+    def release(self, step_fd: int | None, count: int) -> None:
+        """Release replay events one by one; the replay server fences each."""
+        for _ in range(count):
+            if step_fd is None:
+                raise RuntimeError("replay release has no step FIFO")
+            os.write(step_fd, b"\0")
+            self._fenced()
+
+    def resize(self, rows: int, columns: int) -> None:
+        """Resize the PTY; the client's resize event is its own fence."""
+        if (rows, columns) == self.size:
+            raise ValueError("a resize step must change the terminal size")
+        self.size = (rows, columns)
+        _set_window_size(self.fd, rows, columns)
+        self.terminal.resize(rows, columns)
+        self._fenced()
+
+    def _fenced(self) -> None:
+        self.fences += 1
+        self.settle()
+
+    def settle(self) -> None:
+        """Feed output until the client acks the latest fence."""
+        while (ack := self._take_ack()) is None:
+            data = _read(self.fd, self.spec.failsafe)
+            self.clipboard.feed(data)
+            self.buffered += data
+        if ack != self.fences:
+            raise RuntimeError(f"client acked fence {ack}, expected {self.fences}")
+
+    def _take_ack(self) -> int | None:
+        """Feed the terminal up to the next complete ack and return its count."""
+        _answer_terminal_queries(self.fd, self.buffered, self.spec.terminal_responses)
+        prefix = self.spec.ack_prefix
+        if (start := self.buffered.find(prefix)) == -1:
+            return None
+        if (end := self.buffered.find(b"\x07", start + len(prefix))) == -1:
+            return None
+        count = int(self.buffered[start + len(prefix) : end])
+        self.terminal.feed(bytes(self.buffered[:start]))
+        del self.buffered[: end + 1]
+        return count
 
 
 def _batches(step: str) -> list[str]:
@@ -199,29 +237,10 @@ def _read(fd: int, failsafe: float) -> bytes:
     try:
         chunk = os.read(fd, 65536)
     except OSError as error:
-        raise EOFError("client exited before emitting an idle marker") from error
+        raise EOFError("client exited before acking its fence") from error
     if not chunk:
-        raise EOFError("client exited before emitting an idle marker")
+        raise EOFError("client exited before acking its fence")
     return chunk
-
-
-def _settle(
-    fd: int,
-    terminal: Terminal,
-    clipboard: _ClipboardCapture,
-    buffered: bytearray,
-    spec: CaptureSpec,
-) -> bytearray:
-    while True:
-        _answer_terminal_queries(fd, buffered, spec.terminal_responses)
-        if (marker_index := buffered.find(spec.idle_marker)) != -1:
-            break
-        data = _read(fd, spec.failsafe)
-        clipboard.feed(data)
-        buffered += data
-    terminal.feed(bytes(buffered[:marker_index]))
-    del buffered[: marker_index + len(spec.idle_marker)]
-    return buffered
 
 
 def _answer_terminal_queries(

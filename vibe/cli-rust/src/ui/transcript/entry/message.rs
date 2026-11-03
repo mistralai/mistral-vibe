@@ -67,6 +67,15 @@ pub(super) fn render(
             push_subagent_severity(&mut lines, &message_text(message), width, theme::error())
         }
         "whats_new" => startup::push_whats_new(&mut lines, &message_text(message), width),
+        "startup_notices" => {
+            startup::push_startup_notices(&mut lines, &message_text(message), width)
+        }
+        "notice_warning" | "notice_error" => startup::push_notice_row(
+            &mut lines,
+            &message_text(message),
+            width,
+            message.role == "notice_error",
+        ),
         "progress_status" => push_compact_status(
             &mut lines,
             &message_text(message),

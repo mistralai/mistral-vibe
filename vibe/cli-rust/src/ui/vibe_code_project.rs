@@ -4,7 +4,7 @@ pub(super) mod paint;
 
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::Modifier,
     widgets::{Block, Borders},
     Frame,
 };
@@ -43,7 +43,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, creating: bool) {
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::popup_border())),
+            .border_style(theme::border_style()),
         area,
     );
     let x = area.x + 2;

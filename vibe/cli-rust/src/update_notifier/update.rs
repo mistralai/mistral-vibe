@@ -499,8 +499,8 @@ async fn wait_update_command(
     mut child: tokio::process::Child,
     terminate: &mut tokio::sync::watch::Receiver<bool>,
 ) -> UpdateCommandOutcome {
-    let stdout = tokio::spawn(read_pipe(child.stdout.take(), terminate.clone()));
-    let stderr = tokio::spawn(read_pipe(child.stderr.take(), terminate.clone()));
+    let stdout = crate::work::spawn_daemon(read_pipe(child.stdout.take(), terminate.clone()));
+    let stderr = crate::work::spawn_daemon(read_pipe(child.stderr.take(), terminate.clone()));
     let status = tokio::select! {
         status = child.wait() => status,
         changed = terminate.changed() => {
@@ -559,7 +559,7 @@ async fn read_pipe<P: tokio::io::AsyncRead + Unpin>(
                         Err(_) => terminate_armed = false,
                         Ok(()) if *terminate.borrow() => {
                             drain_deadline = Some(
-                                tokio::time::Instant::now() + TERMINATED_PIPE_DRAIN,
+                                tokio::time::Instant::from_std(crate::clock::real_now()) + TERMINATED_PIPE_DRAIN,
                             );
                         }
                         Ok(()) => {}
@@ -600,12 +600,13 @@ async fn terminate_child(child: &mut tokio::process::Child) {
             // SAFETY: a signal to the pid of a child this process spawned.
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
         }
-        let deadline = tokio::time::Instant::now() + TERMINATE_GRACE_SECONDS;
-        while tokio::time::Instant::now() < deadline {
+        let deadline =
+            tokio::time::Instant::from_std(crate::clock::real_now()) + TERMINATE_GRACE_SECONDS;
+        while tokio::time::Instant::from_std(crate::clock::real_now()) < deadline {
             if matches!(child.try_wait(), Ok(Some(_))) {
                 return;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            crate::clock::sleep_real(std::time::Duration::from_millis(50)).await;
         }
     }
     let _ = child.start_kill();

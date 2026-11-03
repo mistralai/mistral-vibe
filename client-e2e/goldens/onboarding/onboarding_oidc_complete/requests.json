@@ -14,12 +14,6 @@
   }
  },
  {
-  "method": "setup/oidc-poll",
-  "params": {
-   "attemptId": "oidc-replay"
-  }
- },
- {
   "method": "setup/submit-choices",
   "params": {
    "consoleBaseUrl": "https://console.mistral.ai",

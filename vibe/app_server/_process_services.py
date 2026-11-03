@@ -13,19 +13,29 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from vibe.app_server._org_config_service import OrgConfigService
+from vibe.app_server.connector_catalog import SharedConnectorCatalog
+from vibe.setup.auth._oidc_tenant import OidcTenantResolver
 
 
 @dataclass(frozen=True, slots=True)
 class ProcessServices:
     org_config: OrgConfigService
+    connector_catalog: SharedConnectorCatalog
+    # The OIDC tenant per signed-in user, shared by CLI and Desktop connections.
+    oidc_tenants: OidcTenantResolver
 
     @classmethod
     def create(cls) -> ProcessServices:
         """The production services; an entry point calls this once."""
-        return cls(org_config=OrgConfigService())
+        return cls(
+            org_config=OrgConfigService(),
+            connector_catalog=SharedConnectorCatalog(),
+            oidc_tenants=OidcTenantResolver(),
+        )
 
     async def close(self) -> None:
         await self.org_config.close()
+        await self.connector_catalog.close()
 
 
 __all__ = ["ProcessServices"]

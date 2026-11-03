@@ -1,9 +1,10 @@
 //! UI state; the `ui` module renders a pure view over it.
 
+use crate::clock::UiInstant;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::post_ready::AccountReads;
 use crate::server::{UserQuestion, UserQuestionRequest};
@@ -29,7 +30,7 @@ use crate::turn_summary::Narrator;
 use crate::ui;
 use crate::ui::banner::Banner;
 use crate::ui::loading::LoadingAnim;
-use crate::utils::file_index::FileIndex;
+use crate::utils::file_index::FileIndexHandle;
 use crate::utils::history_manager::HistoryManager;
 use crate::utils::startup_cache::StartupConfig;
 use crate::utils::transcript_cache::{QueueSpacer, TranscriptCache};
@@ -43,7 +44,7 @@ pub enum Status {
     Ready,
     /// A turn is running since `since` (drives the elapsed counter).
     Generating {
-        since: Instant,
+        since: UiInstant,
     },
 }
 
@@ -100,32 +101,14 @@ pub struct SelectionState {
     pub had_selection_at_press: bool,
 }
 
-/// An inline status line, shown until `until`.
-pub struct Notice {
-    pub text: String,
-    pub severity: ToastSeverity,
-    pub until: Instant,
-}
+use crate::ui::notice::Notice;
 
-/// Toast severity, selecting the left-border color.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ToastSeverity {
+/// Notice severity, selecting its color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
     Information,
     Warning,
     Error,
-}
-
-/// A short-lived warning/error toast overlay.
-pub struct Toast {
-    /// Identity within this process, so a selection can follow the toast it was
-    /// anchored in while the rack shifts it around.
-    pub id: u64,
-    pub text: String,
-    pub severity: ToastSeverity,
-    pub duration: Duration,
-    pub until: Option<Instant>,
-    /// Evictions reported with this toast at overflow time.
-    pub omitted: usize,
 }
 
 /// A prompt the client still owns end to end, used by the `/clear <prompt>` seed.
@@ -170,7 +153,7 @@ pub struct ChatInput {
     pub recall_draft: Option<crate::edit_history::Snapshot>,
     /// When the last key reached the chat input, so a bottom-app that wants to
     /// replace it can wait for a pause first.
-    pub last_keystroke: Option<Instant>,
+    pub last_keystroke: Option<UiInstant>,
 }
 
 impl ChatInput {
@@ -192,7 +175,7 @@ pub struct Session {
     /// The in-progress manual shell operation, needed to reject queued input.
     pub shell_operation_id: Option<String>,
     /// When the manual shell operation started, for the loader elapsed time.
-    pub shell_started_at: Option<Instant>,
+    pub shell_started_at: Option<UiInstant>,
     /// Whether the shell run frame has been handed to the app-server writer.
     pub shell_request_started: bool,
     /// RPC settled before the final shell effect reached the transcript.
@@ -214,6 +197,8 @@ pub struct Session {
     /// The session's PR/MR artifacts, latest first; the footer shows the
     /// latest as a link, or a modal listing them all when there are several.
     pub artifacts: Vec<crate::server::PublicSessionArtifact>,
+    /// The session `artifacts` was read for; a switch away re-reads the list.
+    pub artifacts_session: Option<String>,
     pub stats: crate::server::SessionStats,
     pub startup_config: StartupConfig,
     pub startup_error: Option<String>,
@@ -235,15 +220,11 @@ pub struct Session {
     pub startup_telemetry: Option<std::collections::BTreeMap<String, Value>>,
     /// Telemetry queued before the session id exists, flushed by `set_session_id`.
     pub held_telemetry: Vec<crate::telemetry::TelemetryEvent>,
-    /// Whether the last turn was interrupted, so `/retry` can continue it.
+    /// Whether the last turn failed or was interrupted, so `/retry` can re-run it.
     pub can_retry: bool,
-    /// The active turn's latest assistant row.
-    pub turn_assistant_id: Option<String>,
-    /// Armed on retryable failures.
+    /// The rows a successful `/retry` replaces.
     pub retry_presentation: Option<crate::commands::retry::RetryPresentation>,
-    /// A retried turn's output merging into the interrupted assistant row.
-    pub retry_continuation: Option<crate::commands::retry::RetryContinuation>,
-    /// Silent incomplete_stream continuations spent.
+    /// Silent incomplete_stream retries spent.
     pub incomplete_stream_retries: u32,
     /// The mounted what's-new entry, dropped on the first submit.
     pub whats_new: Option<crate::startup::banners::WhatsNew>,
@@ -288,14 +269,10 @@ pub struct View {
     pub pointer_shape: crate::pointer::Shape,
     /// The selectable region painted last frame, published by the visible screen.
     pub selection_region: Region,
-    /// Text rectangle of each toast painted last frame, keyed by toast id and
-    /// ordered newest last. Bounded by the stack the rack fits on screen.
-    pub toast_text_areas: Vec<(u64, Rect)>,
-    /// The active model's name in the bottom bar painted last frame, which a click opens `/model` on.
-    pub footer_model_area: Rect,
-    /// The toast text region a selection is anchored in, or the default region
-    /// while no toast owns one.
-    pub toast_selection_region: Region,
+    /// The active model's name on the composer's top border painted last frame, which a click opens `/model` on.
+    pub model_area: Rect,
+    /// The context gauge in the bottom bar painted last frame, which a click opens `/context` on.
+    pub footer_tokens_area: Rect,
     /// The loading-area row a drag can select, published by whichever screen
     /// paints it.
     pub loading_selection_region: Region,
@@ -308,10 +285,8 @@ pub struct View {
     pub bottom_app_selection_folds: crate::selection::Folds,
     /// The bottom app drawn last frame and its box rect, which own the box selection.
     pub bottom_app: Option<(crate::ui::bottom_app::Kind, Rect)>,
-    /// The PR/MR link painted in the bottom bar last frame, for click routing.
-    pub bottom_bar_link: Option<ui::bottom_bar::BarLink>,
-    /// Wrapped rows of each toast painted last frame, keyed by toast id.
-    pub toast_folds: Vec<(u64, crate::selection::Folds)>,
+    /// The links painted in the bottom bar last frame (the cwd's copy icon, the PR/MR link), for click routing.
+    pub bottom_bar_links: Vec<ui::bottom_bar::BarLink>,
     /// Inclusive `(y, x0, x1)` cells inside the region that belong to no widget,
     /// so a drag never selects them: padding around and between widgets.
     pub selection_chrome: Vec<(u16, u16, u16)>,
@@ -376,16 +351,14 @@ impl Default for View {
             mouse_position: None,
             pointer_shape: crate::pointer::Shape::default(),
             selection_region: Region::default(),
-            toast_text_areas: Vec::new(),
-            footer_model_area: Rect::default(),
-            toast_selection_region: Region::default(),
+            model_area: Rect::default(),
+            footer_tokens_area: Rect::default(),
             loading_selection_region: Region::default(),
             bottom_app_selection_region: Region::default(),
             bottom_app_selection_chrome: Vec::new(),
             bottom_app_selection_folds: crate::selection::Folds::default(),
             bottom_app: None,
-            bottom_bar_link: None,
-            toast_folds: Vec::new(),
+            bottom_bar_links: Vec::new(),
             selection_chrome: Vec::new(),
             selection_hangs: Vec::new(),
             selection_scrollbar: ui::scrollbar::State::default(),
@@ -409,18 +382,14 @@ impl Default for View {
     }
 }
 
-/// Transient overlays: inline notice, toast, and quit confirm.
+/// Transient overlays: inline notice and quit confirm.
 #[derive(Default)]
 pub struct Overlays {
-    /// Active inline notice (e.g. "Copied to clipboard"), self-hiding after its timeout.
+    /// Active inline notice: a confirmation fades on its timer, a refusal stays until the next key.
     pub notice: Option<Notice>,
-    /// Stacked warning/error toasts, each self-hiding.
-    pub toasts: VecDeque<Toast>,
-    /// Identity handed to the next toast; only ever moves forward.
-    next_toast_id: u64,
     /// When the last unhandled Escape landed, so a second one within
     /// `DOUBLE_ESC_DELAY` clears the input or enters rewind mode.
-    pub last_escape: Option<Instant>,
+    pub last_escape: Option<UiInstant>,
 }
 
 /// Shared `/` and `@` completion popup state.
@@ -428,8 +397,8 @@ pub struct Overlays {
 pub struct Completion {
     /// User-invocable skills, shown as `/name` popup rows.
     pub skills: Vec<crate::skill::Skill>,
-    /// Files below `cwd`, maintained by a background watcher.
-    pub files: FileIndex,
+    /// Files below `cwd`, maintained by a background watcher the handle owns.
+    pub files: FileIndexHandle,
     /// Entries currently displayed by the shared `/` and `@` popup.
     pub entries: Vec<CompletionEntry>,
     /// Selected entry index in the completion popup (Up/Down, wrap-around).
@@ -445,7 +414,7 @@ pub struct Completion {
 /// Voice-mode state: config projection, recording lifecycle, and mic level.
 #[derive(Default)]
 pub struct Voice {
-    /// Whether voice mode is on; gates Ctrl+R.
+    /// Whether voice mode is on; gates Ctrl+T.
     pub mode_enabled: bool,
     /// Projected transcription config, `None` until `config/read` returns.
     pub transcription: Option<TranscriptionConfig>,
@@ -480,6 +449,8 @@ pub struct ConfigScreen {
     pub search: crate::search_field::Search,
     /// Nested editor opened by Enter on a writable settings field.
     pub edit: Option<ConfigEdit>,
+    /// A failure or refusal shown in place of the key hints until the next key.
+    pub status: Option<Notice>,
 }
 
 /// `/theme` picker state (a bottom-app).
@@ -518,7 +489,7 @@ pub struct Agents {
     /// Whether `/leanstall` or `/unleanstall` is in flight; input is rejected until it finishes.
     pub installing: bool,
     /// When the prompt spinner is due, or `None` once fired or cancelled.
-    pub spinner_at: Option<Instant>,
+    pub spinner_at: Option<UiInstant>,
     /// Whether the spinner has replaced the prompt marker.
     pub switching_indicator: bool,
     /// Spinner frame, advanced on the shared 100 ms tick.
@@ -561,6 +532,8 @@ pub struct ArtifactsModal {
     pub open: bool,
     /// Highlighted artifact (latest first) and the viewport.
     pub list: crate::option_list::OptionList<crate::option_list::SingleAction>,
+    /// Option rows from the last render; PageUp/PageDown move by its height.
+    pub list_area: ratatui::layout::Rect,
 }
 
 /// `/log-level` picker state (a bottom-app).
@@ -674,7 +647,7 @@ pub struct QuestionApp {
     /// Per-frame screen geometry of the free-text field, to map a click to the caret.
     pub other_field: Option<crate::question_app::OtherField>,
     /// When the app opened, so buffered keys cannot answer it instantly.
-    pub mount_time: Option<Instant>,
+    pub mount_time: Option<UiInstant>,
 }
 
 /// `/mcp` browser state (a bottom-app).
@@ -690,7 +663,7 @@ pub struct MCPApp {
     /// A refresh is in flight; further refreshes are coalesced into it.
     pub refreshing: bool,
     /// When the open browser next re-discovers sources in the background.
-    pub refresh_at: Option<Instant>,
+    pub refresh_at: Option<UiInstant>,
     /// Source whose tools are listed, or `None` in the source list view.
     pub viewing_name: Option<String>,
     pub viewing_kind: Option<crate::server::MCPSourceKind>,
@@ -707,12 +680,63 @@ pub struct MCPApp {
 pub struct WhoamiCache {
     model: Option<String>,
     reads: AccountReads,
+    /// When the account was last read or asked for, to space the usage gauge's re-reads.
+    read_at: Option<Instant>,
+    /// The model the latest read was asked for, so a model switch asks once
+    /// and an answer for an older ask is dropped.
+    asked: Option<String>,
+    /// When the latest read failed, so a retry waits a little instead of asking every frame.
+    failed_at: Option<Instant>,
 }
 
 impl WhoamiCache {
+    /// Keep `reads` for the `model` they were asked under, unless a later ask superseded it.
     pub fn store(&mut self, model: String, reads: AccountReads) {
+        if self.asked.as_ref().is_some_and(|asked| *asked != model) {
+            return;
+        }
+        self.asked = Some(model.clone());
         self.model = Some(model);
         self.reads = reads;
+        self.failed_at = None;
+        self.read_at.get_or_insert_with(crate::clock::real_now);
+    }
+
+    /// Forget a failed ask for `model` at `at`, so the next frame asks again
+    /// once the retry delay passes; the last stored reads stay.
+    pub fn failed(&mut self, model: &str, at: Instant) {
+        if self.asked.as_deref() != Some(model) || self.model.as_deref() == Some(model) {
+            return;
+        }
+        self.asked = self.model.clone();
+        self.failed_at = Some(at);
+    }
+
+    pub fn failed_at(&self) -> Option<Instant> {
+        self.failed_at
+    }
+
+    /// Record that the account is being read for `model` (startup, `/whoami`).
+    pub fn ask(&mut self, model: String) {
+        self.asked = Some(model);
+    }
+
+    pub fn read_at(&self) -> Option<Instant> {
+        self.read_at
+    }
+
+    pub fn mark_read(&mut self, at: Instant, model: String) {
+        self.read_at = Some(at);
+        self.asked = Some(model);
+    }
+
+    /// Whether any read was asked for; until the post-ready fetch asks, it owns the account.
+    pub fn has_asked(&self) -> bool {
+        self.asked.is_some()
+    }
+
+    pub fn asked_for(&self, model: &str) -> bool {
+        self.asked.as_deref() == Some(model)
     }
 
     pub fn hit(&self, model: &str) -> Option<&AccountReads> {
@@ -781,6 +805,8 @@ pub struct App {
     pub selection: SelectionState,
     pub overlays: Overlays,
     pub completion: Completion,
+    /// The Ctrl+R prompt-history search the composer holds, if any.
+    pub reverse_search: Option<crate::reverse_search::ReverseSearch>,
     pub paste_image: crate::paste_image::State,
     pub voice: Voice,
     pub voice_app: crate::voice_app::VoiceApp,
@@ -804,6 +830,8 @@ pub struct App {
     pub question_app: QuestionApp,
     pub mcp: MCPApp,
     pub plugins: crate::plugins::State,
+    /// The `/context` bottom app.
+    pub context_app: crate::context_app::State,
     pub mcp_oauth: MCPOAuthApp,
     pub connector_auth: ConnectorAuthApp,
     /// The pre-session workspace-trust gate.
@@ -830,9 +858,6 @@ pub struct App {
     /// Whether a `/compact` request is in flight, so the UI shows the spinner
     /// and the `session/compacted` notification can settle it.
     pub compacting: bool,
-    /// Picker commits and slash commands whose server round-trip is still in
-    /// flight; the app is not idle while one is pending.
-    pub pending_commits: Arc<AtomicU32>,
     /// Slash commands submitted while the session is still starting, replayed
     /// once `apply_ready` settles.
     pub pending_commands: Vec<String>,
@@ -846,8 +871,10 @@ pub struct App {
     pub subagents: crate::subagents::Subagents,
     /// Older history paged in once the transcript is scrolled to its top.
     pub older_history: crate::older_history::OlderHistory,
-    /// Config validation warnings already toasted.
+    /// Config validation warnings already shown.
     pub shown_config_warnings: HashSet<String>,
+    /// The startup warnings box, filled until the first turn.
+    pub startup_notices: crate::notices::StartupNotices,
     /// The `/debug` console: a right-docked live view of the session logs.
     pub debug_console: crate::debug_console::DebugConsole,
 }
@@ -860,9 +887,15 @@ impl App {
             self.terminal_notifier.clear_outcome();
             self.vibe_code_project = Default::default();
             crate::teleport::reset(self);
+            // The retry offer names the previous session's turn and rows.
+            crate::commands::retry::cancel(self);
             // A session switch starts a new log: drop the old session's lines
             // and paging offset so the console repopulates from the new one.
             crate::debug_console::clear_session(&mut self.debug_console);
+            // The old session's PRs/MRs go with it; `artifacts::follow_session` reads the new ones.
+            self.session.artifacts.clear();
+            self.session.artifacts_session = None;
+            crate::artifacts_modal::close(self);
         }
         // The console's poll task reads the current id on every tick.
         if let Some(session_tx) = &self.debug_console.session_tx {
@@ -898,52 +931,18 @@ impl App {
         self.view.loading = LoadingAnim::default();
     }
 
-    /// True when no turn is running and startup has settled -- the app is waiting
-    /// on the user. Drives the replay-mode idle marker (see main.rs); `Failed` is
-    /// terminal and counts as settled so a broken startup still emits a marker.
-    pub fn is_idle(&self) -> bool {
-        // The gate parks startup on the user, so its frame is already final.
-        if self.trust.open {
-            return true;
-        }
-        self.is_settled()
-            // A pending child-transcript refresh owes the frame a re-fetch.
-            && self.subagents.refresh_at.is_none()
-            && matches!(self.session.status, Status::Ready | Status::Failed)
-            // An accepted prompt the server has not promoted yet is still work
-            // in flight.
-            && self.queue.is_empty()
-            // A teleport reports progress by notification, like a turn.
-            && !crate::teleport::busy(self)
-    }
-
-    /// True once client-owned work has landed: startup finished, no request of
-    /// ours in flight, no config screen loading, no armed theme preview (the
-    /// frame is stable while its debounce runs, but the theme has not applied).
-    /// A running turn does not count, so this is what a `settle_busy` capture
-    /// waits for.
+    /// True once state the replay harness cannot see has landed: startup
+    /// finished, no config screen loading, no coalescing window armed. A running
+    /// turn does not count: the harness releases its events itself.
     pub fn is_settled(&self) -> bool {
         // An open gate counts as settled: nothing of ours is in flight.
         (self.trust.open || !matches!(self.session.status, Status::Starting))
             && (!self.config_screen.open || !self.config_screen.loading)
-            && self.theme_picker.preview_at.is_none()
-            && self.pending_commits.load(Ordering::Relaxed) == 0
             // A debounced theme preview repaints later; stay busy until it lands
             // so the captured frame shows the applied theme.
             && self.theme_picker.preview_at.is_none()
             // A scheduled child-transcript refresh owes the frame a re-fetch.
             && self.subagents.refresh_at.is_none()
-    }
-
-    /// Mark a picker commit as in flight, keeping the app busy until its answer
-    /// has been applied here on the main thread.
-    pub fn commit_started(&self) -> Arc<AtomicU32> {
-        self.pending_commits.fetch_add(1, Ordering::Relaxed);
-        self.pending_commits.clone()
-    }
-
-    pub fn commit_finished(&self) {
-        self.pending_commits.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Only the main input ignores the shared blink phase when blinking is disabled.
@@ -991,14 +990,8 @@ impl App {
     }
 }
 
-/// Seconds a voice error/notice line stays up, matching the copy notice.
+/// Seconds a voice notice line stays up, matching the copy notice.
 const VOICE_NOTICE_SECS: u64 = 4;
-
-/// Seconds a toast stays up.
-const TOAST_SECS: u64 = 5;
-
-/// Max toasts kept at once; overflow is reported with the newest toast.
-const MAX_TOASTS: usize = 64;
 
 impl App {
     /// True whenever a recording is in flight.
@@ -1011,7 +1004,7 @@ impl App {
         f32::from_bits(self.voice.peak.load(Ordering::Relaxed))
     }
 
-    /// Ctrl+R: start or stop recording.
+    /// Ctrl+T: start or stop recording.
     pub fn toggle_recording(&mut self) {
         match self.voice.transcribe_state {
             TranscribeState::Idle => self.start_recording(),
@@ -1092,7 +1085,7 @@ impl App {
                 self.voice.transcribe_state = TranscribeState::Recording;
                 self.voice.tracking.start();
             }
-            Err(msg) => self.show_toast(msg, ToastSeverity::Warning, TOAST_SECS),
+            Err(msg) => ui::notice::show_sticky(self, Severity::Warning, &msg),
         }
     }
 
@@ -1139,7 +1132,8 @@ impl App {
                     &mut self.chat_input.cursor,
                     &text,
                 );
-                self.chat_input.record_edit(before, true, Instant::now());
+                self.chat_input
+                    .record_edit(before, true, crate::clock::now());
                 crate::completion_manager::input_changed(self);
             }
             // A cancelled recording already reported; its late session is noise.
@@ -1162,11 +1156,7 @@ impl App {
                 );
                 self.voice.recording = None;
                 self.voice.transcribe_state = TranscribeState::Idle;
-                self.show_toast(
-                    format!("Voice transcription failed: {msg}"),
-                    ToastSeverity::Error,
-                    TOAST_SECS,
-                );
+                crate::notices::failed(self, &format!("Voice transcription failed: {msg}"));
             }
             VoiceEvent::Finished => {
                 crate::telemetry::record(
@@ -1181,43 +1171,6 @@ impl App {
     }
 
     fn show_voice_notice(&mut self, text: String) {
-        self.overlays.notice = Some(Notice {
-            text,
-            severity: ToastSeverity::Information,
-            until: Instant::now() + Duration::from_secs(VOICE_NOTICE_SECS),
-        });
-    }
-
-    /// Enqueue a toast for `seconds`, bounded.
-    pub fn show_toast(&mut self, text: String, severity: ToastSeverity, seconds: u64) {
-        let id = self.overlays.next_toast_id;
-        self.overlays.next_toast_id = id.wrapping_add(1);
-        self.overlays.toasts.push_back(Toast {
-            id,
-            text,
-            severity,
-            duration: Duration::from_secs(seconds),
-            until: None,
-            omitted: 0,
-        });
-        if self.overlays.toasts.len() <= MAX_TOASTS {
-            return;
-        }
-        let mut omitted = self
-            .overlays
-            .toasts
-            .iter()
-            .map(|toast| toast.omitted)
-            .fold(0usize, usize::saturating_add);
-        while self.overlays.toasts.len() > MAX_TOASTS {
-            self.overlays.toasts.pop_front();
-            omitted = omitted.saturating_add(1);
-        }
-        for toast in &mut self.overlays.toasts {
-            toast.omitted = 0;
-        }
-        if let Some(newest) = self.overlays.toasts.back_mut() {
-            newest.omitted = omitted;
-        }
+        ui::notice::show(self, Severity::Information, &text, VOICE_NOTICE_SECS);
     }
 }

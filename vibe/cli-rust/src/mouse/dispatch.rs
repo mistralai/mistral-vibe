@@ -28,8 +28,7 @@ pub(super) fn dispatch(
 ) {
     match target {
         MouseTarget::Transcript | MouseTarget::Composer => selection_event(app, target, event),
-        MouseTarget::Toast => toast_event(app, event),
-        MouseTarget::BottomBar => bottom_bar_event(app, event),
+        MouseTarget::BottomBar => bottom_bar_event(app, client, event),
         MouseTarget::Loading => loading_event(app, event),
         MouseTarget::Question => question_input::handle_mouse(app, client, event),
         MouseTarget::RemoteProject => crate::vibe_code_project::input::mouse(app, client, event),
@@ -88,6 +87,11 @@ pub(super) fn dispatch(
         }
         MouseTarget::BottomApp => bottom_app_event(app, event, |_, _| {}),
         MouseTarget::Trust => crate::trust_folders::handle_mouse(app, event),
+        MouseTarget::JumpToBottom => {
+            if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+                crate::mouse::scroll_chat(app, false, u16::MAX);
+            }
+        }
         // A click on the pinned todo line opens the full plan.
         MouseTarget::TodoRow => {
             if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -205,6 +209,7 @@ fn subagent_list_event(app: &mut App, event: MouseEvent) {
             });
         }
         MouseEventKind::Down(MouseButton::Left) if index.is_some() => {
+            crate::reverse_search::cancel(app);
             app.subagents.list.focused = true;
             app.set_app_focus(false);
             crate::selection::blur_composer(app);
@@ -237,12 +242,7 @@ fn loading_event(app: &mut App, event: MouseEvent) {
     });
 }
 
-/// Selecting toast text never dismisses the toast, which self-hides on timeout.
-fn toast_event(app: &mut App, event: MouseEvent) {
-    owned_region_event(app, event, selection::press_toast);
-}
-
-fn bottom_bar_event(app: &mut App, event: MouseEvent) {
+fn bottom_bar_event(app: &mut App, client: &Arc<Client>, event: MouseEvent) {
     let at = (event.column, event.row);
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
@@ -258,36 +258,34 @@ fn bottom_bar_event(app: &mut App, event: MouseEvent) {
             let pressed = app.selection.press;
             let dragged = app.selection.dragged;
             let release = selection::release(app);
-            // A plain click (release on the pressed cell, no selection) on
-            // the painted PR/MR link opens it, or the artifacts modal when
-            // several artifacts share the slot.
+            // A plain click on a painted link opens the PR/MR, lists several, or copies the cwd.
             if pressed == Some(at) && !matches!(release, Release::Selected) {
-                let action = app
-                    .view
-                    .bottom_bar_link
-                    .as_ref()
-                    .filter(|link| link.area.contains(at.into()))
-                    .map(|link| link.action.clone());
-                if let Some(action) = action {
-                    match action {
-                        crate::ui::bottom_bar::BarLinkAction::OpenUrl(url) => {
-                            external_url::open(&url)
-                        }
-                        crate::ui::bottom_bar::BarLinkAction::ListArtifacts => {
-                            artifacts_modal::open(app)
-                        }
+                let action =
+                    crate::ui::bottom_bar::link_at(app, at).map(|link| link.action.clone());
+                match action {
+                    Some(crate::ui::bottom_bar::BarLinkAction::OpenUrl(url)) => {
+                        external_url::open(&url)
                     }
+                    Some(crate::ui::bottom_bar::BarLinkAction::ListArtifacts) => {
+                        artifacts_modal::open(app)
+                    }
+                    Some(crate::ui::bottom_bar::BarLinkAction::CopyPath(path)) => {
+                        // A double click copies twice instead of selecting the icon.
+                        app.selection.chain = Default::default();
+                        crate::ui::notice::copied(app, &path)
+                    }
+                    None => {}
                 }
             }
-            // A plain click on the model name opens `/model` and keeps the composer's draft.
-            let click = !dragged
-                && pressed.is_some_and(|press| crate::ui::bottom_bar::model_at(app, press))
-                && crate::ui::bottom_bar::model_at(app, at);
-            if matches!(release, Release::Nothing) && click {
-                // The second press of a double click starts afresh instead of selecting a word.
+            // A plain click on the context gauge opens `/context`, a side-channel
+            // read that also works while a turn generates.
+            let tokens_click = !dragged
+                && pressed.is_some_and(|press| crate::ui::bottom_bar::tokens_at(app, press))
+                && crate::ui::bottom_bar::tokens_at(app, at);
+            if matches!(release, Release::Nothing) && tokens_click {
                 app.selection.chain = Default::default();
-                model_picker::open(app);
-                crate::telemetry::slash_command_clicked(app, "/model", "footer");
+                crate::context_app::open(app, client);
+                crate::telemetry::slash_command_clicked(app, "/context", "footer");
             }
         }
         _ => {}
@@ -317,7 +315,24 @@ fn selection_event(app: &mut App, target: MouseTarget, event: MouseEvent) {
         }
         MouseEventKind::Drag(MouseButton::Left) => selection::drag(app, at),
         MouseEventKind::Up(MouseButton::Left) => {
+            // The press cell and drag flag are cleared by release; read them first.
+            let pressed = app.selection.press;
+            let dragged = app.selection.dragged;
             let released = selection::release(app);
+            // A plain click on the model name opens `/model` and keeps the composer's draft.
+            let on_model = |at| crate::ui::composer_title::model_at(app, at);
+            if target == MouseTarget::Composer
+                && !dragged
+                && !matches!(released, Release::Selected)
+                && pressed.is_some_and(on_model)
+                && on_model(at)
+            {
+                // The second press of a double click starts afresh instead of selecting a word.
+                app.selection.chain = Default::default();
+                model_picker::open(app);
+                crate::telemetry::slash_command_clicked(app, "/model", "composer");
+                return;
+            }
             if target != MouseTarget::Transcript || matches!(released, Release::Selected) {
                 return;
             }

@@ -1,7 +1,5 @@
 //! What a picker resume leaves behind when it succeeds, fails or is cancelled.
 
-use std::time::Instant;
-
 use crossterm::event::KeyCode;
 use serde_json::json;
 use vibe_rs::app::{App, Status};
@@ -52,14 +50,13 @@ pub fn picking() -> App {
 pub fn picking_while_generating() -> App {
     let mut app = picking();
     app.set_status(Status::Generating {
-        since: Instant::now(),
+        since: vibe_rs::clock::now(),
     });
     app
 }
 
 /// Enter was pressed: the `session/resume` answer is in flight.
 pub fn resuming(app: &mut App) {
-    app.commit_started();
     app.resume_picker.resuming = true;
 }
 
@@ -143,7 +140,7 @@ async fn a_cancelled_resume_drops_its_late_answer_quietly() {
         resume_picker::apply_event(&mut app, &stub(), late);
         assert_eq!(messages(&app), cancelled);
         assert_eq!(app.session.session_id.as_deref(), Some(CURRENT));
-        assert!(app.overlays.toasts.is_empty());
+        assert!(app.overlays.notice.is_none());
     }
 }
 
@@ -172,7 +169,7 @@ async fn a_picker_resume_never_shows_the_post_init_notices_again() {
     );
     assert_eq!(app.session.session_id.as_deref(), Some(SAVED));
     assert_eq!(notices(&app), 1);
-    assert!(app.overlays.toasts.is_empty());
+    assert!(app.overlays.notice.is_none());
 }
 
 #[tokio::test]

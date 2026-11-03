@@ -4,6 +4,9 @@ use serde_json::json;
 use vibe_rs::app::App;
 use vibe_rs::{config, config_fields};
 
+use crate::feedback_support::errors;
+use crate::support::{redraw, rows};
+
 fn loaded(names: &[&str]) -> config::Loaded {
     config_fields::parse(&json!({
         "fields": names.iter().map(|name| json!({
@@ -88,13 +91,82 @@ fn failed_refresh_keeps_the_rows_and_selection() {
         assert!(!app.config_screen.loading);
         assert_eq!(app.config_screen.list.selected(), 1);
         assert_eq!(config::filtered(&app).len(), 2);
-        assert_eq!(app.overlays.toasts.len(), 1);
+        assert_eq!(errors(&app).len(), 1);
+        assert!(app
+            .config_screen
+            .status
+            .as_ref()
+            .is_some_and(|status| status.text.starts_with("Failed to load settings: ")));
     }
 }
 
 #[test]
-fn failed_refresh_after_close_shows_no_toast() {
+fn failed_refresh_after_close_reports_nothing() {
     let mut app = App::default();
     config::apply_loaded(&mut app, failed());
-    assert!(app.overlays.toasts.is_empty());
+    assert!(errors(&app).is_empty());
+    assert!(app.config_screen.status.is_none());
+}
+
+#[test]
+fn a_failed_refresh_replaces_the_hints() {
+    let mut app = App::default();
+    app.config_screen.open = true;
+    config::apply_loaded(&mut app, loaded(&["a"]));
+    config::apply_loaded(&mut app, failed());
+
+    let screen = rows(&redraw(&mut app)).join("\n");
+    assert!(screen.contains("Failed to load settings: app-server closed"));
+    assert!(app.config_screen.status.as_ref().unwrap().shown);
+}
+
+#[test]
+fn a_refusal_from_behind_config_shows_on_its_status_line() {
+    let mut app = App::default();
+    app.config_screen.open = true;
+
+    vibe_rs::notices::failed(&mut app, "Failed to switch agent: broken");
+
+    assert_eq!(errors(&app), ["Failed to switch agent: broken"]);
+    assert!(app
+        .config_screen
+        .status
+        .as_ref()
+        .is_some_and(|status| status.text == "Failed to switch agent: broken"));
+}
+
+#[test]
+fn a_status_waits_for_a_screen_large_enough_to_paint_it() {
+    let mut app = App::default();
+    app.config_screen.open = true;
+    vibe_rs::notices::failed(&mut app, "Failed to switch agent: broken");
+
+    crate::support::render(18, 6, |frame| app.draw(frame));
+    assert!(
+        !app.config_screen.status.as_ref().unwrap().shown,
+        "too small to paint it"
+    );
+
+    redraw(&mut app);
+    assert!(app.config_screen.status.as_ref().unwrap().shown);
+}
+
+#[test]
+fn a_status_under_the_edit_dialog_waits_for_it_to_close() {
+    let mut app = App::default();
+    app.config_screen.open = true;
+    config::apply_loaded(&mut app, loaded(&["a"]));
+    let field = config::filtered(&app)[0].clone();
+    vibe_rs::config_edit::open(&mut app, field);
+    vibe_rs::notices::failed(&mut app, "Failed to save a (temporary): rejected");
+
+    redraw(&mut app);
+    assert!(
+        !app.config_screen.status.as_ref().unwrap().shown,
+        "covered by the dialog"
+    );
+
+    app.config_screen.edit = None;
+    redraw(&mut app);
+    assert!(app.config_screen.status.as_ref().unwrap().shown);
 }

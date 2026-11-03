@@ -1,7 +1,6 @@
 //! What the question app records as an answer, when it submits, and the mount grace period.
 
 use std::collections::BTreeSet;
-use std::time::Instant;
 
 use crossterm::event::KeyCode;
 use vibe_rs::app::App;
@@ -140,7 +139,7 @@ fn the_app_submits_only_once_every_question_is_answered() {
 #[test]
 fn enter_and_esc_are_ignored_within_the_grace_period_but_navigation_is_not() {
     let mut app = with_question(false);
-    app.question_app.mount_time = Some(Instant::now());
+    app.question_app.mount_time = Some(vibe_rs::clock::now());
 
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Enter);

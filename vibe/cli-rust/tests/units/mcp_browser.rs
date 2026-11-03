@@ -6,6 +6,7 @@ use vibe_rs::mcp::{self, rows, rows::Row};
 use vibe_rs::server::{MCPSourceKind, MCPSourceStatus, MCPState};
 use vibe_rs::ui_event::{self, UiEvent};
 
+use crate::feedback_support::{errors, warnings};
 use crate::support::stub;
 
 fn source(name: &str, kind: &str, extra: Value) -> Value {
@@ -399,7 +400,7 @@ fn rejected_toggle_restores_the_server_state_and_warns() {
     assert_eq!(status(&app, "fs"), MCPSourceStatus::Disabled);
     mcp::apply_event(&mut app, &client, toggle_failed("fs", None));
     assert_eq!(status(&app, "fs"), MCPSourceStatus::Connected);
-    assert_eq!(app.overlays.toasts.back().unwrap().text, "rejected");
+    assert_eq!(errors(&app), ["rejected"]);
 }
 
 fn toggle_failed(name: &str, tool_name: Option<&str>) -> mcp::Event {
@@ -461,10 +462,9 @@ fn plugin_server_toggles_are_refused_locally() {
     let mut app = open_app(&runtime(vec![source("fs", "server", plugin)], json!({})));
     mcp::set_disabled(&mut app, &stub(), true);
     assert_eq!(status(&app, "fs"), MCPSourceStatus::Connected);
-    let toast = &app.overlays.toasts.back().unwrap().text;
     assert_eq!(
-        toast,
-        "fs is managed by the devtools plugin and cannot be toggled here."
+        warnings(&app),
+        ["fs is managed by the devtools plugin and cannot be toggled here."]
     );
 }
 
@@ -624,7 +624,7 @@ fn a_failed_connect_leaves_another_viewed_connector_alone() {
     mcp::apply_event(&mut app, &stub(), failed);
     assert_eq!(app.mcp.viewing_name.as_deref(), Some("wiki"));
     assert_eq!(app.mcp.connecting.as_deref(), Some("wiki"));
-    assert_eq!(app.overlays.toasts.len(), 1);
+    assert_eq!(errors(&app).len(), 1);
 }
 
 #[test]

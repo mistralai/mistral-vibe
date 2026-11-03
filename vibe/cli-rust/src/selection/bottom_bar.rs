@@ -1,7 +1,5 @@
 //! Bottom-bar selection: a single-row column range copied on release.
 
-use std::time::Instant;
-
 use crate::app::{App, Surface};
 use crate::selection::{Granularity, Release};
 
@@ -24,7 +22,7 @@ pub fn press(app: &mut App, at: (u16, u16)) {
     app.chat_input.anchor = None;
     app.selection.press = Some(at);
     app.selection.dragged = false;
-    app.selection.granularity = app.selection.chain.press(at, Instant::now());
+    app.selection.granularity = app.selection.chain.press(at, crate::clock::now());
     app.selection.drag = Some(Surface::BottomBar);
     app.selection.bottom_bar = Some(BottomBarSelection {
         anchor: at.0,
