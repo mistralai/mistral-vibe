@@ -173,6 +173,11 @@ def _provenance_name(payload_name: str, display_names: Sequence[str]) -> str | N
     )
 
 
+def is_skill_content(text: str) -> bool:
+    """Whether a content block is a rendered skill body appended to a prompt."""
+    return _skill_content_name(text) is not None
+
+
 def _already_loaded_skill_name(text: str) -> str | None:
     if not text.startswith(_ALREADY_LOADED_NAME_PREFIX) or not text.endswith(
         _ALREADY_LOADED_NAME_SUFFIX
@@ -261,6 +266,7 @@ __all__ = [
     "SKILL_INVOCATION_DISPLAY_BLOCK",
     "invoked_skill_names",
     "invoked_skill_payloads",
+    "is_skill_content",
     "leading_skill_name",
     "mentioned_skill_names",
     "public_session_preview",

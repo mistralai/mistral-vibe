@@ -2,6 +2,7 @@
 
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
+use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
@@ -85,7 +86,7 @@ pub(super) fn draw(app: &mut App, wizard: &mut OnboardingState, f: &mut Frame, a
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(theme::popup_border())),
+            .border_style(theme::border_style()),
         Rect::new(list_x, selected_y, list_w, 3),
     );
     let centered = format!(
@@ -184,7 +185,7 @@ fn fade_style(distance: usize) -> Style {
 /// (content height, clipped by the pane's maximum height), and the content
 /// width (the container scrollbar, when the pane clips, narrows the widget
 /// by two columns).
-type Preview = (u16, u16, Vec<ratatui::text::Line<'static>>);
+type Preview = (u16, u16, Vec<Line<'static>>);
 
 fn preview_pane(area_width: u16, max_height: u16) -> Preview {
     let width = 70u16.min(area_width);
@@ -222,8 +223,11 @@ fn draw_preview(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(theme::popup_border()))
-            .title(" Preview ")
+            .border_style(theme::border_style())
+            .title(Line::styled(
+                " Preview ",
+                theme::text(theme::popup_border()),
+            ))
             .title_alignment(Alignment::Center),
         Rect::new(x, area.y, width, pane_h),
     );

@@ -3,7 +3,9 @@
 mod frames;
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::UiInstant;
 
 use frames::{LECHONK_STARTING_DOTS, LECHONK_TRANSITIONS, STARTING_DOTS, TRANSITIONS};
 
@@ -88,7 +90,7 @@ pub struct PetitChat {
     transition_index: usize,
     /// After a pause, play a full cycle back to this frame before pausing again.
     resume_frame: Option<usize>,
-    pause_until: Option<Instant>,
+    pause_until: Option<UiInstant>,
     rng: Rng,
     variant: CatVariant,
 }
@@ -132,7 +134,7 @@ impl PetitChat {
     }
 
     /// Advance one frame. Returns whether its visible dots changed.
-    pub fn tick(&mut self, now: Instant) -> bool {
+    pub fn tick(&mut self, now: UiInstant) -> bool {
         if let Some(until) = self.pause_until {
             if now < until {
                 return false;
@@ -178,7 +180,7 @@ impl PetitChat {
         }
     }
 
-    fn pause_between_cycles(&mut self, now: Instant) {
+    fn pause_between_cycles(&mut self, now: UiInstant) {
         self.resume_frame = Some(self.transition_index);
         let delay = self.rng.uniform(CYCLE_DELAY_MIN_S, CYCLE_DELAY_MAX_S);
         self.pause_until = Some(now + Duration::from_secs_f64(delay));

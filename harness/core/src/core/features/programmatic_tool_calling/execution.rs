@@ -204,23 +204,37 @@ fn evaluate_program_round(
     .map_err(CoreError::invariant)?
     {
         EvaluationOutcome::PartialEvaluation {
-            mut partial_evaluation,
+            partial_evaluation: evaluated,
             logs,
         } => {
             if budget_used {
                 // The program reached its next tool calls after the budget
                 // ran out: it stops before them, so steering gets in.
+                let error = budget_exceeded_error(budget_ms, used_ms);
+                accepted_results.extend(unstarted_program_results(
+                    context,
+                    &partial_evaluation.tool_state,
+                    &evaluated.tool_state,
+                    Some(&error),
+                ));
                 let result = failed_program_tool_result(
                     context.descriptors(),
                     &logs,
-                    &partial_evaluation.tool_state,
-                    budget_exceeded_error(budget_ms, used_ms),
+                    &evaluated.tool_state,
+                    error,
                 )?;
                 return Ok(ControlFlow::Break((
                     ProgramOutcome::Completed(Box::new(CompletedProgramResult { result })),
                     Vec::new(),
                 )));
             }
+            accepted_results.extend(unstarted_program_results(
+                context,
+                &partial_evaluation.tool_state,
+                &evaluated.tool_state,
+                None,
+            ));
+            let mut partial_evaluation = evaluated;
             let mut pending_operations = Vec::new();
             // Operations Core settles without starting them: permission
             // denials and sleeps after the time budget is used up.
@@ -320,6 +334,16 @@ fn evaluate_program_round(
             log_positions,
             result,
         } => {
+            let stop_error = match &result {
+                CodeResult::Error { error } => Some(error),
+                CodeResult::Success { .. } => None,
+            };
+            accepted_results.extend(unstarted_program_results(
+                context,
+                &partial_evaluation.tool_state,
+                &tool_state,
+                stop_error,
+            ));
             let result = completed_program_tool_result(
                 context.descriptors(),
                 &ProgramLogs {
@@ -348,6 +372,83 @@ fn evaluate_program_round(
             )))
         }
     }
+}
+
+/// Committed results for the calls of one round that never started, so that
+/// each one is recorded like a call Core denied: calls whose arguments the
+/// sandbox rejected, and, when the program stopped with `stop_error`, calls
+/// still pending.
+fn unstarted_program_results(
+    context: ProgramContext<'_>,
+    before: &[ToolState],
+    after: &[ToolState],
+    stop_error: Option<&Value>,
+) -> Vec<AcceptedProgramResult> {
+    let settled_before = |operation_id: &str| {
+        before.iter().any(|operation| match operation {
+            ToolState::Resolved { id, .. } | ToolState::Rejected { id, .. } => id == operation_id,
+            ToolState::Pending { .. } => false,
+        })
+    };
+    after
+        .iter()
+        .filter_map(|operation| match operation {
+            ToolState::Rejected {
+                kind: ToolKind::External,
+                id,
+                function,
+                error,
+                ..
+            } if !settled_before(id) => Some((id, function, error)),
+            ToolState::Pending {
+                kind: ToolKind::External,
+                id,
+                function,
+            } => stop_error.map(|error| (id, function, error)),
+            _ => None,
+        })
+        .filter_map(|(operation_id, function, error)| {
+            let resolved = context.resolve_operation(&function.name, function.arguments.clone())?;
+            let call = ExternalToolCall {
+                action_id: effect_id_for_operation(ToolOrigin::Programmatic, operation_id),
+                call_id: operation_id.clone(),
+                origin: ToolOrigin::Programmatic,
+                call: resolved.tool,
+            };
+            Some(accepted_program_result(call, unstarted_tool_result(error)))
+        })
+        .collect()
+}
+
+fn unstarted_tool_result(error: &Value) -> ToolResult {
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    ToolResult::Failure {
+        content: text_content(message.clone()),
+        structured_content: StructuredContent::Absent,
+        meta: None,
+        error: ProtocolError {
+            code: program_error_code(error),
+            message,
+            retryable: false,
+            details: error.get("details").cloned().unwrap_or(Value::Null),
+        },
+    }
+}
+
+/// The protocol code of a program error: a `ToolError` keeps the failed tool's code; other
+/// errors are named by their class.
+fn program_error_code(error: &Value) -> String {
+    let name = error.get("name").and_then(Value::as_str);
+    (name == Some("ToolError"))
+        .then(|| error.get("code").and_then(Value::as_str))
+        .flatten()
+        .or(name)
+        .unwrap_or("ExecutionError")
+        .to_string()
 }
 
 fn completed_program_tool_result(
@@ -391,14 +492,7 @@ fn failed_program_tool_result(
     tool_state: &[ToolState],
     error: Value,
 ) -> Result<ToolResult, CoreError> {
-    // A `ToolError` keeps the failed tool's code; other errors are named by their class.
-    let name = error.get("name").and_then(Value::as_str);
-    let code = (name == Some("ToolError"))
-        .then(|| error.get("code").and_then(Value::as_str))
-        .flatten()
-        .or(name)
-        .unwrap_or("ExecutionError")
-        .to_string();
+    let code = program_error_code(&error);
     let message = error
         .get("message")
         .and_then(Value::as_str)

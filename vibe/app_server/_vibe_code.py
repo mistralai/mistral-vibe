@@ -33,6 +33,8 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import TeleportEventParams, TeleportStartParams
 from vibe.core.config import VibeConfigSchema
+from vibe.core.platform_auth import PlatformCredentialFactory
+from vibe.core.platform_auth._mistral import mistral_credentials
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import (
     LaunchContext,
@@ -87,6 +89,8 @@ class VibeCodeSession(Protocol):
     def launch_context(self) -> LaunchContext | None: ...
     @property
     def summarizer(self) -> TeleportContextSummarizer: ...
+    @property
+    def credentials(self) -> PlatformCredentialFactory | None: ...
     async def read_account(self) -> AccountView: ...
     def session_message_count(self) -> int: ...
     def has_conversation_history(self) -> bool: ...
@@ -569,12 +573,12 @@ class VibeCodeController:
 
     def _make_service(self) -> VibeCodeProjectPickerService:
         config = self._session.config
-        api_key = config.resolve_mistral_api_key()
-        if not api_key:
+        mistral = mistral_credentials(config, self._session.credentials)
+        if mistral is None:
             raise VibeCodeError("Mistral API key not set.")
         return VibeCodeProjectPickerService(
             base_url=config.vibe_code_sessions_base_url,
-            api_key=api_key,
+            credentials=mistral.credentials,
             repo_root=self._session.cwd,
             project_store=self._store,
             timeout=config.api_timeout,

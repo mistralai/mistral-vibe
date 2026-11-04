@@ -56,8 +56,10 @@
         "theme": "ansi-dark",
         "logLevel": null,
         "disableWelcomeBannerAnimation": true,
+        "cursorBlink": false,
         "showGreeting": true,
         "autocopyToClipboard": true,
+        "enableFileAutocomplete": true,
         "fileWatcherForAutocomplete": false,
         "askConfirmationOnExit": true,
         "voiceModeEnabled": true,
@@ -282,8 +284,10 @@
           "theme": "ansi-dark",
           "logLevel": null,
           "disableWelcomeBannerAnimation": true,
+          "cursorBlink": false,
           "showGreeting": true,
           "autocopyToClipboard": true,
+          "enableFileAutocomplete": true,
           "fileWatcherForAutocomplete": false,
           "askConfirmationOnExit": true,
           "voiceModeEnabled": true,
@@ -1311,6 +1315,22 @@
           ]
         },
         {
+          "name": "enable_file_autocomplete",
+          "kind": "bool",
+          "description": "Offer @ file mentions with repository file completion. Disable to skip building the file index and watching the filesystem for it.",
+          "value": true,
+          "path": "/enable_file_autocomplete",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": true
+            }
+          ]
+        },
+        {
           "name": "file_watcher_for_autocomplete",
           "kind": "bool",
           "description": "",
@@ -1798,8 +1818,10 @@
           "theme": "gruvbox",
           "logLevel": null,
           "disableWelcomeBannerAnimation": true,
+          "cursorBlink": false,
           "showGreeting": true,
           "autocopyToClipboard": true,
+          "enableFileAutocomplete": true,
           "fileWatcherForAutocomplete": false,
           "askConfirmationOnExit": true,
           "voiceModeEnabled": true,

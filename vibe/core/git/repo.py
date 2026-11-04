@@ -463,9 +463,10 @@ class GitRepo:  # noqa: PLR0904 - every git operation goes through here
         return find_github_remote(self._repo)
 
     def has_commits(self) -> bool:
-        """Whether HEAD resolves to a commit."""
+        # Refs only: peeling HEAD to its commit opens the packs, which takes
+        # seconds in a partial clone with thousands of them.
         try:
-            self._repo.git.rev_parse("--quiet", "--verify", "HEAD^{commit}")
+            self._repo.git.rev_parse("--quiet", "--verify", "HEAD")
         except self._gitpy.git_command_error as e:
             # An unborn HEAD names no commit; other failures are git's own.
             if e.status == 1:
@@ -740,7 +741,17 @@ class GitRepo:  # noqa: PLR0904 - every git operation goes through here
         try:
             git = self._sanitized_git()
             if branch_created:
-                create = ["add", "--no-checkout", "-b", branch, str(target)]
+                # --no-track: tracking a remote start point writes the shared
+                # .git/config, and git fails rather than waits on its lock, so
+                # two sessions creating worktrees at once would fail one.
+                create = [
+                    "add",
+                    "--no-checkout",
+                    "--no-track",
+                    "-b",
+                    branch,
+                    str(target),
+                ]
                 # Omitted rather than defaulted, because git's own default is
                 # the invoking checkout's HEAD and that is the right answer for
                 # a repository with no remote to start from.

@@ -1,8 +1,6 @@
 //! Slash commands submitted during `Status::Starting` are deferred and replayed
 //! once `apply_ready` settles.
 
-use std::sync::atomic::Ordering;
-
 use tokio::sync::mpsc;
 
 use vibe_rs::app::{App, Status};
@@ -116,7 +114,7 @@ async fn side_channel_command_during_starting_is_deferred() {
 async fn flush_pending_replay_against_stub_does_not_panic() {
     let mut app = with_status(Status::Ready);
     app.session.session_id = Some("rs-test".to_owned());
-    let (command_tx, _command_rx) = mpsc::channel::<CommandEvent>(8);
+    let (command_tx, mut command_rx) = mpsc::channel::<CommandEvent>(8);
     app.command_tx = Some(command_tx);
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
 
@@ -127,9 +125,9 @@ async fn flush_pending_replay_against_stub_does_not_panic() {
         app.pending_commands.is_empty(),
         "pending commands should be flushed"
     );
-    assert_eq!(
-        app.pending_commits.load(Ordering::Relaxed),
-        1,
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(5), command_rx.recv()).await;
+    assert!(
+        matches!(answer, Ok(Some(CommandEvent::Whoami { .. }))),
         "the deferred /whoami should dispatch its background identity read"
     );
 }
@@ -153,7 +151,7 @@ async fn flush_pending_propagates_deferred_exit() {
 async fn flush_pending_preserves_in_progress_input() {
     let mut app = App::default();
     app.session.status = Status::Generating {
-        since: std::time::Instant::now(),
+        since: vibe_rs::clock::now(),
     };
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
 
@@ -173,7 +171,7 @@ async fn flush_pending_preserves_in_progress_input() {
 async fn flush_pending_rejects_non_side_channel_while_generating() {
     let mut app = App::default();
     app.session.status = Status::Generating {
-        since: std::time::Instant::now(),
+        since: vibe_rs::clock::now(),
     };
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
 
@@ -194,7 +192,7 @@ async fn flush_pending_rejects_non_side_channel_while_generating() {
 async fn flush_pending_restores_a_rejected_teleport() {
     let mut app = App::default();
     app.session.status = Status::Generating {
-        since: std::time::Instant::now(),
+        since: vibe_rs::clock::now(),
     };
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
 

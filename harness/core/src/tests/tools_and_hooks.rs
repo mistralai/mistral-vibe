@@ -613,6 +613,10 @@ fn restored_direct_pre_tool_skip_commits_failure_without_runtime_execution() {
         observations[0]["result"]["content"][0]["text"],
         "file access denied"
     );
+    assert_eq!(
+        observations[0]["result"]["error"]["message"],
+        "file access denied"
+    );
     assert_eq!(observations[1]["type"], "tool_execution_finished");
     assert_eq!(observations[1]["call_id"], "call-direct-skip");
     assert_eq!(observations[1]["result"], observations[0]["result"]);

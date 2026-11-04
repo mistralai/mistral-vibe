@@ -2,7 +2,7 @@
 
 pub mod petit_chat;
 
-use std::time::Instant;
+use crate::clock::UiInstant;
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -28,7 +28,7 @@ pub struct Banner {
 
 impl Banner {
     /// Advance the cat animation, returning whether its visible dots changed.
-    pub fn tick(&mut self, now: Instant) -> bool {
+    pub fn tick(&mut self, now: UiInstant) -> bool {
         self.chat.tick(now)
     }
 
@@ -86,18 +86,17 @@ impl Banner {
         let grid = self.chat.render();
         let cat = grid
             .lines()
-            .map(|row| format!("{row:<width$}", width = CAT_COLS));
+            .map(|row| Line::from(Span::styled(format!("{row:<CAT_COLS$}"), meta)));
         if info
             .iter()
             .any(|line| CAT_COLS + line.width() > usize::from(width))
         {
-            lines.extend(cat.map(Line::from));
+            lines.extend(cat);
             lines.push_gap();
             lines.extend(info);
         } else {
             // The cat is indentation, so a copy keeps only the info text.
-            for (row, info) in cat.zip(info) {
-                let mut line = Line::from(row);
+            for (mut line, info) in cat.zip(info) {
                 line.spans.extend(info.spans);
                 lines.push_folded(line, Some(Fold::indented(CAT_COLS as u16)));
             }

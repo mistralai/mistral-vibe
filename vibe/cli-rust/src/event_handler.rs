@@ -8,26 +8,20 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::app::{App, Status, ToastSeverity};
+use crate::app::{App, Status};
 use crate::cli::StartupResume;
 use crate::commands::compact;
 use crate::commands::retry;
-use crate::commands::retry_continuation;
 use crate::commands::submission;
 use crate::commands::submission::new_message_id;
 use crate::startup::StartupEvent;
 use crate::transcript::local;
 use crate::utils::startup_cache;
 use crate::{
-    agents, approval, artifacts, completion_manager, config, config_issues, feedback, mcp,
-    message_queue, model_picker, observability, post_ready, question_app, resume_picker,
-    session_exit, startup, subagents, todo_tracker, turn_summary, ui,
+    agents, approval, artifacts, completion_manager, config, feedback, mcp, message_queue,
+    model_picker, notices, observability, post_ready, question_app, resume_picker, session_exit,
+    startup, subagents, todo_tracker, turn_summary, ui,
 };
-
-/// Seconds a server warning/error toast stays up.
-pub(crate) const SERVER_TOAST_SECS: u64 = 5;
-/// The `warning` code of a connector or MCP server that failed to load.
-const INTEGRATIONS_UNAVAILABLE: &str = "integrations_unavailable";
 
 /// Returns true if a deferred `/exit` was replayed during the Ready event.
 pub fn apply_startup_event(
@@ -129,7 +123,7 @@ fn spawn_background_update_check(enabled: bool) {
     if !enabled || crate::utils::is_replaying() {
         return;
     }
-    tokio::spawn(async move {
+    crate::work::spawn_daemon(async move {
         let repository = crate::update_notifier::cache::FileSystemUpdateCacheRepository;
         let gateway =
             crate::update_notifier::gateway::UpdateCheckGateway::for_project("mistral-vibe").await;
@@ -209,6 +203,16 @@ fn apply_ready(
     }
     app.subagents.status_list_enabled = startup::read_show_subagent_status_list(&runtime);
     app.quit.ask_confirmation_on_exit = startup::read_ask_confirmation_on_exit(&runtime);
+    // Later picker resumes resend this config, so it must keep naming the
+    // settled worktree, not the checkout the run started in. Parking must land
+    // before the config apply queues a deferred index start, so that start
+    // builds at the settled worktree, not the checkout it left.
+    if let Some(cwd) = settled {
+        app.session.agent_config.cwd = Some(cwd.clone());
+        if !app.completion.files.running() {
+            app.completion.files.park(std::path::PathBuf::from(cwd));
+        }
+    }
     apply_final_startup_config(app, startup_cache);
     app.view
         .transcript
@@ -225,6 +229,7 @@ fn apply_ready(
             false => {
                 app.todo_tracker.seed_from_history(state.history.as_ref());
                 resume_picker::load_history(app, &state);
+                // The ready read below reads the live branch.
                 crate::worktree::track_state(app, &state);
             }
         }
@@ -243,11 +248,6 @@ fn apply_ready(
             tracing::debug!("absorbed notification deferred; no approval is pending pre-TUI");
         }
     }
-    // Later picker resumes resend this config, so it must keep naming the
-    // settled worktree, not the checkout the run started in.
-    if let Some(cwd) = settled {
-        app.session.agent_config.cwd = Some(cwd);
-    }
     // Snapshot the usage baseline once the session attaches; a picker resume
     // that already adopted keeps the baseline it set.
     if !app.session.resumed {
@@ -262,7 +262,7 @@ fn apply_ready(
     agents::apply_runtime(app, &runtime);
     agents::flush_pending(app, client);
     mcp::show_post_init_notices(app, &runtime);
-    config_issues::show_config_issues(app, &runtime);
+    notices::show_config_issues(app, &runtime);
     startup::banners::mount(app, &runtime, client);
     // Read the what's-new gate inside mount before scheduling the update
     // check; keeping the spawn after mount preserves that ordering.
@@ -376,7 +376,7 @@ pub fn apply_runtime_value(app: &mut App, runtime: &Value) {
 pub fn apply_response_runtime(app: &mut App, response: &Value) {
     if response.get("runtime").is_some_and(Value::is_object) {
         apply_runtime_value(app, response);
-        config_issues::show_updated_config_warnings(app, response);
+        notices::show_updated_config_warnings(app, response);
     }
 }
 
@@ -388,12 +388,21 @@ fn apply_final_startup_config(app: &mut App, config: startup_cache::StartupConfi
 }
 
 fn show_startup_config(app: &mut App, config: startup_cache::StartupConfig) {
-    ui::theme::set_active(&config.theme);
-    app.session.tokens.1 = config.context_window;
-    app.completion.skills.clone_from(&config.skills);
-    agents::show_startup_agents(app, &config);
-    app.view.banner.sync_model_variant(&config);
     app.session.startup_config = config;
+    ui::theme::set_active(&app.session.startup_config.theme);
+    app.session.tokens.1 = app.session.startup_config.context_window;
+    app.completion
+        .skills
+        .clone_from(&app.session.startup_config.skills);
+    agents::show_startup_agents(app, &app.session.startup_config.clone());
+    app.view
+        .banner
+        .sync_model_variant(&app.session.startup_config);
+    crate::utils::file_index::reconcile(
+        &mut app.completion.files,
+        &app.session.startup_config,
+        app.session.cwd.as_deref(),
+    );
     completion_manager::refresh(app);
 }
 
@@ -554,6 +563,10 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
         }
         return true;
     }
+    if event.method == notification::REPLAY_FENCE {
+        crate::replay_fence::note();
+        return true;
+    }
     if event.method == server_method::CALLBACK_CALL
         && event.params["callback"]["detail"]["kind"] == "approval"
     {
@@ -571,7 +584,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
         }
         return true;
     }
-    // Warnings/errors are transient toasts, never re-sent in the snapshot: surface them pre-Ready too.
+    // Warnings/errors are never re-sent in the snapshot: surface them pre-Ready too.
     if matches!(app.session.status, Status::Starting | Status::Failed)
         && !matches!(
             event.method.as_str(),
@@ -604,10 +617,6 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             crate::program_status::shell_history_updated(app);
             crate::worktree::track_entry(app, &event.params);
             record_todos(app, event.params.get("entry"));
-            retry_continuation::merge_continuation(app);
-            // Track the turn's assistant message inside the resolve, so a
-            // continuation's hidden entry maps to the merged row it feeds.
-            retry::track_turn_assistant(app, entry);
             expand_live_reasoning(app, entry);
             sync_loading_label(app, &params);
             turn_summary::track_narrator_added(app, &event.params, entry);
@@ -623,7 +632,6 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             // The wire patch carries no entry; the stored one is post-patch.
             let entry = updated_entry_raw(app, &params);
             record_todos(app, entry.as_ref());
-            retry_continuation::merge_continuation(app);
             sync_loading_label(app, &params);
             turn_summary::track_narrator_updated(app, &event.params);
             if let Some(entry) = updated_entry_raw(app, &params) {
@@ -647,8 +655,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                             resume_picker::load_history(app, &state);
                         }
                     }
-                    crate::worktree::track_state(app, &state);
-                    retry_continuation::reconcile_snapshot(app, same_session);
+                    crate::worktree::adopt_state(app, &state);
                     sync_retrying_label(app, &state);
                     app.expand_rebuilt_tools();
                     app.subagents.seed_snapshot(state.child_sessions.clone());
@@ -660,6 +667,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             }
         }
         notification::TURN_STARTED => {
+            notices::close_startup(app);
             let turn = PublicTurn::read(&event.params);
             app.session.active_turn_id = turn.id;
             let interrupt = message_queue::take_interrupt_on_start(app);
@@ -669,7 +677,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                 }
             }
             app.set_status(Status::Generating {
-                since: std::time::Instant::now(),
+                since: crate::clock::now(),
             });
             // An unsolicited turn ends the previous turn's open data, drops
             // whatever summary it still had in flight, and opens a fresh one.
@@ -700,16 +708,13 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             app.view.transcript.settle_reasoning();
             app.view.transcript.settle_compactions(None);
             app.session.active_turn_id = None;
-            // The retried turn ended; its merged row is final until a snapshot replaces it.
-            app.session.retry_continuation = None;
             if retry::auto_continue_incomplete_stream(app, client, &turn) {
                 return true;
             }
             let retryable = turn
                 .failure()
                 .is_some_and(|code| RETRYABLE_ERROR_CODES.contains(&code));
-            app.session.can_retry = retryable;
-            if let Some((message, hint)) = turn_error_message(app, &turn, retryable) {
+            let error_row = turn_error_message(app, &turn, retryable).map(|(message, hint)| {
                 app.terminal_notifier.set_error_message(&message);
                 let id = new_message_id();
                 local::add_command_error(
@@ -717,13 +722,12 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                     &id,
                     &format!("{message}{hint}"),
                 );
-                if retryable {
-                    retry::offer(app, Some(id));
-                }
-            } else if retryable {
-                retry::offer(app, None);
-            }
-            if !retryable {
+                id
+            });
+            // An interrupted turn can be retried too, as the marker Esc left says.
+            if retryable || status == Some("interrupted") {
+                retry::offer(app, turn.id.as_deref(), error_row.filter(|_| retryable));
+            } else {
                 retry::cancel(app);
             }
             app.set_status(Status::Ready);
@@ -742,6 +746,9 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                 _ => false,
             };
             turn_summary::on_turn_end(app, client);
+            // The turn spent usage; a rate limit may mean the allowance ran out.
+            let rate_limited = turn.error_code() == Some("rate_limit");
+            crate::usage_gauge::refresh(app, client, rate_limited);
             if !interrupted && !app.queue.is_empty() && !app.queue.paused {
                 app.session.deferred_completion = turn
                     .queue_item_id
@@ -757,8 +764,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                 app.terminal_notifier
                     .remember_completion(crate::program_status::ProgramState::Idle);
             } else {
-                app.terminal_notifier
-                    .notify(context, std::time::Instant::now());
+                app.terminal_notifier.notify(context, crate::clock::now());
             }
         }
         notification::TURN_QUEUE_UPDATED => {
@@ -778,6 +784,8 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                 app.session.tokens = (current, max);
             }
             app.session.stats = stats;
+            // The `/context` app, when open, re-reads so its estimates follow the new reading.
+            crate::context_app::refresh(app, client);
         }
         notification::ARTIFACTS_CREATED | notification::ARTIFACTS_UPDATED => {
             if let Some(artifact) = event.params.get("artifact") {
@@ -809,6 +817,8 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                         subagents::anchor(app);
                     }
                     subagents::refresh_context_progress(app);
+                    // The open `/context` app reads the viewed child, so it follows its updates too.
+                    crate::context_app::refresh(app, client);
                     subagents::schedule_refresh(app);
                 }
                 subagents::refresh(app);
@@ -828,27 +838,19 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                 subagents::refresh(app);
             }
         }
-        // Server-pushed operational warning/error: surface as a toast.
+        // Server-pushed operational warning/error: the startup box, then transcript rows.
         notification::WARNING => {
             if let Some(message) = event
                 .params
                 .pointer("/warning/message")
                 .and_then(Value::as_str)
             {
-                let seconds = match event
-                    .params
-                    .pointer("/warning/code")
-                    .and_then(Value::as_str)
-                {
-                    Some(INTEGRATIONS_UNAVAILABLE) => mcp::INTEGRATIONS_UNAVAILABLE_TOAST_SECS,
-                    _ => SERVER_TOAST_SECS,
-                };
-                app.show_toast(message.to_owned(), ToastSeverity::Warning, seconds);
+                notices::warn(app, message);
             }
         }
         notification::ERROR => {
             if let Some(message) = event.params["error"]["message"].as_str() {
-                app.show_toast(message.to_owned(), ToastSeverity::Error, SERVER_TOAST_SECS);
+                notices::error(app, message);
             }
         }
         // ADR 0009: `turn/retrying` is a compatibility notification. New reducers
@@ -859,7 +861,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
         // refresh (after resume, turn/completed, ...) does not.
         notification::RUNTIME_UPDATED => {
             apply_runtime_value(app, &event.params);
-            config_issues::show_updated_config_warnings(app, &event.params);
+            notices::show_updated_config_warnings(app, &event.params);
         }
         // Forwarded by the client: a callback the user must answer.
         server_method::CALLBACK_CALL => {
@@ -923,7 +925,7 @@ fn turn_error_message(app: &App, turn: &PublicTurn, retryable: bool) -> Option<(
         _ => turn.error_message().unwrap_or("Turn failed").to_owned(),
     };
     let hint = if retryable {
-        "\n\nRun /retry [additional instructions] to continue the interrupted response.".to_owned()
+        "\n\nRun /retry [additional instructions] to try again.".to_owned()
     } else {
         String::new()
     };

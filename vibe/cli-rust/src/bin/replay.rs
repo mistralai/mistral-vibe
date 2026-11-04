@@ -10,6 +10,9 @@ use std::thread;
 
 use serde_json::{json, Map, Value};
 
+#[path = "replay/jitter.rs"]
+mod jitter;
+
 const TURN_ENQUEUE: &str = "session/turn/enqueue";
 const TURN_START: &str = "turn/start";
 const TURN_QUEUE_REPLACE: &str = "session/turn/queue/replace";
@@ -39,6 +42,11 @@ enum Emit {
 /// Tells the client a request's response and every event it released are written.
 fn drained_frame(request_id: &Value) -> Value {
     json!({"jsonrpc": "2.0", "method": "replay/drained", "params": {"requestId": request_id}})
+}
+
+/// A harness fence: the client acks it once the gated event before it has settled.
+fn fence_frame() -> Value {
+    json!({"jsonrpc": "2.0", "method": "replay/fence", "params": {}})
 }
 
 /// Methods answered with another method's canned result: resume reuses start, continue the saved session.
@@ -349,6 +357,9 @@ fn run_emitter(rx: std::sync::mpsc::Receiver<Emit>, writer: Writer, event_id: Ar
         for event in batch {
             await_step(&mut step);
             send_event(&writer, &event_id, &event);
+            if step.is_some() {
+                send(&writer, fence_frame());
+            }
         }
     }
 }
@@ -430,7 +441,11 @@ fn main() {
     let writer = thread::spawn(move || {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
+        let mut jitter = jitter::Jitter::from_env();
         while let Ok(Some(line)) = writer_rx.recv() {
+            if let Some(jitter) = jitter.as_mut() {
+                jitter.delay();
+            }
             if out.write_all(line.as_bytes()).is_err() || out.write_all(b"\n").is_err() {
                 break;
             }

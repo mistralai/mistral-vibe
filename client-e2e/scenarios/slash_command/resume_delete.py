@@ -16,4 +16,3 @@ capture_startup = False
 # The 100 ms preview debounce can race the transient frame immediately after
 # deletion under load. The final frame still verifies both deletion and cancel.
 capture_steps = {1, 2, 3, 5}
-settle_per_key = True

@@ -182,7 +182,8 @@ pub(super) async fn settle_worktree_session(
 )> {
     let (mut stream, bridge) =
         notifications.context("a worktree run hands its notification stream to the handshake")?;
-    let deadline = tokio::time::Instant::now() + crate::worktree_gate::SETTLE_WAIT;
+    let deadline = tokio::time::Instant::from_std(crate::clock::real_now())
+        + crate::worktree_gate::SETTLE_WAIT;
     let (settle, waited) = crate::worktree_gate::absorb_until_settled(&mut stream, deadline)
         .await
         .map_err(anyhow::Error::msg)?;
@@ -190,7 +191,7 @@ pub(super) async fn settle_worktree_session(
     let prepared = settle.worktree;
     let absorbed = waited.notifications;
     // The event loop reads the bridge; everything past the settle flows on.
-    tokio::spawn(async move {
+    crate::work::spawn_daemon(async move {
         while let Some(notification) = stream.recv().await {
             if bridge.send(notification).await.is_err() {
                 break;

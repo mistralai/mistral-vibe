@@ -32,6 +32,6 @@ pub fn restore(app: &mut App, action: &Action) {
 
 pub fn finish(input: &mut ChatInput, before: Option<(Snapshot, bool)>) {
     if let Some((snapshot, isolated)) = before {
-        input.record_edit(snapshot, isolated, std::time::Instant::now());
+        input.record_edit(snapshot, isolated, crate::clock::now());
     }
 }

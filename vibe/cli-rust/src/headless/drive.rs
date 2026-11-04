@@ -53,7 +53,7 @@ pub async fn drive(
     stop: &Arc<StopRequests>,
 ) -> RunReport {
     let state = Arc::new(Mutex::new(RunState::default()));
-    let mut work = tokio::spawn(
+    let mut work = crate::work::spawn_daemon(
         run_session(options.clone(), cwd, connect, stop.clone(), state.clone()).in_current_span(),
     );
 
@@ -74,7 +74,8 @@ pub async fn drive(
 
     // One grace period covers winding down, so a run that stops exits about
     // STOP_GRACE_SECONDS later at worst.
-    let grace_ends = Instant::now() + Duration::from_secs_f64(STOP_GRACE_SECONDS);
+    let grace_ends =
+        Instant::from_std(crate::clock::real_now()) + Duration::from_secs_f64(STOP_GRACE_SECONDS);
 
     let (outcome, stop_reason, error, final_response) = match race {
         Race::Work(end) => match end {
@@ -260,7 +261,7 @@ async fn finalize_stopped(
     format: &OutputFormat,
     grace_ends: Instant,
 ) -> Option<String> {
-    if grace_ends <= Instant::now() {
+    if grace_ends <= Instant::from_std(crate::clock::real_now()) {
         return None;
     }
     let (client, session_id, turn_id) = {

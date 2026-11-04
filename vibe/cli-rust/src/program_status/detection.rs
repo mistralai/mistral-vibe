@@ -26,11 +26,13 @@ impl Detection {
         let mut out = std::io::stdout().lock();
         out.write_all(b"\x1b]7501;?\x1b\\").ok()?;
         out.flush().ok()?;
-        Some(Instant::now() + REPLY_TIMEOUT)
+        Some(crate::clock::real_now() + REPLY_TIMEOUT)
     }
 
     pub fn observe(&self, filter: &mut TerminalInputFilter, deadline: Option<Instant>) {
-        if filter.take_program_status_reply() && deadline.is_some_and(|at| Instant::now() <= at) {
+        if filter.take_program_status_reply()
+            && deadline.is_some_and(|at| crate::clock::real_now() <= at)
+        {
             self.0.store(true, Ordering::Relaxed);
         }
     }

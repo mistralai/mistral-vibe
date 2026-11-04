@@ -39,7 +39,7 @@ impl MuxClient {
         let (to_child, from_slots) = mpsc::unbounded_channel();
         write_lines(stdin, from_slots);
         let slots = Arc::new(Slots::new(to_child));
-        tokio::spawn(demux(stdout, slots.clone()));
+        crate::work::spawn_daemon(demux(stdout, slots.clone()));
         Ok(Self {
             slots,
             child: Mutex::new(Some(child)),
@@ -64,7 +64,7 @@ impl MuxClient {
 
     fn wire(&self, id: u64, lines_rx: mpsc::UnboundedReceiver<Vec<u8>>, open: &Value) -> Connected {
         let (to_writer, from_client) = mpsc::unbounded_channel();
-        tokio::spawn(slots::forward(
+        crate::work::spawn_daemon(slots::forward(
             self.slots.clone(),
             id,
             open.to_string(),

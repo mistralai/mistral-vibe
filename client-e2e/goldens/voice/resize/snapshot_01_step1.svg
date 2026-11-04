@@ -33,11 +33,12 @@
     }
 
     .vibe-r1 { fill: #c5c8c6 }
-.vibe-r2 { fill: #ff8205;font-weight: bold }
+.vibe-r2 { fill: #ff8204;font-weight: bold }
 .vibe-r3 { fill: #00cdcd }
 .vibe-r4 { fill: #868887 }
 .vibe-r5 { fill: #0000ee;font-weight: bold }
 .vibe-r6 { fill: #000000;font-weight: bold }
+.vibe-r7 { fill: #ffffff }
     </style>
 
     <defs>
@@ -111,7 +112,7 @@
             </g>
         
     <g transform="translate(9, 41)" clip-path="url(#vibe-clip-terminal)">
-    <rect fill="#e5e5e5" x="24.4" y="318.7" width="378.2" height="24.65" shape-rendering="crispEdges" />
+    <rect fill="#e5e5e5" x="24.4" y="318.7" width="378.2" height="24.65" shape-rendering="crispEdges" /><rect fill="#7f7f7f" x="268.4" y="465.1" width="73.2" height="24.65" shape-rendering="crispEdges" />
     <g class="vibe-matrix">
     <text class="vibe-r1" x="1464" y="20" textLength="12.2" clip-path="url(#vibe-line-0)">
 </text><text class="vibe-r1" x="1464" y="44.4" textLength="12.2" clip-path="url(#vibe-line-1)">
@@ -132,7 +133,7 @@
 </text><text class="vibe-r4" x="0" y="410.4" textLength="12.2" clip-path="url(#vibe-line-16)">│</text><text class="vibe-r5" x="24.4" y="410.4" textLength="12.2" clip-path="url(#vibe-line-16)">↑</text><text class="vibe-r5" x="36.6" y="410.4" textLength="12.2" clip-path="url(#vibe-line-16)">↓</text><text class="vibe-r5" x="48.8 61 73.2" y="410.4" clip-path="url(#vibe-line-16)" style="font-variant-ligatures:none;font-kerning:none">/jk</text><text class="vibe-r4" x="85.4 97.6 109.8 122 134.2 146.4 158.6 170.8 183 195.2 207.4" y="410.4" clip-path="url(#vibe-line-16)" style="font-variant-ligatures:none;font-kerning:none"> navigate  </text><text class="vibe-r5" x="219.6 231.8 244 256.2 268.4 280.6 292.8 305 317.2 329.4 341.6" y="410.4" clip-path="url(#vibe-line-16)" style="font-variant-ligatures:none;font-kerning:none">Space/Enter</text><text class="vibe-r4" x="414.8" y="410.4" textLength="12.2" clip-path="url(#vibe-line-16)">│</text><text class="vibe-r1" x="1464" y="410.4" textLength="12.2" clip-path="url(#vibe-line-16)">
 </text><text class="vibe-r4" x="0" y="434.8" textLength="12.2" clip-path="url(#vibe-line-17)">│</text><text class="vibe-r4" x="24.4 36.6 48.8 61 73.2 85.4 97.6 109.8" y="434.8" clip-path="url(#vibe-line-17)" style="font-variant-ligatures:none;font-kerning:none">toggle  </text><text class="vibe-r5" x="122 134.2 146.4" y="434.8" clip-path="url(#vibe-line-17)" style="font-variant-ligatures:none;font-kerning:none">Esc</text><text class="vibe-r4" x="158.6 170.8 183 195.2 207.4" y="434.8" clip-path="url(#vibe-line-17)" style="font-variant-ligatures:none;font-kerning:none"> exit</text><text class="vibe-r4" x="414.8" y="434.8" textLength="12.2" clip-path="url(#vibe-line-17)">│</text><text class="vibe-r1" x="1464" y="434.8" textLength="12.2" clip-path="url(#vibe-line-17)">
 </text><text class="vibe-r4" x="0 12.2 24.4 36.6 48.8 61 73.2 85.4 97.6 109.8 122 134.2 146.4 158.6 170.8 183 195.2 207.4 219.6 231.8 244 256.2 268.4 280.6 292.8 305 317.2 329.4 341.6 353.8 366 378.2 390.4 402.6 414.8" y="459.2" clip-path="url(#vibe-line-18)" style="font-variant-ligatures:none;font-kerning:none">└─────────────────────────────────┘</text><text class="vibe-r1" x="1464" y="459.2" textLength="12.2" clip-path="url(#vibe-line-18)">
-</text><text class="vibe-r4" x="0 12.2 24.4 36.6 48.8 61 73.2 85.4 97.6 109.8 122 134.2 146.4" y="483.6" clip-path="url(#vibe-line-19)" style="font-variant-ligatures:none;font-kerning:none">/test/workdir</text><text class="vibe-r4" x="207.4 219.6 231.8 244 256.2 268.4 280.6 292.8 305 317.2 329.4 341.6 353.8 366 378.2 390.4 402.6 414.8" y="483.6" clip-path="url(#vibe-line-19)" style="font-variant-ligatures:none;font-kerning:none">0/600k tokens (0%)</text><text class="vibe-r1" x="1464" y="483.6" textLength="12.2" clip-path="url(#vibe-line-19)">
+</text><text class="vibe-r4" x="0 12.2 24.4 36.6 48.8 61 73.2 85.4 97.6 109.8 122 134.2 146.4" y="483.6" clip-path="url(#vibe-line-19)" style="font-variant-ligatures:none;font-kerning:none">/test/workdir</text><text class="vibe-r1" x="170.8" y="483.6" textLength="12.2" clip-path="url(#vibe-line-19)">⧉</text><text class="vibe-r4" x="219.6 231.8 244 256.2" y="483.6" clip-path="url(#vibe-line-19)" style="font-variant-ligatures:none;font-kerning:none">ctx </text><text class="vibe-r4" x="341.6 353.8 366 378.2 390.4 402.6 414.8" y="483.6" clip-path="url(#vibe-line-19)" style="font-variant-ligatures:none;font-kerning:none"> 0/600k</text><text class="vibe-r1" x="1464" y="483.6" textLength="12.2" clip-path="url(#vibe-line-19)">
 </text>
     </g>
     </g>

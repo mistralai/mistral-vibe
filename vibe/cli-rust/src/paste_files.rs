@@ -5,7 +5,6 @@ use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::Instant;
 
 use crate::app::App;
 use crate::edit_history::Snapshot;
@@ -42,10 +41,9 @@ pub(crate) fn spawn_job(
         return false;
     };
     app.paste_image.in_flight += 1;
-    let pending = app.commit_started();
-    tokio::spawn(async move {
-        let event = tokio::task::spawn_blocking(job).await.unwrap_or(fallback);
-        crate::input::deliver(Some(tx), event, &pending).await;
+    crate::work::spawn(async move {
+        let event = crate::work::spawn_blocking(job).await.unwrap_or(fallback);
+        crate::input::deliver(Some(tx), event).await;
     });
     true
 }
@@ -90,7 +88,8 @@ pub fn apply_probed(app: &mut App, start: usize, raw: &str, paths: Option<Vec<St
         &tokens,
     );
     completion_manager::input_changed(app);
-    app.chat_input.record_edit(before, true, Instant::now());
+    app.chat_input
+        .record_edit(before, true, crate::clock::now());
 }
 
 fn find_standalone(input: &str, raw: &str) -> Option<usize> {
@@ -127,7 +126,8 @@ pub fn apply_image_files(app: &mut App, paths: Vec<PathBuf>) {
         .collect();
     insert_images(app, &paths);
     app.chat_input.scroll = None;
-    app.chat_input.record_edit(before, true, Instant::now());
+    app.chat_input
+        .record_edit(before, true, crate::clock::now());
     completion_manager::input_changed(app);
 }
 

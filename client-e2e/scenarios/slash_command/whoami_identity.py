@@ -20,11 +20,16 @@ handshake = {
     "account/read": {
         "account": {
             "status": "ready",
-            "plan": {"kind": "chat", "name": "TEAM", "title": "[Subscription] Pro"},
+            "plan": {"kind": "chat", "name": "TEAM", "title": "Team"},
             "planOffer": None,
             "rateLimitAction": None,
             "teleportEligible": True,
             "teleportAction": None,
+            "apiKey": {
+                "preview": "****wxyz",
+                "scope": "workspace",
+                "accessScope": "shared_only",
+            },
         }
     },
 }

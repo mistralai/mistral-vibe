@@ -76,7 +76,7 @@ pub async fn setup_round(
         };
         timings.record("child_spawned");
         // A dropped receiver would stop the reader on the first server notification.
-        tokio::spawn(async move { while notifs.recv().await.is_some() {} });
+        crate::work::spawn_daemon(async move { while notifs.recv().await.is_some() {} });
         let client = Arc::new(client);
         let _ = child_tx.send(child);
         // A failed initialize leaves no setup surface to fall back to, so

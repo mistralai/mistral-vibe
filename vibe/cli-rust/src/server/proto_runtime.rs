@@ -70,6 +70,11 @@ pub struct ConfigView {
     pub autocopy_to_clipboard: bool,
     #[serde(default = "yes")]
     pub enable_mouse_capture: bool,
+    /// Absent on an older server: completion stays on, per ADR 0014.
+    #[serde(default = "yes")]
+    pub enable_file_autocomplete: bool,
+    #[serde(default = "yes")]
+    pub file_watcher_for_autocomplete: bool,
     #[serde(default = "yes")]
     pub ask_confirmation_on_exit: bool,
     pub voice_mode_enabled: Option<bool>,

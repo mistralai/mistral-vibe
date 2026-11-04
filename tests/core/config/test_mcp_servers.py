@@ -516,6 +516,66 @@ async def test_persist_stdio_mcp_server_rejects_name_collision_with_different_op
         )
 
 
+def _stdio(name: str) -> MCPStdio:
+    return MCPStdio(name=name, transport="stdio", command="python")
+
+
+@pytest.mark.asyncio
+async def test_add_mcp_server_keeps_a_server_another_session_added(
+    config_dir: Path,
+) -> None:
+    first = await build_default_orchestrator()
+    second = await build_default_orchestrator()
+
+    await persist_stdio_mcp_server(second, _stdio("from_second"))
+    await persist_stdio_mcp_server(first, _stdio("from_first"))
+
+    assert [s["name"] for s in _persisted_servers(config_dir)] == [
+        "from_second",
+        "from_first",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_remove_mcp_server_keeps_a_server_another_session_added(
+    config_dir: Path,
+) -> None:
+    await persist_stdio_mcp_server(await build_default_orchestrator(), _stdio("old"))
+    first = await build_default_orchestrator()
+    await persist_stdio_mcp_server(await build_default_orchestrator(), _stdio("new"))
+
+    result = await remove_mcp_server(first, "old")
+
+    assert result.removed is True
+    assert [s["name"] for s in _persisted_servers(config_dir)] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_remove_mcp_server_drops_a_server_another_session_already_removed(
+    config_dir: Path,
+) -> None:
+    await persist_stdio_mcp_server(await build_default_orchestrator(), _stdio("old"))
+    first = await build_default_orchestrator()
+    await remove_mcp_server(await build_default_orchestrator(), "old")
+
+    result = await remove_mcp_server(first, "old")
+
+    assert result.removed is False
+    assert first.config.mcp_servers == []
+
+
+@pytest.mark.asyncio
+async def test_remove_mcp_server_reports_a_config_file_broken_after_load(
+    config_dir: Path,
+) -> None:
+    await persist_stdio_mcp_server(await build_default_orchestrator(), _stdio("old"))
+    orchestrator = await build_default_orchestrator()
+    (config_dir / "config.toml").write_text("not = [valid")
+
+    with pytest.raises(MCPServerRemoveError):
+        await remove_mcp_server(orchestrator, "old")
+
+
 def test_parse_mcp_add_transport_rejects_unsupported_transport() -> None:
     from vibe.utils.mcp import parse_mcp_add_transport
 

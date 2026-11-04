@@ -64,6 +64,7 @@ fn tracked_apply_counts_walks_only_for_directory_creates() {
         &version_tx,
         &mut ignore,
         false,
+        None,
     );
     assert!(!git_backed);
     assert_eq!(stats.events, 1);
@@ -79,6 +80,7 @@ fn tracked_apply_counts_walks_only_for_directory_creates() {
         &version_tx,
         &mut ignore,
         false,
+        None,
     );
     assert_eq!(stats.walks, 1);
     assert_eq!(stats.walked_entries, 2);
@@ -96,8 +98,15 @@ fn tracked_apply_marks_rescans_as_full_rebuilds() {
 
     fs::write(root.join("unseen.txt"), "u").unwrap();
     let rescan = Event::new(EventKind::Other).set_flag(Flag::Rescan);
-    let (git_backed, stats) =
-        apply_events_tracked(&root, &paths, vec![rescan], &version_tx, &mut ignore, false);
+    let (git_backed, stats) = apply_events_tracked(
+        &root,
+        &paths,
+        vec![rescan],
+        &version_tx,
+        &mut ignore,
+        false,
+        None,
+    );
     assert!(!git_backed);
     assert!(stats.rebuilt);
     assert_eq!(stats.walks, 1);

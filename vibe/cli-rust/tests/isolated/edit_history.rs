@@ -1,6 +1,8 @@
 //! Composer checkpoint batching, restoration, resource bounds, and platform shortcuts.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use vibe_rs::clock::UiInstant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vibe_rs::app::{App, ChatInput};
@@ -8,7 +10,7 @@ use vibe_rs::chat_input::{apply, Action};
 use vibe_rs::edit_history::{Snapshot, MAX_CHECKPOINTS, MAX_HISTORY_BYTES};
 use vibe_rs::{input, keymap};
 
-fn edit(input: &mut ChatInput, action: Action, now: Instant) {
+fn edit(input: &mut ChatInput, action: Action, now: UiInstant) {
     if !action.is_edit() {
         input.edit_history.checkpoint();
     }
@@ -22,7 +24,7 @@ fn edit(input: &mut ChatInput, action: Action, now: Instant) {
     input.record_edit(before, false, now);
 }
 
-fn type_text(input: &mut ChatInput, text: &str, now: Instant) {
+fn type_text(input: &mut ChatInput, text: &str, now: UiInstant) {
     for ch in text.chars() {
         edit(input, Action::Insert(ch), now);
     }
@@ -31,7 +33,7 @@ fn type_text(input: &mut ChatInput, text: &str, now: Instant) {
 #[test]
 fn typing_and_deletion_are_separate_batches() {
     let mut input = ChatInput::default();
-    let now = Instant::now();
+    let now = vibe_rs::clock::now();
     type_text(&mut input, "helped", now);
     edit(&mut input, Action::DeleteLeft, now);
     edit(&mut input, Action::DeleteLeft, now);
@@ -50,7 +52,7 @@ fn typing_and_deletion_are_separate_batches() {
 #[test]
 fn edits_after_undo_discard_redo_but_noops_do_not() {
     let mut input = ChatInput::default();
-    let now = Instant::now();
+    let now = vibe_rs::clock::now();
     type_text(&mut input, "old", now);
     assert!(input.restore_edit(false));
     edit(&mut input, Action::DeleteLeft, now);
@@ -64,7 +66,7 @@ fn edits_after_undo_discard_redo_but_noops_do_not() {
 #[test]
 fn movement_pause_and_redo_start_new_batches() {
     let mut input = ChatInput::default();
-    let now = Instant::now();
+    let now = vibe_rs::clock::now();
     type_text(&mut input, "ab", now);
     edit(&mut input, Action::CursorLeft, now);
     edit(&mut input, Action::Insert('X'), now);
@@ -86,7 +88,7 @@ fn movement_pause_and_redo_start_new_batches() {
 #[test]
 fn pause_separates_otherwise_contiguous_typing() {
     let mut input = ChatInput::default();
-    let now = Instant::now();
+    let now = vibe_rs::clock::now();
     type_text(&mut input, "first", now);
     type_text(&mut input, "second", now + Duration::from_secs(3));
     assert!(input.restore_edit(false));
@@ -98,10 +100,10 @@ fn pause_separates_otherwise_contiguous_typing() {
 #[test]
 fn resetting_a_document_during_an_edit_does_not_record_the_replacement() {
     let mut input = ChatInput::default();
-    type_text(&mut input, "draft", Instant::now());
+    type_text(&mut input, "draft", vibe_rs::clock::now());
     let before = Snapshot::capture(&input);
     input.load_full_text("recalled".to_owned());
-    input.record_edit(before, true, Instant::now());
+    input.record_edit(before, true, vibe_rs::clock::now());
     assert!(!input.restore_edit(false));
     assert_eq!(input.input, "recalled");
 }
@@ -127,7 +129,7 @@ fn unicode_selection_and_multiline_paste_restore_caret_and_anchor() {
 #[test]
 fn newline_is_isolated_from_typing_on_either_side() {
     let mut input = ChatInput::default();
-    type_text(&mut input, "top\nbottom", Instant::now());
+    type_text(&mut input, "top\nbottom", vibe_rs::clock::now());
     assert!(input.restore_edit(false));
     assert_eq!(input.input, "top\n");
     assert!(input.restore_edit(false));
@@ -139,7 +141,7 @@ fn newline_is_isolated_from_typing_on_either_side() {
 #[test]
 fn clear_and_recall_reset_both_stacks() {
     let mut input = ChatInput::default();
-    let now = Instant::now();
+    let now = vibe_rs::clock::now();
     type_text(&mut input, "submitted", now);
     input.clear();
     assert!(!input.restore_edit(false));
@@ -156,7 +158,7 @@ fn clear_and_recall_reset_both_stacks() {
 #[test]
 fn unrecorded_replacements_never_restore_an_unrelated_draft() {
     let mut input = ChatInput::default();
-    type_text(&mut input, "old", Instant::now());
+    type_text(&mut input, "old", vibe_rs::clock::now());
     input.input = "external".to_owned();
     assert!(!input.restore_edit(false));
     assert_eq!(input.input, "external");
@@ -165,13 +167,13 @@ fn unrecorded_replacements_never_restore_an_unrelated_draft() {
 #[test]
 fn batch_character_limit_and_checkpoint_limit_evict_oldest() {
     let mut input = ChatInput::default();
-    type_text(&mut input, &"x".repeat(101), Instant::now());
+    type_text(&mut input, &"x".repeat(101), vibe_rs::clock::now());
     assert!(input.restore_edit(false));
     assert_eq!(input.input.len(), 100);
     input.clear();
     for _ in 0..MAX_CHECKPOINTS + 5 {
         input.edit_history.checkpoint();
-        type_text(&mut input, "x", Instant::now());
+        type_text(&mut input, "x", vibe_rs::clock::now());
     }
     for _ in 0..MAX_CHECKPOINTS {
         assert!(input.restore_edit(false));
@@ -192,7 +194,7 @@ fn byte_budget_evicts_old_checkpoints_and_preserves_redo() {
     for ch in ['b', 'c', 'd'] {
         let before = Snapshot::capture(&input);
         input.input = ch.to_string().repeat(size);
-        input.record_edit(before, true, Instant::now());
+        input.record_edit(before, true, vibe_rs::clock::now());
     }
     assert!(input.restore_edit(false));
     assert!(input.restore_edit(false));
@@ -209,7 +211,8 @@ fn byte_budget_drops_oversized_checkpoints() {
     let before = Snapshot::capture(&app.chat_input);
     app.chat_input.input = "x".repeat(MAX_HISTORY_BYTES + 1);
     app.chat_input.cursor = app.chat_input.input.len();
-    app.chat_input.record_edit(before, true, Instant::now());
+    app.chat_input
+        .record_edit(before, true, vibe_rs::clock::now());
     assert!(!app.chat_input.restore_edit(false));
     assert_eq!(app.chat_input.input.len(), MAX_HISTORY_BYTES + 1);
 }

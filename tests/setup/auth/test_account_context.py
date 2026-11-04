@@ -8,7 +8,12 @@ import pytest
 from tests.conftest import build_test_vibe_config
 from vibe.app_server._account import AccountController
 from vibe.core.paths import WHOAMI_CACHE_FILE
-from vibe.setup.auth import _oidc_runtime
+from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
+from vibe.setup.auth._cli_oidc_platform_credentials import (
+    CliOidcPlatformCredentialProvider,
+)
+from vibe.setup.auth._oidc_credentials import OidcTokens
+from vibe.setup.auth._oidc_tenant import OidcTenantResolver
 from vibe.setup.auth.whoami import (
     HttpAccountGateway,
     WhoAmICache,
@@ -16,7 +21,6 @@ from vibe.setup.auth.whoami import (
     load_cached_whoami,
     store_cached_whoami,
 )
-from vibe.utils.api_keys import resolve_api_key
 
 # Producer: dashboard/dashboard/users/services/vibe_account_context.py:resolve_vibe_account_context.
 _CONTEXT = {
@@ -33,9 +37,16 @@ _CONTEXT = {
 }
 
 
+def _oidc(tokens: OidcTokens) -> CliOidcPlatformCredentialProvider:
+    return CliOidcPlatformCredentialProvider(
+        OidcTenantResolver(),
+        id_token=lambda: tokens.id_token.get_secret_value(),
+        stored_tokens=lambda: tokens,
+    )
+
+
 @pytest.mark.asyncio
 async def test_oidc_session_reads_account_context(monkeypatch, tokens, respx_mock):
-    monkeypatch.setenv("VIBE_CLI_OIDC_ENABLED", "true")
     monkeypatch.setenv("MISTRAL_API_KEY", "test-api-key")
     monkeypatch.setenv("VIBE_CLI_OIDC_ORGANIZATION_ID", "org")
     monkeypatch.setenv("VIBE_CLI_OIDC_WORKSPACE_ID", "workspace")
@@ -43,10 +54,8 @@ async def test_oidc_session_reads_account_context(monkeypatch, tokens, respx_moc
     route = respx_mock.get("https://console.mistral.ai/api/vibe/account-context").mock(
         return_value=httpx.Response(200, json=_CONTEXT)
     )
-    api_key = resolve_api_key("MISTRAL_API_KEY")
-    assert api_key is not None
     result = await HttpAccountGateway().read(
-        base_url="https://console.mistral.ai", api_key=api_key
+        base_url="https://console.mistral.ai", credentials=_oidc(tokens)
     )
     assert result.plan_name == "TEAM"
     assert result.has_paid_vibe_entitlement
@@ -60,7 +69,6 @@ async def test_oidc_session_reads_account_context(monkeypatch, tokens, respx_moc
 
 @pytest.mark.asyncio
 async def test_api_key_reads_whoami(monkeypatch, respx_mock):
-    monkeypatch.setenv("VIBE_CLI_OIDC_ENABLED", "false")
     monkeypatch.setenv("MISTRAL_API_KEY", "test-api-key")
     account_context = respx_mock.get(
         "https://console.mistral.ai/api/vibe/account-context"
@@ -81,10 +89,9 @@ async def test_api_key_reads_whoami(monkeypatch, respx_mock):
             },
         )
     )
-    api_key = resolve_api_key("MISTRAL_API_KEY")
-    assert api_key == "test-api-key"
     result = await HttpAccountGateway().read(
-        base_url="https://console.mistral.ai", api_key=api_key
+        base_url="https://console.mistral.ai",
+        credentials=ApiKeyPlatformCredentialProvider("MISTRAL_API_KEY"),
     )
     assert result.plan_name == "PAY_AS_YOU_GO"
     assert result.prompt_switching_to_pro_plan
@@ -100,14 +107,12 @@ async def test_api_key_reads_whoami(monkeypatch, respx_mock):
 async def test_oidc_account_cache_does_not_reuse_another_tenant(
     monkeypatch, tokens, respx_mock
 ):
-    monkeypatch.setattr(
-        _oidc_runtime, "_resolve_id_token", lambda: tokens.id_token.get_secret_value()
-    )
     route = respx_mock.get("https://console.mistral.ai/api/vibe/account-context").mock(
         return_value=httpx.Response(200, json=_CONTEXT)
     )
     cache = WhoAmICache()
-    await cache.resolve(base_url="https://console.mistral.ai", api_key="vibe-cli-oidc")
+    credentials = _oidc(tokens)
+    await cache.resolve(base_url="https://console.mistral.ai", credentials=credentials)
     monkeypatch.setenv("VIBE_CLI_OIDC_ORGANIZATION_ID", "other-org")
     route.mock(
         return_value=httpx.Response(
@@ -121,7 +126,7 @@ async def test_oidc_account_cache_does_not_reuse_another_tenant(
         )
     )
     second = await cache.resolve(
-        base_url="https://console.mistral.ai", api_key="vibe-cli-oidc"
+        base_url="https://console.mistral.ai", credentials=credentials
     )
     assert second is not None
     assert second.plan_name == "FREE"
@@ -129,7 +134,7 @@ async def test_oidc_account_cache_does_not_reuse_another_tenant(
 
 
 @pytest.mark.asyncio
-async def test_oidc_account_view_has_no_api_key_preview(monkeypatch, tokens):
+async def test_oidc_account_view_has_no_api_key_preview(tokens):
     config = build_test_vibe_config()
     host = MagicMock(
         config=config,
@@ -139,7 +144,8 @@ async def test_oidc_account_view_has_no_api_key_preview(monkeypatch, tokens):
     gateway = MagicMock(
         read=AsyncMock(return_value=WhoAmIResult.model_validate(_CONTEXT))
     )
-    view = await AccountController(host, gateway).read()
+    controller = AccountController(host, gateway, credentials=lambda _: _oidc(tokens))
+    view = await controller.read()
     assert view.status.value == "ready"
     assert view.api_key is None
     assert view.plan is not None
@@ -176,9 +182,9 @@ async def test_oidc_account_context_never_rewrites_tenant_domains(monkeypatch, t
 def test_account_context_cache_invalidates_legacy_format():
     import json
 
-    store_cached_whoami("api-key", WhoAmIResult.model_validate(_CONTEXT))
+    store_cached_whoami("principal", WhoAmIResult.model_validate(_CONTEXT))
     entries = json.loads(WHOAMI_CACHE_FILE.path.read_text())
     for entry in entries.values():
         entry["format"] = 2
     WHOAMI_CACHE_FILE.path.write_text(json.dumps(entries))
-    assert load_cached_whoami("api-key") is None
+    assert load_cached_whoami("principal") is None

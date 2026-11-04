@@ -28,7 +28,7 @@ impl Client {
         let (frames_tx, frames_rx) = mpsc::unbounded_channel();
         let pending = Pending::default();
         let answers = pending.clone();
-        tokio::spawn(async move {
+        crate::work::spawn_daemon(async move {
             while let Some(Some(frame)) = writer_rx.recv().await {
                 let Ok(frame) = serde_json::from_str::<Value>(&frame) else {
                     continue;
@@ -57,7 +57,6 @@ impl Client {
             deny_callbacks: Arc::new(AtomicBool::new(false)),
             active_session: Arc::new(Mutex::new(None)),
             replay_drained: AtomicU64::new(0),
-            unsent_telemetry: AtomicU64::new(0),
             server_pid: AtomicU32::new(0),
         }
     }

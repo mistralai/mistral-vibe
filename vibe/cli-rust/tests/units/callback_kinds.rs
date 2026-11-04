@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
-use vibe_rs::app::{App, Status, ToastSeverity};
+use vibe_rs::app::{App, Severity, Status};
 use vibe_rs::approval::{self, Event as ApprovalEvent, KeyAction, State, MAX_PENDING_APPROVALS};
 use vibe_rs::server::{
     callback, server_method, ActiveSession, ApprovalCallback, ApprovalDecisionType, Pending,
@@ -178,17 +178,17 @@ fn approval_only_advances_after_a_successful_response() {
 }
 
 #[test]
-fn answering_approval_keeps_unrelated_toasts() {
+fn answering_approval_keeps_an_unrelated_notice() {
     let mut app = with_status(Status::Ready);
     app.approval
         .enqueue(approval_callback("approval-1"))
         .unwrap();
     approval::show_pending(&mut app);
     app.approval.mount_time = None;
-    app.show_toast("server warning".into(), ToastSeverity::Warning, 5);
+    vibe_rs::ui::notice::show(&mut app, Severity::Information, "Copied to clipboard", 5);
 
     approval::handle_key(&mut app, &stub(), key(KeyCode::Enter));
-    assert_eq!(app.overlays.toasts.len(), 1);
+    assert!(app.overlays.notice.is_some());
 
     approval::apply_event(
         &mut app,
@@ -196,7 +196,7 @@ fn answering_approval_keeps_unrelated_toasts() {
             callback_id: "approval-1".into(),
         },
     );
-    assert_eq!(app.overlays.toasts.len(), 1);
+    assert!(app.overlays.notice.is_some());
 }
 
 #[test]

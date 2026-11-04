@@ -20,7 +20,7 @@ _OLD = "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\n"
 _NEW = "alpha\nBETA\ngamma\ndelta\nEPSILON\nzeta\n"
 
 # A drag starting in the numbered gutter must still select body text only.
-# Keep it on one row so selection-triggered copy toasts cannot shift the later
+# Keep it on one row so selection-triggered copy notices cannot shift the later
 # endpoint while the gesture is in progress.
 _DRAG = "\x1b[<0;6;14M\x1b[<32;14;14M\x1b[<0;14;14m"
 # A double-click on a diff body word snaps to that word, gutter excluded.

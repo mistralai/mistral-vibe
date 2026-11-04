@@ -84,7 +84,7 @@ pub async fn onboarding_round(run: EventLoop, provider: Option<String>) -> Resul
     // SIGKILL is all the cleanup it needs.
     run.client.close_stdin().await;
     if let Some(child) = run.child.take() {
-        tokio::spawn(async move {
+        crate::work::spawn_daemon(async move {
             match child.wait_with_grace().await {
                 Some(status) => {
                     tracing::debug!(status = %status, "app-server reaped before onboarding")
@@ -230,7 +230,7 @@ pub fn retry_handshake(
 ) {
     let (trust_tx, trust_rx) = mpsc::channel::<String>(1);
     run.app.trust.tx = Some(trust_tx);
-    tokio::spawn(crate::startup::handshake(
+    crate::work::spawn_daemon(crate::startup::handshake(
         run.client.clone(),
         run.ready_tx.clone(),
         trust_rx,

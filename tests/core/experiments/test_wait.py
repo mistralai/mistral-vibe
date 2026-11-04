@@ -48,7 +48,9 @@ async def test_a_cached_eval_means_no_wait(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(
         wait_module,
         "load_cached_eval_response",
-        lambda _config: EvalResponse.model_validate({"features": {}}),
+        lambda _config, _credentials=None: EvalResponse.model_validate({
+            "features": {}
+        }),
     )
 
     assert experiments_wait_needed(await _config()) is False
@@ -59,7 +61,9 @@ async def test_a_cached_eval_the_session_loaded_means_no_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cached = routing_eval_response("experiment-routed")
-    monkeypatch.setattr(wait_module, "load_cached_eval_response", lambda _c: cached)
+    monkeypatch.setattr(
+        wait_module, "load_cached_eval_response", lambda _c, _credentials=None: cached
+    )
     orchestrator = await _config()
     layer = orchestrator.get_layer(GrowthbookLayer.NAME)
     assert isinstance(layer, GrowthbookLayer)
@@ -75,7 +79,9 @@ async def test_a_cached_eval_written_after_the_config_was_built_still_waits(
     # Another session's eval landed between this config's build and its open.
     orchestrator = await _config()
     cached = routing_eval_response("experiment-routed")
-    monkeypatch.setattr(wait_module, "load_cached_eval_response", lambda _c: cached)
+    monkeypatch.setattr(
+        wait_module, "load_cached_eval_response", lambda _c, _credentials=None: cached
+    )
 
     assert experiments_wait_needed(orchestrator) is True
 
@@ -95,7 +101,7 @@ async def test_no_mistral_credential_means_no_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        wait_module, "get_mistral_provider_and_api_key", lambda _config: None
+        wait_module, "mistral_credentials", lambda _config, _credentials=None: None
     )
 
     assert experiments_wait_needed(await _config()) is False

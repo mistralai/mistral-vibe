@@ -16,6 +16,7 @@ use vibe_rs::server::{
 use vibe_rs::ui_event::{self, UiEvent};
 use vibe_rs::{approval, question_app};
 
+use crate::feedback_support::errors;
 use crate::support::{key, with_status};
 
 const ROOT: &str = "session-root";
@@ -23,7 +24,7 @@ const TITLE: &str = "User input required";
 
 fn app() -> (App, mpsc::Receiver<UiEvent>) {
     let mut app = with_status(Status::Generating {
-        since: std::time::Instant::now(),
+        since: vibe_rs::clock::now(),
     });
     app.session.session_id = Some(ROOT.into());
     let (events, received) = mpsc::channel(8);
@@ -168,7 +169,7 @@ async fn a_rejected_answer_reopens_the_question_and_a_rejected_cancel_drops_it()
     let event = events.recv().await.expect("answer reply");
     ui_event::apply(&mut app, &client, event);
     assert!(app.question_app.open);
-    assert_eq!(app.overlays.toasts.len(), 1);
+    assert_eq!(errors(&app).len(), 1);
     assert_eq!(app.view.loading.label(), TITLE);
 
     app.question_app.mount_time = None;

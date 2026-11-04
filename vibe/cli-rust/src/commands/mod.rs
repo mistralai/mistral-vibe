@@ -10,7 +10,6 @@ pub mod event;
 pub mod leanstall;
 pub mod provider_auth;
 pub mod retry;
-pub mod retry_continuation;
 pub mod retry_prompt;
 pub mod shell;
 pub mod simple;

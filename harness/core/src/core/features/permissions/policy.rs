@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::core::features::permissions::public_arguments::{
@@ -65,6 +67,47 @@ impl PermissionPattern {
     fn matches_arguments(&self, texts: &FilterTexts) -> bool {
         self.matches(&texts.spaced) || self.matches(&texts.compact)
     }
+
+    /// The namespace a `tools` pattern names: its literal text before the
+    /// first `.` separator, which may also be written `[.]`. `None` when a
+    /// wildcard or a class of more than one character comes first, or when the
+    /// pattern has no separator: then the pattern does not name one namespace.
+    fn literal_namespace(&self) -> Option<String> {
+        let mut namespace = String::new();
+        let mut characters = self.pattern.as_str().chars();
+        while let Some(character) = characters.next() {
+            let literal = match character {
+                '*' | '?' => return None,
+                '[' => single_character_class(&mut characters)?,
+                other => other,
+            };
+            if literal == '.' {
+                return Some(namespace);
+            }
+            namespace.push(literal);
+        }
+        None
+    }
+}
+
+/// The one character a glob class matches, read after its opening `[`, or
+/// `None` for a class that can match more than one character.
+fn single_character_class(characters: &mut std::str::Chars<'_>) -> Option<char> {
+    let first = characters.next()?;
+    if first == '!' || characters.next()? != ']' {
+        return None;
+    }
+    Some(first)
+}
+
+/// A `tools` pattern that names a namespace of a tool catalog but matches none
+/// of its tools, so its rule never applies to them.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct UnmatchedToolPattern {
+    pub(crate) rule_index: usize,
+    pub(crate) pattern: String,
+    pub(crate) namespace: String,
+    pub(crate) namespace_tool_ids: Vec<String>,
 }
 
 /// The field of a permission rule that a pattern belongs to.
@@ -163,6 +206,51 @@ impl PermissionRule {
 }
 
 impl PermissionPolicy {
+    /// The `tools` patterns that name a namespace of `tool_ids` but match none
+    /// of its tool IDs. A namespace in `open_namespaces` is not checked: its
+    /// tools are known only when a Session lists them. Neither is a pattern
+    /// that names no namespace of `tool_ids`.
+    pub(crate) fn unmatched_tool_patterns(
+        &self,
+        tool_ids: &[String],
+        open_namespaces: &[String],
+    ) -> Vec<UnmatchedToolPattern> {
+        let open_namespaces: BTreeSet<&str> = open_namespaces.iter().map(String::as_str).collect();
+        let mut ids_by_namespace: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for tool_id in tool_ids {
+            let Some((namespace, _)) = tool_id.split_once('.') else {
+                continue;
+            };
+            if !open_namespaces.contains(namespace) {
+                ids_by_namespace
+                    .entry(namespace)
+                    .or_default()
+                    .insert(tool_id);
+            }
+        }
+        let mut unmatched = Vec::new();
+        for (rule_index, rule) in self.rules.iter().enumerate() {
+            for pattern in &rule.tools {
+                let Some(namespace) = pattern.literal_namespace() else {
+                    continue;
+                };
+                let Some(namespace_ids) = ids_by_namespace.get(namespace.as_str()) else {
+                    continue;
+                };
+                if namespace_ids.iter().any(|tool_id| pattern.matches(tool_id)) {
+                    continue;
+                }
+                unmatched.push(UnmatchedToolPattern {
+                    rule_index,
+                    pattern: pattern.pattern.as_str().to_owned(),
+                    namespace,
+                    namespace_tool_ids: namespace_ids.iter().map(|id| (*id).to_owned()).collect(),
+                });
+            }
+        }
+        unmatched
+    }
+
     pub(crate) fn evaluate(&self, call: &ExternalToolCall) -> PermissionDecision {
         let stable_tool_id = call.hook_tool_key().qualified_name;
 

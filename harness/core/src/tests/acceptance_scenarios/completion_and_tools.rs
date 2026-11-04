@@ -401,7 +401,7 @@ fn tool_discovery_reports_the_completed_summary() {
                     &first_completion,
                     &discovery_calls,
                 ))
-                .observe(tool_execution_started(turn_id, "discovery-1"))
+                .observe(core_tool_execution_started(turn_id, "discovery-1"))
                 .observe(json!({
                     "type": "tool_discovery_finished",
                     "turn_id": turn_id,
@@ -470,7 +470,7 @@ fn tool_discovery_details_render_the_description_once() {
                     &first_completion,
                     &discovery_calls,
                 ))
-                .observe(tool_execution_started(turn_id, "discovery-details"))
+                .observe(core_tool_execution_started(turn_id, "discovery-details"))
                 .observe(json!({
                     "type": "tool_discovery_finished",
                     "turn_id": turn_id,
@@ -557,7 +557,7 @@ fn tool_discovery_reports_the_returned_count_when_matches_exceed_the_limit() {
                     &first_completion,
                     &discovery_calls,
                 ))
-                .observe(tool_execution_started(turn_id, "discovery-over-limit"))
+                .observe(core_tool_execution_started(turn_id, "discovery-over-limit"))
                 .observe(json!({
                     "type": "tool_discovery_finished",
                     "turn_id": turn_id,
@@ -856,7 +856,7 @@ fn invalid_unicode_in_programmatic_arguments_finishes_without_a_runtime_tool_act
             run_typescript_completion(action_id(&first_completion), call_id, source),
             running(turn_id)
                 .dispatch(llm_call(1))
-                .observe(tool_execution_started(turn_id, call_id))
+                .observe(core_tool_execution_started(turn_id, call_id))
                 .observe(tool_execution_finished(turn_id, call_id, failure_result)),
         )
         .only_action();
@@ -916,7 +916,7 @@ fn a_thrown_object_with_a_code_fails_the_program_as_an_execution_error() {
             run_typescript_completion(action_id(&first_completion), call_id, source),
             running(turn_id)
                 .dispatch(llm_call(1))
-                .observe(tool_execution_started(turn_id, call_id))
+                .observe(core_tool_execution_started(turn_id, call_id))
                 .observe(tool_execution_finished(turn_id, call_id, failure_result)),
         )
         .only_action();
@@ -1087,9 +1087,10 @@ fn completed_programmatic_sibling_is_observed_before_another_sibling_resumes() {
                         "tool_name": "ask_enable_connector",
                         "arguments": {"connector": "data_gouv"},
                     },
+                    "parent_call_id": pending_call_id,
                 }))
-                .observe(tool_execution_started(turn_id, completed_call_id))
-                .observe(tool_execution_started(turn_id, pending_call_id))
+                .observe(core_tool_execution_started(turn_id, completed_call_id))
+                .observe(core_tool_execution_started(turn_id, pending_call_id))
                 .observe(tool_execution_finished(
                     turn_id,
                     completed_call_id,

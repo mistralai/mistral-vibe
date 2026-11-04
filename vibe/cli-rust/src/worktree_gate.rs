@@ -145,7 +145,7 @@ pub async fn absorb_until_settled(
                 }
                 None => return Ok((Settled::default(), waited)),
             },
-            _ = tokio::time::sleep_until(deadline) => return Ok((Settled::default(), waited)),
+            _ = crate::clock::sleep_until_real(Some(deadline.into_std())) => return Ok((Settled::default(), waited)),
         }
     }
 }
@@ -207,7 +207,7 @@ pub async fn early_start(
     let (trust_tx, trust_rx) = mpsc::channel::<String>(1);
     // The bridge carries the notifications the event loop still reads.
     let (bridge_tx, bridge_rx) = mpsc::channel::<Notification>(256);
-    tokio::spawn(handshake(
+    crate::work::spawn_daemon(handshake(
         client.clone(),
         ready_tx,
         trust_rx,

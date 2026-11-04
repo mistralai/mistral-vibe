@@ -31,6 +31,24 @@ _CLI_REGISTRATIONS = {
 _DEFAULT_ISSUER = "https://auth.mistral.ai"
 
 
+@dataclass(frozen=True, slots=True)
+class RegisteredWebOrigin:
+    """A first-party web origin that accepts the ID token issued for ``audience``."""
+
+    issuer: str
+    audience: str
+
+
+def registered_web_origin(origin: str) -> RegisteredWebOrigin | None:
+    """The registration whose ID token ``origin`` (``scheme://host[:port]``)
+    accepts, when it is one of its first-party web origins.
+    """
+    for issuer, registration in _CLI_REGISTRATIONS.items():
+        if origin in registration.web_origins:
+            return RegisteredWebOrigin(issuer=issuer, audience=registration.audience)
+    return None
+
+
 class OidcError(Exception):
     """A safe-to-display error from the isolated CLI experiment."""
 

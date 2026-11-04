@@ -77,11 +77,10 @@ pub(super) fn start(app: &mut App, client: &Arc<Client>, operation: Operation) {
         app.vibe_code_project.session_id = session_id.clone();
     }
     app.vibe_code_project.pending = true;
-    let pending = app.commit_started();
     let client = client.clone();
     let picker_id = app.vibe_code_project.picker_id.clone();
     let cancelling = matches!(operation, Operation::Cancel);
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let event = match client.request(operation.method(), params).await {
             Ok(value) => response(operation, value).unwrap_or_else(Event::Error),
             Err(error) => Event::Error(
@@ -102,7 +101,6 @@ pub(super) fn start(app: &mut App, client: &Arc<Client>, operation: Operation) {
                 picker_id,
                 event,
             })),
-            &pending,
         )
         .await;
     });

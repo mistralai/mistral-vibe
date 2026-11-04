@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::app::{App, ChatInput};
+use crate::app::{App, ChatInput, Severity};
 
 /// A paste longer than this many characters collapses.
 pub const MAX_INLINE_CHARS: usize = 1000;
@@ -109,5 +109,5 @@ pub fn insert_collapsed(app: &mut App, text: &str) {
     input
         .mentions
         .add(&input.input, start, start + label.len(), Some(paste));
-    crate::ui::notice::show(app, HINT, HINT_SECS);
+    crate::ui::notice::show(app, Severity::Information, HINT, HINT_SECS);
 }

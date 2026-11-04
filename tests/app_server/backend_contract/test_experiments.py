@@ -189,6 +189,7 @@ async def test_a_resolved_variant_is_cached_for_the_next_session(
     )
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_unified_pushes_a_freshly_resolved_variant_into_the_live_session(
     experiments_connection: BackendContractConnection, growthbook_api: respx.Route

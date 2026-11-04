@@ -46,6 +46,7 @@ from mistralai_vibe_local_harness.session_protocol import JsonObject
 from mistralai_vibe_local_harness.vibe._completion import report_request_sent
 from mistralai_vibe_local_harness.vibe._credentials import ProviderAuthRequired
 from mistralai_vibe_local_harness.vibe._runtime_config import (
+    LocalModelRoute,
     LocalRuntimeAdapterConfig,
     ProviderRetry,
 )
@@ -53,6 +54,11 @@ from mistralai_vibe_local_harness.vibe._utility_completion import (
     CompletionFn,
     UtilityCompletionError,
     execute_utility_completion,
+)
+from mistralai_vibe_local_harness.vibe.completion_profile import (
+    REASONING_LOWEST,
+    ReasoningSupport,
+    find_known_model,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,16 +69,12 @@ DEFAULT_SMART_APPROVE_MODEL = "mistral-small-latest"
 # are serialized, so a turn with N non-precleared tools pays up to N of these back
 # to back -- keep it tight for an interactive TUI. A timeout maps to ERROR ->
 # escalate (never a silent allow), so a slow classifier degrades to a prompt, not a
-# hang. Overlapping/concurrent classification is a follow-up (see the design doc's
-# Known follow-ups).
+# hang.
 _CLASSIFY_TIMEOUT_S = 10.0
 _MAX_ARGS_CHARS = 3000
 _MAX_USER_MESSAGE_CHARS = 2000
 _CLARIFICATION_TOOL_NAME = "ask_user_question"
-_ERROR_REASON = (
-    "Smart approve could not verify this call is safe, so it was skipped. "
-    "Try a narrower, clearly safe alternative."
-)
+_MAX_ERROR_DETAIL_CHARS = 200
 
 # The taxonomies the classifier prompt is contracted to emit.
 _RISK_LEVELS = frozenset({"low", "medium", "high", "critical"})
@@ -246,11 +248,9 @@ async def classify_tool_call(
     classifier to run. It defaults to the model classifier.
     """
     factory = classifier_factory or default_tool_risk_classifier
-    # Swap the classify route onto the fast model with deterministic decoding
-    # (temperature 0, thinking off, no top_p or output cap), independent of the
-    # session: a thinking session must not send a thinking request to the small
-    # classifier. config.model is re-derived from active_model in __post_init__, so
-    # model= alone would be ignored.
+    # Classify at temperature 0 with the least reasoning the classifier model takes;
+    # thinking="off" leaves a model with unknown levels without a reasoning field.
+    # config.model is re-derived from active_model, so model= alone is ignored.
     classifier = factory(
         replace(
             config,
@@ -261,6 +261,8 @@ async def classify_tool_call(
                 thinking="off",
                 top_p=None,
                 max_output_tokens=None,
+                reasoning=_classifier_reasoning(config.active_model, classify_model),
+                request_thinking=REASONING_LOWEST,
             ),
         )
     )
@@ -311,7 +313,7 @@ async def _classify_safely(
         return RiskClassificationResult(
             verdict=ClassificationVerdict.ERROR,
             tier=ClassificationTier.FAST,
-            reason=_ERROR_REASON,
+            reason=_error_reason(error, described),
             model=model,
             latency_ms=latency_ms,
             error=described,
@@ -319,6 +321,32 @@ async def _classify_safely(
         )
 
     return result
+
+
+def _classifier_reasoning(
+    session: LocalModelRoute, classify_model: str
+) -> ReasoningSupport | None:
+    # The session route's levels belong to the session model; another model uses
+    # its own known levels, or none.
+    if classify_model == session.model:
+        return session.reasoning
+    known = find_known_model(classify_model)
+    return None if known is None else known.reasoning
+
+
+def _error_reason(error: BaseException, described: str) -> str:
+    # The user approves this call by hand, so name what broke: a classifier that
+    # fails on every call otherwise looks like a cautious one.
+    detail = (
+        error.explanation
+        if isinstance(error, UtilityCompletionError) and error.explanation
+        else described
+    )
+    first_line = detail.splitlines()[0][:_MAX_ERROR_DETAIL_CHARS]
+    return (
+        f"Smart approve could not verify this call is safe (classifier error: "
+        f"{first_line}), so it was skipped. Try a narrower, clearly safe alternative."
+    )
 
 
 def _provider_failure(error: BaseException) -> BaseException:

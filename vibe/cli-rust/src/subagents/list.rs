@@ -39,7 +39,7 @@ pub struct ListState {
     pub waiting_count: usize,
     /// The list has had a child: Main stays on screen until the session changes.
     pub shown: bool,
-    /// Painted widget area, used to anchor toasts while the input box is hidden.
+    /// Painted widget area, published for mouse routing while the input box is hidden.
     pub area: ratatui::layout::Rect,
 }
 
@@ -197,6 +197,7 @@ pub fn show_subagent_chat(app: &mut App, session_id: &str) {
     }
     app.subagents.viewed_subagent_id = Some(session_id.to_owned());
     // Hide the composer, focus the list.
+    crate::reverse_search::cancel(app);
     crate::completion_manager::dismiss(app);
     app.subagents.list.focused = true;
     app.set_app_focus(false);
@@ -216,6 +217,7 @@ pub fn focus_first(app: &mut App) -> bool {
     if !app.subagents.list.shown {
         return false;
     }
+    crate::reverse_search::cancel(app);
     app.subagents.list.mouse_session_id = None;
     app.subagents.list.options.highlight(0);
     app.subagents.list.focused = true;
@@ -271,12 +273,8 @@ pub fn handle_list_key(app: &mut App, key: KeyEvent) -> bool {
             let total = app.subagents.list.rows.len() + 1;
             let page = page_rows(app).min(total);
             app.subagents.list.mouse_session_id = None;
-            let options = &mut app.subagents.list.options;
-            options.select(if key.code == KeyCode::PageDown {
-                (options.selected() + page).min(total - 1)
-            } else {
-                options.selected().saturating_sub(page)
-            });
+            let down = key.code == KeyCode::PageDown;
+            app.subagents.list.options.page(down, total, page);
             return true;
         }
         KeyCode::Enter => {

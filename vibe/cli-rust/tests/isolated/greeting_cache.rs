@@ -85,7 +85,10 @@ async fn a_missing_identity_greets_nobody_and_stamps_nothing() {
         .expect("the post-ready reads answer")
         .expect("an event");
 
-    let CommandEvent::PostReady { reads, greeting } = event else {
+    let CommandEvent::PostReady {
+        reads, greeting, ..
+    } = event
+    else {
         panic!("expected the post-ready answer");
     };
     assert!(reads.is_some_and(|reads| reads.identity.is_null()));

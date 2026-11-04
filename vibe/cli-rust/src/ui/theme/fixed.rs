@@ -2,33 +2,22 @@
 
 use ratatui::style::{Color, Style};
 
-/// $mistral_orange #FF8205 — the prompt marker and brand accent.
-pub const ORANGE: Color = Color::Rgb(0xFF, 0x82, 0x05);
-pub const ORANGE_LIGHT: Color = Color::Rgb(0xFF, 0xAF, 0x00);
+/// Brand Orange Medium — the prompt marker and brand accent.
+pub const ORANGE: Color = Color::Rgb(0xFF, 0x82, 0x04);
+/// Brand Orange Light.
+pub const ORANGE_LIGHT: Color = Color::Rgb(0xFF, 0xAF, 0x01);
+/// Brand Orange Strong.
 pub const ORANGE_DARK: Color = Color::Rgb(0xFA, 0x50, 0x0F);
-pub const YELLOW: Color = Color::Rgb(0xFF, 0xD8, 0x00);
-pub const RED: Color = Color::Rgb(0xE1, 0x05, 0x00);
 
-/// Warm gradient the loading label cycles through (yellow → orange → red).
-pub const LOADING_GRADIENT: [Color; 5] = [YELLOW, ORANGE_LIGHT, ORANGE, ORANGE_DARK, RED];
+/// The brand orange ramp the loading label ping-pongs through.
+pub const LOADING_GRADIENT: [Color; 3] = [ORANGE_LIGHT, ORANGE, ORANGE_DARK];
 
 /// Onboarding heading; not the selection orange.
-pub const ONBOARDING_TITLE: Color = Color::Rgb(0xff, 0x5a, 0x00);
-/// Idle onboarding card border.
-pub const ONBOARDING_CARD_BORDER: Color = Color::Rgb(0x30, 0x30, 0x40);
+pub const ONBOARDING_TITLE: Color = ORANGE_DARK;
+/// Idle onboarding card border (brand Black Light).
+pub const ONBOARDING_CARD_BORDER: Color = Color::Rgb(0x34, 0x34, 0x46);
 /// The welcome banner highlight and the browser sign-in wait ramp.
-pub const WELCOME_GRADIENT: [Color; 10] = [
-    Color::Rgb(0xff, 0x6b, 0x00),
-    Color::Rgb(0xff, 0x7b, 0x00),
-    Color::Rgb(0xff, 0x8c, 0x00),
-    Color::Rgb(0xff, 0x9d, 0x00),
-    Color::Rgb(0xff, 0xae, 0x00),
-    Color::Rgb(0xff, 0xbf, 0x00),
-    Color::Rgb(0xff, 0xae, 0x00),
-    Color::Rgb(0xff, 0x9d, 0x00),
-    Color::Rgb(0xff, 0x8c, 0x00),
-    Color::Rgb(0xff, 0x7b, 0x00),
-];
+pub const WELCOME_GRADIENT: [Color; 4] = [ORANGE_DARK, ORANGE, ORANGE_LIGHT, ORANGE];
 
 /// SGR sequences for plain terminal output (rich's colors, by terminal depth).
 pub mod sgr {

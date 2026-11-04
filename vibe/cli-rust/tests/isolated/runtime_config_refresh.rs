@@ -1,4 +1,4 @@
-//! Config changes reach the live UI: model window, footer model, caret blink, mouse capture and theme.
+//! Config changes reach the live UI: model window, input box model, caret blink, mouse capture and theme.
 
 use std::sync::{Arc, Mutex, MutexGuard, Once};
 
@@ -9,7 +9,7 @@ use ratatui::Terminal;
 use serde_json::{json, Value};
 use vibe_rs::app::App;
 use vibe_rs::server::Client;
-use vibe_rs::ui::{bottom_bar, theme};
+use vibe_rs::ui::{bottom_bar, composer_title, theme};
 use vibe_rs::{event_handler, input, model_picker, theme_picker};
 
 /// Guards the active theme, which is process-global across this binary's tests.
@@ -116,17 +116,23 @@ async fn a_picked_theme_is_applied_before_its_write_completes() {
 }
 
 #[test]
-fn a_model_switch_renames_the_model_in_the_bottom_bar() {
+fn a_model_switch_renames_the_model_and_resizes_the_context_gauge() {
     let _guard = isolated();
     let mut app = App::default();
     event_handler::apply_runtime_value(&mut app, &runtime(json!({}), 600_000));
-    assert!(bottom_bar_row(&mut app).ends_with(" Medium[off] · 0/600k tokens (0%)"));
+    assert!(model_title(&app).starts_with(" Medium[off]"));
+    assert!(bottom_bar_row(&mut app).ends_with(" ctx        0/600k"));
 
     let small =
         json!({"activeModel": {"alias": "small", "displayName": "Small", "thinking": "high"}});
     event_handler::apply_runtime_value(&mut app, &runtime(small, 128_000));
 
-    assert!(bottom_bar_row(&mut app).ends_with(" Small[high] · 0/128k tokens (0%)"));
+    assert!(model_title(&app).starts_with(" Small[high]"));
+    assert!(bottom_bar_row(&mut app).ends_with(" ctx        0/128k"));
+}
+
+fn model_title(app: &App) -> String {
+    composer_title::title(app, 120).line.to_string()
 }
 
 fn bottom_bar_row(app: &mut App) -> String {

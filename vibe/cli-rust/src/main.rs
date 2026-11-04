@@ -208,7 +208,6 @@ async fn run() -> Result<std::process::ExitCode> {
     let startup_config = cached_startup_config.unwrap_or_default();
     let resolved_auto = vibe_rs::theme_detection::resolve_auto_theme();
     ui::theme::prepare_active(&startup_config.theme, resolved_auto);
-
     // The worktree is prepared before the TUI exists: wait the server's
     // preparation out right here, with its two stderr lines, and let the
     // terminal start only once the
@@ -288,6 +287,23 @@ async fn run() -> Result<std::process::ExitCode> {
         .or_else(|| cwd.clone());
     let cached_tokens = (0, startup_config.context_window);
     let mut app = App::default();
+    // The index starts only from a warm cache that enables it; a cold start
+    // defers to the Ready event's authoritative config. The env check is a
+    // read-only shortcut so a single-run opt-out never pays for a build.
+    let launch_index = !show_unready_config
+        && startup_config.enable_file_autocomplete
+        && !vibe_rs::utils::file_index::env_opt_out();
+    app.completion.files = if launch_index {
+        vibe_rs::utils::file_index::FileIndexHandle::start(
+            index_root.unwrap_or_default(),
+            startup_config.file_watcher_for_autocomplete,
+        )
+    } else {
+        match index_root {
+            Some(root) => vibe_rs::utils::file_index::FileIndexHandle::parked(root),
+            None => vibe_rs::utils::file_index::FileIndexHandle::default(),
+        }
+    };
     app.terminal_notifier
         .enable_program_reports(vibe_rs::program_status::supported());
     // Hold the positional prompt until startup converges. An empty positional
@@ -443,7 +459,7 @@ async fn run() -> Result<std::process::ExitCode> {
                 // key is present, so no pre-session status is asked).
                 let (ready_tx, ready_rx) = mpsc::channel::<StartupEvent>(1);
                 let (trust_tx, trust_rx) = mpsc::channel::<String>(1);
-                tokio::spawn(setup::boot::background_boot(
+                vibe_rs::work::spawn_daemon(setup::boot::background_boot(
                     client.clone(),
                     ready_tx.clone(),
                     trust_rx,
@@ -472,13 +488,9 @@ async fn run() -> Result<std::process::ExitCode> {
     app.trust.tx = trust_tx;
     app.credential_client = Some(client.clone());
     let channels = vibe_rs::channels::connect(&mut app);
-    // The index watches from here: the build overlaps the boot instead of
-    // delaying the first frame.
-    let (files, file_changes) = utils::file_index::FileIndex::start(index_root);
-    app.completion.files = files;
     let config_tx = channels.config_tx.clone();
 
-    let sources = channels.sources(notifications, ready_rx, file_changes);
+    let sources = channels.sources(notifications, ready_rx);
     let mut run = event_loop::EventLoop {
         terminal,
         terminal_guard,

@@ -14,7 +14,10 @@ use crate::core::wire::tool::{ProtocolError, ToolResult};
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TurnStopReason {
     IterationLimit,
+    /// A `pre_agent_turn` or `pre_llm_call` hook skipped the work; the Turn's output is the hook's reason.
     Skipped,
+    /// A `post_llm_call` or `post_agent_turn` hook rejected the reply; the Turn's output is the hook's reason.
+    Rejected,
 }
 
 /// What one Core feature function produced: actions for the Runtime to run and
@@ -131,6 +134,10 @@ pub(crate) enum WarningCode {
     CompactionSummaryCutOff,
     /// Items after the summary did not fit and are shown reduced.
     CompactionInputsReduced,
+    /// Post-tool-call hooks turned a tool result whose `content` held its
+    /// `structured_content` into one whose `content` does not. Core uses the
+    /// result as returned.
+    PostToolCallResultInconsistent,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -170,6 +177,10 @@ pub(crate) enum Observation {
     ToolExecutionStarted {
         turn_id: String,
         call_id: String,
+        /// Core runs this tool itself (`run_typescript`, `search_tool_functions`):
+        /// no tool call Action reaches the Runtime for it. Omitted when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        executed_by_core: bool,
     },
     ToolExecutionFinished {
         turn_id: String,

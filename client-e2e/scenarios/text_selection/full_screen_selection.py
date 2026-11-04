@@ -47,6 +47,3 @@ timeline: Timeline = [
     _SELECT,
     _SCROLL_UP * 6,
 ]
-
-# Each key must land on a settled UI: batching changes the outcome here.
-settle_per_key = True

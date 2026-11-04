@@ -106,13 +106,20 @@ def resolve_subagent_configuration(
     connector_catalog: ResolvedConnectorCatalog | None = None,
     connector_selection: ResolvedConnectorSelection | None = None,
     connector_gateway_authority_digest: str | None = None,
+    connector_policy_digest: str | None = None,
 ) -> ResolvedSubagentConfiguration:
-    """Resolve the generic subagent profile beneath one parent ceiling."""
+    """Resolve the generic subagent profile beneath one parent ceiling.
+
+    ``connector_policy_digest`` is ``connector_policy_digest_of`` the same
+    connector arguments, computed once by a caller that resolves often under
+    one catalog. Omitted, it is computed here.
+    """
     integration_authority = _integration_authority(
         mcp_catalog=mcp_catalog,
         connector_catalog=connector_catalog,
         connector_selection=connector_selection,
         connector_gateway_authority_digest=connector_gateway_authority_digest,
+        connector_policy_digest=connector_policy_digest,
     )
     policy = _policy_ceiling(
         config, adapter, integration_authority=integration_authority
@@ -671,6 +678,7 @@ def _integration_authority(
     connector_catalog: ResolvedConnectorCatalog | None,
     connector_selection: ResolvedConnectorSelection | None,
     connector_gateway_authority_digest: str | None,
+    connector_policy_digest: str | None = None,
 ) -> dict[str, JsonValue] | None:
     mcp = []
     for server in sorted(
@@ -709,9 +717,10 @@ def _integration_authority(
             "allowed_tool_names": [],
         })
 
-    connector_policy_digest: str | None = None
     allowed_connector_ids: list[str] = []
-    if connector_catalog is not None or connector_selection is not None:
+    if connector_catalog is None and connector_selection is None:
+        connector_policy_digest = None
+    else:
         if (
             connector_catalog is None
             or connector_selection is None
@@ -731,51 +740,12 @@ def _integration_authority(
                     and setting.disabled
                 )
             )
-        connector_policy_digest = _digest(
-            cast(
-                JsonValue,
-                {
-                    "gateway_authority_digest": connector_gateway_authority_digest,
-                    "catalog_revision": connector_catalog.revision,
-                    "connectors": [
-                        {
-                            "raw_id": connector.raw_id,
-                            "alias": connector.alias,
-                            "ready": connector.ready,
-                            "auth_action": connector.auth_action,
-                            "tools": [
-                                {
-                                    "raw_name": tool.raw_name,
-                                    "input_schema": dict(tool.input_schema),
-                                }
-                                for tool in connector.tools
-                            ],
-                        }
-                        for connector in sorted(
-                            connector_catalog.connectors, key=lambda item: item.raw_id
-                        )
-                    ],
-                    "selection": {
-                        "selection_revision": connector_selection.selection_revision,
-                        "enable_connectors": connector_selection.enable_connectors,
-                        "implicit_source_enabled": connector_selection.implicit_source_enabled,
-                        "connector_settings": [
-                            {
-                                "alias": item.alias,
-                                "disabled": item.disabled,
-                                "disabled_tools": sorted(item.disabled_tools),
-                            }
-                            for item in sorted(
-                                connector_selection.connector_settings,
-                                key=lambda item: item.alias,
-                            )
-                        ],
-                        "enabled_tools": sorted(connector_selection.enabled_tools),
-                        "disabled_tools": sorted(connector_selection.disabled_tools),
-                    },
-                },
+        if connector_policy_digest is None:
+            connector_policy_digest = connector_policy_digest_of(
+                connector_catalog,
+                connector_selection,
+                connector_gateway_authority_digest,
             )
-        )
     if not mcp and connector_policy_digest is None:
         return None
     return {
@@ -783,6 +753,59 @@ def _integration_authority(
         "allowed_connector_ids": cast(JsonValue, allowed_connector_ids),
         "connector_policy_digest": connector_policy_digest,
     }
+
+
+def connector_policy_digest_of(
+    connector_catalog: ResolvedConnectorCatalog,
+    connector_selection: ResolvedConnectorSelection,
+    connector_gateway_authority_digest: str,
+) -> str:
+    """The digest the subagent policy ceiling pins for this connector authority."""
+    return _digest(
+        cast(
+            JsonValue,
+            {
+                "gateway_authority_digest": connector_gateway_authority_digest,
+                "catalog_revision": connector_catalog.revision,
+                "connectors": [
+                    {
+                        "raw_id": connector.raw_id,
+                        "alias": connector.alias,
+                        "ready": connector.ready,
+                        "auth_action": connector.auth_action,
+                        "tools": [
+                            {
+                                "raw_name": tool.raw_name,
+                                "input_schema": dict(tool.input_schema),
+                            }
+                            for tool in connector.tools
+                        ],
+                    }
+                    for connector in sorted(
+                        connector_catalog.connectors, key=lambda item: item.raw_id
+                    )
+                ],
+                "selection": {
+                    "selection_revision": connector_selection.selection_revision,
+                    "enable_connectors": connector_selection.enable_connectors,
+                    "implicit_source_enabled": connector_selection.implicit_source_enabled,
+                    "connector_settings": [
+                        {
+                            "alias": item.alias,
+                            "disabled": item.disabled,
+                            "disabled_tools": sorted(item.disabled_tools),
+                        }
+                        for item in sorted(
+                            connector_selection.connector_settings,
+                            key=lambda item: item.alias,
+                        )
+                    ],
+                    "enabled_tools": sorted(connector_selection.enabled_tools),
+                    "disabled_tools": sorted(connector_selection.disabled_tools),
+                },
+            },
+        )
+    )
 
 
 def _digest(value: JsonValue | str) -> str:
@@ -807,6 +830,7 @@ __all__ = [
     "LocalChildSessionBinding",
     "ResolvedSubagentConfiguration",
     "child_config",
+    "connector_policy_digest_of",
     "resolve_declared_agent_types",
     "resolve_subagent_configuration",
 ]

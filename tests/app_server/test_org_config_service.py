@@ -16,6 +16,7 @@ from vibe.app_server._org_config_service import (
 )
 from vibe.core.config import managed_config_cache
 from vibe.core.config.admin_config import AdminConfigOutcome
+from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
 from vibe.core.utils.remote_cache import Cached, CacheStore
 
 
@@ -32,7 +33,11 @@ class _Store:
         self.entry = entry
 
 
-_KEY = OrgConfigKey("user", base_url="https://vibe.test", api_key="key")
+_KEY = OrgConfigKey(
+    "user",
+    base_url="https://vibe.test",
+    credentials=ApiKeyPlatformCredentialProvider.from_api_key("key"),
+)
 _NOW = 1_000_000.0
 
 

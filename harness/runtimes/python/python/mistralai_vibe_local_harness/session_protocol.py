@@ -441,10 +441,19 @@ class CompletedPublicTurn(SessionProtocolModel):
     # ``limit``: the Turn hit its iteration limit. ``length``: its last answer
     # was cut off at the output-token cap.
     stop_reason: Literal["limit", "length"] | None = None
-    # Set only when a ``pre_agent_turn`` hook skipped the Turn: the text of the
-    # hook's reason, which is the Turn's whole output. Omitted when unset so a
-    # Turn that was not skipped stays readable by a reader without this field.
+    # Set only when a ``pre_agent_turn`` hook skipped the Turn, or a
+    # ``pre_llm_call`` hook skipped one of its model calls: the text of the
+    # hook's reason, which is the Turn's whole output; empty when a
+    # ``pre_llm_call`` hook gave none. Omitted when unset so a Turn that was not
+    # skipped stays readable by a reader without this field.
     skip_reason: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    # Set only when a ``post_llm_call`` or ``post_agent_turn`` hook rejected the
+    # Turn's answer: the text of the hook's reason, which is the Turn's whole
+    # output. Omitted when unset so a Turn that was not rejected stays readable by
+    # a reader without this field.
+    reject_reason: str | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
 

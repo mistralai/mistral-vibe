@@ -6,6 +6,11 @@ from typing import Any
 import httpx2
 from pydantic import BaseModel, ValidationError
 
+from vibe.core.platform_auth import (
+    PlatformCredentialProvider,
+    PlatformCredentialUnavailable,
+)
+from vibe.core.platform_auth._mistral import credential_request
 from vibe.core.skills.registry.models import (
     ListSkillsResponse,
     ListVersionsResponse,
@@ -41,19 +46,22 @@ class RegistrySkillsClient:
         "skillId,skill.skillName,skill.skillDescription,attributes,metadata,version"
     )
 
-    def __init__(self, base_url: str, api_key: str, *, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        credentials: PlatformCredentialProvider,
+        *,
+        timeout: float = 30.0,
+    ) -> None:
         self._skills_url = f"{base_url.rstrip('/')}/skills"
-        self._api_key = api_key
+        self._credentials = credentials
         self._timeout = timeout
         self._client: VibeAsyncHTTPClient | None = None
 
     async def __aenter__(self) -> RegistrySkillsClient:
         self._client = VibeAsyncHTTPClient(
             timeout=self._timeout,
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Accept": "application/json",
-            },
+            headers={"Accept": "application/json"},
             verify=build_ssl_context(),
         )
         return self
@@ -116,7 +124,13 @@ class RegistrySkillsClient:
         if self._client is None:
             raise RegistrySkillsError("client used outside of an async context")
         try:
-            response = await self._client.get(url, params=params)
+            response = await credential_request(
+                self._credentials, "GET", url, client=self._client, params=params
+            )
+        except PlatformCredentialUnavailable as exc:
+            raise RegistrySkillsError(
+                f"no platform credential ({exc.required.reason})"
+            ) from exc
         except httpx2.RequestError as exc:
             raise RegistrySkillsError(f"request failed: {exc}") from exc
 

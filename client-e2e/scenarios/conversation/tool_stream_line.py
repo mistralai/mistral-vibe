@@ -16,10 +16,6 @@ from e2e.app_server.scenario import Timeline
 _PROMPT = "tail the log"
 _EFFECT_ID = "streaming-bash"
 
-# Busy frames settle under replay so the streamed arrow line is capturable.
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
-# A release step must not consume a marker of its own, so settle key by key.
-settle_per_key = True
 # The lone running call stays ungrouped, so its stream line shows unfolded.
 capture_steps = {1, 2, 3}
 

@@ -11,7 +11,7 @@ use crate::onboarding_common::{fake_server, sandbox};
 fn headers_server() {
     fake_server::serve_scripted(|method, msg| {
         Ok(match method {
-            "setup/oidc-headers" => {
+            "platformCredentials/headers" => {
                 assert!(msg["params"]["url"].as_str().is_some());
                 json!({"headers": {"Authorization": "Bearer id-token", "x-external-organization-id": "org"}})
             }
@@ -52,7 +52,7 @@ async fn rust_audio_uses_server_oidc_headers_instead_of_saved_key() {
     assert_eq!(
         requests
             .iter()
-            .filter(|r| r["method"] == "setup/oidc-headers")
+            .filter(|r| r["method"] == "platformCredentials/headers")
             .count(),
         2
     );

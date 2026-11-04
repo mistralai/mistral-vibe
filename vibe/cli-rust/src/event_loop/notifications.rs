@@ -4,20 +4,18 @@ use std::sync::Arc;
 
 use crate::app::App;
 use crate::event_handler;
-use crate::server::{notification, Client, Notification};
+use crate::server::{Client, Notification};
 
 use super::{EventSources, NOTIF_DRAIN_CAP};
 
 /// Apply one notification and drain what fits, deferring when approval is full.
-/// Returns whether any of them was more than a replay drain sentinel.
 pub(super) fn absorb_notification(
     app: &mut App,
     client: &Arc<Client>,
     sources: &mut EventSources,
     first: Notification,
     deferred: &mut Option<Notification>,
-) -> bool {
-    let mut real = first.method != notification::REPLAY_DRAINED;
+) {
     if !event_handler::apply_notification(app, client, &first) {
         *deferred = Some(first);
     }
@@ -25,7 +23,6 @@ pub(super) fn absorb_notification(
     while drained < NOTIF_DRAIN_CAP && deferred.is_none() {
         match sources.notifications.try_recv() {
             Ok(notification) => {
-                real |= notification.method != notification::REPLAY_DRAINED;
                 if !event_handler::apply_notification(app, client, &notification) {
                     *deferred = Some(notification);
                 }
@@ -34,7 +31,6 @@ pub(super) fn absorb_notification(
             Err(_) => break,
         }
     }
-    real
 }
 
 /// Mark the backend closed; surface the crash notice when it died on us.

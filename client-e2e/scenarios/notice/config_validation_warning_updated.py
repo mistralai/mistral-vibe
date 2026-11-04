@@ -1,4 +1,4 @@
-"""A mid-session validation warning surfaces as a toast once (VIBE-5122)."""
+"""A mid-session validation warning mounts one warning row (VIBE-5122, VIBE-4099)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-# The second identical update must not re-toast: one warning, one toast.
+# The second identical update must not repeat it: one warning, one row.
 timeline: Timeline = [
     "hi\r",
     turn_started(),
@@ -22,5 +22,4 @@ timeline: Timeline = [
     runtime_updated(["Model 'toto' is not available — running 'Mistral Medium 3.5'."]),
 ]
 
-# The toast box wraps at 56 cells; assert fragments that each fit on one wrapped row.
-screen_contains = ("Model 'toto' is not available", "3.5'.")
+screen_contains = ("⚠ Model 'toto' is not available",)

@@ -55,6 +55,3 @@ timeline: Timeline = [
     _SHIFT_UP * 3,
     _SHIFT_DOWN * 3,
 ]
-
-# Each key must land on a settled UI: batching changes the outcome here.
-settle_per_key = True

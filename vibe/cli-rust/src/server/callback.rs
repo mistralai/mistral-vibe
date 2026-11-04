@@ -125,7 +125,7 @@ async fn send_deny(wiring: DenyWiring<'_>, address: &CallbackAddress, kind: &str
     }
     let callback_id = address.callback_id.clone();
     let notif_tx = notif_tx.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         match rx.await {
             Ok(Ok(_)) => {}
             Ok(Err(failure)) => {

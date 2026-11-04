@@ -70,6 +70,12 @@ pub struct StartupConfig {
     /// Whether the TUI captures the mouse; older caches keep capturing.
     #[serde(default = "default_enable_mouse_capture")]
     pub enable_mouse_capture: bool,
+    /// Whether `@` completion runs; older caches keep it on (ADR 0014).
+    #[serde(default = "default_enable_file_autocomplete")]
+    pub enable_file_autocomplete: bool,
+    /// Whether the file index watches the filesystem; older caches keep watching.
+    #[serde(default = "default_file_watcher_for_autocomplete")]
+    pub file_watcher_for_autocomplete: bool,
     /// Main input blink preference; older caches keep the default blinking caret.
     #[serde(default = "default_cursor_blink")]
     pub cursor_blink: bool,
@@ -107,6 +113,8 @@ impl Default for StartupConfig {
             disable_welcome_banner_animation: false,
             autocopy_to_clipboard: true,
             enable_mouse_capture: default_enable_mouse_capture(),
+            enable_file_autocomplete: default_enable_file_autocomplete(),
+            file_watcher_for_autocomplete: default_file_watcher_for_autocomplete(),
             cursor_blink: default_cursor_blink(),
             active_model: String::new(),
             active_model_display_name: String::new(),
@@ -128,6 +136,14 @@ fn default_cursor_blink() -> bool {
 }
 
 fn default_enable_mouse_capture() -> bool {
+    true
+}
+
+fn default_enable_file_autocomplete() -> bool {
+    true
+}
+
+fn default_file_watcher_for_autocomplete() -> bool {
     true
 }
 
@@ -213,6 +229,8 @@ impl StartupConfig {
             disable_welcome_banner_animation: config.disable_welcome_banner_animation,
             autocopy_to_clipboard: config.autocopy_to_clipboard,
             enable_mouse_capture: config.enable_mouse_capture,
+            enable_file_autocomplete: config.enable_file_autocomplete,
+            file_watcher_for_autocomplete: config.file_watcher_for_autocomplete,
             cursor_blink: config.cursor_blink,
             active_model: format!("{model_name}[{thinking}]"),
             active_model_display_name: model_name,

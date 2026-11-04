@@ -102,9 +102,8 @@ pub fn load_page(app: &mut App, client: &Arc<Client>) {
     };
     let offset = console.cursor.unwrap_or(0);
     let generation = console.generation.load(Ordering::Relaxed);
-    let pending = app.commit_started();
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let params = json!({"sessionId": session_id.clone(), "limit": PAGE_SIZE, "offset": offset});
         let page = client
             .request(method::DIAGNOSTICS_LOGS_READ, params)
@@ -120,7 +119,6 @@ pub fn load_page(app: &mut App, client: &Arc<Client>) {
                 requested: offset,
                 page,
             },
-            &pending,
         )
         .await;
     });
@@ -142,9 +140,8 @@ fn start_polling(
     let in_flight = console.page_in_flight.clone();
     let observed = generation.load(Ordering::Relaxed);
     let client = client.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(POLL_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    crate::work::spawn_daemon(async move {
+        let mut interval = crate::clock::interval_real(POLL_INTERVAL);
         interval.tick().await; // the first tick is immediate; polls start one interval in
         loop {
             interval.tick().await;

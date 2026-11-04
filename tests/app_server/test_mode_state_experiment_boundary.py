@@ -9,11 +9,15 @@ build_mode_state, which is what the desktop client renders.
 
 from __future__ import annotations
 
+from pathlib import Path
+import tomllib
+
 import pytest
+import tomli_w
 
 from vibe.acp.utils import build_mode_state
 from vibe.app_server._projection import project_agent_summaries
-from vibe.core.agents.manager import AgentManager, resolve_default_agent
+from vibe.core.agents.manager import AgentManager
 from vibe.core.config import build_default_orchestrator
 from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.experiments.active import ExperimentName
@@ -27,8 +31,8 @@ def _default_value_only_smart_approve() -> EvalResponse:
     return EvalResponse.model_validate({
         "features": {
             ExperimentName.SMART_APPROVE.value: {"defaultValue": True, "rules": []},
-            ExperimentName.SMART_APPROVE_DEFAULT.value: {
-                "defaultValue": True,
+            ExperimentName.DEFAULT_AGENT.value: {
+                "defaultValue": "smart-approve",
                 "rules": [],
             },
         }
@@ -51,15 +55,13 @@ async def test_default_value_rollout_enables_smart_approve_config() -> None:
     orchestrator = await _orchestrator_with_smart_approve()
     config = orchestrator.config
     assert config.smart_approve_available is True
-    assert config.smart_approve_default is True
-    assert config.smart_approve_offered() is True
-    assert resolve_default_agent(orchestrator) == "smart-approve"
+    assert config.default_agent == "smart-approve"
 
 
 @pytest.mark.asyncio
 async def test_default_value_rollout_surfaces_smart_approve_in_mode_list() -> None:
     orchestrator = await _orchestrator_with_smart_approve()
-    agents = AgentManager(orchestrator, resolve_default_agent(orchestrator))
+    agents = AgentManager(orchestrator, None)
 
     active, summaries = project_agent_summaries(
         agents.active_profile, agents.available_agents.values()
@@ -70,3 +72,19 @@ async def test_default_value_rollout_surfaces_smart_approve_in_mode_list() -> No
     assert "smart-approve" in mode_ids
     assert state.current_mode_id == "smart-approve"
     assert "smart-approve" in [choice.value for choice in option.options]
+
+
+@pytest.mark.asyncio
+async def test_default_value_rollout_keeps_the_configured_default_agent(
+    config_dir: Path,
+) -> None:
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["default_agent"] = "auto-approve"
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+    orchestrator = await _orchestrator_with_smart_approve()
+
+    agents = AgentManager(orchestrator, initial_agent=None)
+
+    assert orchestrator.config.origin_of("default_agent") == "user-toml"
+    assert agents.active_profile.name == "auto-approve"

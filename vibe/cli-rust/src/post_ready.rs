@@ -50,9 +50,10 @@ pub fn fetch(app: &mut App, client: &Arc<Client>, show_greeting: bool) {
     else {
         return;
     };
-    app.commit_started();
+    let model = crate::usage_gauge::account_model(app).to_owned();
+    app.whoami.ask(model.clone());
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let reads = read(&client, &session_id).await;
         let greeting = reads
             .as_ref()
@@ -62,7 +63,11 @@ pub fn fetch(app: &mut App, client: &Arc<Client>, show_greeting: bool) {
         if greeting.is_some() {
             greeting_cache::mark_shown();
         }
-        let _ = tx.try_send(CommandEvent::PostReady { reads, greeting });
+        let _ = tx.try_send(CommandEvent::PostReady {
+            model,
+            reads,
+            greeting,
+        });
     });
 }
 

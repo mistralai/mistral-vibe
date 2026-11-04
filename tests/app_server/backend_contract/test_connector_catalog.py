@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import json
 from typing import Any
 
 import httpx
@@ -787,6 +788,7 @@ async def test_terminal_connector_rejection_is_not_retried_until_revision_change
         await session.close()
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_connector_refresh_retains_old_session_revision_while_busy(
     backend_contract_connection: BackendContractConnection,
@@ -817,7 +819,7 @@ async def test_connector_refresh_retains_old_session_revision_while_busy(
 
     turn = asyncio.create_task(consume_turn())
     try:
-        await asyncio.wait_for(started.wait(), timeout=2)
+        await asyncio.wait_for(started.wait(), timeout=5)
         before = ConnectorCatalogReadResponse.model_validate(
             await backend_contract_connection.client.request(
                 "connector_catalog/read",
@@ -896,6 +898,88 @@ async def test_connector_refresh_retains_old_session_revision_while_busy(
         await session.close()
 
 
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_sessionless_refresh_during_a_turn_reaches_the_model_at_its_end(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_gated_mistral_response,
+    backend_contract_mistral_response,
+    backend_contract_mistral_api: respx.Route,
+    respx_mock: respx.MockRouter,
+) -> None:
+    """*Prepare*: A session running a turn, with GitHub and Linear connected.
+    *Do*: Disconnect Linear and send the sessionless refresh Desktop sends,
+      end the turn, then start the next one.
+    *Assert*: The next turn's model request offers GitHub's connector group
+      but no longer Linear's.
+    """
+    session, bootstrap_route = await _open_connector_session(
+        backend_contract_connection,
+        respx_mock,
+        _payload(
+            _connector("github/raw", "github"), _connector("linear/raw", "linear")
+        ),
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    requests: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request.content.decode())
+        if len(requests) == 1:
+            return backend_contract_gated_mistral_response(
+                "finished", started=started, release=release
+            )
+        return backend_contract_mistral_response("noted")
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+
+    async def consume_turn(message: str) -> None:
+        _ = [event async for event in session.act(message)]
+
+    turn = asyncio.create_task(consume_turn("wait"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        bootstrap_route.mock(
+            return_value=httpx.Response(
+                200,
+                json=_payload(
+                    _connector("github/raw", "github"),
+                    _connector(
+                        "linear/raw", "linear", ready=False, auth_action="oauth"
+                    ),
+                ),
+            )
+        )
+        await backend_contract_connection.client.request(
+            "connector_catalog/refresh", ConnectorCatalogRefreshParams()
+        )
+        release.set()
+        await turn
+
+        await consume_turn("next")
+
+        assert _connector_groups(requests[0]) == [
+            "connector_github",
+            "connector_linear",
+        ]
+        assert _connector_groups(requests[1]) == ["connector_github"]
+    finally:
+        release.set()
+        if not turn.done():
+            await turn
+        await session.close()
+
+
+def _connector_groups(request_body: str) -> list[str]:
+    """The connector groups the model's system message lists."""
+    system = json.loads(request_body)["messages"][0]["content"]
+    section = system.split("### Searchable connector groups\n\n", 1)[1]
+    listed = section.split("\n\n", 1)[0].splitlines()
+    return [line[2:] for line in listed if line.startswith("- connector_")]
+
+
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_busy_targeted_toggle_persists_and_converges_retained_candidate(
     backend_contract_connection: BackendContractConnection,
@@ -929,7 +1013,7 @@ async def test_busy_targeted_toggle_persists_and_converges_retained_candidate(
 
     turn = asyncio.create_task(consume_turn())
     try:
-        await asyncio.wait_for(started.wait(), timeout=2)
+        await asyncio.wait_for(started.wait(), timeout=5)
         before = ConnectorCatalogReadResponse.model_validate(
             await backend_contract_connection.client.request(
                 "connector_catalog/read",

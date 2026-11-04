@@ -1,4 +1,4 @@
-//! Fresh OIDC headers for first-party client-owned requests.
+//! The connection's first-party credential headers, for client-owned requests.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -34,7 +34,7 @@ pub async fn headers(
     let client = client.ok_or("OIDC authentication needs the app server")?;
     let value = tokio::time::timeout(
         Duration::from_secs(60),
-        client.request("setup/oidc-headers", json!({"url": url})),
+        client.request("platformCredentials/headers", json!({"url": url})),
     )
     .await
     .map_err(|_| "OIDC credential resolution timed out")?

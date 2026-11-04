@@ -31,5 +31,4 @@ timeline: Timeline = [
 ]
 
 capture_startup = False
-settle_per_key = True
 screen_excludes = ("Resume cancelled.",)

@@ -3,17 +3,23 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::collect_files;
 
-pub fn rebuild_index(root: &Path) -> (BTreeMap<String, bool>, bool) {
-    match git_ls_files(root) {
+/// `None` when nothing can stop this enumeration; a stopped one returns a
+/// partial map its caller must not publish.
+pub fn rebuild_index(root: &Path, stop: Option<&AtomicBool>) -> (BTreeMap<String, bool>, bool) {
+    match git_ls_files(root, stop) {
         Some(entries) => (entries, true),
-        None => (collect_files(root, root), false),
+        None => (collect_files(root, root, stop), false),
     }
 }
 
-pub fn git_ls_files(root: &Path) -> Option<BTreeMap<String, bool>> {
+pub fn git_ls_files(root: &Path, stop: Option<&AtomicBool>) -> Option<BTreeMap<String, bool>> {
+    if stop.is_some_and(|stop| stop.load(Ordering::Relaxed)) {
+        return None;
+    }
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -36,6 +42,9 @@ pub fn git_ls_files(root: &Path) -> Option<BTreeMap<String, bool>> {
     for raw in output.stdout.split(|byte| *byte == 0) {
         if raw.is_empty() {
             continue;
+        }
+        if stop.is_some_and(|stop| stop.load(Ordering::Relaxed)) {
+            return Some(entries);
         }
         let rel = String::from_utf8_lossy(raw).into_owned();
         let path = root.join(&rel);

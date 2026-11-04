@@ -107,6 +107,7 @@ def project_config_view(
         show_greeting=config.show_greeting,
         autocopy_to_clipboard=config.autocopy_to_clipboard,
         enable_mouse_capture=config.enable_mouse_capture,
+        enable_file_autocomplete=config.enable_file_autocomplete,
         file_watcher_for_autocomplete=config.file_watcher_for_autocomplete,
         ask_confirmation_on_exit=config.ask_confirmation_on_exit,
         voice_mode_enabled=config.voice_mode_enabled,

@@ -33,7 +33,7 @@ pub(super) fn clear_history(app: &mut App, client: &Arc<Client>, value: &str) {
         return;
     };
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         // Read before the clear: the server drops the old session once it is replaced.
         let previous_session_id = is_resumable(&client, &session_id, PREVIOUS_SESSION_READ_TIMEOUT)
             .await
@@ -81,6 +81,7 @@ pub fn cleared(
 /// Wipe the screen once the server confirmed: a failed clear keeps its history.
 fn reset_transcript(app: &mut App) {
     app.view.transcript.clear();
+    crate::notices::clear(app);
     app.todo_tracker.clear();
     app.queue.clear();
     app.view.transcript_cache.invalidate_layouts();
@@ -128,7 +129,7 @@ pub fn new_conversation_text(previous_session_id: Option<&str>) -> String {
 pub fn start_seed_turn(app: &App, client: &Arc<Client>, session_id: String, seed: QueuedPrompt) {
     let client = client.clone();
     let telemetry = app.telemetry_tx.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         super::submission::start_turn(client, session_id, seed, telemetry).await;
     });
 }

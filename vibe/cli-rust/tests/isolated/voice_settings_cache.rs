@@ -4,7 +4,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use serde_json::{json, Value};
-use vibe_rs::app::{App, ToastSeverity};
+use vibe_rs::app::App;
+use vibe_rs::server::{HistoryEntry, MessageContent};
 
 /// Guards VIBE_HOME, which is process-global across this binary's tests.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -49,16 +50,23 @@ fn unavailable_audio_warns_without_undoing_the_accepted_setting() {
 
     assert!(app.voice.mode_enabled, "the server accepted the change");
     let warning = app
-        .overlays
-        .toasts
-        .iter()
-        .find(|toast| matches!(toast.severity, ToastSeverity::Warning));
+        .view
+        .transcript
+        .lines()
+        .find_map(|line| match line.entry {
+            HistoryEntry::Message(message) if message.role == "command_warning" => {
+                match message.content.first() {
+                    Some(MessageContent::Text { text }) => Some(text.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        });
     if cfg!(feature = "voice") {
         assert!(warning.is_none());
     } else {
-        assert!(warning.is_some_and(|toast| toast
-            .text
-            .starts_with("Audio setting saved, but audio is unavailable")));
+        assert!(warning
+            .is_some_and(|text| text.starts_with("Audio setting saved, but audio is unavailable")));
     }
 }
 

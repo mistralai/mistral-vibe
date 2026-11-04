@@ -5,9 +5,6 @@ from e2e.app_server.scenario import Timeline
 
 _SHIFT_UP = "\x1b[1;2A"
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
-settle_per_key = True
-
 
 def _tall_reply(tag: str, lines: int) -> str:
     """Build a deterministic reply from distinct Markdown paragraphs."""

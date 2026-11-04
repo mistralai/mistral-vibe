@@ -193,6 +193,12 @@ pub fn bottom_bar_row(app: &mut App, width: u16) -> String {
     row(&bottom_bar(app, width), 0)
 }
 
+/// The cell where `text` starts in a row of one-cell glyphs, some multi-byte (`⧉`, `·`).
+pub fn column(row: &str, text: &str) -> u16 {
+    let byte = row.find(text).expect("text");
+    row[..byte].chars().count() as u16
+}
+
 /// A prompt the server already queued, with the same UI and server id.
 pub fn queued(id: &str, text: &str) -> QueueItem {
     QueueItem {

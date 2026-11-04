@@ -1,7 +1,7 @@
 //! The UI's channel plumbing: the shared widget-answer channel plus the few
 //! streams with their own capacity or drain rules, folded into the event loop's sources.
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
 use crate::app::App;
 use crate::commands::CommandEvent;
@@ -54,7 +54,6 @@ impl UiChannels {
         self,
         notifications: mpsc::Receiver<Notification>,
         ready: mpsc::Receiver<StartupEvent>,
-        files: watch::Receiver<u64>,
     ) -> EventSources {
         EventSources {
             notifications,
@@ -64,7 +63,6 @@ impl UiChannels {
             commands: self.commands,
             voice: self.voice,
             telemetry: self.telemetry,
-            files,
         }
     }
 }

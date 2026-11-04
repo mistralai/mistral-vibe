@@ -10,12 +10,7 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-# The turn stays open: the tool blocks on the callback until the user answers.
-env = {
-    "VIBE_REPLAY_SETTLE_BUSY": "1",
-    "VIBE_TYPING_GRACE_PERIOD_MS": "0",
-    "SSH_TTY": "/dev/pts/0",
-}
+env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0", "SSH_TTY": "/dev/pts/0"}
 handshake = {"callback/result": {"accepted": True}}
 capture_startup = False
 
@@ -47,6 +42,3 @@ timeline: Timeline = [
     {"release": 5},
     _DRAG_TITLE,
 ]
-
-# Each key must land on a settled UI: batching changes the outcome here.
-settle_per_key = True

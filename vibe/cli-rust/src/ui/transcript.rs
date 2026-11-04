@@ -239,6 +239,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         area.height,
         scroll.position,
     );
+    super::jump_to_bottom::draw(app, f, content_area);
 }
 
 /// The rows above the entries: `banner`, the promo with its links, then an empty child view's placeholder.

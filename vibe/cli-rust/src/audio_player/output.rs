@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
@@ -49,12 +49,12 @@ pub async fn play(pcm: Pcm, stop: Arc<AtomicBool>) -> Result<Done, AudioError> {
             }
         };
         let _ = ready_tx.send(Ok(()));
-        let deadline = Instant::now() + length + STALL_MARGIN;
+        let deadline = crate::clock::real_now() + length + STALL_MARGIN;
         let failed = || failure.lock().is_ok_and(|failure| failure.is_some());
         while !stop.load(Ordering::Relaxed)
             && !ended.load(Ordering::Relaxed)
             && !failed()
-            && Instant::now() < deadline
+            && crate::clock::real_now() < deadline
         {
             std::thread::sleep(POLL);
         }

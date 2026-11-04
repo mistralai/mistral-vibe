@@ -1,4 +1,5 @@
 //! A run stopped before its session opens ends at once, without the stop grace.
+#![allow(clippy::disallowed_methods)] // Tests drive tasks directly; replay acks never run here.
 
 use std::io::BufRead;
 use std::sync::Arc;

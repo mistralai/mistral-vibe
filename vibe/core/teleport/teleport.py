@@ -10,6 +10,7 @@ from uuid import uuid4
 import httpx2
 import zstandard
 
+from vibe.core.platform_auth import PlatformCredentialProvider
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.git import GitRepoInfo, GitRepository
 from vibe.core.teleport.nuage import (
@@ -40,7 +41,7 @@ class TeleportService:
     def __init__(
         self,
         vibe_code_sessions_base_url: str,
-        api_key: str,
+        credentials: PlatformCredentialProvider | None,
         workdir: Path | None = None,
         *,
         client: VibeAsyncHTTPClient | None = None,
@@ -48,7 +49,7 @@ class TeleportService:
         timeout: float = 60.0,
     ) -> None:
         self._vibe_code_sessions_base_url = vibe_code_sessions_base_url
-        self._api_key = api_key
+        self._credentials = credentials
         self._git = GitRepository(workdir)
         self._client = client
         self._project_store = project_store or VibeProjectsStore()
@@ -61,9 +62,12 @@ class TeleportService:
             self._client = VibeAsyncHTTPClient(
                 timeout=httpx2.Timeout(self._timeout), verify=build_ssl_context()
             )
-        self._nuage_client_instance = NuageClient(
-            self._vibe_code_sessions_base_url, self._api_key, client=self._client
-        )
+        if self._credentials is not None:
+            self._nuage_client_instance = NuageClient(
+                self._vibe_code_sessions_base_url,
+                self._credentials,
+                client=self._client,
+            )
         await self._git.__aenter__()
         return self
 
@@ -90,9 +94,11 @@ class TeleportService:
     @property
     def _nuage_client(self) -> NuageClient:
         if self._nuage_client_instance is None:
+            if self._credentials is None:
+                raise ServiceTeleportError("Mistral API key not set.")
             self._nuage_client_instance = NuageClient(
                 self._vibe_code_sessions_base_url,
-                self._api_key,
+                self._credentials,
                 client=self._http_client,
             )
         return self._nuage_client_instance
@@ -169,7 +175,7 @@ class TeleportService:
             raise ServiceTeleportError(f"Failed to push current branch to {remote}.")
 
     def _validate_config(self) -> None:
-        if not self._api_key:
+        if self._credentials is None:
             raise ServiceTeleportError("Mistral API key not set.")
 
     def _build_nuage_request(

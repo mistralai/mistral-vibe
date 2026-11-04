@@ -28,6 +28,7 @@ from vibe.app_server._effect_models import (
     FileWriteEffectInput as FileWriteEffectInput,
     FileWriteEffectOutput as FileWriteEffectOutput,
     GenericEffectDetail as GenericEffectDetail,
+    McpAppReference as McpAppReference,
     ProcessEffectDetail as ProcessEffectDetail,
     ScratchpadEffectDetail as ScratchpadEffectDetail,
     ScratchpadEffectInput as ScratchpadEffectInput,
@@ -116,6 +117,15 @@ class AccountApiKeyView(ProtocolModel):
     access_scope: str | None = None
 
 
+class AccountBudgetView(ProtocolModel):
+    """The monthly Vibe Code allowance, from ``/v1/billing/budget``."""
+
+    usage_percentage: float
+    reset_at: str | None = None
+    # Usage past 100% is billed instead of paused.
+    payg_enabled: bool = False
+
+
 class AccountView(ProtocolModel):
     status: AccountStatus
     plan: AccountPlanView | None = None
@@ -124,6 +134,7 @@ class AccountView(ProtocolModel):
     teleport_eligible: bool = False
     teleport_action: AccountAction | None = None
     api_key: AccountApiKeyView | None = None
+    budget: AccountBudgetView | None = None
 
 
 class IdentityEntityView(ProtocolModel):
@@ -1193,7 +1204,6 @@ class PublicSession(ProtocolModel):
     id: str
     root_session_id: str | None = None
     parent_session_id: str | None = None
-    # Filled by `session/list` only; absent elsewhere does not mean none.
     started_by_session_id: str | None = Field(
         default=None, exclude_if=lambda value: value is None
     )

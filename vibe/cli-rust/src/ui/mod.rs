@@ -1,23 +1,31 @@
 //! UI components; each submodule owns one region of the screen.
 
 pub mod approval;
+pub mod artifacts_checks;
 pub mod artifacts_modal;
 pub mod auth_app;
 pub mod banner;
 pub(crate) mod bottom_app;
 pub mod bottom_bar;
+mod bottom_bar_parts;
 pub mod braille_renderer;
 pub mod chat_input;
 pub mod completion_popup;
 pub(crate) mod composer_layout;
+pub mod composer_title;
 pub mod config;
 pub mod config_edit;
 mod config_options;
 pub mod connector_auth;
+pub mod context_app;
+pub mod context_bar;
 pub mod debug_console;
 pub mod feedback_bar;
+pub mod footer_fit;
+pub mod footer_gauge;
 pub mod highlight;
 pub(crate) mod hint_line;
+pub mod jump_to_bottom;
 pub(crate) mod list_cursor;
 mod list_hover;
 pub mod list_scroll;
@@ -39,6 +47,7 @@ mod question_rows;
 pub mod recording_indicator;
 pub mod release_notes;
 pub mod resume_picker;
+pub mod reverse_search;
 pub mod rewind;
 pub mod rng;
 pub mod scrollbar;
@@ -50,7 +59,6 @@ pub mod tab_cells;
 pub mod theme;
 pub mod theme_picker;
 pub mod thinking_picker;
-pub mod toast;
 pub mod todo;
 pub mod transcript;
 pub mod trust_folders;
@@ -73,25 +81,6 @@ pub fn draw(app: &mut App, f: &mut Frame) {
     let area = f.area();
     draw_active_screen(app, f, area);
     list_hover::paint(app, f);
-    // The toast stack is a top-level overlay so warnings show on every screen,
-    // not just the base chat.
-    toast::draw(app, f, toast_anchor(app, area));
-}
-
-/// Anchor the toast stack above the bottom-app box while one replaces the
-/// input box, else above the input box, else near the bottom of the frame so
-/// startup warnings on modal screens stay visible.
-fn toast_anchor(app: &App, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
-    if let Some((_, box_area)) = app.view.bottom_app {
-        box_area
-    } else if app.view.input_area.height > 0 {
-        app.view.input_area
-    } else if app.subagents.list.area.height > 0 {
-        // A child view hides the input box; the list sits where it was.
-        app.subagents.list.area
-    } else {
-        ratatui::layout::Rect::new(0, area.height.saturating_sub(1), area.width, 0)
-    }
 }
 
 fn draw_active_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
@@ -128,6 +117,7 @@ fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect
         Focus::ResumePicker => resume_picker::draw(app, f, area),
         Focus::Mcp => mcp::draw(app, f, area),
         Focus::Plugins => plugins::draw(app, f, area),
+        Focus::ContextApp => context_app::draw(app, f, area),
         Focus::McpOAuth => mcp_oauth::draw(app, f, area),
         Focus::ConnectorAuth => connector_auth::draw(app, f, area),
         Focus::Rewind => rewind::draw(app, f, area),

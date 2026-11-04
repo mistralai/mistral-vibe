@@ -33,7 +33,7 @@ pub struct Theme {
     pub input_cursor_bg: Color,
     pub scrollbar: Color,
     pub scrollbar_bg: Color,
-    /// `$panel-lighten-1`, used by toast backgrounds.
+    /// `$panel-lighten-1`, used by the jump-to-bottom chip.
     pub panel_lighten_1: Color,
 }
 
@@ -49,11 +49,15 @@ pub const AUTO_NAME: &str = "auto";
 
 /// Every built-in theme, ordered light A→Z then dark A→Z. Values are generated
 /// from Textual's `ColorSystem.generate()`, where these themes come from.
+/// The `mistral-*` rows feed it the brand palette (background, surface, panel,
+/// foreground and the six base colors below); `mistral-light` darkens
+/// `block_cursor_fg` to Black Strong for contrast on the orange cursor.
 #[rustfmt::skip]
 pub const ALL: &[Theme] = &[
     Theme { name: "ansi-light", dark: false, background: R, foreground: R, primary: Color::Blue, accent: Color::Magenta, secondary: Color::Cyan, warning: Color::LightRed, error: Color::Red, success: Color::Green, text_success: Color::Green, text_error: Color::Red, surface: R, popup_border: R, selection_bg: Color::Cyan, input_selection_bg: Color::Cyan, block_cursor_bg: Color::Blue, block_cursor_fg: Color::White, input_cursor_bg: Color::Reset, scrollbar: Color::LightBlue, scrollbar_bg: Color::Gray, panel_lighten_1: Color::Gray },
     Theme { name: "atom-one-light", dark: false, background: rgb(0xFAFAFA), foreground: rgb(0x383A42), primary: rgb(0x4078F2), accent: rgb(0xBF9232), secondary: rgb(0xA626A4), warning: rgb(0xD7D938), error: rgb(0xF13F3F), success: rgb(0x6BF23F), text_success: rgb(0x479F29), text_error: rgb(0x9F2929), surface: rgb(0xE0E0E0), popup_border: rgb(0x85868B), selection_bg: rgb(0x9DB9F6), input_selection_bg: rgb(0xBACDFC), block_cursor_bg: rgb(0x4078F2), block_cursor_fg: rgb(0xE6EDFD), input_cursor_bg: rgb(0x383A42), scrollbar: rgb(0xA2B8E9), scrollbar_bg: rgb(0xE4E4E4), panel_lighten_1: rgb(0xE1E1E1) },
     Theme { name: "catppuccin-latte", dark: false, background: rgb(0xEFF1F5), foreground: rgb(0x4C4F69), primary: rgb(0x8839EF), accent: rgb(0xFE640B), secondary: rgb(0xDB8A78), warning: rgb(0xDE8E1D), error: rgb(0xD10F39), success: rgb(0x40A02B), text_success: rgb(0x2A691C), text_error: rgb(0x8A0925), surface: rgb(0xE6E9EF), popup_border: rgb(0x8D8FA1), selection_bg: rgb(0xBB95F2), input_selection_bg: rgb(0xCEAFF9), block_cursor_bg: rgb(0x8839EF), block_cursor_fg: rgb(0xEFE5FC), input_cursor_bg: rgb(0x4C4F69), scrollbar: rgb(0xB89AE5), scrollbar_bg: rgb(0xD9DBDF), panel_lighten_1: rgb(0xE1E5EF) },
+    Theme { name: "mistral-light", dark: false, background: rgb(0xFBFBF8), foreground: rgb(0x171722), primary: rgb(0xFA500F), accent: rgb(0xFF8204), secondary: rgb(0x044298), warning: rgb(0xB75002), error: rgb(0xC4001D), success: rgb(0x318E68), text_success: rgb(0x205D44), text_error: rgb(0x810013), surface: rgb(0xF5F4EF), popup_border: rgb(0x727277), selection_bg: rgb(0xFAA583), input_selection_bg: rgb(0xFCBFA4), block_cursor_bg: rgb(0xFA500F), block_cursor_fg: rgb(0x171722), input_cursor_bg: rgb(0x171722), scrollbar: rgb(0xEDA98D), scrollbar_bg: rgb(0xE5E5E2), panel_lighten_1: rgb(0xF1F1FD) },
     Theme { name: "rose-pine-dawn", dark: false, background: rgb(0xFAF4ED), foreground: rgb(0x575279), primary: rgb(0x907AA9), accent: rgb(0xD7827E), secondary: rgb(0x286983), warning: rgb(0xE99D34), error: rgb(0xB4637A), success: rgb(0x56949F), text_success: rgb(0x386168), text_error: rgb(0x764150), surface: rgb(0xFFFAF3), popup_border: rgb(0x9892A7), selection_bg: rgb(0xC5B7CB), input_selection_bg: rgb(0xDFDAD9), block_cursor_bg: rgb(0x575279), block_cursor_fg: rgb(0xFAF4ED), input_cursor_bg: rgb(0x575279), scrollbar: rgb(0xC2B6C4), scrollbar_bg: rgb(0xE4DED7), panel_lighten_1: rgb(0xFFFEF6) },
     Theme { name: "solarized-light", dark: false, background: rgb(0xFDF6E3), foreground: rgb(0x586E75), primary: rgb(0x268BD2), accent: rgb(0x6C71C4), secondary: rgb(0x2AA198), warning: rgb(0xCA4B16), error: rgb(0xDB322F), success: rgb(0x849900), text_success: rgb(0x576400), text_error: rgb(0x91211F), surface: rgb(0xEEE8D5), popup_border: rgb(0x9AA4A1), selection_bg: rgb(0x91C0DA), input_selection_bg: rgb(0xB3D2E4), block_cursor_bg: rgb(0x268BD2), block_cursor_fg: rgb(0xE2EFF9), input_cursor_bg: rgb(0x586E75), scrollbar: rgb(0x99BECF), scrollbar_bg: rgb(0xE7E0CD), panel_lighten_1: rgb(0xFFFDEA) },
     Theme { name: "textual-light", dark: false, background: rgb(0xE0E0E0), foreground: rgb(0x1F1F1F), primary: rgb(0x004578), accent: rgb(0xFFA62B), secondary: rgb(0x0178D4), warning: rgb(0xFEA62B), error: rgb(0xB93C5B), success: rgb(0x4EBF71), text_success: rgb(0x337E4A), text_error: rgb(0x7A273C), surface: rgb(0xD8D8D8), popup_border: rgb(0x6C6C6C), selection_bg: rgb(0x7092AC), input_selection_bg: rgb(0x94A8BE), block_cursor_bg: rgb(0x004578), block_cursor_fg: rgb(0xDDE6ED), input_cursor_bg: rgb(0x1F1F1F), scrollbar: rgb(0x7994A9), scrollbar_bg: rgb(0xCACACA), panel_lighten_1: rgb(0xE5E5E5) },
@@ -65,6 +69,7 @@ pub const ALL: &[Theme] = &[
     Theme { name: "dracula", dark: true, background: rgb(0x282A36), foreground: rgb(0xF8F8F2), primary: rgb(0xBD93F9), accent: rgb(0xFF79C6), secondary: rgb(0x6272A4), warning: rgb(0xFEB86C), error: rgb(0xFE5555), success: rgb(0x50FA7B), text_success: rgb(0x8BFBA7), text_error: rgb(0xFF8E8E), surface: rgb(0x2B2E3B), popup_border: rgb(0xA4A5A6), selection_bg: rgb(0x725E97), input_selection_bg: rgb(0x6C5C86), block_cursor_bg: rgb(0xBD93F9), block_cursor_fg: rgb(0x181320), input_cursor_bg: rgb(0xF8F8F2), scrollbar: rgb(0x5A4A79), scrollbar_bg: rgb(0x181A25), panel_lighten_1: rgb(0x414453) },
     Theme { name: "flexoki", dark: true, background: rgb(0x100F0F), foreground: rgb(0xFFFCF0), primary: rgb(0x205EA6), accent: rgb(0x9B76C8), secondary: rgb(0x24837B), warning: rgb(0xAC8301), error: rgb(0xAE3029), success: rgb(0x65800B), text_success: rgb(0x9AAB5D), text_error: rgb(0xCA7671), surface: rgb(0x1C1B1A), popup_border: rgb(0x9F9D96), selection_bg: rgb(0x17365A), input_selection_bg: rgb(0x31302E), block_cursor_bg: rgb(0x205EA6), block_cursor_fg: rgb(0xE2EAF3), input_cursor_bg: rgb(0xFFFCF0), scrollbar: rgb(0x0C2542), scrollbar_bg: rgb(0x000000), panel_lighten_1: rgb(0x383736) },
     Theme { name: "gruvbox", dark: true, background: rgb(0x282828), foreground: rgb(0xFBF1C7), primary: rgb(0x85A598), accent: rgb(0xFABD2F), secondary: rgb(0xA89A85), warning: rgb(0xFD8019), error: rgb(0xFA4934), success: rgb(0xB7BB26), text_success: rgb(0xD0D26F), text_error: rgb(0xFC8679), surface: rgb(0x3C3836), popup_border: rgb(0xA6A087), selection_bg: rgb(0x56665F), input_selection_bg: rgb(0x384538), block_cursor_bg: rgb(0x85A598), block_cursor_fg: rgb(0xFBF1C7), input_cursor_bg: rgb(0xFBF1C7), scrollbar: rgb(0x43504B), scrollbar_bg: rgb(0x181818), panel_lighten_1: rgb(0x615A56) },
+    Theme { name: "mistral-dark", dark: true, background: rgb(0x1D1D2A), foreground: rgb(0xF5F4EF), primary: rgb(0xFF8204), accent: rgb(0xFFAF01), secondary: rgb(0x55B3FB), warning: rgb(0xFEC63A), error: rgb(0xFF6E35), success: rgb(0x44BA82), text_success: rgb(0x83D1AC), text_error: rgb(0xFF9F79), surface: rgb(0x2C2C3C), popup_border: rgb(0x9E9EA0), selection_bg: rgb(0x8D4F17), input_selection_bg: rgb(0x774D28), block_cursor_bg: rgb(0xFF8204), block_cursor_fg: rgb(0x211000), input_cursor_bg: rgb(0xF5F4EF), scrollbar: rgb(0x6D3A11), scrollbar_bg: rgb(0x0D0B1A), panel_lighten_1: rgb(0x515166) },
     Theme { name: "monokai", dark: true, background: rgb(0x272822), foreground: rgb(0xD6D6D6), primary: rgb(0xAE81FF), accent: rgb(0x66D9EF), secondary: rgb(0xF82672), warning: rgb(0xFC971F), error: rgb(0xF82672), success: rgb(0xA5E22E), text_success: rgb(0xC4EB75), text_error: rgb(0xFB6FA1), surface: rgb(0x2E2E2E), popup_border: rgb(0x797979), selection_bg: rgb(0x6A5490), input_selection_bg: rgb(0x424445), block_cursor_bg: rgb(0xAE81FF), block_cursor_fg: rgb(0x161021), input_cursor_bg: rgb(0xD6D6D6), scrollbar: rgb(0x534270), scrollbar_bg: rgb(0x171812), panel_lighten_1: rgb(0x4F4E42) },
     Theme { name: "nord", dark: true, background: rgb(0x2E3440), foreground: rgb(0xD8DEE9), primary: rgb(0x88C0D0), accent: rgb(0xB48EAD), secondary: rgb(0x81A1C1), warning: rgb(0xEACB8B), error: rgb(0xBE616A), success: rgb(0xA3BE8C), text_success: rgb(0xC2D4B3), text_error: rgb(0xD4969C), surface: rgb(0x3B4252), popup_border: rgb(0x949AA5), selection_bg: rgb(0x5A7987), input_selection_bg: rgb(0x4B5A6D), block_cursor_bg: rgb(0x88C0D0), block_cursor_fg: rgb(0x2E3440), input_cursor_bg: rgb(0xD8DEE9), scrollbar: rgb(0x48626F), scrollbar_bg: rgb(0x1E242F), panel_lighten_1: rgb(0x545D70) },
     Theme { name: "rose-pine", dark: true, background: rgb(0x191724), foreground: rgb(0xE0DEF4), primary: rgb(0xC4A7E7), accent: rgb(0xEBBCBA), secondary: rgb(0x31748F), warning: rgb(0xF5C177), error: rgb(0xEA6F92), success: rgb(0x9CCFD8), text_success: rgb(0xBDDFE5), text_error: rgb(0xF19FB7), surface: rgb(0x1F1D2E), popup_border: rgb(0x908EA0), selection_bg: rgb(0x6E5E85), input_selection_bg: rgb(0x403D52), block_cursor_bg: rgb(0xC4A7E7), block_cursor_fg: rgb(0x191724), input_cursor_bg: rgb(0xF4EDE8), scrollbar: rgb(0x524269), scrollbar_bg: rgb(0x060015), panel_lighten_1: rgb(0x36324B) },
@@ -75,9 +80,9 @@ pub const ALL: &[Theme] = &[
 ];
 
 /// Index into `ALL` of the currently active theme. Seeded from config at startup.
-static ACTIVE: AtomicUsize = AtomicUsize::new(11);
+static ACTIVE: AtomicUsize = AtomicUsize::new(12);
 /// Process-local resolution of the persisted `auto` value, seeded dark.
-static AUTO_RESOLVED: AtomicUsize = AtomicUsize::new(6);
+static AUTO_RESOLVED: AtomicUsize = AtomicUsize::new(7);
 
 /// The active theme's palette.
 pub fn active() -> &'static Theme {
@@ -102,8 +107,8 @@ pub fn selection_fg() -> Color {
     }
 }
 
-/// `$panel-lighten-1`, used by toast backgrounds.
-pub fn toast_background() -> Color {
+/// `$panel-lighten-1`, used by the jump-to-bottom chip.
+pub fn chip_background() -> Color {
     active().panel_lighten_1
 }
 

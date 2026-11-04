@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from tests.conftest import ConfigBuilder, OrchestratorLoader
-from vibe.core.agents.manager import AgentManager, resolve_default_agent
+from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import (
     BUILTIN_AGENTS,
     EXPLORE,
@@ -142,20 +142,16 @@ class TestAgentManager:
         assert "smart-approve" in manager.available_agents
         assert "smart-approve" in manager.get_agent_order()
 
-    def test_smart_approve_default_flag_offers_and_defaults(
+    def test_smart_approve_as_default_agent_is_offered_without_the_flag(
         self,
         build_config: ConfigBuilder,
         load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        """The default flag both exposes smart approve and makes it the resolved default."""
-        config = build_config(smart_approve_default=True)
-        orchestrator = load_orchestrator(config)
-        manager = AgentManager(
-            orchestrator, initial_agent=resolve_default_agent(orchestrator)
-        )
+        config = build_config(default_agent="smart-approve")
+        manager = AgentManager(load_orchestrator(config), initial_agent=None)
 
-        assert "smart-approve" in manager.available_agents
         assert manager.active_profile.name == "smart-approve"
+        assert "smart-approve" in manager.available_agents
 
     def test_explicit_smart_approve_selection_bypasses_the_gate(
         self,
@@ -466,9 +462,7 @@ class TestAgentManager:
         config = build_config(default_agent="plan")
         with caplog.at_level("WARNING"):
             orchestrator = load_orchestrator(config)
-            manager = AgentManager(
-                orchestrator, initial_agent=resolve_default_agent(orchestrator)
-            )
+            manager = AgentManager(orchestrator, initial_agent=None)
 
         assert manager.active_profile.name == "ask"
         assert "plan" not in manager.available_agents
@@ -496,9 +490,7 @@ class TestAgentManager:
         config = build_config(default_agent="plan", agent_paths=[agents_dir])
 
         orchestrator = load_orchestrator(config)
-        manager = AgentManager(
-            orchestrator, initial_agent=resolve_default_agent(orchestrator)
-        )
+        manager = AgentManager(orchestrator, initial_agent=None)
 
         assert manager.active_profile.name == "plan"
         assert manager.active_profile.display_name == "My Plan"
@@ -557,10 +549,11 @@ class TestAgentManager:
 
 
 async def _org_orchestrator(
-    *, local: dict[str, Any] | None = None, policy: str = "", cohort: bool = False
+    *, local: dict[str, Any] | None = None, policy: str = "", rollout: str | None = None
 ) -> ConfigOrchestrator[VibeConfigSchema]:
     growthbook = GrowthbookLayer()
-    growthbook.set_variants({"vibe_cli_smart_approve_default": cohort})
+    if rollout is not None:
+        growthbook.set_variants({"vibe_cli_default_agent": rollout})
     admin = AdminConfigLayer()
     admin.load_managed_toml(policy)
     return await ConfigOrchestrator.create(
@@ -572,32 +565,62 @@ async def _org_orchestrator(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("local", "policy", "cohort", "expected"),
+    ("local", "policy", "rollout", "expected"),
     [
-        ({}, "", False, BuiltinAgentName.ACCEPT_EDITS),
-        ({"default_agent": "ask"}, "", False, BuiltinAgentName.ASK),
-        # The smart-approve experiment's cohort default beats the local one.
-        ({"default_agent": "ask"}, "", True, BuiltinAgentName.SMART_APPROVE),
-        # An org-enforced default beats the experiment.
-        ({}, 'default_agent = "ask"\n', True, BuiltinAgentName.ASK),
-        # Even when the org also enforces the experiment's flag: an org that
-        # wants smart-approve as the default enforces it as default_agent.
+        ({}, "", None, BuiltinAgentName.ACCEPT_EDITS),
+        ({"default_agent": "ask"}, "", None, BuiltinAgentName.ASK),
+        # The rollout only replaces the built-in default.
+        ({}, "", "smart-approve", BuiltinAgentName.SMART_APPROVE),
+        ({}, "", "ask", BuiltinAgentName.ASK),
+        ({"default_agent": "ask"}, "", "smart-approve", BuiltinAgentName.ASK),
         (
-            {},
-            'default_agent = "ask"\nsmart_approve_default = true\n',
-            True,
-            BuiltinAgentName.ASK,
+            {"default_agent": "auto-approve"},
+            "",
+            "smart-approve",
+            BuiltinAgentName.AUTO_APPROVE,
         ),
-        # An org config without default_agent leaves the experiment alone.
-        ({}, 'theme = "nord"\n', True, BuiltinAgentName.SMART_APPROVE),
+        # The org's default beats both.
+        ({}, 'default_agent = "ask"\n', "smart-approve", BuiltinAgentName.ASK),
+        ({}, 'theme = "nord"\n', "smart-approve", BuiltinAgentName.SMART_APPROVE),
     ],
 )
-async def test_resolve_default_agent(
-    local: dict[str, Any], policy: str, cohort: bool, expected: str
+async def test_a_new_session_starts_in_the_default_agent(
+    local: dict[str, Any], policy: str, rollout: str | None, expected: str
 ) -> None:
-    orchestrator = await _org_orchestrator(local=local, policy=policy, cohort=cohort)
+    local = {**local, "smart_approve_available": True}
+    orchestrator = await _org_orchestrator(local=local, policy=policy, rollout=rollout)
 
-    assert resolve_default_agent(orchestrator) == expected
+    agents = AgentManager(orchestrator, None)
+
+    assert agents.active_profile.name == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("local", "rollout", "started"),
+    [
+        ({"disabled_agents": ["ask"]}, "ask", BuiltinAgentName.ACCEPT_EDITS),
+        # The experiment does not opt a user into smart-approve: the mode
+        # still needs the vibe_cli_smart_approve rollout, and the user's lists.
+        ({}, "smart-approve", BuiltinAgentName.ACCEPT_EDITS),
+        (
+            {"smart_approve_available": True, "disabled_agents": ["smart-approve"]},
+            "smart-approve",
+            BuiltinAgentName.ACCEPT_EDITS,
+        ),
+    ],
+)
+async def test_a_rollout_default_the_session_cannot_start_starts_another_mode(
+    local: dict[str, Any], rollout: str, started: str
+) -> None:
+    # The user did not choose the rollout's mode, so it must not stop the
+    # session from starting.
+    orchestrator = await _org_orchestrator(local=local, rollout=rollout)
+
+    agents = AgentManager(orchestrator, None)
+
+    assert agents.active_profile.name == started
+    assert agents.excluded_agent is None
 
 
 @pytest.mark.asyncio
@@ -726,22 +749,26 @@ async def test_a_local_enabled_agents_does_not_widen_the_orgs() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("policy", "requested", "cohort"),
+    ("policy", "requested", "rollout"),
     [
         # Asking for smart-approve opts in past the rollout gate, not past the
         # org's agent lists.
-        ('disabled_agents = ["smart-approve"]\n', "smart-approve", False),
-        # Nor does the experiment's cohort default.
-        ('disabled_agents = ["smart-approve"]\n', None, True),
-        ('enabled_agents = ["ask", "accept-edits"]\n', None, True),
+        ('disabled_agents = ["smart-approve"]\n', "smart-approve", None),
+        # Nor does the rollout's default.
+        ('disabled_agents = ["smart-approve"]\n', None, "smart-approve"),
+        ('enabled_agents = ["ask", "accept-edits"]\n', None, "smart-approve"),
         # A fallback the org excludes is skipped too.
-        ('disabled_agents = ["auto-approve", "smart-approve"]\n', "auto-approve", True),
+        (
+            'disabled_agents = ["auto-approve", "smart-approve"]\n',
+            "auto-approve",
+            "smart-approve",
+        ),
     ],
 )
 async def test_smart_approve_the_org_excludes_never_starts(
-    policy: str, requested: str | None, cohort: bool
+    policy: str, requested: str | None, rollout: str | None
 ) -> None:
-    orchestrator = await _org_orchestrator(policy=policy, cohort=cohort)
+    orchestrator = await _org_orchestrator(policy=policy, rollout=rollout)
 
     agents = AgentManager(orchestrator, requested)
 

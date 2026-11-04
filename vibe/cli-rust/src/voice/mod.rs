@@ -56,7 +56,8 @@ pub struct Recording {
 impl Recording {
     /// Signal end-of-audio; the pipeline flushes and later emits `Finished`.
     pub fn stop(&self) {
-        self.signal.stop(self.started.elapsed());
+        self.signal
+            .stop(crate::clock::real_now().duration_since(self.started));
         self.stop.store(true, Ordering::Relaxed);
     }
 
@@ -97,7 +98,7 @@ pub fn start(
     let task_cancel = cancel.clone();
     let task_stop = stop.clone();
     let task_signal = signal.clone();
-    let task = tokio::spawn(async move {
+    let task = crate::work::spawn_daemon(async move {
         let result = transcribe::transcribe(
             &cfg,
             credential_client.as_deref(),
@@ -133,7 +134,7 @@ pub fn start(
     Ok(Recording {
         stop,
         signal,
-        started: Instant::now(),
+        started: crate::clock::real_now(),
         cancel,
         task,
     })

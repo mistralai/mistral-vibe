@@ -91,11 +91,11 @@ def _build_commands() -> dict[str, AcpCommand]:
         "retry": AcpCommand(
             name="retry",
             description=(
-                "Continue an interrupted model response; optionally pass "
+                "Retry a failed or interrupted response; optionally pass "
                 "additional instructions"
             ),
             kind=AcpCommandKind.RETRY,
-            input_hint="Optional additional instructions for the continuation",
+            input_hint="Optional additional instructions for the retry",
         ),
         "leanstall": AcpCommand(
             name="leanstall",

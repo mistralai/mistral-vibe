@@ -235,9 +235,23 @@ class _EffectDetailBase(ProtocolModel):
     display: EffectCallDisplay
 
 
+class McpAppReference(ProtocolModel):
+    """The MCP App that renders a connector tool's calls.
+
+    Clients load ``resource_uri`` and call the app's tools through the
+    connector, so the connector id is the one the connectors API knows.
+    """
+
+    resource_uri: str
+    connector_id: str
+    connector_name: str
+    connector_display_name: str
+
+
 class GenericEffectDetail(_EffectDetailBase):
     kind: Literal[ToolEffectKind.TOOL] = ToolEffectKind.TOOL
     input: JsonValue = None
+    mcp_app: McpAppReference | None = None
 
 
 class ShellEffectDetail(_EffectDetailBase):

@@ -3,11 +3,13 @@
 use ratatui::style::{Color, Modifier, Style};
 
 pub mod color_system;
+mod context;
 pub mod fixed;
 mod markdown;
 mod registry;
 pub(crate) mod syntax;
 
+pub use context::{context_buffer, context_palette, context_track};
 pub use fixed::{LOADING_GRADIENT, ORANGE};
 pub use markdown::{
     code_plain, md_accent, md_code_inline, md_fence_border, md_heading, md_keyline, md_link,
@@ -16,8 +18,8 @@ pub use markdown::{
 };
 
 pub use registry::{
-    active, active_index, ansi_background, resolve, selection_fg, set_active_index,
-    toast_background, ALL, AUTO_NAME,
+    active, active_index, ansi_background, chip_background, resolve, selection_fg,
+    set_active_index, ALL, AUTO_NAME,
 };
 
 /// Seed the detected `auto` palette, then activate the configured name.
@@ -93,6 +95,10 @@ pub fn muted() -> Color {
 pub fn popup_border() -> Color {
     active().popup_border
 }
+/// Border lines in `popup_border`, SGR-dimmed on ANSI themes to match the truecolor blend.
+pub fn border_style() -> Style {
+    dim(popup_border())
+}
 /// Text-selection highlight background (`$screen-selection-background`).
 pub fn selection_bg() -> Color {
     active().selection_bg
@@ -102,7 +108,7 @@ pub fn selection_bg() -> Color {
 pub fn warning() -> Color {
     active().warning
 }
-/// $success — a safe agent's input border, completed effects, added diff lines.
+/// $success — a safe agent's mode label, completed effects, added diff lines.
 pub fn success() -> Color {
     active().success
 }
@@ -187,6 +193,22 @@ pub fn input_cursor_reverse() -> bool {
 /// styles differ from truecolor themes (fence margin, code color).
 pub fn is_ansi() -> bool {
     active().background == Color::Reset
+}
+
+/// A footer gauge's fill and the track it fills: white on bright black on ANSI themes, else the text on a faint tint.
+pub fn gauge_fill() -> Color {
+    match (is_ansi(), is_dark()) {
+        (true, true) => Color::White,
+        (true, false) => Color::Black,
+        (false, _) => foreground(),
+    }
+}
+pub fn gauge_track() -> Color {
+    match (is_ansi(), is_dark()) {
+        (true, true) => Color::DarkGray,
+        (true, false) => Color::Gray,
+        (false, _) => blend(background(), auto_contrast(), 0.22),
+    }
 }
 
 /// Scrollbar thumb ($scrollbar) and track ($scrollbar-background).

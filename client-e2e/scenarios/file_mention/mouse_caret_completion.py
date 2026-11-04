@@ -11,7 +11,6 @@ _DRAG = "\x1b[<0;41;36M\x1b[<32;13;36M\x1b[<0;13;36m"
 
 capture_startup = False
 capture_steps = {1, 2, 5, 7}
-settle_per_key = True
 expected_clipboard = "@README.md ! @data/fixture.j"
 
 timeline: Timeline = [

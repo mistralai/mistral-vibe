@@ -14,6 +14,12 @@ from vibe.cli.transcribe import (
     TranscribeSessionCreated,
     TranscribeTextDelta,
 )
+from vibe.core.platform_auth import (
+    ApiKeyPlatformCredentialProvider,
+    PlatformCredentialProvider,
+    PlatformCredentialSnapshot,
+    PlatformCredentialTarget,
+)
 
 
 def _make_provider() -> AudioProviderView:
@@ -316,3 +322,54 @@ class TestConnectionCloseRace:
             TranscribeError,
         ]
         assert isinstance(events[-1], TranscribeError)
+
+
+class _UserToken:
+    """A signed-in user's ID token, as Desktop or the CLI session resolves it."""
+
+    async def resolve(self, target: PlatformCredentialTarget) -> object:
+        del target
+        return PlatformCredentialSnapshot(
+            kind="oidc_id_token",
+            headers={"Authorization": "Bearer user-id-token"},
+            cache_namespace="oidc_id_token:test",
+            revision="revision",
+        )
+
+    async def reject(self, target: object, **_: object) -> object:
+        raise AssertionError("no request was refused")
+
+
+@pytest.mark.parametrize(
+    ("credentials", "follows"),
+    [
+        (ApiKeyPlatformCredentialProvider.from_api_key("test-key"), True),
+        (_UserToken(), False),
+    ],
+    ids=["api_key", "user_token"],
+)
+@pytest.mark.asyncio
+async def test_only_an_api_key_follows_a_redirect(
+    credentials: PlatformCredentialProvider, follows: bool
+) -> None:
+    """*Prepare*: A transcription client for each kind of credential.
+    *Do*: Transcribe.
+    *Assert*: Its HTTP client follows redirects for an API key, as before, and
+      never for a user token.
+    """
+    # Prepare
+    client = MistralTranscribeClient(
+        _make_provider(), _make_model(), credentials=credentials
+    )
+    sdk = client._get_client()
+    sdk.audio.realtime.transcribe_stream = _patch_sdk([
+        _make_sdk_done("")
+    ]).audio.realtime.transcribe_stream
+
+    # Do
+    await _collect(client)
+
+    # Assert
+    assert client._http_client is not None
+    assert client._http_client.follow_redirects is follows
+    await client.close()

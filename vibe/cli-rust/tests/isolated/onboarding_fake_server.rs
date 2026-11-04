@@ -312,7 +312,7 @@ async fn retry_sign_in_resets_the_full_browser_sign_in_state() {
     wizard.browser_sign_in.sign_in_url = Some("https://console.example/sign-in".into());
     wizard.browser_sign_in.show_url_help = true;
     wizard.browser_sign_in.reveal_sign_in_url = true;
-    wizard.browser_sign_in.sign_in_started_at = Some(std::time::Instant::now());
+    wizard.browser_sign_in.sign_in_started_at = Some(vibe_rs::clock::now());
 
     let mut sign_in = None;
     let close = handle_onboarding_action(

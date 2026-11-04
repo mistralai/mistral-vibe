@@ -6,7 +6,7 @@ use vibe_rs::ui::theme;
 #[test]
 fn semantic_colors_match_theme_bindings() {
     theme::prepare_active("ansi-dark", "ansi-dark");
-    assert_eq!(theme::toast_background(), Color::Black);
+    assert_eq!(theme::chip_background(), Color::Black);
     assert_eq!(theme::selection_bg(), Color::LightBlue);
     assert_eq!(theme::selection_fg(), Color::Black);
     assert_eq!(theme::link_hover_style().fg, Some(Color::Black));
@@ -14,7 +14,7 @@ fn semantic_colors_match_theme_bindings() {
     assert_eq!(theme::block_hover_bg(Color::Reset), Color::Black);
 
     theme::prepare_active("ansi-light", "ansi-light");
-    assert_eq!(theme::toast_background(), Color::Gray);
+    assert_eq!(theme::chip_background(), Color::Gray);
     assert_eq!(theme::selection_bg(), Color::Cyan);
     assert_eq!(theme::selection_fg(), Color::White);
     assert_eq!(theme::link_hover_style().fg, Some(Color::Gray));
@@ -38,6 +38,8 @@ fn semantic_colors_match_theme_bindings() {
         ("dracula", Color::Rgb(0x41, 0x44, 0x53)),
         ("flexoki", Color::Rgb(0x38, 0x37, 0x36)),
         ("gruvbox", Color::Rgb(0x61, 0x5A, 0x56)),
+        ("mistral-dark", Color::Rgb(0x51, 0x51, 0x66)),
+        ("mistral-light", Color::Rgb(0xF1, 0xF1, 0xFD)),
         ("monokai", Color::Rgb(0x4F, 0x4E, 0x42)),
         ("nord", Color::Rgb(0x54, 0x5D, 0x70)),
         ("rose-pine", Color::Rgb(0x36, 0x32, 0x4B)),
@@ -50,6 +52,6 @@ fn semantic_colors_match_theme_bindings() {
         ("tokyo-night", Color::Rgb(0x53, 0x59, 0x7A)),
     ] {
         theme::prepare_active(name, "ansi-dark");
-        assert_eq!(theme::toast_background(), expected, "{name}");
+        assert_eq!(theme::chip_background(), expected, "{name}");
     }
 }

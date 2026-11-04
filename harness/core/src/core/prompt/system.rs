@@ -245,6 +245,7 @@ mod tests {
                 input_schema: json!({"type": "object"}),
                 output_schema: None,
                 exposure: ProvidedToolExposure::Programmatic,
+                direct_name: None,
             }],
         });
         config.capabilities.skills.push(SkillDefinition {
@@ -366,6 +367,9 @@ mod tests {
         assert!(prompt.contains(
             "For unfamiliar tool calls, use this sequence: `best_match` → `details` → `run_typescript`."
         ));
+        assert!(prompt.contains(
+            "A tool with no group is in the `client` group: call it as `tools.client.<function>`."
+        ));
         assert!(!prompt.contains("mode: \"best_match\""));
         assert!(!prompt.contains("all_connector_capabilities"));
         assert!(!prompt.contains("moreCandidatesAvailable"));
@@ -429,6 +433,7 @@ mod tests {
                     input_schema: json!({"type": "object"}),
                     output_schema: None,
                     exposure: ProvidedToolExposure::Programmatic,
+                    direct_name: None,
                 }],
             });
             config.capabilities.skills.push(SkillDefinition {

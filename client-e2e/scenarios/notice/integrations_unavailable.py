@@ -1,4 +1,4 @@
-"""A connector that failed to load mid-turn is named in a toast; the turn still completes."""
+"""A connector that failed to load mid-turn is named in a warning row; the turn still completes."""
 
 from __future__ import annotations
 
@@ -25,4 +25,4 @@ timeline: Timeline = [
     turn_completed(),
 ]
 
-screen_contains = ("Couldn't load connectors Buildkite", "Hello.")
+screen_contains = ("⚠ Couldn't load connectors Buildkite", "Hello.")

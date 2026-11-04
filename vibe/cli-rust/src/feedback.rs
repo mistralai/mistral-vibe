@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::UiInstant;
 
 use serde_json::Value;
 
@@ -27,7 +29,7 @@ pub enum Message {
 #[derive(Default)]
 pub struct Feedback {
     pub message: Message,
-    pub hide_at: Option<Instant>,
+    pub hide_at: Option<UiInstant>,
     pub snooze_duration_seconds: Option<u64>,
     checking: bool,
 }
@@ -51,7 +53,6 @@ pub fn maybe_show(app: &mut App, client: &Arc<Client>, session_id: Option<String
         return;
     };
     app.feedback.checking = true;
-    let pending = app.commit_started();
     let params = FeedbackShouldShowParams {
         session_id: session_id.clone(),
         pending_user_messages: 1,
@@ -64,7 +65,7 @@ pub fn maybe_show(app: &mut App, client: &Arc<Client>, session_id: Option<String
         serde_json::to_value(params).unwrap_or(Value::Null),
     );
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let (show, snooze_duration_seconds) = match sent {
             Ok(rx) => match rx.await {
                 Ok(Ok(value)) => serde_json::from_value::<FeedbackShouldShowResponse>(value)
@@ -85,7 +86,6 @@ pub fn maybe_show(app: &mut App, client: &Arc<Client>, session_id: Option<String
                 show,
                 snooze_duration_seconds,
             },
-            &pending,
         )
         .await;
     });
@@ -112,7 +112,7 @@ pub fn rate(app: &mut App, client: &Arc<Client>, rating: u8) {
         return;
     }
     app.feedback.message = Message::ThankYou;
-    app.feedback.hide_at = Some(Instant::now() + THANK_YOU_DURATION);
+    app.feedback.hide_at = Some(crate::clock::now() + THANK_YOU_DURATION);
     record(app, client, FeedbackAction::Given, Some(rating));
 }
 
@@ -121,7 +121,7 @@ pub fn snooze(app: &mut App, client: &Arc<Client>) {
         return;
     }
     app.feedback.message = Message::Snoozed;
-    app.feedback.hide_at = Some(Instant::now() + THANK_YOU_DURATION);
+    app.feedback.hide_at = Some(crate::clock::now() + THANK_YOU_DURATION);
     record(app, client, FeedbackAction::Snoozed, None);
 }
 
@@ -131,7 +131,11 @@ pub fn hide(app: &mut App) {
 }
 
 pub fn hide_expired(app: &mut App) {
-    if app.feedback.hide_at.is_some_and(|at| Instant::now() >= at) {
+    if app
+        .feedback
+        .hide_at
+        .is_some_and(|at| crate::clock::now() >= at)
+    {
         hide(app);
     }
 }

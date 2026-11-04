@@ -1,16 +1,18 @@
-//! Browser sign-in state folding: one sign-in event becomes wizard view
-//! state plus the actions it resolves to (a completed sign-in submits its
-//! key).
+//! Browser sign-in state folding; a completed sign-in arms its action behind the success dwell.
 
-use std::time::Instant;
+use std::time::Duration;
+
+use crate::clock::UiInstant;
 
 use crate::setup::auth::sign_in_flow::{SignInEvent, SignInStatus};
 
 use super::Action;
 
-/// Fold one browser sign-in event into the wizard state, returning the actions
-/// it resolves to (a completed sign-in submits its key).
-pub fn sign_in_actions(state: &mut BrowserSignInState, event: SignInEvent) -> Vec<Action> {
+/// How long "Sign-in complete" shows before the wizard moves on.
+pub const SUCCESS_DWELL: Duration = Duration::from_secs(2);
+
+/// Fold one browser sign-in event into the wizard state.
+pub fn apply_sign_in_event(state: &mut BrowserSignInState, event: SignInEvent) {
     match event {
         SignInEvent::Started { sign_in_url } => {
             state.sign_in_url = Some(sign_in_url);
@@ -18,8 +20,7 @@ pub fn sign_in_actions(state: &mut BrowserSignInState, event: SignInEvent) -> Ve
             // live, the copy help appears after the 4s help delay.
             state.show_url_help = crate::utils::is_replaying();
             state.reveal_sign_in_url = false;
-            state.sign_in_started_at = Some(Instant::now());
-            Vec::new()
+            state.sign_in_started_at = Some(crate::clock::now());
         }
         SignInEvent::StatusChanged(status) => {
             match status {
@@ -42,17 +43,15 @@ pub fn sign_in_actions(state: &mut BrowserSignInState, event: SignInEvent) -> Ve
                     state.message = "Sign-in complete".into();
                 }
             }
-            Vec::new()
         }
-        SignInEvent::Completed { api_key } => vec![Action::SubmitApiKey(api_key)],
-        SignInEvent::OidcCompleted => vec![Action::CompleteOidc],
+        SignInEvent::Completed { api_key } => state.finish(Action::SubmitApiKey(api_key)),
+        SignInEvent::OidcCompleted => state.finish(Action::CompleteOidc),
         SignInEvent::Failed { message } => {
             state.variant = SignInVariant::Error;
             state.message = message;
             state.running = false;
             // Keep the copy help when a URL exists.
             state.show_url_help = state.sign_in_url.is_some();
-            Vec::new()
         }
     }
 }
@@ -78,13 +77,19 @@ pub struct BrowserSignInState {
     pub reveal_sign_in_url: bool,
     /// When the sign-in URL landed; the copy help appears 4s later unless the
     /// copy key set `show_url_help` already.
-    pub sign_in_started_at: Option<Instant>,
+    pub sign_in_started_at: Option<UiInstant>,
+    /// The completed sign-in's action and the UI time it runs at, once the success dwell ends.
+    pub finished: Option<(UiInstant, Action)>,
 }
 
 impl BrowserSignInState {
-    /// A spawned flow that has not reached its waiting step nor failed yet.
-    pub fn is_starting(&self) -> bool {
-        self.running && self.variant == SignInVariant::Pending && self.step == SignInStep::Open
+    fn finish(&mut self, action: Action) {
+        self.finished = Some((crate::clock::now() + SUCCESS_DWELL, action));
+    }
+
+    /// When the completed sign-in's action is due.
+    pub fn finished_at(&self) -> Option<UiInstant> {
+        self.finished.as_ref().map(|(at, _)| *at)
     }
 }
 
@@ -106,6 +111,7 @@ impl Default for BrowserSignInState {
             show_url_help: false,
             reveal_sign_in_url: false,
             sign_in_started_at: None,
+            finished: None,
         }
     }
 }

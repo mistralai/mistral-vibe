@@ -149,9 +149,8 @@ fn spawn(app: &App, reply: impl Future<Output = Reply> + Send + 'static) {
     let Some(tx) = app.command_tx.clone() else {
         return;
     };
-    let pending = app.commit_started();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let reply = reply.await;
-        deliver(Some(tx), CommandEvent::Teleport(Box::new(reply)), &pending).await;
+        deliver(Some(tx), CommandEvent::Teleport(Box::new(reply))).await;
     });
 }

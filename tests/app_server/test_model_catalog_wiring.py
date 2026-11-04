@@ -57,7 +57,7 @@ async def test_the_cached_catalog_reaches_the_session_config(
     _enable_model_catalog(config_dir)
     monkeypatch.setattr(
         "vibe.core.model_catalog.load_cached_model_catalog",
-        lambda _config: _runnable_catalog("cached-model"),
+        lambda _config, _credentials=None: _runnable_catalog("cached-model"),
     )
     orchestrator = await build_default_orchestrator()
 
@@ -205,7 +205,7 @@ async def test_every_session_config_starts_with_the_cached_catalog(
     _enable_model_catalog(config_dir)
     monkeypatch.setattr(
         "vibe.core.model_catalog.load_cached_model_catalog",
-        lambda _config: _runnable_catalog("cached-model"),
+        lambda _config, _credentials=None: _runnable_catalog("cached-model"),
     )
 
     session_config = await runtime_module.HarnessProcess(
@@ -232,7 +232,7 @@ async def test_a_cached_catalog_applies_a_sparse_override_from_the_first_build(
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
     monkeypatch.setattr(
         "vibe.core.model_catalog.load_cached_model_catalog",
-        lambda _config: _runnable_catalog("cached-model"),
+        lambda _config, _credentials=None: _runnable_catalog("cached-model"),
     )
 
     session_config = await runtime_module.HarnessProcess(

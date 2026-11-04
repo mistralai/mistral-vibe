@@ -49,7 +49,9 @@ def _config(*, has_credential: bool = True) -> Any:
 
 @pytest.fixture
 def _fixed_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cache, "_cache_key", lambda _config: "user-abc")
+    monkeypatch.setattr(
+        cache, "_cache_key", lambda _config, _credentials=None: "user-abc"
+    )
 
 
 def test_store_then_load_round_trips(_fixed_key: None) -> None:
@@ -98,7 +100,9 @@ def test_store_overwrites_previous_catalog_with_empty_list(_fixed_key: None) -> 
 
 def test_entries_are_isolated_per_credential(monkeypatch: pytest.MonkeyPatch) -> None:
     current = {"key": "user-a"}
-    monkeypatch.setattr(cache, "_cache_key", lambda _config: current["key"])
+    monkeypatch.setattr(
+        cache, "_cache_key", lambda _config, _credentials=None: current["key"]
+    )
 
     store_cached_model_catalog(_config(), _catalog())
     current["key"] = "user-b"

@@ -40,7 +40,7 @@ async def test_agents_list_offers_smart_approve_from_cached_experiment(
     monkeypatch.setattr(
         cached_layers_module,
         "load_cached_eval_response",
-        lambda _config: _smart_approve_available_response(),
+        lambda _config, _credentials=None: _smart_approve_available_response(),
     )
     handler = HostRequestHandler(
         HarnessFilesManager(sources=("user",)), org_config=process_services.org_config

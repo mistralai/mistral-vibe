@@ -275,6 +275,7 @@ async def test_an_auto_worktree_is_still_a_worktree(
         await connection.host.close()
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_first_turn_response_does_not_wait_for_worktree_creation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
@@ -347,6 +348,7 @@ async def test_first_turn_response_does_not_wait_for_worktree_creation(
         await connection.host.close()
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_an_agent_switch_does_not_wait_for_worktree_creation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
@@ -419,6 +421,7 @@ async def test_an_agent_switch_does_not_wait_for_worktree_creation(
         await connection.host.close()
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_a_turn_claimed_before_a_failed_worktree_reports_it_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
@@ -529,6 +532,7 @@ async def test_a_session_without_a_worktree_runs_where_it_was_told(
         await connection.host.close()
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 @pytest.mark.parametrize("file_location", ["extra", "checkout"])
 async def test_a_worktree_preserves_extra_roots_but_not_the_original_checkout(
@@ -631,6 +635,7 @@ async def test_a_session_holds_its_worktree_and_lets_go_on_close(
     assert session_id not in managed.holders()
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_the_first_tool_call_runs_inside_the_worktree(
     backend_contract_mistral_api: respx.Route,
@@ -709,6 +714,7 @@ async def test_the_first_tool_call_runs_inside_the_worktree(
         await connection.host.close()
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_a_worktree_that_cannot_be_raised_refuses_the_turn(
     tmp_path: Path, process_services: ProcessServices
@@ -751,6 +757,7 @@ async def test_a_worktree_that_cannot_be_raised_refuses_the_turn(
         await connection.host.close()
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_smart_approve_does_not_treat_the_worktree_as_agent_config(
     backend_contract_mistral_api: respx.Route,

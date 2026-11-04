@@ -23,7 +23,6 @@ fn progress_events_update_the_status_row_and_keep_the_app_busy() {
         )]
     );
     assert!(teleport::busy(&app));
-    assert!(!app.is_idle());
     assert!(teleport::loading_since(&app).is_some());
 }
 
@@ -74,7 +73,7 @@ fn push_required_without_a_count_still_asks() {
 #[test]
 fn push_required_declines_instead_of_replacing_a_callback_question() {
     let mut app = running();
-    app.chat_input.last_keystroke = Some(std::time::Instant::now());
+    app.chat_input.last_keystroke = Some(vibe_rs::clock::now());
     let callback = QuestionSource::Callback(vibe_rs::server::CallbackAddress {
         callback_id: "callback".into(),
         session_id: Some("session".into()),
@@ -99,7 +98,7 @@ fn complete_settles_the_row_with_the_url() {
         json!({"kind": "complete", "url": "https://chat.example/code/1"}),
     );
     assert!(app.teleport.is_none());
-    assert!(app.is_idle());
+    assert!(!teleport::busy(&app));
     assert_eq!(
         transcript_rows(&app),
         [(
@@ -215,7 +214,7 @@ fn a_cancel_racing_push_required_closes_the_push_question() {
 #[test]
 fn a_new_session_drops_a_push_question_still_waiting_to_open() {
     let mut app = running();
-    app.chat_input.last_keystroke = Some(std::time::Instant::now());
+    app.chat_input.last_keystroke = Some(vibe_rs::clock::now());
     emit(
         &mut app,
         json!({"kind": "push_required", "unpushedCount": 1}),

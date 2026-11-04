@@ -15,7 +15,7 @@ request_methods = {"session/lease/subscribe"}
 
 # Enter submits /resume (the picker highlights the current session), Up
 # selects the locked row, and its Enter is refused locally with the busy
-# toast, without a session/resume request.
+# warning row, without a session/resume request.
 timeline: Timeline = ["/resume", "\r", "\x1b[A", "\r"]
 
 capture_startup = False

@@ -6,9 +6,9 @@ import hashlib
 from typing import Literal, cast
 
 from pydantic import Field, JsonValue
-import rfc8785
 
 from mistralai_vibe_local_harness.protocol import RustRuntimeBuiltinToolCallAction
+from mistralai_vibe_local_harness.vibe._storage import sha256_json
 from mistralai_vibe_local_harness.vibe._subagents._models import (
     ChildSessionRecord,
     ChildTombstone,
@@ -33,6 +33,7 @@ class SpawnInput(SubagentModel):
     agent_name: str = Field(alias="agentName", min_length=1)
     message: str = Field(min_length=1)
     agent_type: str | None = Field(default=None, alias="agentType", min_length=1)
+    instructions: str | None = Field(default=None, min_length=1)
 
 
 class WaitInput(SubagentModel):
@@ -54,13 +55,25 @@ class InterruptInput(AgentInput):
 
 
 def request_digest(action: RustRuntimeBuiltinToolCallAction) -> str:
-    payload = {"name": action.call.name, "arguments": action.call.arguments}
-    return hashlib.sha256(rfc8785.dumps(payload)).hexdigest()
+    return sha256_json({"name": action.call.name, "arguments": action.call.arguments})
 
 
-def child_session_id(parent_session_id: str, action_id: str) -> str:
-    digest = hashlib.sha256(f"{parent_session_id}\0{action_id}".encode()).hexdigest()
-    return f"child-{digest[:24]}"
+def child_session_id(
+    parent_session_id: str, action_id: str, admission_sequence: int
+) -> str:
+    """The session ID of the child an ``agents.spawn`` Action admits.
+
+    Core names a spawn Action after the model's call ID, which a provider can
+    reuse in a later turn while the earlier child lives on, so the Action ID
+    alone does not name one child. The admission sequence only ever grows, and
+    a resumed spawn reads its session ID back from its receipt rather than
+    deriving it again.
+    """
+    seed = f"{parent_session_id}\0{action_id}\0{admission_sequence}"
+    return f"child-{hashlib.sha256(seed.encode()).hexdigest()[:24]}"
+
+
+CHILD_WATCH_FAILED = "subagent_child_watch_failed"
 
 
 def failure(code: str, message: str, *, retryable: bool) -> SubagentFailure:
@@ -129,10 +142,16 @@ def child_unavailable_failure(child: ChildSessionRecord) -> SubagentFailure:
 def child_is_sendable(child: ChildSessionRecord) -> bool:
     if isinstance(child.state, RunningChild | IdleChild):
         return True
-    return isinstance(child.state, TurnFailedChild) and child.state.reusable
+    # A failed Turn leaves the child's Session valid. Only a child whose Turn its
+    # parent could not observe stays unavailable.
+    return (
+        isinstance(child.state, TurnFailedChild)
+        and child.state.outcome.failure.code != CHILD_WATCH_FAILED
+    )
 
 
 __all__ = [
+    "CHILD_WATCH_FAILED",
     "AgentInput",
     "ListInput",
     "MessageInput",

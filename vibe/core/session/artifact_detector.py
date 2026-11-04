@@ -30,7 +30,6 @@ __all__ = [
     "cli_binary_source",
     "extract_draft_from_command",
     "extract_pr_from_output",
-    "extract_title_from_command",
     "find_cli_binary",
     "is_pr_creation_command",
     "resolve_gitlab_repo_id",
@@ -105,10 +104,14 @@ def cli_binary_source(name: str) -> Literal["system", "bundled", "none"]:
 # blanked before matching: ``rg 'gh pr create'`` is a search, not a creation.
 _QUOTED_SPAN_RE = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'')
 
-# A creation must start a command position: the beginning of the command
-# string, or right after a shell separator. This keeps ``echo gh pr create``
-# (a message, not a creation) from matching.
-_COMMAND_POSITION = r"(?:^|[;&|(\n])\s*"
+_COMMENT_RE = re.compile(r"(?:^|(?<=\s))#[^\n]*")
+_COMMAND_SEPARATOR_RE = re.compile(r"[;&|(\n]")
+
+# The CLI may sit anywhere in a simple command, after a wrapper that runs it
+# (``perl -e 'alarm 90; exec @ARGV' gh``, ``timeout 90 gh``, ``env X=1 gh``),
+# but only as a whole word: ``foo-gh`` and ``gh.sh`` are other programs.
+# Commands that print their arguments say nothing about a creation.
+_PRINTING_COMMANDS = frozenset({"echo", "printf", "print"})
 
 # Global flags may sit between the CLI and its subcommand (``gh -R o/r pr
 # create``, ``glab --hostname gitlab.example.com mr create``), and the binary
@@ -118,7 +121,7 @@ _GLOBAL_FLAGS = r"(?:\s+(?:-R|--repo|--hostname)(?:[=\s]\S+)?)*"
 
 def _cli_command_re(cli: str, subcommand: str) -> re.Pattern[str]:
     return re.compile(
-        _COMMAND_POSITION
+        r"(?:^|(?<=\s))"
         + rf"(?:[\w.@~+/:\\-]+[\\/])?{cli}(?:\.exe)?"
         + _GLOBAL_FLAGS
         + rf"\s+{subcommand}\b",
@@ -136,11 +139,15 @@ _GLAB_MR_REOPEN_RE = _cli_command_re("glab", r"mr\s+reopen")
 
 def is_pr_creation_command(command: str) -> Literal["github", "gitlab"] | None:
     """Return the provider if the command creates or reopens a PR/MR, else None."""
-    unquoted = _QUOTED_SPAN_RE.sub(" ", command)
-    if _GH_PR_CREATE_RE.search(unquoted) or _GH_PR_REOPEN_RE.search(unquoted):
-        return "github"
-    if _GLAB_MR_CREATE_RE.search(unquoted) or _GLAB_MR_REOPEN_RE.search(unquoted):
-        return "gitlab"
+    unquoted = _COMMENT_RE.sub(" ", _QUOTED_SPAN_RE.sub(" ", command))
+    for segment in _COMMAND_SEPARATOR_RE.split(unquoted):
+        words = segment.split(maxsplit=1)
+        if not words or words[0].lower() in _PRINTING_COMMANDS:
+            continue
+        if _GH_PR_CREATE_RE.search(segment) or _GH_PR_REOPEN_RE.search(segment):
+            return "github"
+        if _GLAB_MR_CREATE_RE.search(segment) or _GLAB_MR_REOPEN_RE.search(segment):
+            return "gitlab"
     return None
 
 
@@ -318,49 +325,10 @@ async def resolve_gitlab_repo_id(
 # --- Metadata extraction from the command ---
 
 
-def _mask_quoted_spans(command: str) -> str:
-    """Blank quoted spans with same-length NUL placeholders, so match
-    positions in the masked command align 1:1 with the raw command and
-    whitespace-separator patterns stop right before a blanked value.
-    """
-    return _QUOTED_SPAN_RE.sub(lambda match: "\x00" * len(match.group(0)), command)
-
-
-# Title flag locators run on the masked command: a ``--title`` / ``-t``
-# inside a quoted ``--body``/``--description`` is text, not a flag. The
-# title's own quoted argument is read back from the raw command.
-_TITLE_FLAG_PATTERNS = [
-    re.compile(r"--title[=\s]+"),
-    # ``-t`` must start a token so it never matches inside ``--title`` or a
-    # longer flag.
-    re.compile(r"(?<![\w-])-t\s+"),
-]
-_TITLE_VALUE_PATTERNS = [
-    # A quoted title may contain spaces — capture everything between quotes.
-    re.compile(r"[\"']([^\"']+)[\"']"),
-    # An unquoted title is a single shell token — stop before the next flag.
-    re.compile(r"([^\"\'\s]\S*)"),
-]
-
 # --draft is unambiguous for both gh and glab.
 _DRAFT_LONG_RE = re.compile(r"--draft\b")
 # -d means --draft for gh but --description for glab; only match it for gh.
 _DRAFT_SHORT_GH_RE = re.compile(r"(?<![\w-])-d\b")
-
-
-def extract_title_from_command(command: str) -> str | None:
-    """Extract the PR/MR title from ``--title`` / ``-t`` in the command."""
-    masked = _mask_quoted_spans(command)
-    for flag_pattern in _TITLE_FLAG_PATTERNS:
-        flag_match = flag_pattern.search(masked)
-        if flag_match is None:
-            continue
-        rest = command[flag_match.end() :]
-        for value_pattern in _TITLE_VALUE_PATTERNS:
-            value_match = value_pattern.match(rest)
-            if value_match:
-                return value_match.group(1).strip()
-    return None
 
 
 def extract_draft_from_command(

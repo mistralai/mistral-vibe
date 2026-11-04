@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{App, Status};
+use crate::app::{App, Severity, Status};
 use crate::hints::{action, key, Hint};
 use crate::server::Client;
 use crate::ui;
@@ -23,7 +23,6 @@ const CONSUMED_EDIT_HINTS: &[Hint] = &[
     (key::ESC, action::DISCARD),
 ];
 const CONSUMED_EDIT_HINT: &str = "This message was already processed - press Enter again.";
-const CONSUMED_EDIT_HINT_SECS: u64 = 8;
 const REPLACEMENT_PENDING_HINT: &str = "Saving queued prompt…";
 const REPLACEMENT_PENDING_HINT_SECS: u64 = 3;
 
@@ -114,7 +113,12 @@ pub fn edit_selected(app: &mut App) {
         .filter(|item| &item.server_message_id == server_message_id)
         .any(|item| item.replacing)
     {
-        ui::notice::show(app, REPLACEMENT_PENDING_HINT, REPLACEMENT_PENDING_HINT_SECS);
+        ui::notice::show(
+            app,
+            Severity::Information,
+            REPLACEMENT_PENDING_HINT,
+            REPLACEMENT_PENDING_HINT_SECS,
+        );
         return;
     }
     app.queue.editing = true;
@@ -150,7 +154,7 @@ pub fn confirm_consumed_edit(app: &mut App) -> bool {
         return false;
     };
     app.queue.consumed_edit = Some(ConsumedEdit::Confirmed { position });
-    ui::notice::show_warning(app, CONSUMED_EDIT_HINT, CONSUMED_EDIT_HINT_SECS);
+    ui::notice::show_sticky(app, Severity::Warning, CONSUMED_EDIT_HINT);
     true
 }
 

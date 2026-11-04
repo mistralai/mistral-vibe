@@ -5,6 +5,7 @@ use crate::core::action_id;
 use crate::core::error::CoreError;
 use crate::core::features::large_output::{ResultDisposition, evaluate_result};
 use crate::core::features::permissions::{ApprovalFailureReason, ApprovalOutcome};
+use crate::core::features::programmatic_tool_calling;
 use crate::core::features::programmatic_tool_calling::{
     AcceptedProgramResult, CompletedProgramResult, ProgramAdvance, ProgramInput, ProgramOutcome,
     ProgramTransition, dispatch as dispatch_program,
@@ -57,7 +58,10 @@ pub(crate) fn start_tool_batch(
     let mut effects = Vec::new();
     let mut observations = calls
         .iter()
-        .map(|call| tool_execution_started(tools.turn_id, &call.id))
+        .map(|call| {
+            let executed_by_core = core_tool(tools, call).is_some();
+            tool_execution_started(tools.turn_id, &call.id, executed_by_core)
+        })
         .collect::<Vec<_>>();
     let mixed_batch = calls.len() > 1;
     for call in calls {
@@ -105,9 +109,8 @@ fn start_tool_execution(
         let result = invalid_tool_call_result(invalid_json_arguments_reason(error));
         return Ok(completed_execution(tools.turn_id, call, result, Vec::new()));
     }
-    // With programmatic tool calling disabled, `search_tool_functions` and
-    // `run_typescript` fall through to the direct routes and fail as unsupported.
-    if tools.programmatic_enabled()
+    let core_tool = core_tool(tools, &call);
+    if core_tool == Some(CoreTool::ToolDiscovery)
         && let Some(result) = tool_discovery::dispatch(&call, |request| tools.search(request))
     {
         let observations = result
@@ -127,7 +130,7 @@ fn start_tool_execution(
         ));
     }
     let mut accepted_results = Vec::new();
-    if tools.programmatic_enabled()
+    if core_tool == Some(CoreTool::Program)
         && let Some(result) = tools.with_program_context(|context| {
             dispatch_program(context, &call, determinism, &mut accepted_results)
         })
@@ -413,10 +416,32 @@ fn completed_execution(
     (ToolExecution { call, state }, Vec::new(), observations)
 }
 
-fn tool_execution_started(turn_id: &str, call_id: &str) -> Observation {
+/// A tool Core runs itself, so that no tool call Action reaches the Runtime for
+/// it. Routing and the start Observation's `executed_by_core` both read it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CoreTool {
+    ToolDiscovery,
+    Program,
+}
+
+/// The tool Core runs itself that this model tool call names. Without
+/// programmatic tool calling there is none: `search_tool_functions` and
+/// `run_typescript` fall through to the direct routes and fail as unsupported.
+fn core_tool(tools: ToolContext<'_>, call: &ToolCall) -> Option<CoreTool> {
+    if !tools.programmatic_enabled() {
+        return None;
+    }
+    if tool_discovery::is_direct_name(&call.name) {
+        return Some(CoreTool::ToolDiscovery);
+    }
+    programmatic_tool_calling::is_direct_name(&call.name).then_some(CoreTool::Program)
+}
+
+fn tool_execution_started(turn_id: &str, call_id: &str, executed_by_core: bool) -> Observation {
     Observation::ToolExecutionStarted {
         turn_id: turn_id.to_string(),
         call_id: call_id.to_string(),
+        executed_by_core,
     }
 }
 
@@ -446,6 +471,10 @@ fn resolve_tool_batch(batch: ToolBatch, actions: Vec<Action>) -> ToolBatchResolu
             .collect();
         return ToolBatchResolution::ContinueTurn { messages };
     }
+    let actions = actions
+        .into_iter()
+        .map(|action| batch.with_program_parent(action))
+        .collect();
     ToolBatchResolution::AwaitingActions { batch, actions }
 }
 
@@ -776,6 +805,7 @@ pub(crate) fn finish_tool_batch_hook(
                     Some((skipped_tool_result(reason)?, pending.call.clone()))
                 }
                 (HookSide::Post, HookResult::PostToolCall { tool_result }) => {
+                    observations.extend(pending.post_hook_warning(&tool_result, tools.turn_id));
                     Some((tool_result, pending.call.clone()))
                 }
                 (HookSide::Pre, _) => {
@@ -805,6 +835,17 @@ pub(crate) fn finish_tool_batch_hook(
             execution_index,
             hook_action_id,
         } => {
+            if let (
+                ToolExecutionState::ProgramPending { execution: program },
+                HookResult::PostToolCall { tool_result },
+            ) = (&batch.executions[execution_index].state, &result)
+            {
+                observations.extend(program.post_hook_warning(
+                    &hook_action_id,
+                    tool_result,
+                    tools.turn_id,
+                ));
+            }
             advance_program(
                 tools,
                 &mut batch.executions[execution_index],

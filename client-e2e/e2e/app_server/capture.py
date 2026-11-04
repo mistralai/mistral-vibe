@@ -14,10 +14,10 @@ import subprocess
 import tempfile
 
 from e2e.app_server.config import (
-    BATCH_KEYS,
+    ACK_PREFIX,
     CLIENT_BIN,
     COLUMNS,
-    IDLE_MARKER,
+    FENCE_KEY,
     MINIMAL_HOME_CONFIG,
     REPLAY_BIN,
     REPLAY_NOW_MS,
@@ -108,10 +108,11 @@ def capture_scenario(scenario: Scenario, launch: Launcher = exec_launch) -> Capt
             env=env,
             rows=ROWS,
             columns=COLUMNS,
-            idle_marker=IDLE_MARKER,
+            ack_prefix=ACK_PREFIX,
+            fence_key=FENCE_KEY,
             steps=tuple(step.text for step in scenario.steps),
             resizes=tuple(step.resize for step in scenario.steps),
-            batch_keys=None if scenario.settle_per_key else BATCH_KEYS,
+            settle_per_key=scenario.settle_per_key,
             exit_after_last_step=scenario.exit_after_last_step,
             terminal_responses=tuple(
                 (query.encode(), response.encode())
@@ -244,6 +245,9 @@ def _environment(
     environment = os.environ.copy()
     # The pin is server-owned (clients learn it via setup/status); a host-set value would leak into goldens.
     environment.pop("VIBE_CUSTOM_CONSOLE_URL", None)
+    # A host tmux would receive copies through `tmux load-buffer` instead of the PTY.
+    environment.pop("TMUX", None)
+    environment.pop("TMUX_PANE", None)
     environment.update({
         "TERM": "xterm-256color",
         # Pin truecolor so the host's COLORTERM never decides the rendered colors.

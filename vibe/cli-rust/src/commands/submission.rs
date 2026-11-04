@@ -11,7 +11,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::{dispatch, is_side_channel, parse, waits_for_jobs};
-use crate::app::{App, QueuedPrompt, Status, ToastSeverity};
+use crate::app::{App, QueuedPrompt, Severity, Status};
 use crate::input_modes::{classify, classify_submitted, submitted_value, ClassifiedInput};
 use crate::startup::banners;
 use crate::telemetry::TelemetrySender;
@@ -19,8 +19,6 @@ use crate::transcript::local;
 use crate::{completion_manager, config, message_queue};
 
 pub(super) const NOTICE_TIMEOUT_SECS: u64 = 4;
-/// Toast timeout (5s).
-const TOAST_SECS: u64 = 5;
 
 /// Replay slash commands deferred while the session was starting.
 /// Returns true if a deferred `/exit` was replayed, so the caller can quit.
@@ -48,7 +46,7 @@ pub fn flush_pending(
             saved_input = value;
             restore_rejected = true;
         }
-        app.show_toast(message, ToastSeverity::Warning, TOAST_SECS);
+        crate::ui::notice::show_sticky(app, Severity::Warning, &message);
     };
     for value in pending {
         if let ClassifiedInput::Teleport { target } = classify(&value, &[]) {
@@ -262,7 +260,7 @@ fn record_loop_usage(app: &App, value: &str) {
 }
 
 fn reject_input(app: &mut App, value: &str, message: String) {
-    app.show_toast(message, ToastSeverity::Warning, TOAST_SECS);
+    crate::ui::notice::show_sticky(app, Severity::Warning, &message);
     remember(app, value);
     app.chat_input.cursor = 0;
     completion_manager::input_changed(app);
@@ -337,7 +335,10 @@ pub fn interrupt_turn(app: &mut App, client: &Arc<Client>) {
         return;
     }
     crate::telemetry::user_cancelled_action(app, "interrupt_agent");
-    local::add_interrupt(&mut app.view.transcript, &new_message_id());
+    let marker = new_message_id();
+    local::add_interrupt(&mut app.view.transcript, &marker);
+    // A `/retry` of the interrupted turn replaces the marker with its reply.
+    super::retry::track_interrupt(app, marker);
     if unstarted {
         crate::message_queue::interrupt_on_start(app);
         return;
@@ -354,7 +355,7 @@ pub fn send_interrupt(app: &mut App, client: &Arc<Client>) {
         return;
     };
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let params = TurnInterruptParams {
             session_id,
             expected_turn_id: turn_id,

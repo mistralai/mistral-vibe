@@ -87,7 +87,7 @@ class TestTelemetryClient:
         env_key = config.get_active_provider().api_key_env_var
         monkeypatch.delenv(env_key, raising=False)
         client = TelemetryClient(config_getter=lambda: config)
-        assert client._get_mistral_api_key() is None
+        assert not client.is_active()
         client._client = MagicMock()
         client._client.post = AsyncMock()
 

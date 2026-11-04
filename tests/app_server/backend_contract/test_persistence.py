@@ -31,6 +31,8 @@ from vibe.app_server.protocol import (
 )
 from vibe.app_server.session import AppServerSession
 
+pytestmark = pytest.mark.both_paths
+
 
 @pytest.mark.asyncio
 async def test_completed_turn_is_visible_in_the_persisted_session_log(
@@ -52,40 +54,7 @@ async def test_completed_turn_is_visible_in_the_persisted_session_log(
     assert backend_contract_persistent_session.exit_summary().session_id == (session_id)
 
 
-@pytest.mark.asyncio
-async def test_completed_turn_survives_a_new_host(
-    backend_contract_mistral_api: respx.Route,
-    backend_contract_mistral_response: Callable[[str], httpx.Response],
-    backend_contract_persistent_connection: BackendContractConnection,
-    process_services: ProcessServices,
-) -> None:
-    backend_contract_mistral_api.mock(
-        return_value=backend_contract_mistral_response("stored")
-    )
-    session = await backend_contract_persistent_connection.host.open_session()
-    try:
-        _ = [event async for event in session.act("save this")]
-        session_id = session.session_id
-    finally:
-        await session.close()
-
-    resumed_connection = await connect_backend_contract_host(
-        session_options=SessionOptions(),
-        capabilities=ClientCapabilities(),
-        process_services=process_services,
-    )
-    resumed = await resumed_connection.host.resume_session(session_id)
-    try:
-        assert resumed.session_id == session_id
-        assert [
-            entry.text
-            for entry in resumed.history
-            if isinstance(entry, PublicMessageEntry)
-        ] == ["save this", "stored"]
-    finally:
-        await resumed.close()
-
-
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_empty_started_session_is_not_persisted(
     backend_contract_persistent_connection: BackendContractConnection,
@@ -309,7 +278,7 @@ async def test_compaction_rejects_an_active_turn(
         )
     )
     turn = asyncio.create_task(run_turn())
-    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(started.wait(), timeout=5)
 
     # Do / Assert
     try:

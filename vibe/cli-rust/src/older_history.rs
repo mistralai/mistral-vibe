@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::app::App;
+use crate::app::{App, Severity};
 use crate::server::{method, Client, HISTORY_LIMIT};
 use crate::transcript::HistoryCursor;
 
@@ -55,9 +55,8 @@ pub fn load_older_history_page(app: &mut App, client: &Arc<Client>) {
         return;
     };
     app.older_history.loading = true;
-    let pending = app.commit_started();
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let params = json!({
             "sessionId": cursor.session_id,
             "page": {"cursor": cursor.before, "limit": HISTORY_LIMIT, "direction": "backward"},
@@ -68,7 +67,7 @@ pub fn load_older_history_page(app: &mut App, client: &Arc<Client>) {
             .inspect_err(|err| tracing::warn!(%err, "older history page failed"))
             .ok()
             .and_then(|page| parse_page(&page));
-        crate::input::deliver(Some(tx), Event { cursor, page }, &pending).await;
+        crate::input::deliver(Some(tx), Event { cursor, page }).await;
     });
 }
 
@@ -85,7 +84,7 @@ pub fn apply_event(app: &mut App, event: Event) {
         return;
     };
     if failed {
-        crate::ui::notice::show_warning(app, "Failed to load older messages.", 3);
+        crate::ui::notice::show(app, Severity::Warning, "Failed to load older messages.", 6);
     }
     if added == 0 {
         return;

@@ -137,7 +137,7 @@ async fn cancelling_during_start_preserves_attempt_id_beyond_five_seconds() {
 }
 
 #[tokio::test]
-async fn completed_status_dwells_then_emits_credential_free_completion() {
+async fn completed_status_emits_credential_free_completion() {
     let _sandbox = sandbox::sandbox();
     let (client, _child) = fake_server::spawn(&test_name!("server_completed")).await;
     let mut handle = oidc::spawn(client.clone());
@@ -152,14 +152,12 @@ async fn completed_status_dwells_then_emits_credential_free_completion() {
             .unwrap(),
         Some(SignInEvent::StatusChanged(SignInStatus::Completed))
     ));
-    let completed_at = tokio::time::Instant::now();
     assert!(matches!(
-        timeout(Duration::from_secs(3), handle.recv())
+        timeout(Duration::from_secs(1), handle.recv())
             .await
             .unwrap(),
         Some(SignInEvent::OidcCompleted)
     ));
-    assert!(completed_at.elapsed() >= Duration::from_secs(2));
     drop(handle);
     let requests = fake_server::requests(&client).await;
     assert_eq!(

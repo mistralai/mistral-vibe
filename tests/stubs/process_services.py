@@ -14,7 +14,10 @@ from typing import Any
 
 from vibe.app_server._org_config_service import OrgConfigService
 from vibe.app_server._process_services import ProcessServices
+from vibe.app_server.connector_catalog import SharedConnectorCatalog
 from vibe.core.config.admin_config import ManagedConfig, ManagedConfigResult
+from vibe.core.platform_auth import PlatformCredentialProvider
+from vibe.setup.auth._oidc_tenant import OidcTenantResolver
 
 
 @dataclass
@@ -37,7 +40,9 @@ class FakeOrgConfigServer:
     def serve(self, *answers: str | None) -> None:
         self.answers = list(answers)
 
-    async def fetch(self, base_url: str, _api_key: str) -> ManagedConfigResult:
+    async def fetch(
+        self, base_url: str, _credentials: PlatformCredentialProvider
+    ) -> ManagedConfigResult:
         self.base_urls.append(base_url)
         if self.respond is not None:
             self.fetches += 1
@@ -54,12 +59,20 @@ class FakeOrgConfigServer:
 
 
 def fake_process_services(
-    org_server: FakeOrgConfigServer | None = None, **org_config: Any
+    org_server: FakeOrgConfigServer | None = None,
+    *,
+    connector_catalog: SharedConnectorCatalog | None = None,
+    **org_config: Any,
 ) -> ProcessServices:
-    """``org_config`` goes to ``OrgConfigService`` (policy, first wait...)."""
+    """``org_config`` goes to ``OrgConfigService`` (policy, first wait...). The
+    connector catalog fetches from the bootstrap endpoint unless given: tests
+    mock it with ``respx``, and connectors are off by default.
+    """
     server = org_server or FakeOrgConfigServer()
     return ProcessServices(
-        org_config=OrgConfigService(fetch=server.fetch, **org_config)
+        org_config=OrgConfigService(fetch=server.fetch, **org_config),
+        connector_catalog=connector_catalog or SharedConnectorCatalog(),
+        oidc_tenants=OidcTenantResolver(),
     )
 
 

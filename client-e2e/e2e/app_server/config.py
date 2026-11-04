@@ -5,10 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 ROWS, COLUMNS = 40, 120
-IDLE_MARKER = b"\x1b]5379;vibe-idle\x07"
-# Kitty-protocol F23/F24. The client drops them and uses them to hold the idle
-# marker across a batched step, so a step's keys cost one marker, not one each.
-BATCH_KEYS = ("\x1b[57386u", "\x1b[57387u")
+# The client acks fence N with `ACK_PREFIX N BEL` once its frame has settled.
+ACK_PREFIX = b"\x1b]5379;vibe-idle;"
+# Kitty-protocol F24: the fence the harness sends after each key batch.
+FENCE_KEY = "\x1b[57387u"
 # 2026-09-10T09:00:45Z, exactly two weeks after the fixture sessions.
 REPLAY_NOW_MS = 1_789_030_845_000
 

@@ -20,7 +20,9 @@ from vibe.app_server.protocol import (
     ProtocolErrorCode,
     SessionOptions,
 )
-from vibe.app_server.session import AppServerSession
+from vibe.app_server.session import AppServerSession, AppServerTurnError
+
+pytestmark = pytest.mark.both_paths
 
 
 def _texts(session: AppServerSession) -> list[str]:
@@ -124,6 +126,48 @@ async def test_in_place_rewind_leaves_the_session_usable_for_the_next_turn(
     assert result.message == "Second"
     assert backend_contract_persistent_session.session_id == session_id
     assert _texts(backend_contract_persistent_session) == []
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_in_place_rewind_past_the_latest_turn_leaves_no_earlier_turn_outcome(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    # The rewind drops the latest Turn. The failed Turn before it must not
+    # come back as the latest Turn: the Session is idle, as a fresh read
+    # shows, and the next Turn's updates apply to what the client was given.
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            httpx.Response(400, json={"message": "provider rejected the request"}),
+            backend_contract_mistral_response("Second answer"),
+            backend_contract_mistral_response("Third answer"),
+        ]
+    )
+    session = backend_contract_persistent_session
+    with pytest.raises(AppServerTurnError):
+        await _act(session, "First", "user-1")
+    await _act(session, "Second", "user-2")
+
+    result = await session.resources.sessions.rewind(
+        "user-2", restore_files=False, inplace=True
+    )
+
+    assert result.state.session.status.type == "idle"
+    assert result.state.latest_turn is None
+    assert session.state.session.status.type == "idle"
+    assert session.state.latest_turn is None
+    reread = await session.resources.sessions.get_session_history(session.session_id)
+    assert [entry.id for entry in reread] == [entry.id for entry in session.history]
+
+    await _act(session, "Third", "user-3")
+
+    assert session.state.session.status.type == "idle"
+    latest = session.state.latest_turn
+    assert latest is not None
+    assert latest.status == "completed"
+    assert _texts(session) == ["First", "Third", "Third answer"]
 
 
 @pytest.mark.asyncio
@@ -326,6 +370,7 @@ async def test_a_turn_can_be_rewound_after_the_session_was_renamed_between_turns
     assert _texts(backend_contract_persistent_session) == []
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_rewind_rejects_an_entry_that_is_not_a_rewindable_message(
     backend_contract_mistral_api: respx.Route,
@@ -521,6 +566,7 @@ def _overwrite_tool_call(target: Path, content: str) -> dict[str, Any]:
     }
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_in_place_rewind_restores_a_file_the_rewound_turn_created(
     backend_contract_mistral_api: respx.Route,
@@ -561,6 +607,7 @@ async def test_in_place_rewind_restores_a_file_the_rewound_turn_created(
         await connection.host.close()
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_in_place_rewind_restores_a_file_the_rewound_turn_overwrote(
     backend_contract_mistral_api: respx.Route,
@@ -604,6 +651,7 @@ async def test_in_place_rewind_restores_a_file_the_rewound_turn_overwrote(
         await connection.host.close()
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_a_fork_restores_files_of_the_turns_it_inherited(
     backend_contract_mistral_api: respx.Route,

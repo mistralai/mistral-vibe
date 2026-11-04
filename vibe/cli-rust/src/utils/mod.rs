@@ -40,6 +40,7 @@ pub mod input_edit;
 pub mod json;
 pub mod paths;
 pub mod scroll;
+pub mod settle;
 pub mod startup_cache;
 pub mod system_proxy;
 pub mod text;

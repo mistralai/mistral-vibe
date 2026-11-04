@@ -1,6 +1,8 @@
 //! Click chains: char, word, paragraph, then wrap; a drag or a pause starts a new chain.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use vibe_rs::clock::UiInstant;
 
 use vibe_rs::selection::{ClickChain, Granularity};
 
@@ -14,14 +16,14 @@ fn name(granularity: Granularity) -> &'static str {
     }
 }
 
-fn press(chain: &mut ClickChain, at: Instant) -> &'static str {
+fn press(chain: &mut ClickChain, at: UiInstant) -> &'static str {
     name(chain.press(CELL, at))
 }
 
 #[test]
 fn a_fourth_click_wraps_to_char_and_later_clicks_advance_again() {
     let mut chain = ClickChain::default();
-    let now = Instant::now();
+    let now = vibe_rs::clock::now();
 
     let cycle: Vec<_> = (0..6).map(|_| press(&mut chain, now)).collect();
 
@@ -34,7 +36,7 @@ fn a_fourth_click_wraps_to_char_and_later_clicks_advance_again() {
 #[test]
 fn a_finished_drag_starts_a_new_chain_but_a_plain_release_keeps_it() {
     let mut chain = ClickChain::default();
-    let now = Instant::now();
+    let now = vibe_rs::clock::now();
     press(&mut chain, now);
     chain.release(false);
     assert_eq!(press(&mut chain, now), "word");
@@ -47,7 +49,7 @@ fn a_finished_drag_starts_a_new_chain_but_a_plain_release_keeps_it() {
 #[test]
 fn a_click_after_the_chain_window_starts_a_new_chain() {
     let mut chain = ClickChain::default();
-    let start = Instant::now();
+    let start = vibe_rs::clock::now();
     press(&mut chain, start);
     assert_eq!(
         press(&mut chain, start + Duration::from_millis(500)),
@@ -63,7 +65,7 @@ fn a_click_after_the_chain_window_starts_a_new_chain() {
 #[test]
 fn a_click_on_another_cell_starts_a_new_chain() {
     let mut chain = ClickChain::default();
-    let now = Instant::now();
+    let now = vibe_rs::clock::now();
     press(&mut chain, now);
 
     assert_eq!(name(chain.press((CELL.0 + 1, CELL.1), now)), "char");

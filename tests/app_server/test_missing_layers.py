@@ -117,6 +117,9 @@ def oidc_credentials(monkeypatch):
 _CLIENT = ClientInfo(name="vibe-desktop", version="9.9.9")
 _ORG_TOML = 'default_agent = "ask"\n'
 _LIMIT = 0.2
+# Long enough that the fake org server always answers within it on a loaded
+# worker; only tests of a hanging org config wait for it.
+_ORG_LIMIT = 5.0
 
 
 def _catalog() -> ModelCatalogResponse:
@@ -191,7 +194,9 @@ class _Remote:
                 fetched_for=await resolve_credential_cache_key(config),
             )
 
-    async def _catalog(self, config: Any) -> ModelCatalogResponse | None:
+    async def _catalog(
+        self, config: Any, _credentials: Any = None
+    ) -> ModelCatalogResponse | None:
         if not await self._block("catalog"):
             return None
         store_cached_model_catalog(
@@ -229,7 +234,7 @@ def short_limits(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def org_limit() -> float:
     """How long the org config's first fetch is waited for, and may run."""
-    return _LIMIT
+    return _ORG_LIMIT
 
 
 @pytest_asyncio.fixture
@@ -318,7 +323,9 @@ async def test_oidc_tenant_resolution_timeout_keeps_local_defaults(
         await asyncio.Event().wait()
 
     resolve.side_effect = blocked
-    monkeypatch.setattr("vibe.core.telemetry.send._OIDC_TENANT_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        "vibe.core.platform_auth._mistral._PRINCIPAL_TIMEOUT_SECONDS", 0.01
+    )
     remote = _Remote(monkeypatch, org_server)
     view = (await _read_config(_handler(process_services=process_services))).config
     assert view.default_agent != "ask"
@@ -349,7 +356,9 @@ async def test_tenant_timeout_does_not_wait_for_discovery_worker(
         await asyncio.to_thread(discover)
 
     resolve.side_effect = blocked
-    monkeypatch.setattr("vibe.core.telemetry.send._OIDC_TENANT_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        "vibe.core.platform_auth._mistral._PRINCIPAL_TIMEOUT_SECONDS", 0.01
+    )
     orchestrator = await build_default_orchestrator(
         harness_files=HarnessFilesManager(sources=("user",))
     )
@@ -430,6 +439,7 @@ async def test_a_read_with_nothing_cached_answers_with_the_fetched_config(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("remote_config_enabled", "short_limits")
+@pytest.mark.parametrize("org_limit", [_LIMIT])
 async def test_hanging_endpoints_answer_local_defaults_and_are_not_waited_for_again(
     monkeypatch: pytest.MonkeyPatch,
     process_services: ProcessServices,
@@ -572,7 +582,7 @@ async def test_reads_the_picker_does_not_make_fetch_nothing(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("remote_config_enabled")
-@pytest.mark.parametrize("org_limit", [1.0])
+@pytest.mark.parametrize("org_limit", [2.0])
 async def test_a_slow_org_config_is_not_counted_against_the_other_fetches(
     monkeypatch: pytest.MonkeyPatch,
     process_services: ProcessServices,
@@ -581,16 +591,17 @@ async def test_a_slow_org_config_is_not_counted_against_the_other_fetches(
     # The org config takes most of the read's limit, so the read answers
     # before GrowthBook and the catalog land. Each lands within its own limit,
     # so neither is recorded as failed: a session start still waits for them.
-    # Read limit 1 s; GrowthBook and the catalog land at 1.3 s, 0.4 s before
-    # their own limits, which start once the org config is in at 0.7 s.
-    _set_limits(monkeypatch, 1.0)
+    # Read limit 2 s; GrowthBook and the catalog land at 2.6 s, 0.8 s before
+    # their own limits, which start once the org config is in at 1.4 s. Each
+    # step keeps 0.6 s of slack for a loaded worker.
+    _set_limits(monkeypatch, 2.0)
     remote = _Remote(
-        monkeypatch, org_server, delays={"org": 0.7, "eval": 0.6, "catalog": 0.6}
+        monkeypatch, org_server, delays={"org": 1.4, "eval": 1.2, "catalog": 1.2}
     )
     handler = _handler(process_services=process_services)
 
     first = (await _read_config(handler)).config
-    await asyncio.sleep(0.6)
+    await asyncio.sleep(1.2)
     second = (await _read_config(handler)).config
 
     assert "catalog-model" not in {model.alias for model in first.models}
@@ -710,6 +721,7 @@ async def test_the_server_tells_picker_reads_whether_a_session_is_attached(
     _, server_transport = memory_transport_pair()
     server = AppServer(
         server_transport,
+        oidc_tenants=process_services.oidc_tenants,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
         host_handler=host,
     )

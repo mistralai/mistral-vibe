@@ -161,9 +161,8 @@ fn fetch_untrusted_config(app: &mut App, client: &Arc<Client>) {
     let (Some(cwd), Some(tx)) = (app.session.cwd.clone(), app.command_tx.clone()) else {
         return;
     };
-    app.commit_started();
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let response = client
             .request(
                 method::WORKSPACE_TRUST_UNTRUSTED_CONFIG,

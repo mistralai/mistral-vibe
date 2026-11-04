@@ -9,7 +9,10 @@ from vibe.core.types import Backend
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mistralai_vibe_local_harness.vibe import UtilityReply
+    from mistralai_vibe_local_harness.vibe import (
+        ProviderCredentialProvider,
+        UtilityReply,
+    )
     from vibe.config_values import ThinkingLevel
     from vibe.core.config import ModelConfig, ProviderConfig
     from vibe.core.llm.completion import CompletionTransport
@@ -30,6 +33,7 @@ async def complete_vision(
     messages: Sequence[LLMMessage],
     transport: CompletionTransport,
     session_id: str | None,
+    credentials: ProviderCredentialProvider | None = None,
 ) -> UtilityReply:
     # Reasoning off whatever the model config says: transcribing an image is
     # not a reasoning task, and the trace is charged against max_tokens -- a
@@ -48,4 +52,5 @@ async def complete_vision(
         ).model_dump(exclude_none=True),
         transport=transport,
         request_thinking="lowest",
+        credentials=credentials,
     )

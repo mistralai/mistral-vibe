@@ -55,8 +55,9 @@ pub fn toggle(app: &mut App, client: &Arc<Client>, args: &str) {
         let key = format!("{KEY_PREFIX}{}", stress_id(counter, "buildkite-call-00"));
         app.view.expanded.insert(key);
     }
-    app.stress = Some(tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(delay);
+    app.stress = Some(crate::work::spawn_daemon(async move {
+        let mut ticker = crate::clock::interval_real(delay);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
         for counter in 0..count {
             ticker.tick().await;
             let n = Notification {

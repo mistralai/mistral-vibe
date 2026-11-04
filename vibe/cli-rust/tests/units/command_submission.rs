@@ -11,6 +11,7 @@ use vibe_rs::config;
 use vibe_rs::post_ready::AccountReads;
 use vibe_rs::server::{Client, HistoryEntry, MessageContent};
 
+use crate::feedback_support::notice_text;
 use crate::support::{key, settle};
 
 struct Harness {
@@ -51,12 +52,8 @@ impl Harness {
             .collect()
     }
 
-    fn last_toast(&self) -> Option<&str> {
-        self.app
-            .overlays
-            .toasts
-            .back()
-            .map(|toast| toast.text.as_str())
+    fn notice(&self) -> Option<&str> {
+        notice_text(&self.app)
     }
 }
 
@@ -79,14 +76,14 @@ async fn branch_during_a_turn_is_refused_kept_and_never_forks() {
     let mut harness = Harness::ready();
     harness.app.session.active_turn_id = Some("turn".into());
     harness.app.session.status = Status::Generating {
-        since: std::time::Instant::now(),
+        since: vibe_rs::clock::now(),
     };
 
     assert!(!harness.submit("/branch"));
 
     assert_eq!(harness.app.chat_input.full_text(), "/branch");
     assert!(harness
-        .last_toast()
+        .notice()
         .is_some_and(|text| text.starts_with("Slash commands cannot be queued")));
     assert!(!harness
         .sent_methods()
@@ -123,7 +120,7 @@ async fn display_settings_run_during_a_turn_and_with_a_paused_queue() {
         |app| {
             app.session.active_turn_id = Some("turn".into());
             app.session.status = Status::Generating {
-                since: std::time::Instant::now(),
+                since: vibe_rs::clock::now(),
             };
         },
         |app| app.queue.paused = true,
@@ -142,7 +139,7 @@ async fn display_settings_run_during_a_turn_and_with_a_paused_queue() {
             assert!(!harness.submit(command));
 
             assert!(harness.app.chat_input.full_text().is_empty(), "{command}");
-            assert_eq!(harness.last_toast(), None, "{command} is not refused");
+            assert_eq!(harness.notice(), None, "{command} is not refused");
         }
         // The harness refuses MCP, connector and plugin changes during a turn.
         for command in ["/mcp", "/connectors", "/plugins", "/reload-plugins"] {
@@ -153,7 +150,7 @@ async fn display_settings_run_during_a_turn_and_with_a_paused_queue() {
 
             assert_eq!(harness.app.chat_input.full_text(), command);
             assert!(harness
-                .last_toast()
+                .notice()
                 .is_some_and(|text| text.starts_with("Slash commands cannot be queued")));
         }
         let mut harness = Harness::ready();
@@ -188,7 +185,7 @@ async fn settings_wait_for_a_running_job_while_read_only_commands_still_run() {
             assert_eq!(harness.app.chat_input.full_text(), command);
             assert!(!harness.app.theme_picker.open);
             assert!(harness
-                .last_toast()
+                .notice()
                 .is_some_and(|text| text.starts_with("Slash commands cannot be queued")));
         }
         let mut harness = Harness::ready();
@@ -197,7 +194,7 @@ async fn settings_wait_for_a_running_job_while_read_only_commands_still_run() {
         assert!(!harness.submit("/help"));
 
         assert!(harness.app.chat_input.full_text().is_empty());
-        assert_eq!(harness.last_toast(), None);
+        assert_eq!(harness.notice(), None);
     }
 }
 
@@ -205,7 +202,7 @@ async fn settings_wait_for_a_running_job_while_read_only_commands_still_run() {
 async fn a_command_read_during_a_turn_keeps_the_turn_loading_line() {
     let mut harness = Harness::ready();
     harness.app.session.status = Status::Generating {
-        since: std::time::Instant::now(),
+        since: vibe_rs::clock::now(),
     };
     harness.app.view.loading.set_label("Thinking");
 

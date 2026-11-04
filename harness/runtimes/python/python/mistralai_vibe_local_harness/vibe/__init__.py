@@ -68,6 +68,7 @@ from mistralai_vibe_local_harness.vibe._errors import (
     HarnessTurnQueuePendingError,
     HarnessUnfinishedMigrationError,
 )
+from mistralai_vibe_local_harness.vibe._file_tools import FILE_SYSTEM
 from mistralai_vibe_local_harness.vibe._foreign_hooks import (
     HookProcess,
     HookProcessResolver,
@@ -137,11 +138,13 @@ from mistralai_vibe_local_harness.vibe._runtime_config import (
     LocalRuntimeAdapterConfig,
     LocalRuntimeAdapterPorts,
     MalformedToolCallsTelemetry,
+    ModelRequest,
     PathSpace,
     RequestSentTelemetry,
     SessionConfig,
     SessionWorkspace,
     ToolApprovalMode,
+    output_room,
 )
 from mistralai_vibe_local_harness.vibe._sandbox import (
     SANDBOX_FAILURES,
@@ -187,6 +190,7 @@ __all__ = [
     "BASH_TIMEOUT",
     "CLASSIFICATION_EVENT_TYPE",
     "DEFAULT_SMART_APPROVE_MODEL",
+    "FILE_SYSTEM",
     "INVALID_API_KEY_MESSAGE",
     "MCP_DISCOVERY_PENDING",
     "SANDBOX_FAILURES",
@@ -268,6 +272,7 @@ __all__ = [
     "MCPSourceState",
     "MCPToolFilter",
     "MalformedToolCallsTelemetry",
+    "ModelRequest",
     "ModelRiskClassifier",
     "PathSpace",
     "PostAgentTurnHookHandler",
@@ -324,6 +329,7 @@ __all__ = [
     "default_tool_risk_classifier",
     "execute_utility_completion",
     "invalid_api_key_message",
+    "output_room",
     "protected_target",
     "run_helper",
     "rust_input_modalities",

@@ -121,6 +121,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "agents/uninstall",
     "artifacts/list",
     "artifacts/markViewed",
+    "artifacts/subscribe",
     "artifacts/sync",
     "callback/result",
     "config/effective/read",
@@ -169,6 +170,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "narration/summarize",
     "plugin/info",
     "plugin/reload",
+    "platformCredentials/headers",
     "plugins/read",
     "plugin_catalog/read",
     "providerAuth/read",
@@ -198,6 +200,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "session/compact",
     "session/continue",
     "session/context/inject",
+    "session/context/read",
     "session/delete",
     "session/fork",
     "session/history/clear",
@@ -230,7 +233,6 @@ SERVER_METHODS: tuple[str, ...] = (
     "setup/oidc-cancel",
     "setup/oidc-probe",
     "setup/oidc-clear",
-    "setup/oidc-headers",
     "setup/status",
     "setup/store-credential",
     "setup/submit-choices",
@@ -474,8 +476,16 @@ class SessionStartTurn(ProtocolModel):
     client_user_message_id: str | None = None
 
 
+class SessionProjectStamp(ProtocolModel):
+    kind: Literal["local", "cloud"]
+    id: str = Field(min_length=1)
+
+
 class SessionStartParams(SessionOpenParams):
     idempotency_key: str | None = None
+    # Written to the session metadata; forks and replacements inherit their source's.
+    # Absent leaves the session unstamped, as a CLI session is.
+    project: SessionProjectStamp | None = None
     kind: SessionKind = SessionKind.NORMAL
     # Applied before the first turn, as the matching mid-session changes are.
     title: str | None = Field(default=None, min_length=1)
@@ -1137,6 +1147,9 @@ class PublicPullRequestSharedEnrichment(ProtocolModel):
     pr_status: Literal["action_needed", "waiting", "mergeable"] | None = None
     checks: PublicChecksSummary | None = None
     checks_status: Literal["none", "pending", "passing", "failing"] | None = None
+    optional_checks_status: Literal["none", "pending", "passing", "failing"] | None = (
+        None
+    )
     review_decision: (
         Literal["none", "review_required", "changes_requested", "approved"] | None
     ) = None
@@ -1222,8 +1235,11 @@ class ArtifactsMarkViewedParams(ProtocolModel):
 
 
 class ArtifactsSyncParams(ProtocolModel):
-    """Client-driven provider sync (Phase 4): the Desktop fires it for a
-    project's local sessions when the user switches project in the sidebar.
+    """Read a session's PRs/MRs from their provider at once.
+
+    The Desktop sends it when the user looks at a session or a project. The
+    reads arrive as ``artifacts/updated``: on the session's event stream when
+    it is attached, to ``artifacts/subscribe`` otherwise.
     """
 
     session_id: str
@@ -2081,6 +2097,54 @@ class SessionLogReadResponse(ProtocolModel):
     log: SessionLogSummary
 
 
+class ContextCategoryId(StrEnum):
+    SYSTEM = auto()
+    TOOLS = auto()
+    SKILLS = auto()
+    CONVERSATION = auto()
+
+
+class ContextCategory(ProtocolModel):
+    """One high-level slice of the payload sent to the model.
+
+    ``characters`` is the measured size of the slice in the newest model input;
+    ``estimated_tokens`` is that share of the API-measured context usage, so the
+    categories sum to ``used_tokens`` exactly (largest-remainder rounding). No
+    category is reported while the model input is unknown, such as for a session
+    reopened before its next model call.
+    """
+
+    id: ContextCategoryId
+    characters: int = Field(ge=0)
+    estimated_tokens: int = Field(ge=0)
+
+
+class ContextBreakdown(ProtocolModel):
+    """What fills the model's context window, for `/context`.
+
+    ``used_tokens`` is the API-reported usage of the last model call (prompt +
+    completion); ``measured`` is false until the first call, when no estimate is
+    shown. ``compaction_threshold`` is where auto-compaction triggers, so the
+    window above it is the compaction buffer and the rest above ``used_tokens``
+    is free space.
+    """
+
+    context_window: int = Field(ge=0)
+    compaction_threshold: int = Field(ge=0)
+    used_tokens: int = Field(ge=0)
+    measured: bool
+    total_characters: int = Field(ge=0)
+    categories: list[ContextCategory] = Field(default_factory=list)
+
+
+class SessionContextReadParams(ProtocolModel):
+    session_id: str
+
+
+class SessionContextReadResponse(ProtocolModel):
+    breakdown: ContextBreakdown
+
+
 class WorkspacePromptPrepareParams(ProtocolModel):
     session_id: str
     message: str
@@ -2860,6 +2924,7 @@ SESSION_PEER_LIST_METHOD = "session/peer/list"
 SESSION_PEER_READ_METHOD = "session/peer/read"
 SESSION_PEER_SEND_METHOD = "session/peer/send"
 SESSION_PEER_ARCHIVE_METHOD = "session/peer/archive"
+SESSION_PEER_RESTORE_METHOD = "session/peer/restore"
 """Server requests asking a client that advertised ``sessionPeers`` about the
 other sessions it hosts in the calling session's project. Each arrives on the
 calling session's own connection, which names the caller; every session id in
@@ -2979,6 +3044,25 @@ class PeerSessionNotArchived(ProtocolModel):
 class SessionPeerArchiveResponse(ProtocolModel):
     archived: list[PeerSessionArchived]
     failed: list[PeerSessionNotArchived] = Field(default_factory=list)
+
+
+class SessionPeerRestoreParams(ProtocolModel):
+    session_ids: list[str] = Field(min_length=1)
+
+
+class PeerSessionRestored(ProtocolModel):
+    session_id: str
+    title: str | None = Field(default=None, exclude_if=_is_empty)
+
+
+class PeerSessionNotRestored(ProtocolModel):
+    session_id: str
+    error: str
+
+
+class SessionPeerRestoreResponse(ProtocolModel):
+    restored: list[PeerSessionRestored]
+    failed: list[PeerSessionNotRestored] = Field(default_factory=list)
 
 
 class CallbackResultError(ProtocolModel):

@@ -77,3 +77,12 @@ fn remote_project_targets_have_matching_pointer_shapes() {
     app.view.mouse_position = Some((21, 4));
     assert_eq!(shape(&app), Shape::Default);
 }
+
+#[test]
+fn hovering_the_jump_to_bottom_chip_asks_for_the_hand() {
+    let mut app = App::default();
+    mouse::register_region(&mut app, Rect::new(0, 0, 40, 10), MouseTarget::Transcript);
+    mouse::register_region(&mut app, Rect::new(10, 9, 18, 1), MouseTarget::JumpToBottom);
+    app.view.mouse_position = Some((12, 9));
+    assert_eq!(shape(&app), Shape::Pointer);
+}

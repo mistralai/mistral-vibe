@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::{json, Value};
 
-use crate::app::{App, ToastSeverity};
+use crate::app::App;
 use crate::commands::{submission::new_message_id, CommandEvent};
 use crate::config_write;
 use crate::server::{method, Client, TelemetryRecordParams};
@@ -79,9 +79,8 @@ fn close(app: &mut App, client: &Arc<Client>) {
         .iter()
         .zip(app.voice_app.values)
         .any(|(changed, value)| *changed && value);
-    let pending = app.commit_started();
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let result =
             config_write::write(&client, &session_id, ops, "app-server config update").await;
         let event = match result {
@@ -90,7 +89,7 @@ fn close(app: &mut App, client: &Arc<Client>) {
                     .and_then(|c| c.voice_mode_enabled)
                 {
                     if enabled != previous_enabled {
-                        tokio::spawn(record_toggle(client.clone(), session_id, enabled));
+                        crate::work::spawn(record_toggle(client.clone(), session_id, enabled));
                     }
                 }
                 CommandEvent::VoiceSettings {
@@ -101,7 +100,7 @@ fn close(app: &mut App, client: &Arc<Client>) {
             }
             Err(error) => failed(error),
         };
-        crate::input::deliver(Some(tx), event, &pending).await;
+        crate::input::deliver(Some(tx), event).await;
     });
 }
 
@@ -125,17 +124,16 @@ pub fn apply_saved(app: &mut App, runtime: &Value, previous_enabled: bool, enabl
     crate::event_handler::apply_runtime_value(app, runtime);
     if app.voice.mode_enabled != previous_enabled {
         let message = if app.voice.mode_enabled {
-            "Voice mode enabled. Press **Ctrl+R** to start recording."
+            "Voice mode enabled. Press **Ctrl+T** to start recording."
         } else {
             "Voice mode disabled."
         };
         local::add_command_status(&mut app.view.transcript, &new_message_id(), message);
     }
     if enabling_audio && !cfg!(feature = "voice") {
-        app.show_toast(
-            "Audio setting saved, but audio is unavailable: Voice capture is not available in this build.".to_owned(),
-            ToastSeverity::Warning,
-            15,
+        crate::notices::refused(
+            app,
+            "Audio setting saved, but audio is unavailable: Voice capture is not available in this build.",
         );
     }
 }

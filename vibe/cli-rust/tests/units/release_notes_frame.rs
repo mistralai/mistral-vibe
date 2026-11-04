@@ -4,9 +4,14 @@ use unicode_width::UnicodeWidthStr;
 use vibe_rs::ui::markdown;
 
 fn rows(width: u16) -> Vec<String> {
-    markdown::framed("**v1.0.0**\n\n- 宽 note", width, "Release notes", |_| {
-        false
-    })
+    let border = vibe_rs::ui::theme::md_fence_border();
+    markdown::framed(
+        "**v1.0.0**\n\n- 宽 note",
+        width,
+        "Release notes",
+        border,
+        |_| false,
+    )
     .lines()
     .iter()
     .map(|line| line.to_string())

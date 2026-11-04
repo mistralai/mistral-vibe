@@ -23,6 +23,21 @@ pub fn navigate(app: &mut App, down: bool) {
     app.artifacts_modal.list.step(down, count, true, |_| true);
 }
 
+/// PageUp/PageDown: move the highlight by one visible page, clamped to the list.
+pub fn page(app: &mut App, down: bool) {
+    let page = usize::from(app.artifacts_modal.list_area.height.max(1));
+    let count = option_count(app);
+    app.artifacts_modal.list.page(down, count, page);
+}
+
+/// Home/End: highlight the first or the last artifact.
+pub fn edge(app: &mut App, end: bool) {
+    let Some(last) = option_count(app).checked_sub(1) else {
+        return;
+    };
+    app.artifacts_modal.list.select(if end { last } else { 0 });
+}
+
 /// The highlighted artifact, if any.
 pub fn selected(app: &App) -> Option<&PublicSessionArtifact> {
     app.session

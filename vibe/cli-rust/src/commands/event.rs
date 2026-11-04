@@ -13,6 +13,8 @@ pub enum CommandEvent {
     RemoteProject(Box<crate::vibe_code_project::Reply>),
     Teleport(Box<crate::teleport::Reply>),
     Plugins(Box<crate::plugins::Event>),
+    /// The `/context` breakdown read, with the generation it was requested at.
+    Context(Box<(u64, crate::context_app::Event)>),
     Leanstall(Box<super::leanstall::Event>),
     /// A content command's markdown body.
     Result(String),
@@ -36,16 +38,21 @@ pub enum CommandEvent {
     },
     /// The `/proxy-setup` settings read, or why it failed.
     ProxySettings(Result<crate::server::proto_proxy::ProxySettingsView, String>),
-    /// The post-ready account and identity reads, for the banner.
+    /// The post-ready account and identity reads asked under `model`, for the banner.
     PostReady {
+        model: String,
         reads: Option<AccountReads>,
         greeting: Option<String>,
     },
-    /// The post-ready `artifacts/list` answer, for the bottom-bar PR link.
-    ArtifactsRead(Vec<crate::server::PublicSessionArtifact>),
+    /// An `artifacts/list` answer for `session_id`, for the bottom-bar PR link.
+    ArtifactsRead {
+        session_id: String,
+        artifacts: Vec<crate::server::PublicSessionArtifact>,
+    },
     /// The `/whoami` reads: identity and account (cached or fetched) and the
     /// `providerAuth/read` view, each `None` when its read failed.
     Whoami {
+        model: String,
         reads: Option<AccountReads>,
         auth: Option<Value>,
     },
@@ -89,7 +96,6 @@ pub enum CommandEvent {
 pub(super) fn dispatch(app: &mut App) -> Option<(String, mpsc::Sender<CommandEvent>)> {
     let session_id = app.session.session_id.clone()?;
     let tx = app.command_tx.clone()?;
-    app.commit_started();
     Some((session_id, tx))
 }
 

@@ -60,7 +60,7 @@ pub(crate) fn direct_routes(config: &HarnessConfig) -> Vec<(String, ToolTarget)>
             .filter(|tool| tool.exposure.is_direct())
             .map(|tool| {
                 (
-                    tool.name.clone(),
+                    tool.direct_function_name().to_string(),
                     ToolTarget::Provided {
                         group_name: group.name.clone(),
                         tool_name: tool.name.clone(),

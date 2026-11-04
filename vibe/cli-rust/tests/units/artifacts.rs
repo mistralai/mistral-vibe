@@ -1,21 +1,16 @@
-//! Session-artifact labels, latest-first list, count label, bar rendering and
-//! the artifacts modal's highlight state.
+//! Session-artifact labels, latest-first list, count label and the artifacts modal's highlight state.
 
-use ratatui::layout::Rect;
 use serde_json::{json, Value};
 
 use vibe_rs::app::App;
 use vibe_rs::artifacts;
 use vibe_rs::artifacts_modal;
 use vibe_rs::server::PublicSessionArtifact;
-use vibe_rs::ui::bottom_bar;
 
-use crate::support::bottom_bar_row;
-
-const WIDTH: u16 = 120;
 const URL: &str = "https://github.com/mistral-ai/vibe/pull/123";
 const T1: &str = "2026-10-18T10:00:00+00:00";
 const T2: &str = "2026-10-18T11:00:00+00:00";
+const SESSION: &str = "00000000-0000-4000-8000-000000000001";
 
 fn artifact(
     id: &str,
@@ -108,7 +103,12 @@ fn upsert_replaces_an_updated_artifact_by_id() {
 #[test]
 fn apply_list_keeps_every_artifact_latest_first() {
     let mut app = App::default();
-    artifacts::apply_list(&mut app, vec![github("a1", 1, T1), github("a2", 2, T2)]);
+    app.session.session_id = Some(SESSION.into());
+    artifacts::apply_list(
+        &mut app,
+        SESSION,
+        vec![github("a1", 1, T1), github("a2", 2, T2)],
+    );
     assert_eq!(app.session.artifacts.len(), 2);
     let latest = artifacts::latest(&app).expect("artifact");
     assert_eq!(artifacts::label(latest), "PR #2");
@@ -141,7 +141,12 @@ fn modal_title_names_the_providers_present() {
 #[test]
 fn the_modal_opens_on_the_latest_and_navigates_wrapping() {
     let mut app = App::default();
-    artifacts::apply_list(&mut app, vec![github("a1", 1, T1), github("a2", 2, T2)]);
+    app.session.session_id = Some(SESSION.into());
+    artifacts::apply_list(
+        &mut app,
+        SESSION,
+        vec![github("a1", 1, T1), github("a2", 2, T2)],
+    );
     artifacts_modal::open(&mut app);
     assert!(app.artifacts_modal.open);
     let selected = artifacts_modal::selected(&app).expect("selected");
@@ -155,81 +160,6 @@ fn the_modal_opens_on_the_latest_and_navigates_wrapping() {
     assert_eq!(artifacts::label(selected), "PR #2");
     artifacts_modal::close(&mut app);
     assert!(!app.artifacts_modal.open);
-}
-
-#[test]
-fn center_x_centers_and_clamps_between_the_edge_segments() {
-    let area = Rect::new(0, 0, WIDTH, 1);
-    assert_eq!(bottom_bar::center_x(area, 7, 20, 100), Some(56));
-    assert_eq!(bottom_bar::center_x(area, 7, 60, 100), Some(60));
-    assert_eq!(bottom_bar::center_x(area, 7, 0, 50), Some(43));
-    assert_eq!(bottom_bar::center_x(area, 7, 60, 62), None);
-    assert_eq!(bottom_bar::center_x(area, 0, 0, 100), None);
-    assert_eq!(bottom_bar::center_x(area, 121, 0, 120), None);
-}
-
-#[test]
-fn the_bar_paints_a_single_artifact_as_a_link_that_opens_its_url() {
-    let mut app = App::default();
-    app.session.cwd = Some("/tmp/project".into());
-    app.session.tokens = (0, 600_000);
-    app.session.artifacts = vec![github("a1", 123, T1)];
-
-    let row = bottom_bar_row(&mut app, WIDTH);
-
-    let link = "PR #123";
-    let x = (WIDTH as usize - link.len()) / 2;
-    assert_eq!(&row[x..x + link.len()], link);
-    let painted = app.view.bottom_bar_link.as_ref().expect("link");
-    assert_eq!(painted.area, Rect::new(x as u16, 0, link.len() as u16, 1));
-    match &painted.action {
-        bottom_bar::BarLinkAction::OpenUrl(url) => assert_eq!(url, URL),
-        bottom_bar::BarLinkAction::ListArtifacts => panic!("expected OpenUrl"),
-    }
-}
-
-#[test]
-fn the_bar_paints_a_count_link_that_opens_the_modal_when_several_artifacts() {
-    let mut app = App::default();
-    app.session.cwd = Some("/tmp/project".into());
-    app.session.tokens = (0, 600_000);
-    app.session.artifacts = vec![github("a1", 123, T1), github("a2", 124, T2)];
-
-    let row = bottom_bar_row(&mut app, WIDTH);
-
-    let link = "PRs (2)";
-    let x = (WIDTH as usize - link.len()) / 2;
-    assert_eq!(&row[x..x + link.len()], link);
-    let painted = app.view.bottom_bar_link.as_ref().expect("link");
-    assert_eq!(painted.area, Rect::new(x as u16, 0, link.len() as u16, 1));
-    assert!(matches!(
-        painted.action,
-        bottom_bar::BarLinkAction::ListArtifacts
-    ));
-}
-
-#[test]
-fn the_bar_hides_the_link_when_it_does_not_fit() {
-    let mut app = App::default();
-    app.session.cwd = Some("/tmp/project".into());
-    app.session.tokens = (0, 600_000);
-    app.session.artifacts = vec![github("a1", 123, T1)];
-
-    let row = bottom_bar_row(&mut app, 30);
-
-    assert!(!row.contains("PR #123"));
-    assert!(app.view.bottom_bar_link.is_none());
-}
-
-#[test]
-fn the_bar_without_an_artifact_paints_no_link() {
-    let mut app = App::default();
-    app.session.cwd = Some("/tmp/project".into());
-
-    let row = bottom_bar_row(&mut app, WIDTH);
-
-    assert!(!row.contains("PR #"));
-    assert!(app.view.bottom_bar_link.is_none());
 }
 
 // --- Phase 4: synced status and CI checks ---
@@ -290,6 +220,44 @@ fn an_open_pr_without_a_synced_status_shows_none() {
 }
 
 #[test]
+fn the_short_label_is_the_bare_number_and_falls_back_to_the_label() {
+    assert_eq!(artifacts::short_label(&github("a1", 123, T1)), "#123");
+    assert_eq!(artifacts::short_label(&gitlab("a2", 7, T1)), "!7");
+    let bare = artifact("a3", "github", json!({}), T1);
+    assert_eq!(artifacts::short_label(&bare), "PR");
+}
+
+#[test]
+fn the_standing_reads_the_wire_state_and_status() {
+    use artifacts::Standing::*;
+    for (details, expected) in [
+        (
+            json!({ "state": "merged", "prStatus": "action_needed" }),
+            Merged,
+        ),
+        (
+            json!({ "state": "closed", "prStatus": "mergeable" }),
+            Blocked,
+        ),
+        (
+            json!({ "state": "open", "prStatus": "action_needed" }),
+            Blocked,
+        ),
+        (json!({ "prStatus": "action_needed" }), Blocked),
+        (json!({ "state": "open", "prStatus": "mergeable" }), Ready),
+        (
+            json!({ "state": "draft", "prStatus": "mergeable" }),
+            Pending,
+        ),
+        (json!({ "state": "open", "prStatus": "waiting" }), Pending),
+        (json!({ "state": "open" }), Pending),
+    ] {
+        let artifact = artifact("a1", "github", details_with(details.clone()), T1);
+        assert_eq!(artifacts::standing(&artifact), expected, "{details}");
+    }
+}
+
+#[test]
 fn the_bar_label_carries_the_status() {
     let open = artifact(
         "a1",
@@ -306,21 +274,4 @@ fn the_bar_label_carries_the_status() {
         T2,
     );
     assert_eq!(artifacts::labeled(&merged), "MR !7 (merged)");
-}
-
-#[test]
-fn the_bar_link_shows_the_synced_status() {
-    let mut app = App::default();
-    app.session.cwd = Some("/tmp/project".into());
-    app.session.tokens = (0, 600_000);
-    app.session.artifacts = vec![artifact(
-        "a1",
-        "github",
-        details_with(json!({ "state": "open", "prStatus": "action_needed" })),
-        T1,
-    )];
-
-    let row = bottom_bar_row(&mut app, WIDTH);
-
-    assert!(row.contains("PR #123 (action needed)"));
 }

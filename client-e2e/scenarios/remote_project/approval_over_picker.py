@@ -14,12 +14,7 @@ from e2e.app_server.scenario import Timeline
 
 request_methods = METHODS
 handshake = {**project_handshake(), "callback/result": {"accepted": True}}
-env = {
-    "VIBE_REPLAY_SETTLE_BUSY": "1",
-    "VIBE_TYPING_GRACE_PERIOD_MS": "0",
-    "VIBE_INPUT_GRACE_PERIOD_MS": "0",
-}
-settle_per_key = True
+env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0", "VIBE_INPUT_GRACE_PERIOD_MS": "0"}
 capture_startup = False
 screen_contains = ("Vibe Code project",)
 timeline: Timeline = [

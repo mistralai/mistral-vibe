@@ -140,16 +140,16 @@ impl Slots {
         slot.closing = true;
         let close = format!(r#"{{"channelId":"{id}","message":null}}"#);
         let acknowledged = slot.opened && self.to_child.send(Some(close)).is_ok();
-        let runtime = tokio::runtime::Handle::try_current();
-        let (true, Ok(runtime)) = (acknowledged, runtime) else {
+        let runtime = tokio::runtime::Handle::try_current().is_ok();
+        let (true, true) = (acknowledged, runtime) else {
             self.remove(&mut state, id);
             return;
         };
         let slots = self.clone();
         let wait =
             crate::utils::timeout_or_env("VIBE_TEST_CLOSE_ACK_TIMEOUT_MS", CLOSE_ACK_TIMEOUT);
-        runtime.spawn(async move {
-            tokio::time::sleep(wait).await;
+        crate::work::spawn_daemon(async move {
+            crate::clock::sleep_real(wait).await;
             slots.unacknowledged(id);
         });
     }

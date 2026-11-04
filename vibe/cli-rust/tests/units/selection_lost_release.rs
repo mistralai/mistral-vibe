@@ -2,24 +2,32 @@
 
 use crossterm::event::{MouseButton, MouseEventKind};
 
-use vibe_rs::app::{App, ToastSeverity};
+use vibe_rs::app::{App, Severity};
 use vibe_rs::mouse;
 
 use crate::support::{message, redraw, row, send_mouse, up};
 
-const TOAST: &str = "Slash commands cannot be queued";
+const WORDS: &str = "Slash commands cannot be queued";
 
 struct Harness {
     app: App,
+    /// The cell where the notice's first word starts.
+    anchor: (u16, u16),
 }
 
 impl Harness {
     fn new() -> Self {
         let mut app = App::default();
-        app.show_toast(TOAST.to_owned(), ToastSeverity::Warning, 60);
-        let mut harness = Self { app };
-        harness.redraw();
-        harness
+        vibe_rs::ui::notice::show_sticky(&mut app, Severity::Warning, WORDS);
+        let buffer = redraw(&mut app);
+        let anchor = (0..buffer.area.height)
+            .find_map(|y| {
+                let line = row(&buffer, y);
+                line.find(WORDS)
+                    .map(|at| (line[..at].chars().count() as u16, y))
+            })
+            .expect("painted notice");
+        Self { app, anchor }
     }
 
     fn redraw(&mut self) -> ratatui::buffer::Buffer {
@@ -30,14 +38,11 @@ impl Harness {
         send_mouse(&mut self.app, crate::support::mouse(kind, at.0, at.1));
     }
 
-    /// Press on the toast's first cell and drag over its first word, never releasing.
+    /// Press on the notice's first cell and drag over its first word, never releasing.
     fn drag_first_word(&mut self) {
-        let (_, area) = *self.app.view.toast_text_areas.last().expect("toast row");
-        self.mouse(MouseEventKind::Down(MouseButton::Left), (area.x, area.y));
-        self.mouse(
-            MouseEventKind::Drag(MouseButton::Left),
-            (area.x + 4, area.y),
-        );
+        let (x, y) = self.anchor;
+        self.mouse(MouseEventKind::Down(MouseButton::Left), (x, y));
+        self.mouse(MouseEventKind::Drag(MouseButton::Left), (x + 4, y));
         self.redraw();
     }
 
@@ -76,7 +81,7 @@ fn motion_without_a_button_ends_the_drag_and_copies_its_selection() {
 fn a_press_after_a_lost_release_copies_the_previous_selection() {
     let mut harness = Harness::new();
     harness.drag_first_word();
-    assert!(harness.app.overlays.notice.is_none());
+    assert_eq!(harness.copied_text(), None);
 
     harness.mouse(MouseEventKind::Down(MouseButton::Left), (40, 2));
 
@@ -89,7 +94,7 @@ fn a_press_after_a_lost_release_copies_the_previous_selection() {
     assert!(notice.is_some_and(|text| text.starts_with("Copied")));
 }
 
-/// A press past the painted frame: it hits no target, so the toast selection stays.
+/// A press past the painted frame: it hits no target, so the notice selection stays.
 const NOWHERE: (u16, u16) = (200, 100);
 
 fn selected(harness: &Harness) -> Option<(&str, bool)> {
@@ -143,18 +148,15 @@ fn with_autocopy_off_a_press_after_a_lost_release_keeps_the_text_without_copying
     harness.mouse(MouseEventKind::Down(MouseButton::Left), NOWHERE);
 
     assert_eq!(selected(&harness), Some(("Slash", false)));
-    assert!(harness.app.overlays.notice.is_none());
+    assert_eq!(harness.copied_text(), None);
 }
 
 #[test]
 fn a_press_before_any_paint_read_the_selection_leaves_its_copy_for_the_paint() {
     let mut harness = Harness::new();
-    let (_, area) = *harness.app.view.toast_text_areas.last().expect("toast row");
-    harness.mouse(MouseEventKind::Down(MouseButton::Left), (area.x, area.y));
-    harness.mouse(
-        MouseEventKind::Drag(MouseButton::Left),
-        (area.x + 4, area.y),
-    );
+    let (x, y) = harness.anchor;
+    harness.mouse(MouseEventKind::Down(MouseButton::Left), (x, y));
+    harness.mouse(MouseEventKind::Drag(MouseButton::Left), (x + 4, y));
 
     harness.mouse(MouseEventKind::Down(MouseButton::Left), NOWHERE);
     assert_eq!(selected(&harness), Some(("", true)));

@@ -377,6 +377,7 @@ def test_todo_is_routed_to_the_name_its_permission_is_configured_under() -> None
         f"{VIBE_TOOL_GROUP}.read_session": "read_session",
         f"{VIBE_TOOL_GROUP}.send_to_session": "send_to_session",
         f"{VIBE_TOOL_GROUP}.archive_sessions": "archive_sessions",
+        f"{VIBE_TOOL_GROUP}.restore_sessions": "restore_sessions",
     }
     assert VIBE_PROVIDED_TOOL_MODES == {
         TODO_TOOL_NAME: "ask",
@@ -386,6 +387,7 @@ def test_todo_is_routed_to_the_name_its_permission_is_configured_under() -> None
         "read_session": "ask",
         "send_to_session": "ask",
         "archive_sessions": "ask",
+        "restore_sessions": "ask",
         SCRATCHPAD_TOOL_NAME: "allow",
     }
 

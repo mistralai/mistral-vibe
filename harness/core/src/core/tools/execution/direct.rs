@@ -241,6 +241,7 @@ mod tests {
                 input_schema: json!({"type": "object"}),
                 output_schema: None,
                 exposure: ProvidedToolExposure::Programmatic,
+                direct_name: None,
             }],
         });
         let state = advance(
