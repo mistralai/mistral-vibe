@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::{at_top, load_page, view, DebugConsole};
-use crate::app::{App, ToastSeverity};
+use crate::app::App;
 use crate::server::Client;
 
 /// A scroll intent from a key or the mouse wheel.
@@ -111,7 +111,7 @@ pub fn entry_at(console: &DebugConsole, row: u16) -> Option<usize> {
         .map(|(_, _, index)| *index)
 }
 
-/// Copy a clicked line's plain text and toast.
+/// Copy a clicked line's plain text and confirm it inline.
 pub fn copy_entry_at(app: &mut App, row: u16) {
     let Some(index) = entry_at(&app.debug_console, row) else {
         return;
@@ -120,10 +120,6 @@ pub fn copy_entry_at(app: &mut App, row: u16) {
         return;
     };
     let text = entry.plain_line();
-    crate::clipboard::copy_to_clipboard(&text);
-    app.show_toast(
-        "Copied to clipboard".to_string(),
-        ToastSeverity::Information,
-        2,
-    );
+    let verified = crate::clipboard::copy_to_clipboard(&text);
+    crate::ui::notice::copied_as(app, "Copied to clipboard", "Copied", verified);
 }

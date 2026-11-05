@@ -29,10 +29,9 @@ handshake = {
     )
 }
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 
 # Final frame: back on Main, the main loader and the main context gauge return.
-screen_contains = ("Generating", "0/600k tokens (0%)")
+screen_contains = ("Generating", "ctx        0/600k")
 screen_excludes = ("Viewing Explore 1", "18k/600k", "12.5k/600k")
 
 timeline: Timeline = [

@@ -18,6 +18,7 @@ from vibe.core.compaction.context import (
 )
 from vibe.core.config import VibeConfigSchema
 from vibe.core.llm.completion import CompletionTransport, complete_once
+from vibe.core.platform_auth import PlatformCredentialFactory
 from vibe.core.telemetry.build_metadata import build_request_metadata
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import LaunchContext, ProjectPickerTelemetryPayload
@@ -163,7 +164,15 @@ class UnifiedTeleportContextSummarizer:
                 "Failed to summarize context for teleport.",
                 telemetry_details={"failure_kind": "provider_not_found"},
             )
-        if provider.api_key_env_var and not resolve_api_key(provider.api_key_env_var):
+        provider_credentials = self._adapter.provider_credentials
+        credentials = (
+            provider_credentials(provider.name) if provider_credentials else None
+        )
+        if (
+            credentials is None
+            and provider.api_key_env_var
+            and not resolve_api_key(provider.api_key_env_var)
+        ):
             raise ServiceTeleportError(
                 "Failed to summarize context for teleport.",
                 telemetry_details={"failure_kind": "no_api_key"},
@@ -191,6 +200,7 @@ class UnifiedTeleportContextSummarizer:
             max_tokens=None,
             metadata=metadata,
             transport=CompletionTransport.from_config(config),
+            credentials=credentials,
         )
         raw_content = result.text.strip()
         if not raw_content:
@@ -250,6 +260,10 @@ class UnifiedVibeCodeSession:
     @property
     def summarizer(self) -> TeleportContextSummarizer:
         return self._summarizer
+
+    @property
+    def credentials(self) -> PlatformCredentialFactory | None:
+        return self._adapter._context.platform_credentials
 
     async def read_account(self) -> AccountView:
         return await self._adapter._read_account()

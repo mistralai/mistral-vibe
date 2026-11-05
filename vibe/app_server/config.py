@@ -100,6 +100,8 @@ class ConfigView(ProtocolModel):
     autocopy_to_clipboard: bool
     # Preserve mouse capture when reading an older app-server response (ADR 0014).
     enable_mouse_capture: bool = True
+    # Preserve @ file completion when reading an older app-server response (ADR 0014).
+    enable_file_autocomplete: bool = True
     file_watcher_for_autocomplete: bool
     ask_confirmation_on_exit: bool
     voice_mode_enabled: bool

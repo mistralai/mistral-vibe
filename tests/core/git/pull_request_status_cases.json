@@ -1,0 +1,131 @@
+[
+  {
+    "name": "a merged pull request keeps its lifecycle state",
+    "input": {
+      "state": "merged",
+      "checksStatus": "failing",
+      "reviewDecision": "changes_requested",
+      "mergeStatus": "conflicting"
+    },
+    "status": "merged",
+    "cliStatus": null
+  },
+  {
+    "name": "a draft keeps its lifecycle state",
+    "input": { "state": "draft", "checksStatus": "failing" },
+    "status": "draft",
+    "cliStatus": null
+  },
+  {
+    "name": "a pull request without a lifecycle state is unknown",
+    "input": {},
+    "status": "unknown",
+    "cliStatus": null
+  },
+  {
+    "name": "failing required checks need the user",
+    "input": {
+      "state": "open",
+      "checksStatus": "failing",
+      "reviewDecision": "approved",
+      "mergeStatus": "mergeable"
+    },
+    "status": "action_required",
+    "cliStatus": "action_needed"
+  },
+  {
+    "name": "requested changes need the user",
+    "input": {
+      "state": "open",
+      "checksStatus": "passing",
+      "reviewDecision": "changes_requested",
+      "mergeStatus": "blocked"
+    },
+    "status": "action_required",
+    "cliStatus": "action_needed"
+  },
+  {
+    "name": "conflicts need the user, even while checks run",
+    "input": {
+      "state": "open",
+      "checksStatus": "pending",
+      "reviewDecision": "approved",
+      "mergeStatus": "conflicting"
+    },
+    "status": "action_required",
+    "cliStatus": "action_needed"
+  },
+  {
+    "name": "running required checks win over a blocked merge",
+    "input": {
+      "state": "open",
+      "checksStatus": "pending",
+      "reviewDecision": "approved",
+      "mergeStatus": "blocked"
+    },
+    "status": "checks_pending",
+    "cliStatus": "waiting"
+  },
+  {
+    "name": "a required review waits for reviewers",
+    "input": {
+      "state": "open",
+      "checksStatus": "passing",
+      "reviewDecision": "review_required",
+      "mergeStatus": "blocked"
+    },
+    "status": "awaiting_review",
+    "cliStatus": "waiting"
+  },
+  {
+    "name": "a merge blocked by a branch rule is not a failure",
+    "input": {
+      "state": "open",
+      "checksStatus": "passing",
+      "reviewDecision": "approved",
+      "mergeStatus": "blocked"
+    },
+    "status": "merge_blocked",
+    "cliStatus": "waiting"
+  },
+  {
+    "name": "failing optional checks do not block",
+    "input": {
+      "state": "open",
+      "checksStatus": "passing",
+      "optionalChecksStatus": "failing",
+      "reviewDecision": "approved",
+      "mergeStatus": "mergeable"
+    },
+    "status": "ready_to_merge",
+    "cliStatus": "mergeable"
+  },
+  {
+    "name": "no required check and no review is ready when mergeable",
+    "input": {
+      "state": "open",
+      "checksStatus": "none",
+      "reviewDecision": "none",
+      "mergeStatus": "mergeable"
+    },
+    "status": "ready_to_merge",
+    "cliStatus": "mergeable"
+  },
+  {
+    "name": "an unknown merge status stays open",
+    "input": {
+      "state": "open",
+      "checksStatus": "passing",
+      "reviewDecision": "approved",
+      "mergeStatus": "unknown"
+    },
+    "status": "open",
+    "cliStatus": null
+  },
+  {
+    "name": "an open pull request not read yet stays open",
+    "input": { "state": "open" },
+    "status": "open",
+    "cliStatus": null
+  }
+]

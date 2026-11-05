@@ -1,7 +1,5 @@
 //! Queue selection and edit mode driven by real keys while a turn runs (ADR 0013).
 
-use std::time::Instant;
-
 use crossterm::event::KeyCode;
 use ratatui::layout::Rect;
 use vibe_rs::app::{App, Status};
@@ -14,7 +12,7 @@ fn busy_app(texts: &[&str]) -> App {
     app.session.session_id = Some("sess".into());
     app.session.active_turn_id = Some("turn".into());
     app.session.status = Status::Generating {
-        since: Instant::now(),
+        since: vibe_rs::clock::now(),
     };
     app.queue.items = texts.iter().map(|text| queued(text, text)).collect();
     // The renderer records the composer area; Up reads its width to find the first row.

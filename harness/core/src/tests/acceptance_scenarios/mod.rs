@@ -16,6 +16,7 @@ mod image_input;
 mod large_output;
 mod model_wait;
 mod permissions;
+mod post_tool_results;
 mod program_timing;
 mod recovery;
 mod runtime_driver;
@@ -244,6 +245,16 @@ fn tool_execution_started(turn_id: &str, call_id: &str) -> Value {
         "type": "tool_execution_started",
         "turn_id": turn_id,
         "call_id": call_id,
+    })
+}
+
+/// A model tool call that Core runs itself (`run_typescript`, `search_tool_functions`).
+fn core_tool_execution_started(turn_id: &str, call_id: &str) -> Value {
+    json!({
+        "type": "tool_execution_started",
+        "turn_id": turn_id,
+        "call_id": call_id,
+        "executed_by_core": true,
     })
 }
 

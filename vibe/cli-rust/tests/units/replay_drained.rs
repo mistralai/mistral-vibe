@@ -1,4 +1,4 @@
-//! Replay drain sentinels release the e2e idle marker per request.
+//! Replay drain sentinels release the e2e fence ack per request.
 
 use std::sync::Arc;
 
@@ -47,16 +47,6 @@ fn event() -> TelemetryEvent {
         name: "vibe.test",
         properties: Default::default(),
     }
-}
-
-#[tokio::test]
-async fn sent_telemetry_owes_frames_before_its_task_runs() {
-    let (client, _frames) = Client::stub_answering();
-    let client = Arc::new(client);
-
-    telemetry::send(&client, "session", event());
-
-    assert!(client.owes_replay_frames());
 }
 
 #[tokio::test]

@@ -32,6 +32,7 @@ def build_test_app_config(
         log_level=None,
         disable_welcome_banner_animation=False,
         autocopy_to_clipboard=True,
+        enable_file_autocomplete=True,
         file_watcher_for_autocomplete=False,
         ask_confirmation_on_exit=True,
         show_greeting=True,

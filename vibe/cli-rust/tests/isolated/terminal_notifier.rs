@@ -1,6 +1,6 @@
 //! Pure terminal title and notification transitions.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use vibe_rs::program_status::{BlockedKind, ProgramState};
 use vibe_rs::terminal_notifier::{updated_title, NotificationContext, TerminalNotifier};
 
@@ -27,7 +27,7 @@ fn focus_acknowledges_suffix_but_preserves_waiting() {
     assert_eq!(notifier.title(state), ">> Vibe");
     notifier.set_focus(false);
     state = ProgramState::Blocked(BlockedKind::Permission);
-    notifier.notify(NotificationContext::ActionRequired, Instant::now());
+    notifier.notify(NotificationContext::ActionRequired, vibe_rs::clock::now());
     assert_eq!(notifier.title(state), "Vibe - Action Required");
     assert!(notifier.take_bell());
     assert!(!notifier.take_bell());
@@ -43,7 +43,7 @@ fn focus_acknowledges_suffix_but_preserves_waiting() {
 
 #[test]
 fn completion_is_terminal_and_bells_are_throttled() {
-    let now = Instant::now();
+    let now = vibe_rs::clock::now();
     let mut notifier = TerminalNotifier::default();
     notifier.configure(true, true);
     notifier.set_focus(false);
@@ -71,7 +71,7 @@ fn invalidating_title_preserves_notification_without_repeating_bell() {
     notifier.configure(true, true);
     notifier.set_focus(false);
     let state = ProgramState::Blocked(BlockedKind::Permission);
-    notifier.notify(NotificationContext::ActionRequired, Instant::now());
+    notifier.notify(NotificationContext::ActionRequired, vibe_rs::clock::now());
     assert!(notifier.take_bell());
     assert_eq!(
         notifier.take_title(state).as_deref(),
@@ -95,14 +95,14 @@ fn config_gates_indicators_and_notifications_independently() {
     notifier.clear_outcome();
     assert_eq!(notifier.title(state), "Vibe");
     notifier.set_focus(false);
-    notifier.notify(NotificationContext::Complete, Instant::now());
+    notifier.notify(NotificationContext::Complete, vibe_rs::clock::now());
     assert_eq!(notifier.title(state), "Vibe - Task Complete");
     assert!(notifier.take_bell());
     notifier.set_focus(true);
     notifier.configure(false, true);
     notifier.set_focus(false);
     state = ProgramState::Blocked(BlockedKind::Permission);
-    notifier.notify(NotificationContext::ActionRequired, Instant::now());
+    notifier.notify(NotificationContext::ActionRequired, vibe_rs::clock::now());
     assert_eq!(notifier.title(state), "? Vibe");
     assert!(!notifier.take_bell());
     notifier.configure(false, false);

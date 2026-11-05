@@ -186,7 +186,6 @@ async fn a_picker_resume_before_ready_keeps_the_adopted_paused_queue() {
         StartupEvent::Attached("fresh".into()),
     );
     resume_picker::open(&mut app, &client);
-    app.commit_started();
     app.resume_picker.resuming = true;
     let saved = json!({"eventId": 1, "session": {"id": SAVED}, "history": [],
         "turnQueue": {"paused": true, "items": [{"id": "queue-1", "createdAt": 1,

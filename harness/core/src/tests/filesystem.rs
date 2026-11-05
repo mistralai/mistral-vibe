@@ -93,7 +93,7 @@ fn direct_tool_completion(action_id: &str, call_id: &str, name: &str, arguments:
 ///
 /// *Prepare*: Each built-in filesystem tool starts from a fresh session and receives valid arguments and structured output.
 /// *Do*: Invoke every tool through its bare top-level name, then return its Runtime result.
-/// *Assert*: Every serialized action uses the stable qualified Runtime route and the model's arguments, accepts its output schema, and resumes model execution.
+/// *Assert*: Every serialized action uses the stable qualified Runtime route and the model's arguments, names no parent call, accepts its output schema, and resumes model execution.
 ///
 #[test]
 fn direct_filesystem_route_matrix_is_step_visible() {
@@ -141,6 +141,7 @@ fn direct_filesystem_route_matrix_is_step_visible() {
         assert_eq!(action["call"]["type"], "runtime_builtin");
         assert_eq!(action["call"]["name"], case.runtime_name);
         assert_eq!(action["call"]["arguments"], case.runtime_arguments);
+        assert_eq!(action.get("parent_call_id"), None);
         assert_eq!(
             resumed["transition"]["observations"][0]["type"],
             "tool_result_committed"
@@ -155,7 +156,7 @@ fn direct_filesystem_route_matrix_is_step_visible() {
 ///
 /// *Prepare*: One `run_typescript` call starts all four filesystem operations in parallel.
 /// *Do*: Serialize the dispatched actions, checkpoint the pending program, and restore it into a new session.
-/// *Assert*: Programmatic names map to the same four qualified Runtime routes with the model's arguments, and restoration preserves every pending route.
+/// *Assert*: Programmatic names map to the same four qualified Runtime routes with the model's arguments, each action names the `run_typescript` call as its parent, and restoration preserves every pending route.
 ///
 #[test]
 fn programmatic_filesystem_route_matrix_survives_restore() {
@@ -201,6 +202,7 @@ fn programmatic_filesystem_route_matrix_survives_restore() {
         assert_eq!(action["type"], "runtime_builtin_tool_call");
         assert_eq!(action["call"]["name"], case.runtime_name);
         assert_eq!(action["call"]["arguments"], case.runtime_arguments);
+        assert_eq!(action["parent_call_id"], "call-programmatic-filesystem");
     }
     assert_eq!(
         inspection_value(&restored)["pending_actions"],

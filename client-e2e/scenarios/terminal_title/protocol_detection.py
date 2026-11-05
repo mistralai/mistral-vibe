@@ -11,7 +11,6 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 terminal_responses = {"\x1b]7501;?\x1b\\": "\x1b]7501;?:future=ignored\x07"}
 capture_steps = {1, 2, 3, 4, 5, 6}
 

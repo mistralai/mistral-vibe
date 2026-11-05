@@ -127,7 +127,7 @@ pub(super) fn spawn<R: AsyncRead + Unpin + Send + 'static>(
     deny_callbacks: Arc<AtomicBool>,
     active_session: ActiveSession,
 ) {
-    tokio::spawn(async move {
+    crate::work::spawn_daemon(async move {
         let mut sink = NotifSink {
             tx: notif_tx,
             backlog: VecDeque::new(),
@@ -135,7 +135,7 @@ pub(super) fn spawn<R: AsyncRead + Unpin + Send + 'static>(
         };
         let mut frames = Frames::default();
         let mut chunk = vec![0u8; 16384];
-        let mut flush_tick = tokio::time::interval(std::time::Duration::from_millis(20));
+        let mut flush_tick = crate::clock::interval_real(std::time::Duration::from_millis(20));
         let mut reading = true;
         while reading {
             tokio::select! {

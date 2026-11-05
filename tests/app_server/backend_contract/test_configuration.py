@@ -28,6 +28,7 @@ from vibe.app_server.session import AppServerSession
 from vibe.core.config import VibeConfigSchema
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_session_configuration_updates_and_reloads_through_the_backend(
     backend_contract_session: AppServerSession,
@@ -48,6 +49,7 @@ async def test_session_configuration_updates_and_reloads_through_the_backend(
     assert stripped_history_images == 0
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_a_model_pick_goes_through_the_typed_write(
     backend_contract_session: AppServerSession,
@@ -67,6 +69,7 @@ async def test_a_model_pick_goes_through_the_typed_write(
     assert config.current.active_model.thinking == "high"
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_config_updates_refresh_the_public_runtime_tool_catalog(
     backend_contract_session: AppServerSession,
@@ -80,6 +83,7 @@ async def test_config_updates_refresh_the_public_runtime_tool_catalog(
     assert not backend_contract_session.resources.runtime.has_tool("grep")
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_active_model_update_preserves_usage_and_updates_prices(
     backend_contract_mistral_api: respx.Route,
@@ -126,6 +130,7 @@ async def test_active_model_update_preserves_usage_and_updates_prices(
     assert after.output_price_per_million == 7.5
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_config_subscribers_observe_updates_until_unsubscribed(
     backend_contract_session: AppServerSession,
@@ -142,6 +147,7 @@ async def test_config_subscribers_observe_updates_until_unsubscribed(
     assert themes == ["monokai"]
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_active_model_is_pinned_on_first_turn_and_restored_on_resume(
     config_dir: Path,
@@ -221,6 +227,7 @@ async def test_active_model_is_pinned_on_first_turn_and_restored_on_resume(
         await resumed.close()
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("target_layer", "updates_session_pin"), [("user-toml", False), ("overrides", True)]
@@ -281,6 +288,7 @@ async def test_explicit_active_model_target_controls_session_pin_update(
     )
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_removed_session_active_model_falls_back_to_default(
     config_dir: Path,
@@ -366,6 +374,7 @@ def _session_model_is_persisted(session_root: Path, session_id: str) -> bool:
     return UnifiedSessionStore(session_root, session_id).exists
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_runtime_mutations_leave_the_connection_usable_with_the_updated_runtime(
     backend_contract_session: AppServerSession,
@@ -410,6 +419,7 @@ async def _turn_running(
         await turn
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["write", "mixed_write", "reload", "teleport"])
 async def test_turn_affecting_mutations_conflict_while_a_turn_is_running(
@@ -441,6 +451,7 @@ async def test_turn_affecting_mutations_conflict_while_a_turn_is_running(
     assert exc_info.value.error.code is ProtocolErrorCode.CONFLICT
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("key", "value"),
@@ -473,6 +484,7 @@ async def test_display_settings_save_while_a_turn_is_running(
     assert getattr(response.runtime.config, key) == value
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_proxy_settings_save_while_a_turn_is_running(
     backend_contract_gated_mistral_response: Callable[..., httpx.Response],
@@ -491,6 +503,7 @@ async def test_proxy_settings_save_while_a_turn_is_running(
     assert settings.values["HTTP_PROXY"] == "http://proxy.example.com:8080"
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_remote_project_picker_reaches_the_repository_check_while_a_turn_is_running(
     backend_contract_gated_mistral_response: Callable[..., httpx.Response],
@@ -509,6 +522,7 @@ async def test_remote_project_picker_reaches_the_repository_check_while_a_turn_i
     assert "requires a git repository" in exc_info.value.error.message
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_agent_install_and_uninstall_round_trip_through_the_backend(
     backend_contract_session: AppServerSession,
@@ -547,6 +561,7 @@ async def test_agent_install_rejects_unknown_agent_names(
     assert "no-such-agent" in exc_info.value.error.message
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_agent_uninstall_switches_away_from_the_active_agent(
     backend_contract_session: AppServerSession,
@@ -569,6 +584,7 @@ _PNG = base64.b64decode(
 )
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pick", ["model_write", "config_write", "reload"])
 async def test_a_refused_model_pick_leaves_the_session_and_config_on_the_old_model(
@@ -663,6 +679,7 @@ async def test_a_refused_model_pick_leaves_the_session_and_config_on_the_old_mod
     assert persisted["active_model"] == "roomy"
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_a_mid_turn_pick_core_refuses_at_the_boundary_is_shown_and_the_session_carries_on(
     config_dir: Path,
@@ -810,6 +827,7 @@ async def test_a_config_the_schema_refuses_fails_session_start_with_its_reason(
     )
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_a_config_write_the_schema_refuses_is_rejected_with_its_reason(
     backend_contract_session: AppServerSession,

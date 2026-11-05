@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::app::{App, ModelOption, ToastSeverity};
+use crate::app::{App, ModelOption};
 use crate::config_write::Scope;
 use crate::event_handler;
 use crate::server::Client;
@@ -23,13 +23,11 @@ pub enum Event {
     Failed(String),
 }
 
-pub(crate) const FAILED_TOAST_SECS: u64 = 8;
-
-/// Apply the server's answer and release the commit that was in flight.
+/// Apply the server's answer.
 pub fn apply_event(app: &mut App, event: Event) {
     match event {
         Event::Written(runtime) => event_handler::apply_runtime_value(app, &runtime),
-        Event::Failed(message) => app.show_toast(message, ToastSeverity::Error, FAILED_TOAST_SECS),
+        Event::Failed(message) => crate::notices::failed(app, &message),
     }
 }
 

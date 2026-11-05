@@ -99,7 +99,7 @@ fn confirmed_support_keeps_session_title_and_suppresses_status_and_bells() {
         NotificationContext::Complete,
         NotificationContext::Failed,
     ] {
-        notifier.notify(context, Instant::now());
+        notifier.notify(context, vibe_rs::clock::now());
         assert_eq!(notifier.title(ProgramState::Working), "Session title");
         assert!(!notifier.take_bell());
     }
@@ -116,7 +116,7 @@ fn confirmation_removes_a_pending_legacy_indicator_and_bell() {
     notifier.configure(true, true);
     notifier.enable_program_reports(true);
     notifier.set_focus(false);
-    notifier.notify(NotificationContext::ActionRequired, Instant::now());
+    notifier.notify(NotificationContext::ActionRequired, vibe_rs::clock::now());
     assert_eq!(
         notifier
             .take_title(ProgramState::Blocked(BlockedKind::Permission))
@@ -149,7 +149,7 @@ fn disabling_reports_restores_legacy_notifications() {
         .unwrap()
         .contains("state=idle"));
     notifier.set_focus(false);
-    notifier.notify(NotificationContext::Complete, Instant::now());
+    notifier.notify(NotificationContext::Complete, vibe_rs::clock::now());
     assert_eq!(
         notifier.title(ProgramState::Working),
         "Vibe - Task Complete"

@@ -11,10 +11,13 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-from vibe.core.config import resolve_api_key
-from vibe.core.config._defaults import DEFAULT_MISTRAL_API_ENV_KEY
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.harness_files._paths import GLOBAL_SKILLS_DIR
+from vibe.core.platform_auth import (
+    PlatformCredentialFactory,
+    PlatformCredentialProvider,
+)
+from vibe.core.platform_auth._mistral import mistral_credentials
 from vibe.core.skills.models import REGISTRY_LATEST_ALIAS, SkillScope
 from vibe.core.skills.registry import _ledger, _manifest, _notify, _resolved, _store
 from vibe.core.skills.registry._client import RegistrySkillsClient, RegistrySkillsError
@@ -79,20 +82,19 @@ class SkillUpdate:
 @dataclass(frozen=True)
 class _Endpoint:
     api_base: str
-    api_key: str
+    credentials: PlatformCredentialProvider
 
 
-def _resolve_endpoint(config: VibeConfigSchema) -> _Endpoint | None:
-    provider = config.get_mistral_provider()
-    if provider is None:
-        logger.debug("Registry skills enabled but no Mistral provider is configured")
+def _resolve_endpoint(
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
+) -> _Endpoint | None:
+    mistral = mistral_credentials(config, credentials)
+    if mistral is None:
+        logger.debug("Registry skills enabled but no Mistral credential is available")
         return None
-    env_var = provider.api_key_env_var or DEFAULT_MISTRAL_API_ENV_KEY
-    api_key = resolve_api_key(env_var)
-    if not api_key:
-        logger.info("Registry skills enabled but %s is not set; skipping", env_var)
-        return None
-    return _Endpoint(api_base=provider.api_base, api_key=api_key)
+    return _Endpoint(
+        api_base=mistral.provider.api_base, credentials=mistral.credentials
+    )
 
 
 async def _manifest_paths(roots: Sequence[Path] | None = None) -> list[Path]:
@@ -115,7 +117,10 @@ def _unsafe_pin(entry: ManifestEntry) -> bool:
 
 
 async def refresh_registry_skills(
-    config: VibeConfigSchema, roots: Sequence[Path] | None = None
+    config: VibeConfigSchema,
+    roots: Sequence[Path] | None = None,
+    *,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> RegistrySyncResult:
     """Session-start sync.
 
@@ -130,7 +135,7 @@ async def refresh_registry_skills(
     """
     if not config.experimental_enable_registry_skills:
         return RegistrySyncResult(RegistrySyncStatus.SKIPPED)
-    endpoint = await asyncio.to_thread(_resolve_endpoint, config)
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
     if endpoint is None:
         return RegistrySyncResult(RegistrySyncStatus.SKIPPED)
     if not await _needs_sync(roots):
@@ -138,7 +143,9 @@ async def refresh_registry_skills(
         return RegistrySyncResult(RegistrySyncStatus.SKIPPED)
 
     try:
-        async with RegistrySkillsClient(endpoint.api_base, endpoint.api_key) as client:
+        async with RegistrySkillsClient(
+            endpoint.api_base, endpoint.credentials
+        ) as client:
             latest_by_id = await _resolve_latest_versions(
                 client, await _latest_pinned_skill_ids(roots)
             )
@@ -454,16 +461,20 @@ async def _materialize_missing(
     return written, len(results) - written
 
 
-async def has_registry_endpoint(config: VibeConfigSchema) -> bool:
-    """Is a Mistral provider configured with a usable API key?"""
-    return await asyncio.to_thread(_resolve_endpoint, config) is not None
+async def has_registry_endpoint(
+    config: VibeConfigSchema, *, credentials: PlatformCredentialFactory | None = None
+) -> bool:
+    """Is a Mistral provider configured with a usable credential?"""
+    return await asyncio.to_thread(_resolve_endpoint, config, credentials) is not None
 
 
-async def list_catalog(config: VibeConfigSchema) -> list[CatalogItem]:
-    endpoint = await asyncio.to_thread(_resolve_endpoint, config)
+async def list_catalog(
+    config: VibeConfigSchema, *, credentials: PlatformCredentialFactory | None = None
+) -> list[CatalogItem]:
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
     if endpoint is None:
         return []
-    async with RegistrySkillsClient(endpoint.api_base, endpoint.api_key) as client:
+    async with RegistrySkillsClient(endpoint.api_base, endpoint.credentials) as client:
         items = await client.list_catalog(page_size=_PAGE_SIZE)
     catalog: list[CatalogItem] = []
     for item in items:
@@ -483,26 +494,36 @@ async def list_catalog(config: VibeConfigSchema) -> list[CatalogItem]:
 
 
 async def get_skill_body(
-    config: VibeConfigSchema, skill_id: str, *, version: int | None = None
+    config: VibeConfigSchema,
+    skill_id: str,
+    *,
+    version: int | None = None,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> str:
     """Fetch a single skill's SKILL.md body (for preview/details). No caching."""
-    endpoint = await asyncio.to_thread(_resolve_endpoint, config)
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
     if endpoint is None:
         raise RegistrySkillsError("no authenticated Mistral endpoint available")
-    async with RegistrySkillsClient(endpoint.api_base, endpoint.api_key) as client:
+    async with RegistrySkillsClient(endpoint.api_base, endpoint.credentials) as client:
         item = await client.get_skill(skill_id, version=version)
     return item.skill.skill_body
 
 
 async def get_skill_details(
-    config: VibeConfigSchema, skill_id: str, *, version: int | None = None
+    config: VibeConfigSchema,
+    skill_id: str,
+    *,
+    version: int | None = None,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> SkillDetails | None:
     """Fetch a skill version's full registry object (metadata + body)."""
-    endpoint = await asyncio.to_thread(_resolve_endpoint, config)
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
     if endpoint is None:
         return None
     try:
-        async with RegistrySkillsClient(endpoint.api_base, endpoint.api_key) as client:
+        async with RegistrySkillsClient(
+            endpoint.api_base, endpoint.credentials
+        ) as client:
             item = await client.get_skill(skill_id, version=version)
     except RegistrySkillsError as exc:
         logger.warning("Failed to load skill details: %s", exc.reason)
@@ -533,6 +554,7 @@ async def import_skill(
     alias: str | None = None,
     scope: SkillScope = SkillScope.GLOBAL,
     roots: Sequence[Path] | None = None,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> ManifestEntry:
     """Materialize a skill and pin it.
 
@@ -541,7 +563,7 @@ async def import_skill(
     resolved server-side. ``roots`` selects the project scope's manifest (session
     project roots); defaults to the global harness singleton.
     """
-    endpoint = await asyncio.to_thread(_resolve_endpoint, config)
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
     if endpoint is None:
         raise RegistrySkillsError("no authenticated Mistral endpoint available")
     pin: int | str
@@ -552,7 +574,7 @@ async def import_skill(
     else:
         pin = REGISTRY_LATEST_ALIAS
 
-    async with RegistrySkillsClient(endpoint.api_base, endpoint.api_key) as client:
+    async with RegistrySkillsClient(endpoint.api_base, endpoint.credentials) as client:
         if isinstance(pin, int):
             item = await client.get_skill(skill_id, version=pin)
         else:
@@ -609,13 +631,18 @@ def project_scope_available(roots: Sequence[Path] | None = None) -> bool:
 
 
 async def list_skill_versions(
-    config: VibeConfigSchema, skill_id: str
+    config: VibeConfigSchema,
+    skill_id: str,
+    *,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> list[SkillVersionInfo]:
-    endpoint = await asyncio.to_thread(_resolve_endpoint, config)
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
     if endpoint is None:
         return []
     try:
-        async with RegistrySkillsClient(endpoint.api_base, endpoint.api_key) as client:
+        async with RegistrySkillsClient(
+            endpoint.api_base, endpoint.credentials
+        ) as client:
             return await client.list_versions(skill_id)
     except RegistrySkillsError as exc:
         logger.warning("Failed to list skill versions: %s", exc.reason)
@@ -747,13 +774,20 @@ async def set_skill_version(
     version: int,
     scope: SkillScope = SkillScope.GLOBAL,
     roots: Sequence[Path] | None = None,
+    *,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> ManifestEntry | None:
     """Freeze an imported skill at a specific version, in the given scope."""
     skill_id = _find_skill_id(name, scope, roots)
     if skill_id is None:
         return None
     return await import_skill(
-        config, skill_id, version=version, scope=scope, roots=roots
+        config,
+        skill_id,
+        version=version,
+        scope=scope,
+        roots=roots,
+        credentials=credentials,
     )
 
 
@@ -762,12 +796,16 @@ async def set_skill_latest(
     name: str,
     scope: SkillScope = SkillScope.GLOBAL,
     roots: Sequence[Path] | None = None,
+    *,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> ManifestEntry | None:
     """Switch a scope's pin to the 'latest' alias (resolved server-side)."""
     skill_id = _find_skill_id(name, scope, roots)
     if skill_id is None:
         return None
-    return await import_skill(config, skill_id, scope=scope, roots=roots)
+    return await import_skill(
+        config, skill_id, scope=scope, roots=roots, credentials=credentials
+    )
 
 
 async def set_skill_alias(
@@ -776,12 +814,16 @@ async def set_skill_alias(
     alias: str,
     scope: SkillScope = SkillScope.GLOBAL,
     roots: Sequence[Path] | None = None,
+    *,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> ManifestEntry | None:
     """Pin a scope to a custom alias (a moving pointer like 'latest')."""
     skill_id = _find_skill_id(name, scope, roots)
     if skill_id is None:
         return None
-    return await import_skill(config, skill_id, alias=alias, scope=scope, roots=roots)
+    return await import_skill(
+        config, skill_id, alias=alias, scope=scope, roots=roots, credentials=credentials
+    )
 
 
 def remove_skill(
@@ -815,14 +857,17 @@ def remove_skill(
 
 
 async def check_updates(
-    config: VibeConfigSchema, roots: Sequence[Path] | None = None
+    config: VibeConfigSchema,
+    roots: Sequence[Path] | None = None,
+    *,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> list[SkillUpdate]:
     """Frozen pins whose registry latest is newer than the pinned version.
 
     Tracking pins are excluded: they advance to latest on every refresh, so a
     newer version is never 'available' for them, it is simply adopted.
     """
-    endpoint = await asyncio.to_thread(_resolve_endpoint, config)
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
     if endpoint is None:
         return []
     manifests = await _load_update_manifests(roots)
@@ -835,7 +880,9 @@ async def check_updates(
     if not frozen_ids:
         return []
     try:
-        async with RegistrySkillsClient(endpoint.api_base, endpoint.api_key) as client:
+        async with RegistrySkillsClient(
+            endpoint.api_base, endpoint.credentials
+        ) as client:
             latest_by_id = await _resolve_latest_versions(client, frozen_ids)
     except RegistrySkillsError as exc:
         logger.warning("Failed to check registry skill updates: %s", exc.reason)
@@ -874,14 +921,17 @@ async def _load_update_manifests(
 
 
 async def check_new_versions(
-    config: VibeConfigSchema, roots: Sequence[Path] | None = None
+    config: VibeConfigSchema,
+    roots: Sequence[Path] | None = None,
+    *,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> list[SkillUpdate]:
     """Like ``check_updates`` but only versions that are new *since last session*.
 
     Used by the session-start prompt: a frozen pin lagging behind is surfaced
     once per registry release, then recorded so it does not nag every launch.
     """
-    updates = await check_updates(config, roots)
+    updates = await check_updates(config, roots, credentials=credentials)
     if not updates:
         return []
     ids = await _ids_by_name(roots)

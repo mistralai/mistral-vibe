@@ -1,6 +1,6 @@
-"""The ``list_sessions``, ``read_session``, ``send_to_session`` and
-``archive_sessions`` tools: the attached client reaches the other sessions it
-hosts in the caller's project.
+"""The ``list_sessions``, ``read_session``, ``send_to_session``,
+``archive_sessions`` and ``restore_sessions`` tools: the attached client
+reaches the other sessions it hosts in the caller's project.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import uuid
 from pydantic import BaseModel, ConfigDict, Field
 
 from vibe.app_server.protocol import (
+    ClientCapabilities,
     PeerSessionStatus,
     SessionPeerArchiveParams,
     SessionPeerArchiveResponse,
@@ -20,6 +21,8 @@ from vibe.app_server.protocol import (
     SessionPeerListResponse,
     SessionPeerReadParams,
     SessionPeerReadResponse,
+    SessionPeerRestoreParams,
+    SessionPeerRestoreResponse,
     SessionPeerSendParams,
     SessionPeerSendResponse,
 )
@@ -28,6 +31,7 @@ LIST_SESSIONS_TOOL_NAME = "list_sessions"
 READ_SESSION_TOOL_NAME = "read_session"
 SEND_TO_SESSION_TOOL_NAME = "send_to_session"
 ARCHIVE_SESSIONS_TOOL_NAME = "archive_sessions"
+RESTORE_SESSIONS_TOOL_NAME = "restore_sessions"
 
 LIST_SESSIONS_TOOL_DESCRIPTION = """\
 To answer a question about many sessions, such as which have a pull request \
@@ -62,19 +66,25 @@ message to this session itself."""
 ARCHIVE_SESSIONS_TOOL_DESCRIPTION = """\
 Archive other sessions of this project, all in one call: find their ids with \
 `list_sessions` first (from a program to filter many), then pass them all \
-here. An archived session leaves the user's session list; the user can \
-restore it. A session that is working, has queued messages or waits for the \
+here. An archived session leaves the user's session list; `restore_sessions` \
+brings it back. A session that is working, has queued messages or waits for the \
 user is not archived: tell the user, who can archive it once it is done. \
 Never archive this session itself."""
+
+RESTORE_SESSIONS_TOOL_DESCRIPTION = """\
+Restore archived sessions of this project, all in one call, so they return to \
+the user's session list and can take messages again: find their ids with \
+`list_sessions` and `statuses: ["archived"]` first, then pass them all here. \
+A session that is not archived is left as it is."""
 
 DEFAULT_LIST_LIMIT: Final = 20
 MAX_LIST_LIMIT: Final = 50
 MAX_MESSAGE_CHARS: Final = 4000
 DEFAULT_MESSAGE_LIMIT: Final = 10
 MAX_MESSAGE_LIMIT: Final = 50
-MAX_ARCHIVE_SESSIONS: Final = 50
+MAX_SESSIONS_PER_CALL: Final = 50
 PEER_REQUEST_TIMEOUT_SECONDS: Final = 30.0
-ARCHIVE_SECONDS_PER_SESSION: Final = 5.0
+SECONDS_PER_SESSION: Final = 5.0
 
 _IDEMPOTENCY_NAMESPACE: Final = uuid.UUID("9d6c0a3e-1f2b-4c7d-8e5a-6b4f3c2d1e0f")
 
@@ -134,8 +144,18 @@ class ArchiveSessionsArgs(BaseModel):
 
     session_ids: list[str] = Field(
         min_length=1,
-        max_length=MAX_ARCHIVE_SESSIONS,
+        max_length=MAX_SESSIONS_PER_CALL,
         description="The sessions to archive.",
+    )
+
+
+class RestoreSessionsArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_ids: list[str] = Field(
+        min_length=1,
+        max_length=MAX_SESSIONS_PER_CALL,
+        description="The archived sessions to restore.",
     )
 
 
@@ -144,6 +164,8 @@ class SessionPeerError(Exception):
 
 
 class SessionPeers(Protocol):
+    def client_capabilities(self) -> ClientCapabilities: ...
+
     async def list_peer_sessions(
         self, params: SessionPeerListParams
     ) -> SessionPeerListResponse: ...
@@ -159,6 +181,10 @@ class SessionPeers(Protocol):
     async def archive_peer_sessions(
         self, params: SessionPeerArchiveParams
     ) -> SessionPeerArchiveResponse: ...
+
+    async def restore_peer_sessions(
+        self, params: SessionPeerRestoreParams
+    ) -> SessionPeerRestoreResponse: ...
 
 
 type AwaitsUser = Callable[[str], bool]
@@ -233,14 +259,54 @@ async def run_archive_sessions(
     peers: SessionPeers,
     awaits_user: AwaitsUser,
 ) -> SessionPeerArchiveResponse:
+    return await _run_on_sessions(
+        args.session_ids,
+        lambda session_ids: peers.archive_peer_sessions(
+            SessionPeerArchiveParams(session_ids=session_ids)
+        ),
+        session_id=session_id,
+        awaits_user=awaits_user,
+        done="archived",
+        doing="archiving",
+    )
+
+
+async def run_restore_sessions(
+    args: RestoreSessionsArgs,
+    *,
+    session_id: str,
+    peers: SessionPeers,
+    awaits_user: AwaitsUser,
+) -> SessionPeerRestoreResponse:
+    return await _run_on_sessions(
+        args.session_ids,
+        lambda session_ids: peers.restore_peer_sessions(
+            SessionPeerRestoreParams(session_ids=session_ids)
+        ),
+        session_id=session_id,
+        awaits_user=awaits_user,
+        done="restored",
+        doing="restoring",
+    )
+
+
+async def _run_on_sessions[T](
+    requested_ids: list[str],
+    request: Callable[[list[str]], Coroutine[Any, Any, T]],
+    *,
+    session_id: str,
+    awaits_user: AwaitsUser,
+    done: str,
+    doing: str,
+) -> T:
     _require_user_turn(session_id, awaits_user)
-    session_ids = list(dict.fromkeys(args.session_ids))
+    session_ids = list(dict.fromkeys(requested_ids))
     return await _within(
-        peers.archive_peer_sessions(SessionPeerArchiveParams(session_ids=session_ids)),
-        PEER_REQUEST_TIMEOUT_SECONDS + ARCHIVE_SECONDS_PER_SESSION * len(session_ids),
+        request(session_ids),
+        PEER_REQUEST_TIMEOUT_SECONDS + SECONDS_PER_SESSION * len(session_ids),
         unknown_outcome=(
-            "The client did not confirm in time, so some sessions may have been "
-            "archived. List them before archiving again."
+            f"The client did not confirm in time, so some sessions may have been "
+            f"{done}. List them before {doing} again."
         ),
     )
 

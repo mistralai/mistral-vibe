@@ -11,7 +11,6 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 capture_steps = {1, 2, 3, 4, 5, 6}
 
 # An inert Right key requests a settled frame after each focus event.

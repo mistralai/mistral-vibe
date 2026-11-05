@@ -41,7 +41,7 @@ fn program_approval_longer_than_the_time_budget_does_not_stop_the_program() {
             START_MS,
             running(turn_id)
                 .dispatch(json!({"type": "approval", "call_id": operation_id}))
-                .observe(tool_execution_started(turn_id, call_id)),
+                .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
     let write = runtime
@@ -123,7 +123,7 @@ fn pre_hook_wait_does_not_count_toward_the_time_budget() {
             START_MS,
             running(turn_id)
                 .dispatch(hook_call("pre_tool_call", &["pre-tool"], Value::Null))
-                .observe(tool_execution_started(turn_id, call_id)),
+                .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
     let sleep = runtime
@@ -137,6 +137,8 @@ fn pre_hook_wait_does_not_count_toward_the_time_budget() {
             running(turn_id).dispatch(runtime_tool("self.sleep", json!({"seconds": 1}))),
         )
         .only_action();
+    // The tool call Action sent after the pre-tool Hook still names its program.
+    assert_eq!(sleep["parent_call_id"], call_id);
     let sleep_result = structured_tool_success(&sleep, json!({"seconds": 1}));
 
     // Do / Assert
@@ -179,7 +181,7 @@ fn a_sleep_a_pre_hook_shortened_is_not_a_budget_stop() {
             START_MS,
             running(turn_id)
                 .dispatch(hook_call("pre_tool_call", &["pre-tool"], Value::Null))
-                .observe(tool_execution_started(turn_id, call_id)),
+                .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
     let sleep = runtime
@@ -227,7 +229,7 @@ fn a_sleep_a_pre_hook_lengthened_is_still_cut_to_the_time_budget_across_a_restor
             START_MS,
             running(turn_id)
                 .dispatch(hook_call("pre_tool_call", &["pre-tool"], Value::Null))
-                .observe(tool_execution_started(turn_id, call_id)),
+                .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
     let read = runtime
@@ -324,7 +326,7 @@ fn a_sleep_the_time_budget_cut_short_is_listed_as_never_started() {
                     "file_system.read_file",
                     json!({"path": "slow.txt"}),
                 ))
-                .observe(tool_execution_started(turn_id, call_id)),
+                .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
     let read_result = file_read_success(&read, "slow");
@@ -368,6 +370,16 @@ fn a_sleep_the_time_budget_cut_short_is_listed_as_never_started() {
         running(turn_id)
             .dispatch(llm_call(1))
             .observe(tool_result_committed(turn_id, &sleep, budget_failure))
+            .observe(never_started_commit(
+                turn_id,
+                "typescript:3:program:2:tool:2",
+                json!({
+                    "type": "runtime_builtin",
+                    "name": "file_system.write_file",
+                    "arguments": {"path": "out.txt", "content": "x"},
+                }),
+                budget_stop_error(60_000),
+            ))
             .observe_tool_execution_finished(call_id, stopped),
     );
 }
@@ -394,7 +406,7 @@ fn sleep_beyond_the_time_budget_ends_early_and_the_program_continues() {
             START_MS,
             running(turn_id)
                 .dispatch(runtime_tool("self.sleep", json!({"seconds": 30})))
-                .observe(tool_execution_started(turn_id, call_id)),
+                .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
     let first_sleep_result = structured_tool_success(&first_sleep, json!({"seconds": 30}));
@@ -500,6 +512,33 @@ fn budget_stop(used_ms: u64, call_lines: &[&str], stdout: &str) -> Value {
     })
 }
 
+/// The committed result of a program call that never started: the call is
+/// recorded with the error that stopped it, without a dispatched Action.
+fn never_started_commit(turn_id: &str, operation_id: &str, call: Value, error: Value) -> Value {
+    json!({
+        "type": "tool_result_committed",
+        "turn_id": turn_id,
+        "action_id": crate::core::testing::tool_action_id("programmatic", operation_id),
+        "call_id": operation_id,
+        "call": call,
+        "result": {
+            "type": "failure",
+            "content": [{"type": "text", "text": error["message"]}],
+            "error": error,
+        },
+    })
+}
+
+/// The error a call gets when its program stopped on the time budget before it started.
+fn budget_stop_error(used_ms: u64) -> Value {
+    json!({
+        "code": "ProgramBudgetExceeded",
+        "message": "run_typescript used its 60.0 s time budget and stopped before its next tool call.",
+        "retryable": false,
+        "details": {"budget_ms": 60_000, "used_ms": used_ms},
+    })
+}
+
 /// *Prepare*: A program reads a slow file, logs, then writes a file.
 /// *Do*: Return the read after 70 s, longer than the program's 60 s time budget.
 /// *Assert*: The read is not cut short, it counts, and the program stops before the write starts.
@@ -524,7 +563,7 @@ fn slow_tool_execution_counts_and_the_program_stops_before_its_next_call() {
                     "file_system.read_file",
                     json!({"path": "slow.txt"}),
                 ))
-                .observe(tool_execution_started(turn_id, call_id)),
+                .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
     let read_result = file_read_success(&read, "slow");
@@ -546,6 +585,16 @@ fn slow_tool_execution_counts_and_the_program_stops_before_its_next_call() {
             running(turn_id)
                 .dispatch(llm_call(1))
                 .observe_tool_result(&read, &read_result)
+                .observe(never_started_commit(
+                    turn_id,
+                    "typescript:3:program:1:tool:1",
+                    json!({
+                        "type": "runtime_builtin",
+                        "name": "file_system.write_file",
+                        "arguments": {"path": "out.txt", "content": "x"},
+                    }),
+                    budget_stop_error(70_000),
+                ))
                 .observe_tool_execution_finished(call_id, stopped.clone()),
         )
         .only_action();
@@ -558,6 +607,68 @@ fn slow_tool_execution_counts_and_the_program_stops_before_its_next_call() {
             model_assistant_typescript(call_id, source),
             json!({"role": "tool", "tool_call_id": call_id, "name": "run_typescript", "outcome": "failure", "content": stopped["content"]}),
         ],
+    );
+}
+
+/// *Prepare*: A program reads a slow file, then starts a write without awaiting it and reads the clock.
+/// *Do*: Return the read after 70 s, longer than the program's 60 s time budget.
+/// *Assert*: The program stops at the clock read, and the write it started but never ran is
+/// committed with the budget error.
+#[test]
+fn a_call_still_pending_when_the_program_stops_is_committed_as_never_started() {
+    let turn_id = "unawaited-call";
+    let call_id = "program";
+    let source = r#"async function main() {
+      await tools.file_system.read_file({ path: "slow.txt" });
+      const write = tools.file_system.write_file({ path: "out.txt", content: "x" });
+      const now = Date.now();
+      await write;
+      return now;
+    }"#;
+    let mut runtime = SynchronousRuntime::new(config());
+    let completion = runtime.start_turn(turn_id, "copy the file");
+    let read = runtime
+        .apply_at(
+            run_typescript_completion(action_id(&completion), call_id, source),
+            START_MS,
+            running(turn_id)
+                .dispatch(runtime_tool(
+                    "file_system.read_file",
+                    json!({"path": "slow.txt"}),
+                ))
+                .observe(core_tool_execution_started(turn_id, call_id)),
+        )
+        .only_action();
+    let read_result = file_read_success(&read, "slow");
+
+    // Do / Assert
+    let mut stopped = budget_stop(
+        70_000,
+        &[
+            "tools.file_system.read_file 1: done",
+            "tools.file_system.write_file 2: never started",
+        ],
+        "",
+    );
+    // The program logged nothing, so its result has no stdout block.
+    stopped["content"].as_array_mut().unwrap().pop();
+    runtime.apply_at(
+        read_result.clone(),
+        START_MS + 70_000,
+        running(turn_id)
+            .dispatch(llm_call(1))
+            .observe_tool_result(&read, &read_result)
+            .observe(never_started_commit(
+                turn_id,
+                "typescript:3:program:1:tool:1",
+                json!({
+                    "type": "runtime_builtin",
+                    "name": "file_system.write_file",
+                    "arguments": {"path": "out.txt", "content": "x"},
+                }),
+                budget_stop_error(70_000),
+            ))
+            .observe_tool_execution_finished(call_id, stopped),
     );
 }
 
@@ -585,7 +696,7 @@ fn steering_reaches_the_model_at_the_first_tool_call_after_the_time_budget() {
                     "file_system.read_file",
                     json!({"path": "a.txt"}),
                 ))
-                .observe(tool_execution_started(turn_id, call_id)),
+                .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
     runtime.receive_steering(turn_id, "only read a.txt", &[&first]);
@@ -624,6 +735,16 @@ fn steering_reaches_the_model_at_the_first_tool_call_after_the_time_budget() {
             running(turn_id)
                 .dispatch(llm_call(1))
                 .observe_tool_result(&second, &second_result)
+                .observe(never_started_commit(
+                    turn_id,
+                    "typescript:3:program:2:tool:2",
+                    json!({
+                        "type": "runtime_builtin",
+                        "name": "file_system.read_file",
+                        "arguments": {"path": "c.txt"},
+                    }),
+                    budget_stop_error(65_000),
+                ))
                 .observe_tool_execution_finished(
                     call_id,
                     json!({
@@ -691,7 +812,7 @@ fn process_output_waits_only_for_the_remaining_time_budget() {
                     "process.output",
                     json!({"processId": "p", "waitMs": 2_000}),
                 ))
-                .observe(tool_execution_started(turn_id, call_id)),
+                .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
     let first_result = structured_tool_success(&first, output.clone());
@@ -762,7 +883,7 @@ fn stopped_program_summary_stays_small_after_many_large_tool_calls() {
                     "file_system.read_file",
                     json!({"path": "page-0.txt"}),
                 ))
-                .observe(tool_execution_started(turn_id, call_id)),
+                .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
     let page = "x".repeat(64 * 1024);
@@ -890,7 +1011,7 @@ fn interrupted_program_result_says_which_tool_calls_ran() {
                     "file_system.read_file",
                     json!({"path": "notes.txt"}),
                 ))
-                .observe(tool_execution_started(turn_id, call_id)),
+                .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
     let first_read_result = file_read_success(&first_read, "notes");
@@ -998,7 +1119,7 @@ fn interrupted_program_result_lists_a_failed_call_waiting_for_its_post_hook_as_f
                     "file_system.read_file",
                     json!({"path": "missing.txt"}),
                 ))
-                .observe(tool_execution_started(turn_id, call_id)),
+                .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
     let failure = json!({
@@ -1085,7 +1206,7 @@ fn interrupted_program_result_lists_a_failed_call_waiting_for_its_post_hook_as_f
 
 /// *Prepare*: Programmatic sleep is available with its resolved thirty-second maximum.
 /// *Do*: Catch the validation result of a thirty-one-second request.
-/// *Assert*: The script continues without dispatching the invalid timer.
+/// *Assert*: The script continues without dispatching the invalid timer, and the rejected call is committed.
 #[test]
 fn program_sleep_rejects_requests_above_the_resolved_maximum() {
     let turn_id = "sleep-cap";
@@ -1102,7 +1223,32 @@ fn program_sleep_rejects_requests_above_the_resolved_maximum() {
             run_typescript_completion(action_id(&completion), call_id, source),
             running(turn_id)
                 .dispatch(llm_call(1))
-                .observe(tool_execution_started(turn_id, call_id))
+                .observe(core_tool_execution_started(turn_id, call_id))
+                .observe(never_started_commit(
+                    turn_id,
+                    "typescript:3:program:0:tool:0",
+                    json!({
+                        "type": "runtime_builtin",
+                        "name": "self.sleep",
+                        "arguments": {"seconds": 31},
+                    }),
+                    json!({
+                        "code": "invalid_arguments",
+                        "message": "Invalid arguments for tools.self.sleep: at /seconds: 31 is greater than the maximum of 30.0",
+                        "retryable": false,
+                        "details": {
+                            "type": "jsonSchemaArgumentValidationError",
+                            "functionName": "sleep",
+                            "argumentsValidationErrors": [{
+                                "instancePath": "/seconds",
+                                "schemaPath": "#/properties/seconds/maximum",
+                                "keyword": "maximum",
+                                "params": {"comparison": "<=", "limit": 30},
+                                "message": "must be <= 30.0",
+                            }],
+                        },
+                    }),
+                ))
                 .observe_tool_execution_finished(
                     call_id,
                     run_typescript_success(json!("sleep rejected")),

@@ -60,7 +60,7 @@ pub async fn run(
     };
     {
         let stop = stop.clone();
-        tokio::spawn(async move {
+        crate::work::spawn_daemon(async move {
             loop {
                 shutdown.wait().await;
                 stop.request(RunOutcome::Terminated);

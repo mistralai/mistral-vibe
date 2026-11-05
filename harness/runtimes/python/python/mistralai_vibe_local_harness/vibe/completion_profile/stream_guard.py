@@ -146,6 +146,7 @@ class StreamGuard:
         # the first-output wait when heartbeats alone have filled the rest.
         self._idle_silence_seconds = self.idle_seconds
         self._timeout: GuardTimeout | None = None
+        self._held_retry_after_seconds: float | None = None
 
     @property
     def read_timeout_seconds(self) -> float:
@@ -165,10 +166,19 @@ class StreamGuard:
         self._last_data_at = now
         self._reschedule()
 
-    def hold(self) -> None:
-        """Lift every limit until the next attempt or output."""
+    def hold(self, *, retry_after_seconds: float | None = None) -> None:
+        """Lift every limit until the next attempt or output.
+
+        `retry_after_seconds` is the wait the provider asked for, if it named one.
+        """
         self._phase = "held"
+        self._held_retry_after_seconds = retry_after_seconds
         self._reschedule()
+
+    @property
+    def retry_after_seconds(self) -> float | None:
+        """The wait the provider asked for, while the guard holds for it."""
+        return self._held_retry_after_seconds if self._phase == "held" else None
 
     def mark_output(self) -> None:
         """Record output: from now on, silence is measured against the idle limit."""

@@ -50,7 +50,7 @@ fn a_crash_locks_the_session() {
     let mut app = App::default();
     app.terminal_notifier.configure(true, true);
     app.set_status(Status::Generating {
-        since: std::time::Instant::now(),
+        since: vibe_rs::clock::now(),
     });
     assert_eq!(
         vibe_rs::terminal_notifier::take_title(&mut app).as_deref(),
@@ -74,7 +74,7 @@ fn a_crash_locks_the_session() {
     // A clean stop closes the state without failing or mounting anything.
     let mut app = App::default();
     app.session.status = Status::Generating {
-        since: std::time::Instant::now(),
+        since: vibe_rs::clock::now(),
     };
     assert!(!surface_server_close(&mut app, false));
     assert!(matches!(app.session.status, Status::Generating { .. }));

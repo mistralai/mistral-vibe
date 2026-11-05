@@ -1,0 +1,7 @@
+# The copied Session API files keep the formatting and lint rules of the package
+# they are copied from, so they stay byte-for-byte identical to it.
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]

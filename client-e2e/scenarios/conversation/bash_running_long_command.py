@@ -24,10 +24,6 @@ _COMMAND = (
     'git -C "$WT/$NAME" log --oneline -1'
 )
 
-# Busy frames settle under replay so the running header is capturable.
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
-# A release step must not consume a marker of its own, so settle key by key.
-settle_per_key = True
 capture_steps = {1, 2}
 
 timeline: Timeline = [

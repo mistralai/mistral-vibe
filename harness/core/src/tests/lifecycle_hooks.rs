@@ -208,7 +208,7 @@ fn failed_completion_lifecycle_hooks_keep_discard_and_failure_order() {
 ///
 /// *Prepare*: A restored active turn is waiting on its pre-LLM hook.
 /// *Do*: Complete the hook with a skip result.
-/// *Assert*: The correlated completion is discarded as skipped and the turn completes empty without another action.
+/// *Assert*: The correlated completion is discarded as skipped and the turn completes on the stop reason `skipped` with the reason as its output, without another action.
 ///
 #[test]
 fn restored_pre_llm_skip_completes_without_calling_the_model() {
@@ -257,7 +257,11 @@ fn restored_pre_llm_skip_completes_without_calling_the_model() {
     assert_ne!(completion_action_id, hook_action_id);
     assert_eq!(observations[0]["cause"], json!({"type": "skipped"}));
     assert_eq!(observations[1]["type"], "turn_completed");
-    assert_eq!(observations[1]["output"], json!([]));
+    assert_eq!(
+        observations[1]["output"],
+        json!([{"type": "text", "text": "runtime policy"}])
+    );
+    assert_eq!(observations[1]["stop_reason"], "skipped");
     assert_eq!(skipped["transition"]["turn"]["status"], "completed");
     assert_eq!(skipped["transition"]["next"], json!({"type": "none"}));
 }
@@ -317,9 +321,63 @@ fn restored_completion_retry_adds_feedback_without_committing_the_draft() {
 }
 
 ///
+/// *Prepare*: A turn's draft completion waits on its post-LLM hook, or on its post-agent-turn hook.
+/// *Do*: Reject the draft from the hook with a reason.
+/// *Assert*: The turn completes on the stop reason `rejected` with the reason as its output.
+///
+#[test]
+fn completion_rejection_completes_the_turn_with_the_reason_on_rejected() {
+    for (point, hook) in [
+        (HookPoint::PostLlmCall, "post_llm_call"),
+        (HookPoint::PostAgentTurn, "post_agent_turn"),
+    ] {
+        // Prepare
+        let (mut session, _, hook_action_id) = pending_post_llm_hook(
+            config_with_lifecycle_hook(point),
+            "turn-reject",
+            "unsafe draft",
+        );
+
+        // Do
+        let rejected = accepted_value(session.apply(input(
+            3,
+            json!({
+                "type": "hook_completed",
+                "action_id": hook_action_id,
+                "result": {
+                    "hook": hook,
+                    "output": {
+                        "type": "reject",
+                        "reason": [{"type": "text", "text": "unsafe"}],
+                    },
+                },
+            }),
+        )));
+
+        // Assert
+        let observations = rejected["transition"]["observations"]
+            .as_array()
+            .expect("observations are an array");
+        let completed = observations.last().expect("the turn completes");
+        assert_eq!(completed["type"], "turn_completed", "{hook}");
+        assert_eq!(
+            completed["output"],
+            json!([{"type": "text", "text": "unsafe"}]),
+            "{hook}"
+        );
+        assert_eq!(completed["stop_reason"], "rejected", "{hook}");
+        assert_eq!(
+            rejected["transition"]["turn"]["output"],
+            json!([{"type": "text", "text": "unsafe"}]),
+            "{hook}"
+        );
+    }
+}
+
+///
 /// *Prepare*: A restored post-LLM hook holds an uncommitted draft completion.
 /// *Do*: Reject the candidate with a reason.
-/// *Assert*: The turn completes empty, the draft never enters later model input, and no further action is dispatched for the rejected turn.
+/// *Assert*: The turn completes on the stop reason `rejected` with the reason as its output, the draft never enters later model input, and no further action is dispatched for the rejected turn.
 ///
 #[test]
 fn restored_completion_rejection_keeps_the_draft_out_of_context() {
@@ -364,8 +422,16 @@ fn restored_completion_rejection_keeps_the_draft_out_of_context() {
     assert_eq!(observations[0]["action_id"], completion_action_id);
     assert_eq!(observations[0]["cause"], json!({"type": "rejected"}));
     assert_eq!(observations[1]["type"], "turn_completed");
-    assert_eq!(observations[1]["output"], json!([]));
+    assert_eq!(
+        observations[1]["output"],
+        json!([{"type": "text", "text": "unsafe"}])
+    );
+    assert_eq!(observations[1]["stop_reason"], "rejected");
     assert_eq!(rejected["transition"]["turn"]["status"], "completed");
+    assert_eq!(
+        rejected["transition"]["turn"]["output"],
+        json!([{"type": "text", "text": "unsafe"}])
+    );
     assert_eq!(rejected["transition"]["next"], json!({"type": "none"}));
     let next_model_input = serde_json::to_string(
         &next_turn["transition"]["next"]["directives"][0]["action"]["model_input"],

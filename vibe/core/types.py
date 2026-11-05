@@ -63,6 +63,17 @@ class WorktreeContext(BaseModel):
     created_at: int
 
 
+# A "cloud" id names a cloud project the starter did not resolve to a local one (the
+# flag was off, say): readers must still resolve it through a local project's backing.
+# "none" (no id) is read for the projectless sessions to come; nothing writes it yet.
+class SessionProject(BaseModel):
+    # A field a newer version adds must not invalidate the whole meta.json.
+    model_config = ConfigDict(extra="ignore")
+
+    kind: Literal["local", "cloud", "none"]
+    id: str | None = None
+
+
 class SessionMetadata(BaseModel):
     session_id: str
     parent_session_id: str | None = None
@@ -102,8 +113,15 @@ class SessionMetadata(BaseModel):
     # (the resolved alias) and ``model_name`` (the provider model name) before
     # their first user turn; older snapshots remain valid.
     config: dict[str, JsonValue] | None = None
+    # How the app server last drove this session's local runtime: through the
+    # Session API or by calling the runtime directly. Fixed when the session
+    # opens, so a resume after the switch changed records the new path. ``None``
+    # for sessions written before this field existed.
+    runtime_path: Literal["session_api", "direct"] | None = None
     import_provenance: dict[str, JsonValue] | None = None
     created_worktree: WorktreeContext | None = None
+    # The project the session was started in, written once; None for unstamped sessions.
+    project: SessionProject | None = None
     # Durable external work products (PRs/MRs) observed during this session.
     # Absent from sessions written before this field existed; defaults to [].
     artifacts: list[SessionArtifact] = Field(default_factory=list)

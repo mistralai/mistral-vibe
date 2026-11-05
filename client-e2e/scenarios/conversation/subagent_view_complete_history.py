@@ -49,7 +49,6 @@ handshake = {
 
 request_methods = frozenset({"session/read", "session/history/list"})
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 
 screen_contains = ("message 0", "message 1", "message 2", "message 22")
 

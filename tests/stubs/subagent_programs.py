@@ -34,7 +34,7 @@ def spawn_and_wait(name: str, message: str) -> str:
     named = f"{SUBAGENT_NAME}: {json.dumps(name)}"
     return f"""
 async function main() {{
-  await {SUBAGENT_TOOLS}.spawn({{{named}, message: {json.dumps(message)}}});
+  await {SUBAGENT_TOOLS}.spawn({{{named}, instructions: "Follow the message.", message: {json.dumps(message)}}});
 {_WAIT_FOR_CHILD.format(tools=SUBAGENT_TOOLS, name=json.dumps(name))}
   return {{child}};
 }}
@@ -48,7 +48,7 @@ def spawn_only(name: str, message: str) -> str:
     named = f"{SUBAGENT_NAME}: {json.dumps(name)}"
     return f"""
 async function main() {{
-  await {SUBAGENT_TOOLS}.spawn({{{named}, message: {json.dumps(message)}}});
+  await {SUBAGENT_TOOLS}.spawn({{{named}, instructions: "Follow the message.", message: {json.dumps(message)}}});
   return "spawned";
 }}
 """
@@ -60,6 +60,7 @@ def spawn_two(first: str, second: str, message: str) -> str:
     """
     spawns = "\n".join(
         f"  await {SUBAGENT_TOOLS}.spawn({{{SUBAGENT_NAME}: {json.dumps(name)},"
+        ' instructions: "Follow the message.",'
         f" message: {json.dumps(message)}}});"
         for name in (first, second)
     )

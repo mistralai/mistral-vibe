@@ -49,14 +49,10 @@ pub fn enqueue(
 
 /// Effect side: detached, so no caller ever waits on an analytics round-trip.
 pub fn send(client: &Arc<Client>, session_id: &str, event: TelemetryEvent) {
-    client.telemetry_spawned();
+    // Tracked, so the replay ack waits until the frame is sent and answered.
     let client = client.clone();
     let session_id = session_id.to_owned();
-    tokio::spawn(async move {
-        let answer = deliver(&client, &session_id, event);
-        client.telemetry_written();
-        answer.await;
-    });
+    crate::work::spawn(async move { deliver(&client, &session_id, event).await });
 }
 
 /// Send what is still queued, concurrently, so the last actions (such as

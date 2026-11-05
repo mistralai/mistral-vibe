@@ -195,3 +195,21 @@ fn from_runtime_stamps_the_write_time() {
     assert!(config.cached_at >= before && config.cached_at <= after);
     assert!(config.is_fresh(CLIENT_VERSION, after));
 }
+
+#[test]
+fn file_autocomplete_defaults_to_enabled_when_the_runtime_omits_it() {
+    let config = StartupConfig::from_runtime("1.0.0", &runtime("safe")).unwrap();
+    assert!(config.enable_file_autocomplete);
+    assert!(config.file_watcher_for_autocomplete);
+}
+
+#[test]
+fn runtime_flags_project_into_the_startup_config() {
+    let mut runtime = runtime("safe");
+    let config = &mut runtime["runtime"]["config"];
+    config["enableFileAutocomplete"] = false.into();
+    config["fileWatcherForAutocomplete"] = false.into();
+    let config = StartupConfig::from_runtime("1.0.0", &runtime).unwrap();
+    assert!(!config.enable_file_autocomplete);
+    assert!(!config.file_watcher_for_autocomplete);
+}

@@ -115,6 +115,15 @@ def _harness_files_from_context(context: Any) -> HarnessFilesManager | None:
     return harness_files if isinstance(harness_files, HarnessFilesManager) else None
 
 
+def stored_tool_allowlist_patterns(
+    tool_name: str, patterns: Sequence[str]
+) -> list[str]:
+    """The ``patterns``, deduplicated, in the form the tool stores them."""
+    if tool_name in _SESSION_PATTERN_WILDCARD_TOOLS:
+        patterns = [_strip_session_pattern_wildcard(p) for p in patterns]
+    return list(dict.fromkeys(patterns))
+
+
 class EnvValueOrigin(StrEnum):
     """Where a value Vibe itself wrote into ``os.environ`` came from."""
 
@@ -473,7 +482,6 @@ class VibeConfigSchema(ConfigSchema):
         "routed_model_config",
         "routed_extra_models",
         "smart_approve_available",
-        "smart_approve_default",
     })
 
     _validation_warnings: list[str] = PrivateAttr(default_factory=list)
@@ -713,6 +721,16 @@ class VibeConfigSchema(ConfigSchema):
             " connector bootstrap alongside web_search."
         ),
     )
+    experimental_enable_mistral_mcp_connector: Annotated[bool, WithReplaceMerge()] = (
+        Field(
+            default=False,
+            description=(
+                "Experimental: expose the Mistral MCP builtin connector and its"
+                " tools. Rolled out through the vibe_cli_mistral_mcp_connector"
+                " GrowthBook experiment."
+            ),
+        )
+    )
     connectors: Annotated[list[ConnectorConfig], WithUnionMerge(merge_key="name")] = (
         Field(
             default_factory=list,
@@ -757,22 +775,14 @@ class VibeConfigSchema(ConfigSchema):
             "Applies in both interactive and programmatic (-p/--prompt) mode."
         ),
     )
-    # Smart approve rollout, driven by GrowthBook (see experiments/active.py). The two
-    # flags are independent, mirroring model routing (#49523): one exposes the mode in
-    # the picker, the other makes it the default. Kept off by default so smart approve
-    # ships dark until a cohort is opted in.
+    # Kept off by default so smart approve ships dark until a cohort is opted in.
+    # The vibe_cli_default_agent experiment makes a mode the default by setting
+    # default_agent itself.
     smart_approve_available: Annotated[bool, WithReplaceMerge()] = Field(
         default=False,
         description=(
             "Expose the smart-approve mode in the mode picker/cycle. "
             "Set by the vibe_cli_smart_approve experiment; does not change the default."
-        ),
-    )
-    smart_approve_default: Annotated[bool, WithReplaceMerge()] = Field(
-        default=False,
-        description=(
-            "Make smart-approve the default mode (implies it is available). "
-            "Set by the vibe_cli_smart_approve_default experiment."
         ),
     )
     enable_auto_approve: Annotated[bool, WithReplaceMerge()] = Field(
@@ -843,9 +853,10 @@ class VibeConfigSchema(ConfigSchema):
             "Experimental: detect pull requests and merge requests created during"
             " a session (gh pr create, glab mr create) and discover the ones that"
             " already exist for the session's repository at session load"
-            " (gh pr list, glab mr list), persist them as session artifacts, and"
-            " expose them via the artifacts/ RPC namespace. Requires gh/glab"
-            " (system-installed or bundled)."
+            " (gh pr list, glab mr list), persist them as session artifacts,"
+            " keep their status in sync with the provider, and expose them via"
+            " the artifacts/ RPC namespace. Requires gh/glab (system-installed or"
+            " bundled)."
         ),
     )
     experimental_enable_pr_discovery: Annotated[bool, WithReplaceMerge()] = Field(
@@ -853,8 +864,19 @@ class VibeConfigSchema(ConfigSchema):
         description=(
             "Experimental: discover open pull requests / merge requests for the"
             " session's repository at session load (gh pr list, glab mr list),"
-            " persist them as session artifacts, and notify clients. Runs only"
-            " when the session has no existing PR artifacts. Local only."
+            " persist them as session artifacts, and notify clients. Runs again"
+            " when the session moves to another checkout, and skips a branch"
+            " the session already has a PR for. Local only."
+        ),
+    )
+    experimental_local_runtime_session_api: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Experimental: the app server drives local Sessions through the"
+            " Session API instead of calling the local runtime directly. Set by"
+            " the vibe_cli_local_runtime_session_api_migration experiment; the"
+            " VIBE_EXPERIMENTAL_LOCAL_RUNTIME_SESSION_API environment variable"
+            " takes precedence. Read when a Session opens."
         ),
     )
 
@@ -904,6 +926,13 @@ class VibeConfigSchema(ConfigSchema):
             "Disable to keep the terminal's native text selection."
         ),
     )
+    enable_file_autocomplete: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
+        description=(
+            "Offer @ file mentions with repository file completion. Disable to "
+            "skip building the file index and watching the filesystem for it."
+        ),
+    )
     file_watcher_for_autocomplete: Annotated[bool, WithReplaceMerge()] = True
     ask_confirmation_on_exit: Annotated[bool, WithReplaceMerge()] = True
     displayed_workdir: Annotated[str, WithReplaceMerge()] = Field(
@@ -932,10 +961,10 @@ class VibeConfigSchema(ConfigSchema):
         le=100,
         description="Maximum number of recent managed worktrees kept locally.",
     )
-    experimental_worktree_copy_on_write: Annotated[bool, WithReplaceMerge()] = Field(
-        default=False,
+    worktree_copy_on_write: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
         description=(
-            "Experimental, macOS only: create managed worktrees of a trusted"
+            "macOS only: create managed worktrees of a trusted"
             " repository by cloning an idle template checkout with APFS"
             " copy-on-write, which uses less disk and is faster on large"
             " repositories. Keeps one template checkout per repository under"
@@ -1104,14 +1133,6 @@ class VibeConfigSchema(ConfigSchema):
     experiments: Annotated[ExperimentsConfig, WithShallowMerge()] = Field(
         default_factory=ExperimentsConfig
     )
-
-    def smart_approve_offered(self) -> bool:
-        """Whether smart-approve is exposed in the mode picker/cycle.
-
-        Making it the default implies it is offered, so a cohort can be defaulted
-        into it without also flipping the availability flag.
-        """
-        return self.smart_approve_available or self.smart_approve_default
 
     def resolve_default_model_alias(self) -> str:
         available = self.available_models()
@@ -1304,33 +1325,6 @@ class VibeConfigSchema(ConfigSchema):
         raise ValueError(
             f"TTS provider '{model.provider}' for TTS model '{model.name}' not found in configuration."
         )
-
-    def build_tool_allowlist_update(
-        self,
-        tool_name: str,
-        patterns: list[str],
-        *,
-        current_allowlist: list[str] | None = None,
-    ) -> dict[str, Any] | None:
-        """Extend a tool's allowlist in memory and return the persist payload.
-
-        Returns ``None`` when every pattern is already allowlisted. Callers
-        persist the returned payload; the in-memory config is kept current so
-        repeated calls merge from fresh state.
-        """
-        if tool_name in _SESSION_PATTERN_WILDCARD_TOOLS:
-            patterns = [_strip_session_pattern_wildcard(p) for p in patterns]
-        allowlist: list[str] = list(
-            current_allowlist
-            if current_allowlist is not None
-            else self.tools.get(tool_name, {}).get("allowlist", [])
-        )
-        new_patterns = [p for p in patterns if p not in allowlist]
-        if not new_patterns:
-            return None
-        merged = sorted(allowlist + new_patterns)
-        self.tools.setdefault(tool_name, {})["allowlist"] = merged
-        return {"tools": {tool_name: {"allowlist": merged}}}
 
     @property
     def system_prompt(self) -> str:

@@ -12,6 +12,6 @@ timeline: Timeline = [
     "\x1b[A",
     "\x1b[B",
     "\x1b[200~should not be pasted\x1b[201~",
-    "x\x12",
+    "x\x14",
     "\x1b",
 ]

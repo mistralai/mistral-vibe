@@ -44,7 +44,10 @@ class ChildSessionHost(Protocol):
         spawn_key: str,
         start_new_actions: bool,
         require_existing: bool,
-    ) -> ChildSessionHandle: ...
+        instructions: str | None = None,
+    ) -> ChildSessionHandle:
+        """Open the child under ``binding``; ``instructions`` replace the binding's."""
+        ...
 
     async def start_child_turn(
         self,
@@ -63,6 +66,8 @@ class ChildSessionHost(Protocol):
         known_generation: ChildGenerationRef,
         operation_key: str,
     ) -> ChildCommandAdmission: ...
+
+    async def wait_for_child_restore(self, child_session_id: str) -> None: ...
 
     async def interrupt_child(
         self,
@@ -90,8 +95,6 @@ class ChildSessionHost(Protocol):
     async def reconfigure_child(
         self, child: ChildSessionHandle, binding: ResolvedChildSessionBinding
     ) -> bool: ...
-
-    async def child_is_quiescent(self, child_session_id: str) -> bool: ...
 
     async def delete_child(self, child_session_id: str) -> None: ...
 

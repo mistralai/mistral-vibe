@@ -33,6 +33,19 @@ pub(crate) fn hook_tool_catalog(config: &HarnessConfig) -> Vec<crate::core::hook
     assembly::hook_tool_catalog(config)
 }
 
+/// The key of the tool that a top-level model call named `name` reaches, by the
+/// same routes `ResolvedTools::resolve_direct_call` uses, or `None` when no
+/// top-level tool has that name.
+pub(crate) fn direct_tool_key(
+    config: &HarnessConfig,
+    name: &str,
+) -> Option<crate::core::hooks::HookToolKey> {
+    assembly::direct_routes(config)
+        .into_iter()
+        .find(|(route_name, _)| route_name == name)
+        .map(|(_, target)| target.hook_tool_key())
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ResolvedTools {
     top_level_tools: Vec<ToolDefinition>,
@@ -245,20 +258,37 @@ fn validate_tool_groups(config: &HarnessConfig) -> Result<(), CoreError> {
                     format!("duplicate stable tool ID {qualified_name:?}"),
                 ));
             }
-            if tool.exposure.is_direct() {
-                if is_reserved_direct_name(config, &tool.name) {
+            if let Some(direct_name) = &tool.direct_name {
+                if !tool.exposure.is_direct() {
                     return Err(CoreError::invalid_configuration(
                         "tool_groups",
                         format!(
-                            "direct tool name {:?} conflicts with a built-in tool",
-                            tool.name
+                            "programmatic-only tool {qualified_name:?} must not set direct_name"
                         ),
                     ));
                 }
-                if !direct_names.insert(tool.name.clone()) {
+                if !tool_discovery::is_identifier(direct_name) {
                     return Err(CoreError::invalid_configuration(
                         "tool_groups",
-                        format!("ambiguous duplicate direct tool name {:?}", tool.name),
+                        format!(
+                            "direct tool name {direct_name:?} in group {:?} must be a valid TypeScript identifier",
+                            group.name
+                        ),
+                    ));
+                }
+            }
+            if tool.exposure.is_direct() {
+                let direct_name = tool.direct_function_name();
+                if is_reserved_direct_name(config, direct_name) {
+                    return Err(CoreError::invalid_configuration(
+                        "tool_groups",
+                        format!("direct tool name {direct_name:?} conflicts with a built-in tool"),
+                    ));
+                }
+                if !direct_names.insert(direct_name.to_string()) {
+                    return Err(CoreError::invalid_configuration(
+                        "tool_groups",
+                        format!("ambiguous duplicate direct tool name {direct_name:?}"),
                     ));
                 }
             }
@@ -275,7 +305,7 @@ fn build_top_level_tools(config: &HarnessConfig) -> Vec<ToolDefinition> {
         .flat_map(|group| &group.tools)
         .filter(|tool| tool.exposure.is_direct())
         .map(|tool| ToolDefinition {
-            name: tool.name.clone(),
+            name: tool.direct_function_name().to_string(),
             description: tool.description.clone(),
             parameters: tool.input_schema.clone(),
         })
@@ -320,6 +350,7 @@ mod tests {
     };
     use crate::core::features::programmatic_tool_calling::ProgrammaticName;
     use crate::core::features::tool_discovery::{SearchMode, SearchRequest};
+    use crate::core::hooks::{HookToolKey, HookToolTarget};
     use crate::core::testing::CommandEnvironment;
     use crate::core::tools::resolved::testing::{config, qualified_name};
     use serde_json::json;
@@ -375,6 +406,7 @@ mod tests {
                 input_schema: json!({"type": "object"}),
                 output_schema: Some(json!({"type": "array"})),
                 exposure: ProvidedToolExposure::Programmatic,
+                direct_name: None,
             }],
         }];
         let mut config = config();
@@ -494,6 +526,7 @@ mod tests {
                 input_schema: json!({"type": "object"}),
                 output_schema: Some(json!({"type": "object"})),
                 exposure: ProvidedToolExposure::Direct,
+                direct_name: None,
             }],
         }];
 
@@ -513,5 +546,183 @@ mod tests {
         );
         assert!(result.contains("<name>clientInteraction</name>"));
         assert!(result.contains("<status>not_callable</status>"));
+    }
+
+    fn direct_named_group(
+        group_name: &str,
+        exposure: ProvidedToolExposure,
+        direct_name: Option<&str>,
+    ) -> ToolGroupDefinition {
+        ToolGroupDefinition {
+            name: group_name.to_string(),
+            description: String::new(),
+            metadata: None,
+            icon_url: None,
+            tools: vec![ProvidedToolDefinition {
+                name: "delete_item".to_string(),
+                description: "Delete an item".to_string(),
+                input_schema: json!({"type": "object"}),
+                output_schema: None,
+                exposure,
+                direct_name: direct_name.map(str::to_string),
+            }],
+        }
+    }
+
+    ///
+    /// *Prepare*: Two groups each expose a direct tool named `delete_item` with distinct direct names.
+    /// *Do*: Compile the resolved tools.
+    /// *Assert*: The top-level catalog lists the direct names, and each routes to its own stable ID.
+    ///
+    #[test]
+    fn direct_names_keep_same_named_tools_from_different_groups_distinct() {
+        // Prepare
+        let mut config = config();
+        config.capabilities.tool_groups = vec![
+            direct_named_group(
+                "inventory",
+                ProvidedToolExposure::Direct,
+                Some("inventory_delete_item"),
+            ),
+            direct_named_group(
+                "archive",
+                ProvidedToolExposure::DirectAndProgrammatic,
+                Some("archive_delete_item"),
+            ),
+        ];
+
+        // Do
+        let tools = ResolvedTools::compile(&config).unwrap();
+        let call = |name: &str| ToolCall {
+            id: format!("{name}-call"),
+            name: name.to_string(),
+            arguments: json!({}),
+            argument_error: None,
+        };
+
+        // Assert
+        let names = tools
+            .top_level_tools()
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"inventory_delete_item"));
+        assert!(names.contains(&"archive_delete_item"));
+        assert!(!names.contains(&"delete_item"));
+        for (direct_name, group_name) in [
+            ("inventory_delete_item", "inventory"),
+            ("archive_delete_item", "archive"),
+        ] {
+            let external = tools.resolve_direct_call(&call(direct_name)).unwrap();
+            assert_eq!(
+                external.hook_tool_key().qualified_name,
+                format!("{group_name}.delete_item")
+            );
+        }
+    }
+
+    ///
+    /// *Prepare*: Tool groups set `direct_name` on a programmatic-only tool, reuse one direct name, or use an invalid one.
+    /// *Do*: Compile the resolved tools for each.
+    /// *Assert*: Each configuration is rejected.
+    ///
+    #[test]
+    fn rejects_invalid_direct_names() {
+        let cases = [
+            vec![direct_named_group(
+                "inventory",
+                ProvidedToolExposure::Programmatic,
+                Some("inventory_delete_item"),
+            )],
+            vec![
+                direct_named_group("inventory", ProvidedToolExposure::Direct, Some("delete")),
+                direct_named_group("archive", ProvidedToolExposure::Direct, Some("delete")),
+            ],
+            vec![direct_named_group(
+                "inventory",
+                ProvidedToolExposure::Direct,
+                Some("inventory.delete_item"),
+            )],
+        ];
+        for tool_groups in cases {
+            // Prepare
+            let mut config = config();
+            config.capabilities.tool_groups = tool_groups;
+
+            // Do
+            let result = ResolvedTools::compile(&config);
+
+            // Assert
+            assert!(result.is_err(), "{:?}", config.capabilities.tool_groups);
+        }
+    }
+
+    ///
+    /// *Prepare*: A config with the built-in direct tools, `wait`, a provided group that
+    /// exposes one tool directly, and one whose direct tool has its own direct name.
+    /// *Do*: Look up the tool behind each model-facing name.
+    /// *Assert*: Each name reaches its full tool ID; a name no top-level tool has reaches none.
+    ///
+    #[test]
+    fn direct_tool_key_names_the_tool_a_model_call_reaches() {
+        // Prepare
+        let mut config = config();
+        config.settings.tools.model_wait =
+            serde_json::from_value(json!({"mode": "enabled"})).unwrap();
+        config.capabilities.tool_groups = vec![ToolGroupDefinition {
+            name: "clientInteraction".to_string(),
+            description: "Request structured participation from the connected client.".to_string(),
+            metadata: None,
+            icon_url: None,
+            tools: vec![ProvidedToolDefinition {
+                name: "askUser".to_string(),
+                description: "Ask the user to choose one of a bounded set of options.".to_string(),
+                input_schema: json!({"type": "object"}),
+                output_schema: None,
+                exposure: ProvidedToolExposure::Direct,
+                direct_name: None,
+            }],
+        }];
+        config.capabilities.tool_groups.push(direct_named_group(
+            "inventory",
+            ProvidedToolExposure::Direct,
+            Some("inventory_delete_item"),
+        ));
+
+        // Do
+        let keys = [
+            "read_file",
+            "wait",
+            "askUser",
+            "inventory_delete_item",
+            "delete_item",
+            "no_such_tool",
+        ]
+        .map(|name| direct_tool_key(&config, name));
+
+        // Assert
+        assert_eq!(
+            keys,
+            [
+                Some(HookToolKey {
+                    target: HookToolTarget::Filesystem,
+                    qualified_name: "file_system.read_file".to_string(),
+                }),
+                Some(HookToolKey {
+                    target: HookToolTarget::SelfTool,
+                    qualified_name: "self.wait".to_string(),
+                }),
+                Some(HookToolKey {
+                    target: HookToolTarget::Provided,
+                    qualified_name: "clientInteraction.askUser".to_string(),
+                }),
+                Some(HookToolKey {
+                    target: HookToolTarget::Provided,
+                    qualified_name: "inventory.delete_item".to_string(),
+                }),
+                None,
+                None,
+            ]
+        );
     }
 }

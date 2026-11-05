@@ -6,6 +6,7 @@ from typing import Any, Final
 
 from pydantic import ValidationError
 
+from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config.fingerprint import create_dict_fingerprint
 from vibe.core.config.layer import ConfigLayer, RawConfig
 from vibe.core.config.models import ModelConfig
@@ -17,6 +18,14 @@ type GrowthbookConfigMapper = Callable[[object], str | bool | None]
 
 _ON_TOKENS = frozenset({"on", "true"})  # accept boolean and string authoring
 
+# An experiment never moves a cohort into auto-approve, which skips every
+# permission prompt.
+_DEFAULT_AGENT_ROLLOUT_MODES: Final = frozenset({
+    BuiltinAgentName.ASK,
+    BuiltinAgentName.ACCEPT_EDITS,
+    BuiltinAgentName.SMART_APPROVE,
+})
+
 
 def _map_on(value: object) -> bool | None:
     """Map a boolean rollout flag to True, or None when off/unset."""
@@ -24,6 +33,12 @@ def _map_on(value: object) -> bool | None:
         return True
     if isinstance(value, str) and value.strip().lower() in _ON_TOKENS:
         return True
+    return None
+
+
+def _map_default_agent(value: object) -> str | None:
+    if isinstance(value, str) and value in _DEFAULT_AGENT_ROLLOUT_MODES:
+        return value
     return None
 
 
@@ -111,9 +126,15 @@ GROWTHBOOK_CONFIG_MAPPINGS: Final[
         ),
     ),
     ExperimentName.SMART_APPROVE: (("smart_approve_available", _map_on),),
-    ExperimentName.SMART_APPROVE_DEFAULT: (("smart_approve_default", _map_on),),
+    ExperimentName.DEFAULT_AGENT: (("default_agent", _map_default_agent),),
     ExperimentName.REGISTRY_SKILLS: (("experimental_enable_registry_skills", _map_on),),
     ExperimentName.PR_MONITORING: (("experimental_enable_pr_monitoring", _map_on),),
+    ExperimentName.MISTRAL_MCP_CONNECTOR: (
+        ("experimental_enable_mistral_mcp_connector", _map_on),
+    ),
+    ExperimentName.LOCAL_RUNTIME_SESSION_API: (
+        ("experimental_local_runtime_session_api", _map_on),
+    ),
 }
 
 

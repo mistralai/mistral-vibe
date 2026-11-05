@@ -98,8 +98,6 @@ class SubagentSessionIdentity(_SessionIdentityModel):
     def validate_ownership(self) -> Self:
         if self.session_id in {self.root_session_id, self.parent_session_id}:
             raise ValueError("a subagent Session must have a distinct identity")
-        if self.parent_session_id != self.root_session_id:
-            raise ValueError("a depth-one subagent must be owned by its root Session")
         return self
 
 
@@ -201,6 +199,8 @@ class CreationCleanupPendingChild(SubagentModel):
 class TurnFailedChild(SubagentModel):
     type: Literal["turn_failed"] = "turn_failed"
     outcome: FailedChildTurnOutcome
+    # Written for other readers; whether the child takes messages is decided
+    # from ``outcome.failure.code``.
     reusable: bool
 
 
@@ -240,6 +240,11 @@ class ChildSessionRecord(SubagentModel):
     spawn_request_digest: str = Field(min_length=1)
     template_digest: str = Field(min_length=1)
     policy_ceiling_digest: str = Field(min_length=1)
+    # A generic child's own instructions, from its spawn; they replace its
+    # binding's, which are its parent's. ``None`` runs the binding's. The
+    # binding's digest still covers the parent's instructions, so a change to
+    # them rebinds the child, which then keeps these.
+    instructions: str | None = Field(default=None, min_length=1)
     depth: Literal[1] = 1
     state: ChildLifecycleState
     last_notified_generation: int = Field(default=0, ge=0)

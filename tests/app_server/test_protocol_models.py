@@ -261,6 +261,16 @@ def test_agent_config_carries_app_server_and_vibe_launch_fields() -> None:
     assert config.tools[0].input_schema == {"type": "object"}
 
 
+@pytest.mark.parametrize(
+    "project", [{"kind": "local"}, {"kind": "cloud", "id": ""}, {"kind": "none"}]
+)
+def test_session_start_rejects_a_project_stamp_without_a_project(
+    project: dict[str, str],
+) -> None:
+    with pytest.raises(ValidationError):
+        validate_wire(SessionStartParams, {"project": project})
+
+
 def test_session_start_wraps_vibe_configuration_in_agent_config() -> None:
     params = SessionStartParams(
         agent_config=AgentConfig(cwd="/workspace", headless=True), history_limit=100
@@ -292,6 +302,7 @@ def test_session_start_wraps_vibe_configuration_in_agent_config() -> None:
         },
         "historyLimit": 100,
         "idempotencyKey": None,
+        "project": None,
         "kind": "normal",
         "title": None,
         "model": None,

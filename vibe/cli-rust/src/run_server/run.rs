@@ -107,7 +107,7 @@ impl LiveRun {
         self.hard_stop.send_if_modified(|at| {
             let first = at.is_none();
             let hard_stop = crate::utils::timeout_or_env("VIBE_TEST_HARD_STOP_MS", HARD_STOP);
-            at.get_or_insert_with(|| Instant::now() + hard_stop);
+            at.get_or_insert_with(|| Instant::from_std(crate::clock::real_now()) + hard_stop);
             first
         });
     }
@@ -171,7 +171,7 @@ async fn hard_stopped(hard_stop: &mut watch::Receiver<Option<Instant>>) {
     loop {
         let at = *hard_stop.borrow_and_update();
         match at {
-            Some(at) => return tokio::time::sleep_until(at).await,
+            Some(at) => return crate::clock::sleep_until_real(Some(at.into_std())).await,
             None if hard_stop.changed().await.is_err() => std::future::pending().await,
             None => {}
         }
@@ -185,14 +185,14 @@ async fn export(
     mut hard_stop: watch::Receiver<Option<Instant>>,
 ) -> (Option<PathBuf>, Option<String>, Option<&'static str>) {
     let report = report.clone();
-    let mut writing = tokio::task::spawn_blocking(move || headless.export(&report));
+    let mut writing = crate::work::spawn_blocking(move || headless.export(&report));
     let mut watching = true;
     loop {
-        let deadline =
-            (*hard_stop.borrow_and_update()).map(|at| at.max(Instant::now()) + EXPORT_GRACE);
+        let deadline = (*hard_stop.borrow_and_update())
+            .map(|at| at.max(Instant::from_std(crate::clock::real_now())) + EXPORT_GRACE);
         let bounded = async {
             match deadline {
-                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                Some(deadline) => crate::clock::sleep_until_real(Some(deadline.into_std())).await,
                 None => std::future::pending().await,
             }
         };

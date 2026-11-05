@@ -1,0 +1,22 @@
+[
+ {
+  "method": "account/read",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "config/model/write",
+  "params": {
+   "modelAlias": "devstral-small",
+   "reasoningEffort": "off",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "account/read",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

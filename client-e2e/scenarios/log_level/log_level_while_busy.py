@@ -7,8 +7,6 @@ from e2e.app_server.scenario import Timeline
 
 _ESCAPE = "\x1b[27u"
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
-settle_per_key = True
 screen_contains = ("config.toml → ERROR",)
 screen_excludes = ("Slash commands cannot be queued",)
 # Down to ERROR, focus and set the config badge, then apply.

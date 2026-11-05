@@ -10,15 +10,17 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::app::{App, ToastSeverity};
+use crate::app::{App, Severity};
 pub use crate::config_fields::{ConfigField, Loaded};
 use crate::model_picker;
 use crate::search_field::{self, Outcome, Search};
+use crate::ui::notice::Notice;
 pub fn open(app: &mut App, client: &Arc<Client>, tx: &mpsc::Sender<Loaded>) {
     app.config_screen.fields.clear();
     app.config_screen.list.reset();
     app.config_screen.search = Search::default();
     app.config_screen.edit = None;
+    app.config_screen.status = None;
     app.config_screen.loading = true;
     app.config_screen.open = true;
     if let Some(session_id) = app.session.session_id.clone() {
@@ -29,7 +31,7 @@ pub fn open(app: &mut App, client: &Arc<Client>, tx: &mpsc::Sender<Loaded>) {
 pub fn load(session_id: String, client: &Arc<Client>, tx: &mpsc::Sender<Loaded>, report: bool) {
     let client = client.clone();
     let tx = tx.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let params = serde_json::json!({ "sessionId": session_id });
         let loaded = match client.request(method::CONFIG_FIELDS_READ, params).await {
             Ok(value) => crate::config_fields::parse(&value),
@@ -48,8 +50,7 @@ pub fn apply_loaded(app: &mut App, mut loaded: Loaded) {
         app.config_screen.loading = false;
         if app.config_screen.open {
             let message = format!("Failed to load settings: {error}");
-            let secs = model_picker::FAILED_TOAST_SECS;
-            app.show_toast(message, ToastSeverity::Error, secs);
+            crate::notices::failed(app, &message);
         }
         return;
     }
@@ -226,15 +227,12 @@ fn reset_selected(app: &mut App, client: &Arc<Client>, tx: &mpsc::Sender<Loaded>
         .map(|(layer, _)| layer.clone())
         .unwrap_or_default();
     if !app.config_screen.targets.contains(&target) {
-        app.show_toast(
-            format!(
-                "'{}' is pinned by {}; nothing to clear.",
-                field.name,
-                origin_label(&target)
-            ),
-            ToastSeverity::Information,
-            5,
+        let message = format!(
+            "'{}' is pinned by {}; nothing to clear.",
+            field.name,
+            origin_label(&target)
         );
+        app.config_screen.status = Some(Notice::new(Severity::Warning, &message, None));
         return;
     }
     write(app, client, tx, field, "remove", Value::Null, target);
@@ -268,9 +266,8 @@ pub(crate) fn write(
     let client = client.clone();
     let tx = tx.clone();
     let events_tx = app.events.clone();
-    let pending = app.commit_started();
     let op = op.to_owned();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let ops = vec![serde_json::json!(
             {"op": op, "path": field.path, "value": value, "targetLayer": target}
         )];
@@ -292,8 +289,8 @@ pub(crate) fn write(
             }
         };
         let failed = matches!(event, model_picker::Event::Failed(_));
-        crate::input::deliver(events_tx, event, &pending).await;
-        // A failed write may still have moved layers; its toast already reports the failure.
+        crate::input::deliver(events_tx, event).await;
+        // A failed write may still have moved layers; its `✕` row already reports the failure.
         load(session_id, &client, &tx, !failed);
     });
 }

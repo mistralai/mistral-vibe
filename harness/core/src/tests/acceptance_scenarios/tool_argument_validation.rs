@@ -509,10 +509,10 @@ fn search_tool_functions_rejects_a_mode_name_used_as_an_argument_name() {
                     &first_completion,
                     &calls,
                 ))
-                .observe(tool_execution_started(turn_id, "query-as-value"))
-                .observe(tool_execution_started(turn_id, "nested-arguments"))
-                .observe(tool_execution_started(turn_id, "functions-as-value"))
-                .observe(tool_execution_started(turn_id, "two-mode-names"))
+                .observe(core_tool_execution_started(turn_id, "query-as-value"))
+                .observe(core_tool_execution_started(turn_id, "nested-arguments"))
+                .observe(core_tool_execution_started(turn_id, "functions-as-value"))
+                .observe(core_tool_execution_started(turn_id, "two-mode-names"))
                 .observe_tool_execution_finished(
                     "query-as-value",
                     invalid_tool_call_result(&best_match_error),
@@ -583,7 +583,10 @@ fn search_tool_functions_rejects_an_unknown_argument() {
                     &first_completion,
                     &calls,
                 ))
-                .observe(tool_execution_started(turn_id, "unknown-search-argument"))
+                .observe(core_tool_execution_started(
+                    turn_id,
+                    "unknown-search-argument",
+                ))
                 .observe(tool_execution_finished(
                     turn_id,
                     "unknown-search-argument",

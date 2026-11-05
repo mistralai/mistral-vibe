@@ -140,6 +140,76 @@ fn copying_keeps_rail_colored_content_inside_a_fence() {
 }
 
 #[test]
+fn copying_the_warnings_box_skips_its_warning_colored_frame() {
+    use ratatui::prelude::Widget;
+    use ratatui::widgets::Paragraph;
+    use vibe_rs::ui::theme;
+
+    let text = "- first warning\n- second warning";
+    let lines = markdown::framed(text, 40, "Warnings", theme::warning(), |_| false);
+    let area = Rect::new(0, 0, 40, lines.len() as u16);
+    let mut buf = Buffer::empty(area);
+    for (y, line) in lines.lines().iter().enumerate() {
+        let row = Rect {
+            y: y as u16,
+            height: 1,
+            ..area
+        };
+        Paragraph::new(line.clone()).render(row, &mut buf);
+    }
+    let mut app = App::default();
+    app.view.selection_region.area = area;
+    app.selection.region = Some(Selection {
+        owner: RegionId::Main,
+        anchor: (0, 0),
+        head: (area.right() - 1, i32::from(area.bottom() - 1)),
+        pending_copy: false,
+        edge_scroll: 0,
+        scroll_target: ScrollTarget::Transcript,
+        table_cell: None,
+        text: String::new(),
+    });
+    let spans = region::spans(&app, &buf, area);
+    assert!(
+        spans.iter().all(|&(_, x0, x1)| x0 >= 2 && x1 < 38),
+        "{spans:?}"
+    );
+    assert_eq!(
+        region::extract(&buf, &spans),
+        "• first warning\n• second warning"
+    );
+}
+
+#[test]
+fn copying_a_warning_row_keeps_its_box_glyphs() {
+    use ratatui::prelude::Widget;
+    use ratatui::style::Style;
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::Paragraph;
+    use vibe_rs::ui::theme;
+
+    let style = Style::default().fg(theme::warning());
+    let row = Line::from(vec![Span::styled("⚠ tree │ a │", style)]);
+    let area = Rect::new(0, 0, 40, 1);
+    let mut buf = Buffer::empty(area);
+    Paragraph::new(row).render(area, &mut buf);
+    let mut app = App::default();
+    app.view.selection_region.area = area;
+    app.selection.region = Some(Selection {
+        owner: RegionId::Main,
+        anchor: (0, 0),
+        head: (area.right() - 1, 0),
+        pending_copy: false,
+        edge_scroll: 0,
+        scroll_target: ScrollTarget::Transcript,
+        table_cell: None,
+        text: String::new(),
+    });
+    let copied = region::extract(&buf, &region::spans(&app, &buf, area));
+    assert_eq!(copied, "⚠ tree │ a │");
+}
+
+#[test]
 fn a_bare_or_cramped_fence_drops_the_language_label() {
     let top = |text: &str, width: u16| -> String {
         let rows = markdown::render(text, width);

@@ -79,7 +79,6 @@ pub struct Client {
     deny_callbacks: Arc<AtomicBool>,
     active_session: ActiveSession,
     replay_drained: AtomicU64,
-    unsent_telemetry: AtomicU64,
     /// The app-server's own pid, from `initialize`'s `processId`; 0 before it.
     server_pid: AtomicU32,
 }

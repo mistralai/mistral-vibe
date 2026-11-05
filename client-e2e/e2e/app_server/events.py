@@ -279,6 +279,21 @@ def complete_entry(entry_id: str) -> AppServerEvent:
     )
 
 
+def discard_entry(entry_id: str, cause: str = "failure") -> AppServerEvent:
+    """Settle one streaming entry as output the model never kept, as an ended turn does."""
+    return _updated(
+        entry_id,
+        [
+            {"op": "replace", "path": "/generationStatus", "value": "completed"},
+            {
+                "op": "add",
+                "path": "/outcome",
+                "value": {"type": "discarded", "cause": cause},
+            },
+        ],
+    )
+
+
 COMPACTION_ENTRY_ID = "checkpoint-compaction-00000000-0000-4000-8000-0000000000c1"
 
 

@@ -34,9 +34,9 @@
 
     .vibe-r1 { fill: #000000 }
 .vibe-r2 { fill: #abb2bf }
-.vibe-r3 { fill: #ff5a00;font-weight: bold }
+.vibe-r3 { fill: #fa500f;font-weight: bold }
 .vibe-r4 { fill: #abb2bf;font-weight: bold }
-.vibe-r5 { fill: #303040 }
+.vibe-r5 { fill: #343446 }
 .vibe-r6 { fill: #a9aaad }
 .vibe-r7 { fill: #d9a5e8;text-decoration: underline; }
     </style>

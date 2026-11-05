@@ -1,4 +1,6 @@
-//! Clipboard I/O: the native platform tool with an OSC 52 fallback.
+//! Clipboard I/O: the native platform tool, then tmux forwarding or an OSC 52 fallback.
+
+mod tmux;
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -34,7 +36,9 @@ impl Clipboard for SystemClipboard {
         } else {
             copy_native(text)
         };
-        copy_osc52(text);
+        if !tmux::copy(text) {
+            copy_osc52(text);
+        }
         verified
     }
 
@@ -101,28 +105,29 @@ fn copy_native(text: &str) -> bool {
             ("xsel", &["--clipboard", "--input"]),
         ]
     };
-    for (program, args) in candidates {
-        let Ok(mut child) = Command::new(program)
-            .args(*args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
-            continue; // tool not installed; try the next one
-        };
-        let wrote = child
-            .stdin
-            .take()
-            .map(|mut stdin| stdin.write_all(text.as_bytes()).is_ok())
-            .unwrap_or(false);
-        let succeeded = child.wait().is_ok_and(|status| status.success());
-        if wrote && succeeded {
-            return true;
-        }
-        // e.g. wl-copy outside Wayland: fall through to the X11 tools
-    }
-    false
+    // A missing tool, or e.g. wl-copy outside Wayland, falls through to the next one.
+    candidates
+        .iter()
+        .any(|(program, args)| pipe(program, args, text))
+}
+
+/// Pipe `text` into `program`, returning whether it ran and exited successfully.
+fn pipe(program: &str, args: &[&str], text: &str) -> bool {
+    let Ok(mut child) = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let wrote = child
+        .stdin
+        .take()
+        .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+    let succeeded = child.wait().is_ok_and(|status| status.success());
+    wrote && succeeded
 }
 
 /// Copy `text` via OSC 52 on stdout, tmux-passthrough wrapped.

@@ -38,6 +38,7 @@ pub(crate) use conversation::{ConversationSeed, SpawnContext};
 pub(crate) use features::file_system::{BashTimeout, BashTimeoutSettings, restored_bash_call};
 #[cfg(test)]
 pub(crate) use features::large_output::Policy as LargeOutputPolicy;
+pub(crate) use features::permissions::{PermissionPolicy, UnmatchedToolPattern};
 pub(crate) use session::HarnessSession;
 pub(crate) use step_protocol::{HarnessApplyResult, HarnessInput, Inspection};
 pub(crate) use wire::content::ContentBlock;
@@ -96,6 +97,12 @@ pub(crate) fn hook_tool_catalog(config: &HarnessConfig) -> Vec<hooks::HookToolKe
     tools::resolved::hook_tool_catalog(config)
 }
 
+/// The key of the tool a top-level model call named `name` reaches, or `None`
+/// when no top-level tool has that name.
+pub(crate) fn direct_tool_key(config: &HarnessConfig, name: &str) -> Option<hooks::HookToolKey> {
+    tools::resolved::direct_tool_key(config, name)
+}
+
 /// Checks one permission rule pattern with the same glob syntax that policy
 /// evaluation uses, so a Runtime can reject it before it creates a Session.
 /// An argument pattern must also use one separator spelling.
@@ -106,6 +113,17 @@ pub(crate) fn validate_permission_pattern(pattern: &str, arguments: bool) -> Res
         features::permissions::PermissionPatternField::Tools
     };
     features::permissions::validate_permission_pattern(pattern, field)
+}
+
+/// The `tools` patterns of `policy` that name a namespace of `tool_ids` but
+/// match none of its tools, read with the glob syntax that policy evaluation
+/// uses, so a Runtime can reject a rule that never applies.
+pub(crate) fn unmatched_permission_tool_patterns(
+    policy: &PermissionPolicy,
+    tool_ids: &[String],
+    open_namespaces: &[String],
+) -> Vec<UnmatchedToolPattern> {
+    policy.unmatched_tool_patterns(tool_ids, open_namespaces)
 }
 
 pub(crate) fn initial_state(config: HarnessConfig) -> Result<HarnessState, CoreError> {

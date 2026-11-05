@@ -1,7 +1,6 @@
 //! Draft restoration preserves local history; other text fields ignore composer undo.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
@@ -17,7 +16,7 @@ use vibe_rs::{chat_input::Action, config_edit, input, keymap, mcp};
 fn queued_app() -> App {
     let mut app = App::default();
     app.session.status = Status::Generating {
-        since: Instant::now(),
+        since: vibe_rs::clock::now(),
     };
     app.queue.items.push(QueueItem {
         queue_item_id: None,

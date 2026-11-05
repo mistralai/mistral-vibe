@@ -123,6 +123,8 @@ from vibe.core.git.worktree import (
     WorktreeRepository,
 )
 from vibe.core.hooks.config import load_hooks_from_fs
+from vibe.core.platform_auth import PlatformCredentialFactory
+from vibe.core.platform_auth._mistral import api_key_credentials
 from vibe.core.session.artifacts import sanitize_artifacts_in_raw_metadata
 from vibe.core.session.saved_sessions import (
     delete_saved_session,
@@ -180,20 +182,22 @@ class HostRequestHandler:
         harness_files: HarnessFilesManager,
         *,
         org_config: OrgConfigService,
+        credentials: PlatformCredentialFactory | None = None,
         image_fallback: bool = False,
         builtin_plugin_roots: Sequence[Path] | None = None,
     ) -> None:
         self._harness_files = harness_files
         self._org_config = org_config
+        self._credentials = credentials or api_key_credentials
         self._image_fallback = image_fallback
         self._builtin_plugin_roots = builtin_plugin_roots
-        self._project_links = ProjectLinksController()
+        self._project_links = ProjectLinksController(self._credentials)
         self._local_projects = LocalProjectsController()
         self._setup = SetupRequestHandler(harness_files)
         self._local_skills = LocalSkillsController(
             self._local_skill_files, self._load_orchestrator
         )
-        self._missing_layers = MissingLayerFetches(org_config)
+        self._missing_layers = MissingLayerFetches(org_config, self._credentials)
 
     def handles(self, method: str) -> bool:
         return method in _HOST_METHODS
@@ -727,7 +731,9 @@ class HostRequestHandler:
     async def setup_telemetry(self, client_info: ClientInfo) -> TelemetryClient:
         config = await self._load_config(None)
         return TelemetryClient(
-            config_getter=lambda: config, launch_context=_launch_context(client_info)
+            config_getter=lambda: config,
+            launch_context=_launch_context(client_info),
+            credentials=self._credentials,
         )
 
     async def _load_config(self, cwd: str | None) -> VibeConfigSchema:
@@ -749,7 +755,7 @@ class HostRequestHandler:
         # Match the session path so host reads (agents/list) see rollout flags
         # like smart_approve_available and the enforced default agent.
         await apply_cached_layers(
-            orchestrator, self._org_config if org_config else None
+            orchestrator, self._org_config if org_config else None, self._credentials
         )
         return orchestrator
 

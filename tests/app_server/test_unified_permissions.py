@@ -12,9 +12,11 @@ import logging
 from pathlib import Path
 import sys
 import tempfile
+import tomllib
 from typing import Any
 
 import pytest
+import tomli_w
 
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
@@ -607,6 +609,86 @@ async def test_a_permanent_grant_writes_the_pattern_to_the_allowlist(
 
 
 @pytest.mark.asyncio
+async def test_a_permanent_grant_keeps_allowlist_entries_another_session_saved(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    # Prepare
+    resolver, _ = _resolver(tmp_path, bash={"allowlist": ["ls"]})
+    outcome = await resolver.resolve("file_system.bash", {"command": "npm test"})
+    config_file = config_dir / "config.toml"
+    saved = tomllib.loads(config_file.read_text())
+    saved.setdefault("tools", {})["bash"] = {"allowlist": ["ls", "make"]}
+    config_file.write_text(tomli_w.dumps(saved))
+
+    # Do
+    await resolver.grant("file_system.bash", _granted(outcome), permanent=True)
+
+    # Assert
+    persisted = tomllib.loads(config_file.read_text())
+    assert persisted["tools"]["bash"]["allowlist"] == ["ls", "make", "npm test"]
+
+
+@pytest.mark.asyncio
+async def test_a_permanent_grant_rewrites_a_pattern_removed_from_the_file(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    # Prepare
+    resolver, _ = _resolver(tmp_path, bash={"allowlist": ["ls"]})
+    outcome = await resolver.resolve("file_system.bash", {"command": "npm test"})
+    await resolver.grant("file_system.bash", _granted(outcome), permanent=True)
+    config_file = config_dir / "config.toml"
+    saved = tomllib.loads(config_file.read_text())
+    saved["tools"]["bash"]["allowlist"] = ["ls"]
+    config_file.write_text(tomli_w.dumps(saved))
+
+    # Do
+    await resolver.grant("file_system.bash", _granted(outcome), permanent=True)
+
+    # Assert
+    persisted = tomllib.loads(config_file.read_text())
+    assert persisted["tools"]["bash"]["allowlist"] == ["ls", "npm test"]
+
+
+@pytest.mark.asyncio
+async def test_a_permanent_grant_already_in_the_file_leaves_it_byte_identical(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    # Prepare
+    resolver, _ = _resolver(tmp_path, bash={"allowlist": ["ls"]})
+    outcome = await resolver.resolve("file_system.bash", {"command": "npm test"})
+    config_file = config_dir / "config.toml"
+    saved = tomllib.loads(config_file.read_text())
+    saved.setdefault("tools", {})["bash"] = {"allowlist": ["npm test", "ls"]}
+    original = "# my comment\n" + tomli_w.dumps(saved)
+    config_file.write_text(original)
+
+    # Do
+    await resolver.grant("file_system.bash", _granted(outcome), permanent=True)
+
+    # Assert
+    assert config_file.read_text() == original
+
+
+@pytest.mark.asyncio
+async def test_a_permanent_grant_keeps_entries_deleted_from_the_file_deleted(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    # Prepare
+    resolver, _ = _resolver(tmp_path, bash={"allowlist": ["ls", "make"]})
+    outcome = await resolver.resolve("file_system.bash", {"command": "npm test"})
+    config_file = config_dir / "config.toml"
+    assert "bash" not in tomllib.loads(config_file.read_text()).get("tools", {})
+
+    # Do
+    await resolver.grant("file_system.bash", _granted(outcome), permanent=True)
+
+    # Assert
+    allowlist = tomllib.loads(config_file.read_text())["tools"]["bash"]["allowlist"]
+    assert "make" not in allowlist
+    assert {"npm test", "git status"} <= set(allowlist)
+
+
+@pytest.mark.asyncio
 async def test_a_grant_for_a_command_with_an_expansion_covers_the_next_one(
     tmp_path: Path,
 ) -> None:
@@ -719,7 +801,7 @@ async def test_a_permanent_grant_persists_command_and_path_scopes(
 
     # Assert
     allowlist = orchestrator.config.tools["bash"]["allowlist"]
-    assert allowlist == sorted(["grep", path_grant])
+    assert {"grep", path_grant} <= set(allowlist)
     assert PermissionScope.OUTSIDE_DIRECTORY.value not in caplog.text
     next_session, _ = _resolver(tmp_path, bash={"allowlist": allowlist})
     again = await next_session.resolve("file_system.bash", {"command": command})

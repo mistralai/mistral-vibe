@@ -18,7 +18,7 @@ fn synthesizing() -> Fixture {
     let (tx, telemetry) = mpsc::channel(TELEMETRY_CHANNEL_CAP);
     app.telemetry_tx = Some(tx);
     let stop = Arc::new(AtomicBool::new(false));
-    let task = tokio::spawn(std::future::pending::<()>());
+    let task = crate::work::spawn_daemon(std::future::pending::<()>());
     app.narrator.speech_id = 1;
     app.narrator.speech = Some(Speech {
         id: 1,

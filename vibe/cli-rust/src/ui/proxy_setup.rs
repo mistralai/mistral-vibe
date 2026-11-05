@@ -30,7 +30,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::popup_border())),
+            .border_style(theme::border_style()),
         area,
     );
     let x = area.x + 2;
@@ -108,9 +108,7 @@ fn draw_input(
     focused: bool,
     cursor_on: bool,
 ) {
-    let bar = Style::default()
-        .fg(theme::popup_border())
-        .bg(theme::background());
+    let bar = theme::border_style().bg(theme::background());
     f.buffer_mut().set_string(x, text.y, "▎", bar);
     if !input.field.text.is_empty() {
         paint::field(f, text, &mut input.field, focused, cursor_on);

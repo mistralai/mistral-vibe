@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from e2e.app_server.events import (
     assistant_msg,
+    discard_entry,
     turn_completed,
     turn_failed,
     turn_started,
@@ -11,22 +12,21 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
-
-screen_contains = ("partial recovered.",)
-screen_excludes = ("Stream ended early", "/retry", "Retrying")
+screen_contains = ("Recovered in full.",)
+screen_excludes = ("partial", "Stream ended early", "/retry", "Retrying")
 
 timeline: Timeline = [
     "hi\r",
     turn_started(),
     user_msg("hi"),
-    assistant_msg("partial", generation_status="in_progress"),
+    assistant_msg("partial", entry_id="partial", generation_status="in_progress"),
+    discard_entry("partial"),
     turn_failed(code="incomplete_stream", message="Stream ended early"),
     # Frame: the injected turn/start is in flight; Retrying, and no error row.
-    {"release": 5},
+    {"release": 6},
     turn_started(),
-    assistant_msg(" recovered."),
+    assistant_msg("Recovered in full."),
     turn_completed(),
-    # Frame: the continuation merged into the interrupted answer.
+    # Frame: the retried reply replaced the discarded answer.
     {"release": 4},
 ]

@@ -90,6 +90,7 @@ from mistralai_vibe_local_harness.session_protocol import (
     TurnQueueSteerResponse,
     TurnQueueUpdatedEvent,
 )
+from mistralai_vibe_local_harness.vibe import _sandbox_helper
 from mistralai_vibe_local_harness.vibe._connector_models import (
     ConnectorRouteSnapshot,
     ResolvedConnectorCatalog,
@@ -118,6 +119,11 @@ from mistralai_vibe_local_harness.vibe._errors import (
     HarnessTurnQueueIdempotencyConflictError,
     HarnessTurnQueuePendingError,
 )
+from mistralai_vibe_local_harness.vibe._fact_recorder import (
+    NO_FACTS,
+    FactRecorder,
+    fact_recorder,
+)
 from mistralai_vibe_local_harness.vibe._file_images import file_image_content_block
 from mistralai_vibe_local_harness.vibe._local_actions import (
     ApprovalGrant,
@@ -135,6 +141,7 @@ from mistralai_vibe_local_harness.vibe._mcp_runtime import MCPRuntime
 from mistralai_vibe_local_harness.vibe._paths import file_uri_to_path
 from mistralai_vibe_local_harness.vibe._projection import (
     content_is_injected,
+    effect_entry_id,
     first_user_message_preview,
     public_message_entry,
     renamed_session_state,
@@ -142,6 +149,7 @@ from mistralai_vibe_local_harness.vibe._projection import (
 from mistralai_vibe_local_harness.vibe._runtime import (
     ContextCompactionFailure,
     DurableSessionRuntime,
+    RecoveredTurn,
     is_image_block,
 )
 from mistralai_vibe_local_harness.vibe._runtime_config import (
@@ -195,7 +203,7 @@ from mistralai_vibe_local_harness.vibe.plugins import (
 
 logger = logging.getLogger(__name__)
 
-_MAX_IMAGE_BYTES = 10 * 1024 * 1024
+_MAX_IMAGE_BYTES = _sandbox_helper.MAX_IMAGE_BYTES
 
 # A turn's start reaches the Core after its task is scheduled, so an interrupt
 # can arrive while the Core is still idle and reject it with invalid_state.
@@ -317,6 +325,17 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         self._retrying: PublicRetryState | None = None
         self._lease = lease
         self._runtime = runtime
+        # The Session API recorder of a Session not saved yet. Its Runtime takes
+        # this same object on promotion, so the view a Session API client reads
+        # never changes owner. A restored Session uses its Runtime's.
+        self._unpromoted_facts = (
+            fact_recorder(
+                enabled=adapter_config is not None and adapter_config.session_api,
+                saved=None,
+            )
+            if runtime is None
+            else None
+        )
         # Reads and events share this Runtime-refreshed public projection. Reading
         # the durable process store for every session snapshot adds filesystem I/O
         # even when no process changed.
@@ -354,14 +373,22 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         self._reserved_turn_task: asyncio.Task[None] | None = None
         self._active_queue_item_id: str | None = None
         self._active_turn_task: asyncio.Task[None] | None = None
+        self._restored_turn = False
+        # What the bind that restored a running child left to run once it settles.
+        self._restored_once_idle: Callable[[], Awaitable[None]] | None = None
         self._turn_tasks: set[asyncio.Task[None]] = set()
         self._turn_task_ids: dict[asyncio.Task[None], str] = {}
         self._settling_turn_tasks: set[asyncio.Task[None]] = set()
         self._queue_drain_task: asyncio.Task[None] | None = None
         self._turn_queue_edit_save_receipts: dict[str, _QueuedTurnEditSaveReceipt] = {}
         self._settle_configuration: Callable[[], Awaitable[None]] | None = None
+        self._after_recovery: Callable[[], Awaitable[None]] | None = None
+        self._recovered_turn_task: asyncio.Task[None] | None = None
+        self._recovery_settlement: asyncio.Future[None] | None = None
         self._last_queue_terminal_turn_id: str | None = None
         self._turn_terminal_events: dict[str, asyncio.Event] = {}
+        # Resolved once Core accepts a scheduled turn, or once its task ends.
+        self._turn_admissions: dict[str, asyncio.Future[None]] = {}
         self._title_task: asyncio.Task[None] | None = None
         self._title_config = adapter_config
         # What the transcript reflects. A resumed session reopens on the model it
@@ -482,6 +509,25 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     @property
     def ephemeral(self) -> bool:
         return self._discard_on_shutdown is not None
+
+    @property
+    def facts(self) -> FactRecorder:
+        """The Session's Session API recorder, shared with its Runtime."""
+        runtime = self._runtime
+        if runtime is not None:
+            return runtime.facts
+        # A closed restored Session has neither.
+        return self._unpromoted_facts or NO_FACTS
+
+    @property
+    def core_config(self) -> RustHarnessConfig | None:
+        if self._runtime is not None:
+            return self._runtime.config
+        return self._pending_core_config
+
+    async def save_session_api_facts(self) -> None:
+        if self._runtime is not None:
+            await self._runtime.save_session_api_facts()
 
     def _unsaved_fork_identity(self) -> tuple[SessionMetadataV1, PluginLockV1] | None:
         """In-memory identity for a live session that has not been persisted yet."""
@@ -1184,11 +1230,137 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     def open_callbacks(self) -> tuple[JsonObject, ...]:
         return tuple(self._open_callbacks.values())
 
-    async def recover(self) -> None:
-        if self._runtime is not None:
-            await self._runtime.recover()
-            self._watermark = max(self._watermark, self._runtime.watermark)
-            self._event_id = max(self._event_id, self._watermark)
+    async def recover(
+        self, *, once_idle: Callable[[], Awaitable[None]] | None = None
+    ) -> None:
+        """Settle the restore, then drive any interrupted turn as a live turn."""
+        runtime = self._runtime
+        if runtime is None:
+            return
+        recovered = await runtime.prepare_recovery()
+        self._advance_watermark(runtime)
+        if recovered is not None and recovered.turn_id is not None:
+            await self._continue_recovered_turn(
+                runtime, recovered, recovered.turn_id, once_idle
+            )
+            return
+        if recovered is not None:
+            await runtime.continue_recovery(recovered)
+            self._advance_watermark(runtime)
+        if once_idle is not None:
+            await once_idle()
+
+    async def wait_for_recovered_turn(self) -> None:
+        """Wait until the turn ``recover`` continued has ended, however it ends."""
+        task = self._recovered_turn_task
+        if task is not None:
+            await asyncio.wait({task})
+
+    async def _continue_recovered_turn(
+        self,
+        runtime: DurableSessionRuntime,
+        recovered: RecoveredTurn,
+        turn_id: str,
+        once_idle: Callable[[], Awaitable[None]] | None,
+    ) -> None:
+        """Replay the interrupted step, then leave the rest of the turn running.
+
+        A failure before that step has work a client can join fails the restore.
+        """
+        self._after_recovery = once_idle
+        live_work = asyncio.Event()
+
+        async def run() -> None:
+            await runtime.continue_recovery(recovered, on_live_work=live_work.set)
+            self._advance_watermark(runtime)
+            await self._settle_recovery(adopt=False)
+
+        self._track_turn_task(
+            turn_id,
+            run(),
+            self._turn_terminal_events.setdefault(turn_id, asyncio.Event()),
+        )
+        task = self._active_turn_task
+        assert task is not None
+        self._recovered_turn_task = task
+        live = asyncio.ensure_future(live_work.wait())
+        try:
+            await asyncio.wait({live, task}, return_when=asyncio.FIRST_COMPLETED)
+            # ``wait`` reports completion, not success. A replay that fails
+            # before the turn has work a client can join is a failed restore.
+            if task.done() and not live_work.is_set():
+                task.result()
+        finally:
+            live.cancel()
+
+    def _advance_watermark(self, runtime: DurableSessionRuntime) -> None:
+        self._watermark = max(self._watermark, runtime.watermark)
+        self._event_id = max(self._event_id, self._watermark)
+
+    async def _settle_recovery(self, *, adopt: bool = True) -> None:
+        """Run the deferred settlement once Core is idle; later callers await it.
+
+        A settlement that fails is armed again, so the next idle point retries it.
+        A caller that only waited on that failed attempt retries before returning,
+        so a turn that joined the failure does not open on the stale catalog.
+        """
+        while True:
+            settlement = self._recovery_settlement
+            if settlement is not None:
+                await asyncio.shield(settlement)
+                # Still the recorded attempt and nothing was re-armed: it finished
+                # cleanly. A failure clears the record, and another caller may
+                # already have started the retry; this idle point still owes one.
+                if (
+                    self._after_recovery is None
+                    and self._recovery_settlement is settlement
+                ):
+                    return
+                continue
+            after_recovery = self._after_recovery
+            runtime = self._runtime
+            if (
+                after_recovery is None
+                or runtime is None
+                or runtime.inspection.active_turn_id is not None
+            ):
+                return
+            self._after_recovery = None
+            settlement = asyncio.ensure_future(
+                self._run_recovery_settlement(runtime, after_recovery, adopt=adopt)
+            )
+            self._recovery_settlement = settlement
+            await asyncio.shield(settlement)
+            return
+
+    async def _cancel_recovery_settlement(self) -> None:
+        self._after_recovery = None
+        settlement = self._recovery_settlement
+        if settlement is None or settlement.done():
+            return
+        settlement.cancel()
+        with suppress(asyncio.CancelledError):
+            await settlement
+
+    async def _run_recovery_settlement(
+        self,
+        runtime: DurableSessionRuntime,
+        after_recovery: Callable[[], Awaitable[None]],
+        *,
+        adopt: bool,
+    ) -> None:
+        try:
+            if adopt:
+                await runtime.adopt_restored_configuration()
+            await after_recovery()
+        except Exception:
+            logger.warning(
+                "Unified session could not settle after recovering a turn",
+                extra={"harness_backend": "unified", "session_id": self._session_id},
+                exc_info=True,
+            )
+            self._after_recovery = after_recovery
+            self._recovery_settlement = None
 
     async def read_plugin_info(self) -> PluginInfo:
         """Ask the plugin port what this session has bound.
@@ -2016,6 +2188,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         await self._wait_for_core_turn(runtime)
         await self._cancel_active_work()
         await runtime.interrupt(expected_turn_id=expected_turn_id, reason=reason)
+        await self._settle_recovery()
 
     async def _wait_for_core_turn(self, runtime: DurableSessionRuntime) -> None:
         """Wait until the Core holds a turn, so the interrupt is not rejected as idle.
@@ -2286,6 +2459,11 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         self._lease = None
         return lease
 
+    def _listing_for_host(self) -> tuple[PublicSession, DurableSessionRuntime | None]:
+        # Not copied: a published state is replaced, never mutated in place.
+        state, _watermark = self._current_state_and_watermark()
+        return state.session, self._runtime
+
     def _state_for_host(self) -> PublicSessionState:
         state, _watermark = self._current_state_and_watermark()
         return state.model_copy(deep=True)
@@ -2311,15 +2489,27 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         event = self._turn_terminal_events.setdefault(
             inspection.active_turn_id, asyncio.Event()
         )
+        if once_idle is None:
+            once_idle = self._restored_once_idle
         if not start_new_actions:
+            # A later open of this live child starts the recovery.
+            self._restored_once_idle = once_idle
             return
+        self._restored_once_idle = None
 
         async def run() -> None:
-            await runtime.recover()
-            if once_idle is not None:
-                await once_idle()
+            # Released once the child is fully restored, its integration tools
+            # published, and also when cancelled before that: nothing else
+            # would release a message waiting on this Turn.
+            try:
+                await runtime.recover()
+                if once_idle is not None:
+                    await once_idle()
+            finally:
+                runtime.release_restored_actions()
 
         self._track_turn_task(inspection.active_turn_id, run(), event)
+        self._restored_turn = True
 
     async def _start_parent_turn(
         self,
@@ -2368,6 +2558,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         operation_key: str,
     ) -> SendStartTarget | SendSteerTarget:
         runtime = self._runtime_for_host()
+        await self._wait_for_restored_turn()
         inspection = runtime.inspection
         if inspection.status == "running":
             if inspection.active_turn_id != known_generation.turn_id:
@@ -2414,6 +2605,12 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 event,
             )
         return target
+
+    async def _wait_for_restored_turn(self) -> None:
+        # Until recovery resolves what the stop cut, a restored Turn may still be
+        # about to fail, and would drop a message steered into it.
+        if self._restored_turn:
+            await self._runtime_for_host().wait_for_restored_actions()
 
     async def _interrupt_parent_turn(
         self,
@@ -2598,6 +2795,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             await self._cancel_active_work()
             await self._cancel_title_task()
             await self._settle_inactive_turn_tasks()
+            await self._cancel_recovery_settlement()
         except BaseException as exc:
             errors.append(exc)
         runtime = self._runtime
@@ -2702,6 +2900,12 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         context_entries: tuple[PreparedTurnEntry, ...] = (),
         accepted_public_history_entries: tuple[JsonObject, ...] = (),
     ) -> None:
+        admitted = asyncio.get_running_loop().create_future()
+
+        def admit() -> None:
+            if not admitted.done():
+                admitted.set_result(None)
+
         async def run() -> None:
             for index, entry in enumerate(context_entries):
                 await runtime.command_without_driving_actions(
@@ -2724,7 +2928,13 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 response_factory=lambda _transition: {},
                 accepted_public_history_entries=accepted_public_history_entries,
                 abandon_on_restart=payload.abandon_on_restart,
+                on_admitted=admit,
             )
+
+        def forget_admission(_task: asyncio.Task[None]) -> None:
+            admit()
+            if self._turn_admissions.get(payload.turn_id) is admitted:
+                del self._turn_admissions[payload.turn_id]
 
         task = asyncio.create_task(run())
         self._reserved_turn_id = payload.turn_id
@@ -2732,7 +2942,19 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         self._active_turn_task = task
         self._turn_tasks.add(task)
         self._turn_task_ids[task] = payload.turn_id
+        self._turn_admissions[payload.turn_id] = admitted
+        task.add_done_callback(forget_admission)
         task.add_done_callback(self._clear_finished_turn_task)
+
+    async def wait_for_turn_admission(self, turn_id: str) -> None:
+        """Wait until Core accepted a scheduled turn, or the turn ended.
+
+        A turn start replies before its turn reaches Core. Once this returns,
+        the turn is in the published state, unless it already ended.
+        """
+        admitted = self._turn_admissions.get(turn_id)
+        if admitted is not None:
+            await asyncio.shield(admitted)
 
     def _schedule_turn_queue_drain(self) -> None:
         if (
@@ -2756,6 +2978,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         two admissions honest. Awaited outside the lifecycle lock, which
         settling takes itself.
         """
+        await self._settle_recovery()
         settle = self._settle_configuration
         if settle is not None:
             await settle()
@@ -2882,20 +3105,20 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         reason: str | None = None,
         required_permissions: tuple[JsonObject, ...] = (),
     ) -> ApprovalGrant:
-        callback_id = f"approval-{action.call_id}"
-        if callback_id in self._approval_waiters:
-            callback_id = f"{callback_id}-{secrets.token_hex(4)}"
+        callback_id = _unique_callback_id("approval", action.call_id)
         future = asyncio.get_running_loop().create_future()
+        state = self._current_state_and_watermark()[0]
         callback = _approval_callback(
             session_id=self._session_id,
             callback_id=callback_id,
             action=action,
             created_at=_now_milliseconds(),
-            input_entry_id=_turn_input_entry_id(
-                self._current_state_and_watermark()[0].latest_turn, action.turn_id
-            ),
+            input_entry_id=_turn_input_entry_id(state.latest_turn, action.turn_id),
             reason=reason,
             required_permissions=required_permissions,
+            related_entry_id=effect_entry_id(
+                state.history.entries, action.action_id, action.turn_id
+            ),
         )
         self._approval_waiters[callback_id] = future
         self._open_callbacks[callback_id] = callback
@@ -2915,9 +3138,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     async def _request_user_input(
         self, action: RustProvidedToolCallAction
     ) -> RustToolSucceededEvent | RustFailTurnEvent:
-        callback_id = f"user-input-{action.call_id}"
-        if callback_id in self._user_input_waiters:
-            callback_id = f"{callback_id}-{secrets.token_hex(4)}"
+        callback_id = _unique_callback_id("user-input", action.call_id)
         future: asyncio.Future[tuple[bool, JsonValue]] = (
             asyncio.get_running_loop().create_future()
         )
@@ -4061,6 +4282,17 @@ def _check_image_size(size: int) -> None:
         raise ValueError(f"Image is too large: {size} > {_MAX_IMAGE_BYTES}")
 
 
+def _unique_callback_id(kind: str, call_id: str) -> str:
+    """A callback ID no other request can share.
+
+    Callbacks are named after the model's tool call ID, which a provider can
+    reuse in a later turn, and both the stored callbacks and the public history
+    keep the IDs of settled ones. The prefix stays ``{kind}-{call_id}-`` so a
+    callback can still be matched to its call.
+    """
+    return f"{kind}-{call_id}-{secrets.token_hex(4)}"
+
+
 def _approval_callback(
     *,
     session_id: str,
@@ -4068,11 +4300,11 @@ def _approval_callback(
     action: RustRuntimeBuiltinToolCallAction | RustProvidedToolCallAction,
     created_at: int,
     input_entry_id: str | None,
+    related_entry_id: str,
     reason: str | None = None,
     required_permissions: tuple[JsonObject, ...] = (),
 ) -> JsonObject:
     tool_name = gated_tool_name(action)
-    related_entry_id = f"effect-{action.action_id}"
     message = tool_name
     status_text = f"Waiting for approval to run {tool_name}"
     if tool_name == "process.start":

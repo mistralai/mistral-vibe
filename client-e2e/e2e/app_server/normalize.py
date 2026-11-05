@@ -78,6 +78,11 @@ def _normalize_request(request: Request, replacement_keys: dict[str, str]) -> Re
         "session/continue",
     } and isinstance(params.get("agentConfig"), dict):
         params["agentConfig"]["cwd"] = "<cwd>"
+    # The footer's branch read names the checkout the same way.
+    if request.method == "workspace/git/checkouts":
+        params["repoLocalPaths"] = ["<cwd>" for _ in params.get("repoLocalPaths", [])]
+        if params.get("sessionCwd") is not None:
+            params["sessionCwd"] = "<cwd>"
     # `initialize` names the build's version; goldens must survive a bump.
     if (
         request.method == "initialize"

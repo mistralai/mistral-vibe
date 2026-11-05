@@ -36,7 +36,7 @@
    "mentionStats": null,
    "message": [
     {
-     "text": "<vibe_warning>The previous model stream ended before reaching its end. Continue the response exactly where it stopped without repeating text already produced. If no response text was produced, answer the pending user request normally.\n\nFollow these additional instructions from the user while continuing:\nkeep it brief</vibe_warning>",
+     "text": "<vibe_warning>Your previous response was interrupted before it finished, and its unfinished output was discarded. Continue working on the pending user request from where the work stands, and write your reply in full.\n\nFollow these additional instructions from the user:\nkeep it brief</vibe_warning>",
      "type": "text"
     }
    ],

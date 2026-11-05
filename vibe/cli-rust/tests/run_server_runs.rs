@@ -1,4 +1,5 @@
 //! `vibe run-server`'s runs: pooled app-servers, isolation, limits and redaction.
+#![allow(clippy::disallowed_methods)] // Tests drive tasks and real time directly; replay acks never run here.
 
 mod run_server_common;
 

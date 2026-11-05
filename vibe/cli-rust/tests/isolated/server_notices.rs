@@ -1,17 +1,11 @@
-//! Server-pushed `warning`/`error`/`turn/retrying` notifications reach the UI
-//! (VIBE-4622).
+//! Server `warning`/`error`/`turn/retrying` notifications reach the transcript (VIBE-4099).
 
 use std::sync::Arc;
-use std::time::Instant;
 
-use ratatui::backend::TestBackend;
-use ratatui::layout::Rect;
-use ratatui::Terminal;
 use serde_json::json;
-use vibe_rs::app::{App, Status, ToastSeverity};
+use vibe_rs::app::{App, Status};
 use vibe_rs::event_handler;
-use vibe_rs::server::{notification, Client, Notification};
-use vibe_rs::ui;
+use vibe_rs::server::{notification, Client, HistoryEntry, Notification};
 
 fn notif(method: &str, params: serde_json::Value) -> Notification {
     Notification {
@@ -20,90 +14,64 @@ fn notif(method: &str, params: serde_json::Value) -> Notification {
     }
 }
 
-#[test]
-fn warning_notification_shows_a_warning_toast() {
-    let mut app = App::default();
-    app.set_status(Status::Ready);
-    let client = Arc::new(Client::stub());
-
-    let event = notif(
-        notification::WARNING,
-        json!({"warning": {"code": "warning", "message": "config is deprecated"}}),
-    );
-    event_handler::apply_notification(&mut app, &client, &event);
-
-    let toast = app
-        .overlays
-        .toasts
-        .back()
-        .expect("warning must surface a toast");
-    assert_eq!(toast.text, "config is deprecated");
-    assert!(matches!(toast.severity, ToastSeverity::Warning));
+/// Every message role the transcript holds, in order.
+fn roles(app: &App) -> Vec<String> {
+    app.view
+        .transcript
+        .lines()
+        .filter_map(|entry| match entry.entry {
+            HistoryEntry::Message(message) => Some(message.role.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
-fn a_failed_integration_load_stays_up_longer_than_other_warnings() {
+fn a_warning_before_the_first_turn_joins_the_startup_box() {
     let mut app = App::default();
     app.set_status(Status::Ready);
     let client = Arc::new(Client::stub());
 
-    for (code, message) in [
-        ("warning", "config is deprecated"),
-        (
-            "integrations_unavailable",
-            "Couldn't load connectors GitHub: timed out.",
-        ),
+    for message in [
+        "config is deprecated",
+        "Couldn't load connectors GitHub: timed out.",
     ] {
         let event = notif(
             notification::WARNING,
-            json!({"warning": {"code": code, "message": message}}),
+            json!({"warning": {"code": "integrations_unavailable", "message": message}}),
         );
         event_handler::apply_notification(&mut app, &client, &event);
     }
 
-    let durations: Vec<(&str, u64)> = app
-        .overlays
-        .toasts
-        .iter()
-        .map(|toast| (toast.text.as_str(), toast.duration.as_secs()))
-        .collect();
-    assert_eq!(
-        durations,
-        vec![
-            ("config is deprecated", 5),
-            ("Couldn't load connectors GitHub: timed out.", 10),
-        ]
-    );
+    assert_eq!(roles(&app), vec!["startup_notices"]);
+    assert!(app.overlays.notice.is_none());
 }
 
 #[test]
-fn error_notification_shows_an_error_toast() {
+fn a_warning_before_ready_is_kept() {
     let mut app = App::default();
-    app.set_status(Status::Ready);
     let client = Arc::new(Client::stub());
 
     let event = notif(
-        notification::ERROR,
-        json!({"error": {"code": "error", "message": "backend unavailable"}}),
+        notification::WARNING,
+        json!({"warning": {"code": "warning", "message": "held"}}),
     );
     event_handler::apply_notification(&mut app, &client, &event);
 
-    let toast = app
-        .overlays
-        .toasts
-        .back()
-        .expect("error must surface a toast");
-    assert_eq!(toast.text, "backend unavailable");
-    assert!(matches!(toast.severity, ToastSeverity::Error));
+    assert_eq!(roles(&app), vec!["startup_notices"]);
 }
 
 #[test]
-fn a_warning_then_error_keeps_both_toasts_in_one_batch() {
+fn once_a_turn_started_warnings_and_errors_are_rows() {
     let mut app = App::default();
     app.set_status(Status::Ready);
     let client = Arc::new(Client::stub());
 
     for event in [
+        notif(
+            notification::TURN_STARTED,
+            json!({"sessionId": "s", "turn": {"id": "t1"}}),
+        ),
         notif(
             notification::WARNING,
             json!({"warning": {"code": "warning", "message": "first"}}),
@@ -116,101 +84,8 @@ fn a_warning_then_error_keeps_both_toasts_in_one_batch() {
         event_handler::apply_notification(&mut app, &client, &event);
     }
 
-    let texts: Vec<&str> = app
-        .overlays
-        .toasts
-        .iter()
-        .map(|t| t.text.as_str())
-        .collect();
-    assert_eq!(texts, vec!["first", "second"]);
-}
-
-#[test]
-fn toast_overflow_is_reported() {
-    let mut app = App::default();
-    for index in 0..65 {
-        app.show_toast(format!("notice {index}"), ToastSeverity::Warning, 5);
-    }
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
-
-    terminal
-        .draw(|frame| ui::draw(&mut app, frame))
-        .expect("draw");
-
-    let screen: String = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(screen.contains("1 earlier notification omitted"));
-}
-
-#[test]
-fn offscreen_toasts_start_expiring_only_after_they_render() {
-    let mut app = App::default();
-    app.show_toast("older".into(), ToastSeverity::Warning, 5);
-    app.show_toast("newer".into(), ToastSeverity::Warning, 5);
-    let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("terminal");
-
-    terminal
-        .draw(|frame| ui::toast::draw(&mut app, frame, Rect::new(0, 4, 80, 0)))
-        .expect("draw");
-
-    assert!(app.overlays.toasts.front().unwrap().until.is_none());
-    assert!(app.overlays.toasts.back().unwrap().until.is_some());
-}
-
-#[test]
-fn oversized_toast_starts_expiring_even_if_it_cannot_paint() {
-    let mut app = App::default();
-    app.show_toast("line\n".repeat(20), ToastSeverity::Warning, 5);
-    let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("terminal");
-
-    terminal
-        .draw(|frame| ui::toast::draw(&mut app, frame, Rect::new(0, 3, 80, 0)))
-        .expect("draw");
-
-    assert!(app.overlays.toasts.back().unwrap().until.is_some());
-}
-
-#[test]
-fn too_narrow_terminal_starts_the_newest_toast_timer() {
-    let mut app = App::default();
-    app.show_toast("warning".into(), ToastSeverity::Warning, 5);
-    let mut terminal = Terminal::new(TestBackend::new(8, 10)).expect("terminal");
-
-    terminal
-        .draw(|frame| ui::toast::draw(&mut app, frame, Rect::new(0, 8, 8, 0)))
-        .expect("draw");
-
-    assert!(app.overlays.toasts.back().unwrap().until.is_some());
-}
-
-#[test]
-fn omitted_count_stays_with_the_overflow_toast() {
-    let mut app = App::default();
-    for index in 0..65 {
-        app.show_toast(format!("notice {index}"), ToastSeverity::Warning, 5);
-    }
-    app.overlays.toasts.pop_back();
-    app.show_toast("later".into(), ToastSeverity::Warning, 5);
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
-
-    terminal
-        .draw(|frame| ui::draw(&mut app, frame))
-        .expect("draw");
-
-    let screen: String = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(!screen.contains("omitted"));
-    assert!(screen.contains("later"));
+    assert_eq!(roles(&app), vec!["notice_warning", "notice_error"]);
+    assert!(app.overlays.notice.is_none());
 }
 
 #[test]
@@ -219,7 +94,7 @@ fn turn_retrying_notification_is_ignored() {
     // label; retry state derives from `PublicSessionState.retrying` on snapshots.
     let mut app = App::default();
     app.set_status(Status::Generating {
-        since: Instant::now(),
+        since: vibe_rs::clock::now(),
     });
     let before = app.view.loading.label().to_owned();
     let client = Arc::new(Client::stub());

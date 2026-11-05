@@ -1,9 +1,10 @@
-"""A /retry whose turn opens with reasoning keeps the new answer as its own assistant row."""
+"""A /retry whose turn opens with reasoning replaces the unfinished answer with the new reply."""
 
 from __future__ import annotations
 
 from e2e.app_server.events import (
     assistant_msg,
+    discard_entry,
     reasoning,
     turn_completed,
     turn_failed,
@@ -17,14 +18,15 @@ handshake = {
     "runtime/read": {"runtime": {"config": {"showThinkingNodes": True}}},
 }
 
-screen_contains = ("partial", "Thought", "recovered")
-screen_excludes = ("partialrecovered", "Upstream 502", "/retry")
+screen_contains = ("Thought", "recovered")
+screen_excludes = ("partial", "Upstream 502", "/retry")
 
 timeline: Timeline = [
     "hi\r",
     turn_started(),
     user_msg("hi"),
-    assistant_msg("partial", generation_status="in_progress"),
+    assistant_msg("partial", entry_id="partial", generation_status="in_progress"),
+    discard_entry("partial"),
     turn_failed(code="backend_error", message="Upstream 502"),
     "/retry\r",
     turn_started(),

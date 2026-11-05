@@ -16,7 +16,13 @@ from mistralai_vibe_local_harness.protocol import (
     RustTextContentBlock,
     RustUserMessage,
 )
-from mistralai_vibe_local_harness.vibe import UtilityCompletionError
+from mistralai_vibe_local_harness.vibe import (
+    ProviderAuthRequired,
+    ProviderCredentialResult,
+    ProviderCredentialSnapshot,
+    ProviderRejectionReason,
+    UtilityCompletionError,
+)
 from mistralai_vibe_local_harness.vibe.completion_profile import WireFormat
 from tests.constants import (
     ANTHROPIC_BASE_URL,
@@ -468,3 +474,91 @@ async def test_a_provider_refusal_carries_its_status(
             await _complete([LLMMessage(role=Role.user, content="ping")])
 
     assert raised.value.status == 404
+
+
+class _SignedInCredentials:
+    """The session's credential for the provider: a user token, not a key."""
+
+    def __init__(self, *, signed_in: bool = True) -> None:
+        self._signed_in = signed_in
+        self.rejected: list[tuple[str, str]] = []
+
+    async def resolve(self) -> ProviderCredentialResult:
+        if not self._signed_in:
+            return ProviderAuthRequired(
+                reason="missing", provider="mistral", message="Not signed in"
+            )
+        return ProviderCredentialSnapshot(
+            token="user-id-token",
+            headers={
+                "Authorization": "Bearer user-id-token",
+                "x-external-organization-id": "org-1",
+            },
+            revision="mistral:user",
+            follow_redirects=False,
+        )
+
+    async def reject(
+        self, *, observed_revision: str, reason: ProviderRejectionReason
+    ) -> None:
+        self.rejected.append((observed_revision, reason))
+
+
+async def _complete_with(credentials: _SignedInCredentials) -> UtilityReply:
+    return await complete_once(
+        provider=_PROVIDER,
+        model=_MODEL,
+        messages=[LLMMessage(role=Role.user, content="ping")],
+        max_tokens=64,
+        metadata={},
+        transport=CompletionTransport(
+            timeout_s=3.0,
+            retry_budget_s=0,
+            stream_idle_timeout_s=30.0,
+            enable_system_trust_store=True,
+        ),
+        credentials=credentials,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_session_credential_is_sent_instead_of_the_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    completion = FakeUtilityCompletion("pong").install(monkeypatch)
+
+    result = await _complete_with(_SignedInCredentials())
+
+    assert result.text == "pong"
+    [request] = completion.requests
+    assert request.credential.headers["Authorization"] == "Bearer user-id-token"
+    assert request.credential.headers["x-external-organization-id"] == "org-1"
+    assert request.credential.follow_redirects is False
+
+
+@pytest.mark.asyncio
+async def test_a_signed_out_session_fails_before_any_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "process-key")
+    completion = FakeUtilityCompletion("pong").install(monkeypatch)
+
+    with pytest.raises(UtilityCompletionError, match="Not signed in"):
+        await _complete_with(_SignedInCredentials(signed_in=False))
+
+    assert completion.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_session_credential_is_reported() -> None:
+    credentials = _SignedInCredentials()
+
+    with respx.mock() as router:
+        router.post(f"{MISTRAL_BASE_URL}{CHAT_COMPLETIONS_PATH}").mock(
+            return_value=httpx.Response(401, json={"message": "Unauthorized"})
+        )
+        with pytest.raises(UtilityCompletionError):
+            await _complete_with(credentials)
+
+    assert credentials.rejected == [("mistral:user", "http_unauthorized")]

@@ -1,4 +1,4 @@
-"""A `/config` edit failing with an RPC error shows the server's own message in the toast."""
+"""A `/config` edit failing with an RPC error shows the server's own message on its status line."""
 
 from __future__ import annotations
 

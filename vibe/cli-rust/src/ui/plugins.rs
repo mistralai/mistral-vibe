@@ -160,7 +160,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, lines: &[Line]) {
     f.render_widget(Clear, area);
     let background = Style::default().bg(theme::background());
     f.buffer_mut().set_style(area, background);
-    let border = background.fg(theme::popup_border());
+    let border = theme::border_style().bg(theme::background());
     f.render_widget(
         Block::default().borders(Borders::ALL).border_style(border),
         area,

@@ -21,6 +21,7 @@ from vibe.core.utils.fetch_wait import FetchFailures, FetchWait
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
     from vibe.core.config.orchestrator import ConfigOrchestrator
+    from vibe.core.platform_auth import PlatformCredentialFactory
 
 _failures = FetchFailures()
 
@@ -40,6 +41,7 @@ def reset_model_catalog_failed() -> None:
 
 def model_catalog_wait_needed(
     orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    credentials: PlatformCredentialFactory | None = None,
 ) -> bool:
     """Whether a session opening on *orchestrator* must wait for its catalog
     fetch.
@@ -54,11 +56,11 @@ def model_catalog_wait_needed(
         return False
     if config.active_model or model_catalog_failed():
         return False
-    # Imported here, as in the fetch: it keeps the telemetry stack off this
+    # Imported here, as in the fetch: it keeps the HTTP stack off this
     # module's import path.
-    from vibe.core.telemetry.send import get_mistral_provider_and_api_key
+    from vibe.core.platform_auth._mistral import mistral_credentials
 
-    if get_mistral_provider_and_api_key(config) is None:
+    if mistral_credentials(config, credentials) is None:
         return False
     try:
         layer = orchestrator.get_layer(ModelCatalogLayer.NAME)

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use super::{back, rows, Event, TOAST_SECS};
-use crate::app::{App, ToastSeverity};
+use super::{back, rows, Event};
+use crate::app::App;
 use crate::server::{method, Client, MCPSourceKind};
 
 /// Connect `name`; its detail view reads `Connecting...` until the answer lands.
@@ -41,9 +41,9 @@ pub(super) fn finished(app: &mut App, client: &Arc<Client>, name: &str, response
             rows::pending_action(&app.mcp.state, source) == Some(rows::SourceAction::Connect)
         })
     {
-        failed(
+        leave(app, name);
+        crate::notices::refused(
             app,
-            name,
             "The connector is not ready yet. Press r to refresh in a moment.",
         );
     }
@@ -51,11 +51,16 @@ pub(super) fn finished(app: &mut App, client: &Arc<Client>, name: &str, response
 
 /// Say why `name` did not connect, leaving its `Connecting...` view if still on it.
 pub(super) fn failed(app: &mut App, name: &str, message: &str) {
+    leave(app, name);
+    crate::notices::failed(app, message);
+}
+
+/// Settle `name`'s connect and leave its `Connecting...` view if still on it.
+fn leave(app: &mut App, name: &str) {
     settle(app, name);
     if viewing(app, name) {
         back(app);
     }
-    app.show_toast(message.to_owned(), ToastSeverity::Warning, TOAST_SECS);
 }
 
 /// Clear the in-flight marker, unless a later connect of another connector owns it.

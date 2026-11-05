@@ -110,6 +110,18 @@ class ApplyErrorLayer(FakeLayer):
         raise self._error
 
 
+class ConflictOnceLayer(RawWritableLayer):
+    def __init__(self, *, name: str, data: dict[str, Any]) -> None:
+        super().__init__(name=name, data=data)
+        self.conflicts = 1
+
+    async def apply(self, *args: Any, **kwargs: Any) -> None:
+        if self.conflicts:
+            self.conflicts -= 1
+            raise ConcurrencyConflictError(expected_fp="before", actual_fp="after")
+        await super().apply(*args, **kwargs)
+
+
 class ParallelSaveBarrier:
     def __init__(self, expected_starts: int) -> None:
         self.expected_starts = expected_starts
@@ -501,8 +513,8 @@ async def test_mutate_field_serializes_read_modify_write_with_preflight() -> Non
     assert not second_entered.is_set()
 
     release_first.set()
-    assert await first == []
-    assert await second == []
+    assert (await first).failures == []
+    assert (await second).failures == []
     assert layer._data == {"values": ["first", "second"]}
     assert orch.config.values == ["first", "second"]
 
@@ -726,6 +738,65 @@ async def test_apply_patch_returns_layer_apply_error_in_failures(
     )
 
     assert assert_single_failure(result, type(error)) is error
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_retries_when_ops_name_the_default_layer_both_ways() -> None:
+    layer = ConflictOnceLayer(name="user", data={"first": "one", "second": "two"})
+    orch = await ConfigOrchestrator.create(
+        schema=MultiValueSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+
+    result = await orch.apply_patch(
+        [
+            ReplaceOperationPatch(path="/first", value="updated-one"),
+            ReplaceOperationPatch(
+                path="/second", value="updated-two", target_layer_name="user"
+            ),
+        ],
+        reason="test update",
+    )
+
+    assert result == []
+    assert layer._data == {"first": "updated-one", "second": "updated-two"}
+
+
+class CountingApplyLayer(RawWritableLayer):
+    def __init__(self, *, name: str, data: dict[str, Any]) -> None:
+        super().__init__(name=name, data=data)
+        self.applies = 0
+
+    async def apply(self, *args: Any, **kwargs: Any) -> None:
+        self.applies += 1
+        await super().apply(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_across_layers_retries_only_the_conflicting_layer() -> None:
+    conflicting = ConflictOnceLayer(name="user", data={"first": "one"})
+    other = CountingApplyLayer(name="session", data={"second": "two"})
+    orch = await ConfigOrchestrator.create(
+        schema=MultiValueSchema,
+        layers=[conflicting, other],
+        default_layer_resolver=lambda: conflicting,
+    )
+
+    result = await orch.apply_patch(
+        [
+            ReplaceOperationPatch(
+                path="/first", value="updated-one", target_layer_name="user"
+            ),
+            ReplaceOperationPatch(
+                path="/second", value="updated-two", target_layer_name="session"
+            ),
+        ],
+        reason="test update",
+    )
+
+    assert result == []
+    assert conflicting._data == {"first": "updated-one"}
+    assert other._data == {"second": "updated-two"}
+    assert other.applies == 1
 
 
 @pytest.mark.asyncio

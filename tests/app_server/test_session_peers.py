@@ -25,13 +25,16 @@ from vibe.app_server._session_peers import (
     ARCHIVE_SESSIONS_TOOL_NAME,
     LIST_SESSIONS_TOOL_NAME,
     READ_SESSION_TOOL_NAME,
+    RESTORE_SESSIONS_TOOL_NAME,
     SEND_TO_SESSION_TOOL_NAME,
     SessionPeerError,
 )
 from vibe.app_server._unified_permissions import UnifiedPermissionResolver
 from vibe.app_server.protocol import (
+    ClientCapabilities,
     PeerSessionArchived,
     PeerSessionMessage,
+    PeerSessionRestored,
     PeerSessionSummary,
     SessionPeerArchiveParams,
     SessionPeerArchiveResponse,
@@ -39,6 +42,8 @@ from vibe.app_server.protocol import (
     SessionPeerListResponse,
     SessionPeerReadParams,
     SessionPeerReadResponse,
+    SessionPeerRestoreParams,
+    SessionPeerRestoreResponse,
     SessionPeerSendParams,
     SessionPeerSendResponse,
 )
@@ -52,6 +57,7 @@ _PEER_TOOLS = [
     READ_SESSION_TOOL_NAME,
     SEND_TO_SESSION_TOOL_NAME,
     ARCHIVE_SESSIONS_TOOL_NAME,
+    RESTORE_SESSIONS_TOOL_NAME,
 ]
 
 
@@ -61,7 +67,11 @@ class _FakePeers:
         self.reads: list[SessionPeerReadParams] = []
         self.sends: list[SessionPeerSendParams] = []
         self.archives: list[SessionPeerArchiveParams] = []
+        self.restores: list[SessionPeerRestoreParams] = []
         self.hang = False
+
+    def client_capabilities(self) -> ClientCapabilities:
+        return ClientCapabilities(session_peers=True, session_peer_restore=True)
 
     async def list_peer_sessions(
         self, params: SessionPeerListParams
@@ -106,6 +116,17 @@ class _FakePeers:
             ]
         )
 
+    async def restore_peer_sessions(
+        self, params: SessionPeerRestoreParams
+    ) -> SessionPeerRestoreResponse:
+        self.restores.append(params)
+        return SessionPeerRestoreResponse(
+            restored=[
+                PeerSessionRestored(session_id=session_id)
+                for session_id in params.session_ids
+            ]
+        )
+
 
 def _executor(
     tmp_path: Path,
@@ -146,7 +167,10 @@ def test_the_peer_tools_are_offered_only_to_a_client_that_hosts_peers() -> None:
 
     assert not set(_PEER_TOOLS) & set(names(vibe_tool_groups({"bash"})))
     assert set(_PEER_TOOLS) <= set(
-        names(vibe_tool_groups({"bash"}, session_peers=True))
+        names(vibe_tool_groups({"bash"}, session_peers=True, session_peer_restore=True))
+    )
+    assert RESTORE_SESSIONS_TOOL_NAME not in names(
+        vibe_tool_groups({"bash"}, session_peers=True)
     )
     filtered = vibe_tool_groups(
         {"bash"}, session_peers=True, disabled_tools=[SEND_TO_SESSION_TOOL_NAME]
@@ -252,7 +276,9 @@ async def test_read_session_never_waits(tmp_path: Path) -> None:
 def test_list_and_read_can_run_from_a_program_but_acting_cannot() -> None:
     exposures = {
         tool.name: tool.exposure
-        for group in vibe_tool_groups({"bash"}, session_peers=True)
+        for group in vibe_tool_groups(
+            {"bash"}, session_peers=True, session_peer_restore=True
+        )
         for tool in group.tools
     }
 
@@ -260,6 +286,7 @@ def test_list_and_read_can_run_from_a_program_but_acting_cannot() -> None:
     assert exposures[READ_SESSION_TOOL_NAME] == "direct_and_programmatic"
     assert exposures[SEND_TO_SESSION_TOOL_NAME] == "direct"
     assert exposures[ARCHIVE_SESSIONS_TOOL_NAME] == "direct"
+    assert exposures[RESTORE_SESSIONS_TOOL_NAME] == "direct"
 
 
 @pytest.mark.asyncio
@@ -274,6 +301,20 @@ async def test_archive_sessions_asks_the_client_once_for_every_session(
 
     assert isinstance(archived, RustToolSucceededEvent)
     assert peers.archives == [SessionPeerArchiveParams(session_ids=["a", "b"])]
+
+
+@pytest.mark.asyncio
+async def test_restore_sessions_asks_the_client_once_for_every_session(
+    tmp_path: Path,
+) -> None:
+    peers = _FakePeers()
+
+    restored = await _executor(tmp_path, peers)(
+        _call("restore", RESTORE_SESSIONS_TOOL_NAME, session_ids=["a", "b", "a"])
+    )
+
+    assert isinstance(restored, RustToolSucceededEvent)
+    assert peers.restores == [SessionPeerRestoreParams(session_ids=["a", "b"])]
 
 
 def test_a_listed_session_leaves_out_what_says_nothing() -> None:
@@ -340,6 +381,20 @@ async def test_a_session_another_one_wrote_to_cannot_archive_sessions(
 
 
 @pytest.mark.asyncio
+async def test_a_session_another_one_wrote_to_cannot_restore_sessions(
+    tmp_path: Path,
+) -> None:
+    peers = _FakePeers()
+
+    refused = await _executor(tmp_path, peers, awaits_user=True)(
+        _call("restore", RESTORE_SESSIONS_TOOL_NAME, session_ids=["parent"])
+    )
+
+    assert "until the user writes to it" in _failure(refused)
+    assert peers.restores == []
+
+
+@pytest.mark.asyncio
 async def test_an_unconfirmed_message_is_reported_as_maybe_sent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -388,6 +443,7 @@ async def test_peer_tools_are_unavailable_without_a_client_that_hosts_peers(
         (READ_SESSION_TOOL_NAME, "allow"),
         (SEND_TO_SESSION_TOOL_NAME, "ask"),
         (ARCHIVE_SESSIONS_TOOL_NAME, "ask"),
+        (RESTORE_SESSIONS_TOOL_NAME, "ask"),
     ],
 )
 async def test_only_what_acts_on_sessions_asks_by_default(

@@ -34,6 +34,3 @@ timeline: Timeline = [
     _INPUT_TO_CHAT,
     _INPUT_TO_CHAT_TO_INPUT,
 ]
-
-# Each key must land on a settled UI: batching changes the outcome here.
-settle_per_key = True

@@ -1,7 +1,17 @@
 [default]
 # "mis-aligned LINKEDIT string pool" is a verbatim macOS dyld error message
 # quoted in CHANGELOG.md, not a misspelling of "miss".
-extend-ignore-re = ["(?m)^.*(#|//)\\s*typos:disable-line$", "datas", "mis-aligned LINKEDIT string pool"]
+# Permission-policy test fixtures in
+# harness/core/src/core/features/permissions/policy/tests.rs: glob character
+# classes in front of "lient" ("[c]lient.ecko") and a deliberately mistyped
+# tool name ("inventory.delte_item").
+extend-ignore-re = [
+  "(?m)^.*(#|//)\\s*typos:disable-line$",
+  "datas",
+  "mis-aligned LINKEDIT string pool",
+  "\\[[^\\]]+\\]lient\\.ecko",
+  "inventory\\.delte_item",
+]
 
 [default.extend-words]
 # Rust TUI crate (vibe/cli-rust/); not the dish "ratatouille".

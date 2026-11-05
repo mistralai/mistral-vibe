@@ -1,7 +1,6 @@
 //! An interrupt leaves queued prompts paused until an empty Enter resumes them.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -23,7 +22,7 @@ fn busy_app_with_follow_up() -> App {
     app.session.session_id = Some("sess".into());
     app.session.active_turn_id = Some("t-retry".into());
     app.session.status = Status::Generating {
-        since: Instant::now(),
+        since: vibe_rs::clock::now(),
     };
     app.view
         .transcript

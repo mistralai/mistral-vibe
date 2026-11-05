@@ -321,6 +321,9 @@ class ConnectorRuntime:
             )
 
     async def _accept(self, snapshot: ConnectorRouteSnapshot) -> None:
+        # Callers store ``snapshot`` right after this returns, with no await in
+        # between: an MCP update queued on the Runtime lock reads it as soon as
+        # the lock is released, and would otherwise put back the previous one.
         if self._accept_snapshot is not None:
             # The acceptor owns DurableSessionRuntime's distinct lock, and its
             # capability transition is required to be action-free.

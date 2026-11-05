@@ -10,5 +10,4 @@ _CLICK = "\x1b[<0;4;36M\x1b[<0;4;36m"
 timeline: Timeline = ["/sta", _CLICK]
 
 capture_startup = False
-settle_per_key = True
 screen_contains = ("/ sta", "/status", "/stress")

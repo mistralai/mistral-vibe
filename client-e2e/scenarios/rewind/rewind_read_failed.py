@@ -1,4 +1,4 @@
-"""A failed rewind read toasts the server's reason and leaves rewind mode."""
+"""A failed rewind read reports the server's reason as an error row and leaves rewind mode."""
 
 from __future__ import annotations
 

@@ -3,9 +3,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import asyncio
 from collections.abc import Sequence
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from jsonpatch import JsonPatchException, apply_patch
 from jsonpointer import JsonPointerException
@@ -131,6 +132,9 @@ class ConfigLayer[S: BaseModel](ABC):
     dictionary of configuration values.
     """
 
+    # Other processes can write the store, so patches apply to a fresh read of it.
+    shared_store: ClassVar[bool] = False
+
     def __init__(self, *, name: str, output_schema: type[S] = RawConfig) -> None:
         self.name = name
         self.output_schema = output_schema
@@ -175,6 +179,10 @@ class ConfigLayer[S: BaseModel](ABC):
         The base class applies patches and validates the result before calling this.
         """
         ...
+
+    def _store_lock(self) -> AbstractAsyncContextManager[object]:
+        """Exclusive access to the backing store across a read, check, and save."""
+        return nullcontext()
 
     # --- Internal ---
 
@@ -235,21 +243,19 @@ class ConfigLayer[S: BaseModel](ABC):
         )
 
         if next_state.data is None or force:
-            try:
-                snapshot = await self._build_config_snapshot()
-                next_state = _LayerState(
-                    is_trusted=next_state.is_trusted,
-                    data=self.validate_output(snapshot.data),
-                    fingerprint=snapshot.fingerprint,
-                )
-            except (ConcurrencyConflictError, ConfigStorageError):
-                raise
-            except Exception as e:
-                raise LayerImplementationError(
-                    self.name, "_build_config_snapshot"
-                ) from e
+            data, fingerprint = await self._read_store()
+            next_state = replace(next_state, data=data, fingerprint=fingerprint)
 
         return next_state
+
+    async def _read_store(self) -> tuple[S, str]:
+        try:
+            snapshot = await self._build_config_snapshot()
+            return self.validate_output(snapshot.data), snapshot.fingerprint
+        except (ConcurrencyConflictError, ConfigStorageError):
+            raise
+        except Exception as e:
+            raise LayerImplementationError(self.name, "_build_config_snapshot") from e
 
     async def _handle_invalidate_cache(self, state: _LayerState[S]) -> _LayerState[S]:
         return _LayerState(is_trusted=state.is_trusted, data=None, fingerprint=None)
@@ -258,35 +264,39 @@ class ConfigLayer[S: BaseModel](ABC):
         self, state: _LayerState[S], patch: ConfigPatch, on_conflict: ConflictStrategy
     ) -> _LayerState[S]:
 
-        if state.data is None or state.fingerprint is None:
+        data, fingerprint = state.data, state.fingerprint
+        if data is None or fingerprint is None:
             raise LayerNotLoadedError(self.name)
+        async with self._store_lock():
+            if self.shared_store:
+                data, fingerprint = await self._read_store()
 
-        match on_conflict:
-            case ConflictStrategy.CANCEL:
-                if patch.fingerprint != state.fingerprint:
-                    raise ConcurrencyConflictError(
-                        expected_fp=patch.fingerprint, actual_fp=state.fingerprint
-                    )
-            case ConflictStrategy.REPLACE:
-                pass
-            case _:
-                raise ValueError(f"Unsupported conflict strategy: {on_conflict!r}")
+            match on_conflict:
+                case ConflictStrategy.CANCEL:
+                    if patch.fingerprint != fingerprint:
+                        raise ConcurrencyConflictError(
+                            expected_fp=patch.fingerprint, actual_fp=fingerprint
+                        )
+                case ConflictStrategy.REPLACE:
+                    pass
+                case _:
+                    raise ValueError(f"Unsupported conflict strategy: {on_conflict!r}")
 
-        try:
-            new_data = apply_patch(
-                ensure_parent_paths(state.data.model_dump(), patch.operations),
-                patch.to_json_patch(),
-            )
-            validated_new_data = self.validate_output(new_data)
-        except (JsonPatchException, JsonPointerException, ValidationError) as e:
-            raise ConfigPatchApplicationError(self.name) from e
+            try:
+                new_data = apply_patch(
+                    ensure_parent_paths(data.model_dump(), patch.operations),
+                    patch.to_json_patch(),
+                )
+                validated_new_data = self.validate_output(new_data)
+            except (JsonPatchException, JsonPointerException, ValidationError) as e:
+                raise ConfigPatchApplicationError(self.name) from e
 
-        try:
-            new_fingerprint = await self._save_to_store(validated_new_data)
-        except (NotImplementedError, ConfigStorageError):
-            raise
-        except Exception as e:
-            raise LayerImplementationError(self.name, "_save_to_store") from e
+            try:
+                new_fingerprint = await self._save_to_store(validated_new_data)
+            except (NotImplementedError, ConfigStorageError):
+                raise
+            except Exception as e:
+                raise LayerImplementationError(self.name, "_save_to_store") from e
         return replace(state, data=validated_new_data, fingerprint=new_fingerprint)
 
     # --- Public ---
@@ -308,6 +318,11 @@ class ConfigLayer[S: BaseModel](ABC):
     async def invalidate_cache(self) -> None:
         """Clear the in-memory cache so the next ``load()`` re-reads."""
         await self._dispatch(_InvalidateCache())
+
+    async def refresh(self) -> None:
+        """Re-read a shared store, so the next patch builds on what it holds now."""
+        if self.shared_store:
+            await self._dispatch(_Load(force=True))
 
     async def load(self, *, force: bool = False) -> S:
         """Load data from this layer, enforcing trust and caching the result.

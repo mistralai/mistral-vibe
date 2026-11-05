@@ -40,7 +40,7 @@ fn entries(paths: &RwLock<BTreeMap<String, bool>>) -> u64 {
 /// Once per session, after the initial index build.
 ///
 /// Logged on the watch thread, not shipped as telemetry: riding the event
-/// loop's channel would gate the replay harness's idle marker on a queue
+/// loop's channel would gate the replay harness's fence ack on a queue
 /// that only a redraw drains.
 pub(super) fn report_started(
     git_backed: bool,

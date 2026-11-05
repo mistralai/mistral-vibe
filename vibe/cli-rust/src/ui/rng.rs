@@ -2,13 +2,18 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// xorshift64 seeded from the wall clock.
+/// xorshift64 seeded from the wall clock, or fixed under replay so animations stay scripted.
 pub struct Rng {
     state: u64,
 }
 
 impl Default for Rng {
     fn default() -> Self {
+        if crate::utils::is_replaying() {
+            return Self {
+                state: 0x9E37_79B9_7F4A_7C15,
+            };
+        }
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)

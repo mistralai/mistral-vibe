@@ -29,8 +29,7 @@ pub(super) fn send(
         return false;
     };
     let client = client.clone();
-    let pending = app.commit_started();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let event = match client.request(method::CALLBACK_RESULT, params).await {
             Ok(_) => Event::Responded { callback_id },
             Err(error) => {
@@ -41,7 +40,7 @@ pub(super) fn send(
                 }
             }
         };
-        crate::input::deliver(Some(tx), event, &pending).await;
+        crate::input::deliver(Some(tx), event).await;
     });
     true
 }

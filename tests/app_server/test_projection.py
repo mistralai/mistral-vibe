@@ -80,6 +80,18 @@ def test_config_view_projects_enable_mouse_capture(enabled: bool) -> None:
     assert type(config).model_validate(payload).enable_mouse_capture is True
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_config_view_projects_enable_file_autocomplete(enabled: bool) -> None:
+    config = project_config_view(
+        build_test_vibe_config(enable_file_autocomplete=enabled)
+    )
+
+    payload = config.model_dump(mode="json", by_alias=True)
+    assert payload["enableFileAutocomplete"] is enabled
+    del payload["enableFileAutocomplete"]
+    assert type(config).model_validate(payload).enable_file_autocomplete is True
+
+
 def test_config_view_projects_the_tls_trust_policy() -> None:
     config = project_config_view(build_test_vibe_config(enable_system_trust_store=True))
 
@@ -495,7 +507,9 @@ async def test_apply_cached_experiment_variants_sets_routed_model(
     from vibe.core.experiments.active import ExperimentName
     from vibe.core.experiments.models import EvalResponse
 
-    monkeypatch.setattr(cache, "_cache_key", lambda _config: "user-abc")
+    monkeypatch.setattr(
+        cache, "_cache_key", lambda _config, _credentials=None: "user-abc"
+    )
     orchestrator = await build_default_orchestrator()
     routing = ExperimentName.CLI_MODEL_ROUTING.value
     response = EvalResponse.model_validate({
@@ -519,7 +533,9 @@ async def test_apply_cached_experiment_variants_noop_on_cold_cache(
     from vibe.core.config import build_default_orchestrator
     from vibe.core.experiments import cache
 
-    monkeypatch.setattr(cache, "_cache_key", lambda _config: "user-abc")
+    monkeypatch.setattr(
+        cache, "_cache_key", lambda _config, _credentials=None: "user-abc"
+    )
     orchestrator = await build_default_orchestrator()
 
     await _apply_cached_experiment_variants(orchestrator)
@@ -550,7 +566,7 @@ async def test_a_cached_system_prompt_variant_is_not_applied_when_experiments_ar
 
     monkeypatch.setattr(
         "vibe.core.telemetry.send.mistral_credential_cache_key",
-        lambda _config: "user-abc",
+        lambda _config, _credentials=None: "user-abc",
     )
     interactive = await build_default_orchestrator({"enable_telemetry": True})
     default_prompt = interactive.config.system_prompt_id

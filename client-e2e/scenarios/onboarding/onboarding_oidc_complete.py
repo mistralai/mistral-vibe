@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Action, Timeline
+from e2e.app_server.scenario import Action, Timeline, advance
 
 client_args = ("--setup",)
 capture_startup = False
-capture_steps = set()
+capture_steps = {4}
 exit_after_last_step = True
 request_methods = {
     "setup/status",
@@ -21,10 +21,7 @@ _AUTHORIZATION_URL = "https://auth.mistral.ai/authorize?state=replay"
 handshake = {
     "setup/status": {"oidcEnabled": True},
     "setup/oidc-start": {"attemptId": "oidc-replay"},
-    "setup/oidc-poll": [
-        {"status": "waiting", "authorizationUrl": None, "detail": None},
-        {"status": "completed", "authorizationUrl": _AUTHORIZATION_URL},
-    ],
+    "setup/oidc-poll": {"status": "completed", "authorizationUrl": _AUTHORIZATION_URL},
 }
 expected_actions = [Action("open_url", _AUTHORIZATION_URL)]
 
@@ -33,5 +30,6 @@ timeline: Timeline = [
     "\x1b[B",  # select atom-one-dark
     "\r",  # theme -> auth method
     "\r",  # browser -> target
-    "\r",  # Mistral AI -> OIDC, then choices and session
+    "\r",  # Mistral AI -> OIDC: "Sign-in complete"
+    advance(2000),  # the success dwell ends: choices, then session
 ]

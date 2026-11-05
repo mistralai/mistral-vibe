@@ -79,7 +79,8 @@ pub(super) async fn run_session(
     // Worktree settle wait.
     let mut settled: Vec<Notification> = Vec::new();
     if options.worktree.is_some() {
-        let deadline = Instant::now() + crate::worktree_gate::SETTLE_WAIT;
+        let deadline =
+            Instant::from_std(crate::clock::real_now()) + crate::worktree_gate::SETTLE_WAIT;
         let settled_cwd =
             match crate::worktree_gate::absorb_until_settled(&mut notifications, deadline).await {
                 Ok((settle, waited)) => {

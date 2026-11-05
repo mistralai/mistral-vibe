@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::app::{App, Status, ToastSeverity};
+use crate::app::{App, Status};
 use serde_json::Value;
 
 use crate::server::{Client, ImageAttachment};
@@ -104,7 +104,9 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: QueueEvent) -> Op
             }
             if app.session.active_turn_id.is_none() && (head || app.queue.is_empty()) {
                 // The interrupted turn will never start; later prompts were queued after it.
-                app.queue.interrupt_on_start = None;
+                if app.queue.interrupt_on_start.take().is_some() {
+                    crate::commands::retry::drop_pending_interrupt(app);
+                }
             }
             if app.queue.is_empty() && app.session.active_turn_id.is_none() {
                 app.set_status(Status::Ready);
@@ -194,17 +196,12 @@ pub(super) fn settle_completion(app: &mut App) {
         app.terminal_notifier
             .remember_completion(context.program_state());
     } else {
-        app.terminal_notifier
-            .notify(context, std::time::Instant::now());
+        app.terminal_notifier.notify(context, crate::clock::now());
     }
 }
 
 fn show_replacement_error(app: &mut App) {
-    app.show_toast(
-        "Failed to update queued message".to_string(),
-        ToastSeverity::Error,
-        5,
-    );
+    crate::notices::failed(app, "Failed to update queued message");
 }
 
 /// Copy unsent revisions away from a consumed server queue item.

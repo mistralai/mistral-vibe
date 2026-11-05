@@ -191,11 +191,9 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let lines = build_lines(app, area.width);
     let total = lines.len();
 
-    let block = Block::default().borders(Borders::ALL).border_style(
-        Style::default()
-            .fg(theme::popup_border())
-            .bg(theme::background()),
-    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::border_style().bg(theme::background()));
     let inner = block.inner(area);
     f.render_widget(block, area);
 

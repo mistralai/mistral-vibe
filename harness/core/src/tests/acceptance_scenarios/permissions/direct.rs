@@ -1,15 +1,5 @@
 use super::*;
 
-fn model_permission_failure(call_id: &str, name: &str, reason: &str) -> Value {
-    json!({
-        "role": "tool",
-        "tool_call_id": call_id,
-        "name": name,
-        "outcome": "failure",
-        "content": [{"type": "text", "text": reason}],
-    })
-}
-
 #[test]
 fn allows_direct_tool_call_with_runtime_dispatch() {
     let turn_id = "turn-allowed-direct-tool";

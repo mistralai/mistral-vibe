@@ -6,7 +6,7 @@ use std::io::Read;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::{Command, Stdio};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::{classify_osc11_response, is_complete_osc11_response, OSC11_QUERY};
 use crate::tty_query;
@@ -57,12 +57,12 @@ fn command_output(program: &str, args: &[&str]) -> Option<(bool, String)> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let deadline = Instant::now() + OS_APPEARANCE_TIMEOUT;
+    let deadline = crate::clock::real_now() + OS_APPEARANCE_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().ok()? {
             break status;
         }
-        if Instant::now() >= deadline {
+        if crate::clock::real_now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
             return None;

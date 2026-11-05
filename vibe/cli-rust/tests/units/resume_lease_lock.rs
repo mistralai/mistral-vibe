@@ -7,6 +7,7 @@ use serde_json::json;
 
 use vibe_rs::resume_picker::{self, held, lease_locked, Event};
 
+use crate::feedback_support::warnings;
 use crate::support::{stub, with_picker};
 
 const BUSY: &str = "This session is open in another Vibe process. Close it there to continue here.";
@@ -151,7 +152,7 @@ fn a_lease_snapshot_still_seeds_locks_before_any_notification() {
 }
 
 #[tokio::test]
-async fn enter_on_a_locked_row_toasts_the_busy_refusal_instead_of_resuming() {
+async fn enter_on_a_locked_row_warns_with_the_busy_refusal_instead_of_resuming() {
     let mut app = with_picker();
     let _channels = vibe_rs::channels::connect(&mut app);
     resume_picker::on_lease_updated(
@@ -162,13 +163,7 @@ async fn enter_on_a_locked_row_toasts_the_busy_refusal_instead_of_resuming() {
     resume_picker::handle_key(&mut app, &stub(), KeyCode::Enter.into());
     assert!(!app.resume_picker.resuming);
     assert!(app.resume_picker.open);
-    let toasts = app
-        .overlays
-        .toasts
-        .iter()
-        .map(|toast| toast.text.clone())
-        .collect::<Vec<_>>();
-    assert!(toasts.contains(&BUSY.to_owned()));
+    assert_eq!(warnings(&app), [BUSY]);
 }
 
 #[tokio::test]

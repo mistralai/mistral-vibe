@@ -107,8 +107,8 @@ impl HistoryManager {
     /// Flush pending entries via a background read-merge-write; never blocks the UI thread.
     pub fn persist(&self) {
         let persister = self.persister.clone();
-        tokio::spawn(async move {
-            let _ = tokio::task::spawn_blocking(move || persister.flush()).await;
+        crate::work::spawn(async move {
+            let _ = crate::work::spawn_blocking(move || persister.flush()).await;
         });
     }
 

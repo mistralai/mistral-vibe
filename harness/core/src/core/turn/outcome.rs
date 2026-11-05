@@ -4,8 +4,8 @@ use crate::core::wire::tool::ProtocolError;
 /// How a turn ended.
 ///
 /// `Rejected` is distinct from `Completed` because the Core knows why the turn
-/// produced no answer, even though the Session Protocol reports both as a
-/// completed turn with empty output.
+/// produced no answer. The Session Protocol reports it as a completed turn whose
+/// output is the reason, with the stop reason `rejected`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TurnOutcome {
     Completed { output: Vec<ContentBlock> },

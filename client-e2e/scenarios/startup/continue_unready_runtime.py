@@ -28,5 +28,5 @@ screen_contains = (
     "Saved session restored.",
     "MCP server 'weather' needs OAuth authentication.",
     "devstral-small",
-    "50k/200k tokens (25%)",
+    "ctx █▌     50k/200k",
 )

@@ -143,11 +143,11 @@ def workspace_agent_types(agents: AgentManager) -> tuple[AgentTypeSource, ...]:
 
     Built-in subagents are left out. ``get_subagents`` reports ``explore``
     alongside the workspace's own, and the harness already spawns a generic
-    child that inherits the parent's prompt and tools, so advertising it again
-    would put a second name on behaviour a bare spawn already has. The test is
-    on the profile rather than on its name, because a file named
-    ``explore.toml`` replaces the built-in entry and a user who writes that file
-    is asking for their version.
+    child with the parent's tools and the instructions its spawn gives, so
+    advertising it again would put a second name on behaviour a bare spawn
+    already has. The test is on the profile rather than on its name, because a
+    file named ``explore.toml`` replaces the built-in entry and a user who
+    writes that file is asking for their version.
     """
     sources: list[AgentTypeSource] = []
     for profile in agents.get_subagents():

@@ -119,24 +119,30 @@ pub(crate) fn model_tool_result_content(result: &ToolResult) -> Vec<ContentBlock
 }
 
 pub(crate) fn model_visible_content_block(mut block: ContentBlock) -> Option<ContentBlock> {
-    let annotations = match &block {
+    if !is_model_visible(&block) {
+        return None;
+    }
+    strip_model_hidden_content_fields(&mut block);
+    Some(block)
+}
+
+/// Whether the model sees `block`: a known block type whose audience, if
+/// set, includes the assistant.
+pub(crate) fn is_model_visible(block: &ContentBlock) -> bool {
+    let annotations = match block {
         ContentBlock::Text(content) => &content.annotations,
         ContentBlock::Image(content) => &content.annotations,
         ContentBlock::Audio(content) => &content.annotations,
         ContentBlock::ResourceLink(resource) => &resource.annotations,
         ContentBlock::Resource(content) => &content.annotations,
-        _ => return None,
+        _ => return false,
     };
-    if annotations.as_ref().is_some_and(|annotations| {
+    !annotations.as_ref().is_some_and(|annotations| {
         annotations
             .audience
             .as_ref()
             .is_some_and(|audience| !audience.is_empty() && !audience.contains(&Role::Assistant))
-    }) {
-        return None;
-    }
-    strip_model_hidden_content_fields(&mut block);
-    Some(block)
+    })
 }
 
 pub(crate) fn model_tool_result_message(

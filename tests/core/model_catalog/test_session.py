@@ -16,7 +16,9 @@ from vibe.core.model_catalog import (
 from vibe.core.model_catalog._constants import build_model_catalog_url
 import vibe.core.model_catalog.session as session_module
 from vibe.core.model_catalog.wait import model_catalog_failed
-import vibe.core.telemetry.send as telemetry_send
+from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
+import vibe.core.platform_auth._mistral as platform_mistral
+from vibe.core.platform_auth._mistral import MistralCredentials
 
 _TEST_API_BASE = "https://api.mistral.ai/v1"
 _TEST_URL = build_model_catalog_url(_TEST_API_BASE)
@@ -40,7 +42,7 @@ class _NoRequestClient:
     def from_provider(cls, provider: Any) -> _NoRequestClient:
         return cls()
 
-    async def fetch(self, api_key: str) -> Any:
+    async def fetch(self, credentials: Any) -> Any:
         raise AssertionError("no request should be made")
 
     async def aclose(self) -> None:
@@ -62,7 +64,7 @@ async def test_refresh_is_gated_on_a_mistral_credential(
 ) -> None:
     monkeypatch.setattr(session_module, "ModelCatalogClient", _NoRequestClient)
     monkeypatch.setattr(
-        telemetry_send, "get_mistral_provider_and_api_key", lambda _config: None
+        platform_mistral, "mistral_credentials", lambda _config, _credentials=None: None
     )
 
     assert await refresh_model_catalog(_config(flag=True)) is None
@@ -80,9 +82,11 @@ async def test_refresh_fetches_with_the_mistral_credential(
     )
     provider = MagicMock(api_base=_TEST_API_BASE)
     monkeypatch.setattr(
-        telemetry_send,
-        "get_mistral_provider_and_api_key",
-        lambda _config: (provider, "test-key"),
+        platform_mistral,
+        "mistral_credentials",
+        lambda _config, _credentials=None: MistralCredentials(
+            provider, ApiKeyPlatformCredentialProvider.from_api_key("test-key")
+        ),
     )
 
     catalog = await refresh_model_catalog(_config(flag=True))
@@ -102,9 +106,11 @@ async def test_refresh_returns_none_when_the_endpoint_is_down(
     respx.get(_TEST_URL).mock(side_effect=httpx.ConnectError("offline"))
     provider = MagicMock(api_base=_TEST_API_BASE)
     monkeypatch.setattr(
-        telemetry_send,
-        "get_mistral_provider_and_api_key",
-        lambda _config: (provider, "test-key"),
+        platform_mistral,
+        "mistral_credentials",
+        lambda _config, _credentials=None: MistralCredentials(
+            provider, ApiKeyPlatformCredentialProvider.from_api_key("test-key")
+        ),
     )
 
     assert await refresh_model_catalog(_config(flag=True)) is None

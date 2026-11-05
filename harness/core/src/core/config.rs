@@ -28,6 +28,17 @@ pub(crate) struct ProvidedToolDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<Value>,
     pub exposure: ProvidedToolExposure,
+    /// The function name a direct tool has in the model's flat tool list. Absent
+    /// means `name`. It never changes the stable tool ID, so permission rules and
+    /// hooks keep matching when a Runtime renames the direct function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_name: Option<String>,
+}
+
+impl ProvidedToolDefinition {
+    pub(crate) fn direct_function_name(&self) -> &str {
+        self.direct_name.as_deref().unwrap_or(&self.name)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
@@ -734,6 +745,7 @@ mod tests {
             input_schema: json!({"type": "object"}),
             output_schema: None,
             exposure: ProvidedToolExposure::Direct,
+            direct_name: None,
         };
         let mut duplicate_config = config();
         duplicate_config.capabilities.tool_groups = vec![

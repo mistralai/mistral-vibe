@@ -56,6 +56,8 @@ MAX_COUNTED_FILE_BYTES = 32 * 1_024 * 1_024
 """The largest file ``read_file`` reads to the end to count its lines."""
 MAX_DIRECTORY_ENTRIES = 500
 """The most entries one ``read_file`` of a directory lists."""
+MAX_IMAGE_BYTES = 10 * 1_024 * 1_024
+"""The largest image ``read_file`` returns."""
 MAX_WRITE_BYTES = 64_000
 MAX_WRITE_PREVIOUS_CONTENT_BYTES = 64_000
 MAX_EDIT_FILE_SIZE_BYTES = 512 * 1_024 * 1_024
@@ -148,21 +150,34 @@ def resolve_path(
 # File tools
 
 
-def read_file(path: Path, *, offset: int = 0, limit: int | None) -> dict[str, Any]:
+def read_file(
+    path: Path, *, offset: int = 0, limit: int | None
+) -> tuple[dict[str, Any], dict[str, str] | None]:
     """Read a text file window, trying each supported encoding in turn.
 
     ``was_truncated`` means the file has more past what was returned, and
     ``next_offset`` is where to read on, None once the window reached the end.
     An offset past the last line is an error, not an empty window. A directory
     reads as its listing; see :func:`_read_directory`.
+
+    A PNG, JPEG, GIF or WebP file reads as the image itself: see
+    :func:`_read_image`. The second value is that image, None for text. Any
+    other file with a NUL byte in its start is binary and is refused. Control
+    characters alone do not refuse a read, so a log with terminal colours
+    still reads.
     """
     if _is_directory(path):
-        return _read_directory(path, offset=offset, limit=limit)
+        return _read_directory(path, offset=offset, limit=limit), None
     handle, status = _open_file(path)
     with handle:
         file_size_bytes = status.st_size
         raw_prefix = handle.read(SNIFF_BYTES)
+        mime_type = _image_mime_type(raw_prefix)
+        if mime_type is not None:
+            return _read_image(path, handle, raw_prefix, mime_type=mime_type)
     for encoding in _candidate_encodings(raw_prefix):
+        if _has_binary_nul(raw_prefix, encoding):
+            raise ValueError(f"Binary files are not supported: {path}")
         try:
             resolved_offset = _resolve_read_offset(
                 path, encoding=encoding, offset=offset
@@ -187,8 +202,47 @@ def read_file(path: Path, *, offset: int = 0, limit: int | None) -> dict[str, An
             "total_lines": window.total_lines,
             "next_offset": window.next_offset,
             "was_truncated": window.next_offset is not None or window.line_cut,
-        }
+        }, None
     raise ValueError(f"Could not decode text file with supported encodings: {path}")
+
+
+def _image_mime_type(raw: bytes) -> str | None:
+    """The image type ``raw``, a file's first bytes, starts with, if any."""
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _read_image(
+    path: Path, handle: IO[bytes], raw_prefix: bytes, *, mime_type: str
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Read a whole image, past the ``raw_prefix`` already read from ``handle``.
+
+    The result describes the image and carries none of its bytes: a program
+    receives only that. The image goes beside it, base64 encoded, for the model.
+    """
+    data = raw_prefix + handle.read(MAX_IMAGE_BYTES + 1 - len(raw_prefix))
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ValueError(
+            f"Image is too large to read: {path} is over {MAX_IMAGE_BYTES} bytes"
+        )
+    return {
+        "path": str(path),
+        "content": f"Image file ({mime_type}, {len(data)} bytes).",
+        "file_size_bytes": len(data),
+        "returned_bytes": 0,
+        "offset": 0,
+        "lines_read": 0,
+        "total_lines": None,
+        "next_offset": None,
+        "was_truncated": False,
+    }, {"data": base64.b64encode(data).decode("ascii"), "mime_type": mime_type}
 
 
 def _is_directory(path: Path) -> bool:
@@ -626,8 +680,9 @@ def run_file_tool(request: Mapping[str, Any]) -> dict[str, Any]:
 
     ``request`` carries ``tool`` (``read_file``, ``write_file`` or ``edit``),
     its validated ``arguments`` and the path ``policy``. Returns
-    ``{"result": ..., "annotations": ...}``, plus ``previous_content`` with the
-    pre-edit text when the tool is ``edit``.
+    ``{"result": ..., "annotations": ...}``, plus ``image`` when the tool is
+    ``read_file`` and ``previous_content`` with the pre-edit text when it is
+    ``edit``.
     """
     tool = request["tool"]
     arguments = request["arguments"]
@@ -654,8 +709,10 @@ def run_file_tool(request: Mapping[str, Any]) -> dict[str, Any]:
         # there since is refused when opened.
         path = path.resolve()
     if tool == "read_file":
-        result = read_file(path, offset=arguments["offset"], limit=arguments["limit"])
-        return {"result": result, "annotations": None}
+        result, image = read_file(
+            path, offset=arguments["offset"], limit=arguments["limit"]
+        )
+        return {"result": result, "annotations": None, "image": image}
     if tool == "write_file":
         result, previous_content = write_file(path, arguments["content"])
         return {"result": result, "annotations": previous_content}
@@ -935,8 +992,13 @@ def _from_lf(text: str, newline: str) -> str:
     return text if newline == "\n" else text.replace("\n", newline)
 
 
+def _has_binary_nul(raw: bytes, encoding: str) -> bool:
+    """Whether ``raw`` holds a NUL byte that ``encoding`` does not explain."""
+    return b"\x00" in raw and not encoding.startswith(("utf-16", "utf-32"))
+
+
 def _looks_binary(text: str, raw: bytes, encoding: str) -> bool:
-    if b"\x00" in raw and not encoding.startswith(("utf-16", "utf-32")):
+    if _has_binary_nul(raw, encoding):
         return True
     return any(
         character not in "\t\n\r\v\f\x1c\x1d\x1e\x85"

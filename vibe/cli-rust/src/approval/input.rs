@@ -85,7 +85,7 @@ fn choose(app: &mut App, client: &Arc<Client>, option: usize) {
         || app
             .approval
             .mount_time
-            .is_some_and(|at| at.elapsed() < input_grace_period())
+            .is_some_and(|at| crate::clock::since(at) < input_grace_period())
     {
         return;
     }

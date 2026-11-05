@@ -1,4 +1,4 @@
-"""A server-pushed warning surfaces as a toast (VIBE-4622)."""
+"""A server-pushed warning after a turn mounts a warning row (VIBE-4622, VIBE-4099)."""
 
 from __future__ import annotations
 
@@ -20,4 +20,4 @@ timeline: Timeline = [
     server_warning("Skill 'demo' failed to load"),
 ]
 
-screen_contains = ("Skill 'demo' failed to load",)
+screen_contains = ("⚠ Skill 'demo' failed to load",)

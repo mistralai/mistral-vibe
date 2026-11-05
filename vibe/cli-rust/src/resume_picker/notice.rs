@@ -21,7 +21,6 @@ pub(super) fn finish_resume(app: &mut App) -> bool {
     if !std::mem::take(&mut app.resume_picker.resuming) {
         return false;
     }
-    app.commit_finished();
     true
 }
 
@@ -86,6 +85,7 @@ pub(super) fn close(app: &mut App) {
             app.view.transcript.restore(transcript);
             local::restore(&mut app.view.transcript, notices);
         }
+        crate::notices::sync(app);
         app.view
             .transcript_cache
             .start_history(app.view.transcript.entry_count());

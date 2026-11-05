@@ -108,3 +108,14 @@ fn every_cat_keeps_the_text_at_column_14() {
         assert!(info.starts_with("Mistral Vibe"), "{model}: {info}");
     }
 }
+
+#[test]
+fn the_cat_uses_the_banner_text_color() {
+    let config = config("Medium", "off", json!({}));
+    let lines = Banner::default().view(&config, 120);
+    let row = &lines.lines()[1];
+    assert_eq!(
+        row.spans[0].style.fg,
+        Some(vibe_rs::ui::theme::foreground())
+    );
+}

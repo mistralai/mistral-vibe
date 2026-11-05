@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from vibe.core.platform_auth._api_key import ApiKeyPlatformCredentialProvider
 from vibe.core.platform_auth._credentials_port import (
+    CachedPrincipal,
+    PlatformCredentialFactory,
     PlatformCredentialIdentity,
     PlatformCredentialKind,
     PlatformCredentialProvider,
@@ -19,7 +21,9 @@ from vibe.core.platform_auth._http import (
 
 __all__ = [
     "ApiKeyPlatformCredentialProvider",
+    "CachedPrincipal",
     "MistralPlatformHTTPClient",
+    "PlatformCredentialFactory",
     "PlatformCredentialHeaderConflict",
     "PlatformCredentialIdentity",
     "PlatformCredentialKind",

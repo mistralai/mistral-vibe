@@ -1,4 +1,4 @@
-//! Replay-server drain tracking, so the e2e idle marker never beats owed frames.
+//! Replay-server drain tracking, so the e2e fence ack never beats owed frames.
 
 use std::sync::atomic::Ordering;
 
@@ -24,20 +24,8 @@ impl Client {
         self.server_pid.store(pid, Ordering::Relaxed);
     }
 
-    /// A detached telemetry task will send a frame: owed until `telemetry_written`.
-    pub fn telemetry_spawned(&self) {
-        self.unsent_telemetry.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// The telemetry frame got its request id, so `next_id` now tracks it.
-    pub fn telemetry_written(&self) {
-        self.unsent_telemetry.fetch_sub(1, Ordering::Release);
-    }
-
     /// Whether a request this client sent still has frames on the way (replay only).
     pub fn owes_replay_frames(&self) -> bool {
-        self.unsent_telemetry.load(Ordering::Acquire) > 0
-            || self.replay_drained.load(Ordering::Relaxed) + 1
-                < self.next_id.load(Ordering::Relaxed)
+        self.replay_drained.load(Ordering::Relaxed) + 1 < self.next_id.load(Ordering::Relaxed)
     }
 }

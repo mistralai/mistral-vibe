@@ -1254,6 +1254,10 @@ class MCPRuntime:
             raise MCPRuntimeFailure("mcp_runtime_closed", "MCP Runtime is closed")
 
     async def _accept(self, snapshot: MCPRouteSnapshot) -> None:
+        # Callers store ``snapshot`` right after this returns, with no await in
+        # between: a connector update queued on the Runtime lock reads it as
+        # soon as the lock is released, and would otherwise put back the
+        # previous one.
         if self._accept_snapshot is not None:
             await self._accept_snapshot(snapshot)
 

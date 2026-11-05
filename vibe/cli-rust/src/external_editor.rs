@@ -2,7 +2,6 @@
 
 use std::ffi::OsString;
 use std::path::Path;
-use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -55,7 +54,8 @@ pub fn apply(app: &mut App, text: String) {
     crate::long_paste::load_collapsed(app, text);
     app.chat_input.edit_history = history;
     crate::composer_paths::rewrite_image_paths(&mut app.chat_input);
-    app.chat_input.record_edit(before, true, Instant::now());
+    app.chat_input
+        .record_edit(before, true, crate::clock::now());
     crate::input::reset_history_state(app);
     crate::completion_manager::input_changed(app);
 }

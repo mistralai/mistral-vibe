@@ -1,4 +1,5 @@
 //! Tests needing process-global isolation; nextest runs each test in its own process.
+#![allow(clippy::disallowed_methods)] // Tests drive tasks directly; replay acks never run here.
 
 /// Plain `cargo test` would share one process across these tests: refuse it.
 #[ctor::ctor]
@@ -32,6 +33,7 @@ mod clipboard;
 mod clipboard_copies;
 mod clipboard_fail_closed;
 mod clipboard_linux;
+mod clipboard_tmux;
 mod completion_manager;
 mod composer_cursor_line;
 mod composer_history_edits;
@@ -75,6 +77,7 @@ mod pending_commands_ready;
 mod piped_stdin;
 mod remote_project;
 mod remote_project_lifecycle;
+mod replay_clock;
 mod resync_backend;
 mod runtime_config_refresh;
 mod server_multiplex;
@@ -95,6 +98,7 @@ mod terminal_init;
 mod terminal_notifier;
 mod theme_picker_state;
 mod tls_custom_roots;
+mod tmux_mouse;
 mod todo_tracker;
 mod transcript_snapshot_order;
 mod trust_folder_copy;
@@ -111,6 +115,7 @@ mod whats_new_cache;
 mod whats_new_dismiss;
 mod windows_child;
 mod windows_mouse_capture;
+mod work_tracking;
 mod workdir;
 mod worktree;
 mod zero_width_graphemes;

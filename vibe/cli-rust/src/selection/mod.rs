@@ -16,8 +16,6 @@ pub use gesture::{ClickChain, Granularity};
 pub use region::{Region, RegionId, RowSpan, ScrollTarget};
 pub use table::{TableCellHit, TableCellKey, TableCellSelection, TableCellSpan};
 
-use std::time::Instant;
-
 use crate::app::{App, Selection, Surface};
 
 /// What a release resolved to, so the caller knows whether to run click actions.
@@ -35,25 +33,13 @@ pub fn press(app: &mut App, at: (u16, u16)) {
     press_with_padding(app, at, RegionId::Main, false, true);
 }
 
-/// Start a gesture in the toast the pointer is over, which owns it until
-/// release. A press routed by a rectangle the newest frame no longer paints
-/// starts nothing.
-pub fn press_toast(app: &mut App, at: (u16, u16)) {
-    let Some(id) = crate::ui::toast::claim_region(app, at) else {
-        app.selection.region = None;
-        cancel_drag(app);
-        return;
-    };
-    press_with_padding(app, at, RegionId::Toast(id), false, false);
-}
-
 /// Start a region gesture even when `at` is on its bare centering padding.
 pub fn press_including_padding(app: &mut App, at: (u16, u16)) {
     press_with_padding(app, at, RegionId::Main, true, true);
 }
 
 /// Start a gesture in a region that paints all its own text (the question box,
-/// the loading row), so the copy comes from the frame like a toast's.
+/// the loading row), so the copy comes from the painted frame.
 pub fn press_owned(app: &mut App, at: (u16, u16), owner: RegionId) {
     press_with_padding(app, at, owner, false, false);
 }
@@ -68,7 +54,7 @@ fn press_with_padding(
     app.selection.bottom_bar = None;
     app.selection.press = Some(at);
     app.selection.dragged = false;
-    app.selection.granularity = app.selection.chain.press(at, Instant::now());
+    app.selection.granularity = app.selection.chain.press(at, crate::clock::now());
     if include_composer {
         if let Some(offset) = offset_at(app, at) {
             app.selection.drag = Some(Surface::Composer);

@@ -24,7 +24,7 @@ pub(super) fn status(app: &mut App, client: &Arc<Client>) {
         return;
     };
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let read = client
             .request(method::PROVIDER_AUTH_READ, json!({"sessionId": session_id}))
             .await;

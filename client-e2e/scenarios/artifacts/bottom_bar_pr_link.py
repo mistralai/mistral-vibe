@@ -1,4 +1,4 @@
-"""One PR: the bar paints its link, centered; clicking opens it in the browser."""
+"""One PR: the bar paints a state dot and its link after the path; hovering highlights it and clicking opens it."""
 
 from __future__ import annotations
 
@@ -14,26 +14,22 @@ _LISTED = artifact(
     discovered_at="2026-08-27T09:00:00Z",
     display_title="Fix the footer",
 )
+_LISTED["details"].update({"state": "open", "prStatus": "mergeable"})
 
 handshake = {"artifacts/list": {"artifacts": [_LISTED]}}
 request_methods = {"artifacts/list"}
 expected_actions = [Action("open_url", _LISTED_URL)]
-screen_contains = ("PR #123",)
 screen_excludes = ("PR #124",)
 
-# The replay-pinned bar edges around the centered link.
-_LEFT = "/test/workdir"
-_RIGHT = "mistral-medium-3.5[medium] · 0/600k tokens (0%)"
-_LINK = "PR #123"
-_LINK_X = (COLUMNS - len(_LINK)) // 2
-screen_rows = {
-    ROWS - 1: _LEFT.ljust(_LINK_X)
-    + _LINK.ljust(COLUMNS - len(_RIGHT) - _LINK_X)
-    + _RIGHT
-}
+_LEFT = "/test/workdir ⧉  "
+_LINK = "● PR #123 mergeable"
+_RIGHT = "ctx        0/600k"
+screen_rows = {ROWS - 1: (_LEFT + _LINK).ljust(COLUMNS - len(_RIGHT)) + _RIGHT}
 
 # SGR mouse coordinates are 1-indexed; the bar is the last row.
-_CLICK_COL = _LINK_X + len(_LINK) // 2 + 1
+_CLICK_COL = len(_LEFT) + 3
+_HOVER = f"\x1b[<35;{_CLICK_COL};{ROWS}M"
 _CLICK = f"\x1b[<0;{_CLICK_COL};{ROWS}M\x1b[<0;{_CLICK_COL};{ROWS}m"
 
-timeline: Timeline = [_CLICK]
+# The hover frame paints the link's highlight before the click opens it.
+timeline: Timeline = [_HOVER, _CLICK]

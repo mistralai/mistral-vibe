@@ -257,7 +257,7 @@ class SessionTelemetry:
         self,
         *,
         provider: Literal["github", "gitlab"],
-        trigger: Literal["session_start", "turn_end", "client_request"],
+        trigger: Literal["session_start", "turn_end", "client_request", "poll"],
         changed: bool,
     ) -> None:
         """A provider sync pass refreshed an artifact (Phase 4).
@@ -274,7 +274,7 @@ class SessionTelemetry:
         self,
         *,
         provider: Literal["github", "gitlab", "unknown"],
-        trigger: Literal["session_start", "turn_end", "client_request"],
+        trigger: Literal["session_start", "turn_end", "client_request", "poll"],
         error_type: str,
     ) -> None:
         """A provider sync fetch failed for one artifact (Phase 4)."""

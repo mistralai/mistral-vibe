@@ -40,8 +40,8 @@ from vibe.core.git.errors import GitError
 from vibe.core.git.repo import GitRepo
 from vibe.core.git.worktree.record import TEMPLATES_DIR_NAME, WorktreeClaim
 from vibe.core.paths import WORKTREES_DIR
-from vibe.core.session.session_lease import _acquire_file_lock, _release_file_lock
 from vibe.core.trusted_folders import TrustedFoldersManager, trusted_folders_manager
+from vibe.core.utils.file_lock import acquire_file_lock, release_file_lock
 from vibe.observability.logging import logger
 
 _CLONE_NOFOLLOW = 0x0001
@@ -259,14 +259,14 @@ class _Template:
         self._lock.parent.mkdir(parents=True, exist_ok=True)
         with self._lock.open("a+b") as file:
             try:
-                _acquire_file_lock(file, blocking=blocking)
+                acquire_file_lock(file, blocking=blocking)
             except BlockingIOError:
                 yield False
                 return
             try:
                 yield True
             finally:
-                _release_file_lock(file)
+                release_file_lock(file)
 
 
 def _clone(source: Path, destination: Path) -> None:

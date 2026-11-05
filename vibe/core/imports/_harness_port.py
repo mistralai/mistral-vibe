@@ -22,6 +22,8 @@ class ImportProject:
     name: str
     cwd: Path
     source_cwd: Path | None = None
+    # The cloud project the provisioner linked the folder to.
+    project_id: str | None = None
 
 
 class ImportProjectProvisioner(Protocol):

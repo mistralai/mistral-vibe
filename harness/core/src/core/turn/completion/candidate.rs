@@ -134,6 +134,7 @@ pub(in crate::core::turn) enum CompletionWait {
 pub(in crate::core::turn) enum CompletionFinish {
     Skipped {
         action_id: String,
+        reason: Vec<ContentBlock>,
     },
     Rejected {
         action_id: String,
@@ -214,9 +215,10 @@ fn resolve_completion_hook(
                     completion_action_id,
                 )),
             ))),
-            PreLlmCallOutput::Skip { .. } => {
+            PreLlmCallOutput::Skip { reason } => {
                 Ok(CompletionResolution::Finish(CompletionFinish::Skipped {
                     action_id: completion_action_id,
+                    reason,
                 }))
             }
         },
@@ -618,7 +620,7 @@ mod tests {
         // The rejected draft is not committed: context is untouched, and the turn
         // ends carrying only why it declined.
         assert_eq!(step.state.context.messages(), messages);
-        assert_eq!(step.output(), Some(Vec::new()));
+        assert_eq!(step.output(), Some(vec![ContentBlock::text("unsafe")]));
         assert_eq!(
             turn_outcome(&step.state),
             Some(&TurnOutcome::Rejected {

@@ -1,5 +1,5 @@
-//! Resume attempts: a locked row's delete refuses with a toast, a failed
-//! delete toasts, and a successful resume drops the stale attempt notices.
+//! Resume attempts: a locked row's delete is refused with a `⚠` row, a failed
+//! delete leaves a `✕` row, and a successful resume drops the stale attempt notices.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use serde_json::json;
@@ -8,22 +8,23 @@ use vibe_rs::app::App;
 use vibe_rs::resume_picker::{self, Event};
 use vibe_rs::server::PublicSessionState;
 
+use crate::feedback_support::{errors, warnings};
 use crate::support::{stub, with_picker};
 
 const BUSY: &str = "This session is open in another Vibe process. Close it there to continue here.";
 
 #[test]
-fn deleting_a_locked_row_toasts_the_busy_refusal() {
+fn deleting_a_locked_row_warns_with_the_busy_refusal() {
     let mut app = with_picker();
     lock(&mut app);
     resume_picker::handle_key(&mut app, &stub(), KeyEvent::from(KeyCode::Char('d')));
     assert!(app.resume_picker.delete_confirm.is_none());
     assert!(app.resume_picker.deleting.is_none());
-    assert!(toast_texts(&app).contains(&BUSY.to_owned()));
+    assert_eq!(warnings(&app), [BUSY]);
 }
 
 #[test]
-fn a_failed_delete_toasts_instead_of_mounting_a_notice() {
+fn a_failed_delete_mounts_an_error_row() {
     let mut app = with_picker();
     app.resume_picker.deleting = Some("busy".into());
     resume_picker::apply_event(
@@ -35,10 +36,10 @@ fn a_failed_delete_toasts_instead_of_mounting_a_notice() {
         },
     );
     assert!(app.resume_picker.deleting.is_none());
-    assert!(
-        toast_texts(&app).contains(&"Failed to delete session: Session is already open".to_owned())
+    assert_eq!(
+        errors(&app),
+        ["Failed to delete session: Session is already open"]
     );
-    assert!(!screen_text(&app).contains("Failed to delete session"));
 }
 
 #[test]
@@ -57,7 +58,6 @@ fn a_successful_resume_drops_the_stale_attempt_error() {
         }
     }));
     app.resume_picker.resuming = true;
-    app.commit_started();
     resume_picker::apply_event(
         &mut app,
         &stub(),
@@ -90,14 +90,6 @@ fn state() -> PublicSessionState {
         }],
     }))
     .unwrap()
-}
-
-fn toast_texts(app: &App) -> Vec<String> {
-    app.overlays
-        .toasts
-        .iter()
-        .map(|toast| toast.text.clone())
-        .collect()
 }
 
 fn screen_text(app: &App) -> String {

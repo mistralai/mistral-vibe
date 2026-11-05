@@ -14,7 +14,6 @@ from e2e.app_server.scenario import Timeline
 
 env = {
     "VIBE_INPUT_GRACE_PERIOD_MS": "0",
-    "VIBE_REPLAY_SETTLE_BUSY": "1",
     "VIBE_TYPING_GRACE_PERIOD_MS": "0",
     "SSH_TTY": "/dev/pts/0",
 }
@@ -47,6 +46,3 @@ timeline: Timeline = [
     _DRAG,
 ]
 capture_steps = {len(_DRAFT) + 1, len(_DRAFT) + 2, len(_DRAFT) + 3}
-
-# Each key must land on a settled UI: batching changes the outcome here.
-settle_per_key = True

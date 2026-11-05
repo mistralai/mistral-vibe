@@ -17,7 +17,7 @@ fn renders_api_key_preview_and_scopes() {
     let text = whoami_text(
         &reads(json!({
             "status": "ready",
-            "apiKey": {"preview": "mstrl_abcd****", "scope": "workspace", "accessScope": "shared_only"},
+            "apiKey": {"preview": "****wxyz", "scope": "workspace", "accessScope": "shared_only"},
         })),
         None,
     );
@@ -25,7 +25,7 @@ fn renders_api_key_preview_and_scopes() {
         text,
         "## Who am I\n\n\
          - **Email**: ada@example.com\n\
-         - **API key**: mstrl\\_abcd\\*\\*\\*\\*\n\
+         - **API key**: \\*\\*\\*\\*wxyz\n\
          - **Key scope**: workspace\n\
          - **Access scope**: shared\\_only"
     );
@@ -36,7 +36,7 @@ fn omits_access_scope_when_backend_does_not_send_it() {
     let text = whoami_text(
         &reads(json!({
             "status": "ready",
-            "apiKey": {"preview": "abcd****", "scope": "vibe", "accessScope": null},
+            "apiKey": {"preview": "****wxyz", "scope": "vibe", "accessScope": null},
         })),
         None,
     );

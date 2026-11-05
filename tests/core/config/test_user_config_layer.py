@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from pathlib import Path
 import tomllib
@@ -26,7 +28,12 @@ from vibe.core.config.patch import (
     RemoveOperationPatch,
     ReplaceOperationPatch,
 )
-from vibe.core.config.types import MISSING_BACKING_STORE_DATA_FINGERPRINT
+from vibe.core.config.types import (
+    MISSING_BACKING_STORE_DATA_FINGERPRINT,
+    ConcurrencyConflictError,
+    ConfigChangeEvent,
+    ConflictStrategy,
+)
 from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.trusted_folders import trusted_folders_manager
 
@@ -88,6 +95,36 @@ async def test_apply_creates_file_when_it_does_not_exist(
 
     with path.open("rb") as file:
         assert tomllib.load(file) == {"active_model": "mistral-large"}
+        assert layer.fingerprint == create_file_fingerprint(file)
+
+
+@pytest.mark.asyncio
+async def test_apply_writes_through_symlinked_config(
+    tmp_working_directory: Path,
+) -> None:
+    target = tmp_working_directory / "dotfiles" / random_config_file_name()
+    target.parent.mkdir()
+    target.write_text('active_model = "old"\n')
+    link = tmp_working_directory / random_config_file_name()
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("this host cannot create symlinks")
+    layer = UserConfigLayer(path=link)
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert isinstance(fingerprint, str)
+
+    await layer.apply(
+        ConfigPatch(
+            ReplaceOperationPatch(path="/active_model", value="new"),
+            fingerprint=fingerprint,
+        )
+    )
+
+    assert link.is_symlink()
+    with target.open("rb") as file:
+        assert tomllib.load(file) == {"active_model": "new"}
         assert layer.fingerprint == create_file_fingerprint(file)
 
 
@@ -336,7 +373,7 @@ async def test_commit_sets_missing_nested_field(tmp_working_directory: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_apply_overwrites_external_file_changes(
+async def test_apply_cancel_rejects_a_file_changed_since_it_was_read(
     tmp_working_directory: Path,
 ) -> None:
     path = tmp_working_directory / random_config_file_name()
@@ -348,17 +385,230 @@ async def test_apply_overwrites_external_file_changes(
     assert isinstance(fingerprint, str)
     path.write_text('active_model = "external"\n')
 
+    with pytest.raises(ConcurrencyConflictError):
+        await layer.apply(
+            ConfigPatch(
+                ReplaceOperationPatch(path="/active_model", value="new"),
+                fingerprint=fingerprint,
+            )
+        )
+
+    with path.open("rb") as file:
+        assert tomllib.load(file) == {"active_model": "external"}
+
+
+@pytest.mark.asyncio
+async def test_apply_replace_keeps_external_changes_to_other_keys(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text('active_model = "old"\n')
+    layer = UserConfigLayer(path=path)
+
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert isinstance(fingerprint, str)
+    path.write_text('active_model = "external"\nenable_mcp = false\n')
+
     await layer.apply(
         ConfigPatch(
             ReplaceOperationPatch(path="/active_model", value="new"),
             fingerprint=fingerprint,
-        )
+        ),
+        on_conflict=ConflictStrategy.REPLACE,
     )
 
     with path.open("rb") as file:
-        assert tomllib.load(file) == {"active_model": "new"}
+        assert tomllib.load(file) == {"active_model": "new", "enable_mcp": False}
     data = await layer.load()
-    assert data.model_extra == {"active_model": "new"}
+    assert data.model_extra == {"active_model": "new", "enable_mcp": False}
+
+
+async def _session_orchestrator(path: Path) -> ConfigOrchestrator[VibeConfigSchema]:
+    layer = UserConfigLayer(path=path)
+    return await ConfigOrchestrator.create(
+        schema=VibeConfigSchema,
+        layers=[DefaultConfigLayer(schema=VibeConfigSchema), layer],
+        default_layer_resolver=lambda: layer,
+    )
+
+
+@pytest.mark.asyncio
+async def test_set_field_keeps_what_another_session_saved_meanwhile(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    first = await _session_orchestrator(path)
+    second = await _session_orchestrator(path)
+
+    assert await first.set_field("/enable_mcp", False) == []
+    assert await second.set_field("/enable_connectors", False) == []
+
+    with path.open("rb") as file:
+        assert tomllib.load(file) == {"enable_mcp": False, "enable_connectors": False}
+    assert second.config.enable_mcp is False
+
+
+@pytest.mark.asyncio
+async def test_mutate_field_builds_on_what_another_session_saved_meanwhile(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    first = await _session_orchestrator(path)
+    second = await _session_orchestrator(path)
+
+    path_in_config = "/tools/edit/allowlist"
+    first_write = await first.mutate_field(
+        path_in_config, lambda c: [*c, "a"], default=[]
+    )
+    second_write = await second.mutate_field(
+        path_in_config, lambda c: [*c, "b"], default=[]
+    )
+
+    assert first_write.failures == second_write.failures == []
+    assert second_write.previous == ["a"]
+    with path.open("rb") as file:
+        assert tomllib.load(file)["tools"]["edit"]["allowlist"] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_mutate_field_leaves_the_file_untouched_when_nothing_changes(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    original = '# my comment\n[tools.edit]\nallowlist = ["a"]\n'
+    path.write_text(original)
+    inode = path.stat().st_ino
+    orchestrator = await _session_orchestrator(path)
+
+    mutation = await orchestrator.mutate_field(
+        "/tools/edit/allowlist", lambda current: current, default=[]
+    )
+
+    assert mutation.failures == []
+    assert path.read_text() == original
+    assert path.stat().st_ino == inode
+
+
+@pytest.mark.asyncio
+async def test_mutate_field_adopts_a_value_another_session_already_saved(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    first = await _session_orchestrator(path)
+    second = await _session_orchestrator(path)
+    events: list[ConfigChangeEvent] = []
+    second.subscribe(events.append)
+    previewed: list[list[str]] = []
+
+    async def preflight(candidate: VibeConfigSchema) -> None:
+        previewed.append(candidate.installed_agents)
+
+    await first.mutate_field("/installed_agents", lambda c: [*c, "lean"], default=[])
+    inode = path.stat().st_ino
+    mutation = await second.mutate_field(
+        "/installed_agents",
+        lambda c: c if "lean" in c else [*c, "lean"],
+        default=[],
+        preflight=preflight,
+    )
+
+    assert mutation.failures == []
+    assert path.stat().st_ino == inode
+    assert previewed == [["lean"]]
+    assert second.config.installed_agents == ["lean"]
+    assert [event.changed_keys for event in events] == [frozenset({"installed_agents"})]
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_across_layers_keeps_what_another_session_saved(
+    tmp_working_directory: Path,
+) -> None:
+    first_path = tmp_working_directory / random_config_file_name()
+    second_path = tmp_working_directory / random_config_file_name()
+    first = UserConfigLayer(path=first_path, name="first")
+    second = UserConfigLayer(path=second_path, name="second")
+    orchestrator = await ConfigOrchestrator.create(
+        schema=VibeConfigSchema,
+        layers=[DefaultConfigLayer(schema=VibeConfigSchema), first, second],
+        default_layer_resolver=lambda: second,
+    )
+    first_path.write_text("enable_mcp = false\n")
+
+    failures = await orchestrator.apply_patch(
+        [
+            AddOperationPatch(
+                path="/enable_connectors", value=False, target_layer_name="first"
+            ),
+            AddOperationPatch(
+                path="/enable_telemetry", value=False, target_layer_name="second"
+            ),
+        ],
+        reason="write both layers",
+    )
+
+    assert failures == []
+    with first_path.open("rb") as file:
+        assert tomllib.load(file) == {"enable_mcp": False, "enable_connectors": False}
+
+
+@pytest.mark.asyncio
+async def test_config_writes_keep_their_lock_out_of_the_config_directory(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / ".vibe" / "config.toml"
+    orchestrator = await _session_orchestrator(path)
+
+    assert await orchestrator.set_field("/enable_mcp", False) == []
+
+    assert sorted(entry.name for entry in path.parent.iterdir()) == ["config.toml"]
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_sessions_all_save_their_writes(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    sessions = [await _session_orchestrator(path) for _ in range(32)]
+
+    results = await asyncio.gather(
+        *(
+            session.set_field(f"/tools/tool{i}/permission", "always")
+            if i % 2
+            else session.mutate_field(
+                "/tools/edit/allowlist", lambda c, i=i: [*c, str(i)], default=[]
+            )
+            for i, session in enumerate(sessions)
+        )
+    )
+
+    assert [
+        result if isinstance(result, list) else result.failures for result in results
+    ] == [[]] * len(sessions)
+    with path.open("rb") as file:
+        tools = tomllib.load(file)["tools"]
+    assert sorted(tools.pop("edit")["allowlist"]) == sorted(
+        str(i) for i in range(0, len(sessions), 2)
+    )
+    assert tools == {
+        f"tool{i}": {"permission": "always"} for i in range(1, len(sessions), 2)
+    }
+
+
+@pytest.mark.asyncio
+async def test_upsert_field_returns_the_error_when_the_file_turned_invalid(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    orchestrator = await _session_orchestrator(path)
+    path.write_text("enable_mcp = tru\n")
+
+    failures = await orchestrator.upsert_field(
+        "/providers", key_field="name", value={"name": "acme"}
+    )
+
+    assert [type(f) for f in failures] == [LayerImplementationError]
+    assert path.read_text() == "enable_mcp = tru\n"
 
 
 @pytest.mark.asyncio
@@ -453,6 +703,47 @@ provider = "mistral"
 
 
 @pytest.mark.asyncio
+async def test_migrate_config_layers_migrates_what_another_session_saved_meanwhile(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text('active_model = "devstral-2"\n')
+    layer = UserConfigLayer(path=path)
+    await layer.load()
+    path.write_text('active_model = "devstral-2"\nenable_mcp = false\n')
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["active_model"] == "mistral-medium-3.5"
+    assert persisted["enable_mcp"] is False
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_warns_when_it_gives_up_on_conflicts(
+    tmp_working_directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    original = 'active_model = "devstral-2"\n'
+    path.write_text(original)
+    layer = UserConfigLayer(path=path)
+
+    async def always_conflict(*_args: object, **_kwargs: object) -> None:
+        raise ConcurrencyConflictError(expected_fp="before", actual_fp="after")
+
+    monkeypatch.setattr(layer, "apply", always_conflict)
+
+    with caplog.at_level(logging.WARNING):
+        await migrate_config_layers([layer])
+
+    assert f"Gave up on migrating {layer.name}" in caplog.text
+    assert path.read_text() == original
+
+
+@pytest.mark.asyncio
 async def test_migrate_config_layers_removes_tool_paths(
     tmp_working_directory: Path,
 ) -> None:
@@ -470,6 +761,24 @@ async def test_migrate_config_layers_removes_tool_paths(
     assert "tool_paths" not in persisted
     assert persisted["active_model"] == "mistral-medium-3.5"
     assert (tools_dir / "weather.py").is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [True, False])
+async def test_migrate_config_layers_renames_experimental_worktree_copy_on_write(
+    tmp_working_directory: Path, value: bool
+) -> None:
+    """An explicit `false` stays an opt-out now that the default is on."""
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text(f"experimental_worktree_copy_on_write = {str(value).lower()}\n")
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert "experimental_worktree_copy_on_write" not in persisted
+    assert persisted["worktree_copy_on_write"] is value
 
 
 @pytest.mark.asyncio

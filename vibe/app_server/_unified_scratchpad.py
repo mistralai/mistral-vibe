@@ -1,7 +1,4 @@
-"""A Unified Harness session's scratchpad: private per-session files for the agent.
-
-Design: ``vibe/docs/design/unified-harness-todo-and-scratchpad.md``.
-"""
+"""A Unified Harness session's scratchpad: private per-session files for the agent."""
 
 from __future__ import annotations
 

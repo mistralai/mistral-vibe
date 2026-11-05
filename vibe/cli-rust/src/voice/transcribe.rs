@@ -55,7 +55,7 @@ pub async fn transcribe(
         .await
         .map_err(|e| format!("Transcription send failed: {e}"))?;
 
-    let send = tokio::spawn(async move {
+    let send = crate::work::spawn_daemon(async move {
         let mut chunks = chunks;
         while let Some(chunk) = chunks.recv().await {
             let audio = base64::engine::general_purpose::STANDARD.encode(&chunk);

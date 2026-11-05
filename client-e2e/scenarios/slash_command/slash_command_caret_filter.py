@@ -6,7 +6,6 @@ from e2e.app_server.scenario import Timeline
 
 _LEFT = "\x1b[D"
 
-settle_per_key = True
 
 timeline: Timeline = ["/status", _LEFT, _LEFT, _LEFT]
 

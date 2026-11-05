@@ -27,7 +27,9 @@ def _config(*, enable_telemetry: bool = True, enable_experiments: bool = True) -
 
 @pytest.fixture
 def _fixed_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cache, "_cache_key", lambda _config: "user-abc")
+    monkeypatch.setattr(
+        cache, "_cache_key", lambda _config, _credentials=None: "user-abc"
+    )
 
 
 def test_store_then_load_round_trips(_fixed_key: None) -> None:
@@ -72,24 +74,21 @@ def test_store_is_noop_when_experiments_disabled() -> None:
 def test_store_is_noop_when_no_mistral_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "vibe.core.telemetry.send.get_mistral_provider_and_api_key",
-        lambda _config: None,
-    )
+    config = _config()
+    config.get_mistral_provider = lambda: None
 
-    cache.store_cached_eval_response(_config(), _response())
+    cache.store_cached_eval_response(config, _response())
 
     assert not EXPERIMENT_EVAL_CACHE_FILE.path.exists()
 
 
 def test_store_and_load_use_hashed_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "vibe.core.telemetry.send.get_mistral_provider_and_api_key",
-        lambda _config: (MagicMock(), "fake-key"),
-    )
+    config = _config()
+    config.get_mistral_provider.return_value = MagicMock(api_key_env_var="EVAL_KEY")
+    monkeypatch.setenv("EVAL_KEY", "fake-key")
 
-    cache.store_cached_eval_response(_config(), _response())
-    loaded = cache.load_cached_eval_response(_config())
+    cache.store_cached_eval_response(config, _response())
+    loaded = cache.load_cached_eval_response(config)
 
     assert loaded is not None
     entries = json.loads(EXPERIMENT_EVAL_CACHE_FILE.path.read_text())

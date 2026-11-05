@@ -418,10 +418,10 @@ class UnifiedPluginProvider:
     ) -> PinnedPlugins:
         """Hand over the installed root of every plugin the request names.
 
-        The only read of an installed directory in the design, and it reads
-        nothing but the path. The roots come from the resolve that produced the
-        request, so they disagree only if the tree moved in between — which the
-        Runtime catches when the ingest digest misses.
+        It reads only the path of each installed directory. The roots come from
+        the resolve that produced the request, so they disagree only if the tree
+        moved in between — which the Runtime catches when the ingest digest
+        misses.
 
         A name this provider does not hold is left out rather than guessed at,
         and the Runtime turns the gap into ``plugin_pin_mismatch``.

@@ -378,7 +378,8 @@ mod tests {
         config.settings.tools.subagents =
             crate::core::features::subagents::Mode::enabled().with_conversation_forking(true);
         let contracts = ToolContracts::compile(&config);
-        let arguments = json!({"name": "a", "message": "hi", "context": "fresh"});
+        let arguments =
+            json!({"name": "a", "message": "hi", "instructions": "Work.", "context": "fresh"});
 
         let resolved = contracts
             .resolve_effective_call(&hook_spawn_call(arguments.clone()), arguments.clone())

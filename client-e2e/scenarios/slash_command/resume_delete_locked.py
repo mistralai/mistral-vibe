@@ -1,4 +1,4 @@
-"""Pressing `d` on a locked session row refuses the delete with a toast."""
+"""Pressing `d` on a locked session row refuses the delete with a warning row."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ handshake = {
 request_methods = {"session/lease/subscribe"}
 
 # Enter submits /resume, Up selects the locked row, and `d` refuses locally
-# with the busy toast, without a session/delete request.
+# with the busy warning row, without a session/delete request.
 timeline: Timeline = ["/resume", "\r", "\x1b[A", "d"]
 
 capture_startup = False

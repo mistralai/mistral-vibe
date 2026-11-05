@@ -164,6 +164,7 @@ fn build_provided_call(
         call: ExternalTool::Provided {
             group_name: group_name.to_string(),
             tool_name: tool_name.to_string(),
+            invocation_name: tool_name.to_string(),
             arguments,
         },
     }
@@ -592,4 +593,76 @@ mod argument_filters {
         assert_eq!(policy.evaluate(&staging), PermissionDecision::Allow);
         assert_eq!(policy.evaluate(&production), PermissionDecision::Ask);
     }
+}
+
+fn deny_policy(pattern: &str) -> PermissionPolicy {
+    serde_json::from_value(serde_json::json!({
+        "default": "allow",
+        "rules": [{
+            "tools": [pattern],
+            "decision": "deny",
+            "allowlist": [],
+            "denylist": [],
+            "sensitive": [],
+        }],
+    }))
+    .expect("the test policy must be valid")
+}
+
+fn catalog() -> Vec<String> {
+    [
+        "client.echo",
+        "client.deploy",
+        "github.summarize",
+        "file_system.bash",
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
+#[rstest]
+#[case::mistyped_name("client.ecko", "client")]
+#[case::bracketed_separator("client[.]ecko", "client")]
+#[case::single_character_class("[c]lient.ecko", "client")]
+#[case::name_glob("client.delete_*", "client")]
+#[case::built_in("file_system.reed_file", "file_system")]
+fn reports_a_pattern_that_matches_no_tool_of_its_namespace(
+    #[case] pattern: &str,
+    #[case] namespace: &str,
+) {
+    let unmatched =
+        deny_policy(pattern).unmatched_tool_patterns(&catalog(), &["github".to_owned()]);
+
+    let namespace_tool_ids = catalog()
+        .into_iter()
+        .filter(|tool_id| tool_id.starts_with(&format!("{namespace}.")))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        unmatched,
+        vec![UnmatchedToolPattern {
+            rule_index: 0,
+            pattern: pattern.to_owned(),
+            namespace: namespace.to_owned(),
+            namespace_tool_ids,
+        }]
+    );
+}
+
+#[rstest]
+#[case::matching_name("client.echo")]
+#[case::namespace_glob("client.*")]
+#[case::leading_glob("*.ecko")]
+#[case::wildcard_namespace("cl*.ecko")]
+#[case::character_range_namespace("[a-z]lient.ecko")]
+#[case::negated_class_namespace("[!x]lient.ecko")]
+#[case::no_namespace("echo")]
+#[case::unknown_namespace("inventory.delte_item")]
+#[case::open_namespace("github.create_issue")]
+fn does_not_report_a_pattern_the_catalog_cannot_disprove(#[case] pattern: &str) {
+    let unmatched =
+        deny_policy(pattern).unmatched_tool_patterns(&catalog(), &["github".to_owned()]);
+
+    assert_eq!(unmatched, Vec::new());
 }

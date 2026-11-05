@@ -19,6 +19,8 @@ from vibe.app_server.session import AppServerSession
 from vibe.core.config import ModelConfig
 from vibe.core.types import LLMMessage
 
+pytestmark = pytest.mark.both_paths
+
 # A valid 1x1 PNG: the Harness reads the file's dimensions to cost the image.
 _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -106,6 +108,80 @@ async def test_a_described_image_reaches_the_model_as_its_description(
     assert "[Image]" not in user
     assert image.resolve().as_uri() not in user
     assert "image_url" not in user
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_reads_images_sees_the_image_file_it_reads(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_session: AppServerSession,
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A session on a model that reads images, and a PNG in the workspace.
+    *Do*: The model calls ``read_file`` on the PNG, then answers.
+    *Assert*: ``read_file`` tells the model it returns images, and the tool
+    message of the next request carries the PNG itself.
+    """
+    # Prepare
+    config = backend_contract_session.resources.config
+    await config.update(
+        {
+            "models": [
+                {
+                    "name": "mistral-medium-latest",
+                    "provider": "mistral",
+                    "alias": "sees",
+                    "supports_images": True,
+                }
+            ],
+            "active_model": "sees",
+        },
+        reload_runtime=True,
+    )
+    image = tmp_path / "shot.png"
+    image.write_bytes(_PNG)
+    requests: list[dict[str, Any]] = []
+    replies = iter([
+        backend_contract_mistral_response(
+            "",
+            tool_calls=[
+                {
+                    "id": "read-1",
+                    "index": 0,
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": str(image)}),
+                    },
+                }
+            ],
+        ),
+        backend_contract_mistral_response("a 1x1 image"),
+    ])
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return next(replies)
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+
+    # Do
+    _ = [event async for event in backend_contract_session.act("what is in shot.png?")]
+
+    # Assert
+    first, second = requests
+    [read_file] = [
+        tool["function"]
+        for tool in first["tools"]
+        if tool["function"]["name"] == "read_file"
+    ]
+    assert "An image file returns the image itself." in read_file["description"]
+    [tool_message] = [m for m in second["messages"] if m.get("role") == "tool"]
+    assert {
+        "type": "image_url",
+        "image_url": {
+            "url": "data:image/png;base64," + base64.b64encode(_PNG).decode("ascii")
+        },
+    } in tool_message["content"]
 
 
 def _user_messages(payload: dict[str, Any]) -> list[Any]:

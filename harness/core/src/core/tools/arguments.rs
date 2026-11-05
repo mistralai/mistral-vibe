@@ -51,7 +51,7 @@ pub(crate) fn validate_arguments<'a>(
 ) -> Result<(), ArgumentsRejection<'a>> {
     validate_json_schema(schema, arguments).map_err(|rejection| match rejection {
         ArgumentsRejection::Schema { error, .. } => ArgumentsRejection::Schema {
-            explained: tool.and_then(|tool| tool.explain_schema_error(&error)),
+            explained: tool.and_then(|tool| tool.explain_schema_error(schema, &error)),
             error,
         },
         rejection => rejection,

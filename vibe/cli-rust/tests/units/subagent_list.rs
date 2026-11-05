@@ -529,11 +529,9 @@ fn a_config_write_toggles_the_status_list_live() {
         vibe_rs::model_picker::Event::Written(runtime)
     };
 
-    app.commit_started();
     vibe_rs::model_picker::apply_event(&mut app, written(false));
     assert!(app.subagents.list.rows.is_empty());
 
-    app.commit_started();
     vibe_rs::model_picker::apply_event(&mut app, written(true));
     assert_eq!(ids(&app.subagents.list.rows), ["a"]);
 }

@@ -16,8 +16,8 @@ from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
 from vibe.core.experiments.wait import mark_experiments_eval_failed
 from vibe.core.identity import IdentityResult, fetch_identity
 from vibe.core.identity_cache import IdentityCache
-from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
-from vibe.core.telemetry.send import get_mistral_provider_and_api_key
+from vibe.core.platform_auth import PlatformCredentialFactory
+from vibe.core.platform_auth._mistral import mistral_credentials, resolve_principal
 from vibe.core.utils import get_platform_id
 from vibe.observability.logging import logger
 from vibe.setup.auth.whoami import (
@@ -62,6 +62,7 @@ async def _fetch_plan_attributes(
     resolve_whoami: WhoAmIResolver | None,
     harness: ExperimentSurface,
     experiment_system_prompt_id: str | None = None,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> tuple[ExperimentAttributes | None, str | None]:
     """Resolve the user-scoped attribute snapshot + user_plan from identity and
     ``/whoami`` (through their caches), independent of the session.
@@ -78,30 +79,28 @@ async def _fetch_plan_attributes(
     user on a third-party model with a Mistral provider still gets their real
     plan/org. This is the single resolution shared by fresh init and resume.
     """
-    provider_and_key = get_mistral_provider_and_api_key(config)
-    if provider_and_key is None:
+    mistral = mistral_credentials(config, credentials)
+    if mistral is None:
         if config.get_mistral_provider() is None:
             sentinel = _build_attributes(
                 config,
-                "",
                 launch_context,
                 harness=harness,
                 experiment_system_prompt_id=experiment_system_prompt_id,
             ).model_copy(update={"planType": NO_PLAN_DATA, "planName": NO_PLAN_DATA})
             return sentinel, NO_PLAN_DATA
         return None, None
-    provider, api_key = provider_and_key
     _resolve_identity = resolve_identity or fetch_identity
     _resolve_whoami = resolve_whoami or fetch_whoami
     identity, whoami = await asyncio.gather(
         _resolve_identity(
-            base_url=provider.api_base,
-            credentials=ApiKeyPlatformCredentialProvider(provider.api_key_env_var),
+            base_url=mistral.provider.api_base,
+            credentials=mistral.credentials,
             timeout=EXPERIMENT_IDENTITY_TIMEOUT_S,
         ),
         _resolve_whoami(
             base_url=config.console_base_url,
-            api_key=api_key,
+            credentials=mistral.credentials,
             timeout=EXPERIMENT_IDENTITY_TIMEOUT_S,
         ),
     )
@@ -112,7 +111,6 @@ async def _fetch_plan_attributes(
     )
     attributes = _build_attributes(
         config,
-        api_key,
         launch_context,
         harness=harness,
         identity=identity,
@@ -132,19 +130,17 @@ async def initialize_experiments(
     resolve_identity: IdentityResolver | None = None,
     resolve_whoami: WhoAmIResolver | None = None,
     experiment_system_prompt_id: str | None = None,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> tuple[bool, str | None]:
     if not config.enable_telemetry or not config.experiments.enable:
         # The `vibe` launcher reads this cache without the config, so opting out must drop it.
         clear_cached_eval_responses()
     if not config.enable_telemetry:
         return False, None
-    from vibe.core.telemetry.send import resolve_credential_cache_key
-
-    cache_key = (
-        await resolve_credential_cache_key(config)
-        if config.experiments.enable
-        else None
+    mistral = (
+        mistral_credentials(config, credentials) if config.experiments.enable else None
     )
+    cache_key = await resolve_principal(mistral) if mistral is not None else None
     attributes, user_plan = await _fetch_plan_attributes(
         config=config,
         launch_context=launch_context,
@@ -152,6 +148,7 @@ async def initialize_experiments(
         resolve_whoami=resolve_whoami,
         harness=harness,
         experiment_system_prompt_id=experiment_system_prompt_id,
+        credentials=credentials,
     )
     if attributes is None:
         # Mistral provider present but key missing — tried but failed.
@@ -177,7 +174,9 @@ async def initialize_experiments(
         mark_experiments_eval_failed()
     else:
         try:
-            store_cached_eval_response(config, state, fetched_for=cache_key)
+            store_cached_eval_response(
+                config, state, fetched_for=cache_key, credentials=credentials
+            )
         except Exception:
             logger.exception("Failed to cache experiment eval response")
     # Persist ONLY the sticky variant assignment. Plan/org attributes and
@@ -195,6 +194,7 @@ async def fetch_and_cache_experiments(
     launch_context: LaunchContext,
     *,
     harness: ExperimentSurface,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> None:
     """Evaluate the experiments once and cache the result, for a caller with
     no session. Fail-open: never raises, and records a failure for the process
@@ -217,6 +217,7 @@ async def fetch_and_cache_experiments(
             harness=harness,
             resolve_identity=IdentityCache().resolve,
             resolve_whoami=WhoAmICache().resolve,
+            credentials=credentials,
         )
     except Exception:
         mark_experiments_eval_failed()
@@ -227,7 +228,6 @@ async def fetch_and_cache_experiments(
 
 def _build_attributes(
     config: VibeConfigSchema,
-    api_key: str,
     launch_context: LaunchContext | None,
     *,
     harness: ExperimentSurface,

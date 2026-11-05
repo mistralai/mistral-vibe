@@ -3,7 +3,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_RESPONSE_BYTES: usize = 256;
@@ -62,10 +62,10 @@ impl Drop for TermiosGuard {
 }
 
 fn read_response(tty: &mut File, complete: fn(&[u8]) -> bool) -> io::Result<Vec<u8>> {
-    let deadline = Instant::now() + TIMEOUT;
+    let deadline = crate::clock::real_now() + TIMEOUT;
     let mut response = Vec::new();
     while response.len() < MAX_RESPONSE_BYTES && !complete(&response) {
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        let remaining = deadline.saturating_duration_since(crate::clock::real_now());
         if remaining.is_zero() || !readable(tty.as_raw_fd(), remaining)? {
             break;
         }
@@ -79,9 +79,9 @@ fn read_response(tty: &mut File, complete: fn(&[u8]) -> bool) -> io::Result<Vec<
 }
 
 fn readable(fd: RawFd, timeout: Duration) -> io::Result<bool> {
-    let deadline = Instant::now() + timeout;
+    let deadline = crate::clock::real_now() + timeout;
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        let remaining = deadline.saturating_duration_since(crate::clock::real_now());
         let mut read_fds = unsafe { std::mem::zeroed() };
         unsafe {
             libc::FD_ZERO(&mut read_fds);

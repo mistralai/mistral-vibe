@@ -38,7 +38,7 @@ fn draw_box(f: &mut Frame, area: Rect, rows: &[Row]) {
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::popup_border()).bg(bg)),
+            .border_style(theme::border_style().bg(bg)),
         area,
     );
 

@@ -218,7 +218,7 @@ pub fn on_turn_end(app: &mut App, client: &Arc<Client>) {
     app.narrator.frame = 0;
     narrator_manager::on_read_aloud_requested(app);
     let client = client.clone();
-    let handle = tokio::spawn(async move {
+    let handle = crate::work::spawn(async move {
         let assistant_text = data.assistant_text();
         let summary = match serde_json::to_value(NarrationSummarizeParams {
             session_id,

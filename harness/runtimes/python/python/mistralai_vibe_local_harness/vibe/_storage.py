@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 import hashlib
+import io
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ import secrets
 import shutil
 from stat import S_ISREG
 from threading import RLock
+import time
 from typing import Annotated, Any, Literal, Self, cast
 
 from pydantic import (
@@ -152,7 +154,11 @@ _JOURNAL_SEGMENT_PATTERN = re.compile(r"^[0-9]{16}\.jsonl$")
 _RETAINED_GENERATIONS = 2
 _MAX_DOCUMENT_BYTES = 64 * 1024 * 1024
 _MAX_SAFE_JSON_INTEGER = 2**53 - 1
-_CANONICAL_INTEGER_RANGE = range(-_MAX_SAFE_JSON_INTEGER, _MAX_SAFE_JSON_INTEGER + 1)
+# ERROR_ACCESS_DENIED and ERROR_SHARING_VIOLATION, raised while another process
+# holds the file open; six attempts wait about 1.5 s in total.
+_WINDOWS_TRANSIENT_ERRORS = frozenset({5, 32})
+_WINDOWS_REPLACE_ATTEMPTS = 6
+_WINDOWS_REPLACE_BASE_DELAY_SECONDS = 0.05
 
 type Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 type Generation = Annotated[str, Field(pattern=r"^[0-9]{16}$")]
@@ -345,8 +351,23 @@ type StoredHarnessSettings = Annotated[
 type StoredHarnessInput = Annotated[
     RustHarnessInput, BeforeValidator(_fill_stored_input)
 ]
+
+
+def _dump_stored_transition(
+    transition: RustSessionTransition, handler: SerializerFunctionWrapHandler
+) -> object:
+    """Store a transition without the fields that route a call's span.
+
+    This Runtime never reads them from a restored transition, and a build whose
+    Core predates them can then still load the document that holds it.
+    """
+    return handler(_without_tool_call_routing(transition) or transition)
+
+
 type StoredSessionTransition = Annotated[
-    RustSessionTransition, BeforeValidator(_drop_commits_without_call)
+    RustSessionTransition,
+    BeforeValidator(_drop_commits_without_call),
+    WrapSerializer(_dump_stored_transition),
 ]
 
 
@@ -521,19 +542,28 @@ class CommandReceiptV1(_StoredModel):
         return self
 
 
-_PRUNABLE_ACTION_KINDS: frozenset[str] = frozenset({
+_RELEASABLE_ACTION_KINDS: frozenset[str] = frozenset({
     "completion",
     "tool",
     "hook",
+    "process",
     "callback",
     "child",
     "filesystem",
 })
-"""Kinds whose settled bodies no reader needs once Core has released the Action.
+"""Kinds ``_release_settled_actions`` may drop once settled and released by Core.
 
-Naming them rather than excluding ``process`` keeps this fail-closed: a kind added
-to the Literal is unprunable until someone audits its read-back paths and lists it
-here, and ``test_every_action_kind_is_classified_for_pruning`` fails until they do.
+Naming kinds keeps the release fail-closed: a kind added to the Literal is kept
+until someone audits its read-back paths and lists it here, and
+``test_every_action_kind_is_classified_for_release`` fails until they do.
+"""
+
+_BODY_PRUNABLE_ACTION_KINDS: frozenset[str] = _RELEASABLE_ACTION_KINDS - {"process"}
+"""Kinds whose entries may carry ``request_pruned`` or ``result_pruned``.
+
+Generations once kept every settled entry and dropped only its bodies, never a
+process Action's; such entries still load and are released at the next
+publication.
 """
 
 
@@ -554,16 +584,17 @@ class RuntimeActionV1(_StoredModel):
     prepared_process_start: PreparedProcessStartV1 | None = None
     result: JsonValue = None
     request_pruned: bool = False
-    """Whether a settled Action's ``request`` was dropped.
+    """Whether a settled Action's ``request`` was dropped while its entry was kept.
 
-    ``request_sha256`` still describes the original request. Generations written
-    before this field existed restore with it false and keep their request.
+    ``request_sha256`` still describes the original request. Such entries come
+    from generations that dropped bodies rather than whole settled entries; this
+    build releases them at its next publication unless recovery still needs them.
     """
     result_pruned: bool = False
     """Whether a settled Action's ``result`` was dropped.
 
     Only ``_resolve_action``'s redelivery short-circuit reads a result back, and
-    only for Actions Core still holds, which the prune excludes. The flag separates
+    only for Actions Core still holds, which were never pruned. The flag separates
     "pruned" from "never produced one" so that an unexpected read fails with an
     explanation instead of validating ``None``.
     """
@@ -573,7 +604,7 @@ class RuntimeActionV1(_StoredModel):
         if self.request_pruned:
             if self.request is not None:
                 raise ValueError("a pruned action request must be empty")
-            if self.kind not in _PRUNABLE_ACTION_KINDS:
+            if self.kind not in _BODY_PRUNABLE_ACTION_KINDS:
                 raise ValueError(f"a {self.kind} action request cannot be pruned")
             if self.state in {"pending", "running"}:
                 raise ValueError("an unsettled action request cannot be pruned")
@@ -582,7 +613,7 @@ class RuntimeActionV1(_StoredModel):
         if self.result_pruned:
             if self.result is not None:
                 raise ValueError("a pruned action result must be empty")
-            if self.kind not in _PRUNABLE_ACTION_KINDS:
+            if self.kind not in _BODY_PRUNABLE_ACTION_KINDS:
                 raise ValueError(f"a {self.kind} action result cannot be pruned")
             if self.state in {"pending", "running"}:
                 raise ValueError("an unsettled action result cannot be pruned")
@@ -1046,12 +1077,73 @@ StoredPublicSessionState = Annotated[
 ]
 
 
+class SessionApiFactsV1(_StoredModel):
+    """Session API facts the public snapshot cannot rebuild.
+
+    ``history_positions`` fixes each entry's Session API index; a tool entry
+    holds one for its call and one for its result. ``turn_outcomes`` keeps how
+    each Turn ended after the snapshot's latest Turn moves on. A journal record
+    carries only the facts its advance added; folding merges them.
+    """
+
+    metadata_version: Literal[1] = 1
+    next_history_index: int = Field(default=0, ge=0)
+    history_positions: dict[str, int] = Field(default_factory=dict)
+    turn_outcomes: dict[str, JsonObject] = Field(default_factory=dict)
+    message_receipts: dict[str, JsonObject] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    """Accepted ``message/send`` results by idempotency key."""
+    agent_config: JsonObject | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    """The Session configuration last written through the Session API."""
+    tool_calls: dict[str, JsonObject] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    """Original tool call ID and arguments by public tool entry ID."""
+
+    def merged(self, added: SessionApiFactsV1) -> SessionApiFactsV1:
+        return self.model_copy(
+            update={
+                "next_history_index": max(
+                    self.next_history_index, added.next_history_index
+                ),
+                "history_positions": {
+                    **self.history_positions,
+                    **added.history_positions,
+                },
+                "turn_outcomes": {**self.turn_outcomes, **added.turn_outcomes},
+                "message_receipts": {**self.message_receipts, **added.message_receipts},
+                "agent_config": (
+                    added.agent_config
+                    if added.agent_config is not None
+                    else self.agent_config
+                ),
+                "tool_calls": {**self.tool_calls, **added.tool_calls},
+            }
+        )
+
+
+def _fold_session_api_facts(
+    current: SessionApiFactsV1 | None, added: SessionApiFactsV1 | None
+) -> SessionApiFactsV1 | None:
+    if added is None:
+        return current
+    if current is None:
+        return added
+    return current.merged(added)
+
+
 class ProjectionStateV1(_StoredModel):
     projection_state_version: Literal[1] = 1
     session_id: str
     snapshot_sequence: int = Field(ge=0)
     watermark: int = Field(ge=0)
     snapshot: StoredPublicSessionState
+    session_api: SessionApiFactsV1 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class AppendEntryOp(_StoredModel):
@@ -1513,6 +1605,9 @@ class ProjectionAdvancedPayloadV1(_StoredModel):
 class ProjectionDeltaPayloadV1(_StoredModel):
     watermark: int = Field(ge=0)
     delta: ProjectionDelta
+    session_api: SessionApiFactsV1 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class SessionRelocatedPayloadV1(_StoredModel):
@@ -2166,6 +2261,15 @@ class ProjectionTail:
 
 
 @dataclass(frozen=True, slots=True)
+class HeldGeneration:
+    session: StoredSession
+    current_sha256: str
+    journal_path: str
+    journal_size: int
+    journal_mtime_ns: int
+
+
+@dataclass(frozen=True, slots=True)
 class _GenerationCacheKey:
     """On-disk identity of a loaded generation.
 
@@ -2334,7 +2438,8 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             checkpoint_messages(checkpoint)
         runtime_state = _discard_provider_operation_results(runtime_state)
         if core_action_ids is not None:
-            runtime_state = _prune_settled_action_bodies(runtime_state, core_action_ids)
+            runtime_state = _release_settled_actions(runtime_state, core_action_ids)
+            runtime_state = _release_settled_callbacks(runtime_state)
 
         generation_root = self.session_root / "generations"
         journal_root = self.session_root / "journal"
@@ -2505,6 +2610,26 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             raise HarnessInvalidSessionStoreError(
                 self.session_id, f"Invalid Unified session store: {exc}"
             ) from exc
+
+    def held_generation(self) -> HeldGeneration | None:
+        """The cached load, without reading the filesystem: while the lease is
+        held nothing else writes the store. Load and identity are read under one
+        lock, so a record on disk but not yet folded in is never claimed.
+        """
+        with self._cache_lock:
+            cached = self._cache
+            if cached is None or self._lease is None or not self._lease.held:
+                return None
+            key = cached.key
+            return HeldGeneration(
+                session=cached.session,
+                current_sha256=hashlib.sha256(
+                    key.current.removesuffix(b"\n")
+                ).hexdigest(),
+                journal_path=key.journal_path.relative_to(self.session_root).as_posix(),
+                journal_size=key.journal_size,
+                journal_mtime_ns=key.journal_mtime_ns,
+            )
 
     def _valid_cached_session(self) -> StoredSession | None:
         cached = self._cache
@@ -3705,16 +3830,22 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
         return record
 
     def advance_projection_delta(
-        self, watermark: int, delta: ProjectionDelta
+        self,
+        watermark: int,
+        delta: ProjectionDelta,
+        session_api: SessionApiFactsV1 | None = None,
     ) -> ProjectionDeltaRecordV1:
         """Journal a projection advance as a structured delta.
 
         The delta carries only what changed, so journal growth is linear in
         session length instead of re-serializing the full history each advance.
+        ``session_api`` carries only the Session API facts this advance added.
         """
         record = self.append_record(
             "projection_delta",
-            ProjectionDeltaPayloadV1(watermark=watermark, delta=delta),
+            ProjectionDeltaPayloadV1(
+                watermark=watermark, delta=delta, session_api=session_api
+            ),
         )
         if not isinstance(record, ProjectionDeltaRecordV1):
             raise TypeError("journal record parser returned the wrong type")
@@ -3901,25 +4032,55 @@ def committed_history_from_checkpoint(
 
 
 def canonical_json(value: JsonValue) -> bytes:
+    # RFC 8785, except that integers of any magnitude are written exactly.
     standard = _standard_encoder_form(value)
-    if standard is not _RFC8785_ONLY:
+    if standard is not _FALLBACK_ONLY:
         try:
             return json.dumps(
                 standard, sort_keys=True, separators=(",", ":"), ensure_ascii=False
             ).encode()
         except UnicodeEncodeError:
             pass
-    return rfc8785.dumps(value)
+    sink = io.BytesIO()
+    _dump_with_exact_integers(value, sink)
+    return sink.getvalue()
 
 
-_RFC8785_ONLY: Any = object()
+def _dump_with_exact_integers(value: JsonValue, sink: io.BytesIO) -> None:
+    match value:
+        case bool():
+            rfc8785.dump(value, sink)
+        case int():
+            sink.write(str(int(value)).encode())
+        case list():
+            sink.write(b"[")
+            for index, item in enumerate(value):
+                if index:
+                    sink.write(b",")
+                _dump_with_exact_integers(item, sink)
+            sink.write(b"]")
+        case dict():
+            sink.write(b"{")
+            members = sorted(value.items(), key=lambda item: item[0].encode("utf-16be"))
+            for index, (key, nested) in enumerate(members):
+                if index:
+                    sink.write(b",")
+                rfc8785.dump(key, sink)
+                sink.write(b":")
+                _dump_with_exact_integers(nested, sink)
+            sink.write(b"}")
+        case _:
+            rfc8785.dump(value, sink)
+
+
+_FALLBACK_ONLY: Any = object()
 # Python's `repr` switches to exponent notation below this magnitude; ES6 only
 # does below 1e-6, so smaller fractions take the fallback.
 _MIN_FIXED_NOTATION_FLOAT = 1e-4
 
 
 def _standard_encoder_form(value: JsonValue) -> JsonValue:
-    """What `json.dumps` must encode to emit exactly what RFC 8785 asks for.
+    """What `json.dumps` must encode to emit exactly the canonical form.
 
     Everything the store persists is digested, and the documents being digested
     hold whole conversations, so canonicalization is most of what a load costs.
@@ -3929,10 +4090,9 @@ def _standard_encoder_form(value: JsonValue) -> JsonValue:
     digits, but ES6 prints an integral float without ``.0`` and switches to
     exponent notation at other magnitudes than `repr`, so integral floats are
     encoded as the integers they equal and fractions below
-    ``_MIN_FIXED_NOTATION_FLOAT`` fall back. Integers outside the range RFC 8785
-    admits and object keys past ASCII (RFC 8785 orders them by UTF-16 code unit,
-    Python by code point) fall back too, as do non-finite floats, which RFC 8785
-    rejects.
+    ``_MIN_FIXED_NOTATION_FLOAT`` fall back. Object keys past ASCII (RFC 8785
+    orders them by UTF-16 code unit, Python by code point) fall back too, as do
+    non-finite floats, which RFC 8785 rejects.
 
     Exact type checks rather than `isinstance`, so that an exotic subclass takes
     the fallback instead of an encoder that may not agree about it.
@@ -3942,31 +4102,27 @@ def _standard_encoder_form(value: JsonValue) -> JsonValue:
     while pending:
         item = pending.pop()
         item_type = type(item)
-        if item_type is str or item is None or item_type is bool:
+        if item_type is str or item_type is int or item is None or item_type is bool:
             continue
         if item_type is dict:
             for key, nested in cast(dict[str, JsonValue], item).items():
                 if type(key) is not str or not key.isascii():
-                    return _RFC8785_ONLY
+                    return _FALLBACK_ONLY
                 pending.append(nested)
             continue
         if item_type is list:
             pending.extend(cast(list[JsonValue], item))
             continue
-        if item_type is int:
-            if item not in _CANONICAL_INTEGER_RANGE:
-                return _RFC8785_ONLY
-            continue
         if item_type is float:
             number = cast(float, item)
             if number.is_integer():
                 if abs(number) > _MAX_SAFE_JSON_INTEGER:
-                    return _RFC8785_ONLY
+                    return _FALLBACK_ONLY
                 integral_floats = True
                 continue
             if _MIN_FIXED_NOTATION_FLOAT <= abs(number) < float("inf"):
                 continue
-        return _RFC8785_ONLY
+        return _FALLBACK_ONLY
     return _integral_floats_as_ints(value) if integral_floats else value
 
 
@@ -4072,9 +4228,17 @@ def _transition_matches_recorded_digest(
     # Journals recorded before replies required token usage: the reply read
     # back with the zero usage, which the transition now carries wherever the
     # reply's usage is copied.
-    recorded_shape = _without_zero_reply_usage(transition)
-    return recorded_shape is not None and _transition_matches_digest(
-        recorded_shape, payload, durable_actions
+    without_zero_usage = _without_zero_reply_usage(transition)
+    # Journals recorded before Core flagged the calls it runs and named a
+    # program's call as the parent of the calls it makes.
+    without_call_routing = _without_tool_call_routing(transition)
+    older_shapes = [without_zero_usage, without_call_routing]
+    if without_zero_usage is not None:
+        older_shapes.append(_without_tool_call_routing(without_zero_usage))
+    return any(
+        shape is not None
+        and _transition_matches_digest(shape, payload, durable_actions)
+        for shape in older_shapes
     )
 
 
@@ -4114,6 +4278,41 @@ def _without_zero_reply_usage(
     for holder in holders:
         if holder.get("usage") == _ZERO_USAGE:
             holder["usage"] = None
+            changed = True
+    return RustSessionTransition.model_validate(value) if changed else None
+
+
+_TOOL_CALL_ROUTING_FIELDS = {
+    "runtime_builtin_tool_call": "parent_call_id",
+    "provided_tool_call": "parent_call_id",
+    "tool_execution_started": "executed_by_core",
+}
+
+
+def _without_tool_call_routing(
+    transition: RustSessionTransition,
+) -> RustSessionTransition | None:
+    """The transition without the fields that say which call Core runs or made it.
+
+    They only place a call's span, so a journal recorded without them holds the
+    same decision.
+    """
+    value = cast(
+        dict[str, JsonValue], transition.model_dump(mode="json", by_alias=True)
+    )
+    holders = [
+        cast(dict[str, JsonValue], observation)
+        for observation in cast(list[JsonValue], value["observations"])
+    ]
+    next_action = cast(dict[str, JsonValue], value["next"])
+    for directive in cast(list[JsonValue], next_action.get("directives", [])):
+        action = cast(dict[str, JsonValue], directive).get("action")
+        if isinstance(action, dict):
+            holders.append(action)
+    changed = False
+    for holder in holders:
+        field = _TOOL_CALL_ROUTING_FIELDS.get(str(holder.get("type")))
+        if field is not None and holder.pop(field, None) is not None:
             changed = True
     return RustSessionTransition.model_validate(value) if changed else None
 
@@ -4270,6 +4469,10 @@ def _action_replay_identity(action: dict[str, JsonValue]) -> dict[str, JsonValue
     value = dict(action)
     if value.get("type") == "llm_call":
         _normalize_llm_action_for_replay(value)
+    # The Runtime journals a request without the program call that made it, as
+    # did builds whose Core predates the field. The parent only places the call's
+    # span, so the same call with or without it is the same request.
+    value.pop("parent_call_id", None)
     return value
 
 
@@ -4313,106 +4516,98 @@ def _normalize_llm_action_for_replay_with_model_input(
         tool_catalog.pop("tools", None)
 
 
-def _prune_settled_action_bodies(
+def _release_settled_actions(
     runtime: RuntimeStateV3, core_action_ids: frozenset[str]
 ) -> RuntimeStateV3:
-    """Drop the request and result bodies of settled Actions Core no longer holds.
+    """Drop the settled Actions recovery can no longer reach, with their provider operations.
 
-    The ledger holds every Action for the life of the Session, so whatever each
-    one retains is reparsed by every load from here on. A completion request
-    embeds the whole transcript, so retaining one per turn grows the ledger with
-    the square of the session's length: on a real session six of them were
-    2.16 MB of a 2.27 MB snapshot. Results are smaller individually but there is
-    one per turn for the life of the session — 2.18 MB across 90 turns of 24 KB
-    replies.
+    Every publication serializes the whole ledger, so an entry kept per Action
+    ever run makes each publication cost more than the last for the life of the
+    Session, and the cost lands at every idle point. An entry is kept while some
+    reader can still name it:
 
-    Every other kind grows linearly rather than quadratically, which bounds
-    nothing: a tool entry holds the arguments and complete output of every call
-    ever made, and a ``filesystem`` request holds a whole offloaded large output
-    a second time, after the write that put that payload on disk.
+    - An Action still pending or running is unfinished work.
+    - An Action Core holds (``core_action_ids``) can still be named by Core.
+      Recovery rehydrates every ``RustKeepActionDirective`` from its stored
+      request (``_start_transition_actions``), and ``_resolve_action`` answers a
+      redelivered Action from its stored result instead of running it again.
+      After this generation the journal restarts empty, so the only Actions a
+      replayed Core can name are the ones it holds now plus ones dispatched
+      later, whose intents are journalled afresh.
+    - A dispatched process start (``prepared_process_start``). A start settles
+      as soon as its process runs, but a terminal snapshot for a process not yet
+      recorded is resolved from this descriptor (``_commit_terminal_snapshot``).
+      These are kept for the life of the Session: one per background process,
+      bounded by the processes the Session starts, not by its turns.
+    - A kind outside ``_RELEASABLE_ACTION_KINDS``, which no one has audited for
+      read-back yet.
 
-    Recovery rehydrates a request whenever Core retains an Action across a
-    restart: ``_start_transition_actions`` calls ``action_from_recovery_state``
-    for every ``RustKeepActionDirective`` before it filters by pending id, so a
-    pruned request there strands the session for good. Only Core can name such a
-    directive, and after this generation the journal restarts empty, so the only
-    Actions a replayed Core can keep are the ones it holds right now
-    (``core_action_ids``) plus ones dispatched later, whose intents are journalled
-    afresh. Excluding the ids Core holds is therefore what makes this safe.
+    Ledger settlement alone is not enough, and quiescence does not imply Core is
+    idle. ``_record_action_result`` journals a result and releases the lock
+    before ``_drive`` hands it to Core, and on the notification path
+    (``deliver_notification``) no command receipt is reserved across the turn,
+    so in that gap the ledger is quiescent while Core still holds the Action. A
+    capacity-triggered ``_compact_store_sync(allow_recoverable=True)`` publishes
+    a generation in exactly that window; the Action is named in
+    ``core_action_ids`` throughout, so it is kept. The same holds for a process
+    result whose write ``_retry_process_action_result`` is retrying: Core has not
+    seen that result yet.
 
-    A result is read back in one place, ``_resolve_action``'s redelivery
-    short-circuit, and that has the same shape: Core only asks again for an Action
-    it still holds, so ``core_action_ids`` covers it. The exception used to be
-    rewind, which re-mints an ``action_id`` because Core derives identity from
-    content — the settled entry from the discarded timeline was still in the ledger
-    and was replayed. ``_runtime_state_for_replaced_context`` now empties the
-    ledgers at the rewind itself, so every settled Action here belongs to the live
-    timeline, where ids do not repeat. ``result_pruned`` records the distinction
-    anyway so a mistake surfaces as a diagnosable error rather than a validation
-    failure on ``None``.
+    Core names a tool Action after the model's call ID, which a provider can
+    reuse in a later turn. A later Action whose ID was released runs as new work;
+    one whose ID is still in the ledger, because no publication came between the
+    two or because the entry is kept, is answered from the stored outcome.
+    Nothing the Runtime derives from that ID can collide with a later call:
+    callback IDs carry a random suffix, a child session is named after its
+    spawn's admission, a saved output's file after its content, and a public
+    history effect entry is suffixed once an earlier run has settled under it.
+    Nothing else reads a settled entry back:
+    ``_validate_process_relationships`` skips a process whose start Action is
+    absent, the Host's process maintenance reads only unsettled Actions, and a
+    provider operation is read only by ``quiescent``.
 
-    Ledger settlement is *not* sufficient on its own, and quiescence does not
-    imply Core is idle. ``_record_action_result`` journals a result and releases
-    the lock before ``_drive`` hands it to Core, and on the notification path
-    (``deliver_notification``) no command receipt is reserved across the turn, so
-    in that gap the ledger is quiescent while Core still calls the Action live. A
-    capacity-triggered ``_compact_store_sync(allow_recoverable=True)`` publishes a
-    generation in exactly that window. Core still holds the Action throughout, so
-    it is named in ``core_action_ids`` and neither body is touched.
-
-    Quiescence is not part of the predicate either. One receipt left reserved
-    holds a Session away from it for good, and every publication until then adds
-    another transcript, so waiting for rest is how a ledger reaches the size
-    where nothing can load it. Settlement, which quiescence used to imply, is
-    now checked per Action: the stored model rejects a pruned body on an Action
-    still pending or running, and ``model_copy`` does not revalidate, so pruning
-    one publishes a generation that only fails on the way back in.
-
-    Exclude ``process``, the one kind read outside that guard, on both fields.
-    Its start request outlives its settlement: a start Action succeeds as soon as
-    the process is running, while ``_validate_process_relationships`` resolves
-    that request's operation name on every load for as long as the process is in
-    the ledger, so dropping it turns a surviving process into a load failure. Its
-    result is read back too — ``record_action_result`` treats a repeat call as a
-    no-op when the stored state and result already match, and the one caller that
-    can re-enter it across a generation boundary is
-    ``_retry_process_action_result``, gated on ``_process_action_reservations`` —
-    so pruning that would turn the idempotent retry into a spurious mismatch.
-
-    A ``child`` Action outlives its settlement the same way — a stateful subagent
-    runs on after its spawn Action succeeds — but is prunable, because the
-    dependency is materialized into ``children`` when the intent is folded.
-    Nothing reads the spawn request back off the snapshot to rebuild it.
+    A spawned child outlives its settled spawn Action, but its dependency is
+    materialized into ``children`` when the intent is folded, and nothing reads
+    the spawn Action back.
     """
     actions = [
-        _prune_settled_action_body(action, core_action_ids)
+        action
         for action in runtime.actions
-    ]
-    if all(
-        pruned is original
-        for pruned, original in zip(actions, runtime.actions, strict=True)
-    ):
-        return runtime
-    return runtime.model_copy(update={"actions": actions})
-
-
-def _prune_settled_action_body(
-    action: RuntimeActionV1, core_action_ids: frozenset[str]
-) -> RuntimeActionV1:
-    if (
-        action.kind not in _PRUNABLE_ACTION_KINDS
-        or action.state in {"pending", "running"}
+        if action.state in {"pending", "running"}
         or action.action_id in core_action_ids
-    ):
-        return action
-    update: dict[str, JsonValue | bool] = {}
-    if not action.request_pruned and action.request is not None:
-        update |= {"request": None, "request_pruned": True}
-    if not action.result_pruned and action.result is not None:
-        update |= {"result": None, "result_pruned": True}
-    if not update:
-        return action
-    return action.model_copy(update=update)
+        or action.prepared_process_start is not None
+        or action.kind not in _RELEASABLE_ACTION_KINDS
+    ]
+    if len(actions) == len(runtime.actions):
+        return runtime
+    retained = {action.action_id for action in actions}
+    return runtime.model_copy(
+        update={
+            "actions": actions,
+            "provider_operations": [
+                operation
+                for operation in runtime.provider_operations
+                if operation.operation_id in retained
+                or operation.state in {"pending", "running"}
+            ],
+        }
+    )
+
+
+def _release_settled_callbacks(runtime: RuntimeStateV3) -> RuntimeStateV3:
+    """Drop resolved and failed callbacks, keeping the ones still waiting.
+
+    Every reader of the stored callbacks looks at pending ones only: a restart
+    closes them, process reservations are restored from them, and
+    ``resolve_callback`` accepts a result for a pending one alone, so a settled
+    one would only grow the ledger with the Session's length.
+    """
+    callbacks = [
+        callback for callback in runtime.callbacks if callback.state == "pending"
+    ]
+    if len(callbacks) == len(runtime.callbacks):
+        return runtime
+    return runtime.model_copy(update={"callbacks": callbacks})
 
 
 def _discard_provider_operation_results(runtime: RuntimeStateV3) -> RuntimeStateV3:
@@ -4422,8 +4617,8 @@ def _discard_provider_operation_results(runtime: RuntimeStateV3) -> RuntimeState
     its provider operation, so the two hold the same payload; at 24 KB replies that
     second copy was 2.15 MB of a 4.44 MB runtime state, and every ``load`` reparses
     all of it. Nothing reads it back — ``quiescent`` consults ``state`` and no other
-    caller in the workspace touches a provider operation — so unlike the request
-    prune this needs no reachability guard.
+    caller touches a provider operation — so unlike releasing the operation itself
+    this needs no reachability guard.
 
     The field stays on the model rather than being removed: ``_StoredModel`` forbids
     extras, so generations already carrying a result must still validate.
@@ -4642,12 +4837,26 @@ def _apply_journal(  # noqa: PLR0912, PLR0914, PLR0915 - one branch per journal 
             case ProjectionDeltaRecordV1(payload=payload):
                 if payload.watermark < current_projection.watermark:
                     raise ValueError("projection watermark moved backwards")
+                if not payload.delta:
+                    # A facts-only record. Advancing the sequence past Core
+                    # inputs not yet projected would hide them from catch-up.
+                    current_projection = current_projection.model_copy(
+                        update={
+                            "session_api": _fold_session_api_facts(
+                                current_projection.session_api, payload.session_api
+                            )
+                        }
+                    )
+                    continue
                 current_projection = current_projection.model_copy(
                     update={
                         "snapshot_sequence": record.sequence,
                         "watermark": payload.watermark,
                         "snapshot": apply_projection_delta(
                             current_projection.snapshot, payload.delta
+                        ),
+                        "session_api": _fold_session_api_facts(
+                            current_projection.session_api, payload.session_api
                         ),
                     }
                 )
@@ -5560,6 +5769,19 @@ def _durable_replace(source: Path, target: Path) -> None:
 
 
 def _windows_replace(source: Path, target: Path) -> None:
+    # Antivirus scanners and indexers briefly hold freshly written files open.
+    for attempt in range(_WINDOWS_REPLACE_ATTEMPTS):
+        try:
+            _move_file_ex(source, target)
+            return
+        except OSError as exc:
+            transient = getattr(exc, "winerror", None) in _WINDOWS_TRANSIENT_ERRORS
+            if not transient or attempt == _WINDOWS_REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_WINDOWS_REPLACE_BASE_DELAY_SECONDS * 2**attempt)
+
+
+def _move_file_ex(source: Path, target: Path) -> None:
     import ctypes
     from ctypes import wintypes
 
@@ -5617,6 +5839,7 @@ __all__ = [
     "ExternalImportMetadataV1",
     "GenerationManifestV1",
     "HarnessStoreCapacityError",
+    "HeldGeneration",
     "ImportProvenanceV1",
     "InteropAssistantContentPartV1",
     "InteropAssistantMessageV1",
@@ -5647,6 +5870,7 @@ __all__ = [
     "ReplaceEntryOp",
     "RuntimeActionV1",
     "RuntimeStateV3",
+    "SessionApiFactsV1",
     "SessionLease",
     "SessionMetadataV1",
     "SessionPin",

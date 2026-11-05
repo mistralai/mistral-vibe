@@ -1,4 +1,5 @@
 //! The headless run's `session/subagents/*` calls against a scripted app-server.
+#![allow(clippy::disallowed_methods)] // Tests drive tasks and real time directly; replay acks never run here.
 
 use std::io::{BufRead, Write};
 use std::sync::Arc;

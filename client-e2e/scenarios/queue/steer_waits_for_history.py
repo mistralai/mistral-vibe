@@ -15,7 +15,6 @@ from e2e.app_server.scenario import Timeline
 
 _SECOND_QUEUE_ITEM_ID = f"{QUEUE_ITEM_ID}-2"
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 handshake = {
     "session/start": {"state": {"session": {"harness": "unified"}}},
     "session/turn/queue/steer": {
@@ -25,7 +24,6 @@ handshake = {
     },
 }
 
-settle_per_key = True
 capture_steps = {1, 2}
 
 timeline: Timeline = [

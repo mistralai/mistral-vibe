@@ -3486,6 +3486,21 @@ def test_new_branch_starts_from_the_fetched_remote_default(tmp_path: Path) -> No
     assert worktree.base_commit == ahead
 
 
+def test_new_branch_from_the_remote_default_does_not_write_the_shared_config(
+    tmp_path: Path,
+) -> None:
+    clone, ahead = _clone_behind_origin(tmp_path)
+    root = Path(clone.working_dir)
+    # Another session mid-write of .git/config holds this lock, and git fails
+    # rather than waits on it.
+    (root / ".git" / "config.lock").touch()
+
+    worktree = _prepare("feature", root)
+
+    assert worktree.base_commit == ahead
+    assert clone.heads["feature"].tracking_branch() is None
+
+
 def test_new_branch_falls_back_to_head_without_a_remote(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
 

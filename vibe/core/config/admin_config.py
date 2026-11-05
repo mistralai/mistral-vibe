@@ -6,9 +6,10 @@ from enum import StrEnum, auto
 import httpx2
 from pydantic import BaseModel, ConfigDict
 
+from vibe.core.platform_auth import PlatformCredentialProvider
+from vibe.core.platform_auth._mistral import credential_request
 from vibe.core.utils.retry import async_retry
 from vibe.observability.logging import logger
-from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 # Served by Vibe server app, so this is appended to vibe_base_url
 # e.g. https://chat.mistral.ai/api/v1/code/managed-config.
@@ -65,17 +66,20 @@ class AdminConfigApplyResult:
 
 
 @async_retry(tries=MANAGED_CONFIG_RETRY_TRIES, delay_seconds=0.5, backoff_factor=2.0)
-async def _fetch_response(url: str, headers: dict[str, str]) -> httpx2.Response:
-    async with VibeAsyncHTTPClient(verify=build_ssl_context()) as client:
-        response = await client.get(
-            url, headers=headers, timeout=MANAGED_CONFIG_TIMEOUT
-        )
-        response.raise_for_status()
-        return response
+async def _fetch_response(
+    url: str, credentials: PlatformCredentialProvider
+) -> httpx2.Response:
+    response = await credential_request(
+        credentials, "GET", url, timeout=MANAGED_CONFIG_TIMEOUT
+    )
+    response.raise_for_status()
+    return response
 
 
-async def fetch_managed_config(base_url: str, api_key: str) -> ManagedConfigResult:
-    """Fetch the org/workspace-enforced config for the given Mistral API key.
+async def fetch_managed_config(
+    base_url: str, credentials: PlatformCredentialProvider
+) -> ManagedConfigResult:
+    """Fetch the org/workspace-enforced config for the given Mistral credential.
 
     ``base_url`` is the Vibe server base (``vibe_base_url``, e.g.
     ``https://chat.mistral.ai``) that serves the managed-config endpoint.
@@ -86,9 +90,8 @@ async def fetch_managed_config(base_url: str, api_key: str) -> ManagedConfigResu
     copy, at a session start), and a fetch problem never stops the client.
     """
     url = f"{base_url.rstrip('/')}{MANAGED_CONFIG_PATH}"
-    headers = {"Authorization": f"Bearer {api_key}"}
     try:
-        response = await _fetch_response(url, headers)
+        response = await _fetch_response(url, credentials)
     except httpx2.HTTPStatusError as exc:
         logger.debug(
             "Managed config fetch status=%s url=%s", exc.response.status_code, url

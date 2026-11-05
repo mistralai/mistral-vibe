@@ -23,6 +23,7 @@ use crate::core::tools::execution::ToolBatch;
 use crate::core::tools::resolved::ResolvedTools;
 use crate::core::turn::PendingLifecycleHook;
 use crate::core::turn::TurnOutcome;
+use crate::core::wire::content::ContentBlock;
 use crate::core::wire::message::{Message, StoredMessage};
 
 /// Private Core state.
@@ -492,9 +493,9 @@ impl HarnessState {
 fn terminal_turn(turn_id: String, outcome: TurnOutcome) -> Turn {
     match outcome {
         TurnOutcome::Completed { output } => Turn::Completed { turn_id, output },
-        TurnOutcome::Rejected { .. } => Turn::Completed {
+        TurnOutcome::Rejected { reason } => Turn::Completed {
             turn_id,
-            output: Vec::new(),
+            output: vec![ContentBlock::text(reason)],
         },
         TurnOutcome::Failed { error } => Turn::Failed { turn_id, error },
         TurnOutcome::Interrupted { reason } => Turn::Interrupted { turn_id, reason },

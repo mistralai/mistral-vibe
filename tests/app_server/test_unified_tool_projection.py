@@ -105,6 +105,34 @@ def test_projects_unified_read_file_with_nullable_limit() -> None:
     )
 
 
+def test_an_image_read_says_it_read_the_image() -> None:
+    entry = _effect(
+        "file_system.read_file",
+        {"path": "shot.png"},
+        result={
+            "content": [
+                {"type": "text", "text": "{}"},
+                {"type": "image", "data": "aW1hZ2U=", "mimeType": "image/png"},
+            ],
+            "structured_content": {
+                "path": "/workspace/shot.png",
+                "content": "Image file (image/png, 5 bytes).",
+                "file_size_bytes": 5,
+                "returned_bytes": 0,
+                "offset": 0,
+                "lines_read": 0,
+                "was_truncated": False,
+            },
+        },
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.message == "the image /workspace/shot.png"
+
+
 @pytest.mark.parametrize(
     ("source_offset", "display_offset", "resolved_offset", "start_line"),
     [(0, None, 0, 1), (-1, -1, 8, 9)],

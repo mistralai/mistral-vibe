@@ -108,6 +108,18 @@ impl<R: ClickRule> OptionList<R> {
         false
     }
 
+    /// PageUp/PageDown: move the highlight by `page` options of `len`, clamped to the ends.
+    pub fn page(&mut self, down: bool, len: usize, page: usize) {
+        let Some(last) = len.checked_sub(1) else {
+            return;
+        };
+        self.select(if down {
+            self.selected.saturating_add(page).min(last)
+        } else {
+            self.selected.saturating_sub(page)
+        });
+    }
+
     /// Scroll the viewport without moving the highlight.
     pub fn wheel(&mut self, down: bool, step: usize) {
         let scroll = if down {

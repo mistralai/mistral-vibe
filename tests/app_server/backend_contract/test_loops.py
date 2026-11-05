@@ -56,6 +56,7 @@ async def test_loop_resource_supports_crud(
     assert await backend_contract_session.resources.loops.list() == []
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_session_state_and_catalogue_report_active_loops(
     backend_contract_mistral_api: respx.Route,
@@ -127,6 +128,7 @@ async def test_loop_resource_returns_typed_validation_errors(
     assert "Invalid interval" in exc_info.value.error.message
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_loop_schedule_survives_resume_from_a_new_host(
     backend_contract_mistral_api: respx.Route,
@@ -185,6 +187,7 @@ async def test_clear_history_preserves_loop_schedules(
     assert after_clear == [loop]
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_fork_preserves_loop_schedules(
     backend_contract_mistral_api: respx.Route,
@@ -213,6 +216,7 @@ async def test_fork_preserves_loop_schedules(
     assert after_fork == [loop]
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_unified_due_loop_runs_as_an_unsolicited_turn(
     backend_contract_mistral_api: respx.Route,
@@ -275,6 +279,7 @@ async def test_unified_due_loop_runs_as_an_unsolicited_turn(
     )
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_unified_fired_loop_prompt_keeps_its_marker_across_fork(
     backend_contract_mistral_api: respx.Route,
@@ -335,6 +340,7 @@ async def test_unified_fired_loop_prompt_keeps_its_marker_across_fork(
         assert isinstance(marker["firedAt"], int)
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_headless_unified_resume_does_not_fire_due_loops(
     backend_contract_mistral_api: respx.Route,

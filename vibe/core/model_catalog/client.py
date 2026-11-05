@@ -13,11 +13,14 @@ from vibe.core.model_catalog.models import (
     ModelCatalogResponse,
     parse_model_catalog_response,
 )
+from vibe.core.platform_auth._http import PlatformCredentialUnavailable
+from vibe.core.platform_auth._mistral import credential_request
 from vibe.observability.logging import logger
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.config import ProviderConfig
+    from vibe.core.platform_auth import PlatformCredentialProvider
 
 
 class ModelCatalogClient:
@@ -47,14 +50,16 @@ class ModelCatalogClient:
             )
         return self._http
 
-    async def fetch(self, api_key: str) -> ModelCatalogResponse | None:
+    async def fetch(
+        self, credentials: PlatformCredentialProvider
+    ) -> ModelCatalogResponse | None:
         if self._url is None:
             return None
         try:
-            response = await self._client.get(
-                self._url, headers={"Authorization": f"Bearer {api_key}"}
+            response = await credential_request(
+                credentials, "GET", self._url, client=self._client
             )
-        except httpx2.HTTPError as exc:
+        except (httpx2.HTTPError, PlatformCredentialUnavailable) as exc:
             logger.warning("Model catalog request failed: %s", exc)
             return None
 

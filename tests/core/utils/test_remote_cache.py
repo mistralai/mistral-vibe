@@ -422,3 +422,88 @@ async def test_a_disk_read_holds_nothing_of_the_reader_that_started_it() -> None
 
     assert entry is not None and entry.value == "disk"
     assert alive() is None
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_refresh_does_not_take_an_answer_asked_before_it() -> None:
+    # A forced fetch in flight may have asked the server before the change the
+    # caller reports: the refresh waits it out and asks again, once for every
+    # caller that came in meanwhile.
+    clock, fetch = _Clock(), _Fetch(values=["before", "after"])
+    fetch.release = asyncio.Event()
+    cache = _cache(fetch, clock)
+    warming = asyncio.create_task(cache.refresh("k"))
+    await asyncio.sleep(0)
+
+    reported = [asyncio.create_task(cache.refresh("k")) for _ in range(2)]
+    await asyncio.sleep(0)
+    fetch.release.set()
+    entries = await asyncio.gather(*reported)
+
+    assert (await warming).value == "before"
+    assert [entry.value for entry in entries] == ["after", "after"]
+    assert fetch.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_without_backoff_leaves_the_next_read_free_to_fetch() -> None:
+    clock, fetch = _Clock(), _Fetch(values=[OSError("down"), "v"])
+    cache = _cache(fetch, clock)
+    with pytest.raises(RemoteFetchFailedError):
+        await cache.refresh("k", backoff=False)
+
+    entry = await _first(cache, "k")
+
+    assert entry is not None and entry.value == "v"
+    assert cache.failure("k") is None
+
+
+@pytest.mark.parametrize("warm_up_first", [True, False])
+@pytest.mark.asyncio
+async def test_a_queued_refresh_backs_off_when_any_caller_sharing_it_asked(
+    warm_up_first: bool,
+) -> None:
+    clock, fetch = _Clock(), _Fetch(values=["v1", OSError("down")])
+    fetch.release = asyncio.Event()
+    cache = _cache(fetch, clock)
+    running = asyncio.create_task(cache.refresh("k"))
+    await asyncio.sleep(0)
+    flags = [False, True] if warm_up_first else [True, False]
+    queued = []
+    for backoff in flags:
+        queued.append(asyncio.create_task(cache.refresh("k", backoff=backoff)))
+        await asyncio.sleep(0)
+
+    fetch.release.set()
+    await running
+    results = await asyncio.gather(*queued, return_exceptions=True)
+
+    assert all(isinstance(result, RemoteFetchFailedError) for result in results)
+    assert fetch.calls == 2
+    assert cache.failure("k") is not None
+
+
+@pytest.mark.parametrize("backoff", [False, True])
+@pytest.mark.asyncio
+async def test_a_failed_explicit_refresh_has_the_next_check_fetch_a_recent_copy(
+    backoff: bool,
+) -> None:
+    # The caller forced it because the copy may be outdated: a recent copy is
+    # not trusted again until a fetch answers, within the usual backoff.
+    clock, fetch = _Clock(), _Fetch(values=[OSError("down"), "fresh"])
+    store = _Store({"k": Cached("disk", stored_at=clock.now - 60)})
+    cache = _cache(fetch, clock, store)
+    await cache.load("k")
+    with pytest.raises(RemoteFetchFailedError):
+        await cache.refresh("k", backoff=backoff)
+    if backoff:
+        cache.check("k")
+        await _settle()
+        assert fetch.calls == 1
+        clock.now += 31
+
+    cache.check("k")
+    await _settle()
+
+    assert fetch.calls == 2
+    assert cache.cached("k") == Cached("fresh", stored_at=clock.now)

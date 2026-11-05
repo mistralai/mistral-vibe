@@ -2,7 +2,6 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::json;
-use std::time::Instant;
 use vibe_rs::app::{App, Status};
 use vibe_rs::program_status::{encode_report, BlockedKind, ProgramState};
 use vibe_rs::server::notification;
@@ -112,7 +111,7 @@ fn completed_failed_and_interrupted_turns_report_distinct_states() {
             ..Default::default()
         };
         app.set_status(Status::Generating {
-            since: Instant::now(),
+            since: vibe_rs::clock::now(),
         });
         notify(
             &mut app,
@@ -144,7 +143,7 @@ fn approval_takes_precedence_and_dismissal_restores_the_question() {
         ..Default::default()
     };
     app.set_status(Status::Generating {
-        since: Instant::now(),
+        since: vibe_rs::clock::now(),
     });
     vibe_rs::question_app::on_callback_call(
         &mut app,
@@ -204,7 +203,7 @@ fn server_crash_reports_error_without_changing_notification_bells() {
         ..Default::default()
     };
     app.set_status(Status::Generating {
-        since: Instant::now(),
+        since: vibe_rs::clock::now(),
     });
     assert!(vibe_rs::event_loop::notifications::surface_server_close(
         &mut app, true
@@ -225,7 +224,7 @@ fn failure_reports_keep_the_existing_completion_title_and_bell() {
     let mut n = notifier();
     n.set_focus(false);
     let state = ProgramState::Error;
-    n.notify(NotificationContext::Failed, Instant::now());
+    n.notify(NotificationContext::Failed, vibe_rs::clock::now());
     assert_eq!(n.title(ProgramState::Error), "Vibe - Task Complete");
     assert!(n.take_bell());
     assert_eq!(

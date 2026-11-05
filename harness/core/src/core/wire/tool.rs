@@ -114,6 +114,12 @@ pub(crate) enum ToolResult {
 }
 
 impl ToolResult {
+    pub(crate) fn content(&self) -> &[ContentBlock] {
+        match self {
+            Self::Success { content, .. } | Self::Failure { content, .. } => content,
+        }
+    }
+
     pub(crate) fn structured_content(&self) -> Option<&Value> {
         match self {
             Self::Success {

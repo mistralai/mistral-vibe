@@ -68,7 +68,10 @@ agent (`agentConfig.agent`), title, model, reasoning effort and first turn,
 applied and pinned as the matching mid-session changes are: like
 `config/model/write`, the model and level also become the user's default unless
 `sessionOnly` is set. If a choice or the first turn fails, the server deletes
-the session it opened and fails the start. Resume loads saved state;
+the session it opened and fails the start. `project` (`{kind: "local" |
+"cloud", id}`) stamps the session's metadata with its project once; forks,
+rewinds and `/clear` replacements inherit their source's stamp. Without it the
+session stays unstamped, as CLI sessions are. Resume loads saved state;
 continue selects the latest eligible session. List, stored read and history
 are passive operations. Fork creates an independent session from a supported
 boundary; `session/stop` flushes and shuts down the attached session.
@@ -197,7 +200,10 @@ The callback lifecycle records an open public entry and blocked effect, sends
 then accepts the semantic answer through **`callback/result`**. Runtime validates
 correlation and resolves the pending execution request once. Identical semantic
 retries are no-ops; conflicting second responses fail. Still-open callbacks
-remain in `activeCallbacks` and are redelivered on live reconnect.
+remain in `activeCallbacks` and are redelivered on live reconnect. When
+`session/resume` or `session/continue` attaches a session whose turn is still
+running, such as a turn recovered after a restart, the server first sends that
+turn's `turn/started` again, so the client can follow and interrupt it.
 
 Client-hosted filesystem/terminal operations require advertised capability.
 The server routes them through its tool-I/O contract, validates responses and
@@ -228,9 +234,14 @@ tool.
 
 A client that advertises `capabilities.sessionPeers` hosts the other sessions
 of a session's project: its sessions are offered `list_sessions`,
-`read_session`, `send_to_session` and `archive_sessions`. Listing and reading
-are allowed by default and callable from programs, so a model filters sessions
-on any field in code; sending and archiving ask, like `start_session`, and
+`read_session`, `send_to_session` and `archive_sessions`, and also
+`restore_sessions` when it advertises `capabilities.sessionPeerRestore`. A
+client that predates `session/peer/restore` fails its whole connection on
+that request, so the server never sends it to a client that did not
+advertise the capability.
+Listing and reading are allowed by default and callable from programs, so a
+model filters sessions on any field in code; sending, archiving and restoring
+ask, like `start_session`, and
 only as direct calls. Each call sends the client a
 request on the calling session's own connection, and the client answers for
 that session's project only:
@@ -260,6 +271,10 @@ that session's project only:
   failed: [{sessionId, error}]}`; one that is not a session of the project, is
   the caller itself, or is working, has queued messages or waits for the user,
   fails alone.
+- **`session/peer/restore`** `{sessionIds}` unarchives those sessions, as the
+  user's restore action does, and answers `{restored: [{sessionId, title?}],
+  failed: [{sessionId, error}]}`; one that is not a session of the project
+  fails alone, and one that is not archived is left as it is.
 
 Session ids are the client's: the `clientSessionId` a `session/spawn` answer
 carries, which `start_session` then returns to the model. `status` is
@@ -305,9 +320,9 @@ only to an app server that asks it for `session/peer/*`, which is as recent.
 
 `session/start` takes an optional `startedBySessionId`: the session that started
 this one to hand it `firstTurn`. The session keeps it, `/clear` included, and
-`session/list` items return it as `startedBySessionId`. Other responses leave it
-out, so its absence there says nothing. App servers before it accept the param
-but do not save it, so they list no starter.
+every `PublicSession` of it (listed, read, or updated) returns it as
+`startedBySessionId`; a session nobody started leaves it out. App servers before
+it accept the param but do not save it, so they report no starter.
 
 ## Product resources and child sessions
 

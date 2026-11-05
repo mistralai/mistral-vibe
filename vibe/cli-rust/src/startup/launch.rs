@@ -107,7 +107,7 @@ static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 static FIRST_DRAW: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 pub fn mark_first_draw() {
-    let _ = FIRST_DRAW.set(Instant::now());
+    let _ = FIRST_DRAW.set(crate::clock::real_now());
 }
 
 pub fn first_frame_duration_ms() -> Option<u64> {
@@ -116,7 +116,11 @@ pub fn first_frame_duration_ms() -> Option<u64> {
 }
 
 pub fn agent_ready_duration_ms() -> Option<u64> {
-    Some(PROCESS_START.get()?.elapsed().as_millis() as u64)
+    Some(
+        crate::clock::real_now()
+            .duration_since(*PROCESS_START.get()?)
+            .as_millis() as u64,
+    )
 }
 
 pub struct StartupRecorder {
@@ -136,7 +140,7 @@ impl StartupRecorder {
         let enabled = std::env::var("VIBE_STARTUP_TIMINGS")
             .map(|v| !v.is_empty())
             .unwrap_or(false);
-        let start = Instant::now();
+        let start = crate::clock::real_now();
         let _ = PROCESS_START.set(start);
         Self {
             enabled,
@@ -147,7 +151,7 @@ impl StartupRecorder {
 
     pub fn record(&mut self, name: &'static str) {
         if self.enabled {
-            self.marks.push((name, Instant::now()));
+            self.marks.push((name, crate::clock::real_now()));
         }
     }
 

@@ -11,10 +11,12 @@ from vibe.app_server._account import (
     AccountGatewayUnavailable,
     HttpAccountGateway,
     WhoAmIResult,
+    _key_preview,
     reconcile_tenant_domains,
 )
 from vibe.app_server.models import AccountPlanKind, AccountView
 from vibe.app_server.protocol import AccountReadParams
+from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
 
 
 @pytest.mark.asyncio
@@ -31,7 +33,8 @@ async def test_http_account_gateway_parses_strict_response(respx_mock) -> None:
     )
 
     result = await HttpAccountGateway().read(
-        base_url="https://console.test", api_key="server-secret"
+        base_url="https://console.test",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("server-secret"),
     )
 
     assert result == WhoAmIResult(
@@ -53,7 +56,8 @@ async def test_http_account_gateway_maps_unauthorized_status(
 
     with pytest.raises(AccountGatewayUnauthorized):
         await HttpAccountGateway().read(
-            base_url="https://console.test", api_key="server-secret"
+            base_url="https://console.test",
+            credentials=ApiKeyPlatformCredentialProvider.from_api_key("server-secret"),
         )
 
 
@@ -67,7 +71,8 @@ async def test_http_account_gateway_maps_server_error_to_unavailable(
 
     with pytest.raises(AccountGatewayUnavailable):
         await HttpAccountGateway().read(
-            base_url="https://console.test", api_key="server-secret"
+            base_url="https://console.test",
+            credentials=ApiKeyPlatformCredentialProvider.from_api_key("server-secret"),
         )
 
 
@@ -80,7 +85,8 @@ async def test_http_account_gateway_ignores_extra_response_fields(respx_mock) ->
     )
 
     result = await HttpAccountGateway().read(
-        base_url="https://console.test", api_key="server-secret"
+        base_url="https://console.test",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("server-secret"),
     )
 
     assert result == WhoAmIResult(plan_type=AccountPlanKind.CHAT, plan_name="FREE")
@@ -96,7 +102,8 @@ async def test_http_account_gateway_rejects_unknown_plan_type(respx_mock) -> Non
 
     with pytest.raises(AccountGatewayUnavailable):
         await HttpAccountGateway().read(
-            base_url="https://console.test", api_key="server-secret"
+            base_url="https://console.test",
+            credentials=ApiKeyPlatformCredentialProvider.from_api_key("server-secret"),
         )
 
 
@@ -167,3 +174,13 @@ async def test_reconcile_tenant_domains_preserves_api_base_when_opted_in(
 
     assert spies.provider_calls == []  # api heal opted out
     assert spies.vibe_calls == ["https://chat.tenant.acme"]  # chat still healed
+
+
+def test_key_preview_masks_all_but_the_last_four_chars() -> None:
+    assert _key_preview("mstrl_0123456789abcdef") == "****cdef"
+    assert (
+        _key_preview("123456789abcdef0") == "****def0"
+    )  # 16 chars: suffix is exactly a quarter
+    # Shorter than 4x the suffix length: showing it would exceed a quarter of the key.
+    assert _key_preview("abcde") == "****"
+    assert _key_preview("123456789abcdef") == "****"

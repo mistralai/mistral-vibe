@@ -23,6 +23,8 @@ from vibe.app_server.protocol import (
 )
 from vibe.app_server.session import AppServerSession
 
+pytestmark = pytest.mark.both_paths
+
 
 @pytest.mark.asyncio
 async def test_session_start_returns_the_attached_public_session(

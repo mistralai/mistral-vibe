@@ -1,4 +1,4 @@
-"""A startup config-issue toast stays visible over a modal picker (VIBE-4622)."""
+"""A startup config issue stays in the transcript above a modal picker (VIBE-4099)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ handshake = {
     }
 }
 
-# Open the `/theme` picker; the startup toast (10s) must still float over it.
+# Open the `/theme` picker; the warnings box stays in the transcript above it.
 timeline: Timeline = ["/theme", "\r"]
 
 screen_contains = ("Failed to parse: bad toml",)
