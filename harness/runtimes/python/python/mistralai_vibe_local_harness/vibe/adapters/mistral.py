@@ -137,6 +137,10 @@ async def execute_mistral_completion(
         replay_reasoning = takes_reasoning_input(
             WireFormat.MISTRAL, route.thinking, route.reasoning, route.request_thinking
         )
+        if config.enable_otel:
+            from mistralai.extra.observability.telemetry import configure_telemetry
+
+            configure_telemetry(client, provider="global")
         kwargs: dict[str, Any] = {
             "model": route.model,
             "messages": [
