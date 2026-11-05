@@ -22,6 +22,10 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from vibe.core.agents.models import BUILTIN_AGENTS
+from vibe.core.config.harness_files import (
+    HarnessFilesManager,
+    get_harness_files_manager,
+)
 from vibe.core.prompts import MissingPromptFileError, load_system_prompt
 from vibe.core.tools.models import ToolPermission
 
@@ -189,6 +193,7 @@ def resolve_agent_types(
     tools: AgentToolCatalogue | None = None,
     *,
     reserved: frozenset[str] = frozenset(),
+    harness_files: HarnessFilesManager | None = None,
 ) -> ResolvedAgentTypes:
     """Turn agent files into what the Core advertises and the Host binds.
 
@@ -212,7 +217,9 @@ def resolve_agent_types(
         if source.name in reserved:
             report.reject(source, "an installed plugin already declares that name")
             continue
-        accepted, instructions = _accepted_instructions(source, report)
+        accepted, instructions = _accepted_instructions(
+            source, report, harness_files=harness_files
+        )
         if not accepted:
             continue
         definition = _definition(source, report)
@@ -242,7 +249,9 @@ def resolve_agent_types(
     )
 
 
-def agent_instructions(profile: AgentProfile) -> str | None:
+def agent_instructions(
+    profile: AgentProfile, *, harness_files: HarnessFilesManager | None = None
+) -> str | None:
     """The system prompt a subagent runs on, or ``None`` to inherit the parent's.
 
     A binding carries prompt text rather than a prompt id, so an agent file that
@@ -255,11 +264,17 @@ def agent_instructions(profile: AgentProfile) -> str | None:
     prompt_id = profile.overrides.get("system_prompt_id")
     if not isinstance(prompt_id, str) or not prompt_id:
         return None
-    return load_system_prompt(prompt_id)
+    manager = (
+        harness_files if harness_files is not None else get_harness_files_manager()
+    )
+    return load_system_prompt(prompt_id, harness_files=manager)
 
 
 def _accepted_instructions(
-    source: AgentTypeSource, report: _Report
+    source: AgentTypeSource,
+    report: _Report,
+    *,
+    harness_files: HarnessFilesManager | None = None,
 ) -> tuple[bool, str | None]:
     """Whether one agent file is usable, and the prompt it asks for.
 
@@ -289,7 +304,7 @@ def _accepted_instructions(
             source.owner,
         )
     try:
-        instructions = agent_instructions(source.profile)
+        instructions = agent_instructions(source.profile, harness_files=harness_files)
     except (MissingPromptFileError, ValueError) as error:
         report.reject(source, str(error))
         return False, None
